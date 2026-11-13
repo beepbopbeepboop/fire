@@ -1,4 +1,4 @@
-SPLIT: (part 2 done: callable-valued param call iteration in compiled generator/coroutine bodies), bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md
+SPLIT: parts 1 (foreign-callable table/param typing), 2 (cpp for over tabled callable), and 3 (csv.reader runtime/iterator and end-to-end `tables.py` compile) — all fixed and deleted
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`

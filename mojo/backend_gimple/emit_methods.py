@@ -4456,9 +4456,18 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if _ptypes and len(arg_pairs) < len(_ptypes):
             for _pad_i in range(len(arg_pairs), len(_ptypes)):
                 arg_pairs.append(('int64_t', gen._new_val('int64_t', '(int64_t)0')))
+        _mret_api = None
+        _mrt = getattr(gen, '_method_returns_generator', None)
+        if _mrt:
+            _mret_api = _mrt.get((struct_name, method))
+        if _mret_api is not None:
+            ret_type = 'MojoGenerator *'
         if ret_type == 'void':
             return gen._void_call(mangled, arg_pairs)
         t = gen._call_expr(ret_type, mangled, arg_pairs)
+        if _mret_api is not None:
+            gen._generator_var_api[t] = _mret_api
+            gen._actual_types[t] = 'MojoGenerator *'
         return ret_type, t
 
     # ── .copy() on Copyable scalars is an identity operation ──────────────
@@ -8491,7 +8500,16 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         all_arg_pairs.append(_ap0)
     if ret_type == 'void':
         return gen._void_call(mangled, all_arg_pairs)
+    _mret_api = None
+    _mrt = getattr(gen, '_method_returns_generator', None)
+    if _mrt:
+        _mret_api = _mrt.get((struct_name, method))
+    if _mret_api is not None:
+        ret_type = 'MojoGenerator *'
     t = gen._call_expr(ret_type, mangled, all_arg_pairs)
+    if _mret_api is not None:
+        gen._generator_var_api[t] = _mret_api
+        gen._actual_types[t] = 'MojoGenerator *'
 
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]
