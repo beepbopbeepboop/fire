@@ -6757,18 +6757,16 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                 except Exception: pass
     except Exception:
         pass
-    # Clear the module-level PER-COMPILE accumulators (foreign callables, the
-    # selfhost extra field cache) so they do not survive past the compile
-    # boundary. Not the module's fixed tables: `_MODULE_MEMBER_LIBC` (the libm
-    # members of an uncompiled module) and `_MOJO_ELEM_C` (Mojo element type
-    # to C type) are constants, and clearing them here made the first compile
-    # in a process empty them for every later one: `math.floor` then lowered to
-    # the uncompiled-module stub, a NotImplementedError at run time, depending
-    # on which tests ran before it.
+    # Clear remaining backend_gimple/middle module-level accumulators (foreign
+    # callables, runtime callable words/values, module member libc, selfhost
+    # extra field cache, mojo elem ctype map) so they do not survive past the
+    # compile boundary (next step).
     try:
         for _modname, _names in (
             ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES',)),
+            ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
             ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
+            ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
         ):
             import importlib as _il2
             _m = _il2.import_module(_modname)
