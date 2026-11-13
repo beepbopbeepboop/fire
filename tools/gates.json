@@ -15,12 +15,6 @@
       "doc": "bugs/mid/GATE_red_recover-land_2026-11-02.md",
       "worker": "integrator",
       "since": "2026-11-02 11:40:57"
-    },
-    "^(stdlib\\-syntax)$": {
-      "reason": "landing gate red on bug-mid-diagnostics-lsp-error-recovery-p-2 fix-proof-bug-mid-codegen-simd-and-array-values-er-2 fix-merge-fix-proof-bug-mid-codegen-dict-slot-reads-refuse-c bug-test-modcache-in-tu-instantiation-ge-3 bug-codegen-int-into-pointer-return-anno (gate red); see bugs/mid/GATE_red_bug-mid-diagnostics-lsp-error-recovery-p-2_2026-11-12.md",
-      "doc": "bugs/mid/GATE_red_bug-mid-diagnostics-lsp-error-recovery-p-2_2026-11-12.md",
-      "worker": "integrator",
-      "since": "2026-11-12 22:35:26"
     }
   }
 }
