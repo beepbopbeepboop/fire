@@ -1790,8 +1790,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_python.h',
             'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
-     desc='runtime header export scan sees every declaration',
-     disabled='bugs/gate-rthdrscan.md')
+     desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
