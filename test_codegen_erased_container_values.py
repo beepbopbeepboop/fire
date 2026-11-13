@@ -200,6 +200,77 @@ def test_part4_part1_int_simd_unchanged():
     assert idsig.startswith('int64_t ') and idsig.endswith('(int64_t x)'), idbody
 
 
+# part4 replan parts 2 and 3 (see bugs/mid/CODEGEN_simd_and_array_values_
+# erase_to_int64-part4-part2.md / -part3.md). Their prefixes deliberately do
+# NOT start with `part4_`: the original part4 probe's command runs every
+# `test_part4_*`, and that probe is green today, so it must not be reddened by
+# an open sub-part.
+#
+# part 2: a module-level `alias` of a float SIMD type is expanded, so the
+# parameter, the return and the call-result local keep the scalar C type.
+P4_ALIAS_SRC = (
+    'alias F2 = SIMD[DType.float32, 2]\n'
+    '\n'
+    'def id_simd(x: F2) -> F2:\n'
+    '    return x\n'
+    '\n'
+    'def use_it(x: F2):\n'
+    '    var r = id_simd(x)\n'
+    '    return r\n'
+)
+
+
+def test_p4_alias_simd_param_return_keep_ctype():
+    c = _compile(P4_ALIAS_SRC, 'p4_alias')
+    assert 'indirect call via SubscriptExpr' not in c, c
+    idbody = _defn(c, 'p4_alias_id_simd')
+    idsig = idbody.splitlines()[1].strip()
+    assert idsig.startswith('float ') and idsig.endswith('(float x)'), idbody
+    assert re.search(r'^float \S+ \(float\);', c, re.M), c
+    ubody = _defn(c, 'p4_alias_use_it')
+    assert 'int64_t r;' not in ubody, ubody
+    assert 'float r;' in ubody, ubody
+
+
+# part 3: a `comptime` name bound to a float DType is resolved before the
+# annotation reaches `_mojo_type`, both at module scope (a signature) and in a
+# function body (an explicitly annotated local).
+P4_COMPTIME_TOP_SRC = (
+    'comptime dt = DType.float32\n'
+    '\n'
+    'def id_simd(x: SIMD[dt, 2]) -> SIMD[dt, 2]:\n'
+    '    return x\n'
+    '\n'
+    'def use_it(x: SIMD[dt, 2]):\n'
+    '    var r = id_simd(x)\n'
+    '    return r\n'
+)
+P4_COMPTIME_LOCAL_SRC = (
+    'def id_simd(x: SIMD[DType.float32, 2]) -> SIMD[DType.float32, 2]:\n'
+    '    return x\n'
+    '\n'
+    'def use_it(x: SIMD[DType.float32, 2]):\n'
+    '    comptime dt = DType.float32\n'
+    '    var r: SIMD[dt, 2] = id_simd(x)\n'
+    '    return r\n'
+)
+
+
+def test_p4_comptime_dtype_keeps_ctype():
+    c = _compile(P4_COMPTIME_TOP_SRC, 'p4_ct_top')
+    assert 'indirect call via SubscriptExpr' not in c, c
+    idbody = _defn(c, 'p4_ct_top_id_simd')
+    idsig = idbody.splitlines()[1].strip()
+    assert idsig.startswith('float ') and idsig.endswith('(float x)'), idbody
+    ubody = _defn(c, 'p4_ct_top_use_it')
+    assert 'int64_t r;' not in ubody, ubody
+    assert 'float r;' in ubody, ubody
+    lc = _compile(P4_COMPTIME_LOCAL_SRC, 'p4_ct_loc')
+    lbody = _defn(lc, 'p4_ct_loc_use_it')
+    assert 'int64_t r;' not in lbody, lbody
+    assert 'float r;' in lbody, lbody
+
+
 # part5: Scalar[X] / SIMD[X, 1] resolve to the scalar C type of X.
 def test_part5_scalar_annotation_resolves_to_scalar_ctype():
     gen = g.GimpleGen()
