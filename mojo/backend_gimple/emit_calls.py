@@ -1994,6 +1994,64 @@ def self_recursive_uninstantiable(gen, func) -> str | None:
     return base
 
 
+def _spells_a_string(node) -> bool:
+    """Whether an expression contains a string literal, e.g. the intrinsic
+    spelling `instruction + " $0, $1;"`. A string-valued comptime expression
+    concatenates a fixed spelling; it is not a progressing integer to unfold."""
+    if isinstance(node, (gimple_ctypes.StringLiteral,
+                         gimple_ctypes.TstringLiteral)):
+        return True
+    if isinstance(node, gimple_ctypes.BinaryOp):
+        return _spells_a_string(node.left) or _spells_a_string(node.right)
+    if isinstance(node, gimple_ctypes.UnaryOp):
+        return _spells_a_string(node.operand)
+    return False
+
+
+# A bracket argument is a progressing RECURSION index when it is written with
+# an arithmetic operator (see _progressing_bracket_arg). Literals, `.dtype`
+# variants, containers, calls and type names are fixed comptime values or
+# type expressions, not an unfolding index, and keep the stub below. The
+# operators here are the ones a never-converging instantiation argument is
+# written with: `f[i + 1]`, `f[i * 2]`, `f[(i << 1) | 1]`. Comparisons and
+# boolean operators are deliberately absent — a boolean-valued comptime
+# expression is fixed once its operands are, not an unfolding index.
+_PROGRESSING_BRACKET_OPS = frozenset(
+    ('+', '-', '*', '/', '//', '%', '**', '<<', '>>', '&', '|', '^'))
+
+
+def _progressing_bracket_arg(e) -> bool:
+    """Whether one bracket argument at an elaborated call site is the
+    progressing RECURSION shape the refusal below exists to catch (`i + 1`),
+    rather than a fixed comptime value or a type expression.
+
+    The refusal's subject is an instantiation that would unfold forever
+    (`a[i + 1]` -> `b[i + 1]` -> `a[i + 2]` ...), which the comment on the
+    refusal states and which this predicate implements. Treating "not a
+    concrete type" as the test instead — the shape the first version had —
+    refused 23 real stdlib files (measured on master b099ff00): the
+    intrinsic-name idiom `llvm_intrinsic["llvm.sin", type_of(x)]`,
+    `_llvm_unary_fn["llvm.sqrt"]`, `_truncate[.uint32]`,
+    `AHasher[SIMD[.uint64, 4](...)]`, `polynomial_evaluate[[...]]`, and
+    `bitcast[T]` for a local `comptime T = _integral_type_of[dtype]()` are
+    all fixed comptime VALUES or type expressions, and `_type_expr_to_ann`
+    returning '' (or a bare `T`) for them is not evidence of an unbound
+    type parameter that can never be instantiated.
+    """
+    if isinstance(e, gimple_ctypes.BinaryOp):
+        if _as_str(e.op) not in _PROGRESSING_BRACKET_OPS:
+            return False
+        return not _spells_a_string(e)
+    if isinstance(e, gimple_ctypes.UnaryOp):
+        if _as_str(e.op) not in ('-', '+', '~'):
+            return False
+        if isinstance(e.operand, (gimple_ctypes.IntLiteral,
+                                  gimple_ctypes.FloatLiteral)):
+            return False  # a negative literal, not arithmetic over a parameter
+        return not _spells_a_string(e)
+    return False
+
+
 def _lower_tuple_box_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """`__mojo_tuple_box_N(a, b, ...)`: a generator's yielded tuple, boxed slot by
     slot (see mojo/middle/coro.py). A slot whose C value is a string or a double
@@ -3430,28 +3488,35 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 f"cannot compile module: self recursive call to "
                 f"{_rec!r} will cause an infinite loop")
         # Inside a concrete (elaborated) instantiation, a bracketed generic
-        # call whose type arguments are not all concrete cannot be
-        # materialized: stubbing it would be a silent wrong answer (mutual /
-        # uninstantiable recursion). Refuse it. Restrict the mutual case to
-        # arguments that read as a progressing expression (e.g. `i + 1`), to
-        # avoid rejecting legitimate non-literal-but-unresolvable type forms.
+        # call whose bracket argument is a PROGRESSING expression over the
+        # instantiation's own comptime parameters is a MUTUAL or unbounded
+        # recursion: it cannot be materialized, and stubbing it would be a
+        # silent wrong answer (a partial answer, not a diagnostic). Refuse it.
+        # The predicate is deliberately narrower than "not a concrete type"
+        # (which refused 23 real stdlib files — see _progressing_bracket_arg):
+        # fixed comptime values, string spellings and type expressions the
+        # renderer cannot spell keep the documented module-boundary stub.
         if (getattr(gen, '_is_elaborated_instantiation', False)
                 and isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)):
             _g = node.func.obj.name
+            # A struct CONSTRUCTOR cannot recurse — its bracket arguments are
+            # its own type/value parameters, not another instantiation of
+            # itself — and a non-concrete one was stubbed before this refusal
+            # existed. Same discriminator as self_recursive_uninstantiable,
+            # plus `_struct_bases` for a struct whose elaborated layout is not
+            # registered yet.
+            _is_struct_ctor = (_g in getattr(gen, 'struct_field_types', ())
+                               or _g in getattr(gen, '_imported_generic_structs', ())
+                               or _g in getattr(gen, '_struct_bases', ()))
             _ix = node.func.index
             _el = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
-            _targs = [gen._type_expr_to_ann(e) for e in _el]
-            if not all(gimple_exprtypes._is_concrete_type_arg(t) for t in _targs):
-                _cfn = getattr(gen, 'current_func_name', None) or ''
-                if _g == _cfn or (isinstance(_cfn, str) and _cfn.startswith(_g + '_')):
-                    raise RuntimeError(
-                        f'cannot compile module: self recursive call to {_g!r} '
-                        f'will cause an infinite loop')
+            if not _is_struct_ctor and any(
+                    _progressing_bracket_arg(e) for e in _el):
                 raise RuntimeError(
                     f"cannot materialize instantiation of generic {_g!r}: "
-                    f"its type arguments are not concrete, which would "
-                    f"cause infinite recursion")
+                    f"its bracket arguments advance without converging, "
+                    f"which would cause infinite recursion")
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')

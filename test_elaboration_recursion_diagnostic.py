@@ -112,12 +112,59 @@ def test_finite_chain_few_levels_deep_builds():
     assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
 
 
+def test_intrinsic_name_bracket_arg_builds():
+    # The measured stdlib shape this refusal must NOT catch: a comptime VALUE
+    # bracket argument (the intrinsic's name) plus a `type_of(...)` type
+    # argument, inside a concrete instantiation. Before the fix the "not a
+    # concrete type" test refused `llvm_intrinsic["llvm.sin", type_of(x)]`,
+    # `_llvm_unary_fn["llvm.sqrt"]`, `_truncate[.uint32]` and 23 real stdlib
+    # files with it. The shipped lowering is the documented stub.
+    src = (
+        'def intrinsic[name: StaticString](x: Int) -> Int:\n'
+        '    return 0\n'
+        '\n'
+        'def taker[T: AnyType](x: Int) -> Int:\n'
+        '    return 0\n'
+        '\n'
+        'def helper[w: Int](x: Int) -> Int:\n'
+        '    var a = intrinsic["llvm.sin"](x)\n'
+        '    return a + taker[type_of(x)](x)\n'
+        '\n'
+        'def main():\n'
+        '    print(helper[1](3))\n'
+    )
+    rc, out, r = _build_and_run(src)
+    assert rc == 0, 'comptime-value bracket argument refused:\n' + out
+    assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
+
+
+def test_string_spelling_bracket_arg_builds():
+    # `instruction + " $0, $1;"` is the inlined-assembly name idiom: a string
+    # expression, fixed once its operand is, not a progressing index. It is a
+    # BinaryOp, so the arithmetic-shape test alone would refuse it.
+    src = (
+        'def asmish[text: StaticString](x: Int) -> Int:\n'
+        '    return 0\n'
+        '\n'
+        'def wrapper[w: Int](x: Int) -> Int:\n'
+        '    return asmish["mov" + " $0, $1;"](x)\n'
+        '\n'
+        'def main():\n'
+        '    print(wrapper[1](3))\n'
+    )
+    rc, out, r = _build_and_run(src)
+    assert rc == 0, 'string-spelling bracket argument refused:\n' + out
+    assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
+
+
 if __name__ == '__main__':
     tests = [
         test_direct_self_recursion_still_refused,
         test_mutual_recursion_refused,
         test_finite_chain_builds_and_runs,
         test_finite_chain_few_levels_deep_builds,
+        test_intrinsic_name_bracket_arg_builds,
+        test_string_spelling_bracket_arg_builds,
     ]
     for t in tests:
         t()
