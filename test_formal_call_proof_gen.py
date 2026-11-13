@@ -3513,8 +3513,14 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         end = len(code)
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, end - end % 4, 4)]
+        # The `svc` words are in the decoder's set but get NO step-OK lemma by
+        # design: its statement `arm64_step s code ≠ none` is false for the
+        # exit form (x16 = 1), so the f03896fff model refuses to emit one for
+        # them.  The expected set must mirror that, or the filter looks like
+        # it "moved" when the model did the right thing.
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
-                    if G._step_branch_index(w) is not None]
+                    if G._step_branch_index(w) is not None
+                    and not G._is_svc(w)]
         self.assertEqual(expected, self.step_ok)
 
     def test_the_derivation_is_total_over_the_step_table(self):
@@ -3625,10 +3631,28 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                 continue
             code = _struct.pack("<I", word)
             with self.subTest(entry=j):
-                self.assertIn("theorem syn_sr_0",
-                              G._gen_step_result_lemmas("syn", code, 0x1000))
-                self.assertIn("rw [syn_sr_0 s h]",
-                              G._gen_step_lemmas("syn", code, 0x1000))
+                sr = G._gen_step_result_lemmas("syn", code, 0x1000)
+                self.assertIn("theorem syn_sr_0", sr)
+                if j == 35:
+                    # The `svc` is the one entry whose step depends on MACHINE
+                    # STATE: x16 picks the form.  Its step-RESULT lemma
+                    # carries the x16 hypothesis that selects it (the single
+                    # word has no `movz` before it, so x16 is dynamic and only
+                    # the write form is admissible, under `¬ x16 = 1`), and NO
+                    # step-OK lemma is emitted for it: the statement the
+                    # step-OK lemma would read off,
+                    # `arm64_step s code ≠ none`, is FALSE for the exit form,
+                    # which is why the f03896fff design refuses to state it.
+                    # The generic `rw [syn_sr_0 s h]` below is the shape every
+                    # other entry has.
+                    self.assertIn("hx : ¬ arm64_reg 16 s = 1", sr)
+                    self.assertNotIn(
+                        "step_ok", G._gen_step_lemmas("syn", code, 0x1000),
+                        "a step-OK lemma for the svc would state "
+                        "`arm64_step s code ≠ none`, false for the exit form")
+                else:
+                    self.assertIn("rw [syn_sr_0 s h]",
+                                  G._gen_step_lemmas("syn", code, 0x1000))
 
 
 class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
@@ -7276,6 +7300,133 @@ class TestTheStackFloorGuardReadsTheLimitInTheStartupStub(unittest.TestCase):
                 "a straight-line program has lost its value theorem")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestTheStackFloorTrapIsAProofObligation(unittest.TestCase):
+    """The stack-floor guard's trap is a real HALT, not a fall-through.
+
+    f03896fff made `svc` x16-discriminating: an exit `svc` steps to `none`.
+    Every compiled function carries the stack-floor guard whose taken edge is
+    a write-then-exit `svc` tail, so the universal walk has to close that edge
+    with a halt certificate rather than certify a `some` result through it.
+    Before this, every ordinary program's proof was refused with "CFG
+    decomposition unsupported" -- `def plain(a, b): return a + b` was enough.
+    """
+
+    SOURCE = "def plain(a, b):\n    return a + b\n"
+
+    @staticmethod
+    def _words(exit_x16=1, write_x16=4):
+        """The two system calls by ENCODING, with their own movz before each."""
+        movz_x16 = lambda imm: 0xd2800010 | (imm << 5)
+        return {
+            0x40: movz_x16(write_x16), 0x44: 0xd4000001,
+            0x48: movz_x16(exit_x16), 0x4c: 0xd4000001,
+        }
+
+    def test_the_structural_predicate_is_the_exit_form_not_the_encoding(self):
+        import formal.arm64_proof_gen as G
+        self.assertTrue(G._is_svc_exit(self._words(), 0x4c),
+                        "an exit svc with x16 = 1 is not a bounded stop")
+        self.assertFalse(G._is_svc_exit(self._words(), 0x44),
+                         "a write svc (x16 = 4) falls through at pc + 4; "
+                         "closing it as a trap loses the path the machine takes")
+        self.assertEqual(G._svc_static_x16(self._words(), 0x44), 4)
+
+    def test_the_guard_trap_gets_a_halt_certificate_and_none_arm(self):
+        tmp = tempfile.mkdtemp(prefix="a2-stacktrap-")
+        try:
+            src = os.path.join(tmp, "plain.mojo")
+            with open(src, "w") as f:
+                f.write(self.SOURCE)
+            r = _compile(src, os.path.join(tmp, "plain.aout"), "arm64")
+            with open(r["proof_path"], encoding="utf-8") as f:
+                text = f.read()
+            self.assertRegex(
+                text, r"(?m)^theorem plain_b\d+_halt_halts",
+                "the block whose own tail is the exit svc has no halt "
+                "certificate, so the walk must still be refusing the guard "
+                "trap (or is certifying a `some` result through a `none` step)")
+            self.assertIn(
+                "arm64_go_exit_step_jump_at",
+                text,
+                "the write svc in the trap tail is not composed with its "
+                "`hx` discharged from the block's own x16 chain")
+            self.assertIn(
+                "| none => True",
+                text,
+                "a reachable halt block requires the statement's honest "
+                "`none => True` arm; without it the trap edge is claimed "
+                "to return a value it does not")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestTheRefusalNamesTheSvcItRefuses(unittest.TestCase):
+    """The CFG-decomposition refusal must name the `svc` it cannot certify.
+
+    Every instruction in a guarded image has a step -- the `svc` too, idx
+    35 -- so the unmodelled-word search finds nothing, and the old sentence
+    blamed "an empty block runs certificate" for a refusal whose cause is
+    the svc.  The gate job reg-formal-ast-bridge-two-arg's planning round
+    asked for exactly this: the message names the svc and the reason its
+    certificate is refused.  The rows below feed hand-built images straight
+    into the diagnostic; none compiles and none touches Lean.
+    """
+
+    BASE = 0x10000000
+    # `movz x0, #5`: a filler the step table models (the diagnostic's first
+    # loop names unmodelled words before it ever reaches the svc scan), and
+    # NOT a move of x16, so an svc right after it has a dynamic x16.
+    FILL = 0xd2800000 | (5 << 5)
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    def _refusal(self, ws):
+        import formal.arm64_proof_gen as G
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        return G._cfg_decomposition_refusal("fn", code, self.BASE, self.BASE)
+
+    def test_a_dynamic_svc_is_named_with_its_pc(self):
+        # entry, filler, filler, svc (no `movz x16` before it: x16 unknown), ret
+        msg = self._refusal([self.FILL, self.FILL, self.SVC, self.RET])
+        self.assertIn("0x10000008", msg, msg)
+        self.assertIn("x16", msg)
+        self.assertIn("dynamic-svc", msg)
+        self.assertNotIn("empty block runs certificate", msg,
+                         "the old sentence blamed an empty runs certificate "
+                         "for what is really the svc")
+
+    def test_an_exit_svc_mid_run_is_named(self):
+        # entry, filler, `movz x16 #1`, svc (exit -- but a ret follows it in
+        # the block, so it is mid-run, not the tail a branch would land on), ret
+        msg = self._refusal([self.FILL, self._movz_x16(1), self.SVC, self.RET])
+        self.assertIn("0x10000008", msg, msg)
+        self.assertIn("exit svc", msg)
+        self.assertIn("middle of a straight-line run", msg)
+        self.assertNotIn("empty block runs certificate", msg)
+
+    def test_a_write_svc_whose_x0_is_read_before_rewritten_is_named(self):
+        # entry, filler, `movz x16 #4`, svc, ADD X1, X0, X2 (reads x0 before
+        # the write's byte count is rewritten), ret
+        msg = self._refusal([self.FILL, self._movz_x16(4), self.SVC,
+                             0x91000401, self.RET])
+        self.assertIn("0x10000008", msg, msg)
+        self.assertIn("write svc", msg)
+        self.assertIn("x0", msg)
+        self.assertNotIn("empty block runs certificate", msg)
+
+    def test_the_generic_sentence_stands_when_no_svc_refuses(self):
+        # No RET at all and no svc in the image: a refusal for the shape,
+        # not for an instruction.  The generic sentence must be unchanged,
+        # so a future reword of it is a visible change here.
+        msg = self._refusal([self.FILL, self.FILL])
+        self.assertIn("with no `RET`", msg)
+        self.assertIn("empty block runs certificate", msg)
 
 
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
