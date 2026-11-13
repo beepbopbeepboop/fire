@@ -3728,13 +3728,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # qualified_call_answers_zero.md`, whose "partial fix
                     # that is NOT enough, recorded so nobody re-lands it"
                     # section is the `_note_own_func_home`-only version.
-                    print(f"BEFORE_EXPS: {module_name}.{method_name}", flush=True)
                     try:
                         _mgc_exps, _mgc_qual = gen._local_sibling_module_exports(
                             _mgc_sub_ref)
-                        print(f"AFTER_EXPS: {module_name}.{method_name}", flush=True)
-                    except Exception as e:
-                        print(f"EXPS_ERR: {e}", flush=True)
+                    except Exception:
                         _mgc_exps, _mgc_qual = None, None
                     # ONLY when nothing has registered it already. An
                     # import this compile already resolved properly --
