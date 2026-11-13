@@ -63,3 +63,85 @@ as about the model, but the guard it steps over protects nothing.
 
 Related: `bugs/mid/FORMAL_svc_exit_handling_incomplete.md` (the `svc` model), and
 `bugs/OPEN_WORK.md`'s `FORMAL_stack_floor_does_not_guard_an_acyclic_chain` (which prologues carry the guard).
+
+## Status (2026-11-13): planning round — root cause confirmed by reading, decision needed
+
+No code landed this round; the output is the design guide below. Nothing in the tree changed.
+
+### Current state (measured by reading the source, both backends)
+
+* `formal/arm64_codegen.py`: `compile()` calls `_emit_stack_floor_init()` only inside `if emit_startup:`
+  (line ~1153). `_emit_stack_floor_guard()` (line ~2136) only LOADS the floor word and compares. A dylib is
+  built with `emit_startup=False` (`formal/build.py` ~23835, ~23920, ~23933), so no writer ever runs.
+* `formal/x86_64_codegen.py`: the same split — `_emit_stack_floor_init()` (line ~1173, inside
+  `if emit_startup:`), load-only `_emit_stack_floor_guard()` (line ~2151).
+* The arm64 docstring at `_emit_stack_floor_guard` (~lines 1825-1832 and ~2165-2170) still describes the
+  pre-`806e72cb7` shape ("a LIBRARY has no stub, so its first guarded prologue still emits the `getrlimit`
+  call"). That text is stale: the guard no longer emits the call in any shape.
+* `formal/model/module.py`: `STACK_FLOOR_BUDGET_BYTES` = 7.5 MiB, `STACK_FLOOR_MARGIN_BYTES` = 256 KiB,
+  `STACK_FLOOR_MIN_BUDGET_BYTES` = 2 * `ARM64_CONTAINER_BUDGET`.
+
+### Why "lazy init in the first guarded prologue" is NOT the fix
+
+The shape the doc's first option names (re-emit the inline `getrlimit` read in the first guarded prologue,
+gated on a cached-limit word) stores `floor = SP_at_first_call - budget`. That anchors the floor to whichever
+caller happens to run first, not to the process's stack:
+
+* first call shallow → floor sits too high → spurious `exit(2)` while real stack remains;
+* first call deep (near the bottom) → floor below the real bottom → the guard never fires → SIGSEGV, the bug
+  again.
+
+It would pass a ctypes pin that calls the export shallow first, and it would still be wrong. Do not land it.
+
+### The decision
+
+Anchor the library's floor at LOAD time, the same moment the program's floor is anchored at process entry
+(the stub runs at the entry SP; the program model already accepts that approximation, with the margin
+absorbing the gap). Reading A (recommended) vs reading B:
+
+* **A (recommended): a load-time floor initializer.** Emit the floor init (`getrlimit` read + clamp + store,
+  i.e. `_emit_stack_floor_init` unchanged) as a standalone function at the end of the image, and register it
+  in `info["mod_init_addrs"]` so the loader runs it at `dlopen`. Consequences that must be handled:
+  1. `formal/build.py` decides `has_mod_init` from `M.module_body_functions(ordered)` BEFORE emission, and
+     `_mod_init_addrs` refuses a mismatch. `has_mod_init` must become "module body OR floor init", computed
+     from one predicate used by both sides.
+  2. The init is not an export, so the proof layer must exclude it from the walked range the same way the
+     program stub is excluded (`_program_extern_calls` / `func_offset`). Its `bl getrlimit` must be recorded
+     as a compiler trap, not a program call (the mechanism `test_formal_call_proof_gen.py::TestCompilerTrapIsNotAProgramCall`
+     pins). Without this, `extern_calls` stops being `[]` and the dylib proof refuses.
+  3. Both containers: Mach-O `__init_offsets` (`formal/macho_linker.py` ~1409-1480) and ELF `DT_INIT_ARRAY`
+     (`formal/elf.py` ~863-936) already carry `mod_init_addrs`; no container change should be needed.
+  4. The x86-64 half mirrors the same change (`x86_64_codegen.py` ~1345 `mod_init_addrs`).
+* **B: an exported `<prefix>_init_stack_floor` the host must call.** Sound but changes the library ABI and
+  every ctypes caller. Not recommended.
+
+### Implementation plan (for reading A)
+
+1. `formal/model/module.py`: one predicate `stack_floor_needs_init(...)` / or reuse `module_body_functions`
+   with a floor flag, so the build and both emitters ask one question.
+2. `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`: add `emit_library_floor_init()` that emits the
+   existing `_emit_stack_floor_init` body as its own labelled function ending in `ret`, appended after every
+   body and before `resolve()`, when `not emit_startup and guarded`. Record its address in `info`.
+3. `formal/build.py`: `has_mod_init` from the shared predicate; `_mod_init_addrs` accepts the floor init.
+4. Proof: `formal/arm64_proof_gen.py` / `formal/x86_64_proof_gen.py` exclude the init's range from the walked
+   set and register its `getrlimit` as a compiler trap; `lib/ProofLib.lean` / `lib/X86.lean` need no new
+   lemma if the init is excluded by address.
+5. Fix the stale docstrings at arm64 ~1825-1832 and ~2165-2170 in the same commit.
+
+### Tests that prove it
+
+* **Quick pin (the `## Done when` test, to be added):** in `test_formal_dylib.py`, build a dylib exporting a
+  recursive function whose depth passes `STACK_FLOOR_BUDGET_BYTES / frame`, `ctypes.CDLL` it, call it at that
+  depth in a child process under a reduced `ulimit -s`, and require exit status `model.STACK_TRAP_STATUS` (2)
+  with `model.stack_trap_message` on stderr, not a signal. Run it for both backends' dylib builds.
+  It must FAIL on master (signal 11) before the fix.
+* **Regression on the existing dylib run:** `test_formal_dylib.py` as a whole (the call-tree and extern
+  accounting it already checks must still pass).
+* **Proof side:** `test_formal_call_proof_gen.py` for the compiler-trap registration.
+* **Gate (integrator only, not run by the worker):** `compile_stdlib.py` / `build_stdlib_dylib.py` skip and
+  unexpected-failure counts unchanged.
+
+### What is still needed from the owner
+
+Confirm reading A (load-time initializer). If B is preferred, the pin test changes to call the host-side init
+first and the ABI note goes in `doc/`.
