@@ -1,5 +1,3 @@
-SPLIT: part 1 (precompiled signature artifact) landed; remaining: bugs/DIAGNOSTICS_mojoc_imports-part2-part2.md, bugs/DIAGNOSTICS_mojoc_imports-part2-part3.md
-
 # DIAGNOSTICS mojoc imports, part 2: implicit default param on precompiled import
 
 Parent: `bugs/hard/DIAGNOSTICS_mojoc_imports.md` (umbrella split; see also

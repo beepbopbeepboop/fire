@@ -909,10 +909,6 @@ class StructDef:
     # (name, type-annotation source) for each bracket parameter, in declaration
     # order. Read by _check_inferred_param_dependencies.
     bracket_types: list = field(default_factory=list)
-    # Full bracket-parameter records in declaration order, one per name in the
-    # bracket block: (name, type_annotation_source_or_"", default_source_text_or_None).
-    # Includes trait-bounded type parameters that bracket_types omits.
-    bracket_param_info: list = field(default_factory=list)
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -5002,7 +4998,7 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
-def align_value_error(val: int) -> str | None:
+def align_value_error(val: int):
     """Shared @align value rule: None if valid, else a diagnostic suffix."""
     try:
         v = int(val)
@@ -5685,13 +5681,11 @@ class Parser:
         # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
         param_fields = []
         bracket_params = []
-        bracket_param_info = []
         if self._peek().kind == "LBRACKET":
             param_fields = self._parse_struct_params_as_fields()
             bracket_params = [f.name for f in param_fields
                               if isinstance(f, VarDecl)]
             type_param_names = list(getattr(self, '_struct_param_names', []) or [])
-            bracket_param_info = list(getattr(self, '_struct_bracket_param_info', []) or [])
         else:
             type_param_names = []
         # `struct Child(Base1, Base2):` / `class Child(Base):` — Python-style
@@ -5965,7 +5959,6 @@ class Parser:
                          bracket_params=bracket_params,
                          type_param_names=type_param_names,
                          where_clause=struct_where,
-                         bracket_param_info=bracket_param_info,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
 
@@ -8362,7 +8355,6 @@ class Parser:
         # not comptime VALUE parameters), but the StructDef's type_param_names
         # must still see them — see that field's comment.
         self._struct_param_names = []
-        self._struct_bracket_param_info = []
         while True:
             t = self._peek()
             if t.kind in ('RBRACKET', 'EOF'):
@@ -8387,41 +8379,34 @@ class Parser:
                 name = t.value
                 self._struct_param_names.append(name)
                 self._advance()
-                type_ann = ''
-                default_text = None
                 if self._peek().kind == 'COLON':
                     self._advance()  # consume ':'
                     type_ann = self._parse_type_ann()
-                    # Optional default value ('=' tokenizes as ASSIGN)
+                    # Skip optional default value ('=' tokenizes as ASSIGN)
                     if self._peek().kind in ('EQUAL', 'ASSIGN') or (
                             self._peek().kind == 'OP' and self._peek().value == '='):
                         self._advance()  # consume '='
-                        # Capture default value expression as source text.
+                        # Skip default value expression (balanced brackets)
                         depth = 0
-                        parts = []
                         while True:
                             pk = self._peek()
                             if pk.kind == 'EOF':
                                 break
                             if pk.kind in ('LPAREN', 'LBRACKET', 'LBRACE'):
                                 depth += 1
-                                parts.append(self._advance().value)
+                                self._advance()
                             elif pk.kind in ('RPAREN', 'RBRACE'):
                                 depth -= 1
-                                parts.append(self._advance().value)
+                                self._advance()
                             elif pk.kind == 'RBRACKET':
                                 if depth <= 0:
                                     break
                                 depth -= 1
-                                parts.append(self._advance().value)
+                                self._advance()
                             elif pk.kind == 'COMMA' and depth == 0:
                                 break
                             else:
-                                parts.append(self._advance().value)
-                        text = " ".join(parts).strip()
-                        for ch in "[](),.":
-                            text = text.replace(" " + ch, ch).replace(ch + " ", ch)
-                        default_text = text if text else None
+                                self._advance()
                     # `name: TraitName` is a generic TYPE parameter (T conforms
                     # to the trait), not a comptime VALUE parameter — it must
                     # NOT become a real field, or @fieldwise_init's synthesized
@@ -8433,7 +8418,6 @@ class Parser:
                 else:
                     # No colon — skip this token (could be a bare type name)
                     pass
-                self._struct_bracket_param_info.append((name, type_ann, default_text))
             else:
                 self._advance()  # skip unexpected token
         return fields

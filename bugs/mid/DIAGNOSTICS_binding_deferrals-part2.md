@@ -1,5 +1,3 @@
-SPLIT: DIAGNOSTICS_binding_deferrals-part2-part1, DIAGNOSTICS_binding_deferrals-part2-part2
-
 # DIAGNOSTICS_binding_deferrals part 2: an unprovable signature binding reports `invalid bindings in signature: lacking evidence`
 
 Parent: `bugs/hard/DIAGNOSTICS_binding_deferrals.md` (SPLIT). This part does

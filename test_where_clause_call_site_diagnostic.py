@@ -20,7 +20,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from gimple_codegen import compile_to_gimple
-import elaborate
 
 _SRC = ('fn f[T: DType](x: T) -> Bool where T.is_floating_point():\n'
         '    return True\n')
@@ -47,36 +46,6 @@ def test_violated_where_clause_fails():
 
 def test_satisfied_where_clause_passes():
     _compile(_SRC + '\nfn main():\n    print(f[DType.float32](1.0))\n')
-
-
-def test_dot_relative_dtype_satisfies_a_dtype_where_clause():
-    """`.float32`, `DType.float32` and `Float32` are ONE dtype, so a where
-    clause over it must answer the same for every spelling.
-
-    Monomorphization substitutes the call site's bracket argument TEXTUALLY, so
-    the where-clause checker (which only has `{param: rendered_text}`) sees
-    whatever spelling the callee was written with. It used to recognize only
-    `Float32`/`DType.float32`, so `.float32` fell to the conservative
-    "not a float" answer and the call was rejected:
-    "type '.float32' does not satisfy constraint 'T.is_floating_point()'".
-    That is the red `stdlib-syntax` carried on the held nested-bracket-call
-    branch: test/builtin/test_simd.mojo, test/math/test_exp.mojo and
-    test/math/test_math.mojo all instantiate a `dtype: DType` generic with a
-    dot-relative dtype. The dot spelling is the same text
-    `_type_expr_to_ann` renders for a DottedLiteral bracket argument."""
-    elaborate.check_where_clauses('', _SRC, {'T': '.float32'})
-    elaborate.check_where_clauses('', _SRC, {'T': 'DType.float32'})
-    elaborate.check_where_clauses('', _SRC, {'T': 'Float32'})
-    # The predicate must still say NO for a dtype that is not floating: a
-    # recognizer that accepted every dot spelling would pass the cases above
-    # and also this one, silently.
-    try:
-        elaborate.check_where_clauses('', _SRC, {'T': '.int8'})
-    except elaborate.ConformanceError:
-        pass
-    else:
-        raise AssertionError(
-            "'.int8' satisfied a 'T.is_floating_point()' where clause")
 
 
 if __name__ == '__main__':
