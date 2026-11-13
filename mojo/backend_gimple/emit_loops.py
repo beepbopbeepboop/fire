@@ -280,7 +280,17 @@ def _re_sub_repl_is_callback(gen, cb_arg) -> bool:
     the only way to reference "a function" is by its bare, undeclared
     name — a closure (tracked in `_closure_envs`) or a plain top-level
     `def` name — so a bare identifier that's already a known local/
-    global *variable* can't be one; that's the tell used below."""
+    global *variable* can't be one; that's the tell used below.
+
+    A non-capturing LambdaExpr lifts to a bare top-level C function and
+    its address can be used directly as the callback pointer. A capturing
+    LambdaExpr carries a heap env in a MojoBoundMethod that cannot be
+    passed as a bare fn ptr; refuse those rather than read the wrong env
+    (the else branch will treat them as a replacement string, producing a
+    compile error or runtime failure instead of silent garbage)."""
+    if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
+        # Non-capturing lambda: no explicit captures field content.
+        return not cb_arg.captures
     if not isinstance(cb_arg, gimple_ctypes.IdentExpr):
         return False
     if cb_arg.name in gen._closure_envs:
@@ -294,7 +304,15 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
     """Resolve a re.sub(pattern, CALLBACK, src) callback argument to a
     (fn_ptr_temp, env_temp) pair of void* values, shared by both the
     POSIX-backed mojo_re_sub_fn path and the regex-engine-backed
-    mojo_regex_sub_fn path (identical callback ABI: char *(*)(void *, char *))."""
+    mojo_regex_sub_fn path (identical callback ABI: char *(*)(void *, char *)).
+
+    For LambdaExpr:
+    - If the lambda captures enclosing locals (detected by lower_expr adding it to
+      gen._closure_vals), we cannot pass a MojoBoundMethod as a bare fn ptr, so
+      refuse loudly. The module will fall back to interpreting from source.
+    - If the lambda is non-capturing, lower_expr returns a bare function pointer,
+      which the callback path uses with env=0.
+    """
     if isinstance(cb_arg, gimple_ctypes.IdentExpr) and cb_arg.name in gen._closure_envs:
         # _closure_envs maps inner_name → env_var (NOT lifted_name)
         # Get the actual lifted function name from _all_closures
@@ -314,6 +332,21 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
             gen._emit(f'  {env_t} = (void *){env_var};')
         else:
             gen._emit(f'  {env_t} = (void *)0;')
+        return fn_ptr_t, env_t
+    if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
+        # Lower the lambda; after lowering, we can check whether it produced
+        # a bound method (capturing) or a bare function pointer (non-capturing)
+        # by looking in gen._closure_vals: the capturing path adds its result
+        # to _closure_vals, the non-capturing path does not.
+        cb_type, cb_val = gen.lower_expr(cb_arg)
+        if cb_val in gen._closure_vals:
+            raise RuntimeError(
+                "re.sub(..., <capturing lambda>, ...) is not supported: a capturing "
+                "lambda is a MojoBoundMethod, not a bare function pointer, and this "
+                "codegen cannot wire its env into the regex callback ABI. Use a "
+                "non-capturing lambda or refer to a closure (IdentExpr) instead.")
+        fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
+        env_t = gen._new_val('void *', '(void *)0')
         return fn_ptr_t, env_t
     # Fallback: treat callback as a simple function pointer
     cb_type, cb_val = gen.lower_expr(cb_arg)
@@ -364,7 +397,11 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')
     gen._emit(f'  {pos_var} = (int64_t)0;')
-    gsize = gen._new_val('int64_t', f'(int64_t)(sizeof(int64_t) * {ngroups + 1})')
+    # Byte size of one int64_t group-offset array. A literal, not `sizeof`:
+    # `sizeof` is not a GIMPLE operand, so a `__GIMPLE` body (a method or a
+    # lifted closure) that spelled it was refused by gcc -x c. int64_t is
+    # exactly 64 bits (C99 7.18.1.1), so 8 is the width, not a guess.
+    gsize = gen._new_val('int64_t', str(8 * (ngroups + 1)))
     gstart_vp = gen._new_val('void *', f'malloc ({gsize})')
     gstart_var = gen._new_val('int64_t *', f'(int64_t *){gstart_vp}')
     gend_vp = gen._new_val('void *', f'malloc ({gsize})')
@@ -410,8 +447,14 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer.
     pos_plus1 = gen._inc_val(pos_var)
-    cmp_t = gen._new_val('_Bool', f'{mend_var} > {pos_var}')
-    next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend_var} : {pos_plus1}')
+    # `mend_var` is address-taken (`&mend_var` is the out-param of
+    # mojo_regex_search), and raw GIMPLE rejects an addressable local as a
+    # comparison or `?:` operand ("invalid operands in binary operation").
+    # Read it once into a plain temp and use that for both the compare and
+    # the select.
+    mend_val = gen._new_val('int64_t', mend_var)
+    cmp_t = gen._new_val('_Bool', f'{mend_val} > {pos_var}')
+    next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend_val} : {pos_plus1}')
     gen._emit(f'  {pos_var} = {next_pos};')
     gen._emit(f'  goto {bb_cond};')
     gen._emit_label(bb_after)
@@ -458,7 +501,8 @@ def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')
     gen._emit(f'  {pos_var} = (int64_t)0;')
-    gsize = gen._new_val('int64_t', f'(int64_t)(sizeof(int64_t) * {ngroups + 1})')
+    # Group-offset array byte size: why this is a literal is noted in _gen_for_regex_iter.
+    gsize = gen._new_val('int64_t', str(8 * (ngroups + 1)))
     gstart_vp = gen._new_val('void *', f'malloc ({gsize})')
     gstart_var = gen._new_val('int64_t *', f'(int64_t *){gstart_vp}')
     gend_vp = gen._new_val('void *', f'malloc ({gsize})')

@@ -14521,8 +14521,136 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_re_sub_with_inline_lambda():
+        """A re.sub() whose second argument is an INLINE lambda must be
+        dispatched down the callback path (mojo_regex_sub_fn with the lambda's
+        function pointer), never down the replacement-string path (mojo_regex_sub_str).
+
+        Before the fix, `_re_sub_repl_is_callback` only answered True for an
+        IdentExpr (a closure or a bare top-level def name), so a LambdaExpr was
+        classified as a plain replacement string and its (garbage) address was
+        passed to mojo_regex_sub_str as the replacement value — the compiled
+        program printed the lambda's machine code instead of the replacement
+        (bugs/CODEGEN_re_sub_inline_lambda_used_as_replacement_string).
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_inline_lambda"
+        src = r'''
+import re
+
+def main():
+    print(re.sub(r"[0-9]+", lambda _m: "N", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            # The callback path means the generated call carries the
+            # mojo_regex_sub_fn shape (callback + env), not mojo_regex_sub_str.
+            if 'mojo_regex_sub_fn' not in c_src:
+                print(f"FAIL  {name}: re.sub with a lambda did not emit the callback call")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- generated C ---")
+        for i, line in enumerate(c_src.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
     _run_isolated(lambda: test_regex_tables_are_referenced_by_address_in_a_gimple_body(),
                   'test_regex_tables_are_referenced_by_address_in_a_gimple_body')
+    _run_isolated(lambda: test_re_sub_with_inline_lambda(),
+                  'test_re_sub_with_inline_lambda')
+
+    def test_regex_scan_in_a_method_body_compiles_and_matches_cpython():
+        """`for m in PAT.finditer(s)` inside a struct method — a `__GIMPLE`
+        body, which gcc reads as raw GIMPLE under `-x c` (the build's flags) —
+        must compile and count matches like CPython.
+
+        Two defects, both in emit_loops.py's regex scan lowering:
+        (1) it sized its group-offset arrays with `(int64_t)(sizeof(int64_t)
+        * n)`, and `sizeof` is not a GIMPLE operand ("expected expression
+        before '(' token"); (2) it used the address-taken out-param
+        `mend` directly as a comparison and `?:` operand, which raw GIMPLE
+        rejects ("invalid operands in binary operation"). The module-scope
+        variant of this loop (the test above) never reached either line,
+        because a module-level `def` is ordinary C.
+
+        Compiles the `.ci` as C and RUNS it against CPython so a fix cannot
+        pass by changing which count is produced."""
+        global _PASS, _FAIL
+        name = "regex_scan_in_a_method_body_compiles_and_matches_cpython"
+        src = r'''
+import re
+
+PAT = re.compile(r"(?P<k>[a-z]+)([0-9]+)")
+
+class S:
+    def count(self, s):
+        n = 0
+        for m in PAT.finditer(s):
+            n = n + 1
+        return n
+
+    def count_three_groups(self, s):
+        n = 0
+        for m in PAT3.finditer(s):
+            n = n + 1
+        return n
+
+PAT3 = re.compile(r"([a-z])(-)?([0-9])?")
+
+def main():
+    print(S().count("ab12 cd34 x 9"))
+    print(S().count("nothing here!"))
+    print(S().count_three_groups("a-1 b c-2"))
+
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if not ok:
+            print(f"FAIL  {name}: gimple body refused by gcc -x c:")
+            for line in stderr.splitlines()[:12]:
+                print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'regex_method_scan.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'regex_method_scan.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'regex_method_scan.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_regex_scan_in_a_method_body_compiles_and_matches_cpython(),
+                  'test_regex_scan_in_a_method_body_compiles_and_matches_cpython')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
