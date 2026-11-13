@@ -1,4 +1,4 @@
-SPLIT: bugs/mid/GPU_offload_validation_modular-part1, bugs/mid/GPU_offload_validation_modular-part2, bugs/mid/GPU_offload_validation_modular-part3, bugs/mid/GPU_offload_validation_modular-part4
+SPLIT: bugs/mid/GPU_offload_validation_modular-part1, bugs/mid/GPU_offload_validation_modular-part2, bugs/mid/GPU_offload_validation_modular-part3 (part4 dispositioned 2026-11-13: `test_regress_gpu_offload_validation_modular_part4.py`)
 # GPU: offload validation for modular test cases (category C)
 
 ## Symptom

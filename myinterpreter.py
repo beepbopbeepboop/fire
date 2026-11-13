@@ -3799,12 +3799,29 @@ class _MojoSIMDCtor:
         return _MojoSIMD(self.dtype, self.width, values)
 
 
+def _mojo_simd_width_is_valid(width):
+    """Return True if `width` is an acceptable SIMD lane count.
+
+    Mojo's SIMD vector length must be a power of two in [1, 2**15]. Non-int
+    widths (e.g. symbolic/comptime parameters not yet folded here) are not
+    rejected by this cheap interpreter-side guard.
+    """
+    if isinstance(width, bool) or not isinstance(width, int):
+        return True
+    return 1 <= width <= (1 << 15) and (width & (width - 1)) == 0
+
+
 class _MojoSIMDType:
     """`SIMD[DType.float32, 4](0.0, 1.5, -42.5, -12.7)` — subscript with
     (dtype, width), call with `width` scalar values (or a single value,
     broadcast to fill every lane)."""
     def __getitem__(self, item):
         dtype, width = item
+        if not _mojo_simd_width_is_valid(width):
+            raise ValueError(
+                "SIMD vector length must be a power of two between 1 and "
+                f"2^15, found {width!r}"
+            )
         return _MojoSIMDCtor(dtype, width)
 
 
