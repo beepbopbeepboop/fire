@@ -259,31 +259,32 @@ def _resolve_dtype_name(node, bindings, platform=None):
     return _dtype_name_from_value(v)
 
 
-def _comprehension_iterable_values(iterable, bindings: dict, platform):
+def _comprehension_iterable_values(iterable, bindings: dict, platform, conforms_to_pred=None):
     """The element values a comprehension generator iterates, or None.
 
     `range(...)` expands through resolve_for_iterable (the same bounds the
     unroller uses); anything else must fold to a list/tuple/str value."""
-    items = resolve_for_iterable(iterable, bindings, {}, COMPREHENSION_FOLD_CAP)
+    items = resolve_for_iterable(iterable, bindings, {}, COMPREHENSION_FOLD_CAP,
+                                 conforms_to_pred=conforms_to_pred)
     if items is None:
-        whole = eval_const(iterable, bindings, platform)
+        whole = eval_const(iterable, bindings, platform, conforms_to_pred)
         if isinstance(whole, (list, tuple, str)):
             return list(whole)
         return None
     vals = []
     for item in items:
-        v = eval_const(item, bindings, platform)
+        v = eval_const(item, bindings, platform, conforms_to_pred)
         if v is None:
             return None
         vals.append(v)
     return vals
 
 
-def _comprehension_run(node, generators: list, env: dict, out: list, platform):
+def _comprehension_run(node, generators: list, env: dict, out: list, platform, conforms_to_pred=None):
     """Depth-first walk of a comprehension's generators, appending each
     element's value to `out`. False when any part is not foldable."""
     if not generators:
-        v = eval_const(node.element, env, platform)
+        v = eval_const(node.element, env, platform, conforms_to_pred)
         if v is None:
             return False
         if len(out) >= COMPREHENSION_FOLD_CAP:
@@ -293,7 +294,7 @@ def _comprehension_run(node, generators: list, env: dict, out: list, platform):
     gen = generators[0]
     if not isinstance(gen.target, str):
         return False
-    values = _comprehension_iterable_values(gen.iterable, env, platform)
+    values = _comprehension_iterable_values(gen.iterable, env, platform, conforms_to_pred)
     if values is None:
         return False
     for item in values:
@@ -301,7 +302,7 @@ def _comprehension_run(node, generators: list, env: dict, out: list, platform):
         sub[gen.target] = item
         keep = True
         for cond in (gen.conditions or []):
-            c = eval_const_bool(cond, sub, platform=platform)
+            c = eval_const_bool(cond, sub, platform=platform, conforms_to_pred=conforms_to_pred)
             if c is None:
                 return False
             if not c:
@@ -309,12 +310,12 @@ def _comprehension_run(node, generators: list, env: dict, out: list, platform):
                 break
         if not keep:
             continue
-        if not _comprehension_run(node, generators[1:], sub, out, platform):
+        if not _comprehension_run(node, generators[1:], sub, out, platform, conforms_to_pred):
             return False
     return True
 
 
-def _fold_comprehension(node, bindings: dict, platform):
+def _fold_comprehension(node, bindings: dict, platform, conforms_to_pred=None):
     """Fold a LIST comprehension (`[i * 2 for i in range(3)]`) to a Python list
     of its element values, or None. Set/dict comprehensions are not folded.
 
@@ -326,18 +327,18 @@ def _fold_comprehension(node, bindings: dict, platform):
         return None
     out = []
     if not _comprehension_run(node, list(node.generators or []),
-                              dict(bindings), out, platform):
+                              dict(bindings), out, platform, conforms_to_pred):
         return None
     return out
 
 
-def _eval_subscript(node, bindings: dict, platform=None):
+def _eval_subscript(node, bindings: dict, platform=None, conforms_to_pred=None):
     """Fold subscript/slice on a comptime-known value, or None."""
     if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
-        base = eval_const(node.obj, bindings, platform)
+        base = eval_const(node.obj, bindings, platform, conforms_to_pred)
         if base is None:
             return None
-        idx = eval_const(node.index, bindings, platform)
+        idx = eval_const(node.index, bindings, platform, conforms_to_pred)
         if idx is None:
             return None
         try:
@@ -345,20 +346,20 @@ def _eval_subscript(node, bindings: dict, platform=None):
         except Exception:
             return None
     if SliceExpr is not None and isinstance(node, SliceExpr):
-        base = eval_const(node.obj, bindings, platform)
+        base = eval_const(node.obj, bindings, platform, conforms_to_pred)
         if base is None:
             return None
         start = stop = step = None
         if getattr(node, 'start', None) is not None:
-            start = eval_const(node.start, bindings, platform)
+            start = eval_const(node.start, bindings, platform, conforms_to_pred)
             if start is None:
                 return None
         if getattr(node, 'stop', None) is not None:
-            stop = eval_const(node.stop, bindings, platform)
+            stop = eval_const(node.stop, bindings, platform, conforms_to_pred)
             if stop is None:
                 return None
         if getattr(node, 'step', None) is not None:
-            step = eval_const(node.step, bindings, platform)
+            step = eval_const(node.step, bindings, platform, conforms_to_pred)
             if step is None:
                 return None
         try:
@@ -394,7 +395,100 @@ def _eval_dtype_predicate(dtype_name, method):
     return None
 
 
-def _eval_interpolated_string(node, bindings: dict, platform=None):
+
+def _conforms_to_name(node):
+    if node is None:
+        return None
+    if isinstance(node, IdentExpr):
+        return node.name
+    if isinstance(node, MemberExpr):
+        m = getattr(node, 'member', None)
+        if isinstance(m, str):
+            return m
+        return _conforms_to_name(m)
+    if DottedLiteral is not None and isinstance(node, DottedLiteral):
+        n = getattr(node, 'name', None)
+        if isinstance(n, str):
+            return n
+        p = getattr(node, 'path', None)
+        if isinstance(p, str) and p:
+            return p.split('.')[-1]
+        return None
+    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
+        return _conforms_to_name(getattr(node, 'obj', None))
+    if TupleExpr is not None and isinstance(node, TupleExpr):
+        elems = getattr(node, 'elements', None) or []
+        if len(elems) == 1:
+            return _conforms_to_name(elems[0])
+        return None
+    n = getattr(node, 'name', None)
+    if isinstance(n, str):
+        return n
+    return None
+
+
+def _conforms_to_bases(struct_name, bases_map, _memo=None):
+    if _memo is None:
+        _memo = {}
+    if struct_name in _memo:
+        return _memo[struct_name]
+    _memo[struct_name] = set()
+    out = set()
+    for b in (bases_map.get(struct_name) or []):
+        bname = b if isinstance(b, str) else _conforms_to_name(b)
+        if not bname:
+            continue
+        out.add(bname)
+        out.update(_conforms_to_bases(bname, bases_map, _memo))
+    _memo[struct_name] = out
+    return out
+
+
+def conforms_to(struct_name, trait_name, bases_map):
+    if not isinstance(struct_name, str) or not isinstance(trait_name, str):
+        return None
+    if not bases_map:
+        return None
+    if struct_name not in bases_map:
+        return None
+    if trait_name not in bases_map:
+        known = False
+        for bs in bases_map.values():
+            for b in (bs or []):
+                bname = b if isinstance(b, str) else _conforms_to_name(b)
+                if bname == trait_name:
+                    known = True
+                    break
+            if known:
+                break
+        if not known:
+            return None
+    return trait_name in _conforms_to_bases(struct_name, bases_map)
+
+
+def _fold_conforms_to_call(node, conforms_to_pred):
+    if conforms_to_pred is None:
+        return None
+    if not isinstance(node, CallExpr) or not isinstance(node.func, IdentExpr):
+        return None
+    if node.func.name != 'conforms_to':
+        return None
+    if getattr(node, 'kwargs', None):
+        return None
+    args = getattr(node, 'args', None) or []
+    if len(args) != 2:
+        return None
+    tname = _conforms_to_name(args[0])
+    trname = _conforms_to_name(args[1])
+    if tname is None or trname is None:
+        return None
+    try:
+        return conforms_to_pred(tname, trname)
+    except Exception:
+        return None
+
+
+def _eval_interpolated_string(node, bindings: dict, platform=None, conforms_to_pred=None):
     """Evaluate an interpolated (f/t) string literal into a plain string, or
     None if any interpolation expression cannot be comptime-folded. Used for
     compile-time diagnostic messages (comptime assert / constrained)."""
@@ -422,7 +516,7 @@ def _eval_interpolated_string(node, bindings: dict, platform=None):
                     expr_node = Parser(py_tokenize(expr_src))._parse_expr(0)
                 except Exception:
                     return None
-                v = eval_const(expr_node, bindings, platform)
+                v = eval_const(expr_node, bindings, platform, conforms_to_pred)
                 if v is None:
                     return None
                 if isinstance(v, bool):
@@ -436,7 +530,7 @@ def _eval_interpolated_string(node, bindings: dict, platform=None):
         return None
 
 
-def eval_const(node, bindings: dict, platform: str = None):
+def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
 
@@ -470,9 +564,12 @@ def eval_const(node, bindings: dict, platform: str = None):
     if isinstance(node, FloatLiteral): return node.value
     if isinstance(node, StringLiteral):
         if getattr(node, 'is_interpolated', False):
-            v = _eval_interpolated_string(node, bindings, platform)
+            v = _eval_interpolated_string(node, bindings, platform, conforms_to_pred)
             return v if v is not None else node.value
         return node.value
+    _ct = _fold_conforms_to_call(node, conforms_to_pred)
+    if _ct is not None:
+        return bool(_ct)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
         # .name - for enum/DType values, return a marker
         try:
@@ -482,7 +579,7 @@ def eval_const(node, bindings: dict, platform: str = None):
     if TupleExpr is not None and isinstance(node, TupleExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
-            v = eval_const(e, bindings, platform)
+            v = eval_const(e, bindings, platform, conforms_to_pred)
             if v is None:
                 return None
             res.append(v)
@@ -490,20 +587,20 @@ def eval_const(node, bindings: dict, platform: str = None):
     if ListExpr is not None and isinstance(node, ListExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
-            v = eval_const(e, bindings, platform)
+            v = eval_const(e, bindings, platform, conforms_to_pred)
             if v is None:
                 return None
             res.append(v)
         return res
     if Comprehension is not None and isinstance(node, Comprehension):
-        return _fold_comprehension(node, bindings, platform)
+        return _fold_comprehension(node, bindings, platform, conforms_to_pred)
     if DictExpr is not None and isinstance(node, DictExpr):
         res = {}
         for pair in getattr(node, 'pairs', []) or []:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
                 return None
-            k = eval_const(pair[0], bindings, platform)
-            v = eval_const(pair[1], bindings, platform)
+            k = eval_const(pair[0], bindings, platform, conforms_to_pred)
+            v = eval_const(pair[1], bindings, platform, conforms_to_pred)
             if k is None or v is None:
                 return None
             try:
@@ -545,7 +642,7 @@ def eval_const(node, bindings: dict, platform: str = None):
             and len(node.args) == 1 and not node.kwargs
             and node.func.name in ('String', 'StringSlice', 'StaticString',
                                    'StringSpan')):
-        v = eval_const(node.args[0], bindings, platform)
+        v = eval_const(node.args[0], bindings, platform, conforms_to_pred)
         if node.func.name == 'String' and isinstance(v, (int, bool)) and not isinstance(v, str):
             return str(v)
         return v
@@ -565,18 +662,18 @@ def eval_const(node, bindings: dict, platform: str = None):
             and len(node.args) == 1 and not node.kwargs):
         _cfn = node.func.name
         if _cfn == 'len':
-            _lv = eval_const(node.args[0], bindings, platform)
+            _lv = eval_const(node.args[0], bindings, platform, conforms_to_pred)
             if isinstance(_lv, (list, tuple, str, dict)):
                 return len(_lv)
             return None
         if _cfn == 'ord':
-            _ov = eval_const(node.args[0], bindings, platform)
+            _ov = eval_const(node.args[0], bindings, platform, conforms_to_pred)
             if isinstance(_ov, str) and len(_ov) == 1:
                 return ord(_ov)
             return None
         _bits = _SCALAR_CTOR_BITS.get(_cfn)
         if _bits is not None:
-            _iv = eval_const(node.args[0], bindings, platform)
+            _iv = eval_const(node.args[0], bindings, platform, conforms_to_pred)
             if isinstance(_iv, int) and not isinstance(_iv, (bool, str)):
                 _w = _iv & ((1 << _bits[0]) - 1)
                 if _bits[1] and _w >= (1 << (_bits[0] - 1)):
@@ -635,19 +732,19 @@ def eval_const(node, bindings: dict, platform: str = None):
     # access or slicing). Required so `comptime assert a[i] == ...` and similar
     # conditions over comptime collections produce compile-time diagnostics
     # (comptime collection ops beyond len()).
-    _sv = _eval_subscript(node, bindings, platform)
+    _sv = _eval_subscript(node, bindings, platform, conforms_to_pred)
     if _sv is not None:
         return _sv
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
-        v = eval_const(node.operand, bindings, platform)
+        v = eval_const(node.operand, bindings, platform, conforms_to_pred)
         return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
             and not isinstance(v, str) else None
     if isinstance(node, UnaryOp) and node.op == 'not':
-        v = eval_const(node.operand, bindings, platform)
+        v = eval_const(node.operand, bindings, platform, conforms_to_pred)
         return not v if isinstance(v, (bool, int)) else None
     if isinstance(node, BinaryOp):
         op = node.op
-        l = eval_const(node.left, bindings, platform)
+        l = eval_const(node.left, bindings, platform, conforms_to_pred)
         # Short-circuit `and`/`or`: a provably-false left of `and` (or
         # provably-true left of `or`) determines the result even when the
         # right side cannot be folded. This is required for compile-time
@@ -658,17 +755,17 @@ def eval_const(node, bindings: dict, platform: str = None):
                 return None
             if not l:
                 return l
-            r = eval_const(node.right, bindings, platform)
+            r = eval_const(node.right, bindings, platform, conforms_to_pred)
             return r
         if op == 'or':
             if l is None:
                 return None
             if l:
                 return l
-            r = eval_const(node.right, bindings, platform)
+            r = eval_const(node.right, bindings, platform, conforms_to_pred)
             return r
         if op == 'in':
-            r = eval_const(node.right, bindings, platform)
+            r = eval_const(node.right, bindings, platform, conforms_to_pred)
             if l is None or r is None:
                 return None
             try:
@@ -686,7 +783,7 @@ def eval_const(node, bindings: dict, platform: str = None):
             if res is None:
                 return None
             return not res
-        r = eval_const(node.right, bindings, platform)
+        r = eval_const(node.right, bindings, platform, conforms_to_pred)
         if l is None or r is None: return None
         # `eval_const` yields an int or a str depending on the expression, and
         # a statically compiled backend types a local from its uses: one
@@ -759,7 +856,7 @@ def eval_const(node, bindings: dict, platform: str = None):
     return None
 
 
-def eval_const_int(node, bindings: dict, call_hook=None):
+def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
     """Evaluate `node` as a compile-time int, or None.
 
     `call_hook(name, args) -> int | None` is the one backend-specific case —
@@ -775,22 +872,22 @@ def eval_const_int(node, bindings: dict, call_hook=None):
             return int(v)
         return None
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
-        v = eval_const_int(node.operand, bindings, call_hook)
+        v = eval_const_int(node.operand, bindings, call_hook, conforms_to_pred)
         return None if v is None else fold_unary_sign(node.op, v)
     if isinstance(node, BinaryOp):
         op = node.op
-        l = eval_const_int(node.left, bindings, call_hook)
+        l = eval_const_int(node.left, bindings, call_hook, conforms_to_pred)
         # Short-circuit and/or: required for comptime diagnostics and to
         # match eval_const's semantics (False and <unknown> is provably false).
         if op == 'and':
             if l is None: return None
             if not l: return l
-            return eval_const_int(node.right, bindings, call_hook)
+            return eval_const_int(node.right, bindings, call_hook, conforms_to_pred)
         if op == 'or':
             if l is None: return None
             if l: return l
-            return eval_const_int(node.right, bindings, call_hook)
-        r = eval_const_int(node.right, bindings, call_hook)
+            return eval_const_int(node.right, bindings, call_hook, conforms_to_pred)
+        r = eval_const_int(node.right, bindings, call_hook, conforms_to_pred)
         if l is None or r is None: return None
         if op == '+': return l + r
         if op == '-': return l - r
@@ -809,10 +906,10 @@ def eval_const_int(node, bindings: dict, call_hook=None):
         # Same short-circuit chained-comparison semantics as
         # myinterpreter.py's eval_CompareChain / _lower_compare_chain, just
         # over compile-time constants instead of runtime values.
-        left = eval_const_int(node.operands[0], bindings, call_hook)
+        left = eval_const_int(node.operands[0], bindings, call_hook, conforms_to_pred)
         if left is None: return None
         for op, operand in zip(node.ops, node.operands[1:]):
-            right = eval_const_int(operand, bindings, call_hook)
+            right = eval_const_int(operand, bindings, call_hook, conforms_to_pred)
             if right is None: return None
             link = compare_op(op, left, right)
             if link is None: return None
@@ -837,20 +934,20 @@ def eval_const_int(node, bindings: dict, call_hook=None):
         return None
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
-        argvals = [eval_const_int(a, bindings, call_hook) for a in node.args]
+        argvals = [eval_const_int(a, bindings, call_hook, conforms_to_pred) for a in node.args]
         if argvals and all(v is not None for v in argvals):
             return call_hook(node.func.name, argvals)
     return None
 
 
-def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None):
+def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as a compile-time bool, or None."""
-    v = eval_const(node, bindings, platform)
+    v = eval_const(node, bindings, platform, conforms_to_pred)
     if isinstance(v, (bool, int)):
         return bool(v)
     # Fallback: eval_const_int also folds what eval_const does not (calls,
     # via the hook).
-    result = eval_const_int(node, bindings, call_hook)
+    result = eval_const_int(node, bindings, call_hook, conforms_to_pred)
     return bool(result) if isinstance(result, (bool, int)) else None
 
 
@@ -867,7 +964,7 @@ CONST_FALSE = 0
 CONST_UNKNOWN = -1
 
 
-def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
+def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None) -> bool:
     """Is `node` a compile-time constant at all? Decided from the SHAPE of
     the expression and the names bound, never from a folded value, so the
     answer survives the compiled value model (see CONST_UNKNOWN). Mirrors
@@ -880,23 +977,29 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
         return True
     if TupleExpr is not None and isinstance(node, TupleExpr):
         for e in getattr(node, 'elements', []) or []:
-            if not _const_foldable(e, bindings, call_hook):
+            if not _const_foldable(e, bindings, call_hook, conforms_to_pred):
                 return False
         return True
     if ListExpr is not None and isinstance(node, ListExpr):
         for e in getattr(node, 'elements', []) or []:
-            if not _const_foldable(e, bindings, call_hook):
+            if not _const_foldable(e, bindings, call_hook, conforms_to_pred):
                 return False
         return True
     if DictExpr is not None and isinstance(node, DictExpr):
         for pair in getattr(node, 'pairs', []) or []:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
                 return False
-            if not _const_foldable(pair[0], bindings, call_hook):
+            if not _const_foldable(pair[0], bindings, call_hook, conforms_to_pred):
                 return False
-            if not _const_foldable(pair[1], bindings, call_hook):
+            if not _const_foldable(pair[1], bindings, call_hook, conforms_to_pred):
                 return False
         return True
+    _ct = _fold_conforms_to_call(node, conforms_to_pred)
+    if _ct is not None:
+        return True
+    if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+            and node.func.name == 'conforms_to'):
+        return False
     if isinstance(node, IdentExpr):
         return node.name in bindings
     # `DType.int32` / `dtype.int32`
@@ -952,56 +1055,56 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
         if getattr(node, 'attrs', None):
             return False
-        return (_const_foldable(node.obj, bindings, call_hook)
-                and _const_foldable(node.index, bindings, call_hook))
+        return (_const_foldable(node.obj, bindings, call_hook, conforms_to_pred)
+                and _const_foldable(node.index, bindings, call_hook, conforms_to_pred))
     if SliceExpr is not None and isinstance(node, SliceExpr):
-        if not _const_foldable(node.obj, bindings, call_hook):
+        if not _const_foldable(node.obj, bindings, call_hook, conforms_to_pred):
             return False
         for _part in (getattr(node, 'start', None),
                       getattr(node, 'stop', None),
                       getattr(node, 'step', None)):
-            if _part is not None and not _const_foldable(_part, bindings, call_hook):
+            if _part is not None and not _const_foldable(_part, bindings, call_hook, conforms_to_pred):
                 return False
         return True
     if isinstance(node, UnaryOp) and (node.op in FOLD_UNARY_OPS or node.op == 'not'):
-        return _const_foldable(node.operand, bindings, call_hook)
+        return _const_foldable(node.operand, bindings, call_hook, conforms_to_pred)
     if isinstance(node, BinaryOp):
         op = node.op
         if op == 'and':
-            if not _const_foldable(node.left, bindings, call_hook):
+            if not _const_foldable(node.left, bindings, call_hook, conforms_to_pred):
                 return False
             try:
-                lv = eval_const(node.left, bindings)
+                lv = eval_const(node.left, bindings, None, conforms_to_pred)
             except Exception:
                 lv = None
             if lv is not None and not lv:
                 return True
-            return _const_foldable(node.right, bindings, call_hook)
+            return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
         if op == 'or':
-            if not _const_foldable(node.left, bindings, call_hook):
+            if not _const_foldable(node.left, bindings, call_hook, conforms_to_pred):
                 return False
             try:
-                lv = eval_const(node.left, bindings)
+                lv = eval_const(node.left, bindings, None, conforms_to_pred)
             except Exception:
                 lv = None
             if lv is not None and lv:
                 return True
-            return _const_foldable(node.right, bindings, call_hook)
-        return (_const_foldable(node.left, bindings, call_hook)
-                and _const_foldable(node.right, bindings, call_hook))
+            return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
+        return (_const_foldable(node.left, bindings, call_hook, conforms_to_pred)
+                and _const_foldable(node.right, bindings, call_hook, conforms_to_pred))
     if isinstance(node, CompareChain):
         for _operand in node.operands:
-            if not _const_foldable(_operand, bindings, call_hook):
+            if not _const_foldable(_operand, bindings, call_hook, conforms_to_pred):
                 return False
         return True
     if (call_hook is not None and isinstance(node, CallExpr)
             and isinstance(node.func, IdentExpr)):
-        return eval_const_int(node, bindings, call_hook) is not None
+        return eval_const_int(node, bindings, call_hook, conforms_to_pred) is not None
     return False
 
 
 def eval_const_bool_state(node, bindings: dict, call_hook=None,
-                          platform: str = None) -> int:
+                          platform: str = None, conforms_to_pred=None) -> int:
     """`eval_const_bool` as CONST_TRUE / CONST_FALSE / CONST_UNKNOWN.
 
     Foldability comes first and from the expression's shape
@@ -1009,9 +1112,9 @@ def eval_const_bool_state(node, bindings: dict, call_hook=None,
     shape whose fold still fails (`1 // 0`) answers false rather than
     unknown -- the one place the two spellings differ, and a condition that
     divides by zero at compile time has no meaningful branch either way."""
-    if not _const_foldable(node, bindings, call_hook):
+    if not _const_foldable(node, bindings, call_hook, conforms_to_pred):
         return CONST_UNKNOWN
-    if eval_const_bool(node, bindings, call_hook, platform):
+    if eval_const_bool(node, bindings, call_hook, platform, conforms_to_pred):
         return CONST_TRUE
     return CONST_FALSE
 
@@ -1133,7 +1236,7 @@ def specialization_args(call, ct_params: list) -> list:
 
 
 def eval_const_call(node, bindings: dict, call_hook=None,
-                    platform: str = None):
+                    platform: str = None, conforms_to_pred=None):
     """Fold a bare call by RUNNING it through `call_hook`, or None.
 
     This is the seam a backend plugs its compile-time evaluator into: the
@@ -1157,9 +1260,9 @@ def eval_const_call(node, bindings: dict, call_hook=None,
         # has no IdentExpr case — that is the gimple path's behaviour, kept
         # exactly as it is — so it cannot see `comptime a = square(6)` being
         # passed straight into `comptime b = add(a, 1)`.
-        v = eval_const(a, bindings, platform)
+        v = eval_const(a, bindings, platform, conforms_to_pred)
         if not isinstance(v, (int, bool)) or isinstance(v, str):
-            v = eval_const_int(a, bindings, call_hook)
+            v = eval_const_int(a, bindings, call_hook, conforms_to_pred)
         if v is None:
             return None          # one unfolded argument ⇒ no constant
         args.append(int(v))
@@ -1167,7 +1270,7 @@ def eval_const_call(node, bindings: dict, call_hook=None,
 
 
 def resolve_var(stmt, bindings: dict, call_hook=None,
-                platform: str = None):
+                platform: str = None, conforms_to_pred=None):
     """What a `comptime NAME = value` statement binds, or None if it cannot.
 
     Returns ('value', v) for a scalar that folded, or ('list', ast) for a
@@ -1176,11 +1279,11 @@ def resolve_var(stmt, bindings: dict, call_hook=None,
     unroll over it. None means "not a compile-time constant", which a backend
     must report rather than quietly turn into a runtime variable: that would
     give the program different behaviour than the source declares."""
-    val = eval_const(stmt.value, bindings, platform)
+    val = eval_const(stmt.value, bindings, platform, conforms_to_pred)
     if val is None:
         # A call is the one shape `eval_const` cannot fold on its own; the
         # backend's hook runs it (see formal/comptime_runner.py).
-        val = eval_const_call(stmt.value, bindings, call_hook, platform)
+        val = eval_const_call(stmt.value, bindings, call_hook, platform, conforms_to_pred)
     if val is not None:
         return ('value', val)
     if isinstance(stmt.value, (_fc.ListExpr, _fc.TupleExpr)):
@@ -1189,27 +1292,27 @@ def resolve_var(stmt, bindings: dict, call_hook=None,
 
 
 def resolve_if(stmt, bindings: dict, platform: str = None,
-               call_hook=None):
+               call_hook=None, conforms_to_pred=None):
     """Which `comptime if` branch is taken, or None if it is not knowable.
 
     'then' / ('elif', i) / 'else' mean "emit only that branch"; None means the
     condition is not statically known and the backend must emit a runtime
     branch — same observable behaviour, no silent miscompile."""
     val = eval_const_bool_state(stmt.condition, bindings, call_hook,
-                                platform=platform)
+                                platform=platform, conforms_to_pred=conforms_to_pred)
     if val == CONST_TRUE:
         return 'then'
     if val == CONST_FALSE:
         for i, (cond, _body) in enumerate(getattr(stmt, 'elifs', None) or []):
             if eval_const_bool_state(cond, bindings, call_hook,
-                                     platform=platform) == CONST_TRUE:
+                                     platform=platform, conforms_to_pred=conforms_to_pred) == CONST_TRUE:
                 return ('elif', i)
         return 'else'
     return None
 
 
 def resolve_for_iterable(iterable, bindings: dict, list_asts: dict,
-                         unroll_cap: int, call_hook=None):
+                         unroll_cap: int, call_hook=None, conforms_to_pred=None):
     """The element expressions a `comptime for` iterates, or None.
 
     Two forms fold: `range(...)`, expanded with the same bounds as the
@@ -1241,7 +1344,7 @@ def resolve_for_iterable(iterable, bindings: dict, list_asts: dict,
         return None
     vals = []
     for a in rargs:
-        v = eval_const_int(a, bindings, call_hook)
+        v = eval_const_int(a, bindings, call_hook, conforms_to_pred)
         if v is None:
             return None
         vals.append(v)
