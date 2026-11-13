@@ -8450,7 +8450,18 @@ def _lower_LambdaExpr(gen, node) -> tuple:
 
     outer_ctx = gen.current_func_name or 'root'
     gen._lambda_counter += 1
-    lifted_name = f'{outer_ctx}_lambda_{gen._lambda_counter}'
+    # Qualify with the module when there is one. `_lambda_counter` is PER GEN,
+    # and a flattened do_imports/link compile spins up one temp_gen per inlined
+    # module, each starting at 0 — so two modules that both lift a lambda from
+    # a same-named enclosing function (`_comptime_conforms_to_pred` in
+    # emit_calls.py and emit_stmts.py) produced the SAME
+    # `_comptime_conforms_to_pred_lambda_1` and gcc rejected the second as a
+    # redefinition. Same `_mod_id` rule as the `main` renaming just below
+    # (empty module name -> no prefix, so a standalone compile's
+    # `f_lambda_1` is unchanged).
+    _lmod = gen.module_name.replace('.', '_').replace('-', '_') if gen.module_name else ''
+    lifted_name = (f'{_lmod}_{outer_ctx}_lambda_{gen._lambda_counter}'
+                   if _lmod else f'{outer_ctx}_lambda_{gen._lambda_counter}')
 
     # Build a synthetic FunctionDef whose body is `return <lambda.body>`
     # The synthetic statements carry the lambda's own line: the lifted body is

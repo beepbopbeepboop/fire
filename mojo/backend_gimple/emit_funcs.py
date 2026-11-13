@@ -3034,6 +3034,22 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # to layer on the per-compile `_inline_module_qualifiers` remap,
         # which needs a `gen`.
         from mojo.middle.module_shared import module_qualifier
+        # An EMPTY module name means "no module" (the root compile's own
+        # `GimpleGen` is built without one), so it must sanitize to no
+        # qualifier. Without this guard the remap below answered for it:
+        # `_inline_module_qualifiers` is keyed by the SANITIZED module of
+        # every inlined file AND by `module.lstrip('.')...` for relative
+        # imports (`funcs_shared.py:1276`), so a `from . import x` writes
+        # the key `''` — and the last such writer in a whole-closure build
+        # was `mojo.middle`, making `_sanitize_qualifier('')` return
+        # `mojo_middle`. Every function the ROOT module defined then got a
+        # spurious `mojo_middle_` prefix while its importers' call sites
+        # (resolved through their own non-empty module) stayed bare:
+        # fire.py's `build_executable` was emitted as
+        # `mojo_middle_build_executable_d8f39a` against call sites emitting
+        # `build_executable_d8f39a` — undefined symbol at link.
+        if not q:
+            return ''
         key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
         return module_qualifier(resolved)
