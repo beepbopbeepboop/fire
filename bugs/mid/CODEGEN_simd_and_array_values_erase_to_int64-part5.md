@@ -86,5 +86,6 @@ So landing this part requires, in the same change:
 
 The pinning test for (2) is `test_gimple.py`'s
 `gate_stdlib_syntax_float_bit_accessors`; it fails on a resolver-only landing
-with the errors above and passes on master. The gate red itself is recorded in
-`bugs/gate-stdlib-syntax.md` (green on master).
+with the errors above and passes on master. The `stdlib-syntax` red itself was
+the held branch's landing gate, not a master regression: master is green on
+all eight files.

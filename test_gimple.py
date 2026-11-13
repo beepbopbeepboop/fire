@@ -14527,7 +14527,7 @@ main()
     # gate-stdlib-syntax: a FLOAT scalar's bit accessors answer an integer.
     #
     # This is the minimum shape of the eight-file `stdlib-syntax` red the two
-    # held `SIMD[X, 1] -> X` landings produced (bugs/gate-stdlib-syntax.md).
+    # held `SIMD[X, 1] -> X` landings produced.
     # Once a width-1 SIMD value is typed float/double, `val.to_bits()` and
     # `x._to_bits_signed()` reach the generic scalar-method stub, which hands
     # the receiver's type straight back; a bitwise expression on that result
