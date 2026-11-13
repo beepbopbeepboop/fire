@@ -14936,6 +14936,13 @@ def generate_arm64_proof(prog, code, info) -> str:
     _callees2 = _callee_call_table(go_defs, prog, func_name, arity=2)
     _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2,
                                 exports=_callees2)
+    # The two-argument call environment this program's AST needs, read once and
+    # passed by both the universal `eval_eq_mojo` theorem and every concrete
+    # instance: the concrete theorems used to omit it and rely on `evalFunc`'s
+    # default, which answers 0, so a two-argument user call made the concrete
+    # proposition false while the universal one (and `eval_eq_mojo_test`) was
+    # stated correctly.
+    _ast_call_env2 = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not
@@ -14960,7 +14967,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         _, _dec1_rec = _dec1_pattern(fn)
         param = fn.params[0][0] if fn.params else "n"
         rec_hrhs = _expr_rec_hrhs(fn.body[0].else_body[0].value, func_name, param)
-        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
+        _cf2_use = _ast_call_env2
         eval_eq_mojo_proof = (
             f"simp +decide [mojo, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
             f"  by_cases hn : n = 0\n"
@@ -14994,7 +15001,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         # one-line arm must not carry a second pair -- otherwise `fib`'s proof
         # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
         _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
-        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
+        _cf2_use = _ast_call_env2
         eval_eq_mojo_proof = (
             f"have hunf : evalFunc ast ({_cf_unparenthesised}) [n] ({_cf2_use}) =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
@@ -15091,7 +15098,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {_entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) = "
+            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} ({_ast_call_env2}) = "
             f"{_apply_args('mojo', enames)} := by\n"
             f"  {eval_eq_mojo_proof}"
         )
@@ -15190,7 +15197,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             eval_tests.append(
                 f"theorem eval_eq_mojo_{v} :\n"
                 f"  evalFunc ast {_cf_text} "
-                f"{_entry_arg_list(_vv)} = {_apply_args('mojo', _vv)} := by\n"
+                f"{_entry_arg_list(_vv)} ({_ast_call_env2}) = {_apply_args('mojo', _vv)} := by\n"
                 f"{_tac_eval}"
             )
         _tv = ([f"(UInt64.ofNat {test_input})"] +
@@ -15198,7 +15205,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
             f"  evalFunc ast {_cf_text} {_entry_arg_list(_tv)} "
-            f"({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) = {_apply_args('mojo', _tv)} := by\n"
+            f"({_ast_call_env2}) = {_apply_args('mojo', _tv)} := by\n"
             f"{_tac_eval}"
         )
         eval_test_block = "\n\n".join(eval_tests)
