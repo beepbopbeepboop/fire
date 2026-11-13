@@ -16,7 +16,13 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 FIRE = [sys.executable, os.path.join(ROOT, 'fire.py')]
 
 
-def _build_and_run(source, *, timeout=120):
+def _build_and_run(source, *, timeout=600):
+    # 600 s, not 120: the FIRST `fire.py build` on a cold tree compiles the
+    # runtime and the modules it needs, and was measured at 121 s on this
+    # machine (a loaded box with other lanes) against 20-35 s once that cache
+    # exists — so a 120 s per-build cap failed the job on first run and passed
+    # it on every later one. The suite's own job timeout (3600 s) still bounds
+    # a genuine hang, including the four builds this file makes.
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, 't.mojo')
         exe = os.path.join(d, 'a.out')
