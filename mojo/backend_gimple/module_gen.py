@@ -4872,6 +4872,8 @@ def _gmi_transform_enum_classes(self, stmts: list) -> list:
 
 
 def gen_module_impl(self, stmts: list):
+    self._stmts = stmts
+    self._current_module_stmts = stmts
 
     # A class written INSIDE a function body is a type declaration like any
     # other, and the struct pipeline reads the module-level statement list, so

@@ -4541,6 +4541,192 @@ def _flatten_or_pattern_into(pat, out: list) -> None:
         out.append(pat)
 
 
+
+def _pattern_class_struct_name(gen, func):
+    """Resolve the struct name a class pattern's constructor names, or None."""
+    if isinstance(func, gimple_ctypes.IdentExpr):
+        return _as_str(func.name)
+    if isinstance(func, gimple_ctypes.MemberExpr):
+        # e.g. module.Class or pkg.mod.Class: best-effort last component.
+        return _as_str(getattr(func, 'member', '') or '') or None
+    return None
+
+
+def _iter_structdefs(gen):
+    """Yield StructDef objects visible to this generator, best-effort."""
+    seen = set()
+    def _yield_from(coll):
+        if not coll:
+            return
+        # dict module_name -> stmts
+        if isinstance(coll, dict):
+            for v in coll.values():
+                yield from _yield_from(v)
+            return
+        try:
+            for s in coll:
+                if isinstance(s, gimple_ctypes.StructDef):
+                    sid = id(s)
+                    if sid in seen:
+                        continue
+                    seen.add(sid)
+                    yield s
+        except TypeError:
+            return
+    for name in ('_module_stmts', 'module_stmts', '_all_transitive_stmts_ordered',
+                 '_all_struct_defs', 'all_struct_defs', 'stmts', '_stmts',
+                 '_parsed_stmts', '_root_stmts'):
+        yield from _yield_from(getattr(gen, name, None))
+    # Also scan any list-valued attrs that look like stmt lists as last resort.
+    try:
+        for k, v in list(getattr(gen, '__dict__', {}).items()):
+            if isinstance(v, list) and v and isinstance(v[0], (gimple_ctypes.StructDef,)):
+                yield from _yield_from(v)
+    except Exception:
+        pass
+
+
+def _structdef_for_name(gen, name):
+    if not name:
+        return None
+    for s in _iter_structdefs(gen):
+        if _as_str(getattr(s, 'name', '')) == name:
+            return s
+    return None
+
+
+def _extract_match_args_from_structdef(gen, sd, n_given, cname):
+    """Return (names, explicit_or_dataclass) or (None, reason)."""
+    if sd is None:
+        # Fallback: if generator already knows it as a dataclass-like struct via
+        # field types, we cannot safely synthesize explicit __match_args__ here.
+        # But we can try comptime aliases stored on gen.
+        ca_all = getattr(gen, '_struct_comptime_aliases', {}) or {}
+        ca = ca_all.get(cname, {}) if cname else {}
+        if '__match_args__' in ca:
+            val = ca['__match_args__']
+            if isinstance(val, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                names = []
+                ok = True
+                for el in getattr(val, 'elements', []) or []:
+                    if isinstance(el, gimple_ctypes.StringLiteral):
+                        names.append(el.value)
+                    else:
+                        ok = False
+                        break
+                if ok:
+                    return names, 'explicit'
+            return None, 'nonliteral'
+        # dataclass heuristic from struct_field_types when decorators unknown: refuse,
+        # as we cannot prove init-order vs __match_args__ without StructDef.
+        if cname and cname in getattr(gen, 'struct_field_types', {}):
+            # try to detect dataclass via known decorator tables
+            decs = None
+            for attr in ('_struct_decorators', 'struct_decorators'):
+                dmap = getattr(gen, attr, None) or {}
+                if cname in dmap:
+                    decs = dmap[cname]
+                    break
+            if decs is not None:
+                decs_s = [str(d) for d in decs]
+                if 'dataclass' in decs_s or '@dataclass' in decs_s:
+                    # Use declaration order from struct_field_types.
+                    fields = list((getattr(gen, 'struct_field_types', {}) or {}).get(cname, {}).keys())
+                    # Cannot prove init=False for dataclass fields without StructDef.
+                    return None, 'unknown'
+            # No explicit __match_args__ known
+            return None, 'missing'
+        return None, 'unknown'
+    # Explicit __match_args__ = ('x', 'y') as class-level assignment in fields/body.
+    for f in getattr(sd, 'fields', []) or []:
+        if isinstance(f, gimple_ctypes.AssignStmt):
+            tgt = getattr(f, 'target', None)
+            if isinstance(tgt, gimple_ctypes.IdentExpr) and tgt.name == '__match_args__':
+                val = getattr(f, 'value', None)
+                if isinstance(val, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                    names = []
+                    ok = True
+                    for el in getattr(val, 'elements', []) or []:
+                        if isinstance(el, gimple_ctypes.StringLiteral):
+                            names.append(el.value)
+                        else:
+                            ok = False
+                            break
+                    if ok:
+                        return names, 'explicit'
+                    return None, 'nonliteral'
+                return None, 'nonliteral'
+    # comptime alias form
+    ca = getattr(sd, 'comptime_aliases', None) or {}
+    if '__match_args__' in ca:
+        val = ca['__match_args__']
+        if isinstance(val, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+            names = []
+            ok = True
+            for el in getattr(val, 'elements', []) or []:
+                if isinstance(el, gimple_ctypes.StringLiteral):
+                    names.append(el.value)
+                else:
+                    ok = False
+                    break
+            if ok:
+                return names, 'explicit'
+        return None, 'nonliteral'
+    # dataclass: synthesize from __init__-participating fields in declaration order.
+    decs = [str(d) for d in (getattr(sd, 'decorators', []) or [])]
+    # also check gen decorator maps
+    if not (('dataclass' in decs) or ('@dataclass' in decs)):
+        for attr in ('_struct_decorators', 'struct_decorators'):
+            dmap = getattr(gen, attr, None) or {}
+            if cname and cname in dmap:
+                decs2 = [str(d) for d in dmap[cname]]
+                if 'dataclass' in decs2 or '@dataclass' in decs2:
+                    decs = decs2
+                    break
+    if 'dataclass' in decs or '@dataclass' in decs:
+        names = []
+        for f in getattr(sd, 'fields', []) or []:
+            if isinstance(f, gimple_ctypes.VarDecl):
+                fname = getattr(f, 'name', None)
+                if fname is None:
+                    continue
+                # If compiler cannot prove init=False, refuse rather than guess.
+                if getattr(f, 'init', True) is False:
+                    continue
+                names.append(_as_str(fname))
+            elif isinstance(f, gimple_ctypes.AssignStmt):
+                tgt = getattr(f, 'target', None)
+                if isinstance(tgt, gimple_ctypes.IdentExpr):
+                    tname = _as_str(tgt.name)
+                    if tname.startswith('__') and tname.endswith('__'):
+                        continue
+                    names.append(tname)
+        return names, 'dataclass'
+    # No __match_args__ and not dataclass
+    return None, 'missing'
+
+
+def _resolve_class_match_args(gen, func, args, line):
+    """Return list of attribute names to bind for positional class subpatterns."""
+    from formal import diagnostics as formal_model
+    n = len(args)
+    cname = _pattern_class_struct_name(gen, func)
+    sd = _structdef_for_name(gen, cname) if cname else None
+    names, reason = _extract_match_args_from_structdef(gen, sd, n, cname)
+    display = cname or formal_model.spelled(func)
+    if reason == 'unknown' or reason == 'nonliteral':
+        raise formal_model.CodegenError(
+            f"cannot resolve __match_args__ for '{display}' in class pattern "
+            f"(needed for {n} positional sub-pattern{'s' if n != 1 else ''})")
+    if reason == 'missing':
+        raise formal_model.CodegenError(
+            f"TypeError: {display}() accepts 0 positional sub-patterns ({n} given)")
+    if n > len(names):
+        raise formal_model.CodegenError(
+            f"TypeError: {display}() accepts {len(names)} positional sub-pattern{'s' if len(names) != 1 else ''} ({n} given)")
+    return names[:n]
+
+
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
@@ -4685,8 +4871,7 @@ def _gen_stmt_MatchStmt(gen, node):
             kind = formal_model.match_pattern_kind(pattern, _bound)
             if kind == "class pattern (type test)":
                 # `case C():` or positional-capture-only `case C(x):` — isinstance
-                # guard; positional args bind the subject's __match_args__[i]
-                # attribute via runtime getattr.
+                # guard; positional args bind from C.__match_args__ (CPython).
                 isinstance_node = gimple_ctypes.CallExpr(
                     func=gimple_ctypes.IdentExpr(name="isinstance"),
                     args=[subj_ref, pattern.func],
@@ -4698,16 +4883,16 @@ def _gen_stmt_MatchStmt(gen, node):
                     # Only bind when the isinstance guard holds: bail to fail_bb
                     # otherwise, so the attribute read never runs on a non-instance.
                     gen._emit(f"  if (!{cv}) goto {fail_bb};")
-                    for i, subpat in enumerate(args):
+                    _ma_names = _resolve_class_match_args(gen, pattern.func, args,
+                                                          getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0)
+                    for _ma_i, subpat in enumerate(args):
                         cname = getattr(subpat, 'name', None)
-                        gen._emit("  _mojo_getattr_missed = 0;")
-                        attr_val = gen._call_expr('int64_t', 'mojo_getattr_any',
-                                                 [('void *', f"(void *){subj_v}"),
-                                                  ('char *', gen._intern_string(cname if cname else '_'))])
-                        if cname is not None and cname not in gen.var_types:
-                            gen._declare_var(cname, 'int64_t')
-                        if cname is not None:
-                            gen._emit(f"  {cname} = {attr_val};")
+                        attr_name = _ma_names[_ma_i]
+                        if cname is not None and cname != '_':
+                            at, av = gen.lower_expr(gimple_ctypes.MemberExpr(obj=subj_ref, member=attr_name))
+                            if cname not in gen.var_types:
+                                gen._declare_var(cname, at)
+                            gen._safe_coerce_emit(at, gen.var_types.get(cname, at), av, cname)
                     gen._emit(f"  goto {arm_bb};")
                     cv = None
             elif kind in formal_model.MATCH_REFUSED_KINDS:
