@@ -959,11 +959,9 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
         # the old `argvals and ...` gate read that as "cannot answer" even
         # though every (zero) argument folded. That left the stdlib's
         # zero-arg target queries (`is_nvidia_gpu()`, ...) permanently
-        # CONST_UNKNOWN, so `comptime if` over them emitted the dead GPU
-        # arms, whose runtime-computed `String(...)` bracket calls the
-        # elaborated-instantiation refusal then took the whole module down
-        # (bugs/gate-stdlib-syntax). `all([])` is True: there is nothing
-        # left to fold.
+        # CONST_UNKNOWN, so a `comptime if` over them emitted every arm, the
+        # GPU ones included, as live code on a CPU build. `all([])` is True:
+        # there is nothing left to fold.
         if all(v is not None for v in argvals):
             return call_hook(node.func.name, argvals)
     return None

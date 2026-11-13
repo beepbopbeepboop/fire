@@ -8413,6 +8413,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
     _emit_literal_print('\\n', print_fn)
 
 
+# The stdlib module that owns the zero-arg GPU target queries. The fold
+# below is keyed on the IMPORT SITE as well as the name: a user's own
+# zero-arg `is_gpu()` must keep its real value.
+_GPU_TARGET_QUERY_MODULE = 'std.sys.info'
+
+
 def _comptime_call_hook(gen):
     """Build the call hook for comptime_eval.eval_const_int: fold a call to
     an *imported* function by running it at compile time as cached machine
@@ -8424,7 +8430,9 @@ def _comptime_call_hook(gen):
     it and simply does not fold calls."""
     def hook(name, argvals):
         if not argvals and _is_gpu_target_query_false(name):
-            return 0
+            _imported_from = (gen.imported_symbols.get(name) or {}).get('module')
+            if _imported_from == _GPU_TARGET_QUERY_MODULE:
+                return 0
         cache = getattr(gen, '_comptime_call_hook_cache', None)
         if cache is None:
             cache = {}
@@ -8468,12 +8476,13 @@ def _comptime_call_hook(gen):
 # `comptime if is_nvidia_gpu(): ... elif is_amd_gpu(): ...` cannot resolve:
 # the queries are imported calls the hook's source-extraction route cannot
 # evaluate, the condition stays CONST_UNKNOWN, and the comptime-if emits
-# every arm. The dead GPU bodies then hit the elaborated-instantiation
-# refusal on their runtime-computed `String(...)` bracket calls (b3e501b60)
-# and take the whole module red (bugs/gate-stdlib-syntax: test/math/
-# test_math.mojo through std/math/math.mojo's rsqrt/recip/exp2/log arms).
-# The `has_*` device-capability queries are NOT here: they ask about a
-# runtime accelerator, not the target triple.
+# every arm. The dead GPU bodies are then lowered as live code: the one that
+# carried a progressing bracket call was refused by the
+# elaborated-instantiation guard (the original stdlib-syntax red,
+# test/math/test_math.mojo through std/math/math.mojo's rsqrt/recip/exp2/log
+# arms), and even without that guard every one of them is code a CPU build
+# must not emit. The `has_*` device-capability queries are NOT here: they ask
+# about a runtime accelerator, not the target triple.
 _GPU_TARGET_QUERY_FALSE = frozenset((
     'is_nvidia_gpu', 'is_amd_gpu', 'is_apple_gpu', 'is_gpu',
 ))

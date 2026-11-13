@@ -2271,25 +2271,12 @@ def _type_expr_to_ann(gen, node) -> str:
         return _float_type_arg_text(node.value)
     if isinstance(node, gimple_ctypes.BoolLiteral):
         return 'True' if node.value else 'False'
-    if isinstance(node, gimple_ctypes.StringLiteral) and not node.is_bytes:
-        return _string_type_arg_text(node.value)
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.IntLiteral):
         return str(-node.operand.value)
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.FloatLiteral):
         _text = _float_type_arg_text(node.operand.value)
         return '-' + _text if _text else ''
     return ''
-
-def _string_type_arg_text(value) -> str:
-    """A string literal's rendering as a comptime bracket argument: a
-    double-quoted Mojo literal that reads back as the same text. The node's
-    `value` is already decoded (or the raw body of an `r"..."`), so only the
-    characters that would end or re-escape the literal are escaped. A string
-    argument is a concrete value, not a type name: left as '', it reads as an
-    unbound type argument, and `llvm_intrinsic["llvm.x", T]` in a generic body
-    tripped the elaborated-instantiation refusal (bug gate-stdlib-syntax)."""
-    escapes = {'\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r', '\t': '\\t'}
-    return '"' + ''.join(escapes.get(ch, ch) for ch in str(value)) + '"'
 
 def _float_type_arg_text(value) -> str:
     """A float literal's rendering as a comptime bracket argument, or '' when
