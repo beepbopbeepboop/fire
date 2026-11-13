@@ -14867,6 +14867,43 @@ def g(x: SIMD[Float64, 1]) -> Bool:
     return (b & 0x7FF).eq(0)
 """), 'gate_stdlib_syntax_float_bit_accessors')
 
+    # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
+    #
+    # The Array fill-unroll coerces its fill value to the element type, and a
+    # `{}` fill lowers to a `MojoDict *`. C lets a pointer convert only to an
+    # INTEGER type, so the generic `(double)<ptr>` cast the coercion used to
+    # emit is rejected outright -- gcc: "pointer value used where a
+    # floating-point was expected". Real: test/algorithm/test_vectorize.mojo's
+    # `Array[Float32, buf_len](fill={})` (twice), which only became reachable
+    # when b0910af72 made the width arm fire for a comptime width; the red
+    # that produced is `stdlib-syntax`. The fix is the same int-word
+    # conversion every other pointer->number coercion in emit_resolve.py uses.
+    #
+    # The append count is asserted, not just "gcc accepted it": a dead width
+    # arm would also compile, and that is the regression (b0910af72) this
+    # would otherwise stop watching.
+    def _test_array_float_fill_from_a_container():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_array_float_fill_pointer_coercion"
+        ok, c_src, stderr = gimple_compiles("""\
+def f() -> Float64:
+    comptime n = 23
+    var a = Array[Float32, n](fill={})
+    return Float64(a[0])
+""")
+        appends = c_src.count('mojo_list_append_double')
+        if ok and appends == 23:
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}: ok={ok} appends={appends} (want 23)")
+        for line in stderr.splitlines()[:8]:
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(_test_array_float_fill_from_a_container,
+                  'gate_stdlib_syntax_array_float_fill_pointer_coercion')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:
