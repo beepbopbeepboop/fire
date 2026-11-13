@@ -4622,6 +4622,21 @@ def generator_base_name(fn_name, module_qualifier_str: str) -> str:
     return f'__mgco_{_cm_as_str(fn_name)}'
 
 
+def _attribute_to_def(prologue: list, fn) -> list:
+    """Attribute a synthesized generator-body prologue to the generator's `def`.
+
+    The `var p = __mojo_gen_arg(__c, i)` statements are built here, so they
+    have no source line of their own. gen_stmt stamps every C line it emits
+    with its statement's `#line`, and a line-less statement emits none, which
+    left the first lines of every `__mgco_<name>_body` numbered from whatever
+    directive preceded the function. They take the generator's own line.
+    """
+    for stmt in prologue:
+        stmt.line = fn.line
+        stmt.col = fn.col
+    return prologue
+
+
 def _async_method_setup(fn, base, struct_name):
     """Shared prologue/param plumbing for a plain `async def` and an async
     generator, top-level OR a struct method. For a method: arg 0 is the
@@ -4650,6 +4665,7 @@ def _async_method_setup(fn, base, struct_name):
             prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=pann, value=val))
         else:
             prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None, value=slot))
+    _attribute_to_def(prologue, fn)
     body_params = [(_CVAR, 'Int')]
     if is_method:
         body_params.append(('self', struct_name))
@@ -8537,6 +8553,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
                                       value=_call(ARG_SHIM, [_c_ident(_CVAR),
                                                              N.IntLiteral(value=arg_base + i)])))
 
+    _attribute_to_def(prologue, fn)
     new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind, env)
     body_params = [(_CVAR, 'Int')]
     if has_self:

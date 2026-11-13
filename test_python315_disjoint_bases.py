@@ -128,6 +128,37 @@ class TestDisjointBaseInterpreter(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
         self.assertEqual(r.stdout, "2 3\n")
 
+    def test_dataclass_field_defaults_unwrap_field_objects(self):
+        # `field(default=...)` / `field(default_factory=...)` are calls that
+        # return a dataclasses.Field. The interpreter's constructor must
+        # unwrap them to the default VALUE (call the factory), not bind the
+        # Field object itself. Compared against CPython on the same text,
+        # the oracle for this family of tests.
+        src = (
+            "from dataclasses import dataclass, field\n"
+            "\n"
+            "@dataclass\n"
+            "class P:\n"
+            "    a: int\n"
+            "    xs: list = field(default_factory=list)\n"
+            "    n: int = field(default=7)\n"
+            "\n"
+            "p = P(1)\n"
+            "print(type(p.xs).__name__, type(p.n).__name__)\n"
+            "print(p.xs, p.n)\n"
+            "q = P(2)\n"
+            "q.xs.append(5)\n"
+            "print(P(3).xs, q.xs)\n"
+        )
+        r = self._run_fire(src)
+        self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
+        oracle = subprocess.run(
+            [sys.executable, "-c", src], capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(oracle.returncode, 0, oracle.stderr)
+        self.assertEqual(r.stdout, oracle.stdout)
+        self.assertEqual(r.stdout, "list int\n[] 7\n[] [5]\n")
+
 
 if __name__ == "__main__":
     unittest.main()

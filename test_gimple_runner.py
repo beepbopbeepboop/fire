@@ -263,12 +263,18 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str, filename:
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src, filename)
-        out = run_executable_stdout(exe_path)
+        # The exit code and stderr are kept for the failure message: an empty
+        # stdout with exit 0 and an empty stdout after a crash are different
+        # bugs, and a bare `got ''` cannot tell them apart.
+        _r = subprocess.run([exe_path], capture_output=True, timeout=RUN_TIMEOUT_S,
+                            env=_SCRIBBLE_ENV)
+        out = _r.stdout.decode('utf-8', errors='replace')
         if out == expected_stdout:
             print(f"PASS  {name}")
             _PASS += 1
         else:
-            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r}")
+            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r} "
+                  f"(exit {_r.returncode}, stderr {_r.stderr[-200:]!r})")
             _FAIL += 1
     except subprocess.TimeoutExpired as e:
         # A timeout is LOAD, not a wrong answer: these are 30s/10s
