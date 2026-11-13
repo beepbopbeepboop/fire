@@ -13089,8 +13089,9 @@ def gen_module_impl(self, stmts: list):
     # An ANNOTATED return type is skipped: the annotation decides the C return
     # type (the float arm keeps its old coercion), so the value is not a tagged
     # word and marking it one here would misread it at every consumer. That
-    # shape — a pointer annotation contradicted by a float arm — remains open;
-    # see the bug doc.
+    # shape — a pointer annotation contradicted by a float arm — is not a
+    # tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
+    # refuses it at compile time.
     _ret_float: set = set()
     _fmb = getattr(self, '_float_mixed_return_bodies', None)
     if _fmb is None:

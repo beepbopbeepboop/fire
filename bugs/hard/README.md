@@ -17,7 +17,6 @@ deleted in the same commit, as for any bug.
 | `COMPILE_FAIL_Tools_cases_generator_analyzer.md` | see doc | workers |
 | `DIAGNOSTICS_align_decorator.md` | see doc | workers |
 | `DIAGNOSTICS_binding_deferrals.md` | see doc | workers |
-| `DIAGNOSTICS_docstring_self_import.md` | see doc | workers |
 | `DIAGNOSTICS_formatting_modular.md` | see doc | workers |
 | `DIAGNOSTICS_lsp_error_recovery.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
