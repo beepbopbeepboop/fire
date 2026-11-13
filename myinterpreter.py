@@ -22,7 +22,6 @@ import builtins
 import threading
 from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
-from mojo.middle.simd_width import is_valid_width as _simd_width_is_valid
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -794,92 +793,6 @@ def import_error_suggestion(mod_name, name_from):
     return f". Did you mean: '{suggestion}' ({suggestion!a})?"
 
 
-def name_error_candidate(name, candidates, self_obj):
-    """The single name CPython 3.15's NameError suggestion would offer for
-    `name`, or None. Shared by the CPython-rendered suffix
-    (name_error_suggestion) and the Mojo-rendered diagnostic
-    (mojo_diagnostic_text), so both pick the same candidate: the NFKC
-    normalisation match, then the `self.<name>` refinement, then the shared
-    distance match over `candidates`."""
-    if not isinstance(name, str) or candidates is None:
-        return None
-    d = [x for x in candidates if isinstance(x, str)]
-    name_n, not_normalized = _suggestion_normalize(name)
-    if not_normalized and name_n in d:
-        return name_n
-    if self_obj is not None:
-        try:
-            if hasattr(self_obj, name_n):
-                return f"self.{name_n}"
-        except Exception:
-            pass
-    return _suggestion_after_pool(d, name_n, not_normalized)
-
-
-def mojo_diagnostic(exc, filename, source, fmt='text'):
-    """The modular-format rendering of an unknown-declaration error, or None
-    when `exc` carries no Mojo source location (an error raised from a
-    synthetic node, or one that never reached eval_IdentExpr). `fmt` is
-    'text' (the default) or 'json' (`--diagnostic-format json`).
-
-    One record is built here (the position, the source line, the message and
-    the suggestion) and rendered two ways, matching the modular compiler's
-    output for the same file:
-
-    text, `mojo build`'s shape:
-
-        <file>:<line>:<col>: error: use of unknown declaration '<name>'
-            <the source line, verbatim>
-            <spaces to the column>^~~~ (one ~ per further character of name)
-
-    with a suggestion the head gains `; did you mean '<s>'?` and the
-    suggestion is printed on its own line under the caret, at the column.
-
-    json, one object per record with sorted keys and 0-based columns in
-    `location` and `ranges`, 1-based line/column in `fixIts` (the suggestion
-    replaces the identifier). The driver's closing `failed to parse` record
-    is part of that stream, so it is emitted here too."""
-    loc = getattr(exc, 'mojo_loc', None)
-    name = getattr(exc, 'name', None)
-    if loc is None or not isinstance(name, str) or not filename or source is None:
-        return None
-    line, col, width = loc
-    lines = source.splitlines()
-    if line < 1 or line > len(lines) or col < 1:
-        return None
-    text = lines[line - 1]
-    suggestion = name_error_candidate(name, getattr(exc, 'candidates', None),
-                                      getattr(exc, 'self_obj', None))
-    if suggestion is not None and not suggestion.isascii():
-        suggestion = None
-    message = f"use of unknown declaration '{name}'"
-    if suggestion is not None:
-        message += f"; did you mean '{suggestion}'?"
-    if fmt == 'json':
-        import json
-        diagnostic = {
-            'file': filename,
-            'fixIts': [] if suggestion is None else [{
-                'start': {'line': line, 'column': col},
-                'end': {'line': line, 'column': col + width},
-                'text': suggestion}],
-            'location': {'line': line, 'column': col - 1},
-            'ranges': [{'start': col - 1, 'end': col - 1 + width}],
-            'text': text}
-        records = [{'diagnostic': diagnostic, 'kind': 'error', 'message': message},
-                   {'kind': 'error',
-                    'message': 'failed to parse the provided Mojo source module'}]
-        return '\n'.join(json.dumps(r, sort_keys=True, separators=(',', ':'),
-                                     ensure_ascii=False)
-                         for r in records)
-    out = [f"{filename}:{line}:{col}: error: {message}", text]
-    pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:col - 1])
-    out.append(pad + '^' + '~' * max(width - 1, 0))
-    if suggestion is not None:
-        out.append(' ' * (col - 1) + suggestion)
-    return '\n'.join(out)
-
-
 def name_error_suggestion(name, candidates, self_obj):
     """CPython 3.15's print-time NameError suggestion, as the suffix to
     append to the message: '' when there is nothing to add. CPython reads
@@ -901,7 +814,20 @@ def name_error_suggestion(name, candidates, self_obj):
     '<name>'?` when there is none."""
     if not isinstance(name, str) or candidates is None:
         return ''
-    suggestion = name_error_candidate(name, candidates, self_obj)
+    d = [x for x in candidates if isinstance(x, str)]
+    name_n, not_normalized = _suggestion_normalize(name)
+    suggestion = None
+    if not_normalized and name_n in d:
+        suggestion = name_n
+    else:
+        if self_obj is not None:
+            try:
+                if hasattr(self_obj, name_n):
+                    suggestion = f"self.{name_n}"
+            except Exception:
+                pass
+        if suggestion is None:
+            suggestion = _suggestion_after_pool(d, name_n, not_normalized)
     if suggestion is None:
         if name in _STDLIB_MODULE_NAMES:
             return f". Did you forget to import '{name}'?"
@@ -3066,43 +2992,10 @@ class _MojoListType:
             return list(kwargs['copy'])
         if 'capacity' in kwargs or 'unsafe_uninit_length' in kwargs:
             return []
-        if 'length' in kwargs:
-            # `List(length=, fill=)` is a synthetic `[fill] * length` and
-            # `List(length=, fill_with=<callable>)` fills slot i with
-            # `fill_with(i)`: the same synthetic-comprehension reading the
-            # compiled path gives it (`_lower_bare_list_ctor` in
-            # emit_calls.py). A `fill` is evaluated ONCE by the caller and
-            # copied into every slot, never re-evaluated; a `fill_with` is a
-            # value call per slot, and a MojoFunction answers one like any
-            # other call (`MojoFunction.__call__` resolves its own
-            # interpreter). A `length=` with no filler (`capacity=` beside
-            # it, a misspelt one) builds nothing: an empty list, matching
-            # the compiled path's `mojo_list_new ()` fallback.
-            length = kwargs['length']
-            if 'fill' in kwargs:
-                fill = kwargs['fill']
-                return [fill] * length
-            if 'fill_with' in kwargs:
-                fill_with = kwargs['fill_with']
-                return [fill_with(i) for i in range(length)]
-            return []
-        if len(args) == 1 and isinstance(args[0], (list, tuple, set,
-                                                   frozenset, dict, range,
-                                                   str, bytes)):
-            # `List(<iterable>)` is a COPY in the container's iteration
-            # order, exactly as `list(<iterable>)` is — one walk, the same
-            # one the compiled path reuses in `_lower_bare_list_ctor`
-            # (emit_calls.py). Before this arm existed the sole iterable
-            # was wrapped as ONE element: `List([1, 2])` answered
-            # `[[1, 2]]` and the two engines disagreed on it
-            # (bug:INTERP_list_ctor_wraps_its_iterable).
-            return list(args[0])
         # `List(1, 2, 3, __list_literal__=NoneType())` - real Mojo's
         # list-literal-desugaring init; drop the marker kwarg, keep the
         # positional values as the initial contents. Plain `List[Int]()`
-        # (no positional args) falls through the same path to `[]`, and a
-        # lone NON-iterable (`List(5)`) is wrapped as one element, as it
-        # always was.
+        # (no positional args) falls through the same path to `[]`.
         return list(args)
 
     def alloc(self, count, *args, **kwargs):
@@ -3906,28 +3799,12 @@ class _MojoSIMDCtor:
         return _MojoSIMD(self.dtype, self.width, values)
 
 
-def _mojo_simd_width_is_valid(width):
-    """Return True if `width` is an acceptable SIMD lane count.
-
-    Mojo's SIMD vector length must be a power of two in [1, 2**15]. Non-int
-    widths (e.g. symbolic/comptime parameters not yet folded here) are not
-    rejected by this cheap interpreter-side guard. The rule itself lives in
-    `mojo.middle.simd_width`, shared with the compiled path's guard.
-    """
-    return _simd_width_is_valid(width)
-
-
 class _MojoSIMDType:
     """`SIMD[DType.float32, 4](0.0, 1.5, -42.5, -12.7)` — subscript with
     (dtype, width), call with `width` scalar values (or a single value,
     broadcast to fill every lane)."""
     def __getitem__(self, item):
         dtype, width = item
-        if not _mojo_simd_width_is_valid(width):
-            raise ValueError(
-                "SIMD vector length must be a power of two between 1 and "
-                f"2^15, found {width!r}"
-            )
         return _MojoSIMDCtor(dtype, width)
 
 
@@ -7551,15 +7428,9 @@ class Interpreter:
             # scope.get raises through _tag_name_error (name/candidates/
             # self_obj), and this new exception must carry the same fields
             # for CPython 3.15's print-time NameError suggestion.
-            exc = _tag_name_error(
+            raise _tag_name_error(
                 NameError(f"{self._loc(expr)}name '{expr.name}' is not defined"),
                 self.scope, expr.name)
-            # The source span for the modular-format top-level diagnostic
-            # (mojo_diagnostic_text). Synthetic IdentExprs carry no position
-            # and keep the plain message.
-            if expr.line > 0 and expr.col > 0:
-                setattr(exc, 'mojo_loc', (expr.line, expr.col, len(expr.name)))
-            raise exc
 
     def _resolve_Self(self, expr):
         """Resolve Self to the current struct type (when inside a struct method)."""

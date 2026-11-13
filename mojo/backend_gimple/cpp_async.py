@@ -213,21 +213,18 @@ def _cpp_with_guard_type_name(gen, expr) -> str | None:
 
 def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
     """True when `iterable` is a call this compile can potentially
-    delegate to via `_cpp_for_generator_delegate` — a bare
-    `name(...)` naming a free-function generator, `self.method(...)`
-    / `cls.method(...)` naming a generator METHOD on the SAME struct this
-    body belongs to (`self._cpp_gen_self_struct`, set by
-    `_gen_cpp_generator_unit` while compiling a generator method's body
-    — None for a free function, so the method-call branch below naturally
-    never matches there), or `<module>.<name>(...)` naming a generator
-    compiled in another module of the same whole-program build (resolved
-    via the whole-program/cross-module generator registries). Uses
-    `self._all_generator_names` (every generator name anywhere in the
-    module, computed once up front — see that attribute's own docstring)
-    rather than `self._generator_api`/`self._generator_method_api`
-    directly, so a callee that's a real generator but hasn't been
-    COMPILED yet in this pass still counts as "delegatable" here —
-    `_cpp_for_generator_delegate` itself raises
+    delegate to via `_cpp_for_generator_delegate` — either a bare
+    `name(...)` naming a free-function generator, or `self.method(...)`
+    naming a generator METHOD on the SAME struct this body belongs to
+    (`self._cpp_gen_self_struct`, set by `_gen_cpp_generator_unit`
+    while compiling a generator method's body — None for a free
+    function, so the method-call branch below naturally never matches
+    there). Uses `self._all_generator_names` (every generator name
+    anywhere in the module, computed once up front — see that
+    attribute's own docstring) rather than `self._generator_api`/
+    `self._generator_method_api` directly, so a callee that's a real
+    generator but hasn't been COMPILED yet in this pass still counts as
+    "delegatable" here — `_cpp_for_generator_delegate` itself raises
     `_UnsupportedGeneratorShape` for that case, which is exactly what
     gets the caller retried in gen_module's later passes instead of
     silently falling through to the generic (non-generator-aware)
@@ -240,36 +237,14 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
                 or (name in gen._generator_api))
     if isinstance(iterable.func, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
-        if (_self_struct
-                and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
-                and iterable.func.obj.name in ('self', 'cls')
-                and (iterable.func.member in gen._all_generator_names
-                     # a method the stack-switch path already compiled
-                     # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
-                     # entry points) is driven exactly like a coroutine one
-                     or (_self_struct, iterable.func.member) in gen._generator_method_api)):
-            return True
-        # `<module>.<name>(...)` — a generator in another module of this
-        # whole-program build. `self`/`cls` receivers were handled above.
-        if (isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
-                and iterable.func.obj.name not in ('self', 'cls')):
-            try:
-                _api = gcc_._cpp_resolve_generator_call_api(gen, iterable.func)
-            except Exception:
-                _api = None
-            if _api is not None:
-                return True
-            _obj = iterable.func.obj.name
-            _ma = getattr(gen, '_module_alias_names', None)
-            if _ma and _obj in _ma:
-                # Not resolved/compiled yet in this pass, but the base is a
-                # module alias and the member names some generator in the
-                # whole-program build: treat as potentially delegatable so the
-                # delegate can raise a retriable UnsupportedGeneratorShape.
-                if iterable.func.member in gen._all_generator_names:
-                    return True
-                return True
-        return False
+        return bool(_self_struct
+                    and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
+                    and iterable.func.obj.name in ('self', 'cls')
+                    and (iterable.func.member in gen._all_generator_names
+                         # a method the stack-switch path already compiled
+                         # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
+                         # entry points) is driven exactly like a coroutine one
+                         or (_self_struct, iterable.func.member) in gen._generator_method_api))
     return False
 
 
@@ -738,18 +713,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                         ctype = 'int64_t'
         except Exception:
             pass
-        # Read the evidence off THIS FunctionDef, not the module-level table:
-        # by the time an imported module's generator unit is emitted, the
-        # module's own imports have been compiled (each a `lower()` that
-        # refills the bare-name table), so the table describes the last
-        # nested module rather than this one. See
-        # `coro._compute_pointer_evidence`, which stamps `_ptr_evidence` on
-        # every FunctionDef for exactly this reader. No fallback to the
-        # table: an unstamped node has no evidence of its own, and the
-        # table's entry belongs to whichever module ran last.
-        _ptr_ev = getattr(fn, '_ptr_evidence', ())
         if (ctype == 'char *' and (pt is None or pt == '')
-                and pn in _ptr_ev
+                and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
                         and isinstance(_n.func, gimple_ctypes.IdentExpr)
                         and _n.func.name == 'isinstance' and len(_n.args) == 2
@@ -961,29 +926,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     for _spn0, _sct0 in param_ctypes:
         _self_cts.append(_sct0)
     gen._cpp_gen_self_params = _self_cts
-    # The PARAMETER NAMES parallel to `_cpp_gen_self_params`, one per slot.
-    # Every `_generator_api` entry carries the same `param_names` key (see
-    # `_register_free_generator`), which is what lets a delegated call bind
-    # its keyword arguments to the right slot by name; a self-recursive
-    # `yield from <this-same-function>(...)` builds its api locally (below),
-    # so it needs the names from here for exactly the same reason.
-    _self_pnames = []
-    for _spn1, _sct1 in param_ctypes:
-        _self_pnames.append(gimple_ctypes._as_str(_spn1))
-    gen._cpp_gen_self_param_names = _self_pnames
-    # This unit's own parameter defaults, in `param_defaults`' `[(name,
-    # default_ast), ...]` shape — the snapshot a self-recursive delegated
-    # call needs to pad an OMITTED trailing argument. Registration into
-    # `_func_param_defaults` only happens after this whole unit succeeds, so
-    # without this local copy `yield from <this-function>(n - 1)` against
-    # `def countdown(n, step=1)` had no default to pad with (and the old
-    # `yield from` padding loop, which computed a default but never appended
-    # it, hung instead of refusing). Indexed loop, not a `.items()`
-    # comprehension: see the tuple-unpack note at this function's return.
-    _self_dflts = []
-    for _sdk in (getattr(fn, 'param_defaults', None) or {}):
-        _self_dflts.append((_sdk, fn.param_defaults[_sdk]))
-    gen._cpp_gen_self_defaults = _self_dflts
     gen._cpp_os_path_aliases = gcc_._cpp_collect_os_path_aliases(fn)
     gen._cpp_tuple_guarded_yields = gimple_exprtypes._tuple_guarded_bare_yields(fn)
     # Set True by _cpp_yield_from the moment it actually emits a
@@ -1182,38 +1124,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                     _dict_val_types[f"cls.{_aname}"] = _vt
         _field_elem_types = (gen._field_elem_types.get(struct_name, {})
                              if struct_name is not None else {})
-        # A TUPLE-target `for a, b in <call to a compiled generator>:`
-        # binds each name to the callee's own registered per-slot ctype.
-        # `_generator_yield_ctype`'s pre-pass overlays only a PLAIN target
-        # (`for x in <gen>()`), so `yield <name>` over a tuple slot used to
-        # stay unresolved and refuse the whole generator — real:
-        # tables.py's `parse_table` doing `for line, filename in
-        # strutil.parse_entries(...)` then `yield line`. Resolve the callee
-        # through the SAME cross-module resolver `_cpp_for_generator_delegate`
-        # uses, and seed a COPY of `declared` with the slot ctypes; the
-        # pre-pass itself copies `known` again, so the seeds survive.
-        _yield_declared = declared
-        for _yn in gimple_exprtypes._walk_own_body(fn.body):
-            if not (isinstance(_yn, gimple_ctypes.ForStmt)
-                    and isinstance(_yn.iterable, gimple_ctypes.CallExpr)
-                    and gimple_ctypes.for_target_is_tuple(_yn.target)):
-                continue
-            _ynames = for_target_names(_yn.target)
-            if len(_ynames) < 2:
-                continue
-            _capi = gcc_._cpp_resolve_generator_call_api(gen, _yn.iterable.func)
-            if _capi is None:
-                continue
-            _yslots = _capi.get('tuple_slot_ctypes')
-            if not _yslots:
-                continue
-            if _yield_declared is declared:
-                _yield_declared = dict(declared)
-            for _yi, _ynm in enumerate(_ynames):
-                if _yi < len(_yslots) and isinstance(_ynm, str):
-                    _yield_declared[_ynm] = _yslots[_yi]
         value_ctype = gimple_exprtypes._generator_yield_ctype(
-            fn, _yield_declared, gen._generator_api, self_fields,
+            fn, declared, gen._generator_api, self_fields,
             known_structs=_known_structs, dict_val_types=_dict_val_types,
             method_return_types=gen.func_return_types,
             fn_return_types=gcc_._cpp_trusted_fn_return_types(gen),
@@ -1366,8 +1278,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_name = None
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
-        gen._cpp_gen_self_param_names = None
-        gen._cpp_gen_self_defaults = None
         gen._cpp_os_path_aliases = None
         gen._cpp_str_evidence_names = None
         gen._cpp_list_word_names = None

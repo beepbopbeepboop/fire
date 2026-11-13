@@ -46,7 +46,7 @@
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 0,
+      "count": 1,
       "kind": "claude",
       "recover_hours": 4.23,
       "class": "easy"

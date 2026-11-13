@@ -68,10 +68,10 @@ from formal.build import parse_module  # noqa: E402
 # formal entry point sees the value it would really see.
 PROBE_VALUES = (0, 1, 2, 3, 10)
 
-# What a probe may cost, and what the whole TABLE may cost.  Two numbers, and the
+# What a probe may cost, and what the whole CASE may cost.  Two numbers, and the
 # split is the point: the per-value alarm lives in the CHILD, so a body that
 # genuinely does not terminate is bounded without taking the other four values'
-# answers with it, and the table budget is the parent's backstop for a child that
+# answers with it, and the case budget is the parent's backstop for a child that
 # never reported at all.
 #
 # MEASURED, because a budget with no measurement is a guess wearing a number:
@@ -82,11 +82,8 @@ PROBE_VALUES = (0, 1, 2, 3, 10)
 # exceeding the 20 s it used to allow, in a run whose average launch had degraded
 # to ~1 s.  So the number that was wrong was not the multiplier but the DECISION
 # it was making: a wall clock was allowed to turn a machine stall into a verdict
-# about the language.  The next gate repeated it at table scale: 176 launches
-# took 840 s and timed out seven cases (`gate-formal-read-before-store`).  A
-# launch count that scales with the number of cases is the defect, so the oracle
-# now spends ONE launch for the whole table; 300 s is ~150x the batch's measured
-# 2 s cost on an idle box and the hard backstop, not a verdict.
+# about the language.  `cpython_oracle` now spends one launch per case and
+# treats a value that does not answer as its own failure.
 #
 # NONE of the 7 bodies the gate named loops.  Checked one at a time, all of them
 # terminate: `q = q + 1`, `q += 1`, `if n: p = 1` / `return p`,
@@ -96,7 +93,7 @@ PROBE_VALUES = (0, 1, 2, 3, 10)
 # loop is `range(n)` over `PROBE_VALUES`, i.e. at most 10 iterations.  So the
 # cases were never the defect; the oracle's budget was.
 PROBE_BUDGET_SECONDS = 10
-PROBE_TABLE_TIMEOUT_SECONDS = 300
+PROBE_CASE_TIMEOUT_SECONDS = 120
 
 # (name, function body, expect)
 #
@@ -1285,173 +1282,112 @@ CASES = [
 ]
 
 
-def _probe_child_source(bodies: list, budgets: list) -> str:
-    """The child program: every case's body, each in a namespace of its own.
+def _probe_child_source(body: str) -> str:
+    """The child program: the case's body plus a `sink` and a call per value.
 
     `sink` is here because half these cases end in `sink(t)` rather than
     `return t`, and there is nothing ELSE in scope on purpose — see
-    `cpython_oracles`'s docstring for why the scope has to be empty. Each body
-    is `exec`ed into a FRESH namespace rather than the child's module, which is
-    how one process answers for every case and still gives each one the scope
-    the per-case child used to: a module-level `q` bound by case 2 would make
-    case 1's `q` a global and the oracle would answer "no" for it.
+    `cpython_oracle`'s docstring for why the scope has to be empty.
 
     **Each value runs under its own `SIGALRM`, so a body that does not
     terminate at one value costs that value and not the case.**  An oracle that
     loses every answer to one hung probe reports "CPython ran this without
     UnboundLocalError" for the values it never got to ask about, which is how a
     20 s stall became an accusation against the analysis.  `SIGALRM` is POSIX,
-    which every platform this suite builds for is; the parent's whole-table
-    budget is the backstop for a child that never reported.
-
-    The probe's own stdout/stderr are redirected to a sink: a case may print
-    (`print(t)` is a real row), and the per-case child had that output captured,
-    so it must not be mistaken for one of this program's `R`/`H`/`O` answers.
-
-    The protocol lines are printed AFTER the redirect, so a body printing
-    `R 3 0` cannot forge an answer for another case.
+    which every platform this suite builds for is; the parent's whole-case
+    timeout is the backstop for anything else.
     """
     lines = [
-        "import contextlib",
-        "import io",
         "import signal",
-        "import sys",
         "",
-        "BODIES = %r" % (list(bodies),),
-        "BUDGETS = %r" % (list(budgets),),
-        "VALUES = %r" % (list(PROBE_VALUES),),
+        "def sink(x):",
+        "    return x",
+        "",
+        "def probe(n):",
+        body.rstrip("\n"),
         "",
         "def _timeout(_signum, _frame):",
         "    raise TimeoutError",
         "",
         "signal.signal(signal.SIGALRM, _timeout)",
-        "",
-        "for index, body in enumerate(BODIES):",
-        "    namespace = {}",
-        "    try:",
-        "        exec('def sink(x):\\n    return x\\n', namespace)",
-        "        exec('def probe(n):\\n' + body, namespace)",
-        "    except BaseException:",
-        "        # CPython cannot compile this case (a `var q: Int` row). The",
-        "        # per-case child died before it could answer and printed",
-        "        # nothing, which is `([], [])` for this case; keep that.",
-        "        continue",
-        "    probe = namespace['probe']",
-        "    for value in VALUES:",
-        "        try:",
-        "            with contextlib.redirect_stdout(io.StringIO()):",
-        "                with contextlib.redirect_stderr(io.StringIO()):",
-        "                    signal.alarm(BUDGETS[index])",
-        "                    probe(value)",
-        "        except (UnboundLocalError, NameError):",
-        "            print('R %d %d' % (index, value))",
-        "        except TimeoutError:",
-        "            print('H %d %d' % (index, value))",
-        "        except BaseException:",
-        "            print('O %d %d' % (index, value))",
-        "        finally:",
-        "            signal.alarm(0)",
-        "        sys.stdout.flush()",
-        "print('DONE %d' % len(BODIES))",
     ]
+    for value in PROBE_VALUES:
+        lines += [
+            "",
+            "try:",
+            "    signal.alarm(%d)" % PROBE_BUDGET_SECONDS,
+            "    probe(%d)" % value,
+            "except (UnboundLocalError, NameError):",
+            "    print('raise %d')" % value,
+            "except TimeoutError:",
+            "    print('hang %d')" % value,
+            "except BaseException:",
+            "    print('other %d')" % value,
+            "finally:",
+            "    signal.alarm(0)",
+        ]
     return "\n".join(lines) + "\n"
 
 
-def _probe_answers(stdout: str, count: int):
-    """`[(raised, hung), …]` from the child's `R`/`H`/`O` lines, or `None`.
+def cpython_oracle(body: str):
+    """`(raised, hung)` — which `PROBE_VALUES` CPython raises on, and which it
+    never answered.  `(None, None)` when the child itself never reported.
 
-    `None` means the child never reached its `DONE` line, so it died or was
-    killed part way and some of the table was never asked. A partial table is
-    not an answer: a case after the death would read as "CPython ran it
-    cleanly", which is the exact mistake the no-answer channel exists to
-    prevent.
-    """
-    raised = [[] for _ in range(count)]
-    hung = [[] for _ in range(count)]
-    complete = False
-    for line in stdout.splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        if parts[0] == "DONE" and len(parts) == 2:
-            complete = int(parts[1]) == count
-            continue
-        if parts[0] in ("R", "H", "O") and len(parts) == 3:
-            index, value = int(parts[1]), int(parts[2])
-            if 0 <= index < count:
-                if parts[0] == "R":
-                    raised[index].append(value)
-                elif parts[0] == "H":
-                    hung[index].append(value)
-    if not complete:
-        return None
-    return list(zip(raised, hung))
-
-
-def cpython_oracles(bodies, budget=None):
-    """`[(raised, hung), …]` for `bodies` — **one child for the whole table**.
-
-    `raised` is the `PROBE_VALUES` CPython raises `UnboundLocalError`/`NameError`
-    on; `hung` is the values it never answered. `(None, None)` for a whole table
-    means the child never reported at all.
-
-    **One child for the WHOLE TABLE, not one per case.**  This file ran at -j18
-    in the gate that filed `gate-formal-read-before-store`, and 176 per-case
-    `fork`+`exec` launches took 840 s there against 10 s standalone: the
-    wall-clock cost of a launch was multiplied by the number of cases, so the
-    suite's verdict became a function of the machine's load. The table is
-    static and the interpreter is in the child anyway, so the launch count is a
-    property of the ORACLE and not of the table's length. `check_one_child`
-    pins that: a table of any size costs one launch.
-
-    What the child is still for: a body that does not terminate must not take
-    the harness with it, and a probe that installs a signal handler or leaves
-    interpreter state behind must not reach the next case. Each body gets a
-    fresh namespace, each value its own `SIGALRM`, and the parent has a hard
-    whole-table deadline. **TWO attempts** on a lost child, because a launch
-    that does not report is a machine stall and not a verdict — the failure
-    this replaced was seven 120 s launches timing out and failing seven cases
-    the analysis had answered correctly.
+    **One child for the whole case, not one per value.**  The question is "does
+    CPython raise `UnboundLocalError`/`NameError` for this body", and until this
+    change the gate answered it by launching CPython 700 times for 140 cases —
+    five `fork`+`exec` pairs to learn one bit, and each one with its own 20 s
+    wall clock deciding a verdict.  Measured on this tree: **26 ms** per launch
+    on an idle box and **35 ms** under 16-way CPU contention (18-core host), so
+    the budget had ~570x of headroom against the operation it was timing — and
+    the 2026-10-03 gate still reported 7 launches exceeding 20 s in a run whose
+    AVERAGE launch had degraded to ~1 s.  **None of those 7 bodies loops**: each
+    is straight-line or explicitly bounded (the note on `PROBE_BUDGET_SECONDS`
+    lists them), so the budget was reporting a machine stall as an answer about
+    the language.  Five launches became one, the wall clock that decides a
+    verdict moved from per-value to per-case, and a body that genuinely does not
+    terminate is bounded by `SIGALRM` inside the child rather than by killing
+    the child.
 
     `NameError` counts with `UnboundLocalError` because a `global` declaration
     turns the same defect into a `NameError`, and the case that cares about it
-    says so in its `diverges` note. `O` — any other exception the body raises —
-    is deliberately in neither list: this oracle is about the frame's storage,
-    and a case whose body dies of something else is a mistake in the case
-    rather than an answer, so it must not be read as "CPython accepted it".
+    says so in its `diverges` note.  `other` — any other exception the body
+    raises — is deliberately in neither list: this oracle is about the frame's
+    storage, and a case whose body dies of something else is a mistake in the
+    case rather than an answer, so it must not be read as "CPython accepted it".
 
-    The subprocess is not ceremony. The question is what CPython's own compiler
-    says about the function, and a name the analysis believes is a local is not
-    a local here: a module-level binding for it in this harness would make
-    CPython resolve it as a global and the oracle would answer "no" for every
-    case. So each case is exactly its body plus a `sink`, in a namespace of its
-    own, with nothing else in scope.
+    The subprocess is not ceremony.  The question is what CPython's own compiler
+    says about the function, and a name the analysis believes is a local is not a
+    local here: a module-level binding for it in this harness would make CPython
+    resolve it as a global and the oracle would answer "no" for every case.  So
+    the source is exactly the case's body plus a `sink` and the calls, with
+    nothing else in scope.
     """
-    bodies = list(bodies)
-    if not bodies:
-        return []
-    if budget is None:
-        budget = PROBE_BUDGET_SECONDS
-    source = _probe_child_source(bodies, [budget] * len(bodies))
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write(source)
+        f.write(_probe_child_source(body))
         path = f.name
     try:
-        for _attempt in range(2):
-            try:
-                p = subprocess.run([sys.executable, path], capture_output=True,
-                                   text=True,
-                                   timeout=PROBE_TABLE_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                # No answers this time. A stall is not an answer about the
-                # language, so ask once more before reporting no answer at all.
-                continue
-            answers = _probe_answers(p.stdout, len(bodies))
-            if answers is not None:
-                return answers
-        return [(None, None) for _ in bodies]
+        try:
+            p = subprocess.run([sys.executable, path], capture_output=True,
+                               text=True,
+                               timeout=PROBE_CASE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            # The child died before it could answer — killed, OOM, or a stall
+            # long enough to exhaust the whole-case budget.  Distinct from
+            # `hung`: nothing at all is known, so the caller is told "no answer"
+            # instead of being handed an empty list it would read as "CPython
+            # ran every value cleanly".
+            return None, None
     finally:
         os.unlink(path)
+    raised, hung = [], []
+    for line in p.stdout.splitlines():
+        kind, _, value = line.partition(" ")
+        if kind == "raise":
+            raised.append(int(value))
+        elif kind == "hang":
+            hung.append(int(value))
+    return raised, hung
 
 
 def the_function(stmts):
@@ -2032,86 +1968,41 @@ def check_oracle() -> list:
     value must not take the other four values' answers with it, because that is
     what turns one silent probe into a false accusation.
 
-    The table runs with a 1 s per-value alarm, so the one body that really does
-    loop costs a second here instead of the ten it costs in a gate run.  It is
-    the alarm's resolution that changes (POSIX `alarm` takes whole seconds), not
-    the mechanism, and the four bodies share ONE child with the whole-table
-    oracle rather than four launches.
+    `PROBE_BUDGET_SECONDS` is dropped to 1 for the duration, so the one case
+    that really does loop costs a second here instead of the ten it costs in a
+    gate run.  It is the alarm's resolution that changes (POSIX `alarm` takes
+    whole seconds), not the mechanism.
     """
+    global PROBE_BUDGET_SECONDS
     bad = []
-    answers = cpython_oracles([
-        "    q = q + 1\n    return q\n",
-        "    q = 1\n    return q\n",
-        # Raises on every value before the hang, hangs on the last: both
-        # channels in one case, and the point is that `raised` survives
-        # the hang.
-        "    if n > 5:\n        while True:\n            pass\n"
-        "    return q\n",
-        "    while True:\n        pass\n",
-    ], budget=1)
-    if len(answers) != 4 or any(a[0] is None for a in answers):
-        return [f"oracle: the child did not answer for the four known "
-                f"bodies: {answers!r}"]
-    (raised, hung), (clean_raised, clean_hung), \
-        (mixed_raised, mixed_hung), (hang_raised, hang_hung) = answers
-    if raised != list(PROBE_VALUES) or hung:
-        bad.append(f"oracle: `q = q + 1` raised on {raised} and hung on "
-                   f"{hung}, expected every value to raise and none to "
-                   f"hang")
-    if clean_raised or clean_hung:
-        bad.append(f"oracle: `q = 1` raised on {clean_raised} and hung on "
-                   f"{clean_hung}, expected neither")
-    if mixed_raised != [v for v in PROBE_VALUES if v <= 5] or \
-            mixed_hung != [10]:
-        bad.append(f"oracle: a body that raises then hangs returned "
-                   f"raised={mixed_raised} hung={mixed_hung}, expected the "
-                   f"pre-hang values to raise and only 10 to hang")
-    if hang_raised or hang_hung != list(PROBE_VALUES):
-        bad.append(f"oracle: a body that never terminates returned "
-                   f"raised={hang_raised} hung={hang_hung}, expected every "
-                   f"value to hang and none to raise")
-    return bad
-
-
-def check_one_child() -> list:
-    """The oracle launches CPython ONCE for a table of any size.
-
-    This is the regression pin for `gate-formal-read-before-store`. The gate
-    filed that job red at `624ab4e38a` with no change to this file or to
-    `formal/model.py`: 176 per-case `fork`+`exec` launches took 840 s at -j18
-    against 10 s standalone, and the launches that exceeded their budget were
-    read as answers about the language. **A suite whose verdict is a function
-    of machine load is the bug**, and the launch count is the part of the oracle
-    that load multiplies. So the count is asserted here, through
-    `subprocess.run`, on a table longer than one case: sixteen bodies cost one
-    launch, and the answers are still CPython's.
-
-    This check fails on the per-case oracle in two ways at once — there is no
-    table entry point to call, and sixteen launches is not one.
-    """
-    bodies = ["    return q + 1\n", "    q = 1\n    return q\n"] * 8
-    calls = []
-    real = subprocess.run
-
-    def counting(*args, **kwargs):
-        calls.append(args[0])
-        return real(*args, **kwargs)
-
-    subprocess.run = counting
+    saved = PROBE_BUDGET_SECONDS
+    PROBE_BUDGET_SECONDS = 1
     try:
-        answers = cpython_oracles(bodies)
+        raised, hung = cpython_oracle("    q = q + 1\n    return q\n")
+        if raised != list(PROBE_VALUES) or hung:
+            bad.append(f"oracle: `q = q + 1` raised on {raised} and hung on "
+                       f"{hung}, expected every value to raise and none to "
+                       f"hang")
+        raised, hung = cpython_oracle("    q = 1\n    return q\n")
+        if raised or hung:
+            bad.append(f"oracle: `q = 1` raised on {raised} and hung on "
+                       f"{hung}, expected neither")
+        # Raises on every value before the hang, hangs on the last: both channels
+        # in one case, and the point is that `raised` survives the hang.
+        raised, hung = cpython_oracle(
+            "    if n > 5:\n        while True:\n            pass\n"
+            "    return q\n")
+        if raised != [v for v in PROBE_VALUES if v <= 5] or hung != [10]:
+            bad.append(f"oracle: a body that raises then hangs returned "
+                       f"raised={raised} hung={hung}, expected the pre-hang "
+                       f"values to raise and only 10 to hang")
+        raised, hung = cpython_oracle("    while True:\n        pass\n")
+        if raised or hung != list(PROBE_VALUES):
+            bad.append(f"oracle: a body that never terminates returned "
+                       f"raised={raised} hung={hung}, expected every value to "
+                       f"hang and none to raise")
     finally:
-        subprocess.run = real
-    bad = []
-    if len(calls) != 1:
-        bad.append(f"the oracle launched CPython {len(calls)} time(s) for a "
-                   f"table of {len(bodies)} bodies, not 1: a launch per case "
-                   f"multiplies the machine's load into the verdict (176 of "
-                   f"them took a gate job 840 s and failed it)")
-    want = [([0, 1, 2, 3, 10], []), ([], [])] * 8
-    if answers != want:
-        bad.append(f"the one-child oracle did not answer the known bodies "
-                   f"correctly: {answers!r}")
+        PROBE_BUDGET_SECONDS = saved
     return bad
 
 
@@ -2282,22 +2173,8 @@ def main():
     args = ap.parse_args()
 
     passed = failed = 0
-    # Parse every case first, so the oracle can answer for all of them in ONE
-    # child. The parse result is a `FunctionDef` or the exception that stopped
-    # it; the loop below reports the same message either way.
-    parsed = []
     for case in CASES:
-        name, body = case[0], case[1]
-        try:
-            parsed.append(the_function(parse_module(
-                "def probe(n):\n" + body, filename=f"{name}.mojo")))
-        except Exception as exc:                        # noqa: BLE001
-            parsed.append(exc)
-    oracle_bodies = [case[1] for case, fn in zip(CASES, parsed)
-                     if not isinstance(fn, Exception)]
-    oracle_answers = iter(cpython_oracles(oracle_bodies))
-    for case, parsed_fn in zip(CASES, parsed):
-        name, expect = case[0], case[2]
+        name, body, expect = case[0], case[1], case[2]
         # The optional fourth column is a DELIBERATE divergence: this analysis
         # and CPython answer differently, the difference is understood, and the
         # oracle must not report it as a bug in either direction. Every one of
@@ -2307,10 +2184,11 @@ def main():
         diverges = case[3] if len(case) > 3 else None
         details = []
         fn = None
-        if isinstance(parsed_fn, Exception):
-            details.append(f"the Mojo parser rejected the case: {parsed_fn!r}")
-        else:
-            fn = parsed_fn
+        try:
+            fn = the_function(parse_module("def probe(n):\n" + body,
+                                           filename=f"{name}.mojo"))
+        except Exception as exc:                        # noqa: BLE001
+            details.append(f"the Mojo parser rejected the case: {exc!r}")
         verdict = None
         if fn is not None:
             found = M.read_before_store(fn)
@@ -2320,7 +2198,7 @@ def main():
                          if found else "")
                 details.append(f"the analysis says {verdict!r} and the case "
                                f"expects {expect!r}{where}")
-            raised, hung = next(oracle_answers)
+            raised, hung = cpython_oracle(body)
             # "CPython did not answer" is a THIRD answer, and it must never be
             # read as either of the other two.  The old oracle raised on the
             # timeout, the caller caught it and set `raised = []`, and then
@@ -2331,11 +2209,10 @@ def main():
             # derived verdicts below are reached only when there IS an answer.
             if raised is None:
                 details.append(
-                    f"the CPython oracle child did not report an answer for "
-                    f"this case (the whole table was asked twice with a "
-                    f"{PROBE_TABLE_TIMEOUT_SECONDS}s deadline), so nothing "
-                    f"here can say whether it would raise; the analysis's "
-                    f"own verdict ({verdict!r}) is reported on its own")
+                    f"CPython did not answer for this case at all within "
+                    f"{PROBE_CASE_TIMEOUT_SECONDS}s, so nothing here can say "
+                    f"whether it would raise — the analysis's own verdict "
+                    f"({verdict!r}) is reported on its own")
             else:
                 if hung:
                     details.append(
@@ -2388,9 +2265,6 @@ def main():
     for problem in check_oracle():
         failed += 1
         print(f"  FAIL  {problem}")
-    for problem in check_one_child():
-        failed += 1
-        print(f"  FAIL  one-child: {problem}")
     print(f"read-before-store: PASS={passed} FAIL={failed} "
           f"({len(ENTRY_SHAPES)} graph shapes, "
           f"{len(TRY_ELSE_SHAPES)} try/else graph shapes, "

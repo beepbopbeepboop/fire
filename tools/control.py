@@ -999,52 +999,11 @@ def reset_cap(name, verdict):
         cr = t.setdefault("cap_review", {})
         cr["verdict"], cr["applied"] = verdict, time.strftime("%F %T")
         doc = cr.get("doc")
-    remove_review_doc(doc)
-
-
-def remove_review_doc(doc):
     if doc and os.path.exists(doc):
         os.remove(doc)
 
 
-def sweep_review_docs(dry_run=False):
-    """Remove every bugs/ORCH_REVIEW_*.md that nothing needs any more, and return the paths (removed, or to be removed).
-
-    A review doc is the evidence a capped chain is judged on, so it is needed exactly while something still depends on
-    it: a task that is still capped (`merge_capped`) and names it in its `cap_review`, or a live task or queued item
-    holding its `bug:ORCH_REVIEW_<slug>` claim (the reviewer working on it). Everything else is trash. The cases that
-    used to leave it behind: a STOP or no-verdict review (only FORWARD/FIXED removed it), a reviewer that vanished, a
-    capped task later abandoned or pruned, and a doc whose enqueue failed after the write. Derived from the state, so
-    it cleans up the docs those cases already left as well as any new ones. Called once per swarm pass."""
-    tasks = load()
-    needed = set()
-    for n, t in tasks.items():
-        cr = t.get("cap_review") or {}
-        if t.get("merge_capped") and cr.get("doc"):
-            needed.add(os.path.basename(cr["doc"]))
-        if t.get("state") not in TERMINAL and _working(n, t):
-            needed |= _review_claims(t.get("claims", []))
-    for f in os.listdir(qdir()):
-        if f.endswith(".json"):
-            try:
-                needed |= _review_claims(json.load(open(os.path.join(qdir(), f))).get("claims", []))
-            except (OSError, ValueError):
-                continue
-    gone = []
-    for path in sorted(glob.glob(os.path.join(MAIN, "bugs", "ORCH_REVIEW_*.md"))):
-        if os.path.basename(path) not in needed:
-            gone.append(path)
-            if not dry_run:
-                remove_review_doc(path)
-    return gone
-
-
-def _review_claims(claims):
-    """The review doc file names (`ORCH_REVIEW_<slug>.md`) that a list of claim keys holds."""
-    return {c[len("bug:"):] + ".md" for c in claims if c.startswith("bug:ORCH_REVIEW_")}
-
-
-CONTROLLER_FILES = {"TASK.md", "TASK_REPORT.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md / TASK_REPORT.md) the worker's closing report, left untracked
+CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md) the worker's closing report, left untracked
 
 
 def tree_extras(wt):
@@ -1622,8 +1581,6 @@ def cmd_cleanup(a):
     2026-11-10: a tree a plain PROCESS is working in (a hand-started test run, not a worker, not an
     opencode session, no outside claim) is also left alone — the run's cwd check is rescanned at the
     moment of removal, since the run of one is irreversible."""
-    for path in sweep_review_docs(dry_run=a.dry_run):
-        print("%s orchestration review doc %s" % ("would remove" if a.dry_run else "removed", path))
     reg = load()
     byw = {os.path.realpath(t["worktree"]): (n, t) for n, t in reg.items()}
     wt, cur = [], {}

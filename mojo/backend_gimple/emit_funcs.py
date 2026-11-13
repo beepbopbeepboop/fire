@@ -59,7 +59,7 @@ from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
     _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
-    _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
+    _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
@@ -142,7 +142,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         env_var  = f"_env_{node.name}"
         alloc_fn = f"_alloc_{ci.env_struct}"
         gen._declare_var(env_var, f"{ci.env_struct} *")
-        gen._rt_into(env_var, alloc_fn, [])
+        gen._emit(f"  {env_var} = {alloc_fn} ();")
         for vname, vtype in ci.captures:
             # The FIELD's type, once, for every branch below — a by-reference
             # capture (`ci.mut_names`) is stored as a pointer to the owner's
@@ -439,10 +439,10 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
                 # branch and the submod.GLOBAL branch both emit).
                 raw_ptr = gen._new_val(_gv_decl, f'{_gv_field}')
-                vp = gen._cast('void *', raw_ptr)
-                gen._cast_into(f"{gen._cname(symbol_name)}", 'int64_t', vp)
+                vp = gen._new_val('void *', f'(void *){raw_ptr}')
+                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t){vp};")
             else:
-                gen._copy(f"{gen._cname(symbol_name)}", _gv_field)
+                gen._emit(f"  {gen._cname(symbol_name)} = {_gv_field};")
             continue
         # BUG-2026-021: resolve the name for real when the module is
         # resolvable — a function-scoped `from sibling import f` used to fall
@@ -716,22 +716,8 @@ def _gen_stmt_FromImportStmt(gen, node):
         # consults, and `Alias(...)` inside the function built the generic
         # opaque-constructor fallback. Same shared writer, so the two
         # scopes cannot disagree about what the alias names.
-        #
-        # When the writer confirms the aliased name IS a class, stop here:
-        # the module-scope twin deliberately never puts a class binding in
-        # `imported_symbols` ("a function I can emit an extern for"), and
-        # falling through to the bare no-signature tail below did exactly
-        # that — the extern pass emitted a weak `int64_t Alias (...)`
-        # "unavailable in compiled mode" stub and every value read of the
-        # alias bound to it (`g = Alias` printed `<function Alias at ...>`).
-        # The alias's identity lives in `_struct_import_aliases`, which the
-        # constructor dispatch and the IdentExpr class-value lowering both
-        # consult. First-writer-wins is preserved by the shared writer.
-        _is_class_alias = None
         if not getattr(node, 'wildcard', False):
-            _is_class_alias = gen._note_struct_import_alias(node.module, symbol_name, name)
-        if _is_class_alias is not None:
-            continue
+            gen._note_struct_import_alias(node.module, symbol_name, name)
         # Use known signature if available. Default to 'int64_t' (NOT
         # 'int') for unknown symbols — this must match the fallback
         # return type every other unknown-callee path in this file
@@ -804,13 +790,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_merge = gen._new_bb()
             bb_true = gen._new_bb()
             bb_false = bb_merge
-            gen._cond_goto(f"{cond_v_bool}", bb_true, f"{bb_false}")
+            gen._emit(f"  if ({cond_v_bool}) goto {bb_true}; else goto {bb_false};")
             gen._emit_label(bb_true)
             _bscope = ginf._open_block_scope(gen)
             for s in node.then_body:
                 gen.gen_stmt(s)
             ginf._close_block_scope(gen, _bscope)
-            gen._goto(bb_merge)
+            gen._emit(f"  goto {bb_merge};")
             gen._emit_label(bb_merge)
             if getattr(node, 'else_body', None):
                 for s in node.else_body:
@@ -842,7 +828,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             # Unknown at compile time: emit as runtime branch
             _, cv = gen.lower_expr(elif_cond)
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
-            gen._cond_goto(cv, bb_t, bb_m)
+            gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
             gen._emit_label(bb_t)
             gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
             try:
@@ -852,7 +838,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 gen._close_block_scope(_bscope)
             finally:
                 gen._comptime_runtime_depth -= 1
-            gen._goto(bb_m)
+            gen._emit(f"  goto {bb_m};")
             gen._emit_label(bb_m)
             return
         if node.else_body:
@@ -874,13 +860,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
         else:
             bb_false = bb_merge
         bb_true = gen._new_bb()
-        gen._cond_goto(cond_v, bb_true, f"{bb_false}")
+        gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
         gen._emit_label(bb_true)
         _bscope = gen._open_block_scope()
         for s in node.then_body:
             gen.gen_stmt(s)
         gen._close_block_scope(_bscope)
-        gen._goto(bb_merge)
+        gen._emit(f"  goto {bb_merge};")
         # elif chains
         for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
             gen._emit_label(bb_false)
@@ -891,20 +877,20 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 bb_false = gen._new_bb()
             else:
                 bb_false = bb_merge
-            gen._cond_goto(f"{elif_cv}", bb_elif_true, f"{bb_false}")
+            gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
             gen._emit_label(bb_elif_true)
             _bscope = gen._open_block_scope()
             for _elif_stmt in elif_body:
                 gen.gen_stmt(_elif_stmt)
             gen._close_block_scope(_bscope)
-            gen._goto(bb_merge)
+            gen._emit(f"  goto {bb_merge};")
         if has_else:
             gen._emit_label(bb_false)
             _bscope = gen._open_block_scope()
             for s in node.else_body:
                 gen.gen_stmt(s)
             gen._close_block_scope(_bscope)
-            gen._goto(bb_merge)
+            gen._emit(f"  goto {bb_merge};")
         gen._emit_label(bb_merge)
     finally:
         gen._comptime_runtime_depth -= 1
@@ -2735,6 +2721,31 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         home[bare_name] = gimple_codegen._AMBIGUOUS_FUNC_HOME
 
 
+def _find_decl_location(gen, module: str, name: str):
+    """Best-effort `(path, line, col)` of `name`'s top-level declaration in
+    `module`'s source, for an ambiguity note. None when the module or the
+    declaration cannot be located."""
+    import os as _os
+    try:
+        _p = gen._submodule_source_path(module)
+    except Exception:
+        _p = None
+    if not _p:
+        return None
+    try:
+        with open(_p, 'r') as _f:
+            _lines = _f.readlines()
+    except Exception:
+        return None
+    import re as _re
+    _pat = _re.compile(r'^\s*(?:def|fn|struct|trait|enum|alias|comptime|var|let)\s+'
+                       + _re.escape(name) + r'\b')
+    for _i, _ln in enumerate(_lines, 1):
+        if _pat.match(_ln):
+            return (_p, _i, 1)
+    return None
+
+
 def _push_import_scope(gen) -> dict:
     """Push a fresh lexical-scope import-binding map onto
     _import_scope_stack (see its docstring) and return it — used at the
@@ -2778,53 +2789,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
     to a different module, the unbound reference is ambiguous and is
     refused rather than silently resolved to either one."""
     for stmt in node_list:
-        if isinstance(stmt, gimple_ctypes.ImportStmt):
-            # A plain `import M as A` binds a MODULE NAMESPACE in this
-            # lexical scope, not a symbol: record it exactly as
-            # `_gen_stmt_ImportStmt` will when the body is emitted (module
-            # alias set + a `{module, return_type: 'unknown'}` entry), and
-            # record the name -> qualifier binding in the scope frame the
-            # same way the `FromImportStmt` branch below does. Without the
-            # frame entry, a lifted closure (`_gen_lifted_closure_body`
-            # seeds its scope from `_func_import_frames`, and the
-            # whole-module pre-scan fills that BEFORE any body is emitted)
-            # cannot see an alias its enclosing function binds, so
-            # `A.member(...)` inside the closure lowers on an unknown
-            # name: a placeholder receiver plus a bare/stubbed callee
-            # instead of the qualified symbol. Without the alias-set entry
-            # the module-marker branches (`_lower_MemberExpr`,
-            # `_lower_IdentExpr`, the module-qualified call paths) never
-            # recognize it as a namespace at all.
-            #
-            # `__impmod__` marks the binding as a plain-import alias so the
-            # `FromImportStmt` ambiguity check below does not treat a later
-            # `from Y import A` (a legal Python shadow, not an ambiguous
-            # same-name import) as an error.
-            for _im_mod_raw, _im_alias_raw in gimple_ctypes._import_targets(stmt):
-                _im_mod = gimple_ctypes._as_str(_im_mod_raw)
-                _im_alias = gimple_ctypes._as_str(_im_alias_raw)
-                # `import a.b` (no alias) binds the top-level package name
-                # `a` — same rule as `_gen_stmt_ImportStmt`.
-                if _im_alias:
-                    _im_local = _im_alias
-                elif '.' in _im_mod:
-                    _im_local = _im_mod[:_im_mod.index('.')]
-                else:
-                    _im_local = _im_mod
-                if not _im_local:
-                    continue
-                _im_q = gen._resolve_import_module_qualifier(_im_mod)
-                if not _im_q:
-                    continue
-                scope[_im_local] = _im_q
-                scope['__mod__' + _im_local] = _im_mod
-                scope['__impmod__' + _im_local] = _im_mod
-                gen._module_alias_names.add(_im_local)
-                gen.imported_symbols[_im_local] = {
-                    'module': _im_mod,
-                    'return_type': 'unknown',
-                }
-        elif isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
+        if isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
             for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
                 nm = gimple_ctypes._fi_name(_fip3)
                 alias = gimple_ctypes._fi_alias(_fip3)
@@ -2852,8 +2817,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     continue
                 _local_nm = alias if alias else nm
                 _prev_q = scope.get(_local_nm)
-                if (_prev_q is not None and _prev_q != q
-                        and ('__impmod__' + _local_nm) not in scope):
+                if _prev_q is not None and _prev_q != q:
                     # The same name imported from two different modules into
                     # one function scope is ambiguous (modular's
                     # import_fn_scope_ambiguous.mojo). A re-import from the
@@ -2861,13 +2825,30 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     # pre-scan, so the diagnostic points at the SECOND import
                     # (the body pass runs after this map is already filled and
                     # would otherwise flag the first one).
-                    # The message and its notes come from the one shared
-                    # formatter (mojo/middle/import_ambiguity.py), the same one
-                    # the module-scope check uses.
-                    from mojo.middle.import_ambiguity import ambiguous_import_error
-                    raise RuntimeError(ambiguous_import_error(
-                        gen, _local_nm, scope.get('__mod__' + _local_nm), stmt.module,
-                        getattr(stmt, 'line', 0) or 0))
+                    _iln = getattr(stmt, 'line', 0) or 0
+                    _ilc = getattr(stmt, 'col', 0) or 0
+                    _ifn = getattr(gen, '_current_filename', '') or ''
+                    _iat = f'{_ifn}:{_iln}:{_ilc}: ' if _ifn else f'{_iln}:{_ilc}: '
+                    # Notes naming where each module declares the name, as
+                    # modular does (`note: 'X' declared here` / `also declared
+                    # here`). Best-effort: resolve each module to a source
+                    # file and find the declaration line.
+                    _prev_mod = scope.get('__mod__' + _local_nm)
+                    _decls = []
+                    for _mod in (_prev_mod, stmt.module):
+                        if not _mod:
+                            continue
+                        _d = _find_decl_location(gen, _mod, _local_nm)
+                        if _d:
+                            _decls.append(_d)
+                    _note_txt = ''
+                    if len(_decls) == 2:
+                        _note_txt = (f"\n{_decls[0][0]}:{_decls[0][1]}:{_decls[0][2]}: "
+                                     f"note: '{_local_nm}' declared here")
+                        _note_txt += (f"\n{_decls[1][0]}:{_decls[1][1]}:{_decls[1][2]}: "
+                                      f"note: '{_local_nm}' also declared here")
+                    raise RuntimeError(
+                        f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
                 scope[_local_nm] = q
                 scope['__mod__' + _local_nm] = stmt.module
                 _lex = getattr(gen, '_lexical_func_import_homes', None)
@@ -3053,22 +3034,6 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # to layer on the per-compile `_inline_module_qualifiers` remap,
         # which needs a `gen`.
         from mojo.middle.module_shared import module_qualifier
-        # An EMPTY module name means "no module" (the root compile's own
-        # `GimpleGen` is built without one), so it must sanitize to no
-        # qualifier. Without this guard the remap below answered for it:
-        # `_inline_module_qualifiers` is keyed by the SANITIZED module of
-        # every inlined file AND by `module.lstrip('.')...` for relative
-        # imports (`funcs_shared.py:1276`), so a `from . import x` writes
-        # the key `''` — and the last such writer in a whole-closure build
-        # was `mojo.middle`, making `_sanitize_qualifier('')` return
-        # `mojo_middle`. Every function the ROOT module defined then got a
-        # spurious `mojo_middle_` prefix while its importers' call sites
-        # (resolved through their own non-empty module) stayed bare:
-        # fire.py's `build_executable` was emitted as
-        # `mojo_middle_build_executable_d8f39a` against call sites emitting
-        # `build_executable_d8f39a` — undefined symbol at link.
-        if not q:
-            return ''
         key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
         return module_qualifier(resolved)
@@ -3420,7 +3385,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         _pbase = _pa.split('[', 1)[0].strip()
         if _pbase in ('Tuple', 'tuple') and '[' in _pa:
             gen._ensure_tuple_struct(_pa)
-        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span', 'Array', 'FixedSizeArray') or '[' not in _pa:
+        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span') or '[' not in _pa:
             continue
         _pin = gimple_ctypes._split_top_level_commas(
             _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
@@ -3447,12 +3412,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         # char* (the `_mojo_at_int64_t` / `*` errors in python.mojo's
         # Python.dict(tuples: Span[Tuple[...], _]) body, which only became
         # visible once that overload's signature was correct).
-        # `Array[T, N]` and `FixedSizeArray[T, N]` carry the count SECOND, so
-        # they take their element from the first bracket argument too — see
-        # `CODEGEN_simd_and_array_values_erase_to_int64-part4`. Without this
-        # their two-arg bracket fails the `len(_pin) != 1` gate below and the
-        # parameter's element type was never seeded.
-        if _pbase in ('Span', 'Array', 'FixedSizeArray'):
+        if _pbase == 'Span':
             if not _pin or not _pin[0].strip():
                 continue
             _pin = [_pin[0]]
@@ -3480,17 +3440,6 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
             _ec = _annotated_elem_ctype(gen, _eann)
-            if _ec == 'float':
-                # `Float32` elements of a container are stored as C `double`
-                # (the Array/FixedSizeArray constructor arm does the same:
-                # `MojoList`'s float elements are doubles — emit_calls.py
-                # `_elem_ct == 'float' -> 'double'`). Without this a
-                # param-seeded element stayed `float`, so `a[0]` read
-                # `mojo_list_get_float` and `Span(a)` read `_mojo_at_float`,
-                # while the same value built by a constructor read
-                # `mojo_list_get_double`/`_mojo_at_double` — see
-                # `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
-                _ec = 'double'
             if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)
 
@@ -3843,7 +3792,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
 
     # For main (in main module only), call class-attr initializer first
     if node.name == 'main' and gen.emit_struct_defs:
-        gen._rt_void('_mojo_classattr_init', [])
+        gen._emit('  _mojo_classattr_init ();')
 
     gen._seed_mut_captured_local_types(node.name)
     gen._seed_addressed_locals(node.body)
@@ -3908,7 +3857,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         _n_body_lines = len(gen.body_lines)
         _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
         if not _last_body_line.strip().startswith('return'):
-            gen._ret('0')
+            gen._emit('  return 0;')
 
     # For main function in root module, rename to _gimple_main and create wrapper
     # For main function in library module, rename to _{module}_main to avoid collision
@@ -4004,8 +3953,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         lines.append(f"#if USE_PYTHON")
         lines.append(f"  Py_Finalize ();")
         lines.append(f"#endif")
-        # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
-        lines.append(f"  return (int)result;")
+        lines.append(f"  return result;")
         lines.append(f"}}")
 
     gen._pop_import_scope()
@@ -4031,15 +3979,10 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
-    gen._toplevel_bound_globals = []
     gen._frame_enter_module()
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
-            # AFTER the statement is lowered: a `globals()` inside this
-            # statement must see only the names bound by earlier ones (see
-            # `emit_infra.lower_module_globals_read`).
-            ginf.note_toplevel_bindings(gen, stmt)
     finally:
         gen._in_toplevel_gen = False
     gen._frame_leave()

@@ -4945,39 +4945,6 @@ def _step_rhs(w: int, idx: int):
         cond = (w >> 12) & 0xf
         return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                 f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
-    # 70-79: the scalar-double FP class.  `arm64_step` decodes all ten and
-    # `_WORK_STEP` already names a library lemma for each, so leaving them out
-    # here made `_step_result_plan` drop every one: the decoder claimed the
-    # entry, the proof side had no right-hand side, and the step-OK lemma had
-    # to re-reduce the whole `arm64_step` chain (when it was emitted at all).
-    #
-    # Each spelling below is the `work_step_*` conclusion instantiated at this
-    # word, because `_gen_step_result_lemmas` closes the lemma by `exact`-ing
-    # it: `arm64_reg_d` for a V/D read, `arm64_set_reg_d` for a V/D write, and
-    # the IEEE-754 bit helper named by the model's own arm.  The value helpers
-    # operate on `UInt64` BITS (`lib/IEEE754.lean`), not on `Float`, so they
-    # have the decidable equality the lemma's `rfl` closer needs.
-    if idx == 70:  # FCMP Dn, Dm: flags only, no register write
-        return (f"some {{ s with nzcv := fcmp_nzcv "
-                f"(arm64_reg_d {rn} s) (arm64_reg_d {rm} s) }}")
-    if idx in (71, 72, 73, 74):  # FADD/FSUB/FMUL/FDIV Dd, Dn, Dm
-        helper = {71: "faddBits", 72: "fsubBits",
-                  73: "fmulBits", 74: "fdivBits"}[idx]
-        return (f"some (arm64_set_reg_d {rd} s ({helper} "
-                f"(arm64_reg_d {rn} s) (arm64_reg_d {rm} s)))")
-    if idx == 75:  # FNEG Dd, Dn
-        return (f"some (arm64_set_reg_d {rd} s "
-                f"(fnegBits (arm64_reg_d {rn} s)))")
-    if idx == 76:  # FMOV Dd, Xn: GPR -> V/D
-        return f"some (arm64_set_reg_d {rd} s (arm64_reg {rn} s))"
-    if idx == 77:  # FMOV Xd, Dn: V/D -> GPR
-        return f"some (arm64_set_reg {rd} s (arm64_reg_d {rn} s))"
-    if idx == 78:  # SCVTF Dd, Xn: signed 64-bit int -> double
-        return (f"some (arm64_set_reg_d {rd} s "
-                f"(scvtfBits (arm64_reg {rn} s)))")
-    if idx == 79:  # FCVTZS Xd, Dn: double -> signed 64-bit int
-        return (f"some (arm64_set_reg {rd} s "
-                f"(fcvtzsBits (arm64_reg_d {rn} s)))")
     # CSINC/CSINV/CSNEG (handle by word to be robust to table layout)
     if (w & 0xffe00c00) == 0x9a800400 and not ((w & 0xffff0fe0) == 0x9a9f07e0):  # CSINC, not CSET
         cond = (w >> 12) & 0xf
@@ -5007,6 +4974,13 @@ def _step_rhs(w: int, idx: int):
         if (w & 0xffe00c00) == 0xda800000:
             return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                     f"{cond} s.nzcv then arm64_reg {rn_c} s else arm64_reg {rm_c} s ^^^ (0xffffffffffffffff : UInt64)))")
+    if idx == 86:  # CSNEG
+        cond = (w >> 12) & 0xf
+        rn_c = (w >> 5) & 0x1f
+        rm_c = (w >> 16) & 0x1f
+        if (w & 0xffe00c00) == 0xda800400:
+            return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
+                    f"{cond} s.nzcv then arm64_reg {rn_c} s else (0 : UInt64) - arm64_reg {rm_c} s))")
     if idx == 86:  # ADD Xd, Xn, Xm, UXTX #imm3 (extended register, SP class)
         rn = (w >> 5) & 0x1f
         rm = (w >> 16) & 0x1f
@@ -5353,29 +5327,6 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
                 f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
                 f"else arm64_reg {_RM} s))")
-    # 70-79: the scalar-double FP class, word-relative twin of `_step_rhs`'s
-    # arms.  None of these reads the pc, so the closer takes its `exact` path.
-    if idx == 70:  # FCMP
-        return (f"some {{ s with nzcv := fcmp_nzcv "
-                f"(arm64_reg_d {_RN} s) (arm64_reg_d {_RM} s) }}")
-    if idx in (71, 72, 73, 74):
-        helper = {71: "faddBits", 72: "fsubBits",
-                  73: "fmulBits", 74: "fdivBits"}[idx]
-        return (f"some (arm64_set_reg_d {_RD} s ({helper} "
-                f"(arm64_reg_d {_RN} s) (arm64_reg_d {_RM} s)))")
-    if idx == 75:
-        return (f"some (arm64_set_reg_d {_RD} s "
-                f"(fnegBits (arm64_reg_d {_RN} s)))")
-    if idx == 76:
-        return f"some (arm64_set_reg_d {_RD} s (arm64_reg {_RN} s))"
-    if idx == 77:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg_d {_RN} s))"
-    if idx == 78:
-        return (f"some (arm64_set_reg_d {_RD} s "
-                f"(scvtfBits (arm64_reg {_RN} s)))")
-    if idx == 79:
-        return (f"some (arm64_set_reg {_RD} s "
-                f"(fcvtzsBits (arm64_reg_d {_RN} s)))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 85):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
@@ -6706,27 +6657,13 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
 
 def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                   exit_pc: int = 0, code_name: str = None,
-                  sr_name: str = None, svc_assumed: dict = None):
+                  sr_name: str = None):
     """Emit wrapper defs + a runs-certificate for a straight-line run.
 
     `code_name` / `sr_name` name the SHARED code and step-lemma families when
     the run belongs to a function other than the one they were emitted for --
     which is the by-reference receiver case, where one image's step lemmas are
     used by every method's contract.
-
-    `svc_assumed` maps the pc of a write `svc` whose x16 is not statically
-    known to the `(name, type)` of the hypothesis that stands in for it.  The
-    hypothesis is a SINGLE binder over the states and their pcs
-    (`_svc_write_assumed_type`), stated once on every emitted theorem whose
-    proof uses a site's `hx{k}`; the site's own pre-`svc` state instantiates
-    it with the pc fact the certificate already has.  One binder (not one per
-    site) is what lets the same named hypothesis be passed through a whole
-    walk, from a block certificate to the generated top-level theorem, with
-    nothing re-stated.  The hypothesis is assumed, never proved here and
-    never invented: a dynamic write `svc` with no entry in this map is still
-    refused.  With no map (the default) the behaviour is exactly the
-    pre-assumption one, so every existing caller is unchanged until the
-    universal walk supplies the assumption.
 
     A run is a maximal straight-line sequence of instructions (no branches in
     the middle); it may end in a RET.  Returns (defs_text, cert_name,
@@ -6762,11 +6699,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # discharged from the reg-16 chain and not assumed about an arbitrary
     # state), and the fall-through rewrites x0 before anything reads the
     # byte count the model does not model.  An exit `svc` has no successor
-    # to certify and is still refused.  A dynamic write has no chain, so it
-    # is admitted only by the caller's named `svc_assumed` hypothesis; with
-    # none supplied it is refused exactly as before.
+    # to certify, and a dynamic one has no provenance at all, so both are
+    # still refused.
     svc_write = {}
-    svc_dynamic = {}
     for k, pc in enumerate(run_pcs):
         if not _is_svc(words.get(pc, 0)):
             continue
@@ -6777,17 +6712,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             x16 = (prev >> 5) & 0xffff
         else:
             x16 = None
-        if x16 is None:
-            # No `movz x16` in this run to chain from.  The write form is
-            # still sound when the caller supplies the named hypothesis the
-            # step lemma needs (`¬ arm64_reg 16 s = 1`) AND the fall-through
-            # rewrites x0 before reading it; otherwise this is a refusal.
-            hyp = (svc_assumed or {}).get(pc)
-            if not hyp or not _x0_reassigned_after_write(words, pc):
-                return None
-            svc_dynamic[pc] = hyp
-            continue
-        if x16 == 1:
+        if x16 is None or x16 == 1:
             return None
         if not _x0_reassigned_after_write(words, pc):
             return None
@@ -6842,24 +6767,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                         + _pc_proof(k))
     step_facts = []
     hx_facts = []
-    # A dynamic write `svc` is admitted by the caller's named hypothesis, so
-    # every theorem whose proof applies that site's step lemma carries the
-    # hypothesis as a binder.  Its type is fixed HERE, at the run's own
-    # pre-svc state (`{S}_qS{k} st`), so the same name can be passed to the
-    # self/mid/runs theorems without re-stating the state.
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
         if _is_svc(words[pc]):
-            if pc in svc_dynamic:
-                name, _typ = svc_dynamic[pc]
-                hx_facts.append(
-                    f"  have hx{k} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1 := "
-                    f"{name} ({S}_qS{k} st) (by simp [hpc{k}])")
-                step_facts.append(
-                    f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
-                    f"= some ({S}_qT{k} st) :=\n"
-                    f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k}) (hx{k})")
-                continue
             # The step lemma is `work_step_svc_write`, under its `hx`
             # hypothesis.  Discharge that from the run's OWN reg-16 chain:
             # the preceding `movz` is in this run (the admission above
@@ -6888,31 +6798,6 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                               f"{code_name} = some ({S}_qT{k} st) :=\n"
                               f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
 
-    # Binder group for a theorem whose proof uses the first `upto` steps'
-    # `hx` facts.  There is ONE assumption per certificate, however many
-    # dynamic sites it uses: the caller states a single hypothesis over every
-    # admissible pc, so a run with two dynamic writes must not bind the same
-    # name twice (that would ask the caller for two arguments where the
-    # statement has one).  The name is deduplicated by identity of the
-    # hypothesis, which is also why the type is not printed per site.
-    def _svc_binders(upto):
-        seen, out = set(), []
-        for pc in run_pcs[:upto]:
-            hyp = svc_dynamic.get(pc)
-            if hyp and hyp[0] not in seen:
-                seen.add(hyp[0])
-                out.append(f"({hyp[0]} : {hyp[1]})")
-        return out
-
-    def _svc_binder_args(upto):
-        seen, out = set(), []
-        for pc in run_pcs[:upto]:
-            hyp = svc_dynamic.get(pc)
-            if hyp and hyp[0] not in seen:
-                seen.add(hyp[0])
-                out.append(hyp[0])
-        return out
-
     # The `hseq` side condition of `runs_cons_seq` is discharged two ways, and
     # the split is not stylistic.  For the block's FIRST instruction the source
     # state is `S_qS0 st`, which is `st` (`def S_qS0 := st`), so the condition
@@ -6932,10 +6817,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # first-step `sp` one).
     # self_k theorems: arm64_runs code k st = some (qS_k st) for 1 <= k <= m-1
     for k in range(1, m):
-        head = f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]})"
-        for b in _svc_binders(k):
-            head += f"\n    {b}"
-        A(head + " :")
+        A(f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
         A(f"    arm64_runs {code_name} {k} st = some ({S}_qS{k} st) := by")
         A("\n".join(pc_facts[:k + 1]))
         A("\n".join(hx_facts[:k]))
@@ -6950,9 +6832,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                 A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
-            self_args = " ".join([f"{S}_self{k - 1} st hpc"]
-                                 + _svc_binder_args(k - 1))
-            A(f"  rw [runs_append {code_name} {k - 1} 1 st, {self_args}]")
+            A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
             A(f"  simp only []")
             if pc_writes[k - 1]:
                 A(f"  rw [runs_cons_jump ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
@@ -6980,16 +6860,10 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         # RET-ending run: the jump side-condition (RET pc != current pc) is a
         # value-flow hypothesis the caller must supply.  `hjump` is stated on
         # the pre-RET state's x30 (the return address).
-        head = (f"theorem {S}_runs (st : Arm64State) "
-                f"(hpc : st.pc = {run_pcs[0]})")
-        head += (f"\n    (hjump : ({S}_qS{m - 1} st).x30.toNat "
-                 f"≠ {run_pcs[-1]})")
+        A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
+        A(f"    (hjump : ({S}_qS{m - 1} st).x30.toNat ≠ {run_pcs[-1]}) :")
     else:
-        head = (f"theorem {S}_runs (st : Arm64State) "
-                f"(hpc : st.pc = {run_pcs[0]})")
-    for b in _svc_binders(m):
-        head += f"\n    {b}"
-    A(head + " :")
+        A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
     A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
     A("\n".join(pc_facts))
     A("\n".join(hx_facts))
@@ -7010,9 +6884,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
     else:
-        self_args = " ".join([f"{S}_self{m - 1} st hpc"]
-                             + _svc_binder_args(m - 1))
-        A(f"  rw [runs_append {code_name} {m - 1} 1 st, {self_args}]")
+        A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
         A(f"  simp only []")
         if last_moves_pc:
             A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
@@ -7039,12 +6911,8 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # `∀ p ∈ [p₀, …], p ≠ exit` leaf-by-leaf, so the cost scales with block
     # length instead of failing.  `work_mid_hk` turns it into the per-case fact.
     pcs_lit = ", ".join(str(pc) for pc in run_pcs)
-    mid_head = (f"theorem {S}_mid (exit : Nat) (st : Arm64State) "
-                f"(hpc : st.pc = {run_pcs[0]})")
-    mid_head += f"\n    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit)"
-    for b in _svc_binders(m):
-        mid_head += f"\n    {b}"
-    A(mid_head + " :")
+    A(f"theorem {S}_mid (exit : Nat) (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
+    A(f"    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit) :")
     A(f"    ∀ u < {m}, ∀ su, arm64_runs {code_name} u st = some su → su.pc ≠ exit := by")
     A("  intro u hu su hsu")
     cases = " ∨ ".join(f"u = {k}" for k in range(m))
@@ -7060,9 +6928,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A("    exact hk")
         else:
             A(f"    have hself : arm64_runs {code_name} {k} st = some ({S}_qS{k} st) :=")
-            self_args = " ".join([f"{S}_self{k} st hpc"]
-                                 + _svc_binder_args(k))
-            A(f"      {self_args}")
+            A(f"      {S}_self{k} st hpc")
             A(f"    have heq : some ({S}_qS{k} st) = some su := hself.symm.trans hsu")
             A("    injection heq with hq")
             A("    subst hq")
@@ -7074,7 +6940,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
 
 def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                    exit_pc: int, code_name: str = None, sr_name: str = None,
-                   leaders=frozenset(), svc_assumed: dict[int, tuple[str, str]] | None = None):
+                   leaders=frozenset()):
     """Emit the pieces of a proof that a straight-line run ENDS the program.
 
     The run is a block whose last instruction is a statically-known exit `svc`
@@ -7096,12 +6962,6 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
 
     Returns `(defs_text, halt_theorem_name, n_steps)` or None when the block is
     not this shape or a system call's number is not statically known.
-
-    `svc_assumed` is the same `{pc: (name, type)}` channel `_gen_run_cert`
-    takes: a dynamic write `svc` BEFORE the final exit is admitted under the
-    caller's named hypothesis, which is stated once on `{S}_halts` and
-    instantiated at each site's own pre-`svc` state.  A dynamic FINAL `svc` is
-    still refused -- a halt cannot be assumed.
     """
     code_name = code_name or f"{name}_code"
     sr_name = sr_name or name
@@ -7110,20 +6970,12 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     if not _is_svc_exit(words, run_pcs[-1], leaders):
         return None
     svc_x16 = {}
-    dynamic_writes = set()
     for pc in run_pcs:
         if not _is_svc(words.get(pc, 0)):
             continue
         x = _svc_static_x16(words, pc, leaders)
         if x is None:
-            if pc == run_pcs[-1]:
-                return None
-            if not (svc_assumed and pc in svc_assumed):
-                return None
-            if not _x0_reassigned_after_write(words, pc):
-                return None
-            dynamic_writes.add(pc)
-            continue
+            return None
         svc_x16[pc] = x
     for pc, x in svc_x16.items():
         if pc != run_pcs[-1] and x == 1:
@@ -7167,16 +7019,6 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
 
     A = L.append
     A(f"theorem {S}_halts (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
-    # ONE binder, however many dynamic sites the block has: the caller's
-    # hypothesis is over the STATES and their pcs, so every site instantiates
-    # the same name and the call site supplies it once.  Binding it twice
-    # would ask the caller for two arguments where the statement has one.
-    _seen_hyp = set()
-    for pc in run_pcs:
-        hyp = (svc_assumed or {}).get(pc) if pc in dynamic_writes else None
-        if hyp and hyp[0] not in _seen_hyp:
-            _seen_hyp.add(hyp[0])
-            A(f"    ({hyp[0]} : {hyp[1]})")
     A(f"    (f : Nat) (hf : {total} < f) :")
     A(f"    arm64_go_exit st {code_name} {exit_pc} f = none := by")
 
@@ -7185,39 +7027,10 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     for j, (kind, pcs) in enumerate(segs):
         if kind == "svc":
             pc = pcs
+            x = svc_x16[pc]
             hpc = f"hpc_svc_{j}"
             hpc_proof = cur_pc_fact
             A(f"  have {hpc} : ({cur_state}).pc = {pc} := {hpc_proof}")
-            if pc in dynamic_writes:
-                if pc == run_pcs[-1]:
-                    return None
-                hx = f"hx_svc_{j}"
-                # The hypothesis is stated over the states and their pcs, so
-                # every site -- entry or after a preceding segment -- applies
-                # it at its own pre-svc state with the pc fact it just built.
-                name = svc_assumed[pc][0]
-                A(f"  have {hx} : ¬ arm64_reg 16 ({cur_state}) = 1 := "
-                  f"{name} ({cur_state}) (by simp [{hpc}])")
-                i = (pc - base) // 4
-                tgt = f"{{ {cur_state} with pc := {pc + 4} }}"
-                A(f"  have hstep_w_{j} : arm64_step ({cur_state}) {code_name} = "
-                  f"some ({tgt} : Arm64State) := by")
-                A(f"    have hsr := {sr_name}_sr_{i} ({cur_state}) {hpc} {hx}")
-                A(f"    rw [hsr, {hpc}]")
-                A(f"    try rfl")
-                A(f"  have hne_w_{j} : ({tgt} : Arm64State).pc ≠ ({cur_state}).pc := by")
-                A(f"    rw [{hpc}]")
-                A(f"    change {pc + 4} ≠ {pc}")
-                A(f"    decide")
-                A(f"  have hgj_w_{j} := arm64_go_exit_step_jump_at ({cur_state}) "
-                  f"({tgt}) {code_name} {exit_pc} ({cur_fuel} - 1) {pc} "
-                  f"hstep_w_{j} hne_w_{j} {hpc} (by decide)")
-                A(f"  rw [show ({cur_fuel} - 1) + 1 = {cur_fuel} from by omega] at hgj_w_{j}")
-                A(f"  rw [hgj_w_{j}]")
-                cur_state, cur_pc, cur_fuel, cur_pc_fact = tgt, pc + 4, f"({cur_fuel} - 1)", "by rfl"
-                prev_run = None
-                continue
-            x = svc_x16[pc]
             if prev_run is None:
                 # The number is static in the IMAGE but not in this run: no
                 # preceding movz is in the segment, so there is no chain from
@@ -8994,60 +8807,6 @@ def _x0_reassigned_after_write(words: dict, pc: int, limit: int = 16) -> bool:
     return False
 
 
-def _svc_write_assumed_sites(blocks: list, words: dict, leaders) -> list:
-    """The pcs of the dynamic write `svc`s a generated theorem may ASSUME.
-
-    A dynamic write `svc` has no `movz x16` the reader can see
-    (`_svc_static_x16` answers None), so the certificate builders have no
-    reg-16 chain to discharge `work_step_svc_write`'s `hx : ¬ arm64_reg 16 s =
-    1` from.  They admit it only under a caller-supplied hypothesis of exactly
-    that shape, and this function is the ONE answer to "which sites are
-    admissible": the universal walk collects the binder from it,
-    `_cfg_decomposition_refusal` skips these when it explains a refusal, and
-    `_dylib_total_proof` reads the same set to state the export's termination
-    under the same hypothesis.  Three scans with three slightly different
-    rules would be three answers to one question.
-
-    A site is admissible only when the fall-through rewrites `x0` before
-    anything reads it (`_x0_reassigned_after_write`): assuming the write form
-    makes the step's successor a fact, but not the byte count the model leaves
-    unmodelled in `x0`.  A block's LAST `svc` is never admitted -- a dynamic
-    tail can be `SYS_exit`, and a halt cannot be assumed (the walk refuses it
-    with the dynamic-svc message rather than treating it as a write).
-
-    The answer is sorted so the hypothesis's pc list is a deterministic
-    function of the image: the walk and the dylib emitter must spell the same
-    type for the same program.
-    """
-    sites = []
-    for b in blocks:
-        for pc in b["instrs"][:-1]:
-            if not _is_svc(words.get(pc, 0)):
-                continue
-            if _svc_static_x16(words, pc, leaders) is not None:
-                # A known write (`x16 = 4`) or a known exit (`x16 = 1`): the
-                # first has its own chain, the second is not a write at all.
-                continue
-            if _x0_reassigned_after_write(words, pc):
-                sites.append(pc)
-    return sorted(sites)
-
-
-def _svc_write_assumed_type(pcs) -> str:
-    """The Lean TYPE of the `svc_write_assumed` hypothesis at `pcs`.
-
-    One hypothesis, stated once on the generated theorem and passed to every
-    block certificate that uses a site: `x16` is never the exit number at any
-    of the dynamic `svc` pcs.  Stating it over the STATES and their pcs (not
-    once per site) is what lets one binder reach every certificate: a site's
-    own pre-`svc` state is a value, and its pc is a fact the certificate
-    already has, so the certificate instantiates the same hypothesis rather
-    than accepting a differently-typed copy of it.
-    """
-    return ("∀ s : Arm64State, s.pc ∈ ["
-            + ", ".join(str(pc) for pc in pcs) + "] → ¬ arm64_reg 16 s = 1")
-
-
 def _trap_terminating(blocks: list, words: dict) -> set:
     """The start addresses of the blocks the machine CANNOT return from.
 
@@ -9564,7 +9323,7 @@ def _unmodelled_instruction(word: int):
         12-bit-offset access cannot express, which in practice means a NEGATIVE
         frame offset (measured: `0xf81a83a0` is `stur x0, [x29, #-0x58]`, and
         `#-0x58` is exactly what a spill below the frame base needs).
-        `bugs/hard/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
+        `bugs/mid/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
         instruction whose emission carried a real bug, and the step table still
         has no arm for it.
       * **the EXTENDED-register `ADD`/`SUB`** — bits 28..23 = `010111`, bit 21
@@ -9621,7 +9380,7 @@ def _unmodelled_instruction(word: int):
                 f"the unscaled (9-bit displacement) form, which is how a "
                 f"frame access at a NEGATIVE offset is reached; the step table "
                 f"has arms for the scaled `STR`/`LDR` and not for these, and "
-                f"`bugs/hard/FORMAL_arm64_instruction_coverage.md` lists the pair "
+                f"`bugs/mid/FORMAL_arm64_instruction_coverage.md` lists the pair "
                 f"as uncovered.")
     return (None, "")
 
@@ -9661,14 +9420,13 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     **The `svc` is a second search.**  When the unmodelled-word loop finds
     nothing, the refusal is most often an `svc` whose certificate cannot be
     BUILT even though the instruction has a step (idx 35, so the loop above
-    skips it): a dynamic x16 that is not an admissible ASSUMED write, an exit
-    `svc` mid-run (a runs certificate certifies a `some` successor and cannot
-    cross a halt), or a write `svc` whose x0 the fall-through does not rewrite
-    before a read.  The scan classifies the
+    skips it): a dynamic x16 (neither the exit nor the write form can be
+    selected), an exit `svc` mid-run (a runs certificate certifies a `some`
+    successor and cannot cross a halt), or a write `svc` whose x0 the
+    fall-through does not rewrite before a read.  The scan classifies the
     image's `svc`s the same way the certificate builders do —
     `_svc_static_x16` over the block's leaders, `_x0_reassigned_after_write`
-    — skips the dynamic writes `_svc_write_assumed_sites` says the walk
-    assumes, and names the first one that refuses, so the "every instruction has a
+    — and names the first one that refuses, so the "every instruction has a
     step" sentence stops blaming an empty runs certificate for an svc.
     """
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
@@ -9699,12 +9457,6 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
               "instruction count.")
     blocks = _cfg_blocks(words, func_entry, func_end)
     leaders = frozenset(b["start"] for b in blocks)
-    # The dynamic write `svc`s a generated theorem may ASSUME are not the
-    # cause of a refusal: the walk admits them under `svc_write_assumed`
-    # (`_svc_write_assumed_sites` is the one rule), so skipping exactly that
-    # set keeps the message pointing at the site that really refuses instead
-    # of at the first dynamic one in pc order.
-    assumed = set(_svc_write_assumed_sites(blocks, words, leaders))
     for pc in sorted(p for p in words
                      if func_entry <= p < func_end and _is_svc(words[p])):
         block = next((b for b in blocks if pc in b["instrs"]), None)
@@ -9712,11 +9464,6 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
             continue
         x16 = _svc_static_x16(words, pc, leaders)
         if x16 is None:
-            if pc in assumed:
-                continue
-            _tail = block["instrs"][-1] == pc
-            _x0_reader = (not _tail
-                          and not _x0_reassigned_after_write(words, pc))
             return (
                 f"universal theorem: CFG decomposition unsupported for this "
                 f"function shape, and every instruction in its own code has a "
@@ -9728,13 +9475,7 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
                 f"halts, write continues -- and with x16 unknown the walk "
                 f"refuses rather than guessing which form the machine takes, "
                 f"which is the dynamic-svc case the svc-exit design leaves "
-                f"refused."
-                + ("" if not _x0_reader else
-                   f"  It cannot be assumed to be the write form either: the "
-                   f"fall-through past {pc:#x} does not rewrite x0 before "
-                   f"reading the write svc's byte count, which the model does "
-                   f"not model, so the unrewritten value is a fact about a "
-                   f"state the machine never has."))
+                f"refused.")
         if x16 == 1 and block["instrs"][-1] != pc:
             return (
                 f"universal theorem: CFG decomposition unsupported for this "
@@ -9852,25 +9593,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # returns into a halt), but such a block still has to be CERTIFIED, so the
     # halt certificate is keyed by this narrower set.
     _blocks_by_start = {b["start"]: b for b in blocks}
-    _leaders = frozenset(_blocks_by_start)
     _halt_blocks = {b["start"] for b in blocks
-                    if _is_svc_exit(words, b["instrs"][-1], _leaders)}
+                    if _is_svc_exit(words, b["instrs"][-1],
+                                    frozenset(_blocks_by_start))}
     _halt_info = {}
-    # The dynamic write `svc`s this walk may ASSUME instead of refusing: one
-    # helper decides, so the binder here, the refusal classifier's skip, and
-    # the dylib emitter's restatement of the same type cannot disagree.  One
-    # binder over all the pcs, passed to every certificate that uses a site,
-    # and stated on the universal theorem through the `hyps` channel.
-    _svc_sites = _svc_write_assumed_sites(blocks, words, _leaders)
-    _svc_hyp = (("svc_write_assumed", _svc_write_assumed_type(_svc_sites))
-                if _svc_sites else None)
-
-    def _svc_assumed_for(pcs):
-        """The `{pc: (name, type)}` channel for one block's certificates."""
-        if _svc_hyp is None:
-            return None
-        assumed = {pc: _svc_hyp for pc in pcs if pc in _svc_sites}
-        return assumed or None
 
     def _trap_branch(b) -> bool:
         """A conditional block that reaches a bounded stop on either edge.
@@ -10207,7 +9933,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             hpart = _gen_halt_cert(
                 name, words, base, f"b{bi}_halt", block["instrs"], exit_pc,
                 code_name=code_name, sr_name=sr_name,
-                leaders=_leaders, svc_assumed=_svc_assumed_for(block["instrs"]))
+                leaders=frozenset(_blocks_by_start))
             if hpart is None:
                 return None
             hdefs, hname, htotal = hpart
@@ -10243,8 +9969,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             run_info[bi] = (None, None, "st", 0, [], False, 0, [])
             continue
         part = _gen_run_cert(name, words, base, f"b{bi}", run_pcs, exit_pc,
-                             code_name=code_name, sr_name=sr_name,
-                             svc_assumed=_svc_assumed_for(run_pcs))
+                             code_name=code_name, sr_name=sr_name)
         if part is None:
             return None
         defs_text, cert_name, mid_name, exit_expr, def_names, is_ret = part
@@ -10717,13 +10442,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         block = blocks[bi]
         kind = block["kind"]
         cert_name, mid_name, exit_expr, m_run, def_names, is_ret, run_last_pc, run_pcs = run_info[bi]
-        # The `svc_write_assumed` argument, when this certificate binds one.
-        # Every theorem the run certificate emits that uses an assumed site
-        # carries the ONE binder, so the call site appends the hypothesis by
-        # name; a run with no site gets the text it always had.
-        _svc_arg = (" " + _svc_hyp[0]) if (
-            _svc_hyp is not None
-            and any(pc in _svc_sites for pc in run_pcs)) else ""
         # The address this block's `RET` returns to, when the walk reached
         # it by descending into a callee of the same image.  `None` for
         # every block the entry itself reaches, and `None` is exactly the
@@ -10748,13 +10466,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # by rewriting with that certificate.
             _hname, _htotal = _halt_info[bi]
             _hp = _pf if _pf is not None else "by rfl"
-            _hsvc = (" " + _svc_hyp[0]) if (
-                _svc_hyp is not None
-                and any(pc in _svc_sites for pc in block["instrs"])) else ""
             A(f"{IND}have hpc_halt_{bi} : ({state}).pc = {run_start} := {_hp}")
             A(f"{IND}have hnone_halt_{bi} : arm64_go_exit ({state}) {C} "
               f"{EXIT} {fuel_n} = none := "
-              f"{_hname} ({state}) hpc_halt_{bi}{_hsvc} {fuel_n} (by omega)")
+              f"{_hname} ({state}) hpc_halt_{bi} {fuel_n} (by omega)")
             A(f"{IND}rw [hnone_halt_{bi}]")
             A(f"{IND}exact True.intro")
             return
@@ -10791,9 +10506,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                       f"≠ {run_last_pc} := by")
                     A(f"{IND}  rw [hx30_{bi}]")
                     A(f"{IND}  native_decide")
-                cert_args = f"{cert_name} _ hpc_{bi} hjump_{bi}{_svc_arg}"
+                cert_args = f"{cert_name} _ hpc_{bi} hjump_{bi}"
             else:
-                cert_args = f"{cert_name} _ hpc_{bi}{_svc_arg}"
+                cert_args = f"{cert_name} _ hpc_{bi}"
             # The state argument is `_`, not the record literal: `hpc_{bi}`
             # (`<state>.pc = pc`) fixes it by unification, and spelling it out
             # makes the elaborator compare two separately-elaborated copies of
@@ -10846,7 +10561,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}have h_adv_{bi} : arm64_go_exit ({state}) {C} {EXIT} {fuel_n}")
             A(f"{IND}    = arm64_go_exit s_{bi} {C} {EXIT} {fuel_next} := by")
             A(f"{IND}  have hg := rec1_glue_gen {C} {EXIT} {m_run} {fuel_next} "
-              f"({state}) s_{bi} hrun_{bi} ({mid_name} {EXIT} ({state}) hpc_{bi} hexit_{bi}{_svc_arg})")
+              f"({state}) s_{bi} hrun_{bi} ({mid_name} {EXIT} ({state}) hpc_{bi} hexit_{bi})")
             A(f"{IND}  rw [show {m_run} + {fuel_next} = {fuel_n} from by omega] at hg")
             A(f"{IND}  exact hg")
             A(f"{IND}rw [h_adv_{bi}]")
@@ -12114,9 +11829,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         block = blocks[bi]
         kind = block["kind"]
         cert_name, mid_name, exit_expr, m_run, def_names, is_ret, run_last_pc, run_pcs = run_info[bi]
-        _svc_arg = (" " + _svc_hyp[0]) if (
-            _svc_hyp is not None
-            and any(pc in _svc_sites for pc in run_pcs)) else ""
         IND = "  " * (depth + 1)
         path = path | {bi}
         n = _rn[0]
@@ -12167,7 +11879,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  exact fun h => hx30ret {run_last_pc} (by decide) h.symm")
                 hj = f" hj_{n}"
             A(f"{IND}have hcert_{n} : arm64_runs {C} {m_run} ({cur}) = some ({rhs}) := "
-              f"{cert_name} _ {cur_pc}{hj}{_svc_arg}")
+              f"{cert_name} _ {cur_pc}{hj}")
             A(f"{IND}have hrun_ex_{n} : ∃ s : Arm64State, arm64_runs {C} {m_run} ({cur}) "
               f"= some s := ⟨({rhs}), hcert_{n}⟩")
             A(f"{IND}rcases hrun_ex_{n} with ⟨s_{n}, hrun_{n}⟩")
@@ -12177,7 +11889,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  rw [runs_append_some {C} ({acc}) {m_run} {st0} ({cur}) {hacc}]")
             A(f"{IND}  exact hrun_{n}")
             append_avoid(acc, m_run, cur, hacc,
-                         f"({mid_name} {exit_pc} ({cur}) {cur_pc} (by simp){_svc_arg})", "block")
+                         f"({mid_name} {exit_pc} ({cur}) {cur_pc} (by simp))", "block")
             if not is_ret:
                 rhs_pc = run_pcs[-1] + 4
                 A(f"{IND}have hpc_{n} : (s_{n}).pc = {rhs_pc} := by rw [hsid_{n}]")
@@ -12851,14 +12563,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             + ((", " + _fr0["init_extra"]) if _fr0.get("init_extra") else "")
             + " }")
     _fr = frame or {}
-    # The dynamic-write assumption reaches the top-level theorem through the
-    # SAME `hyps` channel a frame contract uses for its own binders -- one
-    # mechanism, not a second spelling of "extra hypothesis".  It comes after
-    # the entry's `n` so a caller says `{thm} n svc_write_assumed`, which is
-    # the order the dylib termination theorem (`_dylib_total_proof`) applies.
-    if _svc_hyp is not None:
-        _fr = dict(_fr, hyps=(list(_fr.get("hyps") or [])
-                              + [(_svc_hyp[0], _svc_hyp[1], None)]))
     # The `frame` dict is this emitter's EXPLICIT-STATEMENT channel: it is how a
     # caller says "the terminal proposition is not `s.x0 = mojo n`".  The three
     # keyword arguments above are the same channel spelled directly, for the
@@ -15232,13 +14936,6 @@ def generate_arm64_proof(prog, code, info) -> str:
     _callees2 = _callee_call_table(go_defs, prog, func_name, arity=2)
     _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2,
                                 exports=_callees2)
-    # The two-argument call environment this program's AST needs, read once and
-    # passed by both the universal `eval_eq_mojo` theorem and every concrete
-    # instance: the concrete theorems used to omit it and rely on `evalFunc`'s
-    # default, which answers 0, so a two-argument user call made the concrete
-    # proposition false while the universal one (and `eval_eq_mojo_test`) was
-    # stated correctly.
-    _ast_call_env2 = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not
@@ -15263,7 +14960,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         _, _dec1_rec = _dec1_pattern(fn)
         param = fn.params[0][0] if fn.params else "n"
         rec_hrhs = _expr_rec_hrhs(fn.body[0].else_body[0].value, func_name, param)
-        _cf2_use = _ast_call_env2
+        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
         eval_eq_mojo_proof = (
             f"simp +decide [mojo, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
             f"  by_cases hn : n = 0\n"
@@ -15297,7 +14994,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         # one-line arm must not carry a second pair -- otherwise `fib`'s proof
         # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
         _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
-        _cf2_use = _ast_call_env2
+        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
         eval_eq_mojo_proof = (
             f"have hunf : evalFunc ast ({_cf_unparenthesised}) [n] ({_cf2_use}) =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
@@ -15394,7 +15091,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {_entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} ({_ast_call_env2}) = "
+            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) = "
             f"{_apply_args('mojo', enames)} := by\n"
             f"  {eval_eq_mojo_proof}"
         )
@@ -15493,7 +15190,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             eval_tests.append(
                 f"theorem eval_eq_mojo_{v} :\n"
                 f"  evalFunc ast {_cf_text} "
-                f"{_entry_arg_list(_vv)} ({_ast_call_env2}) = {_apply_args('mojo', _vv)} := by\n"
+                f"{_entry_arg_list(_vv)} = {_apply_args('mojo', _vv)} := by\n"
                 f"{_tac_eval}"
             )
         _tv = ([f"(UInt64.ofNat {test_input})"] +
@@ -15501,7 +15198,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
             f"  evalFunc ast {_cf_text} {_entry_arg_list(_tv)} "
-            f"({_ast_call_env2}) = {_apply_args('mojo', _tv)} := by\n"
+            f"({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) = {_apply_args('mojo', _tv)} := by\n"
             f"{_tac_eval}"
         )
         eval_test_block = "\n\n".join(eval_tests)
@@ -16932,20 +16629,6 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     if exec_code_end is None:
         exec_code_end = _exec_code_limit(code)
     func_end = _export_extent(exports, entry, base, exec_code_end)
-    # The same admissible-site rule the walk itself asks
-    # (`_svc_write_assumed_sites`), over the same block partition: the
-    # universal theorem states `svc_write_assumed` over exactly these pcs, so
-    # this function must spell the same type or the application of
-    # `{ident}_halts` below is a type error.  Re-reading the walk's TEXT for
-    # the binder would work too and would be a second, weaker reader: a
-    # silent format drift in the walk would turn the assumption into a
-    # dropped premise instead of a compile failure, which is the defect part 5
-    # exists to close.
-    _words = {base + i: int.from_bytes(code[i:i + 4], "little")
-              for i in range(0, len(code) - len(code) % 4, 4)}
-    _blocks = _cfg_blocks(_words, entry, func_end)
-    _svc_sites = _svc_write_assumed_sites(
-        _blocks, _words, frozenset(b["start"] for b in _blocks))
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
@@ -16996,46 +16679,16 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     except (NotImplementedError, ValueError):
         walk = None
     if walk is None:
-        # The walk's own refusal, inside the obligation's docstring.  The
-        # sentence below names the CLASSES of shape it cannot decompose; this
-        # names the one site in THIS export (`_cfg_decomposition_refusal`),
-        # so "no proof because a dynamic svc at 0x…" is distinguishable from
-        # "no proof because a loop" without re-deriving the image by hand.
-        # The reason is not swallowed, and no unconditional `Total` is stated.
-        _why = _cfg_decomposition_refusal(ident, code, base, entry)
-        _why = _why.replace("-/", "- /")
         return (
             f"/-- OBLIGATION, not proved: this export's run terminates for every\n"
             f"    argument.  The constant-fuel CFG walk does not cover it: its\n"
             f"    control flow has a loop or a call, or a path ends in an exit\n"
             f"    `svc`, which the model steps to `none` (no final state). An\n"
             f"    overflow trap is such a path, so termination for every argument\n"
-            f"    is not a fact of the model.\n"
-            f"    The walk's refusal, so the reason is not swallowed:\n"
-            f"    {_why} -/\n"
+            f"    is not a fact of the model. -/\n"
             f"theorem {ident}_semantics_total :\n"
             f"    DylibExport.Total dylib_image {ident} := by\n"
             f"  sorry")
-    if _svc_sites:
-        # The export's termination is a fact only under the dynamic write
-        # `svc` assumption, and the theorem says so instead of dropping it.
-        # `total_of_halts` takes a function of `n`, so the walk's theorem is
-        # partially applied with the export's own `n` and then the
-        # assumption -- the order the walk's binder list has.
-        _hyp = _svc_write_assumed_type(_svc_sites)
-        return (
-            f"{walk}\n\n"
-            f"/-- TERMINATION, PROVED UNDER `svc_write_assumed`: `{ident}_halts`\n"
-            f"    walks this export's code from its entry to the exit for every\n"
-            f"    argument, at `exportFuel`, provided x16 at the dynamic write\n"
-            f"    `svc` pcs is never 1.  The hypothesis is the walk's own and is\n"
-            f"    passed through here; it is not discharged inside a private\n"
-            f"    certificate and dropped on the way out. -/\n"
-            f"theorem {ident}_semantics_total\n"
-            f"    (svc_write_assumed : {_hyp}) :\n"
-            f"    DylibExport.Total dylib_image {ident} :=\n"
-            f"  DylibExport.total_of_halts dylib_image {ident} "
-            f"(fun n => {ident}_halts n svc_write_assumed)")
     return (
         f"{walk}\n\n"
         f"/-- TERMINATION, PROVED: `{ident}_halts` walks this export's code from\n"
