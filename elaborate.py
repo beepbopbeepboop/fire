@@ -942,6 +942,9 @@ def where_violation_error(kind: str, name: str, exc: 'WhereConformanceError'):
 
 
 # ── Declaration-time conditional conformance checks ──────────────────
+#
+# (synthesis checks added in part 4: copy/move constructor synthesis under
+# conditional conformance. They run as a separate declaration-time pass.)
 
 def _trait_ancestor_closure(trait_name, trait_bases, cache):
     """All ancestors of `trait_name` reachable through known trait bases."""
@@ -1205,6 +1208,317 @@ def check_conformance_declarations(struct_defs, trait_defs):
                     break
             if broke:
                 break
+
+    if errors:
+        line, msg = sorted(errors, key=lambda x: x[0])[0]
+        raise RuntimeError(f"error: {msg}")
+
+
+# ── Copy/move synthesis under conditional conformance (part 4) ──────────
+
+def _sd_base_constraints_map(sd):
+    bc = list(getattr(sd, 'base_constraints', []) or [])
+    if not bc:
+        bc = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
+    out = {}
+    for bname, wtext in bc:
+        out[_as_str(bname)] = _as_str(wtext) if wtext is not None else ''
+    return out
+
+
+def _sd_bracket_param_names(sd):
+    names = []
+    # Prefer explicit type parameter name lists when present.
+    for attr in ('type_param_names', 'bracket_params'):
+        vals = getattr(sd, attr, None) or []
+        if isinstance(vals, list):
+            for v in vals:
+                if isinstance(v, (tuple, list)) and v:
+                    n = _as_str(v[0]).lstrip('*')
+                else:
+                    n = _as_str(v).lstrip('*')
+                if n and n not in names:
+                    names.append(n)
+    for bt in (getattr(sd, 'bracket_types', []) or []):
+        if isinstance(bt, (tuple, list)) and bt:
+            n = _as_str(bt[0]).lstrip('*')
+            if n and n not in names:
+                names.append(n)
+    return names
+
+
+def _ann_to_str(ann):
+    if ann is None:
+        return ''
+    if isinstance(ann, str):
+        return ann.strip()
+    if isinstance(ann, IdentExpr):
+        return _as_str(getattr(ann, 'name', '')).strip()
+    # Best-effort: some AST nodes stringify reasonably.
+    return _as_str(ann).strip()
+
+
+def _split_top_level_type_args(text):
+    s = (text or '').strip()
+    if not s.startswith('[') or not s.endswith(']'):
+        return None
+    inner = s[1:-1]
+    parts = []
+    depth = 0
+    cur = []
+    for ch in inner:
+        if ch in '([{<':
+            depth += 1
+            cur.append(ch)
+        elif ch in ')]}>':
+            depth -= 1
+            cur.append(ch)
+        elif ch == ',' and depth == 0:
+            parts.append(''.join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    if cur or inner.strip() == '':
+        tail = ''.join(cur).strip()
+        if tail or parts:
+            parts.append(tail)
+    return parts
+
+
+def _parse_type_app(text):
+    s = _ann_to_str(text)
+    if not s:
+        return '', []
+    i = s.find('[')
+    if i < 0 or not s.endswith(']'):
+        return s, []
+    base = s[:i].strip()
+    args = _split_top_level_type_args(s[i:])
+    if args is None:
+        return s, []
+    return base, args
+
+
+def _subst_constraint_text(text, subs):
+    if not text:
+        return text
+    # Replace longer keys first to avoid prefix collisions.
+    for k in sorted(subs.keys(), key=len, reverse=True):
+        v = subs[k]
+        text = re.sub(rf'\b{re.escape(k)}\b', v, text)
+    return text
+
+
+def _conforms_atom(tname, trait):
+    return ('conforms', tname, trait)
+
+
+def _is_copyable_trait(trait):
+    return _as_str(trait) in ('Copyable',)
+
+
+def _is_movable_trait(trait):
+    return _as_str(trait) in ('Movable',)
+
+
+def _atom_implied_by_assumptions(atom, assumptions, trait_bases, cache):
+    """Whether `atom` is implied by `assumptions` (all assumed true)."""
+    if atom is None:
+        return False
+    ak = atom[0]
+    if ak == 'and':
+        return (_atom_implied_by_assumptions(atom[1], assumptions, trait_bases, cache)
+                and _atom_implied_by_assumptions(atom[2], assumptions, trait_bases, cache))
+    if ak == 'or':
+        # atom implied if either disjunct implied? no: (x or y) as a goal is implied
+        # if x implied or y implied.
+        return (_atom_implied_by_assumptions(atom[1], assumptions, trait_bases, cache)
+                or _atom_implied_by_assumptions(atom[2], assumptions, trait_bases, cache))
+    if ak == 'conforms':
+        for a in assumptions:
+            if _atom_implies(a, atom, trait_bases, cache):
+                return True
+        return False
+    if ak == 'not':
+        # implied if assumptions prove the negation: e.g. assume not X.
+        for a in assumptions:
+            if _atom_implies(a, atom, trait_bases, cache):
+                return True
+        # or if inner is disproved? conservative: only direct implication.
+        return False
+    return False
+
+
+def _text_implied_by_text(goal_text, assume_text, trait_bases, cache):
+    if not goal_text:
+        return True
+    # Treat empty/absent assumption as unconditional (no assumptions) only when
+    # goal is also empty; otherwise cannot prove from nothing.
+    g = _constraint_atoms(_parse_constraint_expr(goal_text))
+    a = _constraint_atoms(_parse_constraint_expr(assume_text)) if assume_text else None
+    if g is None:
+        # Unknown goal: conservative accept.
+        return True
+    if a is None:
+        if assume_text:
+            # Unparseable assumption: conservative accept.
+            return True
+        assumptions = []
+    else:
+        # Flatten top-level ands into assumptions.
+        assumptions = []
+        stack = [a]
+        while stack:
+            cur = stack.pop()
+            if cur is None:
+                continue
+            if cur[0] == 'and':
+                stack.append(cur[1])
+                stack.append(cur[2])
+            else:
+                assumptions.append(cur)
+    return _atom_implied_by_assumptions(g, assumptions, trait_bases, cache)
+
+
+def _struct_field_defs(sd):
+    out = []
+    for f in (getattr(sd, 'fields', None) or []):
+        if not hasattr(f, 'name'):
+            continue
+        name = _as_str(getattr(f, 'name', ''))
+        if not name or ',' in name:
+            continue
+        t = _ann_to_str(getattr(f, 'type_ann', None))
+        if not t:
+            continue
+        line = getattr(f, 'line', 0) or getattr(sd, 'line', 0) or 0
+        out.append((name, t, line))
+    return out
+
+
+def _field_copy_move_problem(enclosing, fname, ftype_text, want_trait, struct_map, trait_bases, cache):
+    """Return (problem, reason_kind) or None if ok/unknown-accept.
+
+    want_trait: 'Copyable' or 'Movable'.
+    """
+    # Resolve field type
+    base, targs = _parse_type_app(ftype_text)
+    if not base:
+        return None
+    enc_params = set(_sd_bracket_param_names(enclosing))
+    enc_bc = _sd_base_constraints_map(enclosing)
+    enc_assume = enc_bc.get(want_trait, '')
+    # If enclosing doesn't declare this trait, synthesis check not applicable.
+    if want_trait not in enc_bc:
+        return None
+
+    # If base is a type parameter of enclosing struct
+    if base in enc_params and not targs:
+        goal = f"conforms_to({base}, {want_trait})"
+        if _text_implied_by_text(goal, enc_assume, trait_bases, cache):
+            return None
+        # Not provable: for synthesis, an unprovable requirement blocks.
+        # But be careful not to invent diagnostics for genuinely unknown cases
+        # outside scope. For type params, this is the OR/multi-field class.
+        return ('param', goal)
+
+    fdef = struct_map.get(base)
+    if fdef is None:
+        # Unknown/imported type: accept.
+        return None
+    f_bc = _sd_base_constraints_map(fdef)
+    if want_trait not in f_bc:
+        # Field type has no Copyable/Movable conformance at all: out of scope.
+        return None
+    f_need = f_bc.get(want_trait, '')
+    if not f_need:
+        # Field type's conformance is unconditional: fine.
+        return None
+
+    # Field type has conditional conformance. Determine if enclosing implies it
+    # for this declared field instantiation.
+    fparams = _sd_bracket_param_names(fdef)
+    needed = f_need
+
+    # Variadic pack: a single type parameter used as `P.all_conforms_to[Trait]()`
+    # applies to all supplied type arguments. Expand before substitution.
+    _expanded_pack = False
+    if targs and fparams:
+        # Try any single param name as pack if condition has all_conforms_to.
+        for p in fparams:
+            m = re.search(rf'\b{re.escape(p)}\.all_conforms_to\[([A-Za-z_]\w*)\]\s*\(\s*\)', f_need)
+            if m and (len(fparams) == 1 or len(targs) != len(fparams)):
+                tr = m.group(1)
+                parts = [f"conforms_to({a.strip()}, {tr})" for a in targs if _as_str(a).strip()]
+                if parts:
+                    needed = ' and '.join(f'({p2})' for p2 in parts)
+                    _expanded_pack = True
+                break
+
+    if not _expanded_pack:
+        subs = {}
+        if targs and fparams:
+            for i, p in enumerate(fparams):
+                if i < len(targs):
+                    subs[p] = targs[i]
+        needed = _subst_constraint_text(f_need, subs) if subs else f_need
+
+    # If needed text contains unknown constructs, be conservative accept.
+    if 'all_conforms_to' in needed or 'each ' in needed:
+        return None
+
+    # Determine if needed is implied by enclosing assumptions for want_trait.
+    # Also treat enclosing unconditional (empty assume) as "no assumptions".
+    # OR-gated enclosing constraint is not definite enough: for synthesis we need
+    # the requirement provable; _text_implied_by_text treats unparseable/empty
+    # appropriately, but OR in assumption means not all disjuncts hold.
+    # Our _text_implied_by_text checks goal implied by assumptions (flattened ands);
+    # an assumption that is itself an OR does not imply its disjuncts, which is correct.
+    if _text_implied_by_text(needed, enc_assume, trait_bases, cache):
+        return None
+
+    # Not implied. But "genuinely non-copyable field type (no Copyable conformance at all)
+    # is out of scope..." - we already filtered that. A conditional conformance that can't
+    # be proven satisfied is a synthesis problem.
+    return ('cond', needed)
+
+
+def check_copy_move_synthesis(struct_defs, trait_defs):
+    """Declaration-time synthesized copy/move constructor diagnostics (part 4)."""
+    trait_bases = {}
+    for td in (trait_defs or []):
+        if isinstance(td, TraitDef):
+            trait_bases[_as_str(getattr(td, 'name', ''))] = list(getattr(td, 'bases', []) or [])
+    struct_map = {}
+    for sd in (struct_defs or []):
+        if isinstance(sd, StructDef):
+            struct_map[_as_str(getattr(sd, 'name', ''))] = sd
+    cache = {}
+    errors = []
+
+    for sd in (struct_defs or []):
+        if not isinstance(sd, StructDef):
+            continue
+        bc = _sd_base_constraints_map(sd)
+        for want_trait, kind, msg_tail in (
+            ('Copyable', 'copy', "has non-copyable type"),
+            ('Movable', 'move', "has non-movable and non-implicitly-copyable type"),
+        ):
+            if want_trait not in bc:
+                continue
+            for fname, ftype, fline in _struct_field_defs(sd):
+                prob = _field_copy_move_problem(sd, fname, ftype, want_trait, struct_map, trait_bases, cache)
+                if prob is None:
+                    continue
+                errors.append((fline or getattr(sd, 'line', 0) or 0,
+                    f"cannot synthesize {kind} constructor because field '{fname}' {msg_tail}"))
+                # one error per struct/trait is enough? modular shows per field; but
+                # report first deterministically.
+                break
+            if errors:
+                break
+        if errors:
+            break
 
     if errors:
         line, msg = sorted(errors, key=lambda x: x[0])[0]
@@ -1872,10 +2186,14 @@ def _struct_layout_anns(concrete_src: str, name: str):
 
 
 def _elab_signature(concrete_src: str, name: str):
-    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
+    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map.
+
+    `ret_ctype` is None when the function has no return annotation: its return
+    type is then the body's inferred type, which only the defining unit knows
+    (see monomorphize.defined_return_ctype), not this source's signature."""
     for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
-            ret = _mojo_type(s.return_type) if s.return_type else 'void'
+            ret = _mojo_type(s.return_type) if s.return_type else None
             if (isinstance(ret, str) and ret.startswith('MojoTuple_')
                     and not _body_builds_struct_tuple(
                             getattr(s, 'body', None))):
@@ -2081,6 +2399,8 @@ class Elaborator:
                                                      conformance_bases=_where_conformance_bases(module_src))
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
+        if ret is None:
+            ret = mm.defined_return_ctype(mangled) or 'void'
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
                 'ret': ret, 'params': ptypes}
 
