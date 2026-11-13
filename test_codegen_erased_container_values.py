@@ -53,6 +53,19 @@ def _defn(c, prefix):
 
 
 ARRAY_SRC = 'def f():\n    var a = Array[Float32, 4](fill=0.0)\n    print(a[0])\n'
+# `{}` is Mojo's default-initializer spelling, and the width here is a
+# function-local comptime, so the fill arm only reaches it once the count
+# resolves through `_eval_const_int` (b0910af726). It used to fall into the
+# numeric append with a `MojoDict *` and emit `(double)<pointer>`, which gcc
+# -fgimple rejects as `pointer value use` (test/algorithm/test_vectorize.mojo:109).
+ARRAY_DEFAULT_FILL_SRC = (
+    'def f():\n'
+    '    comptime n = 3\n'
+    '    var a = Array[Float32, n](fill={})\n'
+    '    var s = Array[String, n](fill={})\n'
+    '    var i = Array[Int, n](fill={})\n'
+    '    return a[0]\n'
+)
 SPAN_SRC = ('def f():\n    var a = Array[Float32, 4](fill=0.0)\n'
             '    var s = Span(a)\n    print(s[0])\n')
 LIST_SRC = 'def f():\n    var l = List[Int]()\n    l.append(1)\n    print(l[0])\n'
@@ -88,6 +101,21 @@ def test_part1_array_ctor_is_tracked():
     body = _body(_compile(ARRAY_SRC, 'array'), 'array_f')
     assert 'indirect call via SubscriptExpr' not in body, body
     assert 'mojo_list_get_int' not in body, body
+
+
+def test_part1_array_default_fill_unchanged():
+    body = _body(_compile(ARRAY_DEFAULT_FILL_SRC, 'array_default_fill'),
+                 'array_default_fill_f')
+    # One zero value per element, of the ELEMENT's own kind, and no pointer
+    # cast into a numeric append: `{}` is a default initializer, not a dict.
+    assert 'mojo_dict_new' not in body, body
+    assert '(double)' not in body, body
+    assert body.count('mojo_list_append_double') == 3, body
+    assert body.count('mojo_list_append_double (_') == body.count(', 0.0)'), body
+    assert body.count('mojo_list_append_str') == 3, body
+    assert body.count('mojo_list_append_str (_') == body.count(', "");'), body
+    assert body.count('mojo_list_append_int') == 3, body
+    assert body.count('mojo_list_append_int (_') == body.count(', 0);'), body
 
 
 def test_part1_list_ctor_unchanged():
