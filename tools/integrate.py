@@ -313,6 +313,27 @@ def enqueue_merge_fix(name, t, conflict_text):
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
+def commit_gate_doc(path, job, branch):
+    """Commit one gate doc onto master as a PATH-LIMITED commit. A worker is cut from a git commit, so a doc that is
+    only an untracked file in MAIN is invisible to it and blocks the ledger merge (2026-11-13: "would be overwritten by
+    merge", every job's marker held on verify-ledger). `commit --only -- <path>` takes that one path and leaves the rest
+    of MAIN's index and working tree exactly as they were. Nothing is committed when the doc is already tracked and
+    unchanged."""
+    top = C.git("rev-parse", "--show-toplevel", cwd=C.MAIN, check=False)
+    if not top or os.path.realpath(top) != os.path.realpath(C.MAIN):
+        # MAIN must be its own repository root. Otherwise `git add` would stage into an ENCLOSING repo (a scratch
+        # directory under a worktree's .tmp does exactly this), and the commit would land in the wrong tree.
+        sys.exit("gate doc %s: MAIN %s is not a git repository root (toplevel %r); refusing to commit into another repo"
+                 % (path, C.MAIN, top))
+    rel = os.path.relpath(path, C.MAIN)
+    C.git("add", "--", rel, cwd=C.MAIN)
+    if not C.git("diff", "--cached", "--name-only", "--", rel, cwd=C.MAIN):
+        return
+    C.git("commit", "-q", "--only", "-m",
+          "gate: %s is red on master (branch %s); the doc is the work\n\nFiled by the integrator's gate round."
+          % (job, branch), "--", rel, cwd=C.MAIN)
+
+
 def gate_doc(culprit, t, failing, files=()):
     """A red landing gate is not handed to a chain of fresh workers. The gate's failure is a bug like any other, so it
     gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid -> hard like every doc.
@@ -341,17 +362,18 @@ def gate_doc(culprit, t, failing, files=()):
     for j in jobs:
         p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
         paths.append(p)
-        if os.path.exists(p):
-            continue
-        with open(p, "w") as f:
-            f.write(
-                "# Gate: %s is red on master\n\n"
-                "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
-                "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
-                "It is red on `%s`: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
-                % (j, j, branch, culprit or "master", branch, j))
-            if files:
-                f.write("\nFailing files at the time:\n%s\n" % "\n".join("- `%s`" % x for x in files))
+        if not os.path.exists(p):
+            with open(p, "w") as f:
+                f.write(
+                    "# Gate: %s is red on master\n\n"
+                    "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
+                    "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
+                    "It is red on `%s`: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
+                    % (j, j, branch, culprit or "master", branch, j))
+                if files:
+                    f.write("\nFailing files at the time:\n%s\n" % "\n".join("- `%s`" % x for x in files))
+        # Tracked from the moment it exists, so a worktree cut from master sees it (an existing doc is left as written).
+        commit_gate_doc(p, j, branch)
     return paths
 
 
