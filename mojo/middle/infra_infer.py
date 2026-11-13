@@ -63,24 +63,6 @@ def _resolve_type(gen, ann: str | None) -> str:
     # `auto` annotation resolves to the struct registered under `_kw_auto`.
     if isinstance(ann, str):
         ann = gen._c_kw_struct_renames.get(ann, ann)
-    # A module-local `alias NAME = <type>`: expand the name to the aliased
-    # type's annotation text before any other resolution, recursively with a
-    # seen-set so a cycle cannot hang codegen. Only module-local aliases are
-    # in scope (gen._type_aliases); unknown names fall through unchanged.
-    if isinstance(ann, str):
-        _ta = getattr(gen, '_type_aliases', None)
-        if _ta:
-            _ann_s = ann.strip()
-            _seen = set()
-            while _ann_s in _ta and _ann_s not in _seen:
-                _seen.add(_ann_s)
-                _expanded = _ta.get(_ann_s)
-                if _expanded is None:
-                    break
-                _ann_s = str(_expanded).strip()
-                if not _ann_s:
-                    break
-            ann = _ann_s
     if ann in gen.struct_field_types:
         return f"{ann} *"
     # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —
@@ -147,17 +129,17 @@ def _resolve_type(gen, ann: str | None) -> str:
                         s = s[len('dtype.'):]
                     if s.startswith('.'):
                         s = s[1:]
-                    # ONE dtype-spelling table (types._SIMD_FLOAT_DTYPE_CTYPE),
-                    # the same one `emit_calls._float_dtype_arg_ctype` reads, so
-                    # the resolver and the call lowerer cannot drift apart. Its
-                    # keys are the normalized spelling (`float32`, `Float32`,
-                    # `DType.float32`); `f32`/`f64` are the remaining aliases.
                     sl = s.lower()
-                    if sl == 'f32':
-                        sl = 'float32'
-                    elif sl == 'f64':
-                        sl = 'float64'
-                    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(sl)
+                    if sl in ('float32', 'f32'):
+                        return 'float'
+                    if sl in ('float64', 'f64'):
+                        return 'double'
+                    # Alias spellings sometimes used for width-1 scalar SIMD.
+                    if s in ('Float32',):
+                        return 'float'
+                    if s in ('Float64',):
+                        return 'double'
+                    return None
 
                 def _resolve_dtype_token(tok):
                     _ct = _dtype_ctype(tok)

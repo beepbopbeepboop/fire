@@ -69,26 +69,6 @@ Comprehension = getattr(_fc, 'Comprehension', None)
 COMPREHENSION_FOLD_CAP = 4096
 
 
-def _is_dtype_value(v) -> bool:
-    """A value that is a DType: a bound `DType.x` / `dtype.x` spelling, or the
-    `('DType', x)` marker. A bare `('.', x)` is an ENUM variant reference in
-    general and only a DType when the other operand is one."""
-    if isinstance(v, str):
-        return v.startswith('DType.') or v.startswith('dtype.')
-    return isinstance(v, tuple) and len(v) == 2 and v[0] in ('DType', 'dtype')
-
-
-def _dtype_operand_name(v):
-    """The lowercase DType name a comparison operand denotes, or None. Accepts
-    the bound DType spellings and the dot-relative `('.', x)` marker, so
-    `dtype == .float32` and `dtype == DType.float32` decide the same way."""
-    if _is_dtype_value(v):
-        return _dtype_name_from_value(v)
-    if isinstance(v, tuple) and len(v) == 2 and v[0] == '.' and isinstance(v[1], str):
-        return v[1].lower()
-    return None
-
-
 def compare_op(op: str, left, right):
     """Fold one comparison-chain link, or None if `op` is not a known comparison.
 
@@ -102,23 +82,6 @@ def compare_op(op: str, left, right):
     closure-lowering doesn't support several small same-scope lambdas bound
     into one dict literal). Returns None for an unrecognized op, distinct
     from a real False."""
-    # DType operands compare by NAME. A bound `dtype` is `DType.float32` (or
-    # the `('DType', x)` marker) while a dot-relative `.float32` is the
-    # `('.', x)` marker; plain equality of the two spellings is always False,
-    # which folded `dtype == .float32` to a false branch. Only when both sides
-    # resolve to a dtype this evaluator KNOWS is the answer decided; an
-    # unknown spelling keeps the ordinary fold below rather than becoming a
-    # false one.
-    if op in ('==', '!=') and (_is_dtype_value(left) or _is_dtype_value(right)):
-        _ln, _rn = _dtype_operand_name(left), _dtype_operand_name(right)
-        if _ln in _KNOWN_DTYPE_NAMES and _rn in _KNOWN_DTYPE_NAMES:
-            return (_ln == _rn) if op == '==' else (_ln != _rn)
-    if op in ('in', 'not in') and _is_dtype_value(left) and isinstance(right, (tuple, list)):
-        _ln = _dtype_operand_name(left)
-        _names = [_dtype_operand_name(x) for x in right]
-        if (_ln in _KNOWN_DTYPE_NAMES
-                and all(_n in _KNOWN_DTYPE_NAMES for _n in _names)):
-            return (_ln in _names) if op == 'in' else (_ln not in _names)
     if op == '==':  return left == right
     if op == '!=':  return left != right
     if op == '<':   return left < right
@@ -317,41 +280,6 @@ def _dtype_name_from_value(v):
         if v[0] in ('.', 'DType', 'dtype'):
             return str(v[1]).lower()
     return None
-
-
-def _dtype_spelling_name(text) -> str | None:
-    """The lowercase dtype name a concrete SPELLING denotes, or None.
-
-    A `dtype: DType` bracket parameter is instantiated with any of
-    `DType.float32`, `.float32` and `Float32`; a caller that holds only the
-    substituted TEXT (the where-clause checker, which is handed
-    `{param: rendered_arg}`) cannot tell those apart without this, and a
-    spelling it does not recognize must stay unrecognized rather than become
-    a wrong `False`."""
-    s = str(text).strip()
-    if s.startswith('DType.'):
-        s = s[len('DType.'):]
-    elif s.startswith('dtype.'):
-        s = s[len('dtype.'):]
-    elif s.startswith('.'):
-        s = s[1:]
-    s = _DTYPE_TYPE_NAMES.get(s, s).lower()
-    return s or None
-
-
-def dtype_predicate_for_spelling(text, method: str) -> bool | None:
-    """Evaluate a DType predicate for a concrete spelling of a dtype.
-
-    `dtype_predicate_for_spelling('.float32', 'is_floating_point')` is True,
-    exactly as it is for `DType.float32` and `Float32`: all three are the same
-    dtype, and monomorphization substitutes whichever spelling the call site
-    wrote. Returns None when the spelling is not a dtype this folder knows, so
-    a caller keeps its own conservative answer instead of reading "not a
-    known dtype" as "not floating"."""
-    name = _dtype_spelling_name(text)
-    if name is None or name not in _KNOWN_DTYPE_NAMES:
-        return None
-    return _eval_dtype_predicate(name, method)
 
 
 def _resolve_dtype_name(node, bindings, platform=None):
@@ -708,24 +636,21 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
         return bool(_ct)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
         # A dot-relative value (`.float32`, `.Some`) folds to a marker for
-        # enum/DType values. The node's field is `path`
-        # (fire_compiler.DottedLiteral: `.float32` -> path='float32'); it has no
-        # `.name`, and reading that orphan field raised AttributeError, which the
-        # guard turned into "not foldable" — while `_const_foldable` called the
-        # same node foldable, which reads as CONST_FALSE, not CONST_UNKNOWN.
-        # That made `DType.float32 == .float32` fold FALSE and prune the arm
-        # that was true. `path` is REQUIRED to be a non-empty string here: a
-        # dot value whose spelling cannot be read is not foldable, and saying
-        # so keeps it consistent with `_const_foldable`.
+        # enum/DType values.  The node's field is `path`
+        # (fire_compiler.DottedLiteral: `.float32` -> path='float32'), and
+        # `.name` does not exist on it — reading the wrong field raised
+        # AttributeError, the guard turned that into "not foldable", and every
+        # dotted value stayed unfolded while `_const_foldable` called the same
+        # node foldable (which reads as CONST_FALSE, not CONST_UNKNOWN).  That
+        # made `DType.float32 == .float32` fold FALSE and prune the arm that
+        # was true.
         try:
             _dpath = getattr(node, 'path', None)
             if _dpath is None:
                 _dpath = getattr(node, 'name')
+            return ('.', _dpath)
         except Exception:
             return None
-        if not isinstance(_dpath, str) or not _dpath:
-            return None
-        return ('.', _dpath)
     if TupleExpr is not None and isinstance(node, TupleExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
@@ -940,11 +865,6 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             r = eval_const(node.right, bindings, platform, conforms_to_pred)
             if l is None or r is None:
                 return None
-            if _is_dtype_value(l) and isinstance(r, (list, tuple)):
-                # `dtype in (.float32, .float64)`: membership by DType name
-                # (see compare_op), not the raw tuple test a bound DType never
-                # satisfies against its dot-relative members.
-                return compare_op('in', l, r)
             try:
                 if isinstance(r, (list, tuple, set)):
                     return l in r
@@ -1112,14 +1032,7 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
         argvals = [eval_const_int(a, bindings, call_hook, conforms_to_pred) for a in node.args]
-        # A zero-arg call reaches the hook: `argvals` is an empty list, and
-        # the old `argvals and ...` gate read that as "cannot answer" even
-        # though every (zero) argument folded. That left the stdlib's
-        # zero-arg target queries (`is_nvidia_gpu()`, ...) permanently
-        # CONST_UNKNOWN, so a `comptime if` over them emitted every arm, the
-        # GPU ones included, as live code on a CPU build. `all([])` is True:
-        # there is nothing left to fold.
-        if all(v is not None for v in argvals):
+        if argvals and all(v is not None for v in argvals):
             return call_hook(node.func.name, argvals)
     return None
 
@@ -1261,18 +1174,6 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
                 lv = eval_const(node.left, bindings, None, conforms_to_pred)
             except Exception:
                 lv = None
-            if lv is None and call_hook is not None:
-                # `eval_const` carries no hook: a call only the backend's
-                # hook can fold (a zero-arg target query, `is_amd_gpu()`)
-                # reads as not-false here, and the whole `and` would then
-                # demand its right side be foldable to prune an arm the
-                # hook has already decided dead. Ask the hook the same
-                # question; a falsy answer settles the condition.
-                try:
-                    lv = eval_const_int(node.left, bindings, call_hook,
-                                        conforms_to_pred)
-                except Exception:
-                    lv = None
             if lv is not None and not lv:
                 return True
             return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
@@ -1283,14 +1184,6 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
                 lv = eval_const(node.left, bindings, None, conforms_to_pred)
             except Exception:
                 lv = None
-            if lv is None and call_hook is not None:
-                # Mirror of the `and` case: a hook-foldable truthy left
-                # settles the whole condition.
-                try:
-                    lv = eval_const_int(node.left, bindings, call_hook,
-                                        conforms_to_pred)
-                except Exception:
-                    lv = None
             if lv is not None and lv:
                 return True
             return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
