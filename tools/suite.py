@@ -4262,8 +4262,8 @@ test('reg-docstring-mojo-blocks', [PY, 'test_docstring_mojo_blocks.py'], mem='ti
 test('reg-docstring-self-import', [PY, 'test_docstring_self_import.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 # Landed with "Refuse mutually recursive and unbounded generic instantiation"
-# (b3e501b60) and registered nowhere until this audit. 0.1 GB measured, ~32 s
-# warm (it builds and runs four programs through `fire.py`).
+# (b3e501b60) and registered nowhere until this audit. 0.6 GB measured (it
+# builds and runs seven programs through `fire.py`).
 test('reg-elaboration-recursion-diagnostic', [PY, 'test_elaboration_recursion_diagnostic.py'], mem='tiny',
      desc='mutually recursive and unbounded generic instantiation is refused in '
           'bounded work while finite chains still run')
