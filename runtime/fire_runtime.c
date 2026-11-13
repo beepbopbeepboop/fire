@@ -11331,6 +11331,76 @@ int64_t mojo_open_file(char *path) {
     return (int64_t)(intptr_t)f;
 }
 
+int64_t mojo_open_file_ex(char *path, char *mode, char *newline) {
+    /* Extended open honoring an explicit newline argument when provided.
+     * newline==NULL means "not provided" (default behavior). */
+    if (mode == NULL) mode = "r";
+#if USE_PYTHON
+    PyObject *builtins = PyImport_ImportModule("builtins");
+    if (!builtins) {
+        PyErr_Print();
+        return 0;
+    }
+    PyObject *open_func = PyObject_GetAttrString(builtins, "open");
+    Py_DECREF(builtins);
+    if (!open_func) {
+        PyErr_Print();
+        return 0;
+    }
+    PyObject *fh = NULL;
+    if (newline != NULL) {
+        PyObject *args = Py_BuildValue("(ss)", path, mode);
+        PyObject *kwargs = Py_BuildValue("{s:s}", "newline", newline);
+        if (args && kwargs) {
+            fh = PyObject_Call(open_func, args, kwargs);
+        }
+        Py_XDECREF(args);
+        Py_XDECREF(kwargs);
+    } else {
+        fh = PyObject_CallFunction(open_func, "ss", path, mode);
+    }
+    Py_DECREF(open_func);
+    if (!fh) {
+        PyErr_Print();
+        return 0;
+    }
+    return (int64_t)(intptr_t)fh;
+#else
+    const char *eff_mode = mode;
+    char mode_buf[8];
+    /* newline='' requests no universal newline translation; approximate
+     * with binary mode for read-like opens when not already binary. */
+    if (newline != NULL && newline[0] == '\0') {
+        int has_b = 0;
+        for (const char *p = mode; *p; p++) if (*p == 'b') { has_b = 1; break; }
+        if (!has_b) {
+            size_t n = strlen(mode);
+            if (n < sizeof(mode_buf) - 1) {
+                memcpy(mode_buf, mode, n);
+                mode_buf[n] = 'b';
+                mode_buf[n + 1] = '\0';
+                eff_mode = mode_buf;
+            }
+        }
+    }
+    FILE *f = fopen(path, eff_mode);
+    if (!f) {
+        FILE *probe = fopen(path, "r");
+        mojo_exc_type_set(probe ? _MOJO_EXC_TAG_OSERROR
+                                : _MOJO_EXC_TAG_FILENOTFOUND);
+        char msg[512];
+        snprintf(msg, sizeof msg, "[Errno 2] cannot open '%s' (mode '%s')",
+                 path ? path : "?", eff_mode ? eff_mode : "?");
+        char *heap_msg = strdup(msg);
+        mojo_exc_msg_set(heap_msg);
+        mojo_exc_obj_set(heap_msg);
+        mojo_raise();
+        return 0;
+    }
+    return (int64_t)(intptr_t)f;
+#endif
+}
+
 /* ── REPL and utility functions ──────────────────────────────────────*/
 
 char *mojo_input(char *prompt) {

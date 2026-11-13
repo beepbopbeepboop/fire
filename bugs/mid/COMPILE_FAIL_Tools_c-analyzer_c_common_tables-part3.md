@@ -2,7 +2,7 @@
 
 Parent: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (SPLIT). This part closes the file-level bug; it does NOT add new subsystems.
 
-Depends on: part 1 (mixed-scalar tuple literal at the raise-message position, fixed) and part 2 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md`, `with` over a tabled foreign callable). Also builds on the csv.reader foreign-callable table/runtime work already on master (commits 373cf8633, 4cb02b8c1, 7e6a8ac5c — the previous split's parts 1-3, all fixed and deleted).
+Depends on: part 1 (mixed-scalar tuple literal at the raise-message position, fixed 2026-11-13) and part 2 (`with` over a tabled foreign callable, fixed 2026-11-13 and its bug doc deleted). Also builds on the csv.reader foreign-callable table/runtime work already on master (commits 373cf8633, 4cb02b8c1, 7e6a8ac5c — the previous split's parts 1-3, all fixed and deleted).
 
 ## Goal
 
@@ -37,5 +37,5 @@ exits 0 (no `Error building` line; the binary runs).
 ## References
 
 - Parent: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (Status entries 2026-10-29 … 2026-11-12).
-- Depends on: part 1 (mixed-scalar tuple literal at the raise-message position, fixed) and `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md`.
+- Depends on: part 1 (mixed-scalar tuple literal at the raise-message position, fixed 2026-11-13) and part 2 (`with` over a tabled foreign callable, fixed 2026-11-13 and its bug doc deleted).
 - Sites: `mojo/backend_gimple/cpp_core.py` (`_cpp_for_stmt`, yield machinery, `_cpp_raise_stmt`), `mojo/backend_gimple/emit_resolve.py` (`publish_a3_generators`), `mojo/middle/infra_infer.py`, `.tmp/ca/c_common/tables.py` and `.tmp/ca/c_common/strutil.py` (copied sources).
