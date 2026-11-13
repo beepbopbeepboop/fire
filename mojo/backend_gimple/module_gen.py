@@ -11542,15 +11542,17 @@ def gen_module_impl(self, stmts: list):
     # scalar, so the exemption is evidence-based and narrow. A name is exempt
     # ONLY when every binding of it in the caller is a tuple unpack from a
     # module-level call whose returns, in that slot, are containers on every
-    # return statement. A slot the callee returns as a str or a number (or
-    # anything it cannot prove a container) keeps the observation, so
-    # `s, n = pair()` with `pair` returning `"de", 1` still refuses.
+    # return statement. A slot the callee returns as a str or a number keeps
+    # the observation, so `s, n = pair()` with `pair` returning `"de", 1`
+    # still refuses (`_unpack_from_scalar_slot`, the mirror of the container
+    # case, supplies that positive evidence — `_tuple_unpack_locals` alone
+    # exempts every unpack target, including this one).
     _CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
     _caller_body_by_name: dict = {}
     for _cbn, _cbb in _caller_bodies:
         _caller_body_by_name[_as_str(_cbn)] = _cbb
     _caller_binding_memo: dict = {}   # caller -> {name: [binding | None]}
-    _container_slot_memo: dict = {}   # (callee, index, arity) -> bool
+    _slot_kind_memo: dict = {}        # (callee, index, arity) -> kind | None
 
     def _target_names(target):
         """Every bare name a store target binds (`a`, `(a, b)`, `[a, *b]`)."""
@@ -11622,15 +11624,43 @@ def gen_module_impl(self, stmts: list):
             return _as_str(_vt) in _CONTAINER_CTYPES
         return False
 
-    def _slot_is_container(callee, index, arity):
-        """Does every return statement of `callee` yield a `arity`-tuple whose
-        slot `index` is a container? False for no returns, a non-tuple return,
-        or a tuple of another arity. Returns inside nested defs are not the
-        callee's own, so they are skipped."""
+    def _element_is_scalar(callee, e):
+        """Is one return-slot expression provably a NON-container scalar?
+
+        The counterpart of `_element_is_container`, and deliberately as narrow:
+        only a shape that cannot be a container counts. `int64_t` is NOT
+        accepted from an identifier because it is also this pass's unknown
+        fallback (see `_static_arg_elems`), so `return n, x` says nothing about
+        slot 0 unless `n` was inferred `char *`/`double` -- a str or float
+        ANNOTATION is proof, an int one is not.
+        """
+        if isinstance(e, (gimple_ctypes.StringLiteral, gimple_ctypes.FloatLiteral,
+                          gimple_ctypes.IntLiteral, gimple_ctypes.BoolLiteral)):
+            return True
+        if isinstance(e, gimple_ctypes.IdentExpr):
+            _nm = _as_str(e.name)
+            _vt = self._inferred_var_types.get(callee, {}).get(_nm)
+            if _vt is None:
+                _vt = self._inferred_param_types.get(callee, {}).get(_nm)
+            return _as_str(_vt) in ('char *', 'double')
+        return False
+
+    def _slot_kind(callee, index, arity):
+        """'container' / 'scalar' / None for slot `index` of every return
+        statement of `callee`, which must all yield an `arity`-tuple.
+
+        None for no returns, a non-tuple return, a tuple of another arity, a
+        slot whose kind is not provable, and -- importantly -- a slot whose
+        returns DISAGREE. The disagreement case is the one this answer exists
+        to keep honest: `return [1], 2` in one branch and `return "de", 2` in
+        another is not evidence for either side, and picking one would let the
+        wrong kind win the call-site vote. Returns inside nested defs are not
+        the callee's own, so they are skipped.
+        """
         _key = (callee, index, arity)
-        if _key in _container_slot_memo:
-            return _container_slot_memo[_key]
-        _ans = False
+        if _key in _slot_kind_memo:
+            return _slot_kind_memo[_key]
+        _ans = None
         _cfd = _fn_by_name.get(callee)
         if _cfd is not None:
             _nested_ids: set = set()
@@ -11642,15 +11672,29 @@ def gen_module_impl(self, stmts: list):
             for _n in _walk_ast(_cfd.body):
                 if isinstance(_n, gimple_ctypes.ReturnStmt) and id(_n) not in _nested_ids:
                     _rets.append(_n)
-            _ans = len(_rets) > 0
-            for _r in _rets:
-                _rv = _r.value
-                if (not isinstance(_rv, gimple_ctypes.TupleExpr)
-                        or len(_rv.elements) != arity
-                        or not _element_is_container(callee, _rv.elements[index])):
-                    _ans = False
-                    break
-        _container_slot_memo[_key] = _ans
+            _kinds: set = set()
+            if _rets:
+                for _r in _rets:
+                    _rv = _r.value
+                    if (not isinstance(_rv, gimple_ctypes.TupleExpr)
+                            or len(_rv.elements) != arity):
+                        _kinds = set()
+                        break
+                    _el = _rv.elements[index]
+                    if _element_is_container(callee, _el):
+                        _kinds.add('container')
+                    elif _element_is_scalar(callee, _el):
+                        _kinds.add('scalar')
+                    else:
+                        _kinds = set()
+                        break
+                if len(_kinds) == 1:
+                    # `sorted(...)` + index rather than `next(iter(...))`:
+                    # `next` on a set has no lowering in the self-hosted
+                    # codegen (the same reason the sibling resolvers use it).
+                    _sole = sorted(_kinds)
+                    _ans = _sole[0]
+        _slot_kind_memo[_key] = _ans
         return _ans
 
     def _unpack_from_container_slot(a, caller_name):
@@ -11662,7 +11706,34 @@ def gen_module_impl(self, stmts: list):
         if not _bs:
             return False
         for _b in _bs:
-            if _b is None or not _slot_is_container(_b[0], _b[1], _b[2]):
+            if _b is None or _slot_kind(_b[0], _b[1], _b[2]) != 'container':
+                return False
+        return True
+
+    def _unpack_from_scalar_slot(a, caller_name):
+        """Is call argument `a` a name whose every binding in `caller_name` is
+        a PROVABLY SCALAR tuple-unpack slot?
+
+        The mirror of `_unpack_from_container_slot`, and the reason it is
+        needed rather than reusing `_tuple_unpack_locals`: that set exempts
+        EVERY unpack target from the non-container observation, because
+        `_infer_local_var_types_core` types each target with the `int64_t`
+        storage default. The exemption is right for a slot the callee proves
+        is a container (coro.py's `real_params`) and wrong for one it proves
+        is a str: `s, n = pair()` with `pair` returning `"de", 1` then
+        `each(s)` beside `each([4, 5])` recorded only the list observer, so
+        the parameter resolved `MojoList *` and the str was read as a list
+        header (SIGSEGV). Evidence, not the storage default: a slot whose
+        returns are not all provably scalar stays unobserved, exactly as
+        today.
+        """
+        if not isinstance(a, gimple_ctypes.IdentExpr):
+            return False
+        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
+        if not _bs:
+            return False
+        for _b in _bs:
+            if _b is None or _slot_kind(_b[0], _b[1], _b[2]) != 'scalar':
                 return False
         return True
 
@@ -11809,8 +11880,10 @@ def gen_module_impl(self, stmts: list):
                     _record_param_container(callee, pnames[i], _pc)
 
                 st = _arg_scalar_type(caller_name, a)
-                if (_pc is None and _is_noncontainer_arg(a, caller_name, st)
-                        and not _unpack_from_container_slot(a, caller_name)):
+                if (_pc is None
+                        and not _unpack_from_container_slot(a, caller_name)
+                        and (_is_noncontainer_arg(a, caller_name, st)
+                             or _unpack_from_scalar_slot(a, caller_name))):
                     _record_param_noncontainer(callee, pnames[i])
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
@@ -11948,10 +12021,11 @@ def gen_module_impl(self, stmts: list):
                         _kwpc = _static_arg_container(_kw[1], caller_name)
                         if _kwpc is not None:
                             _record_param_container(callee, _kwn, _kwpc)
-                        elif (_is_noncontainer_arg(
-                                _kw[1], caller_name,
-                                _arg_scalar_type(caller_name, _kw[1]))
-                                and not _unpack_from_container_slot(_kw[1], caller_name)):
+                        elif (not _unpack_from_container_slot(_kw[1], caller_name)
+                              and (_is_noncontainer_arg(
+                                  _kw[1], caller_name,
+                                  _arg_scalar_type(caller_name, _kw[1]))
+                                  or _unpack_from_scalar_slot(_kw[1], caller_name))):
                             _record_param_noncontainer(callee, _kwn)
                         break
 
