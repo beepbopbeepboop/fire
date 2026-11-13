@@ -1,4 +1,4 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3 (parts 1 and 2 fixed)
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables parts 1, 2, 3 fixed and deleted.
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
