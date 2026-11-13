@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Regression for bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part2:
-a sibling module's class whose bare name is one of this compiler's own AST
-node names (`IfStmt`, `ForStmt`, `WhileStmt`, `Parser`, ...) must keep its OWN
-layout in the generated C, not the compiler's pre-seeded AST layout.
+"""Regression: a sibling module's class whose bare name is one of this compiler's
+own AST node names (`IfStmt`, `ForStmt`, `WhileStmt`, `Parser`, ...) must keep
+its OWN layout in the generated C, not the compiler's pre-seeded AST layout.
 
 The repro is the real CPython `Tools/cases_generator` parser set
 (parsing.py, parser.py, plexer.py, lexer.py, cwriter.py). The toy two-file
@@ -46,6 +45,24 @@ def f() -> int:
 
 
 def _ifstmt_typedef(c_src: str) -> str | None:
+    """Return the body of the sibling IfStmt typedef.
+
+    The sibling module's class may keep the bare name or take a
+    module-qualified C spelling (e.g. parsing_IfStmt) when it collides with
+    the compiler's pre-seeded AST layout; accept either, selecting the one
+    that carries the sibling's own fields.
+    """
+    for name in re.findall(r'typedef struct (\w*IfStmt\w*) \{', c_src):
+        m = re.search(r'typedef struct %s \{(.*?)\} %s;' % (re.escape(name), re.escape(name)),
+                      c_src, re.S)
+        if not m:
+            continue
+        body = m.group(1)
+        if re.search(r'\bif_;', body) or re.search(r'\bthen_body;', body):
+            # Prefer the sibling layout (has if_) over the compiler layout.
+            if re.search(r'\bif_;', body):
+                return body
+    # Fallback: bare name if present.
     m = re.search(r'typedef struct IfStmt \{(.*?)\} IfStmt;', c_src, re.S)
     return m.group(1) if m else None
 
