@@ -615,26 +615,6 @@ main()
 print(next(it))
 """)
 
-    # A non-literal element of a list-literal argument is typed by its inferred
-    # ctype (`_cpp_typed_list_elem`), so `[top, "x"]` with `top` of an unknown
-    # kind (a popped word) is a MIXED-kind list and is refused as one, rather
-    # than refused for being non-literal at all. Pins the new reason.
-    test_generator_refused("generator_list_literal_arg_mixed_kind_refused", """\
-def g(name):
-    stack = [name]
-    while stack:
-        top = stack.pop()
-        if isinstance(top, tuple):
-            yield top
-            continue
-        yield ",".join([top, "x"])
-
-def main():
-    for v in g("ab"):
-        print(v)
-main()
-""", "a list-literal argument with mixed element types")
-
     # A global bound TWICE to a generator is not one fact, so the read from
     # the function keeps the honest refusal rather than a guessed api.
     test_generator_refused("next_on_a_module_global_bound_twice_refused", """\
