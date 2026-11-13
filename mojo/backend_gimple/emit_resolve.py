@@ -3560,7 +3560,12 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         _emsg = str(e)
         if isinstance(e, RuntimeError) and (
                 'constraint failed' in _emsg
-                or 'comptime assertion failed' in _emsg):
+                or 'comptime assertion failed' in _emsg
+                or ('function instantiation failed' in _emsg
+                    and 'struct alignment must be a positive power of 2' in _emsg)
+                or ('function instantiation failed' in _emsg
+                    and 'use of unknown declaration' in _emsg
+                    and '@align' in _emsg)):
             raise
         # A `where` clause of the struct that is provably false for these type
         # args is a real diagnostic (modular: `error: violated constraint`),
@@ -3611,7 +3616,12 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             _emsg = str(e)
             if isinstance(e, RuntimeError) and (
                     'constraint failed' in _emsg
-                    or 'comptime assertion failed' in _emsg):
+                    or 'comptime assertion failed' in _emsg
+                    or ('function instantiation failed' in _emsg
+                        and 'struct alignment must be a positive power of 2' in _emsg)
+                    or ('function instantiation failed' in _emsg
+                        and 'use of unknown declaration' in _emsg
+                        and '@align' in _emsg)):
                 raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None
