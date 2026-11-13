@@ -1943,8 +1943,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
             'reflect.py'],
      desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-          'agrees with the tree',
-     disabled='bugs/gate-formal-doc-truth.md')
+          'agrees with the tree')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
