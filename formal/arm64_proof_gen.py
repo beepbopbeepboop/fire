@@ -9702,13 +9702,27 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             _succ.append(_fall[_i0])
         _stack.extend(_j for _j in _succ if _j not in _reach_i)
     _reach = [blocks[i] for i in _order if i in _reach_i]
-    # A reachable block whose branch target is a halt block: that edge's
-    # `go_exit` is `none`, so the universal statement needs the `none => True`
-    # arm.  It is NOT `_trap_stop` (the run test is still a value run -- the
-    # stack-floor guard's trap is not taken under the concrete initial state),
-    # which is why the two questions are separate.
+    # A reachable block with a LIVE branch target in a halt block: that
+    # edge's `go_exit` is `none`, so the universal statement needs the
+    # `none => True` arm.  It is NOT `_trap_stop` (the run test is still a
+    # value run -- the stack-floor guard's trap is not taken under the
+    # concrete initial state), which is why the two questions are separate.
+    #
+    # A DEAD edge must not count, for the same reason the run never takes
+    # it: the cbz arm closes the guard's trap arm by contradiction
+    # (`hguard_{bi}` proves the branch is taken for every state the run
+    # visits), so no `none` result can come from it, and the arm it keeps
+    # out of the statement is provable.  On the constant-fuel path that
+    # matters twice over: `DylibExport.total_of_halts` takes the statement
+    # at `none => False`, so a `none => True` spelling -- forced by the
+    # guard's dead edge alone -- is a type error at the application.
+    # Measured on the branching-export image: `Application type mismatch`
+    # on the `none` arm, the whole generated dylib proof rejected, while
+    # the `semantics_total` check in the test passed (it reads the
+    # emitter's text, not the typechecker's verdict).
     _trap_branch_reach = any(
-        any(t in _halt_blocks for t in b["targets"]) for b in _reach)
+        any(t in _halt_blocks for t in b["targets"]
+            if (b["start"], t) not in _dead_edges) for b in _reach)
     _branch_trap_targets = {t for b in _reach for t in b["targets"]
                             if t in _halt_blocks}
     if fuel is not None:
@@ -9892,21 +9906,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # --- per-block straight-line runs certificates ---
     run_info = {}  # bi -> (cert_name, mid_name, exit_expr, m_run)
     for bi, block in enumerate(blocks):
-        if _reach_i is not None and bi not in _reach_i:
-            # Not on any path from `func_entry`, so `emit_block` never visits
-            # it and its certificate is a def nothing consumes.  It MUST be
-            # skipped rather than generated, because the region this block is
-            # in may not be code at all: the LAST export's extent is the end of
-            # the image (`_export_extent`), so `[entry, func_end)` runs past
-            # the export's own `ret` into the emitter's runtime tail and then
-            # into the image's DATA.  `_gen_run_cert` returns None for a data
-            # word, which made the WHOLE walk `None` -- measured on
-            # `test_formal_dylib.py`'s `pick`, whose last data block decodes
-            # nothing.  The placeholder keeps `run_info` total so every index
-            # below stays valid; the entry is never read for a block with no
-            # visit.
-            run_info[bi] = (None, None, "st", 0, [], False, 0, [])
-            continue
         if (block["start"] in _branch_trap_targets
                 and fuel is None and frame is None):
             # A DIRECT branch (the stack-floor guard is the common one) lands
@@ -9917,6 +9916,20 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # block reached as a `BL`'s fall-through is closed by the `bl`
             # arm's own trap stop, and certifying it here would be a def
             # nothing consumes.
+            #
+            # This branch must run BEFORE the reachability placeholder below,
+            # on purpose: the BFS does not follow the guard's DEAD trap edge
+            # (`_dead_edges`), so the guard's trap block is the one branch
+            # target of a reachable block that is NOT in `_reach_i`.  It is
+            # still the block whose tail is the exit `svc`, and the suite
+            # pins that such a block carries a halt certificate
+            # (`test_formal_call_proof_gen.py`: `plain_bN_halt_halts`); before
+            # the dead-edge cut it was in `_reach_i` via the trap edge and
+            # fell into this same branch.  Every OTHER branch target of a
+            # reachable block IS in `_reach_i` (the BFS follows all live
+            # edges), so the placeholder below still receives exactly the
+            # blocks it was added for -- the image's runtime tail and data
+            # past the last `ret`.
             hpart = _gen_halt_cert(
                 name, words, base, f"b{bi}_halt", block["instrs"], exit_pc,
                 code_name=code_name, sr_name=sr_name,
@@ -9930,6 +9943,23 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
               f"({len(block['instrs'])} instructions, no successor) -/")
             A(hdefs)
             A("")
+            continue
+        if _reach_i is not None and bi not in _reach_i:
+            # Not on any path from `func_entry`, so `emit_block` never visits
+            # it and its certificate is a def nothing consumes.  It MUST be
+            # skipped rather than generated, because the region this block is
+            # in may not be code at all: the LAST export's extent is the end of
+            # the image (`_export_extent`), so `[entry, func_end)` runs past
+            # the export's own `ret` into the emitter's runtime tail and then
+            # into the image's DATA.  `_gen_run_cert` returns None for a data
+            # word, which made the WHOLE walk `None` -- measured on
+            # `test_formal_dylib.py`'s `pick`, whose last data block decodes
+            # nothing.  The placeholder keeps `run_info` total so every index
+            # below stays valid; the entry is never read for a block with no
+            # visit.  (The guard's trap block -- the one branch target the
+            # dead-edge cut keeps out of `_reach_i` -- is certified in the
+            # halt-certificate branch above, not skipped here.)
+            run_info[bi] = (None, None, "st", 0, [], False, 0, [])
             continue
         if block["kind"] in ("seq", "ret"):
             run_pcs = block["instrs"]

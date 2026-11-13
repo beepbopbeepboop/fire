@@ -2384,6 +2384,64 @@ def test_a_branching_exports_stack_guard_does_not_defeat_termination(
           "generated theorem is about a different run than `runExport`")
 
 
+def test_a_branching_export_termination_proves_in_lean(tmpdir, shared):
+    """The branching export's PROVED termination must be a file Lean accepts.
+
+    The sibling row above pins the EMITTER's verdict -- `total_of_halts`
+    with the walk's fuel, not a `sorry`.  That is a text check, and it is
+    not the typecheck: `DylibExport.total_of_halts` takes its hypothesis at
+    the statement `runExport` gives,
+
+        match runExport image e n with | some _ => True | none => False,
+
+    and a walk that states its `none` arm `True` where `runExport`'s is
+    `False` does not elaborate.  The arm the walk states is `none => True`
+    whenever a reachable branch targets a halt block, and the guard's dead
+    trap edge forced it on every guarded export -- so the branching
+    export's termination "proved" in the emitter's text and was REJECTED
+    by Lean (`Application type mismatch` on the `none` arm, measured on
+    this image while the row above stayed green).  The dead edge cannot
+    produce a `none` result: the cbz arm closes it by contradiction
+    (`hguard` proves the branch taken for every state the run visits), so
+    the statement states `none => False` and the application typechecks.
+
+    The image is the smallest one with the defect -- ONE branching export,
+    which has no overflow trap of its own, so no obligation anywhere else
+    in the file -- and the requirement is the whole file: it typechecks
+    with zero holes.
+    """
+    import re as _re
+    from formal.build import compile_formal_dylib
+    from formal.lean import find_lean, check_proof_cached
+    from formal.arm64_proof_gen import generate_dylib_proof
+    src = os.path.join(tmpdir, "guard.mojo")
+    with open(src, "w") as f:
+        f.write("def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
+    out = os.path.join(tmpdir, "guard.dylib")
+    built = compile_formal_dylib([src], output=out, prove=False)
+    path = os.path.join(tmpdir, "guard_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(
+            built["code"], built["info"], built["exports"], {}))
+    text = open(path).read()
+    m = _re.search(r"theorem (dylib_export_\w*branchy)_semantics_total :\n"
+                   r"    DylibExport\.Total dylib_image \1 :=\n\s*(.+)", text)
+    check(m is not None, "the branching export has no `semantics_total` "
+                         "theorem at all, so this row is not looking at it")
+    check(m.group(2).strip() != "sorry" and "total_of_halts" in m.group(2),
+          f"the branching export's termination is not the PROVED shape: "
+          f"{m.group(2).strip()!r}")
+    root = HERE
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    ok, detail, _, n = check_proof_cached(path, repo_root=root)
+    check(ok, "lean rejected the branching export's proved termination: "
+              f"{detail[-400:]}")
+    check(n == 0, f"the one-export proof admits {n} hole(s): the branching "
+                  f"body has no trap of its own, so every obligation in the "
+                  f"file is one the walk should have discharged")
+
 
 def _segment_flags_and_section_metadata(data):
     """Header flags, and per-segment `segflags` + per-section flags/reserved1/
@@ -2536,6 +2594,8 @@ TESTS = [
      test_a_conditional_value_is_not_a_branch),
     ("a branching export's termination survives its stack guard",
      test_a_branching_exports_stack_guard_does_not_defeat_termination),
+    ("a branching export's termination proves in Lean",
+     test_a_branching_export_termination_proves_in_lean),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),
