@@ -14425,6 +14425,105 @@ def f() -> Int:
     return s.data[0]
 """), 'struct_subscript_store_with_backing_field')
 
+    def test_regex_tables_are_referenced_by_address_in_a_gimple_body():
+        """A regex table is emitted as an ARRAY; binding it to a pointer temp
+        must spell `&table[0]`, never rely on array-to-pointer decay.
+
+        `_t62 = _re17_prog;` is accepted in an ordinary C function, where gcc's
+        C frontend performs the decay for us — and is a hard error in a
+        `__GIMPLE`-tagged body, which gcc reads as raw GIMPLE (struct methods
+        and lifted closures; `fire.py build` compiles the whole-closure `.ci`
+        with `-x c`): "non-trivial conversion in 'var_decl'", RHS
+        `const struct ReNode[55]` against a `const struct ReNode *` var_decl.
+        That is what broke the self-host `fire.o` step at
+        `Parser._merge_string_literals` and `elaborate_overload_call`, both of
+        which call `re.sub`.
+
+        Asserts the emitted reference for all four tables (prog, ranges,
+        classinfo, names — the last is `for m in PAT.finditer(...)`; note the
+        loop is at module scope here because `finditer` in a `__GIMPLE` body
+        has its own separate gimple-legality gaps), then compiles the `.ci` as
+        C (`-x c`, the build's flags) and RUNS it against CPython so a fix
+        cannot pass by changing which value is read."""
+        global _PASS, _FAIL
+        name = "regex_tables_are_referenced_by_address_in_a_gimple_body"
+        src = r'''
+import re
+
+PAT = re.compile(r"(?P<k>[a-z]+)([0-9]+)")
+SEP = re.compile(r",\s*")
+
+def norm(s):
+    return re.sub(r"[0-9]+", "N", s)
+
+def count_matches(s):
+    n = 0
+    for m in PAT.finditer(s):
+        n = n + 1
+    return n
+
+class S:
+    def sub(self, s):
+        return re.sub(r"[0-9]+", "N", s)
+
+    def parts(self, s):
+        return SEP.split(s)
+
+def main():
+    print(norm("a1b22"))
+    print(count_matches("ab12 cd34"))
+    print(S().sub("c3d4"))
+    print(S().parts("a, b,c"))
+
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        missing = [suffix for suffix in ('prog', 'ranges', 'classinfo', 'names')
+                   if not re.search(rf'= &_re\d+_{suffix}\[0\];', c_src)]
+        bare = re.findall(r'= _re\d+_(?:prog|ranges|classinfo|names);', c_src)
+        # The method body must be a __GIMPLE one, or this test would be
+        # asserting the ordinary-C case gcc already tolerates.
+        if not ok or missing or bare or '__GIMPLE char * S_sub' not in c_src:
+            print(f"FAIL  {name}: ok={ok} missing-address-refs={missing} "
+                  f"bare-decays={bare}")
+            if not ok:
+                for line in stderr.splitlines()[:12]:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'regex_tables.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'regex_tables.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'regex_tables.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_regex_tables_are_referenced_by_address_in_a_gimple_body(),
+                  'test_regex_tables_are_referenced_by_address_in_a_gimple_body')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:
