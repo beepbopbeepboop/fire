@@ -326,6 +326,26 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
     return t
 
 
+def _nested_generator_start_arg_pairs(gen, node: gimple_ctypes.CallExpr,
+                                      api: dict) -> list:
+    """User positional argument pairs followed by captured enclosing values,
+    the assembly shared by every backend that constructs a nested generator
+    (GIMPLE here, and the C++ coroutine delegate). Only the plain positional
+    form is threaded; a keyword or defaulted argument is refused rather than
+    silently mis-slotted into a capture's position."""
+    user_n = len(api['params']) - len(api['captures'])
+    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
+        raise RuntimeError(
+            "cannot compile module: call to nested generator "
+            f"{api.get('nested_name', '<nested>')!r} with keyword or defaulted "
+            "arguments is not supported (only the plain positional form is "
+            "threaded, together with its enclosing-scope captures)")
+    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
+                  for _cn, _ in api['captures']]
+    return arg_pairs
+
+
 def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
                                       api: dict) -> str:
     """Construction of a nested generator that reads enclosing names
@@ -335,16 +355,7 @@ def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
     `_lower_async_closure_construct` uses for a nested async closure. Only
     the plain positional form is threaded; a keyword or defaulted argument
     is refused rather than silently mis-slotted into a capture's position."""
-    user_n = len(api['params']) - len(api['captures'])
-    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
-        raise RuntimeError(
-            "cannot compile module: call to nested generator "
-            f"{api['nested_name']!r} with keyword or defaulted arguments is "
-            "not supported (only the plain positional form is threaded, "
-            "together with its enclosing-scope captures)")
-    arg_pairs = [gen.lower_expr(a) for a in node.args]
-    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
-                  for _cn, _ in api['captures']]
+    arg_pairs = _nested_generator_start_arg_pairs(gen, node, api)
     _record_generator_value_kind(api)
     return _finish_generator_start(gen, api, arg_pairs)
 
