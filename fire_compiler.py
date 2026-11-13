@@ -8084,6 +8084,7 @@ class Parser:
         return target, saw_comma
 
     def _parse_generator(self):
+        for_tok = self._peek()
         self._expect("KW", "for")
         target, _ = self._parse_generator_target()
         self._expect("KW", "in")
@@ -8091,7 +8092,11 @@ class Parser:
         conditions = []
         while self._is_kw("if"):
             self._advance(); conditions.append(self._parse_expr(1))
-        return Generator(target=target, iterable=iterable, conditions=conditions)
+        # The clause's own `for` keyword: genexp_body builds this clause's
+        # ForStmt from it, and a line-less ForStmt emits no `#line` directive
+        # for its lines (the iterable lowering, the loop header).
+        return Generator(target=target, iterable=iterable, conditions=conditions,
+                         line=for_tok.line, col=for_tok.col)
 
     def _parse_generators(self):
         """Parse one or more chained `for ... in ... [if ...]` clauses, as in
@@ -9062,10 +9067,16 @@ class Parser:
                 self._advance()  # skip =
                 keywords[keyword_name] = self._parse_expr(0)  # parse and store value
             else:
+                first_tok = self._peek()
                 first = self._parse_expr(0)
                 if self._is_kw("for"):
                     gens = self._parse_generators()  # allow chained for-clauses
-                    args = [Comprehension(kind="generator", element=first, generators=gens)]
+                    # The genexp's line/col is its element's first token, as
+                    # the parenthesised form's is its `(`. Without it the
+                    # hoisted `__genexp_N` body had no line, so none of its
+                    # statements carried a `#line` directive.
+                    args = [Comprehension(kind="generator", element=first, generators=gens,
+                                          line=first_tok.line, col=first_tok.col)]
                     continue
                 args.append(first)
             if self._peek().kind == "COMMA": self._advance()

@@ -35,11 +35,21 @@ def compile_mojo_to_gimple_exe(mojo_src: str, filename: str = '') -> str:
     """Compile mojo source to GIMPLE executable, return path to executable. A
     `filename` ending in `.py` compiles the text as Python source (Python scoping
     rules apply to nested defs)."""
-    from gimple_codegen import compile_to_gimple
+    from gimple_codegen import compile_to_gimple, compile_to_gimple_with_cpp
+
+    # A program with a generator the C++20 path lowers (`gimple_check_all_idiom`)
+    # has a companion .cpp that must be built and linked. That is the build the
+    # generator runner already does through the production linker, so reuse it
+    # rather than refuse the program: this is what `fire.py build` does.
+    if filename:
+        c_code, cpp_code = compile_to_gimple_with_cpp(mojo_src, filename=filename)
+    else:
+        c_code, cpp_code = compile_to_gimple_with_cpp(mojo_src)
+    if cpp_code.strip():
+        import test_gimple_generator_runner as _gen_runner
+        return _gen_runner._build_generator_program_from_code(c_code, cpp_code)
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
-        # Compile mojo to GIMPLE C code
-        c_code = compile_to_gimple(mojo_src, filename=filename) if filename else compile_to_gimple(mojo_src)
         f.write(c_code)
         c_file = f.name
 
@@ -7126,7 +7136,7 @@ def main():
     s[(1, 2)] = "R"
     print(s[(1, 2)], len(s))
 main()
-""", "1 1\nTrue 1\n3.5 1\nR 1\n")
+""", "True 1\nTrue 1\n3.5 1\nR 1\n")
 
     # The string half of the same seam: a string slot built by a CALL, not a
     # literal. A homogeneous string tuple used to record no kinds, so the key
@@ -12185,7 +12195,7 @@ def shapes():
     print(g)
 
 shapes()
-""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
+""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q<b>}\n")
 
     # The three DERIVED containers, which is where a struct value stopped
     # being its own `__repr__` even though the dict's own repr was already

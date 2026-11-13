@@ -393,6 +393,39 @@ def test_generator_c_compiles(name: str, mojo_src: str):
         _FAIL += 1
 
 
+def _stray_include_lines(c_code: str) -> list:
+    """Return the 1-based line numbers of every `#include` directive that sits
+    inside a brace-delimited body (brace depth > 0). The module prelude is the
+    only place a header may appear; a copy inside a function is a gcc error."""
+    depth = 0
+    stray = []
+    for n, line in enumerate(c_code.splitlines(), 1):
+        if depth > 0 and line.lstrip().startswith('#include'):
+            stray.append(n)
+        depth += line.count('{') - line.count('}')
+    return stray
+
+
+def test_generator_c_no_stray_include(name: str, mojo_src: str):
+    """Emit the generator module's C and assert no `#include` lands inside a
+    function body. Pins the nested generator / generator method emitter
+    (the 2026-11-12 `#include <sys/types.h>` inside `T_run` gcc error, fixed
+    on this tree)."""
+    global _PASS, _FAIL
+    try:
+        c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
+        stray = _stray_include_lines(c_code)
+        if not stray:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: #include inside a function body at line(s) {stray}")
+            _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def test_generator_refused(name: str, mojo_src: str, expected_substr: str):
     """Assert this generator shape is honestly REFUSED at compile time
     (raises with a message containing `expected_substr`) rather than
@@ -3043,6 +3076,36 @@ def outer():
         yield k
     return g
 """, "variable(s) k")
+    test_generator_c_no_stray_include("nested_generator_method_no_stray_include", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+            yield self.k + 1
+        for v in g():
+            print(v)
+
+def main():
+    var t = T(7)
+    t.run()
+""")
+    test_generator_c_no_stray_include("generator_method_no_stray_include", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self) -> Generator[Int]:
+        yield self.k
+        yield self.k + 1
+
+def main():
+    var t = T(3)
+    for v in t.run():
+        print(v)
+""")
     # A nested generator defined in a METHOD that reads `self` (test_frame.py's
     # `g`). `self` is handed over as a hidden pointer, not boxed, so the
     # generator sees the live receiver: a read, a write that lands on the
@@ -3163,9 +3226,12 @@ def main():
     var b = B(2)
     b.run()
 """, "1\n102\n")
-    # `return g()` hands the generator out of the method, which would outlive
-    # the `self` it holds, so it stays refused.
-    test_generator_refused("nested_generator_method_self_escaping_refused", """\
+    # `return g()` hands the generator out of the method: the nested
+    # generator captures `self` and escapes as a live handle. The
+    # dedicated generator-runner harness cannot yet build this case, but
+    # the compiler path (`fire.py run`) supports it.
+    _name = "nested_generator_method_self_escaping"
+    _src = """\
 struct T:
     var k: Int
     def __init__(out self, k: Int):
@@ -3180,7 +3246,24 @@ def main():
     var it = t.run()
     for v in it:
         print(v)
-""", "variable(s) self")
+"""
+    try:
+        import subprocess as _sp, tempfile as _tf, os as _os
+        _wd = _tf.mkdtemp(prefix='mojo_gen_escape_self_')
+        _p = _os.path.join(_wd, 'prog.py')
+        with open(_p, 'w') as _f:
+            _f.write(_src)
+        _r = _sp.run(['python3', 'fire.py', 'run', _p],
+                     capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        if _r.returncode == 0 and _r.stdout == "7\n":
+            print(f"PASS  {_name}")
+            globals()['_PASS'] = globals().get('_PASS', 0) + 1
+        else:
+            print(f"FAIL  {_name}: rc={_r.returncode} out={_r.stdout!r} err={_r.stderr!r}")
+            globals()['_FAIL'] = globals().get('_FAIL', 0) + 1
+    except Exception as _e:
+        print(f"FAIL  {_name}: {_e}")
+        globals()['_FAIL'] = globals().get('_FAIL', 0) + 1
 
 
 def run_star_args_call_tests():
@@ -3323,6 +3406,56 @@ def main():
     for v in b.items(4, 5):
         print(v)
 """, "100\n4\n5\n")
+
+    # `yield from g` where `g` is a local holding a compiled-generator
+    # handle, inside a NESTED generator (the body the cpp coroutine path
+    # compiles). The handle must be driven through its resume/value API,
+    # not treated as a plain collection. (regression:
+    # nested generator: yield from a local holding a generator handle)
+    test_generator_matches_cpython(
+        "nested_generator_yield_from_handle_local",
+        """\
+def leaf():
+    yield 'a'
+    yield 'b'
+
+
+def outer():
+    def inner():
+        g = leaf()
+        yield from g
+
+    yield from inner()
+
+
+def main():
+    for x in outer():
+        print(x)
+
+
+main()
+""",
+        """\
+def leaf():
+    yield 'a'
+    yield 'b'
+
+
+def outer():
+    def inner():
+        g = leaf()
+        yield from g
+
+    yield from inner()
+
+
+def main():
+    for x in outer():
+        print(x)
+
+
+main()
+""")
 
 
 def run_escaping_nested_generator_tests():
@@ -6163,6 +6296,63 @@ def main():
 main()
 """, "0\n1\n")
 
+    # The same walk reached through a NESTED def: `inner` is an ordinary def
+    # nested in `outer`, and the list reaches `walk` only through `inner`'s
+    # parameter. Used to refuse ("yields ['xs'] ... call sites do not all pass
+    # the same statically-known type"): the scan typed `walk(fn)` with
+    # `outer`'s env, where `fn` is not bound, and never recorded `inner`'s own
+    # call sites. The scan now types each nested def's body with that def's own
+    # env, and records its call sites, so `fn` is `outer`'s `body`, a list.
+    test_generator_stdout("nested_def_returned_generator_iterated_in_for", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    return inner(body)
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "0\n1\n")
+
+    # The nested def's argument must be typable for the walk to be. A value
+    # the scan cannot type at the nested call still refuses.
+    test_generator_refused("nested_def_returned_generator_untypable_arg_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    return inner(body)
+def main():
+    for p in outer(getattr(main, 'x', None)):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
+    # A nested def that ESCAPES as a value (here returned, then called through
+    # another name) has call sites this scan cannot see, so its parameter must
+    # not be typed from the direct call alone. The string passed through `f`
+    # would otherwise reach `walk`'s list slot.
+    test_generator_refused("nested_def_escaping_value_call_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    inner(body)
+    return inner
+def main():
+    f = outer([1, 2])
+    for p in f("abc"):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
     # The guard is what makes the recursive argument a list. Without it the
     # argument is an untypable hole and the slot must still refuse.
     test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
@@ -6204,7 +6394,41 @@ main()
 """, "yields ['xs']")
 
 
+def run_generator_tuple_repr_tests():
+    # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
+    # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
+    # into a list. The box was never marked as a TUPLE, so its repr fell
+    # back to list brackets: `[[1, 2], 0]` for `([1, 2], 0)`. A list's
+    # ELEMENT that is itself a list was then printed as a raw address,
+    # because the word-append recorded an int kind for it. Both are the
+    # tuple's own shape (CPython: `[([1, 2], 0), ([1, 2], 1)]`).
+    #
+    # The 0 slot is the one the bug doc named as reading back as None; it
+    # is pinned here too, because it is the same repr and a regression
+    # there would be indistinguishable from this one.
+    test_generator_stdout("generator_tuple_in_list_repr_nested_list_and_zero", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    return list(walk(body))
+def main():
+    print(outer([1, 2]))
+main()
+""", "[([1, 2], 0), ([1, 2], 1)]\n")
+
+    test_generator_stdout("generator_tuple_of_ints_repr_keeps_parens", """\
+def walk(n):
+    for i in range(2):
+        yield i, i * 2
+def main():
+    print(list(walk(3)))
+main()
+""", "[(0, 0), (1, 2)]\n")
+
+
 def run_tests():
+    run_generator_tuple_repr_tests()
     run_nested_recursive_generator_getattr_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()
@@ -9668,6 +9892,7 @@ def main():
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
+    _regression_read_table_callable_reader()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

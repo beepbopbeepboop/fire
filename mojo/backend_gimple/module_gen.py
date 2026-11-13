@@ -2767,7 +2767,12 @@ def _emit_reflection_dispatch(self, parts):
                 "     * probe is what tells the two apart WITHOUT a range test, so a large\n"
                 "     * INTEGER stored under kind 0 (2^40) still renders as itself rather than\n"
                 "     * being read as a pointer. */\n"
-                "    char *_s = mojo_dict_slot_repr(_v, d->slots[_i].kind);\n"
+                "    /* A STRUCT value (kind 5) takes its own repr first: `mojo_dict_slot_repr`\n"
+                "     * answers the decimal of its word, which is never NULL, so the struct arm\n"
+                "     * below was unreachable and `print({'p': obj})` printed the object's address. */\n"
+                "    char *_s = (d->slots[_i].kind == 5) ? _mojo_dict_val_repr(d, _v)\n"
+                "             : (d->slots[_i].kind == 6) ? mojo_dict_repr_other_slot(d, _i, _v)\n"
+                "                                        : mojo_dict_slot_repr(_v, d->slots[_i].kind);\n"
                 "    if (!_s || (d->slots[_i].kind == 0 && _v > 65536\n"
                 "                && (mojo_is_registered_list(_v)\n"
                 "                    || mojo_is_registered_dict(_v)\n"
@@ -5105,6 +5110,34 @@ def gen_module_impl(self, stmts: list):
                     if _cv is not None:
                         self._import_module_comptime_vals[module_qualifier][_cn.target] = _cv
     self._import_scope_stack.append({})
+    # Whole-module body-import pre-scan, BEFORE any function or lifted
+    # closure is emitted (both consume these two registries):
+    #
+    # * `_func_import_frames` — each container's own lexical bindings,
+    #   keyed by the name its body is emitted under. `_gen_lifted_closure_body`
+    #   seeds a closure's frame from its enclosing container's entry, so a
+    #   closure that references a free function imported in the enclosing
+    #   function still resolves it (closures are emitted before that
+    #   function's body).
+    # * `_lexical_func_import_homes` — every (name, module) pair any body
+    #   in this unit binds. `_func_qualifier`'s tier-3 fallback uses this to
+    #   refuse a reference no lexical scope binds when another body binds
+    #   the same name to a DIFFERENT sibling (the silent
+    #   IMPORT_ambiguous_sibling_function miscompile).
+    #
+    # Both must be populated here, not lazily while each body compiles:
+    # the refusal has to be independent of source order (the reference may
+    # come before the conflicting import).
+    self._func_import_frames = {}
+    self._lexical_func_import_homes = {}
+    for _ps_st in stmts:
+        if isinstance(_ps_st, FunctionDef):
+            self._prescan_func_import_frames(
+                getattr(_ps_st, 'body', None) or [], _as_str(_ps_st.name))
+        elif isinstance(_ps_st, (StructDef, TraitDef)):
+            for _ps_m in (getattr(_ps_st, 'methods', None) or []):
+                self._prescan_func_import_frames(
+                    getattr(_ps_m, 'body', None) or [], _as_str(_ps_m.name))
     _generator_fns: dict[int, FunctionDef] = {}
     _async_fns: dict[int, FunctionDef] = {}
     for n in _walk_ast(stmts):
@@ -14208,23 +14241,43 @@ def gen_module_impl(self, stmts: list):
             return self._fn_returns_generator.get(arg.func.name)
         return None
 
-    for _rf in all_functions:
-        if not isinstance(_rf, FunctionDef):
-            continue
-        acc_rt = []
-        _gmi_collect_return_values(acc_rt, _rf.body)
-        rt_prov = None
-        for _rv in acc_rt:
-            if (isinstance(_rv, CallExpr) and isinstance(_rv.func, IdentExpr)
-                    and _rv.func.name in self._generator_api):
-                if rt_prov is None:
-                    rt_prov = _rv.func.name
-                elif rt_prov != _rv.func.name:
+    # A function returns a generator when every value it returns is a call to
+    # a generator, directly or through a function that already returns one:
+    # `def outer(b): def inner(f): return walk(f); return inner(b)` makes
+    # `outer(...)` a generator, so `for p in outer(...)` iterates it. The
+    # candidates are the module's top-level defs plus its nested ordinary defs
+    # the call-site scan can resolve by name (`_nested_plain_defs_for_scan`).
+    # Each round only ADDS names, so the fixpoint terminates.
+    _ret_defs = [_d for _d in all_functions if isinstance(_d, FunctionDef)]
+    _ret_defs += gimple_gen_coro._nested_plain_defs_for_scan(all_functions)
+    _ret_changed = True
+    while _ret_changed:
+        _ret_changed = False
+        for _rf in _ret_defs:
+            if _rf.name in self._fn_returns_generator:
+                continue
+            acc_rt = []
+            _gmi_collect_return_values(acc_rt, _rf.body)
+            rt_prov = None
+            for _rv in acc_rt:
+                _rv_callee = (_rv.func.name
+                              if isinstance(_rv, CallExpr) and isinstance(_rv.func, IdentExpr)
+                              else None)
+                if _rv_callee is not None and _rv_callee in self._generator_api:
+                    _rv_prov = _rv_callee
+                elif _rv_callee is not None and _rv_callee in self._fn_returns_generator:
+                    _rv_prov = self._fn_returns_generator[_rv_callee]
+                else:
+                    _rv_prov = None
+                if _rv_prov is None:
                     rt_prov = '<conflict>'
-            else:
-                rt_prov = '<conflict>'
-        if rt_prov not in (None, '<conflict>'):
-            self._fn_returns_generator[_rf.name] = rt_prov
+                elif rt_prov is None:
+                    rt_prov = _rv_prov
+                elif rt_prov != _rv_prov:
+                    rt_prov = '<conflict>'
+            if rt_prov not in (None, '<conflict>'):
+                self._fn_returns_generator[_rf.name] = rt_prov
+                _ret_changed = True
 
     _param_gen_obs: dict[str, dict[str, dict]] = {}  # callee -> {pname -> {fname: count}}
     for _round in range(4):

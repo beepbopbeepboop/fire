@@ -2605,6 +2605,23 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             ip = gen._new_val('int64_t', f'(int64_t){v}')
             gen._emit(f'  {dest} = ({d}){ip};')
+        elif d.endswith(' *') and s in ('double', 'float'):
+            # A FLOAT returned from a function whose inferred return type is a
+            # pointer. `comptime.py`'s `eval_const` is the live case: it
+            # genuinely returns bool/int/float/str/tuple, so its return-type
+            # join lands on `char *` (the string branches), and the
+            # `return node.value` for a FloatLiteral (added by 13b16397d) then
+            # emitted a bare `(char *)<double>` — not valid C at all, gcc:
+            # "cannot convert to a pointer type", which took down
+            # `make mojoc`, `make stage2/mojo` and `test_selfhost.py`'s build.
+            # The int→pointer spellings above are accepted by gcc with a
+            # warning; a float→pointer is rejected outright, which is why only
+            # this source kind needed a branch. Same two-step as everywhere
+            # else in this file, and the same truncate-to-int word
+            # `_to_int64('double', ...)` hands every other float consumer.
+            v = gen._ensure_local(s, v)
+            ip = gen._new_val('int64_t', f'(int64_t){v}')
+            gen._emit(f'  {dest} = ({d}){ip};')
         else:
             # GIMPLE: a cast operand must be a local, never a global decl
             # (e.g. a _slit_ string literal). Load it first.

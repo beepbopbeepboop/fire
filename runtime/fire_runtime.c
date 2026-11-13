@@ -2008,6 +2008,9 @@ void mojo_list_append_word(MojoList *l, int64_t w)
     /* a bytes object is a pointer too, but not a str: its own slot kind, so the
      * list reads and prints it as bytes (not as its address, an int) */
     if (mojo_is_registered_bytes(w)) { _list_word_push(l, MOJO_KIND_BYTES, w, 'i'); return; }
+    /* a list (or tuple) pointer is a nested container: its own kind, so the element is read and
+     * printed as that container (`[1, 2]` inside `([1, 2], 0)`), not as its address, an int */
+    if (mojo_is_registered_list(w)) { _list_word_push(l, MOJO_KIND_LIST, w, 'i'); return; }
     _list_word_push(l, 'i', w, 'i');
 }
 
@@ -3033,9 +3036,21 @@ int64_t mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw)
         for (int64_t i = 0; i < n; i++) v[i] = mojo_list_get_int(args, i);
         return _mojo_vararg_invoke((MojoVarargFn *)fp, v, n, kw);
     }
+    /* A plain function pointer has no name-based parameter binding, but a
+     * dynamic call may still carry keyword arguments in call order (e.g. a
+     * call through a callable-valued parameter). Append their values after
+     * the positional arguments so they bind positionally. */
+    MojoList *_merged_args = NULL;
     if (kw && mojo_dict_len(kw) > 0) {
-        mojo_raise_type_error((char *)"got an unexpected keyword argument");
-        return 0;
+        _merged_args = mojo_list_new();
+        for (int64_t i = 0; i < n; i++) mojo_list_append_int(_merged_args, mojo_list_get_int(args, i));
+        MojoList *_kws = mojo_dict_keys(kw);
+        for (int64_t i = 0; i < mojo_list_len(_kws); i++) {
+            char *_k = mojo_list_get_str(_kws, i);
+            mojo_list_append_int(_merged_args, mojo_dict_get_int(kw, _k));
+        }
+        args = _merged_args;
+        n = mojo_list_len(args);
     }
     int64_t a[5] = {0, 0, 0, 0, 0};
     if (n > 5) n = 5;
@@ -7683,6 +7698,23 @@ void mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj)
     _dict_set_raw(d, key, (int64_t)(uintptr_t)obj, 6);
 }
 
+/* The string-key store of a struct of another type, with its repr function
+ * kept on the slot (see the field's comment in fire_runtime.h). The slot is
+ * found after the store, so grow and the int-key canonicalisation are handled
+ * by the same lookup every other reader uses. */
+void mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn)
+{
+    mojo_dict_set_other_struct(d, key, obj);
+    _DictSlot *sl = _dict_find_k(d, key, 0);
+    if (sl && sl->key) sl->repr = fn;
+}
+
+char *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v)
+{
+    if (!d || i < 0 || i >= d->cap || !d->slots[i].repr) return NULL;
+    return ((char *(*)(int64_t))d->slots[i].repr)(v);
+}
+
 void mojo_dict_set_val_repr(MojoDict *d, void *fn)
 {
     if (!d) return;
@@ -7893,6 +7925,15 @@ static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
     _DictSlot *sl = _dict_lookup_k(d, k, 1 /* bytes key */);
     free(k);
     return sl;
+}
+
+/* The bytes-key twin of mojo_dict_set_other_struct_repr: a second struct type
+ * under a bytes key, with its own repr kept on the slot. */
+void mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn)
+{
+    mojo_dict_set_bytes_other_struct(d, key, obj);
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    if (sl && sl->key) sl->repr = fn;
 }
 
 int64_t mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key)
@@ -10867,6 +10908,12 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
            strictly more information than a slot's storage kind ('i' for a
            struct pointer is as true as 'i' for a small int and as useless). */
         char *_re = mojo_list_repr_elem(l, mojo_list_get_int(l, _i));
+        /* ...except a slot the kinds row calls a STRING: an element repr is a
+         * thunk for a value word (a struct pointer, or a dict's value kind), and
+         * handing it a char* key printed the key's address. A dict item pair is
+         * the case that set it for slot 1 alone (mojo_dict_items), and this loop
+         * asks every slot. A string slot is spelled by its own kind. */
+        if (_re && _k == MOJO_KIND_STR) { free(_re); _re = NULL; }
         if (_re) {
             _buf = mojo_str_cat_free(_buf, _re);
             free(_re);
@@ -11923,16 +11970,49 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
 }
 
 /* `a + b` where both are words of unknown kind: two strings concatenate, both
- * lists concatenate via mojo_list_concat, otherwise adds as integers (the word
- * is its own value). */
+ * lists concatenate via mojo_list_concat, double boxes add as a double,
+ * otherwise adds as integers (the word is its own value). */
 int64_t mojo_add_words(int64_t a, int64_t b)
 {
     if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
+        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)mojo_unbox_plain(a),
+                                               (char *)(intptr_t)mojo_unbox_plain(b));
     if (mojo_is_registered_list(a) && mojo_is_registered_list(b))
         return (int64_t)(intptr_t)mojo_list_concat((MojoList *)(intptr_t)a,
                                                   (MojoList *)(intptr_t)b);
-    return a + b;
+    {
+        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
+        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
+        if (da || db) {
+            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
+            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
+            return mojo_box_from_double(av + bv);
+        }
+    }
+    return mojo_box_int(a) + mojo_box_int(b);
+}
+
+/* `a * b` where one side is a word of unknown kind that may be a string (a
+ * kind-'p' str box or a string pointer), a double box, or an integer: string
+ * repetition when a side is a string, a boxed double product when a side is a
+ * double box, otherwise integer multiplication of the words' integer values.
+ * Used by tagged mixed-generator values whose kind is a runtime fact. */
+int64_t mojo_mul_word(int64_t a, int64_t b)
+{
+    if (mojo_boxed_is_str(a))
+        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(a), mojo_box_int(b));
+    if (mojo_boxed_is_str(b))
+        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(b), mojo_box_int(a));
+    {
+        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
+        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
+        if (da || db) {
+            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
+            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
+            return mojo_box_from_double(av * bv);
+        }
+    }
+    return mojo_box_int(a) * mojo_box_int(b);
 }
 
 MojoList *mojo_iter_boxed_list(int64_t v)
@@ -14939,9 +15019,13 @@ static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
                             char k, int ecode)
 {
     if (ecode == MOJO_EQ_UNKNOWN) {
-        if (k == 'p' && _pr_has(&_reg_str, (uint64_t)w)) ecode = MOJO_EQ_STR;
-        else if (k == 'p') ecode = MOJO_EQ_INT;
-        else ecode = _kind_to_eq(k);
+        /* A 'p' slot is a str BY ITS RECORDED KIND, whether the string is a
+         * literal in the registered pool or a heap string built at run time (a
+         * `+`, a call result). Asking the literal pool first encoded every heap
+         * string as an integer, so `(s,)` for a computed `s` got a different key
+         * from the same tuple built from a literal. A slot with no recorded kind
+         * reads as 'i' (mojo_list_slot_kind), so 'p' is never a guess. */
+        ecode = (k == 'p') ? MOJO_EQ_STR : _kind_to_eq(k);
     }
     char tmp[_INT_STR_BLOCK];
     if (ecode == MOJO_EQ_DOUBLE) {
