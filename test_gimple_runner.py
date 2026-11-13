@@ -13680,6 +13680,32 @@ main()
         "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
         "a\n")
 
+    # The same disagreement for RHS shapes with no callee at all. The export
+    # scan types a non-literal expression `void *` and every container
+    # literal `void *`, while `_phase17_value_type` types them `int64_t` /
+    # `MojoList *` / `MojoDict *`; measured on this tree, each of these three
+    # was a "conflicting types for '<mod>__mojo_global_get_N'" before the
+    # importer took the definer's final accessor type. They exercise the
+    # BinOp / ListExpr / DictExpr rows of that one table, so a future edit
+    # that narrows the fix back to "call shapes" is caught here.
+    _test_imported_call_initialized_global(
+        "imported_expression_initialized_global_binop",
+        "var N = 1 + 2\n",
+        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
+        "3\n")
+
+    _test_imported_call_initialized_global(
+        "imported_container_initialized_global_list",
+        "var N = [1, 2, 3]\n",
+        "from xmodint_defn import N\n\ndef main():\n    print(N[0])\n\nmain()\n",
+        "1\n")
+
+    _test_imported_call_initialized_global(
+        "imported_container_initialized_global_dict",
+        "var N = {\"a\": 4}\n",
+        "from xmodint_defn import N\n\ndef main():\n    print(N[\"a\"])\n\nmain()\n",
+        "4\n")
+
     # A FLOAT module-scope `var` imported by name. The defining module declared
     # its global `int` (the VarDecl pre-scan's catch-all arm had no FloatLiteral
     # row) and its initializer `0` (`_extract_init_expr` had no float row), so
