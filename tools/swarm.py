@@ -695,9 +695,18 @@ def _move_citations(old, new):
     return [f for f in r.stdout.split() if f]
 
 
+_GIT_LAST_ERR = ""
+
+
 def _git(*a):
-    """(returncode, stdout) for a git command in the main checkout. Never exits: a pass must survive a failed move."""
+    """(returncode, stdout) for a git command in the main checkout. Never exits: a pass must survive a failed move.
+
+    This is the ONE git entry point of a pass (tests replace it, so `make check` never runs git and needs no git binary).
+    git's stderr is left in `_GIT_LAST_ERR` for a caller that must quote the reason, so no caller ever needs a second,
+    uninterceptable `subprocess.run(["git", ...])`."""
+    global _GIT_LAST_ERR
     r = subprocess.run(["git", *a], cwd=C.MAIN, capture_output=True, text=True)
+    _GIT_LAST_ERR = r.stderr
     return r.returncode, r.stdout
 
 
@@ -766,9 +775,10 @@ def apply_moves(st):
                     open(os.path.join(C.MAIN, f), "w", encoding="utf-8").write(body)
                 for base, old, new, cited in plan:
                     os.makedirs(os.path.dirname(os.path.join(C.MAIN, new)), exist_ok=True)
-                    mv = subprocess.run(["git", "mv", old, new], cwd=C.MAIN, capture_output=True, text=True)
-                    if mv.returncode:            # git's reason is on stderr; _git returns only stdout
-                        raise RuntimeError("git mv %s %s failed: %s" % (old, new, mv.stderr.strip()))
+                    rc, _ = _git("mv", old, new)     # through the seam: `make check` must never run git
+                    if rc:
+                        raise RuntimeError("git mv %s %s failed: %s"
+                                           % (old, new, (_GIT_LAST_ERR or "").strip()))
                     done.append((old, new))
             except Exception:                    # put back what this pass changed, then report it
                 for old, new in reversed(done):

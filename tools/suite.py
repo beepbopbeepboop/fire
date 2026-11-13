@@ -59,6 +59,7 @@ Usage
     tools/suite.py                      # the `check` bucket, -j ncpu
     tools/suite.py bootstrap            # the ordered 3-stage self-host chain
     tools/suite.py gate                 # check + every heavy CLAUDE.md gate step
+    tools/suite.py orchestrator         # the swarm/registry/landing tests (no git in `check`)
     tools/suite.py check selfhost       # two buckets
     tools/suite.py gimple               # one test, by name
     tools/suite.py -j1 bootstrap        # strictly serial, output streamed live
@@ -4213,7 +4214,8 @@ test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny
 
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'dead-worker-state', 'done-ratchet-landing', 'modular', 'refill-claim-blocked', 'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why', 'sync-restart-guards', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
@@ -4389,6 +4391,18 @@ BUCKETS = {
               # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
               # seconds.
               'formal-reproducible'],
+
+    # The orchestrator's own tests (the swarm, the registry, reclass, landing).
+    # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
+    # the heavy steps): they exercise tools/swarm.py's git-facing passes and
+    # the fleet registry, and `make check` must not be in the business of
+    # spawning git or touching checkout/fleet state — the default loop needs no
+    # git binary at all. The tests stub `_git` and the registry, but that is a
+    # property of the tests, not something a category boundary should rely on.
+    # Run them explicitly: `make check-orchestrator`.
+    'orchestrator': ['dead-worker-state', 'done-ratchet-landing', 'refill-claim-blocked',
+                     'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why',
+                     'sync-restart-guards'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

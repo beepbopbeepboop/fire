@@ -3680,6 +3680,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             ret_type = 'int64_t'
 
     gen.func_ret_type = ret_type
+    gen.current_func_ret_ann = (
+        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference
     gen.func_return_types[node.name] = ret_type
     # ...and so does every CALL SITE of this definition, which reaches this
@@ -3972,6 +3974,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     gen.current_func_name = fn_name
     gen._current_struct_name = ""   # top-level code is outside any method body
     gen.func_ret_type = 'void'
+    gen.current_func_ret_ann = ''
     gen.func_return_types[fn_name] = 'void'
 
     # Generate code for each top-level statement
@@ -4976,6 +4979,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             ret_type = 'void'
 
     gen.func_ret_type = ret_type
+    gen.current_func_ret_ann = (
+        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference.
     # Store BOTH the base name (for single-overload lookups) and the
     # per-overload keyed name (so multi-overload methods don't clobber each other).

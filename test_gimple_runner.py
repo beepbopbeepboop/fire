@@ -6880,6 +6880,35 @@ def main():
     run("boom")
 """, "body-7\nfin-show\n---\nbody-7\nfin-show\ncaught\n")
 
+    # Module-level `@contextlib.contextmanager` with a PARAMETER, a computed
+    # value captured across the yield, and a `finally` that restores state:
+    # the exact shape of mojo/middle/coro.py's `pinned` (the generator the
+    # compiled path used to refuse whole-module, bugs/CODEGEN_contextmanager_
+    # generator_refused.md). Used both on the normal path and through a raise
+    # out of the `with` body, so the restore runs and the exception still
+    # reaches the outer handler.
+    test_gimple_stdout("gimple_user_contextmanager_param_restore_finally",
+                       """\
+import contextlib
+
+@contextlib.contextmanager
+def pinned(mode: String):
+    var prev = mode + "_prev"
+    try:
+        yield len(mode)
+    finally:
+        print("restore " + prev)
+
+def main() raises:
+    with pinned("cpp") as n:
+        print("body " + str(n))
+    try:
+        with pinned("stack"):
+            raise ValueError("boom")
+    except ValueError:
+        print("caught")
+""", "body 3\nrestore cpp_prev\nrestore stack_prev\ncaught\n")
+
     # Rebuilding a string from its characters must still be right now that the
     # character strings are shared and never freed: `out + ch` frees its own
     # conversion temp only for a number, never for a character (a free of a

@@ -3726,6 +3726,8 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     if ci.is_re_sub_callback:
         ret_type = 'char *'
     gen.func_ret_type = ret_type
+    gen.current_func_ret_ann = (
+        node.return_type if isinstance(node.return_type, str) else '')
 
     # Build parameter list (env pointer first, then actual params)
     param_strs = []

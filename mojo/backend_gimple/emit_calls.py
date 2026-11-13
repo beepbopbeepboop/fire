@@ -1779,12 +1779,63 @@ def _dtype_cast_ctype(e):
     return None
 
 
+def _comptime_conforms_to_pred(gen):
+    try:
+        import mojo.middle.comptime as _comptime_eval
+        sb = getattr(gen, '_struct_bases', None) or {}
+        tb = getattr(gen, '_trait_bases', None) or {}
+        ex = getattr(gen, '_conformance_bases_extra', None) or {}
+        tbt = getattr(gen, '_conformance_trait_bases_text', None)
+        if tbt is None:
+            tbt = {}
+            try:
+                src = getattr(gen, '_source_text', '') or ''
+                if not src:
+                    fn = getattr(gen, '_current_filename', '') or ''
+                    if fn:
+                        with open(fn) as f:
+                            src = f.read()
+                if src:
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
+                        name = m.group(1)
+                        bstr = m.group(3) or ''
+                        blist = []
+                        for part in bstr.split(','):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            b = part.split('[')[0].split('.')[-1].strip()
+                            if b and re.match(r'^[A-Za-z_]\w*$', b):
+                                blist.append(b)
+                        tbt[name] = blist
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
+                        tbt.setdefault(m.group(1), [])
+            except Exception:
+                tbt = {}
+            try:
+                gen._conformance_trait_bases_text = tbt
+            except Exception:
+                pass
+        if not sb and not tb and not ex and not tbt:
+            return None
+        bases = dict(ex)
+        bases.update(sb)
+        bases.update(tb)
+        for k, v in (tbt or {}).items():
+            if v or k not in bases:
+                bases[k] = v
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
 def _eval_constrained_msg(gen, msg_node, node):
     msg = None
     if msg_node is not None:
         try:
             import mojo.middle.comptime as _comptime_eval
-            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {})
+            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {},
+                                          conforms_to_pred=_comptime_conforms_to_pred(gen))
             if isinstance(m, str):
                 msg = m
             elif m is not None:
@@ -1881,7 +1932,9 @@ def _try_lower_constrained(gen, node):
     try:
         import mojo.middle.comptime as _comptime_eval
         cvals = getattr(gen, '_comptime_vals', {}) or {}
-        state = _comptime_eval.eval_const_bool_state(cond_node, cvals)
+        _cpred = _comptime_conforms_to_pred(gen)
+        state = _comptime_eval.eval_const_bool_state(cond_node, cvals,
+                                                     conforms_to_pred=_cpred)
     except Exception:
         state = None
     if state == 0:  # CONST_FALSE / provably false
@@ -2931,6 +2984,45 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit_container_new(t, _generic_ctype)
             gen._note_fresh_result(t)
             return _generic_ctype, t
+        if base in ('SIMD', 'Scalar'):
+            # SIMD/Scalar constructor: dispatch on the bracket's dtype argument.
+            # Float dtypes keep their scalar C type (not erased to int64_t);
+            # integer dtypes keep the existing int64_t lowering. This avoids the
+            # "indirect call via SubscriptExpr" placeholder for these ctors.
+            _idx = node.func.index
+            _idxs = _idx.elements if isinstance(_idx, gimple_ctypes.TupleExpr) else [_idx]
+            _dt_ctype = _dtype_cast_ctype(_idxs[0]) if _idxs else None
+            # Fallback: resolve a bare/spelled dtype name to its C type.
+            if _dt_ctype is None and _idxs:
+                try:
+                    _dt_name = gen._type_expr_to_ann(_idxs[0]) if hasattr(gen, '_type_expr_to_ann') else None
+                    if _dt_name:
+                        _dt_ctype = _DTYPE_CAST_CTYPES.get(str(_dt_name).replace('DType.', '').lstrip('.'))
+                except Exception:
+                    _dt_ctype = None
+            if _dt_ctype in ('float', 'double', '__fp16'):
+                _target = _dt_ctype
+            else:
+                _target = 'int64_t'
+            if node.args:
+                _at, _av = gen.lower_expr(node.args[0])
+                for _a in node.args[1:]:
+                    gen.lower_expr(_a)
+                for _kw in (getattr(node, 'kwargs', None) or []):
+                    try:
+                        gen.lower_expr(_kw[1])
+                    except Exception:
+                        pass
+                _cv = gen._coerce_to_type(_at, _target, _av) if hasattr(gen, '_coerce_to_type') else _av
+                return _target, gen._new_val(_target, _cv)
+            # No args: zero value of the scalar dtype.
+            for _kw in (getattr(node, 'kwargs', None) or []):
+                try:
+                    gen.lower_expr(_kw[1])
+                except Exception:
+                    pass
+            _zv = '0.0' if _target in ('float', 'double', '__fp16') else '0'
+            return _target, gen._new_val(_target, f'({_target}){_zv}')
         if base in ('Array', 'FixedSizeArray'):
             # Array/FixedSizeArray constructor: produce a tracked MojoList *
             # so element reads and Span views can inherit the element type
@@ -11896,6 +11988,17 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
         return ot, addr
 
+    # Scalar-erased SIMD/Scalar lane READ. `mlir.py` states the model: every
+    # `SIMD[dtype, N]` value is scalar-erased — width 1 IS the scalar, and the
+    # C backend does not store wider lanes — so a lane of an erased value is
+    # the value itself. A scalar C type has no other legal Mojo subscript, so
+    # this cannot shadow a real container. Without it, `v[i]` fell through to
+    # the pointer helper below and emitted `_mojo_at_int64_t (double_value, i)`
+    # (invalid C: expected `int64_t *`, have `double`) — the regression that
+    # made test_simd/test_math fail to compile once a float SIMD constructor
+    # started producing its scalar C type (2026-11-12).
+    if ot in ('float', 'double', '__fp16'):
+        return ot, ov
     # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
     et = gimple_ctypes._elem_type(ot)
     cn = gimple_ctypes._c_id(et)

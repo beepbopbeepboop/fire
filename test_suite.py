@@ -4055,6 +4055,7 @@ UNREGISTERED = {
     'test_coro_list_param_int_element.py': _STANDALONE_TEST_REASON,
     'test_coro_module_qualifier_attr.py': _STANDALONE_TEST_REASON,
     'test_dylib_dedup.py': _STANDALONE_TEST_REASON,
+    'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
