@@ -24,7 +24,7 @@ A probe shows these are one defect, not two: `section` IS claimed with its
 `cpp_core._cpp_yield_from` resolves callees from `_generator_api` only, not
 `_nested_generator_api`. The remaining work is split into:
 
-* part 4 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`):
+* part 4 (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`):
   `yield from` a claimed nested generator from a coroutine-path generator —
   the live `fmt_summary`/`section` blocker.
 * part 5 (fixed): the sibling consuming-loop path, `for x in <nested generator>():` inside a

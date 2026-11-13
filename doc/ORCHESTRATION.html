@@ -400,7 +400,7 @@ Workers started before this rule have no record, so the fleet never signals them
 <ul>
 <li><b>Swarm:</b> stopped by the owner for this review (<code>swarm.py --who</code>: lock free). Pool total 7 (haiku 2, one each of iceman, opencode-paid, openrouter-free, opencode-free, qwen-local). 16 tasks queued, 120 registry entries.</li>
 <li><b>Backlog drained by hand today:</b> 16 finished branches landed in three landings (one first, then 14 in a single round, then the haiku end-to-end test branch), after fixing the causes in &sect;13 (2026-11-12). Unmerged <code>work/*</code> branches went from 1,356 to 131; worktrees from 1,586 to 379; 333 dead branches are archived under <code>refs/archive/</code>.</li>
-<li><b>Open:</b> six branches conflicted and have <code>fix-merge-*</code> tasks queued; <code>bug-mid-codegen-simd-and-array-values-er-6</code> turned the landing gate red (<code>bugs/gate-stdlib-syntax.md</code> is the work); the post-landing verifier has not run since the landings.</li>
+<li><b>Open:</b> six branches conflicted and have <code>fix-merge-*</code> tasks queued; <code>bug-mid-codegen-simd-and-array-values-er-6</code> turned the landing gate red (<code>bugs/mid/gate-stdlib-syntax.md</code> is the work); the post-landing verifier has not run since the landings.</li>
 <li><b>Retired, do not trust:</b> <code>keepfull.sh</code> and its log, and <code>feed.log</code> in the parent directory.</li>
 <li><b>Interpreter:</b> the tree needs Python 3.12+ (CLAUDE.md); the swarm runs on homebrew 3.15 (&sect;2).</li>
 </ul>
