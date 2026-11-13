@@ -5009,6 +5009,8 @@ class Parser:
     _struct_param_names: list
     _known_traits: set
     _lazy_import_blockers: list
+    # Recovered parse diagnostics (see `self.errors = []` in __init__).
+    errors: list
     # The `*Name: Type` variadic bracket parameters of the LAST bracket list
     # parsed (`_parse_generic_params_capture`), read once by `_parse_funcdef`
     # to fill `FunctionDef.variadic_bracket_params`. A plain attribute

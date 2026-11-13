@@ -3075,7 +3075,20 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 try:
                     if isinstance(_nnode, gimple_ctypes.IntLiteral):
                         _ncount = int(_nnode.value)
-                    elif hasattr(gen, '_eval_const_int'):
+                    else:
+                        # `gen._eval_const_int` — NOT `_try_eval_const_int`:
+                        # no method of that name exists on GimpleGen, so this
+                        # arm was dead under CPython (its hasattr guard answered
+                        # False) while the COMPILED compiler still EMITS the
+                        # branch body — and that body called
+                        # `GimpleGen__try_eval_const_int`, which nothing defines.
+                        # The self-host link failed with
+                        # `"_GimpleGen__try_eval_const_int", referenced from
+                        # _mojo_backend_gimple_emit_calls__lower_call_d1d4ed`.
+                        # `_eval_const_int` is the real method (emit_funcs.py
+                        # calls `gen._eval_const_int(a)` unconditionally), and
+                        # the surrounding try/except already covers a node it
+                        # cannot evaluate.
                         _ncount = gen._eval_const_int(_nnode)
                 except Exception:
                     _ncount = None

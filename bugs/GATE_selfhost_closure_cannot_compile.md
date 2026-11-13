@@ -94,3 +94,15 @@ sites that still saw the bare name. Two fixes in `emit_funcs.py`:
 symbol's own `imported_symbols` entry, and `_effective_param_types` gained the
 same entry's `c_parameters` (name-stripped) as a last-resort overload-hash
 input. Reproduced minimally with a 4-line module + `--dump-full`.
+
+2026-11-12 (end of session): with those two tiers landed, `fire.py build
+fire.py` compiles with ZERO gcc errors and reaches LINK. One link failure
+remained, from a different commit: `emit_calls.py`'s Array-constructor arm
+guarded `gen._try_eval_const_int` — no such method exists (the real one is
+`_eval_const_int`, which `emit_funcs.py` calls unconditionally), so the arm was
+dead under CPython while the compiled compiler still emitted a call to
+`GimpleGen__try_eval_const_int`, which nothing defines:
+`"_GimpleGen__try_eval_const_int", referenced from
+_mojo_backend_gimple_emit_calls__lower_call_d1d4ed`. Fixed by calling the real
+method; the surrounding try/except already covers a node it cannot evaluate.
+This also cleared the last `assignment to 'char *' from 'int64_t'`.
