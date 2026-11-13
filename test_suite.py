@@ -2175,6 +2175,10 @@ STALE_PER_CHILD_BUDGETS = {
     'test_constrained_paren_diagnostic.py': 2,
     'test_dict_slot_read_bug.py': 1,
     'test_dict_slot_read_bug_demo.py': 1,
+    # The two sites are a whole-program COMPILE and the RUN of the 8-line
+    # program it produced (600 s / 60 s): the compile wall is real work, the run
+    # is a tiny program and a candidate for the shared constant.
+    'test_float_bit_reinterpret.py': 2,
     'test_gimple_function_scoped_alias_extern.py': 1,
     'test_interpreter_assert_message.py': 1,
     'test_interpreter_constrained_diagnostic.py': 1,
@@ -4063,15 +4067,26 @@ _STANDALONE_TEST_REASON = (
     'directly (`python3 <file>`); the subject is named in the file\'s own '
     'docstring. Unregistered so far: a cheap one wants a bucket.')
 
+_OPEN_PROBE_HARNESS_REASON = (
+    'The per-part Done-when probes of the still-open parts of '
+    'CODEGEN_simd_and_array_values_erase_to_int64: red until each part lands, '
+    'so not a registered job. Each is run by its own bug doc\'s command '
+    '(`python3 test_codegen_erased_container_values.py <prefix>`); the landed '
+    'pins are the registered `reg-codegen-erased-container-values` job in '
+    'test_codegen_erased_container_values_pins.py.')
+
 UNREGISTERED = {
+    'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
     'test_codegen_sys_encoding_capture.py': _STANDALONE_TEST_REASON,
     'test_comptime_alias_instance_read.py': _STANDALONE_TEST_REASON,
+    'test_comptime_dtype_compare.py': _STANDALONE_TEST_REASON,
     'test_coro_generator_module_qual.py': _STANDALONE_TEST_REASON,
     'test_coro_list_param_int_element.py': _STANDALONE_TEST_REASON,
     'test_coro_module_qualifier_attr.py': _STANDALONE_TEST_REASON,
     'test_dylib_dedup.py': _STANDALONE_TEST_REASON,
+    'test_float_bit_reinterpret.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
@@ -4123,6 +4138,11 @@ UNREGISTERED = {
         '`bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`.',
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
+    # Landed by master's trait-method-requirement-evidence work (06ea5b0ef).
+    # That lane (`bug:DIAGNOSTICS_trait_conformance-part4`) is still active and
+    # a registration there supersedes this entry — the estate check's
+    # `resolved` assertion enforces the removal.
+    'test_trait_requirement_evidence_diagnostic.py': _STANDALONE_TEST_REASON,
     # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
     # needs a check even though the sweep it feeds does not, so this file checks
     # it. It is unregistered for the reason its own docstring gives: the text

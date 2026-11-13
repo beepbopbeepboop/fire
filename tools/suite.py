@@ -4225,7 +4225,7 @@ test('reg-codegen-drop-unreferenced-unimpl-stubs', [PY, 'test_codegen_drop_unref
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-codegen-enumerate-unpack-shadow-store-cast', [PY, 'test_codegen_enumerate_unpack_shadow_store_cast.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-erased-container-values', [PY, 'test_codegen_erased_container_values.py'], mem='tiny',
+test('reg-codegen-erased-container-values', [PY, 'test_codegen_erased_container_values_pins.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-codegen-import-extern-annotated-ptr-return', [PY, 'test_codegen_import_extern_annotated_ptr_return.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
@@ -4239,6 +4239,14 @@ test('reg-codegen-tuple-slot-scalar-beside-list', [PY, 'test_codegen_tuple_slot_
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condition_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "fix stdlib-dylib: two regressions from today's diagnostics
+# commits" (b3b2233b0) and registered nowhere until this audit, which is the
+# same hole the suite's estate check names. 0.15 s, 0.0 GB measured: it only
+# drives `compile_to_gimple`, no build.
+test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditional_conformance_declaration_diagnostic.py'], mem='tiny',
+     desc='conditional conformance declarations are diagnosed: the diamond, '
+          'the derived/ancestor constraint, conditional RegisterPassable, and '
+          'the `ref` origin rule; positive controls still compile')
 test('reg-conforms-to-condition-diagnostic', [PY, 'test_conforms_to_condition_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-constrained-paren-diagnostic', [PY, 'test_constrained_paren_diagnostic.py'], mem='tiny',
@@ -4333,6 +4341,13 @@ test('orch-control-branch-retire', [PY, 'tools/test_control_branch_retire.py'], 
      desc='orchestrator unit test (estate backlog, 2026-11-13)')
 test('orch-control-cleanup', [PY, 'tools/test_control_cleanup.py'], mem='tiny',
      desc='orchestrator unit test (estate backlog, 2026-11-13)')
+# Landed with "control: norm_claim treats a `bugs/<class>/` path as its
+# document's claim" (6e35ff35e) and registered nowhere until this audit. Pure
+# Python, 0.0 GB: every spelling of one bug document is one `bug:<stem>` claim,
+# whatever class directory it sits in, and an unrecognised path is refused.
+test('orch-control-norm-claim', [PY, 'tools/test_control_norm_claim.py'], mem='tiny',
+     desc="control.norm_claim: bare, .md, bugs/, bugs/hard/ and bugs/mid/ "
+          "spellings are one claim; an unplaceable path is refused")
 test('orch-control-prune-unmerged', [PY, 'tools/test_control_prune_unmerged.py'], mem='tiny',
      desc='orchestrator unit test (estate backlog, 2026-11-13)')
 test('orch-control-retire-landed', [PY, 'tools/test_control_retire_landed.py'], mem='tiny',
@@ -4552,10 +4567,10 @@ BUCKETS = {
     # Run them explicitly: `make check-orchestrator`.
     'orchestrator': ['dead-worker-state', 'done-ratchet-landing', 'refill-claim-blocked',
                      'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why',
-                     'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
+                     'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus

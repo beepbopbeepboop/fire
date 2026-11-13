@@ -28,12 +28,12 @@ argument, so generic call typing sees `Int64`.
 
 ## Done when
 
-File: `test_codegen_erased_container_values.py` (repo root).
+File: `test_codegen_erased_container_values_pins.py` (repo root).
 
-Command: `python3 test_codegen_erased_container_values.py part4`
+Command: `python3 test_codegen_erased_container_values_pins.py part4`
 
-It runs `test_part4_float_simd_survives_call_and_return` (red today; red until
-part 3 lands). It must pass.
+It runs `test_part4_float_simd_survives_call_and_return` (green: part 3 has
+landed and this pin moved to the pins file). It must pass.
 
 ## Where to start
 

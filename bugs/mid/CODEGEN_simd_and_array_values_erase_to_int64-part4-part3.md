@@ -50,8 +50,9 @@ the call result, even though `id_simd` itself returns `float`.
   a scalar type, the `int64_t` fallback stands.
 - One dtype-spelling table only: reuse
   `mojo/middle/types.py::_SIMD_FLOAT_DTYPE_CTYPE` (added by part4-part1)
-  rather than adding a second mapping. The `Scalar[...]` spelling remains
-  part 5's (`bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part5.md`).
+  rather than adding a second mapping. The `Scalar[...]` spelling is part 5's
+  rule and landed with it (`_resolve_type` resolves it through that same
+  table); part 5's doc was DELETED with the fix.
 
 ## Done when
 

@@ -47,9 +47,12 @@ to `int64_t`.
 - An alias to a non-SIMD type keeps the type it resolves to today (for
   example a struct alias still resolves to `Foo *`); an unknown name is left
   untouched, so the conservative fallback stands.
-- Only module-local aliases are in scope. The stdlib's `Scalar[dt]`
-  spelling stays part 5's (`bugs/mid/CODEGEN_simd_and_array_values_erase_to_
-  int64-part5.md`); do not build a second dtype-spelling table.
+- Only module-local aliases are in scope. The stdlib's `Scalar[dt]` spelling
+  is part 5's rule and landed with it (`_resolve_type` resolves `Scalar` and a
+  width-1 `SIMD` through `mojo/middle/types.py::_SIMD_FLOAT_DTYPE_CTYPE`; part
+  5's doc was DELETED with that fix). Do not build a second dtype-spelling
+  table: the resolver and `emit_calls._float_dtype_arg_ctype` both read the
+  one table.
 
 ## Done when
 

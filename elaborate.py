@@ -20,7 +20,7 @@ from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas, VarDecl,
                           AssignStmt, IdentExpr, TupleExpr, StringLiteral,
                           ComptimeVarStmt, CallExpr, BinaryOp, UnaryOp,
-                          align_value_error)
+                          align_value_error, _expr_constraint_text, MemberExpr)
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to)
@@ -549,6 +549,17 @@ def extract_trait(module_src: str, trait_name: str):
     return None
 
 
+def _extract_trait_def(module_src: str, trait_name: str):
+    base, _ = _split_base_type_args(trait_name)
+    try:
+        for s in Parser(py_tokenize(module_src)).parse_module():
+            if isinstance(s, TraitDef) and s.name == base:
+                return s
+    except Exception:
+        return None
+    return None
+
+
 def type_methods(module_src: str, type_name: str):
     """The method signatures a concrete `struct type_name` defines, as a list
     of (name, [param_types], ret_type). None if the type is not a struct here."""
@@ -558,34 +569,264 @@ def type_methods(module_src: str, type_name: str):
     return None
 
 
-def check_conformance(module_src: str, type_name: str, trait_name: str):
-    """Does concrete `type_name` satisfy `trait_name`? Returns (ok, missing),
-    where `missing` lists human-readable descriptions of unmet requirements.
+def _split_base_type_args(name: str):
+    """'S[A,B]' -> ('S', ['A','B']); 'S' -> ('S', [])."""
+    if not isinstance(name, str):
+        return str(name), []
+    name = name.strip()
+    if '[' not in name:
+        return name, []
+    base, rest = name.split('[', 1)
+    if not rest.endswith(']'):
+        return name, []
+    inner = rest[:-1].strip()
+    if not inner:
+        return base, []
+    # split top-level commas
+    args, depth, cur = [], 0, []
+    for c in inner:
+        if c in '([{': depth += 1
+        elif c in ')]}': depth -= 1
+        if c == ',' and depth == 0:
+            args.append(''.join(cur).strip()); cur = []
+        else:
+            cur.append(c)
+    if cur:
+        args.append(''.join(cur).strip())
+    return base, [a for a in args if a]
 
-    A requirement is met when the type defines a method of the same name whose
-    (param types, return type) match. If the trait is unknown we cannot check
-    it, so we conservatively accept (ok=True) — bounds we don't understand do
-    not block instantiation, matching the demand-driven, best-effort style."""
-    required = extract_trait(module_src, trait_name)
-    if required is None:
+
+def _find_struct_def(module_src: str, type_name: str):
+    try:
+        stmts = Parser(py_tokenize(module_src)).parse_module()
+    except Exception:
+        return None, {}
+    base, targs_list = _split_base_type_args(type_name)
+    for s in stmts:
+        if isinstance(s, StructDef) and s.name == base:
+            return s, {'base': base, 'targs_list': targs_list}
+    return None, {}
+
+
+def _struct_targ_bindings(module_src: str, sd: StructDef, targs_list: list):
+    bindings = {}
+    try:
+        tmpl = extract_struct_source(module_src, sd.name) or ''
+        params = type_param_names(tmpl) if tmpl else []
+        for i, p in enumerate(params):
+            if i < len(targs_list):
+                bindings[p] = targs_list[i]
+    except Exception:
+        pass
+    # comptime aliases / constants on the struct (e.g. `comptime x = 0`)
+    try:
+        aliases = getattr(sd, 'comptime_aliases', None) or {}
+        for k, v in aliases.items():
+            try:
+                val = eval_const(v, bindings)
+            except Exception:
+                val = None
+            if isinstance(val, (bool, int, float, str)):
+                bindings[k] = val
+                bindings[f'Self.{k}'] = val
+        # also scan fields/body for `comptime x = ...` / `alias x = ...` parsed as AssignStmt-like in some forms
+        for fld in (getattr(sd, 'fields', None) or []):
+            if isinstance(fld, AssignStmt) and isinstance(getattr(fld, 'target', None), IdentExpr):
+                name = fld.target.name
+                try:
+                    val = eval_const(fld.value, bindings)
+                except Exception:
+                    val = None
+                if isinstance(val, (bool, int, float, str)):
+                    bindings.setdefault(name, val)
+                    bindings.setdefault(f'Self.{name}', val)
+            if isinstance(fld, ComptimeVarStmt):
+                name = getattr(fld, 'target', None)
+                if isinstance(name, str):
+                    try:
+                        val = eval_const(getattr(fld, 'value', None), bindings)
+                    except Exception:
+                        val = None
+                    if isinstance(val, (bool, int, float, str)):
+                        bindings.setdefault(name, val)
+                        bindings.setdefault(f'Self.{name}', val)
+    except Exception:
+        pass
+    return bindings
+
+
+def _substitute_constraint_text(text: str, bindings: dict) -> str:
+    if not text or not bindings:
+        return text or ''
+    out = text
+    # replace Self.X, bare params
+    for k, v in bindings.items():
+        out = re.sub(rf'\bSelf\.{re.escape(k)}\b', str(v), out)
+        out = re.sub(rf'\b{k}\b', str(v), out)
+    return out
+
+
+def _constraint_implied_for_evidence(method_where: str, assumption: str, module_src: str, bindings: dict) -> bool:
+    """Conservative implication: does `assumption` imply `method_where`?
+    Unknown/unparseable => True (accept, do not report)."""
+    mw = _substitute_constraint_text(method_where or '', bindings).strip()
+    if not mw:
+        return True
+    asn = _substitute_constraint_text(assumption or '', bindings).strip()
+    # If method clause textually contained in assumption with simple and/or forms, accept.
+    try:
+        # Build conforms_to predicate and bases for evaluation
+        cpred = _where_conforms_to_pred(module_src, bindings)
+        # If assumption is empty (unconditional conformance), only accept if method clause
+        # is provably true with no extra conforms_to facts.
+        if not asn:
+            st = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=cpred)
+            return st == CONST_TRUE
+        # Try parsing and checking implication via text-level conservative rules.
+        # If assumption implies method clause syntactically/structurally, accept.
+        trait_bases, cache = _where_conformance_bases(module_src), {}
+        if _constraint_implies_text(asn, mw, trait_bases, cache):
+            return True
+        # Also try evaluating method clause assuming conformance facts implied by assumption atoms.
+        # Parse assumption as conforms_to facts and evaluate.
+        # Conservative: if undecidable, accept.
+        st = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=cpred)
+        if st == CONST_TRUE:
+            return True
+        # If assumption is a conforms_to(...) equal to method clause, accept.
+        if mw == asn:
+            return True
+        # Try splitting assumption into and-atoms and see if they imply method clause
+        # by evaluating with a custom predicate that returns True for atoms in assumption.
+        a_atoms = set()
+        try:
+            aexpr = Parser(py_tokenize(asn))._parse_expr(0)
+            a_atoms = set(_constraint_atoms(aexpr))
+        except Exception:
+            a_atoms = set()
+        def _pred2(tname, trname):
+            # resolve through bindings
+            t = bindings.get(tname, tname)
+            r = bindings.get(trname, trname)
+            if cpred and cpred(t, r) is True:
+                return True
+            # check if conforms_to(t,r) implied by assumption atoms
+            try:
+                want = f"conforms_to({t}, {r})"
+                # normalize simple forms
+                for at in a_atoms:
+                    if not isinstance(at, CallExpr):
+                        continue
+                    if isinstance(at.func, IdentExpr) and at.func.name == 'conforms_to' and len(at.args or []) == 2:
+                        a0 = _expr_constraint_text(at.args[0])
+                        a1 = _expr_constraint_text(at.args[1])
+                        a0s = _substitute_constraint_text(a0, bindings)
+                        a1s = _substitute_constraint_text(a1, bindings)
+                        if a0s == str(t) and a1s == str(r):
+                            return True
+                        # ancestor implication
+                        try:
+                            bases = _where_conformance_bases(module_src)
+                            if conforms_to(str(t), a1s, bases) is True and conforms_to(a1s, str(r), bases) is True:
+                                return True
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return None
+        st2 = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=_pred2)
+        if st2 == CONST_TRUE:
+            return True
+        return False if st2 == CONST_FALSE else True
+    except Exception:
+        # Conservative: unknown => accept
+        return True
+
+
+def check_conformance(module_src: str, type_name: str, trait_name: str):
+    """Does concrete `type_name` satisfy `trait_name`? Returns (ok, missing)."""
+    trait_base, trait_args = _split_base_type_args(trait_name)
+    trait_def = _extract_trait_def(module_src, trait_base)
+    if trait_def is None:
         return True, []
-    have = type_methods(module_src, type_name)
-    if have is None:
-        # No struct source to inspect (e.g. a builtin like Int). We cannot
-        # verify, so we do not block — keep behaviour additive.
+    required = [_method_sig(m) for m in trait_def.methods]
+    sd, info = _find_struct_def(module_src, type_name)
+    if sd is None:
         return True, []
+    bindings = _struct_targ_bindings(module_src, sd, info.get('targs_list') or [])
+    # bind trait type params from trait_name args if available (best-effort)
+    try:
+        tparams = [p[0] for p in (getattr(trait_def, 'params', None) or []) if isinstance(p, (list, tuple)) and p]
+        for i, tp in enumerate(tparams):
+            if i < len(trait_args):
+                bindings.setdefault(tp, trait_args[i])
+    except Exception:
+        pass
+
+    # find conformance assumption for trait (base or instantiated form)
+    trait_bases, cache = _where_conformance_bases(module_src), {}
+    assumption = None
+    bc_items = list(getattr(sd, 'base_constraints', None) or [(_as_str(b), '') for b in (getattr(sd,'bases',None) or [])])
+    # normalize bc names with substitutions
+    def _bc_match(bname_s):
+        bb, _ = _split_base_type_args(bname_s)
+        if bname_s == trait_name or bb == trait_base:
+            # if trait_name is parameterized, prefer exact instantiated match when present
+            if trait_name == bname_s:
+                return 2
+            if bb == trait_base and ('[' not in trait_name or '[' in bname_s):
+                return 1
+        return 0
+    # direct
+    best = -1
+    for bname, wtext in bc_items:
+        bname_s = _substitute_constraint_text(_as_str(bname), bindings)
+        wtext_s = _substitute_constraint_text(_as_str(wtext) if wtext is not None else '', bindings)
+        sc = _bc_match(bname_s)
+        if sc > best:
+            best = sc
+            if sc > 0:
+                assumption = wtext_s
+    # ancestor paths if not directly found
+    if best <= 0:
+        found = []
+        for bname, wtext in bc_items:
+            bname_s = _substitute_constraint_text(_as_str(bname), bindings)
+            wtext_s = _substitute_constraint_text(_as_str(wtext) if wtext is not None else '', bindings)
+            for anc, aw, path in _ancestors_with_paths(bname_s, wtext_s, trait_bases, cache):
+                ab, _ = _split_base_type_args(anc)
+                if anc == trait_name or ab == trait_base:
+                    found.append(aw)
+        if found:
+            assumption = '' if any(a == '' for a in found) else found[0]
+        else:
+            assumption = None
+
     by_name = {}
-    for name, ptypes, ret in have:
-        by_name.setdefault(name, []).append((ptypes, ret))
+    for m in (getattr(sd, 'methods', None) or []):
+        sig = _method_sig(m)
+        by_name.setdefault(sig[0], []).append((sig[1], sig[2], m))
     missing = []
-    for name, ptypes, ret in required:
-        cands = by_name.get(name)
+    for tname, ptypes, ret in required:
+        cands = by_name.get(tname)
         if cands is None:
-            missing.append(f"missing method '{name}'")
+            missing.append(f"missing method '{tname}'")
             continue
-        if not any(cp == ptypes and cr == ret for cp, cr in cands):
+        impl = None
+        for cp, cr, m in cands:
+            if cp == ptypes and cr == ret:
+                impl = m
+                break
+        if impl is None:
             want = f"({', '.join(ptypes)}) -> {ret}"
-            missing.append(f"method '{name}' signature mismatch (want {want})")
+            missing.append(f"method '{tname}' signature mismatch (want {want})")
+            continue
+        mw = getattr(impl, 'where_clause', None)
+        if mw is not None:
+            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
+            asn = assumption if assumption is not None else ''
+            if not _constraint_implied_for_evidence(mw_text, asn, module_src, bindings):
+                return False, [f"does not implement all requirements for '{trait_base}'"]
     return (not missing), missing
 
 
@@ -1982,3 +2223,335 @@ class Elaborator:
             if any(not inferred_ctype_is_specific(ct) for ct in arg_ctypes):
                 return None
             raise
+
+
+def _collect_comptime_aliases(sd):
+    aliases = {}
+    try:
+        for k, v in (getattr(sd, 'comptime_aliases', None) or {}).items():
+            aliases[k] = v
+        for fld in (getattr(sd, 'fields', None) or []):
+            if isinstance(fld, AssignStmt) and isinstance(getattr(fld, 'target', None), IdentExpr):
+                aliases.setdefault(fld.target.name, fld.value)
+            if isinstance(fld, ComptimeVarStmt):
+                name = getattr(fld, 'target', None)
+                if isinstance(name, str):
+                    aliases.setdefault(name, getattr(fld, 'value', None))
+    except Exception:
+        pass
+    return aliases
+
+
+def _fn_type_param_bounds(fn):
+    bounds = {}
+    # comptime_params may be strings or richer; try to parse annotations
+    for p in (getattr(fn, 'comptime_params', None) or []):
+        if isinstance(p, str):
+            bounds[p] = None
+        elif isinstance(p, (list, tuple)) and p:
+            bounds[p[0]] = p[1] if len(p) > 1 else None
+    anns = getattr(fn, 'comptime_param_annotations', None) or {}
+    for k, v in anns.items():
+        if v:
+            bounds[k] = v
+    # parse from params-like bracket info not directly stored except comptime_params names
+    # also try parsing fn text? not available. Use comptime_param_annotations if present.
+    return bounds
+
+
+def _is_member_type_ref(type_ann):
+    # "Box[T].R" or "pkg.Box[T].R" - simple detection
+    if not isinstance(type_ann, str):
+        return None
+    s = type_ann.strip()
+    if '.' not in s or '[' not in s:
+        return None
+    # split last .member
+    base_part, _, member = s.rpartition('.')
+    if not member or '[' not in base_part:
+        return None
+    bname, bargs = _split_base_type_args(base_part)
+    return (bname, bargs, member, base_part)
+
+
+def check_signature_binding_evidence(module_src, fn, module_stmts=None):
+    """Detect unprovable constrained comptime member uses in signature types."""
+    if module_stmts is None:
+        try:
+            module_stmts = Parser(py_tokenize(module_src)).parse_module()
+        except Exception:
+            return
+    struct_map = {}
+    for st in module_stmts:
+        if isinstance(st, StructDef):
+            struct_map[st.name] = st
+    fn_bounds = _fn_type_param_bounds(fn)
+    # collect known conforms_to facts from fn bounds: e.g. T: CopyableT
+    known = {}
+    for p, b in fn_bounds.items():
+        if isinstance(b, str) and b:
+            known[p] = [x.strip() for x in b.replace('&',',').split(',') if x.strip()]
+    # also parse comptime params from function signature text if possible? not needed
+    annotations = []
+    rt = getattr(fn, 'return_type', None)
+    if isinstance(rt, str):
+        annotations.append(rt)
+    for n, t in (getattr(fn, 'params', None) or []):
+        if isinstance(t, str):
+            annotations.append(t)
+    for ann in annotations:
+        ref = _is_member_type_ref(ann)
+        if not ref:
+            continue
+        bname, bargs, member, base_part = ref
+        sd = struct_map.get(bname)
+        if sd is None:
+            continue
+        aliases = _collect_comptime_aliases(sd)
+        if member not in aliases:
+            continue
+        val = aliases[member]
+        # If alias value is a generic type application like NeedsCopy[T], check its bounds
+        try:
+            val_text = _expr_constraint_text(val) if not isinstance(val, str) else val
+        except Exception:
+            val_text = ''
+        # parse val_text as Type[Args]
+        vb, vargs = _split_base_type_args(val_text)
+        if not vargs:
+            continue
+        target_sd = struct_map.get(vb)
+        target_src = extract_struct_source(module_src, vb)
+        if target_sd is None or target_src is None:
+            continue
+        # bind target params to vargs, substituting function's type params
+        try:
+            tparams = type_param_names(target_src) or []
+        except Exception:
+            tparams = []
+        # Build bindings mapping target params to concrete or fn params
+        t_bind = {}
+        for i, tp in enumerate(tparams):
+            if i < len(vargs):
+                t_bind[tp] = vargs[i]
+        # Also map struct's own params in bargs context
+        sparams = []
+        try:
+            stmpl = extract_struct_source(module_src, bname)
+            sparams = type_param_names(stmpl) if stmpl else []
+        except Exception:
+            sparams = []
+        s_bind = {}
+        for i, sp in enumerate(sparams):
+            if i < len(bargs):
+                s_bind[sp] = bargs[i]
+        # resolve vargs through s_bind
+        resolved_targs = []
+        unproven = False
+        for i, tp in enumerate(tparams):
+            if i >= len(vargs):
+                break
+            arg = vargs[i]
+            arg_resolved = s_bind.get(arg, arg)
+            # check target bound for tp
+            try:
+                bounds = parse_bounds(target_src)
+            except Exception:
+                bounds = {}
+            bound = bounds.get(tp)
+            if not bound:
+                resolved_targs.append(arg_resolved)
+                continue
+            # if arg_resolved is a function type param, see if fn proves it satisfies bound
+            if arg_resolved in known:
+                k = set(known.get(arg_resolved) or [])
+                # simple check: bound name present
+                if bound in k:
+                    resolved_targs.append(arg_resolved)
+                    continue
+                # try conforms_to via known bases? limited
+            elif arg_resolved not in fn_bounds:
+                # concrete type: check conformance directly
+                ok, _ = check_conformance(module_src, arg_resolved, bound)
+                if ok:
+                    resolved_targs.append(arg_resolved)
+                    continue
+            # unproven
+            unproven = True
+            break
+        if unproven:
+            raise RuntimeError(
+                "error: invalid bindings in signature: lacking evidence to prove correctness\n"
+                "note: add a trailing 'where' clause to the function declaration"
+            )
+
+
+
+def _fn_known_bounds(fn, module_src, module_stmts):
+    known = {}
+    # from comptime_param_annotations
+    for k, v in (getattr(fn, 'comptime_param_annotations', None) or {}).items():
+        if isinstance(v, str) and v:
+            known.setdefault(k, set()).update(x.strip() for x in v.replace('&',',').split(',') if x.strip())
+    # try to parse comptime params text from source? not easy. also check comptime_params elements
+    for p in (getattr(fn, 'comptime_params', None) or []):
+        if isinstance(p, (list, tuple)) and len(p) >= 2 and isinstance(p[1], str):
+            known.setdefault(p[0], set()).update(x.strip() for x in p[1].replace('&',',').split(',') if x.strip())
+    # fallback: parse from function signature line in module_src
+    try:
+        # find "def fnname[" in module_src
+        name = getattr(fn, 'name', '')
+        if name:
+            # simple regex
+            m = re.search(rf'\bdef\s+{re.escape(name)}\s*\[([^\]]*)\]', module_src)
+            if m:
+                inner = m.group(1)
+                # split params
+                for part in gimple_exprtypes_split_commas(inner):
+                    part = part.strip()
+                    if ':' in part:
+                        pn, pb = part.split(':', 1)
+                        pn = pn.strip().lstrip('*')
+                        pb = pb.strip()
+                        if pn and pb:
+                            known.setdefault(pn, set()).update(x.strip() for x in pb.replace('&',',').split(',') if x.strip())
+    except Exception:
+        pass
+    return known
+
+
+def gimple_exprtypes_split_commas(s):
+    # local fallback
+    out, depth, cur = [], 0, []
+    for c in s:
+        if c in '([{': depth += 1
+        elif c in ')]}': depth -= 1
+        if c == ',' and depth == 0:
+            out.append(''.join(cur)); cur=[]
+        else:
+            cur.append(c)
+    if cur: out.append(''.join(cur))
+    return out
+
+
+def _walk_nodes(node):
+    if node is None:
+        return
+    if isinstance(node, list):
+        for x in node:
+            yield from _walk_nodes(x)
+        return
+    yield node
+    if isinstance(node, dict):
+        for v in node.values():
+            yield from _walk_nodes(v)
+        return
+    try:
+        fields = getattr(node, '__dataclass_fields__', None)
+        if fields:
+            for f in fields:
+                yield from _walk_nodes(getattr(node, f))
+            return
+    except Exception:
+        pass
+    # fallback common attrs
+    for attr in ('body','then_body','else_body','elifs','value','args','kwargs','func','obj','target','iterable','condition','left','right','operand','elements'):
+        if hasattr(node, attr):
+            try:
+                yield from _walk_nodes(getattr(node, attr))
+            except Exception:
+                pass
+
+
+def check_method_call_evidence(module_src, fn, module_stmts=None):
+    if module_stmts is None:
+        try:
+            module_stmts = Parser(py_tokenize(module_src)).parse_module()
+        except Exception:
+            return
+    struct_map = {}
+    for st in module_stmts:
+        if isinstance(st, StructDef):
+            struct_map[st.name] = st
+    # param name -> type annotation string
+    param_types = {}
+    for n, t in (getattr(fn, 'params', None) or []):
+        if isinstance(n, str) and isinstance(t, str):
+            param_types[n] = t
+    known_bounds = _fn_known_bounds(fn, module_src, module_stmts)
+    # build a conforms_to predicate based on known bounds (conservative)
+    bases = _where_conformance_bases(module_src)
+    def _known_conforms(t, tr):
+        # t may be a fn type param name
+        if t in known_bounds:
+            ks = known_bounds[t]
+            if tr in ks:
+                return True
+            # ancestor check via bases: if t known to conform to X and X conforms to tr
+            for k in list(ks):
+                try:
+                    if conforms_to(k, tr, bases) is True:
+                        return True
+                except Exception:
+                    pass
+        # concrete type
+        try:
+            if conforms_to(t, tr, bases) is True:
+                return True
+        except Exception:
+            pass
+        return None
+
+    for node in _walk_nodes(getattr(fn, 'body', None)):
+        if not isinstance(node, CallExpr):
+            continue
+        func = getattr(node, 'func', None)
+        if not isinstance(func, MemberExpr):
+            continue
+        obj = getattr(func, 'obj', None)
+        if not isinstance(obj, IdentExpr):
+            continue
+        recv_type = param_types.get(obj.name)
+        if not recv_type:
+            continue
+        rb, rargs = _split_base_type_args(recv_type)
+        sd = struct_map.get(rb)
+        if sd is None:
+            continue
+        method_name = func.member
+        # find method in struct
+        mdef = None
+        for m in (getattr(sd, 'methods', None) or []):
+            if getattr(m, 'name', None) == method_name:
+                mdef = m
+                break
+        if mdef is None:
+            continue
+        mw = getattr(mdef, 'where_clause', None)
+        if mw is None:
+            continue
+        mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
+        # substitute struct type params with rargs
+        bindings = {}
+        try:
+            stmpl = extract_struct_source(module_src, rb)
+            sparams = type_param_names(stmpl) if stmpl else []
+            for i, sp in enumerate(sparams):
+                if i < len(rargs):
+                    bindings[sp] = rargs[i]
+                    bindings[f'Self.{sp}'] = rargs[i]
+        except Exception:
+            pass
+        mw_text = _substitute_constraint_text(mw_text, bindings)
+        try:
+            st = eval_const_bool_state(Parser(py_tokenize(mw_text))._parse_expr(0), {}, conforms_to_pred=_known_conforms)
+        except Exception:
+            st = None
+        if st == CONST_FALSE or st is None or st == -1:
+            # If provably false or undecidable given known bounds in generic context -> lacking evidence
+            # "do not report on unknown evidence" in general, but for this specific call in generic
+            # context with insufficient bounds we must report lacking evidence per case 4/5.
+            if st == CONST_TRUE:
+                continue
+            raise RuntimeError("lacking evidence to prove correctness")
+

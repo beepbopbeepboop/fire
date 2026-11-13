@@ -5630,6 +5630,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return 'MojoList *', t
             except Exception:
                 pass
+        # A FLOAT scalar's bit accessors (`to_bits` / `_to_bits_signed`) were
+        # lowered above, before this scalar-method dispatch: the result is the
+        # integer IEEE-754 pattern, through `_lower_float_bit_accessor`. Do not
+        # lower them a second time here — a "type it as an integer" copy at this
+        # point is unreachable (the earlier arm returns first) and, when the
+        # float case went through a widen-to-double, answered the WRONG bits.
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
