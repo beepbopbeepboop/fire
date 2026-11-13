@@ -1813,13 +1813,17 @@ def _lower_bitcast_call(gen, node):
         if at == target:
             return target, av
         return None
+    return _emit_bits_to_float(gen, target, at, av)
+
+
+def _emit_bits_to_float(gen, target, at, av):
+    """Reinterpret the integer word `av` (C type `at`) as a `target` float or
+    double: the one lowering behind `bitcast[...]` and `SIMD[...](from_bits=)`.
+    Returns (target, temp)."""
     word = gen._coerce_to_type(at, 'int64_t', av) if hasattr(gen, '_coerce_to_type') else av
-    if target == 'double':
-        expr = f'mojo_double_from_bits ({word})'
-    else:
-        expr = f'mojo_float_from_bits ({word})'
+    fn = 'mojo_double_from_bits' if target == 'double' else 'mojo_float_from_bits'
     t = gen._new_temp(target)
-    gen._emit(f'  {t} = ({target}){expr};')
+    gen._emit(f'  {t} = ({target}){fn} ({word});')
     return target, t
 
 
@@ -3263,13 +3267,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _fb_target = _float_dtype_arg_ctype(_idxs[0])
                 if _fb_target is not None:
                     _fb_at, _fb_av = gen.lower_expr(_from_bits[0][1])
-                    _fb_word = (gen._coerce_to_type(_fb_at, 'int64_t', _fb_av)
-                                if hasattr(gen, '_coerce_to_type') else _fb_av)
-                    _fb_fn = ('mojo_double_from_bits' if _fb_target == 'double'
-                              else 'mojo_float_from_bits')
-                    _fb_t = gen._new_temp(_fb_target)
-                    gen._emit(f'  {_fb_t} = ({_fb_target}){_fb_fn} ({_fb_word});')
-                    return _fb_target, _fb_t
+                    return _emit_bits_to_float(gen, _fb_target, _fb_at, _fb_av)
             if node.args:
                 _at, _av = gen.lower_expr(node.args[0])
                 for _a in node.args[1:]:

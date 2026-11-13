@@ -8413,6 +8413,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
     _emit_literal_print('\\n', print_fn)
 
 
+# The stdlib module that owns the zero-arg GPU target queries. The fold
+# below is keyed on the IMPORT SITE as well as the name: a user's own
+# zero-arg `is_gpu()` must keep its real value.
+_GPU_TARGET_QUERY_MODULE = 'std.sys.info'
+
+
 def _comptime_call_hook(gen):
     """Build the call hook for comptime_eval.eval_const_int: fold a call to
     an *imported* function by running it at compile time as cached machine
@@ -8423,6 +8429,17 @@ def _comptime_call_hook(gen):
     of it — a backend with no import elaborator (the formal arm64 path) omits
     it and simply does not fold calls."""
     def hook(name, argvals):
+        if not argvals and _is_gpu_target_query_false(name):
+            _imported_from = (gen.imported_symbols.get(name) or {}).get('module')
+            if _imported_from == _GPU_TARGET_QUERY_MODULE:
+                return 0
+        cache = getattr(gen, '_comptime_call_hook_cache', None)
+        if cache is None:
+            cache = {}
+            gen._comptime_call_hook_cache = cache
+        key = (name, tuple(argvals))
+        if key in cache:
+            return cache[key]
         src_path = gen._imported_fn_sources.get(name)
         if not src_path:
             return None
@@ -8439,11 +8456,44 @@ def _comptime_call_hook(gen):
             module_src = open(src_path).read()
             fn_src = _elab.extract_fn_source(module_src, name)
             if fn_src:
-                return int(_comptime.evaluate(fn_src, name, argvals))
+                value = int(_comptime.evaluate(fn_src, name, argvals))
+                cache[key] = value
+                return value
         except Exception:
             gimple_ctypes._debug_note('comptime evaluation failed', name)
+        cache[key] = None
         return None
     return hook
+
+
+# The stdlib's zero-arg GPU target queries (std/sys/info.mojo), answered
+# False by this backend: the gimple build compiles C for the host's gcc, so
+# the target triple is a CPU triple and no GPU-triple query can be true.
+# `is_gpu` is the or of the three architectures; the `_is_sm_*` family is
+# nvidia-triple-derived (`_is_nvidia_gpu_any[...]` over the sm_ archs) and
+# the `_is_amd_*` family the amdgpu-arch check, so they fold with their
+# architectures. Without the fold a CPU build's
+# `comptime if is_nvidia_gpu(): ... elif is_amd_gpu(): ...` cannot resolve:
+# the queries are imported calls the hook's source-extraction route cannot
+# evaluate, the condition stays CONST_UNKNOWN, and the comptime-if emits
+# every arm. The dead GPU bodies are then lowered as live code: the one that
+# carried a progressing bracket call was refused by the
+# elaborated-instantiation guard (the original stdlib-syntax red,
+# test/math/test_math.mojo through std/math/math.mojo's rsqrt/recip/exp2/log
+# arms), and even without that guard every one of them is code a CPU build
+# must not emit. The `has_*` device-capability queries are NOT here: they ask
+# about a runtime accelerator, not the target triple.
+_GPU_TARGET_QUERY_FALSE = frozenset((
+    'is_nvidia_gpu', 'is_amd_gpu', 'is_apple_gpu', 'is_gpu',
+))
+_GPU_TARGET_QUERY_PREFIXES = ('_is_sm_', '_is_amd_')
+
+
+def _is_gpu_target_query_false(name) -> bool:
+    """A zero-arg compile-target GPU query the gimple (host-CPU) build
+    answers False."""
+    return (name in _GPU_TARGET_QUERY_FALSE
+            or name.startswith(_GPU_TARGET_QUERY_PREFIXES))
 
 
 def _conformance_trait_bases_from_source(gen):

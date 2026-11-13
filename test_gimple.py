@@ -184,6 +184,29 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     return ''
 
 
+def stdlib_unit_emits(mojo_src: str) -> str:
+    """The generated C for mojo_src through
+    build_stdlib_dylib.compile_module_to_c: the single-unit path
+    compile_one.py and the stdlib-syntax gate use, so a shape that only the
+    elaborated (imported-generic) path refuses is exercised here and not by
+    gimple_compiles. Raises on a refusal."""
+    import build_stdlib_dylib
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stdlib_unit_probe.mojo')
+    return build_stdlib_dylib.compile_module_to_c(mojo_src, path, 'stdlib_unit_probe')
+
+
+def stdlib_unit_compiles(mojo_src: str) -> tuple[bool, str]:
+    """Return (ok, error) through build_stdlib_dylib.compile_module_to_c: the
+    single-unit path compile_one.py and the stdlib-syntax gate use. It is not
+    the in-process path gimple_compiles takes, and the two refuse different
+    things (a bracketed generic called from main is only instantiated here)."""
+    try:
+        stdlib_unit_emits(mojo_src)
+        return True, ''
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
 def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
     """Return (ok, c_src, stderr)."""
     c_src = compile_to_gimple(mojo_src)
@@ -14867,6 +14890,21 @@ def g(x: SIMD[Float64, 1]) -> Bool:
     return (b & 0x7FF).eq(0)
 """), 'gate_stdlib_syntax_float_bit_accessors')
 
+    # A float bit REINTERPRETATION, not a zero: `bitcast[Float32, 1](bits)` and
+    # `SIMD[Float64, 1](from_bits=bits)` both lower through _emit_bits_to_float
+    # to the runtime's bit-pattern helpers. Before, the bitcast fell into the
+    # catch-all and produced `(int64_t)0`, a silently wrong answer.
+    test_c_shape("bitcast_and_from_bits_reinterpret_bits",
+                 """\
+def f(bits: Int64) -> Float32:
+    return bitcast[Float32, 1](bits)
+
+def g(bits: Int64) -> Float64:
+    return SIMD[Float64, 1](from_bits=bits)
+""",
+                 must_have=["mojo_float_from_bits (", "mojo_double_from_bits ("],
+                 must_not_have=["/* indirect call via"])
+
     # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
     #
     # The Array fill-unroll coerces its fill value to the element type, and a
@@ -14903,6 +14941,108 @@ def f() -> Float64:
 
     _run_isolated(_test_array_float_fill_from_a_container,
                   'gate_stdlib_syntax_array_float_fill_pointer_coercion')
+
+    # gate-stdlib-syntax (2026-11-13): the elaborated-instantiation refusal
+    # must ask whether a bracket argument PROGRESSES (`i + 1`, the unbounded
+    # instantiation b3e501b60 closed), not whether it is a concrete TYPE.
+    # `llvm_intrinsic["llvm.probe.name", T]` is an imported builtin call
+    # whose first argument is a fixed string value and whose second is a
+    # type: the old "not a concrete type" test read the string's rendering
+    # as '' and refused, taking std/math/math.mojo (frexp, reached from
+    # test_ldexp/test_math) and the other stdlib-syntax files red. The shipped
+    # lowering is the documented module-boundary stub. The case compiles in
+    # single-unit mode, the path compile_one.py uses.
+    def _test_imported_intrinsic_string_arg_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_imported_intrinsic_string_arg"
+        ok, err = stdlib_unit_compiles("""\
+from std.sys.intrinsics import llvm_intrinsic
+
+def wrap[T: DType](x: SIMD[T, 1]) -> SIMD[T, 1]:
+    return llvm_intrinsic["llvm.probe.name", SIMD[T, 1], has_side_effect=False](x)
+
+def main():
+    print(wrap[DType.float32](SIMD[DType.float32, 1](2.0)))
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_imported_intrinsic_string_arg_in_instance,
+                  'gate_stdlib_syntax_imported_intrinsic_string_arg')
+
+    # gate-stdlib-syntax (2026-11-13): the same refusal on the two shapes
+    # that are compile-time VALUES, not type names, through real stdlib
+    # generics: `sqrt(x)`/`sin(x)` (an intrinsic-name string argument) and
+    # `erf(x)` (`polynomial_evaluate[[1.0, ...]]`, a comptime LIST). Both
+    # are imported generics, so this is the elaborated path the sweep uses.
+    # Before the progressing-argument predicate, `sqrt` refused with
+    # `_llvm_unary_fn` and `erf` with `polynomial_evaluate`: the old test
+    # was "not a concrete type", which neither a string nor a list is.
+    def _test_imported_generic_bracket_args():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_imported_generic_bracket_args"
+        ok, err = stdlib_unit_compiles("""\
+from std.math import sqrt, erf, sin
+
+def probe(x: Float32) -> Float32:
+    return sqrt(x) + erf(x) + sin(x)
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_imported_generic_bracket_args,
+                  'gate_stdlib_syntax_imported_generic_bracket_args')
+
+    # gate-stdlib-syntax (2026-11-13): a `comptime if` over the stdlib's
+    # zero-arg GPU target queries in a generic body (std/math/math.mojo's
+    # rsqrt/recip/exp2/log shape, reached from test_math). On a CPU build
+    # the queries are False, so the GPU arms are comptime-dead and must be
+    # pruned, not emitted as a runtime if/elif over an imported query. The
+    # assertion is on the generated C because a build that emitted the arms
+    # also succeeds on the single-unit path; the calls are what the fold
+    # removes, and the dead arm carries a progressing bracket call
+    # (`f[Int64](1 + 2)`) that the elaborated path refuses if it is reached.
+    def _test_comptime_dead_gpu_arm_pruned_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_comptime_gpu_arm_pruned"
+        try:
+            c_src = stdlib_unit_emits("""\
+from std.sys.info import is_nvidia_gpu, is_amd_gpu
+
+def f[T: AnyType](x: Int64) -> Int64:
+    comptime if is_nvidia_gpu():
+        return 0
+    elif is_amd_gpu():
+        return f[Int64](1 + 2)
+    return x
+
+def main():
+    print(f[Float32](1))
+""")
+        except Exception as e:
+            print(f"FAIL  {name}: {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        nvidia = c_src.count('std_sys_info_is_nvidia_gpu ()')
+        amd = c_src.count('std_sys_info_is_amd_gpu ()')
+        if nvidia == 0 and amd == 0:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: emitted the dead arms "
+                  f"(nvidia={nvidia}, amd={amd}; want 0 each)")
+            _FAIL += 1
+
+    _run_isolated(_test_comptime_dead_gpu_arm_pruned_in_instance,
+                  'gate_stdlib_syntax_comptime_gpu_arm_pruned')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

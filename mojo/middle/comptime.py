@@ -1077,7 +1077,14 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
         argvals = [eval_const_int(a, bindings, call_hook, conforms_to_pred) for a in node.args]
-        if argvals and all(v is not None for v in argvals):
+        # A zero-arg call reaches the hook: `argvals` is an empty list, and
+        # the old `argvals and ...` gate read that as "cannot answer" even
+        # though every (zero) argument folded. That left the stdlib's
+        # zero-arg target queries (`is_nvidia_gpu()`, ...) permanently
+        # CONST_UNKNOWN, so a `comptime if` over them emitted every arm, the
+        # GPU ones included, as live code on a CPU build. `all([])` is True:
+        # there is nothing left to fold.
+        if all(v is not None for v in argvals):
             return call_hook(node.func.name, argvals)
     return None
 
@@ -1219,6 +1226,18 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
                 lv = eval_const(node.left, bindings, None, conforms_to_pred)
             except Exception:
                 lv = None
+            if lv is None and call_hook is not None:
+                # `eval_const` carries no hook: a call only the backend's
+                # hook can fold (a zero-arg target query, `is_amd_gpu()`)
+                # reads as not-false here, and the whole `and` would then
+                # demand its right side be foldable to prune an arm the
+                # hook has already decided dead. Ask the hook the same
+                # question; a falsy answer settles the condition.
+                try:
+                    lv = eval_const_int(node.left, bindings, call_hook,
+                                        conforms_to_pred)
+                except Exception:
+                    lv = None
             if lv is not None and not lv:
                 return True
             return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
@@ -1229,6 +1248,14 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
                 lv = eval_const(node.left, bindings, None, conforms_to_pred)
             except Exception:
                 lv = None
+            if lv is None and call_hook is not None:
+                # Mirror of the `and` case: a hook-foldable truthy left
+                # settles the whole condition.
+                try:
+                    lv = eval_const_int(node.left, bindings, call_hook,
+                                        conforms_to_pred)
+                except Exception:
+                    lv = None
             if lv is not None and lv:
                 return True
             return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
