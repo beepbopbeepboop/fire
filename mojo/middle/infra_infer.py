@@ -1888,9 +1888,82 @@ def _collect_return_types(gen, stmts: list, acc: list):
         if isinstance(node, gimple_ctypes.ReturnStmt):
             acc.append('void' if node.value is None else gen._quick_type(node.value))
         elif isinstance(node, gimple_ctypes.IfStmt):
-            gen._collect_return_types(node.then_body, acc)
-            for _, eb in node.elifs:
-                gen._collect_return_types(eb, acc)
+            # Inside `if isinstance(x, T):` a read of `x` IS a `T *`, and
+            # that is the only way a field read whose name is ambiguous
+            # across structs (`value` is a `double` in FloatLiteral and an
+            # int64_t in half this compiler's own AST nodes) can be typed at
+            # all: `_quick_type` resolves the receiver through `var_types`,
+            # which saw only the erased parameter. Without the narrowing
+            # `comptime.eval_const`'s `return node.value` read as int64_t, the
+            # float arm was invisible to the return-type join, and the whole
+            # fix below never fired for the one function that motivated it.
+            # The overlay is exactly the one the lowering installs at the
+            # same guard (`_narrowed_exprs`), so the arm types the scan sees
+            # and the types the body emits cannot disagree.
+            _nw: list = []
+            try:
+                gen._collect_isinstance_narrowings(node.condition, _nw)
+            except Exception:
+                _nw = []
+            # name -> the entry it had (None when it had none), plus the set
+            # of names that DID have one. Dicts of strings, not a list of
+            # (name, value, had) tuples: on the self-hosted path a tuple
+            # element read back is an int64_t word, so the value would stop
+            # being a C type string (see `_apply_isinstance_narrowings`' own
+            # note on indexing its 3-tuples).
+            _saved: dict = {}
+            _had: set = set()
+            for _ni in range(len(_nw)):
+                _key = _as_str(_nw[_ni][0])
+                if not _key.startswith('i:'):
+                    continue
+                _nm = _key[2:]
+                if _nm not in _saved:
+                    if _nm in gen.var_types:
+                        _saved[_nm] = gen.var_types[_nm]
+                        _had.add(_nm)
+                    else:
+                        _saved[_nm] = None
+                gen.var_types[_nm] = _as_str(_nw[_ni][1])
+            try:
+                gen._collect_return_types(node.then_body, acc)
+            finally:
+                for _nm in _saved:
+                    if _nm in _had:
+                        gen.var_types[_nm] = _saved[_nm]
+                    else:
+                        gen.var_types.pop(_nm, None)
+            for _ec, eb in node.elifs:
+                # An `elif` body is guarded by its own condition too, and by
+                # the negations before it; only its own narrowing is applied
+                # here (a negative narrowing is not modelled anywhere).
+                _enw: list = []
+                try:
+                    gen._collect_isinstance_narrowings(_ec, _enw)
+                except Exception:
+                    _enw = []
+                _esaved: dict = {}
+                _ehad: set = set()
+                for _ni in range(len(_enw)):
+                    _key = _as_str(_enw[_ni][0])
+                    if not _key.startswith('i:'):
+                        continue
+                    _nm = _key[2:]
+                    if _nm not in _esaved:
+                        if _nm in gen.var_types:
+                            _esaved[_nm] = gen.var_types[_nm]
+                            _ehad.add(_nm)
+                        else:
+                            _esaved[_nm] = None
+                    gen.var_types[_nm] = _as_str(_enw[_ni][1])
+                try:
+                    gen._collect_return_types(eb, acc)
+                finally:
+                    for _nm in _esaved:
+                        if _nm in _ehad:
+                            gen.var_types[_nm] = _esaved[_nm]
+                        else:
+                            gen.var_types.pop(_nm, None)
             if node.else_body:
                 gen._collect_return_types(node.else_body, acc)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
@@ -1913,12 +1986,33 @@ def _collect_return_types(gen, stmts: list, acc: list):
         elif isinstance(node, gimple_ctypes.WithStmt):
             gen._collect_return_types(node.body, acc)
 
+def _acc_has_float(acc: list) -> bool:
+    """Does this return-arm type list hold a float arm?"""
+    for _t in acc:
+        if _t in ('double', 'float'):
+            return True
+    return False
+
+
 def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
     gen._collect_return_types(body, acc)
     if acc:
         _rt = gimple_ctypes.TypeLattice.join_all(acc)
+        # A float beside a pointer has no arm type that can hold both (a
+        # pointer beats a `double` in `join`, and the float arm then truncates
+        # into it), so the function returns the TAGGED WORD instead. Body
+        # identity is recorded so the return emitter boxes exactly the
+        # functions this decision widened, rather than re-deriving the mix
+        # from a differently-seeded type table.
+        if _acc_has_float(acc) and gimple_ctypes.TypeLattice.is_pointer(_rt):
+            _mixed = getattr(gen, '_float_mixed_return_bodies', None)
+            if _mixed is None:
+                _mixed = set()
+                gen._float_mixed_return_bodies = _mixed
+            _mixed.add(id(body))
+            return 'int64_t'
         # `int` is this compiler's INTERNAL marker for "a _Bool met an int"
         # (see `_dict_val_of`), but it is also the C storage type of a
         # module-level int-literal global. A method that `return G`s such a
