@@ -5,9 +5,10 @@ Every `test_*` here is the Done-when test of a part that has LANDED: its bug
 doc is deleted and the assertion is now a standing pin. This is the registered
 `reg-codegen-erased-container-values` job, so it must stay green.
 
-The per-part Done-when probes of the still-open parts (p4_alias, p4_comptime,
-part5) live in test_codegen_erased_container_values.py and run by their bug
-docs' commands; a probe moves here, in the same commit that lands its part.
+The per-part Done-when probes of the still-open parts (p1_alias, p2_alias_ctor,
+p3_comptime, p4_container_param) live in
+test_codegen_erased_container_values.py and run by their bug docs' commands; a
+probe moves here, in the same commit that lands its part.
 
 They assert on the C of one generated function body, not on the whole module:
 the module header already contains `double` and `float` (`extern double
@@ -29,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import build_stdlib_dylib as b
+import gimple_codegen as g
 
 
 def _compile(src, name):
@@ -201,6 +203,39 @@ def test_part4_part1_int_simd_unchanged():
     idbody = _defn(c, 'simd_sig_gi')
     idsig = idbody.splitlines()[1].strip()
     assert idsig.startswith('int64_t ') and idsig.endswith('(int64_t x)'), idbody
+
+
+# part5: Scalar[X] / SIMD[X, 1] resolve to the scalar C type of X. Its doc was
+# deleted with the fix; the Done-when probe moved here from the open-probe
+# harness.
+def test_part5_scalar_annotation_resolves_to_scalar_ctype():
+    gen = g.GimpleGen()
+    expect = {
+        'Float32': 'float',
+        'Float64': 'double',
+        'Scalar[Float32]': 'float',
+        'SIMD[Float32, 1]': 'float',
+        'Scalar[DType.float32]': 'float',
+        'Scalar[Float64]': 'double',
+        'Scalar[DType.float64]': 'double',
+    }
+    bad = {a: (gen._resolve_type(a), want) for a, want in expect.items()
+           if gen._resolve_type(a) != want}
+    assert not bad, 'annotation -> (got, want): %r' % (bad,)
+
+    # A comptime local `dt` bound to a float dtype must resolve through the
+    # comptime binding, not stay erased to int64_t.
+    gen._comptime_vals['dt32'] = 'DType.float32'
+    gen._comptime_vals['dt64'] = 'DType.float64'
+    expect_ct = {
+        'Scalar[dt32]': 'float',
+        'SIMD[dt32, 1]': 'float',
+        'Scalar[dt64]': 'double',
+        'SIMD[dt64, 1]': 'double',
+    }
+    bad = {a: (gen._resolve_type(a), want) for a, want in expect_ct.items()
+           if gen._resolve_type(a) != want}
+    assert not bad, 'comptime annotation -> (got, want): %r' % (bad,)
 
 
 if __name__ == '__main__':
