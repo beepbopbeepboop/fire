@@ -4225,7 +4225,7 @@ test('reg-codegen-drop-unreferenced-unimpl-stubs', [PY, 'test_codegen_drop_unref
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-codegen-enumerate-unpack-shadow-store-cast', [PY, 'test_codegen_enumerate_unpack_shadow_store_cast.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-erased-container-values', [PY, 'test_codegen_erased_container_values.py'], mem='tiny',
+test('reg-codegen-erased-container-values', [PY, 'test_codegen_erased_container_values_pins.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-codegen-import-extern-annotated-ptr-return', [PY, 'test_codegen_import_extern_annotated_ptr_return.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')

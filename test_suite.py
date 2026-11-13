@@ -4063,7 +4063,16 @@ _STANDALONE_TEST_REASON = (
     'directly (`python3 <file>`); the subject is named in the file\'s own '
     'docstring. Unregistered so far: a cheap one wants a bucket.')
 
+_OPEN_PROBE_HARNESS_REASON = (
+    'The per-part Done-when probes of the still-open parts of '
+    'CODEGEN_simd_and_array_values_erase_to_int64: red until each part lands, '
+    'so not a registered job. Each is run by its own bug doc\'s command '
+    '(`python3 test_codegen_erased_container_values.py <prefix>`); the landed '
+    'pins are the registered `reg-codegen-erased-container-values` job in '
+    'test_codegen_erased_container_values_pins.py.')
+
 UNREGISTERED = {
+    'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
     'test_codegen_sys_encoding_capture.py': _STANDALONE_TEST_REASON,
