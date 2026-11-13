@@ -879,8 +879,12 @@ def retire_dead():
         subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"], capture_output=True)
         n += 1
         if not backfill and C.limit_hit(t) and t.get("pool"):   # an old log's limit line is history, not a live ban
-            C.mark_dead(t["model"], C.pool_slot(t["pool"]), C.limit_reset(t))
-            log("retired %s: a limit kill, slot %s banned until its reset" % (name, t["pool"]))
+            _sl = C.find_slot(t["pool"])
+            if _sl is not None:
+                C.mark_dead(t["model"], _sl, C.limit_reset(t))
+                log("retired %s: a limit kill, slot %s banned until its reset" % (name, t["pool"]))
+            else:
+                log("retired %s: a limit kill, but slot %s is no longer in pool.json" % (name, t["pool"]))
             continue
         if not backfill:
             for c in t.get("claims", []):
