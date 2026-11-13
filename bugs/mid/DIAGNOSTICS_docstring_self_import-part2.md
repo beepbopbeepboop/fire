@@ -6,7 +6,7 @@ Extend the import checker to scan mojo code blocks extracted from docstrings
 there with the diagnostic: `module 'X' cannot import itself`.
 
 ## Dependencies
-- DIAGNOSTICS_docstring_self_import-part1 (docstring mojo code-block extraction)
+- Docstring mojo code-block extraction landed (part 1): reusable API in `mojo/middle/docstring_blocks.py`.
 
 ## Scope
 - Integrate extracted docstring code blocks into import validation.
