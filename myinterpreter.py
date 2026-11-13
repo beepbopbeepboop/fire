@@ -20,7 +20,7 @@ import math
 import collections
 import builtins
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
@@ -55,6 +55,23 @@ _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 # `types.new_class` path) still gets the decorator applied for real; see the
 # `isinstance(bound, MojoClass)` guard in `_apply_function_decorators`.
 _DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
+
+
+def _unwrap_dataclass_field(value):
+    """The default a declared field takes, given the value its initializer
+    evaluated to. `field(default=...)` and `field(default_factory=...)` are
+    calls that return a `dataclasses.Field`; the constructor binds the
+    wrapped default (or the factory's result), never the Field object.
+    Any other value passes through unchanged. A Field with neither a
+    `default` nor a `default_factory` is a required field with no default,
+    which binds None, as a bare `x: int` does."""
+    if not isinstance(value, Field):
+        return value
+    if value.default is not MISSING:
+        return value.default
+    if value.default_factory is not MISSING:
+        return value.default_factory()
+    return None
 
 
 def _decorator_dotted_name(node):
@@ -2690,6 +2707,7 @@ class MojoClass:
                         setattr(instance, f.name, container_default)
                         continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
+                value = _unwrap_dataclass_field(value)
                 value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
@@ -2698,10 +2716,13 @@ class MojoClass:
                 # raised "'AssignStmt' object has no attribute 'targets'"
                 # on any instantiation of a class with a bare `NAME = value`
                 # class-body attribute (e.g. `class Foo: count = 0`).
+                # `name: Type = field(default=...)` lands here (an AssignStmt
+                # carrying `type_ann`, not a VarDecl), so the dataclass Field
+                # unwrap applies to it too.
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 target = f.target
                 if self.interpreter._is_instance(target, 'IdentExpr'):
-                    setattr(instance, target.name, value)
+                    setattr(instance, target.name, _unwrap_dataclass_field(value))
         init = self.methods.get('__init__')
         if init is not None:
             interp = self.interpreter

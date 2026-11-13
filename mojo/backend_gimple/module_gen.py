@@ -11242,6 +11242,10 @@ def gen_module_impl(self, stmts: list):
             _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
                 _as_str(caller_name), ())
             if _as_str(a.name) in _unpacked:
+                # The box says nothing about a tuple-unpack target: whether
+                # the slot is a container, a str or a number is decided by
+                # `_unpack_from_container_slot` / `_unpack_from_scalar_slot`
+                # at the call site below, so this reader stays silent.
                 return False
         return _as_str(st) in ('int64_t', 'int', 'bool')
 
