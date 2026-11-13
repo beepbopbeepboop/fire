@@ -326,6 +326,26 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
     return t
 
 
+def _nested_generator_start_arg_pairs(gen, node: gimple_ctypes.CallExpr,
+                                      api: dict) -> list:
+    """User positional argument pairs followed by captured enclosing values,
+    the assembly shared by every backend that constructs a nested generator
+    (GIMPLE here, and the C++ coroutine delegate). Only the plain positional
+    form is threaded; a keyword or defaulted argument is refused rather than
+    silently mis-slotted into a capture's position."""
+    user_n = len(api['params']) - len(api['captures'])
+    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
+        raise RuntimeError(
+            "cannot compile module: call to nested generator "
+            f"{api.get('nested_name', '<nested>')!r} with keyword or defaulted "
+            "arguments is not supported (only the plain positional form is "
+            "threaded, together with its enclosing-scope captures)")
+    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
+                  for _cn, _ in api['captures']]
+    return arg_pairs
+
+
 def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
                                       api: dict) -> str:
     """Construction of a nested generator that reads enclosing names
@@ -335,16 +355,7 @@ def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
     `_lower_async_closure_construct` uses for a nested async closure. Only
     the plain positional form is threaded; a keyword or defaulted argument
     is refused rather than silently mis-slotted into a capture's position."""
-    user_n = len(api['params']) - len(api['captures'])
-    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
-        raise RuntimeError(
-            "cannot compile module: call to nested generator "
-            f"{api['nested_name']!r} with keyword or defaulted arguments is "
-            "not supported (only the plain positional form is threaded, "
-            "together with its enclosing-scope captures)")
-    arg_pairs = [gen.lower_expr(a) for a in node.args]
-    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
-                  for _cn, _ in api['captures']]
+    arg_pairs = _nested_generator_start_arg_pairs(gen, node, api)
     _record_generator_value_kind(api)
     return _finish_generator_start(gen, api, arg_pairs)
 
@@ -10511,6 +10522,17 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # `node.args` positionally, so an argument coercion can tell what each
     # argument MEANT (see `_emit_call`'s `arg_nodes`).
     t = gen._call_expr(ret_type, fname, arg_pairs, node.args)
+    # A float+pointer callee returns the TAGGED WORD
+    # (`module_gen._ret_may_hold_float`). Every piece of bookkeeping below is
+    # about ONE container shape, and this result has none: it may be a float
+    # box, a str/list/tuple box or a plain int. Recording one of those shapes
+    # would make a consumer cast the box's own address to a container (`f(1)
+    # [0:1]` sliced the box cell as a list). The word is marked as tagged for
+    # the consumers that dispatch by kind instead.
+    if fname_raw in getattr(gen, '_ret_may_hold_float', ()):
+        gen._boxed_vals.add(t)
+        gen._tagged_word_vals.add(t)
+        return ret_type, t
     # A multi-value return's per-slot types, carried across the call (see
     # gen._return_slot_types's declaration). Same reason and same shape as
     # the `_return_elem_types` block just below: the callee's slot types are
@@ -11636,6 +11658,21 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # down, which assumes its receiver is a real pointer and errors trying to
     # dereference a bare _Bool.
     if ot in ('int', 'int64_t', '_Bool'):
+        # A TAGGED word (`_tagged_word_vals`: the result of a float+pointer
+        # mixed return, or a kind-mixed yield) may hold a list/tuple, a str,
+        # a bytes or a scalar. Its kind is a runtime fact, so the subscript is
+        # dispatched there (`mojo_word_subscript`) instead of guessing one
+        # container from the erased int64_t — a guess that read a str's bytes
+        # as a list header. A list slot's float comes back BOXED, which is the
+        # same tagged word the rest of this path already consumes.
+        if ov in getattr(gen, '_tagged_word_vals', ()):
+            _wi = gen._to_int64(idx_type, iv)
+            _wt = gen._call_expr('int64_t', 'mojo_word_subscript',
+                                 [('int64_t', ov), ('int64_t', _wi)])
+            gen._boxed_vals.add(_wt)
+            gen._tagged_word_vals.add(_wt)
+            gen._dyn_word_vals.add(_wt)
+            return 'int64_t', _wt
         # Check actual type for globals loaded as int64_t
         actual_type = gen._get_actual_type(ot, ov)
         if actual_type == 'char *':

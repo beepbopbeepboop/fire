@@ -11861,6 +11861,71 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_attribute_to_def_write_invalidates_the_walk_memo():
+        """`_attribute_to_def` stamps every prologue statement it is handed
+        with the line/col of the generator's `def`, and that stamp is an AST
+        write: the walk-memo entry of every statement it touches must be
+        dropped, like at every other write site in `mojo/`.
+
+        The prologue statements are freshly synthesized in the lowering
+        pipeline, but the helper is shared: the next statement it is handed
+        can be one the memo has already answered, and a write that leaves
+        the entry in place is exactly the stale-memo hazard the memo's
+        contract exists to close. The census
+        (`every_ast_mutation_site_invalidates_the_walk_memo`) polices the
+        contract for this site statically; this is the behavioural half —
+        before the `_walk_ast_invalidate` call, a statement the memo had
+        already answered kept answering with the pre-stamp entry after the
+        write."""
+        global _PASS, _FAIL
+        name = "attribute_to_def_write_invalidates_the_walk_memo"
+        import mojo.middle.exprtypes as ET
+        import mojo.middle.coro as CO
+        from fire_compiler import py_tokenize, Parser, FunctionDef, VarDecl
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            stmts = (Parser(py_tokenize(
+                "def g(a):\n    yield a\nvar p = 1\n")).parse_module() or [])
+            fn = [s for s in stmts if isinstance(s, FunctionDef)][0]
+            stmt = [s for s in stmts if isinstance(s, VarDecl)][0]
+            # The generator def lives on its own line in the source, apart
+            # from the prologue statement, so the stamp moves both fields.
+            fn.line, fn.col = 42, 7
+            first = ET._walk_ast(stmt)
+            if ET._walk_ast(stmt) is not first:
+                err = 'nothing was memoized, so this proved nothing'
+            elif any(isinstance(v, int) and not isinstance(v, bool)
+                     and v == fn.line for v in first):
+                err = ('the test precondition is wrong: the def line is '
+                       'already in the pre-stamp walk')
+            else:
+                CO._attribute_to_def([stmt], fn)
+                after = ET._walk_ast(stmt)
+                scalars = [v for v in after
+                           if isinstance(v, int) and not isinstance(v, bool)]
+                if (stmt.line, stmt.col) != (fn.line, fn.col):
+                    err = 'the stamp did not reach the statement'
+                elif after is first:
+                    err = ('the memo entry for the statement survived the '
+                           'write: the walk after the stamp still answered '
+                           'from the pre-stamp memo')
+                elif fn.line not in scalars:
+                    err = ('the walk after the stamp still answers from the '
+                           'memo: the generator def line %d is missing from '
+                           'it' % fn.line)
+        except Exception as e:  # noqa: BLE001
+            err = f'{type(e).__name__}: {e}'
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -14102,6 +14167,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
     _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
+    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo (line 11864)')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
@@ -14424,6 +14490,382 @@ def f() -> Int:
     s[0] = 5
     return s.data[0]
 """), 'struct_subscript_store_with_backing_field')
+
+    def test_regex_tables_are_referenced_by_address_in_a_gimple_body():
+        """A regex table is emitted as an ARRAY; binding it to a pointer temp
+        must spell `&table[0]`, never rely on array-to-pointer decay.
+
+        `_t62 = _re17_prog;` is accepted in an ordinary C function, where gcc's
+        C frontend performs the decay for us — and is a hard error in a
+        `__GIMPLE`-tagged body, which gcc reads as raw GIMPLE (struct methods
+        and lifted closures; `fire.py build` compiles the whole-closure `.ci`
+        with `-x c`): "non-trivial conversion in 'var_decl'", RHS
+        `const struct ReNode[55]` against a `const struct ReNode *` var_decl.
+        That is what broke the self-host `fire.o` step at
+        `Parser._merge_string_literals` and `elaborate_overload_call`, both of
+        which call `re.sub`.
+
+        Asserts the emitted reference for all four tables (prog, ranges,
+        classinfo, names — the last is `for m in PAT.finditer(...)`; note the
+        loop is at module scope here because `finditer` in a `__GIMPLE` body
+        has its own separate gimple-legality gaps), then compiles the `.ci` as
+        C (`-x c`, the build's flags) and RUNS it against CPython so a fix
+        cannot pass by changing which value is read."""
+        global _PASS, _FAIL
+        name = "regex_tables_are_referenced_by_address_in_a_gimple_body"
+        src = r'''
+import re
+
+PAT = re.compile(r"(?P<k>[a-z]+)([0-9]+)")
+SEP = re.compile(r",\s*")
+
+def norm(s):
+    return re.sub(r"[0-9]+", "N", s)
+
+def count_matches(s):
+    n = 0
+    for m in PAT.finditer(s):
+        n = n + 1
+    return n
+
+class S:
+    def sub(self, s):
+        return re.sub(r"[0-9]+", "N", s)
+
+    def parts(self, s):
+        return SEP.split(s)
+
+def main():
+    print(norm("a1b22"))
+    print(count_matches("ab12 cd34"))
+    print(S().sub("c3d4"))
+    print(S().parts("a, b,c"))
+
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        missing = [suffix for suffix in ('prog', 'ranges', 'classinfo', 'names')
+                   if not re.search(rf'= &_re\d+_{suffix}\[0\];', c_src)]
+        bare = re.findall(r'= _re\d+_(?:prog|ranges|classinfo|names);', c_src)
+        # The method body must be a __GIMPLE one, or this test would be
+        # asserting the ordinary-C case gcc already tolerates.
+        if not ok or missing or bare or '__GIMPLE char * S_sub' not in c_src:
+            print(f"FAIL  {name}: ok={ok} missing-address-refs={missing} "
+                  f"bare-decays={bare}")
+            if not ok:
+                for line in stderr.splitlines()[:12]:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'regex_tables.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'regex_tables.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'regex_tables.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_re_sub_with_inline_lambda():
+        """A re.sub() whose second argument is an INLINE lambda must be
+        dispatched down the callback path (mojo_regex_sub_fn with the lambda's
+        function pointer), never down the replacement-string path (mojo_regex_sub_str).
+
+        Before the fix, `_re_sub_repl_is_callback` only answered True for an
+        IdentExpr (a closure or a bare top-level def name), so a LambdaExpr was
+        classified as a plain replacement string and its (garbage) address was
+        passed to mojo_regex_sub_str as the replacement value — the compiled
+        program printed the lambda's machine code instead of the replacement
+        (bugs/CODEGEN_re_sub_inline_lambda_used_as_replacement_string).
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_inline_lambda"
+        src = r'''
+import re
+
+def main():
+    print(re.sub(r"[0-9]+", lambda _m: "N", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            # The callback path means the generated call carries the
+            # mojo_regex_sub_fn shape (callback + env), not mojo_regex_sub_str.
+            if 'mojo_regex_sub_fn' not in c_src:
+                print(f"FAIL  {name}: re.sub with a lambda did not emit the callback call")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- generated C ---")
+        for i, line in enumerate(c_src.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(lambda: test_regex_tables_are_referenced_by_address_in_a_gimple_body(),
+                  'test_regex_tables_are_referenced_by_address_in_a_gimple_body')
+    _run_isolated(lambda: test_re_sub_with_inline_lambda(),
+                  'test_re_sub_with_inline_lambda')
+
+    def test_re_sub_with_capturing_lambda():
+        """A re.sub() whose second argument is a CAPTURING lambda (one that
+        reads an enclosing local) must be dispatched down the callback path,
+        with the callback and its env unpacked from the lambda's
+        MojoBoundMethod (fn, self) and passed to mojo_regex_sub_fn. Before the
+        fix, `_re_sub_repl_is_callback` answered False for any capturing lambda,
+        so the lambda's value went to mojo_regex_sub_str as a replacement
+        string; a later fix refused it outright, which made `module_gen.py`
+        (its `@@CSYM:` resolution) uncompilable. That is the shape tested here.
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_capturing_lambda"
+        src = r'''
+import re
+
+def main():
+    k = "N"
+    print(re.sub(r"[0-9]+", lambda _m: k, "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            if ('mojo_regex_sub_fn' not in c_src
+                    or 'mojo_bound_method_fn' not in c_src
+                    or 'mojo_bound_method_self' not in c_src):
+                print(f"FAIL  {name}: capturing lambda was not unpacked into (fn, env) for the callback")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(lambda: test_re_sub_with_capturing_lambda(),
+                  'test_re_sub_with_capturing_lambda')
+
+    def test_regex_scan_in_a_method_body_compiles_and_matches_cpython():
+        """`for m in PAT.finditer(s)` inside a struct method — a `__GIMPLE`
+        body, which gcc reads as raw GIMPLE under `-x c` (the build's flags) —
+        must compile and count matches like CPython.
+
+        Two defects, both in emit_loops.py's regex scan lowering:
+        (1) it sized its group-offset arrays with `(int64_t)(sizeof(int64_t)
+        * n)`, and `sizeof` is not a GIMPLE operand ("expected expression
+        before '(' token"); (2) it used the address-taken out-param
+        `mend` directly as a comparison and `?:` operand, which raw GIMPLE
+        rejects ("invalid operands in binary operation"). The module-scope
+        variant of this loop (the test above) never reached either line,
+        because a module-level `def` is ordinary C.
+
+        Compiles the `.ci` as C and RUNS it against CPython so a fix cannot
+        pass by changing which count is produced."""
+        global _PASS, _FAIL
+        name = "regex_scan_in_a_method_body_compiles_and_matches_cpython"
+        src = r'''
+import re
+
+PAT = re.compile(r"(?P<k>[a-z]+)([0-9]+)")
+
+class S:
+    def count(self, s):
+        n = 0
+        for m in PAT.finditer(s):
+            n = n + 1
+        return n
+
+    def count_three_groups(self, s):
+        n = 0
+        for m in PAT3.finditer(s):
+            n = n + 1
+        return n
+
+PAT3 = re.compile(r"([a-z])(-)?([0-9])?")
+
+def main():
+    print(S().count("ab12 cd34 x 9"))
+    print(S().count("nothing here!"))
+    print(S().count_three_groups("a-1 b c-2"))
+
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if not ok:
+            print(f"FAIL  {name}: gimple body refused by gcc -x c:")
+            for line in stderr.splitlines()[:12]:
+                print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'regex_method_scan.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'regex_method_scan.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'regex_method_scan.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_regex_scan_in_a_method_body_compiles_and_matches_cpython(),
+                  'test_regex_scan_in_a_method_body_compiles_and_matches_cpython')
+
+    def test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body():
+        """`re.sub(pat, top_level_def, src)` must pass the callback as the
+        bare `void *` value it already is, never with a C-style `(void *)`
+        cast emitted INSIDE the `__GIMPLE` body.
+
+        A bare top-level `def` lowers to the file-scope
+        `static void * _funcptr_<fn>` (calls_shared._callable_value_symbol),
+        so the old fallback in `_lower_re_sub_callback` emitted
+        `_t6 = (void *)_funcptr_repl_9f63a2;` — and a cast whose operand is a
+        GLOBAL DECL is not a legal raw-GIMPLE operand, so gcc rejected the
+        whole `.ci` with "invalid operand in unary operation". gcc only
+        enforces that under `-x c` (this test's `gimple_body_compiles`, the
+        same parse `fire.py build` uses); a `.c` suffix lowers from C and
+        tolerates it, which is why every pre-existing re.sub test stayed
+        green.
+
+        Both lowering arms are covered because they share
+        `_lower_re_sub_callback`: a literal pattern folds into the codegen's
+        own regex engine (`mojo_regex_sub_fn`), while a pattern PARAMETER
+        falls back to the POSIX backend (`mojo_re_sub_fn`). The program is
+        then compiled and RUN with CPython's own stdout as the expectation,
+        so the callback has to be actually invoked and produce the right
+        string, not merely parse.
+        """
+        global _PASS, _FAIL
+        name = "named_callback_re_sub_compiles_and_runs_in_a_gimple_body"
+        src = r'''
+import re
+
+def repl(mm):
+    return "N"
+
+class S:
+    def sub(self, s):
+        return re.sub(r"[0-9]+", repl, s)
+
+    def sub_dynamic(self, pat, s):
+        return re.sub(pat, repl, s)
+
+def main():
+    print(S().sub("a1b22"))
+    print(S().sub_dynamic(r"[a-z]+", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        # The exact spelling this pins: no cast of the `_funcptr_` static.
+        casted = re.findall(r'= \(void \*\)_funcptr_', c_src)
+        if not ok or casted or '__GIMPLE char * S_sub' not in c_src:
+            print(f"FAIL  {name}: ok={ok} cast-funcptr-elems={casted}")
+            if not ok:
+                for line in stderr.splitlines()[:12]:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'named_cb_re_sub.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'named_cb_re_sub.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'named_cb_re_sub.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body(),
+                  'test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body')
+
+    # gate-stdlib-syntax: a FLOAT scalar's bit accessors answer an integer.
+    #
+    # This is the minimum shape of the eight-file `stdlib-syntax` red the two
+    # held `SIMD[X, 1] -> X` landings produced.
+    # Once a width-1 SIMD value is typed float/double, `val.to_bits()` and
+    # `x._to_bits_signed()` reach the generic scalar-method stub, which hands
+    # the receiver's type straight back; a bitwise expression on that result
+    # is then `float & float`, which gcc rejects. It is live in
+    # std/utils/numerics.mojo's isnan/isinf (their comptime-dead float8 arms
+    # are emitted, not pruned) and in std/math/math.mojo's frexp, reached from
+    # test_ldexp/test_math. The stdlib's own signatures say these accessors
+    # return an integer. This case fails on a resolver-only landing with
+    # "invalid operands to binary & (have 'float' and 'float')" and passes here.
+    _run_isolated(lambda: test("gate_stdlib_syntax_float_bit_accessors", """\
+def f(val: SIMD[Float32, 1]) -> Bool:
+    return (val.to_bits() & 0x7F).eq(0x7C)
+
+def g(x: SIMD[Float64, 1]) -> Bool:
+    var b = x._to_bits_signed()
+    return (b & 0x7FF).eq(0)
+"""), 'gate_stdlib_syntax_float_bit_accessors')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

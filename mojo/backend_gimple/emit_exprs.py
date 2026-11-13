@@ -119,6 +119,20 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
         _rt, _rv = gen._lower_call(node)
+        # The result of calling a float+pointer function is a TAGGED WORD
+        # (`module_gen._ret_may_hold_float`, filled from the same per-body
+        # inference decision that boxed its arms). Mark it so every consumer
+        # dispatches by kind instead of reading the word as an integer or
+        # casting it to the pointer the old join chose: `print` ->
+        # `mojo_repr_boxed`, a list store -> `mojo_list_append_word`,
+        # arithmetic/comparison -> the `_tagged_*_select` pairs, and a bind to
+        # a local carries both marks across (see `stmts_shared`'s unbox arm).
+        if (_rt == 'int64_t' and isinstance(_rv, str)
+                and isinstance(node.func, gimple_ctypes.IdentExpr)
+                and _as_str(node.func.name) in getattr(
+                    gen, '_ret_may_hold_float', ())):
+            gen._boxed_vals.add(_rv)
+            gen._tagged_word_vals.add(_rv)
         # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
         # resume word, which is the None box when the generator was resumed by
         # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
@@ -4161,6 +4175,21 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
         lv = _none_arith_guard(gen, op, lv, 'int', 1)
     if _tag_r:
         rv = _none_arith_guard(gen, op, rv, 'int', 0)
+    # A str box (kind 'p') is not numeric: `x + x` concatenates and `x * n`
+    # repeats, dispatched at run time because the same tagged name can hold an
+    # int box on other iterations.
+    if op == '+' and _tag_l and _tag_r:
+        _t = gen._call_expr('int64_t', 'mojo_add_words',
+                            [('int64_t', lv),
+                             ('int64_t', rv)])
+        gen._dyn_word_vals.add(_t)
+        return _t
+    if op == '*':
+        _t = gen._call_expr('int64_t', 'mojo_mul_word',
+                            [('int64_t', lv),
+                             ('int64_t', rv)])
+        gen._dyn_word_vals.add(_t)
+        return _t
     _t = ginf._float_param_arith(gen, op, left_node, lt, lv, right_node, rt, rv,
                                  lmaybe=_tag_l, rmaybe=_tag_r)
     gen._boxed_vals.add(_t)
@@ -6297,6 +6326,20 @@ def _set_needle_is_word(gen, xv: str) -> bool:
     return xv not in gen._int_word_vals
 
 
+def _in_question_result(gen, ti: str, negate: bool) -> tuple[str, str]:
+    """Turn an `int` membership-answer temp into the `_Bool` `in`/`not in`
+    result. Shared by the tagged-word early return and the ordinary dispatch
+    tail so the negation has exactly one spelling."""
+    t = gen._new_val('_Bool', f"{ti} != 0")
+    if negate:
+        ti2 = gen._new_temp('int')
+        tn = gen._new_temp('_Bool')
+        gen._emit(f"  {ti2} = (int) {t};")
+        gen._emit(f"  {tn} = {ti2} == 0;")
+        return '_Bool', tn
+    return '_Bool', t
+
+
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
                        x_is_none: bool = False) -> tuple[str, str]:
     """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
@@ -6326,6 +6369,20 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         rv = gen._new_val(rt, f"({rt}){rv}")
     ti = gen._new_temp('int')
 
+    # A TAGGED word (`_tagged_word_vals`: the result of a float+pointer mixed
+    # return, or a kind-mixed yield) on the CONTAINER side has its kind as a
+    # runtime fact, so the static dispatch below cannot pick a container kind
+    # and the erased-int fallback asked the registries about the BOX address:
+    # `3 in t` was False for a list arm. Unbox by kind in the runtime, exactly
+    # as the subscript (`mojo_word_subscript`) and `len` (`mojo_len_word`) do
+    # for this value model. A float/int/None word raises TypeError there, as
+    # CPython does for `1 in 2.5`.
+    if rt in ('int', 'int64_t') and rv in getattr(gen, '_tagged_word_vals', ()):
+        _wc = gen._new_val('int64_t', gen._to_int64(rt, rv))
+        _wn = gen._new_val('int64_t', gen._to_int64(xt, xv))
+        gen._emit_call('int', ti, 'mojo_word_contains',
+                       [('int64_t', _wc), ('int64_t', _wn)])
+        return _in_question_result(gen, ti, negate)
     # `x in <bytes-subclass instance>`: substring/byte membership against
     # the backing MojoBytes payload. See COMPILE_FAIL_zipfile___init__.
     if gen._bytes_subclass_of(rt) and not gen._struct_defines_method(
@@ -6536,15 +6593,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         gen._emit(f"  /* TODO: 'in' for {rt} */")
         gen._emit(f"  {ti} = 0;")
 
-    t = gen._new_val('_Bool', f"{ti} != 0")
-
-    if negate:
-        ti2 = gen._new_temp('int')
-        tn  = gen._new_temp('_Bool')
-        gen._emit(f"  {ti2} = (int) {t};")
-        gen._emit(f"  {tn} = {ti2} == 0;")
-        return '_Bool', tn
-    return '_Bool', t
+    return _in_question_result(gen, ti, negate)
 
 
 def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

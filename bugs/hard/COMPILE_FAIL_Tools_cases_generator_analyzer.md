@@ -1,4 +1,5 @@
-SPLIT: bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part1.md, bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part2.md, bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md
+SPLIT: bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md
+(part1 fixed: positional class patterns now bind through __match_args__; part2 fixed: sibling AST-name class layout collision)
 
 ## Status (2026-11-12, replan) — SPLIT into three parts
 

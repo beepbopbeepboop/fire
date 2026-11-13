@@ -174,6 +174,12 @@ int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t
  * the constructor allocated with it. */
 void mojo_bound_method_free(MojoBoundMethod *bm);
 void mojo_closure_free(void *bm);
+/* The two halves of a bound method, for a caller that needs them apart: a
+ * capturing lambda handed to a C ABI that takes a bare function pointer plus
+ * a `void *` env (re.sub's regex callback `char *(*)(void *, char *)`) gets
+ * (fn, env) and calls `fn(env, ...)` exactly as mojo_bound_method_call_N does. */
+static inline void *mojo_bound_method_fn(MojoBoundMethod *bm) { return bm->fn; }
+static inline void *mojo_bound_method_self(MojoBoundMethod *bm) { return bm->self; }
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -754,6 +760,7 @@ int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt);   /* next(x[, 
 int64_t mojo_getitem_word(int64_t w, int64_t i);   /* list element / string character of an unknown-kind word */
 void    mojo_chain_extend(MojoList *dst, int64_t src);   /* itertools.chain, one argument */
 int64_t mojo_add_words(int64_t a, int64_t b);   /* str+str concatenates, else integer add */
+int64_t mojo_mul_word(int64_t a, int64_t b);     /* str*int repeats (a str box/ptr), else integer mul */
 MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes of a word of unknown kind */
 /* Compiled-generator signatures (filled by each unit's constructor) and the
  * live-handle table behind a dynamic call; see the definitions. */
@@ -774,6 +781,11 @@ void mojo_gen_cm_exit_exc(int64_t w);
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
 int mojo_in_dispatch_int(int64_t container, int64_t needle);
+/* `needle in <word of unknown kind>`: the container is a TAGGED word (a
+ * mixed-return value or a kind-mixed yield), so its kind is a runtime fact.
+ * A list/dict/set/str word dispatches through mojo_in_dispatch_int; a float,
+ * int or None word has no membership in Python and raises TypeError. */
+int mojo_word_contains(int64_t container, int64_t needle);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
 /* Per-slot element kinds (see the MojoList comment above for why a flat
@@ -862,6 +874,8 @@ int64_t     mojo_box_int(int64_t v);
 int64_t     mojo_box_from_double(double v);
 int64_t     mojo_box_from_bool(int64_t v);   /* a bool in a tagged word: renders True/False */
 int64_t     mojo_box_from_str(char *s);      /* a str in a tagged word: a kind-'p' box, renders the string */
+int64_t     mojo_box_from_list(MojoList *l); /* a list/tuple in a tagged word: a kind-'l' box, renders the list repr */
+int64_t     mojo_box_from_bytes(void *b);    /* a bytes value in a tagged word: kind 's', renders the bytes repr (void*: MojoBytes is declared later in this header) */
 int64_t     mojo_box_none(void);             /* None in a tagged word: renders None (one shared box) */
 void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
 void        mojo_list_append_str_kinded(MojoList *l, const char *v);   /* a string slot under the 'p' kind */
@@ -1021,6 +1035,16 @@ int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t 
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
  * value, decided by the value itself. See the definition. */
 int64_t     mojo_word_slice(int64_t w, int64_t start, int64_t stop);
+/* `w[i]` on a word of unknown kind (a tagged mixed-return value/mixed yield):
+ * dispatched by the word's kind (list/tuple, str, bytes), box-returning for a
+ * float list slot; a float/int/None receiver raises TypeError. */
+int64_t     mojo_word_subscript(int64_t w, int64_t i);
+/* The `MojoList *` / `char *` a TAGGED word holds, for the member-call
+ * lowering: a kind-'l' box or a registered list is the list, a kind-'p' box
+ * or a bare string is the text. Any other kind raises TypeError instead of
+ * reading the box header as the container it is not. */
+MojoList   *mojo_word_as_list(int64_t w);
+char       *mojo_word_as_text(int64_t w);
 char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
  * slice - see mojo_cstr_region_eq's comment in fire_runtime.c for why this
@@ -2677,3 +2701,8 @@ char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClas
 #ifdef __cplusplus
 }
 #endif
+
+/* csv.reader as a callable value for compiled code (tabled foreign callable).
+ * Returns a list of rows, each row a MojoList* of string fields. */
+int64_t   mojo_csv_reader_vf(int64_t lines_word, MojoList *packed, MojoDict *kw);
+extern void *mojo_csv_reader_w;

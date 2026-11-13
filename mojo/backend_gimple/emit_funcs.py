@@ -522,11 +522,14 @@ def _gen_stmt_FromImportStmt(gen, node):
         if isinstance(_fi_info, dict) and _fi_info.get('signature'):
             if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
                     and 'signature' in gen.imported_symbols[symbol_name]):
+                # The signature stays under the DEFINING name, exactly as
+                # the module-scope path (`_register_sym`) stores it: it
+                # describes the defining function, and the local alias is
+                # only a binding. The import-extern block renames the
+                # original identifier to the C symbol (`original_name` ->
+                # `csym` below); renaming it to the alias here made that
+                # rename a no-op and left the extern under the alias name.
                 _fi_sig = _fi_info['signature']
-                if symbol_name != name:
-                    import re as _re_fi
-                    _fi_sig = _re_fi.sub(r'\b' + _re_fi.escape(name) + r'\b',
-                                         symbol_name, _fi_sig, count=1)
                 gen.imported_symbols[symbol_name] = {
                     # `_fi_eff_mod`, not `node.module`: when the name only
                     # REACHES this module through a re-export, every reader
@@ -633,6 +636,16 @@ def _gen_stmt_FromImportStmt(gen, node):
                         ]
                 if _fi_pts:
                     gen._imported_home_param_types[_pair_key(_fi_home, symbol_name)] = list(_fi_pts)
+            if symbol_name != name:
+                # The C symbol every call site under this alias is emitted
+                # with, resolved HERE, inside the function-body scope whose
+                # `record_flat=False` home binding `_func_csym` reads. The
+                # module-level import-extern preamble runs after that scope
+                # is popped, so resolving it there drops the qualifier and
+                # declares the bare name (a second, independent mismatch
+                # with the call site). The preamble reads this instead.
+                gen.imported_symbols[symbol_name]['csym'] = _as_str(
+                    gen._func_csym(symbol_name))
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:
@@ -2444,7 +2457,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list | None:
+def _imported_def_pts(gen, bare_name: str) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2463,10 +2476,15 @@ def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list |
     vs mod.computer.network.get_energy -> call sites emitted
     computer_case_get_energy_77b31a against definition ..._0ed997).
 
-    `definer_only=True` skips the importer's own snapshot tier, so a hit means
-    a unit that DEFINES the name committed this signature (module_gen's extern
-    block uses it: an extern may only be re-typed from a definition that is
-    really in the translation unit).
+    Both tiers below are read for every caller. The import-extern block used
+    to pass `definer_only=True` so an extern could only be re-typed from a
+    definition really in the translation unit, but that left it with
+    `module_loader`'s text-scan arity whenever the definition belonged to
+    ANOTHER unit (the ordinary single-module compile): the scan drops
+    unannotated parameters, so the extern declared fewer arguments than the
+    call sites — whose mangled suffix comes from `_effective_param_types` —
+    passed. It now reads the same list the name was hashed from, which is
+    what both tiers exist to supply.
 
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
@@ -2531,7 +2549,7 @@ def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list |
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        if store and not definer_only:
+        if store:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts

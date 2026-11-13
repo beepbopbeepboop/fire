@@ -2502,8 +2502,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source',
-     disabled='bugs/gate-stdlib-dylib.md')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -4180,8 +4179,7 @@ test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
 test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)',
-     disabled='bugs/gate-reg-formal-ast-bridge-two-arg.md')
+     desc='registered by the estate audit (every test file runs)')
 test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',
