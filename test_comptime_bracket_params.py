@@ -229,6 +229,22 @@ def test_paramless_function_bracket_refused_in_single_tu():
               detail=s)
 
 
+def test_unannotated_return_bracket_call_link_mode():
+    """Regression for bug CODEGEN_bracket_generic_unannotated_return_stubs_
+    to_zero: a bracketed call to a generic function with a runtime param and
+    NO return annotation must return the body's value in link mode. The
+    elaborator declared the instantiation `void` (it read only the return
+    annotation), so the call site discarded the result and printed 0."""
+    src = ("def f[T: Int](x: Int):\n    return T + x\n\n"
+           "def main():\n    print(f[7](1))\n")
+    out = _build_and_run(src)
+    ok = out == "8\n"
+    check("unannotated-return bracket call returns the body value (8)",
+          ok, detail=repr(out))
+    # `check` only counts; raise too, so a pytest run cannot pass vacuously.
+    assert ok, f"expected stdout '8\\n', got {out!r}"
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):
