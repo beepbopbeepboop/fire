@@ -120,3 +120,15 @@ lambdas were named `<enclosing>_lambda_<n>` with a PER-GEN counter, so two
 inlined modules lifting from a same-named comptime function collided
 (`redefinition of '_comptime_conforms_to_pred_lambda_1'`) — now qualified with
 the module id, using the same empty-module-name rule as the `main` renaming.
+
+2026-11-13 (session 2, end): `fire.py build fire.py` compiles with ZERO gcc
+errors and links everything but ONE symbol. `build_executable` was the other
+half of that link failure and is now fixed: `_sanitize_qualifier('')` consulted
+`gen._inline_module_qualifiers`, which a relative `from . import x` keys as
+`''` (`funcs_shared.py:1276`), so the root gen's empty `module_name` remapped to
+`mojo.middle` and every root-defined function got a spurious `mojo_middle_`
+prefix its importers' call sites did not. An empty module name now sanitizes to
+empty. The one remaining undefined symbol (`_conforms_to`, a module alias not
+visible inside a lifted lambda) is filed separately in
+bugs/mid/CODEGEN_selfhost_link_two_unqualified_calls.md. `test_gimple.py`:
+454 passed, 0 failed.
