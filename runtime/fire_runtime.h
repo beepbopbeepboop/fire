@@ -174,6 +174,12 @@ int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t
  * the constructor allocated with it. */
 void mojo_bound_method_free(MojoBoundMethod *bm);
 void mojo_closure_free(void *bm);
+/* The two halves of a bound method, for a caller that needs them apart: a
+ * capturing lambda handed to a C ABI that takes a bare function pointer plus
+ * a `void *` env (re.sub's regex callback `char *(*)(void *, char *)`) gets
+ * (fn, env) and calls `fn(env, ...)` exactly as mojo_bound_method_call_N does. */
+static inline void *mojo_bound_method_fn(MojoBoundMethod *bm) { return bm->fn; }
+static inline void *mojo_bound_method_self(MojoBoundMethod *bm) { return bm->self; }
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
