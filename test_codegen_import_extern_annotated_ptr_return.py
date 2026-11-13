@@ -54,6 +54,7 @@ sys.path.insert(0, str(ROOT))
 
 from build_config import find_gcc  # noqa: E402
 from build_stdlib_dylib import compile_module_to_c  # noqa: E402
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S  # noqa: E402
 
 HOME_SRC = (
     'def ctype(name) -> str | None:\n'
@@ -96,7 +97,7 @@ def main() -> int:
         # Oracle: the reduced program must itself be valid, or the test
         # would report a compiler failure for a harness mistake.
         py = subprocess.run([sys.executable, main_path], capture_output=True,
-                            text=True, cwd=td, timeout=60)
+                            text=True, cwd=td, timeout=RUN_TIMEOUT_S)
         if py.returncode != 0 or not py.stdout:
             print(f"FAIL: CPython on the fixture exited {py.returncode} "
                   f"printing {py.stdout!r} ({py.stderr[:400]}) — the fixture "
@@ -130,7 +131,7 @@ def main() -> int:
         cc = subprocess.run(
             [gcc, '-fgimple', '-Os', '-g', '-ftrivial-auto-var-init=zero',
              '-I', str(ROOT / 'runtime'), '-c', c_file, '-o', obj_file],
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
         if cc.returncode != 0:
             print(f"FAIL: gcc -fgimple -Os -g -ftrivial-auto-var-init=zero "
                   f"rejected the importer's C:\n{cc.stderr[:2000]}")
