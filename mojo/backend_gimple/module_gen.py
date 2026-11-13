@@ -3036,6 +3036,24 @@ def _module_class_attr_global_stores(gen, cls):
         if _ct is None:
             continue
         _line = getattr(cls, 'line', 0)
+        # A class-body attribute assigned a Python builtin FUNCTION VALUE
+        # (`_StringGlobber.concat_path = operator.add`, CPython 3.15's glob.py)
+        # cannot be evaluated as a value by this backend: it lowered to a
+        # runtime `getattr(operator, 'add')`, which raised
+        # `AttributeError: add` in the module constructor — before main — so
+        # compiling CPython's glob.py produced a program that died at import.
+        # Every CALL through such an attribute resolves statically to the
+        # class's own method of the same name (the synthesized
+        # `<mod>_<Cls>_<method>`: for glob, the base's `path + text`), so the
+        # function word is never called and the attribute needs no value. Skip
+        # the store instead of emitting an initializer that cannot succeed.
+        _v = _cfd[1]
+        if (isinstance(_v, MemberExpr)
+                and isinstance(getattr(_v, 'obj', None), IdentExpr)
+                and _as_str(_v.obj.name) == 'operator'
+                and any(getattr(_m, 'name', None) == _aname
+                        for _m in getattr(cls, 'methods', []) or [])):
+            continue
         gen._global_var_types[_mangled] = _ct
         # The field-typing pass runs BEFORE this module's globals are typed, so
         # it fell back to the `<Cls> *` "unknown" field type; now that the
