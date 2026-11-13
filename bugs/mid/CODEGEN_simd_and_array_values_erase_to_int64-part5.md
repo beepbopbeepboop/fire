@@ -48,3 +48,43 @@ must pass, with the comptime case added as described above).
 `mojo/middle/infra_infer.py::_resolve_type` (the function
 `gimple_codegen.GimpleGen._resolve_type` delegates to). Unwrap `Scalar[X]` and
 `SIMD[X, 1]` to `X`, then resolve `X` through the existing dtype spellings.
+
+## Status 2026-11-12 — the gate constraint on landing this part (measured)
+
+Two attempts are archived, not landed, because `stdlib-syntax` went red on
+exactly the same eight files both times (`e9fc5462a` and `455405950`, branches
+`work/bug-mid-codegen-simd-and-array-values-er-6` / `-5`):
+
+    std/math/math.mojo                         std/math/test_ldexp.mojo
+    std/random/_rng.mojo                       std/math/test_math.mojo
+    test/builtin/test_simd.mojo                test/utils/test_numerics.mojo
+    test/collections/string/test_atof.mojo     test/collections/string/test_string.mojo
+
+Measured by applying only `455405950`'s resolver hunk to master and compiling
+each file through `tools/compile_one.py`: all eight fail with
+
+    error: invalid operands to binary & (have 'float' and 'float')
+    error: invalid operands to binary & (have 'double' and 'double')
+
+The failing expressions are `val.to_bits() & mask` in
+`std/utils/numerics.mojo`'s `isnan`/`isinf` (their comptime-dead float8
+branches ARE emitted by this codegen, not pruned) and
+`x._to_bits_signed() & mask` in `std/math/math.mojo`'s `frexp` (reached from
+`test_ldexp`/`test_math`). Typing the width-1 SIMD receiver as `float` is the
+correct half; the other half is that `to_bits()` / `_to_bits_signed()` have an
+INTEGER return type in their stdlib signatures, while the generic
+scalar-method stub returns the receiver's own type
+(`mojo/backend_gimple/emit_methods.py`, "Other scalar methods: pass the
+receiver through unchanged").
+
+So landing this part requires, in the same change:
+
+1. the resolver rule above (including the comptime-bound dtype case), and
+2. an integer result type for `to_bits` / `_to_bits_signed` on a `float` /
+   `double` receiver — or pruning of the comptime-dead arms, which is the
+   larger change.
+
+The pinning test for (2) is `test_gimple.py`'s
+`gate_stdlib_syntax_float_bit_accessors`; it fails on a resolver-only landing
+with the errors above and passes on master. The gate red itself is recorded in
+`bugs/gate-stdlib-syntax.md` (green on master).
