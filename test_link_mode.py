@@ -36,6 +36,8 @@ explicitly: it builds the same package at a path under this checkout, so
 the invariant is tested in BOTH locations no matter how the suite is
 invoked.
 """
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -218,6 +220,37 @@ def test_bare_submodule_import_call_inside_source_tree() -> bool:
     if not ok:
         print(f"  ✗ bare_submodule_import_call_inside_source_tree: rc={rc} "
               f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_sibling_export_lookup_prints_no_debug_lines() -> bool:
+    """A successful compile is silent: the bare-submodule call below is the
+    fixture that reaches `_local_sibling_module_exports`, which spent
+    2026-11-03 → 2026-11-12 printing unconditional `BEFORE_EXPS:` /
+    `AFTER_EXPS:` / `EXPS_ERR:` diagnostics (`flush=True`, no env guard) on
+    the ordinary link-mode path. Those lines are indistinguishable from
+    compiler output to anything capturing stdout, so they are pinned absent
+    here rather than left to be noticed in someone's build log. `Built:`
+    stays: it is the driver's own user-facing line.
+    """
+    pkg = {
+        'pkg2/__init__.py': '',
+        'pkg2/base2.py': 'def doubleval(x):\n    return x * 2\n',
+        'pkg2/main.py': (
+            'from . import base2\n'
+            'print(base2.doubleval(21))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc, stdout = _build_and_run(pkg, 'pkg2/main.py', td)
+    debug = [line for line in buf.getvalue().splitlines()
+             if line.startswith(('BEFORE_EXPS:', 'AFTER_EXPS:', 'EXPS_ERR:'))]
+    ok = rc == 0 and stdout.strip() == '42' and not debug
+    if not ok:
+        print(f"  ✗ sibling_export_lookup_prints_no_debug_lines: rc={rc} "
+              f"stdout={stdout!r} debug={debug!r}")
     return ok
 
 
@@ -2565,6 +2598,7 @@ CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
+    test_sibling_export_lookup_prints_no_debug_lines,
     test_bare_submodule_import_keyword_call,
     test_cross_module_generator_default_is_padded,
     test_generator_str_param_concat_is_string_concatenation,
