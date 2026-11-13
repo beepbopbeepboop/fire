@@ -5203,37 +5203,52 @@ def test_every_test_file_is_registered():
                   f'{carried[0]}, ...')
 
 
-def test_the_trait_requirement_evidence_diagnostic_is_gated():
-    """The part-2 trait-requirement-evidence suite runs on every gate.
+_TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
+    # (spec name, test file, part) — the whole trait-conformance diagnostics
+    # family. Each is `compile_to_gimple`-only, no build, tiny and
+    # sub-second.
+    ('trait-requirement-evidence-diagnostic',
+     'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
+    ('reg-conditional-conformance-synthesis-diagnostic',
+     'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
+    ('downcast-witness-diagnostic',
+     'test_downcast_witness_diagnostic.py', 'part 7'),
+)
 
-    `test_trait_requirement_evidence_diagnostic.py` landed with `06ea5b0ef`
-    ("compiler: enforce trait method requirement evidence (part 2)") and no
-    spec named it, so `suite-self-test`'s estate row was the only thing that
-    mentioned it and no run executed its cases
-    (`bug:SUITE_trait_requirement_evidence_unregistered`).
 
-    The estate check above is what found that, but it can only ask that SOME
-    spec names the file; a name in a bucket `gate` does not expand to is the
-    same hole one level over, and `regressions`/`orchestrator` are exactly
-    such buckets by design. This file is cheap (tiny, 0.1 GB measured,
-    sub-second, no build) and pins a compiler diagnostic, so it belongs in
-    the everyday loop, and this check pins that by name so dropping the
-    registration — or moving it out of the gate — is a red row rather than a
+def test_the_trait_conformance_diagnostic_suites_are_gated():
+    """Every trait-conformance diagnostic suite runs on every gate.
+
+    The three files landed with their fixes (`06ea5b0ef` part 2, `65cee30d4`
+    part 4, `ec12b76e1` part 7) and none was named by a spec, so
+    `suite-self-test`'s estate row was the only thing that mentioned them and
+    no run executed their cases
+    (`bug:SUITE_trait_requirement_evidence_unregistered`). Each was found by
+    the estate check only after the previous one was "fixed", which is why
+    this pins the family and not one file.
+
+    The estate check above is what found each one, but it can only ask that
+    SOME spec names the file; a name in a bucket `gate` does not expand to is
+    the same hole one level over, and `regressions`/`orchestrator` are exactly
+    such buckets by design. All three are cheap (tiny, 0.0-0.1 GB measured,
+    sub-second, no build) and pin compiler diagnostics, so they belong in the
+    everyday loop, and this check pins that by name so dropping a
+    registration — or moving one out of the gate — is a red row rather than a
     silent coverage loss.
     """
-    name = 'trait-requirement-evidence-diagnostic'
-    spec = suite.REGISTRY.get(name)
-    files = ({os.path.basename(str(c)) for c in spec.cmd}
-             if spec is not None else set())
-    check('the gate: trait-requirement-evidence-diagnostic runs on every gate',
-          spec is not None
-          and 'test_trait_requirement_evidence_diagnostic.py' in files
-          and name in suite.expand_bucket('gate'),
-          ('bug:SUITE_trait_requirement_evidence_unregistered: no spec names '
-           'test_trait_requirement_evidence_diagnostic.py, so it runs on '
-           'nothing' if spec is None else
-           f'bug:SUITE_trait_requirement_evidence_unregistered: {name} is '
-           f'registered but not reachable from `gate` (cmd={sorted(files)})'))
+    for name, filename, part in _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES:
+        spec = suite.REGISTRY.get(name)
+        files = ({os.path.basename(str(c)) for c in spec.cmd}
+                 if spec is not None else set())
+        check(f'the gate: {name} ({part}) runs on every gate',
+              spec is not None
+              and filename in files
+              and name in suite.expand_bucket('gate'),
+              ('bug:SUITE_trait_requirement_evidence_unregistered: no spec '
+               f'names {filename}, so it runs on nothing' if spec is None else
+               'bug:SUITE_trait_requirement_evidence_unregistered: '
+               f'{name} is registered but not reachable from `gate` '
+               f'(cmd={sorted(files)})'))
 
 
 def test_no_test_name_is_registered_twice():
@@ -6676,7 +6691,7 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
-               test_the_trait_requirement_evidence_diagnostic_is_gated,
+               test_the_trait_conformance_diagnostic_suites_are_gated,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,

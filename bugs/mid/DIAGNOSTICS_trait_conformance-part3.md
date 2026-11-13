@@ -82,8 +82,14 @@ gimple and no diagnostic.
 ## Acceptance check
 
 Add `test_conditional_conformance_candidate_diagnostic.py` (next to the other
-`test_*_diagnostic.py` files; do NOT register it in `tools/suite.py`). Use
-reduced, self-contained sources with local traits only:
+`test_*_diagnostic.py` files) and **register it in `tools/suite.py`** as a
+`mem='tiny'` spec in `check` beside the other trait-conformance diagnostic
+suites. The old instruction here said to skip the registration; a
+`test_*.py` on disk that no gate-reachable spec names turns `test_suite.py`'s
+estate row red, which is `bug:SUITE_trait_requirement_evidence_unregistered`
+and recurred once per part until the registration became part of this
+acceptance check. `test_the_trait_conformance_diagnostic_suites_are_gated`
+pins the family. Use reduced, self-contained sources with local traits only:
 
 - each of the four cases raises `RuntimeError` containing the exact
   `does not implement all requirements for '<Trait>'` line; the ambiguity

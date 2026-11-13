@@ -97,7 +97,7 @@ not just `fire_runtime.h`:
 | **word in, word out** | **431** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **511** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **431 of 942 (45.9%)** is the reachable-surface ceiling. The previous
+So **431 of 942 (45.8%)** is the reachable-surface ceiling. The previous
 revision of this section published 418 of 920 (45.4%), and before that 402 of
 863 (46.6%) and 389 of 455 (77%) — the word *share* has been stable across recent censuses. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
