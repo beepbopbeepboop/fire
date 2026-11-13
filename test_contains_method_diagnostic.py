@@ -80,6 +80,41 @@ def test_unresolved_generic_param_conservative():
     _expect_ok('def f[T](x: T):\n    _ = 1 in x\n')
 
 
+def test_unrecorded_call_is_erased_not_int():
+    # The gate regression this pins: the estimator's int64_t FALLBACK for a
+    # call whose return was never recorded is a type-erased box (it may hold
+    # a container), not a proven Int. `content in String(self)` in
+    # std/compile/compile.mojo was rejected as Int on that default, and six
+    # stdlib modules fell back to source on it.
+    _expect_ok('def f(x):\n    _ = "a" in String(x)\n')
+    _expect_ok('def f(x):\n    _ = 1 in x.get_value()\n')
+
+
+def test_erased_operand_binaryop_still_compiles():
+    # `+`/`*`/`|`/`&`/`^`/`-`/`%`/`and`/`or` can yield a CONTAINER from a
+    # type-erased operand (list+list, int*list, dict|dict, set&set, str%s,
+    # `or` selecting the container arm); unproven operands must stay
+    # conservative, and annotated scalars must still be rejected.
+    _expect_ok('def f(a, b):\n    _ = 1 in (a + b)\n')
+    _expect_ok('def f(a, b):\n    _ = 1 in (a or b)\n')
+    _expect_ok('def f(a, b):\n    _ = 1 in (a * b)\n')
+    _expect_contains_error(
+        'def f(a: Int, b: Int):\n    _ = 1 in (a + b)\n', 'Int')
+    _expect_contains_error(
+        'def f(a: Int, b: Int):\n    _ = 1 in (a or b)\n', 'Int')
+
+
+def test_known_int_return_call_still_rejected():
+    # The estimator's SPECIFIC int-return rows (scalar builtins, a recorded
+    # `-> Int`) are proofs and must keep rejecting.
+    _expect_contains_error(
+        'def f(s: String):\n    _ = 1 in len(s)\n', 'Int')
+    _expect_contains_error(
+        'def f(s: String):\n    _ = 1 in int(s)\n', 'Int')
+    _expect_contains_error(
+        'def n() -> Int:\n    return 1\ndef f():\n    _ = 1 in n()\n', 'Int')
+
+
 if __name__ == '__main__':
     test_int_operands_in()
     test_int_operands_not_in()
@@ -89,4 +124,7 @@ if __name__ == '__main__':
     test_positive_membership_still_compiles()
     test_module_global_container_still_compiles()
     test_unresolved_generic_param_conservative()
+    test_unrecorded_call_is_erased_not_int()
+    test_erased_operand_binaryop_still_compiles()
+    test_known_int_return_call_still_rejected()
     print('ok')
