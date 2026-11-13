@@ -570,6 +570,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # paths.
     gen._func_used_setjmp: bool = False
     gen.func_ret_type: str             = ''
+    # The Mojo-level return ANNOTATION ('String', 'Bool', ...), kept
+    # beside func_ret_type's C spelling: the return-arm check needs to
+    # know whether the annotation is itself a scalar, which `Bool *`
+    # cannot say.
+    gen.current_func_ret_ann: str      = ''
     gen._last_was_terminal: bool       = False
     # Computed once, reused for both the _elem_types and _dict_val_types
     # seeds just below -- see _locally_bound_names' own docstring.
@@ -947,6 +952,7 @@ class FuncState:
         self.fs_try_finally_bodies: list = []
         self.fs_func_used_setjmp: bool = False
         self.fsfunc_ret_type: str = ''
+        self.fsfunc_ret_ann: str = ''
         self.fs_last_was_terminal: bool = False
         self.fs_elem_types: dict = {}
         self.fs_nested_elem_types: dict = {}
@@ -1056,6 +1062,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_try_finally_bodies = gen._try_finally_bodies
     st.fs_func_used_setjmp = gen._func_used_setjmp
     st.fsfunc_ret_type = gen.func_ret_type
+    st.fsfunc_ret_ann = gen.current_func_ret_ann
     st.fs_last_was_terminal = gen._last_was_terminal
     st.fs_elem_types = gen._elem_types
     st.fs_nested_elem_types = gen._nested_elem_types
@@ -1175,6 +1182,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._try_finally_bodies = st.fs_try_finally_bodies
     gen._func_used_setjmp = st.fs_func_used_setjmp
     gen.func_ret_type = st.fsfunc_ret_type
+    gen.current_func_ret_ann = st.fsfunc_ret_ann
     gen._last_was_terminal = st.fs_last_was_terminal
     gen._elem_types = st.fs_elem_types
     gen._nested_elem_types = st.fs_nested_elem_types
@@ -7464,6 +7472,15 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     """
     _res = gen._new_temp('int64_t')
     _it64 = gen._ensure_local('int64_t', value)
+    # A kind-'l'/'p'/'s' box — the tagged word of a mixed float+pointer return
+    # — holds its container pointer in the box's bits. The registry dispatch
+    # below only recognises a BARE container pointer, and would read the box
+    # cell as a list header (`len(f(1))` on the tuple arm printed the tuple's
+    # repr where CPython prints 2). `mojo_box_word` is the one unbox: it
+    # answers the pointer for those kinds and the word unchanged otherwise
+    # (a float box stays a box, which the registry arms decline, as they
+    # should — a float has no len()).
+    _it64 = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _it64)])
     # The text of a kind-'p' string box (`mojo_box_from_str`, a tagged word that
     # holds a str) is the pointer the box carries. `mojo_str_box_word` unwraps
     # only that kind, so the string arm below measures the text itself.
@@ -8074,7 +8091,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # list slot. Routed through `_own_repr` because the box's
             # `mojo_repr_boxed` result is a fresh buffer on every path.
             if _pi < len(args) and (_is_may_hold_float_param(gen, args[_pi])
-                                    or _is_float_param_arith(gen, args[_pi])):
+                                    or _is_float_param_arith(gen, args[_pi])
+                                    or aval in getattr(gen, '_tagged_word_vals', ())):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)
@@ -8426,6 +8444,62 @@ def _comptime_call_hook(gen):
     return hook
 
 
+def _conformance_trait_bases_from_source(gen):
+    extra = getattr(gen, '_conformance_trait_bases_text', None)
+    if extra is not None:
+        return extra
+    extra = {}
+    try:
+        src = getattr(gen, '_source_text', '') or ''
+        if not src:
+            fn = getattr(gen, '_current_filename', '') or ''
+            if fn:
+                with open(fn) as f:
+                    src = f.read()
+        if src:
+            for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
+                name = m.group(1)
+                bstr = m.group(3) or ''
+                blist = []
+                for part in bstr.split(','):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    b = part.split('[')[0].split('.')[-1].strip()
+                    if b and re.match(r'^[A-Za-z_]\w*$', b):
+                        blist.append(b)
+                extra[name] = blist
+            for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
+                extra.setdefault(m.group(1), [])
+    except Exception:
+        extra = {}
+    try:
+        gen._conformance_trait_bases_text = extra
+    except Exception:
+        pass
+    return extra
+
+
+def _conforms_to_pred(gen):
+    """Predicate for comptime `conforms_to(T, Trait)` folding, or None."""
+    try:
+        sb = getattr(gen, '_struct_bases', None) or {}
+        tb = getattr(gen, '_trait_bases', None) or {}
+        ex = getattr(gen, '_conformance_bases_extra', None) or {}
+        tbt = _conformance_trait_bases_from_source(gen) or {}
+        if not sb and not tb and not ex and not tbt:
+            return None
+        bases = dict(ex)
+        bases.update(sb)
+        bases.update(tb)
+        for k, v in tbt.items():
+            if v or k not in bases:
+                bases[k] = v
+        return lambda t, tr, _b=bases: comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
 def _eval_const_int(gen, node) -> int | None:
     """Evaluate an expression as a compile-time integer, or return None.
 
@@ -8433,7 +8507,8 @@ def _eval_const_int(gen, node) -> int | None:
     (mojo/middle/comptime.py); this wrapper supplies the gimple path's
     binding table and its compile-time-call hook."""
     return comptime_eval.eval_const_int(node, gen._comptime_vals,
-                                          _comptime_call_hook(gen))
+                                          _comptime_call_hook(gen),
+                                          conforms_to_pred=_conforms_to_pred(gen))
 
 
 def _eval_const_bool_state(gen, node) -> int:
@@ -8441,12 +8516,14 @@ def _eval_const_bool_state(gen, node) -> int:
     every branching caller uses, because `_eval_const_bool`'s `bool | None`
     collapses None into False once compiled (see comptime.CONST_UNKNOWN)."""
     return comptime_eval.eval_const_bool_state(node, gen._comptime_vals,
-                                               _comptime_call_hook(gen))
+                                               _comptime_call_hook(gen),
+                                               conforms_to_pred=_conforms_to_pred(gen))
 
 def _eval_const_bool(gen, node) -> bool | None:
     """Evaluate an expression as a compile-time bool, or return None."""
     return comptime_eval.eval_const_bool(node, gen._comptime_vals,
-                                           _comptime_call_hook(gen))
+                                           _comptime_call_hook(gen),
+                                           conforms_to_pred=_conforms_to_pred(gen))
 
 def _split_top_level_comma(s: str) -> list[str]:
     """Split s by top-level commas only (bracket-aware), stripped.

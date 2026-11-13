@@ -18,9 +18,11 @@ import subprocess
 import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas, VarDecl,
-                          AssignStmt, IdentExpr, TupleExpr, StringLiteral)
+                          AssignStmt, IdentExpr, TupleExpr, StringLiteral,
+                          ComptimeVarStmt, CallExpr, align_value_error)
+from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const_bool_state, CONST_TRUE,
-                                  CONST_FALSE)
+                                  CONST_FALSE, conforms_to)
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
 
@@ -721,6 +723,61 @@ def _where_bindings(targs: dict) -> dict:
     return bindings
 
 
+def _where_conformance_bases(module_src: str) -> dict:
+    """Declared struct/trait bases from module_src for conforms_to folding."""
+    bases = {}
+    try:
+        stmts = Parser(py_tokenize(textwrap.dedent(module_src or ''))).parse_module()
+    except Exception:
+        stmts = []
+    for s in stmts:
+        if isinstance(s, (StructDef, TraitDef)):
+            name = getattr(s, 'name', None)
+            if isinstance(name, str):
+                bases[name] = list(getattr(s, 'bases', None) or [])
+    # TraitDef AST nodes do not currently carry parent traits; extract them from
+    # source text so trait-to-trait conformance is visible.
+    try:
+        src = module_src or ''
+        for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
+            name = m.group(1)
+            bstr = m.group(3) or ''
+            blist = []
+            for part in bstr.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                b = part.split('[')[0].split('.')[-1].strip()
+                if b and re.match(r'^[A-Za-z_]\w*$', b):
+                    blist.append(b)
+            if blist or name not in bases:
+                bases[name] = blist
+        for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
+            bases.setdefault(m.group(1), [])
+    except Exception:
+        pass
+    return bases
+
+
+def _where_conforms_to_pred(module_src: str, targs: dict):
+    bases = _where_conformance_bases(module_src)
+    if not bases:
+        return None
+    def _resolve_name(n):
+        # Map a generic parameter name to its concrete type arg when known.
+        if isinstance(n, str) and n in targs:
+            c = str(targs[n]).strip()
+            # strip simple qualifiers/generics to base name for lookup
+            c = c.split('.')[-1]
+            if '[' in c:
+                c = c.split('[', 1)[0]
+            return c
+        return n
+    def pred(tname, trname):
+        return conforms_to(_resolve_name(tname), _resolve_name(trname), bases)
+    return pred
+
+
 def check_where_clauses(module_src: str, template_src: str, targs: dict):
     """Enforce the template's `where` clauses for the concrete `targs`.
 
@@ -737,9 +794,10 @@ def check_where_clauses(module_src: str, template_src: str, targs: dict):
     if clauses:
         src_texts = _header_where_texts(template_src)
         bindings = _where_bindings(targs)
+        _cpred = _where_conforms_to_pred(module_src, targs)
         for i, item in enumerate(clauses):
             cond, msg = _split_where_message(item)
-            state = eval_const_bool_state(cond, bindings)
+            state = eval_const_bool_state(cond, bindings, conforms_to_pred=_cpred)
             if state == CONST_FALSE:
                 if msg is not None:
                     raise WhereConformanceError(msg)
@@ -1333,6 +1391,113 @@ def _defined_symbols(obj: str) -> set:
 _SYMBOLS_CACHE: dict = {}
 
 
+def _align_instantiation_error(struct_name, type_args, got):
+    ta = ", ".join(str(a) for a in (type_args or []))
+    if ta:
+        head = f"function instantiation failed: {struct_name}[{ta}]"
+    else:
+        head = f"function instantiation failed: {struct_name}"
+    return RuntimeError(
+        f"{head}: @align struct alignment must be a positive power of 2, got {got}"
+    )
+
+
+def _align_instantiation_unknown(struct_name, type_args, name):
+    ta = ", ".join(str(a) for a in (type_args or []))
+    if ta:
+        head = f"function instantiation failed: {struct_name}[{ta}]"
+    else:
+        head = f"function instantiation failed: {struct_name}"
+    # Consistent with compiler unknown-declaration diagnostics.
+    return RuntimeError(f"{head}: @align: use of unknown declaration '{name}'")
+
+
+def _collect_module_int_bindings(module_src):
+    bindings = {}
+    try:
+        mod = Parser(py_tokenize(module_src)).parse_module()
+    except Exception:
+        return bindings
+    for stmt in mod:
+        if isinstance(stmt, ComptimeVarStmt):
+            try:
+                v = _comptime.eval_const_int(stmt.value, bindings)
+            except Exception:
+                v = None
+            if isinstance(v, int):
+                bindings[stmt.target] = v
+        elif isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
+            # Module-level `alias X = 1` can be represented as an assignment in
+            # some paths; capture integer-constant values when available.
+            try:
+                v = _comptime.eval_const_int(stmt.value, bindings)
+            except Exception:
+                v = None
+            if isinstance(v, int):
+                bindings[stmt.target.name] = v
+    return bindings
+
+
+def _find_struct_def_in_source(src, struct_name):
+    try:
+        mod = Parser(py_tokenize(src)).parse_module()
+    except Exception:
+        return None
+    for stmt in mod:
+        if isinstance(stmt, StructDef) and stmt.name == struct_name:
+            return stmt
+    return None
+
+
+def _validate_generic_struct_align(module_src, tmpl_src, struct_name, type_args, targs):
+    # Prefer the full module source so decorators attached above the struct are
+    # visible; fall back to the extracted template.
+    sd = _find_struct_def_in_source(module_src, struct_name)
+    if sd is None:
+        sd = _find_struct_def_in_source(tmpl_src, struct_name)
+    if sd is None:
+        return
+    decs = getattr(sd, "decorators", None) or []
+    # Build bindings: integer bracket args + module-level int aliases/comptimes.
+    bindings = _collect_module_int_bindings(module_src)
+    for k, v in (targs or {}).items():
+        # Integer-like args are represented as strings (e.g. "3").
+        try:
+            iv = int(str(v).strip())
+        except Exception:
+            continue
+        bindings[k] = iv
+    for dec in decs:
+        if not isinstance(dec, CallExpr):
+            continue
+        func = dec.func
+        if not (isinstance(func, IdentExpr) and func.name == "align"):
+            continue
+        args = getattr(dec, "args", None) or []
+        kwargs = getattr(dec, "kwargs", None) or []
+        if len(args) != 1 or kwargs:
+            continue
+        arg = args[0]
+        try:
+            val = _comptime.eval_const_int(arg, bindings)
+        except Exception:
+            val = None
+        if val is None:
+            # Unknown name used in align expression: report user-visible error.
+            if isinstance(arg, IdentExpr) and arg.name not in bindings:
+                raise _align_instantiation_unknown(struct_name, type_args, arg.name)
+            # Other non-constant/unknown cases: leave unknown and do not emit
+            # a false diagnostic.
+            continue
+        err = align_value_error(val)
+        if err is not None and "must be a positive power of 2" in err:
+            raise _align_instantiation_error(struct_name, type_args, val)
+        if err is not None:
+            ta = ", ".join(str(a) for a in (type_args or []))
+            head = f"function instantiation failed: {struct_name}[{ta}]" if ta else f"function instantiation failed: {struct_name}"
+            raise RuntimeError(f"{head}: @align: {err.lstrip('@align ').strip()}")
+
+
 class Elaborator:
     """Demand-driven, CAS-backed elaboration service."""
 
@@ -1372,7 +1537,8 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
+        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
+                                                     conformance_bases=_where_conformance_bases(module_src))
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
@@ -1404,6 +1570,7 @@ class Elaborator:
             return None
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
+        _validate_generic_struct_align(module_src, tmpl, struct_name, type_args, targs)
 
         nested_defs, renames = [], []
         for mention, n_src, n_name, n_args in (nested or []):
@@ -1422,7 +1589,8 @@ class Elaborator:
 
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      nested_defs=nested_defs,
-                                                     renames=renames)
+                                                     renames=renames,
+                                                     conformance_bases=_where_conformance_bases(module_src))
         _, concrete = mm.monomorphize_source(tmpl, targs)
         fields, methods, anns = _struct_layout_anns(concrete, mangled)
         # `symbols`: what the TU ACTUALLY defined (`nm`). The caller registers

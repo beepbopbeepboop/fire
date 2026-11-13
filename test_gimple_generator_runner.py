@@ -1176,53 +1176,63 @@ def _regression_read_table_callable_reader():
     # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must compile
-    # and run correctly.
+    # and produce output matching CPython ground truth.
+    mojo_src = """\
+import csv
+
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=csv.reader):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
+    for r in read_table(data, "a\\tb", sep='\\t'):
+        print(r[0], r[1])
+main()
+"""
+    cpy_src = """\
+import csv
+
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=csv.reader):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
+    for r in read_table(data, "a\\tb", sep='\\t'):
+        print(r[0], r[1])
+main()
+"""
     test_generator_matches_cpython(
         "cpp_for_callable_param_read_table_like",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
+        mojo_src,
+        cpy_src)
 
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
+
+def _regression_read_table_callable_reader_untabled_refusal():
+    # An untabled callable-valued parameter must still be refused by name
+    # (honest refusal, no silent wrong behavior).
+    src = """\
+def my_reader(lines):
+    return []
+
+def read_table(infile, *, _get_reader=my_reader):
     lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
+    for row in _get_reader(lines):
         yield row
 
 def main():
-    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""")
+    for r in read_table("a"):
+        print(r)
+"""
+    test_generator_refused(
+        "cpp_for_callable_param_read_table_like_untabled_refusal",
+        src,
+        "_get_reader")
 
 
 def _cpp_coroutine_builtin_module_constant():
@@ -10065,6 +10075,7 @@ def main():
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
     _regression_read_table_callable_reader()
+    _regression_read_table_callable_reader_untabled_refusal()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

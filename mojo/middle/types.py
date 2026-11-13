@@ -2701,9 +2701,17 @@ _FOREIGN_CALLABLES = {
     'csv.reader': _CPP_CALLABLE_CTYPE,
     'make_reader': _CPP_CALLABLE_CTYPE,
     '_get_reader_list': _CPP_CALLABLE_CTYPE,
+    'os.walk': _CPP_CALLABLE_CTYPE,
+    'glob.glob': _CPP_CALLABLE_CTYPE,
+    'glob.iglob': _CPP_CALLABLE_CTYPE,
 }
 _FOREIGN_CALLABLE_ITER_ELEM = {
     'csv.reader': 'MojoList *',
+    # os.walk / glob.* yield elements as runtime words/containers; generic
+    # iteration over the result is correct without a specific scalar element ctype.
+    'os.walk': 'int64_t',
+    'glob.glob': 'int64_t',
+    'glob.iglob': 'int64_t',
 }
 
 

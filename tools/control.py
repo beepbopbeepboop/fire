@@ -61,11 +61,24 @@ def load_pool():
     return json.load(open(POOL_FILE))
 
 
-def pool_slot(name):
+def find_slot(name):
+    """The slot named NAME, or None when tools/pool.json no longer has it.
+
+    Internal callers follow a STORED pool name (a task or queue item written under
+    an older pool.json). A slot removed since then means that task has no home —
+    it is skipped or bounced — not that the whole runner should exit. The CLI's
+    explicit `--pool` keeps using `pool_slot`, which stays loud about a typo."""
     for sl in load_pool()["slots"]:
         if sl["name"] == name:
             return sl
-    sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
+    return None
+
+
+def pool_slot(name):
+    sl = find_slot(name)
+    if sl is None:
+        sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
+    return sl
 
 
 GATES_FILE = os.path.join(MAIN, "tools", "gates.json")
@@ -198,6 +211,10 @@ def no_restart_reason(t, pool, counts, banned=None):
     rounds. "counts" is alive running tasks keyed by model."""
     m = t.get("model", "")
     sl = next((sl for sl in pool.get("slots", []) if sl.get("model") == m), None)
+    if sl is None and t.get("pool"):
+        # The slot this task ran on was removed from tools/pool.json. Restarting it
+        # would run the model with no slot to charge/recover it, every pass, forever.
+        return "pool slot %r is no longer in %s (model %s has no home)" % (t["pool"], POOL_FILE, m)
     if sl is not None and counts.get(m, 0) >= sl.get("count", 0):
         return "slot %s at capacity (%d/%d)" % (sl["name"], counts.get(m, 0), sl.get("count", 0))
     if m in (banned if banned is not None else dead_models()):
@@ -252,6 +269,23 @@ def ahead(t):
     r = subprocess.run(["git", "rev-list", "--count", "master.." + t["branch"]],
                        cwd=MAIN, capture_output=True, text=True)
     return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+
+
+def ahead_since_base(t):
+    """Commits the WORKER added since its spawn base.
+
+    `ahead()` counts `master..branch`, but a fixer or a continuation is cut from a branch that
+    already has commits master lacks: the fixer that died in its first second still shows the
+    five commits of the branch it repairs. `base..branch` is the worker's own contribution — zero
+    when it did nothing. Falls back to `ahead` when the base is gone or unreadable, so an unknown
+    base can never turn a real attempt into a bounce."""
+    base = t.get("base") or "master"
+    branch = t.get("branch") or ""
+    if not branch or base == branch:
+        return ahead(t)
+    r = subprocess.run(["git", "rev-list", "--count", base + ".." + branch],
+                       cwd=MAIN, capture_output=True, text=True)
+    return int(r.stdout.strip() or 0) if r.returncode == 0 else ahead(t)
 
 
 def next_slot():
@@ -692,13 +726,23 @@ def probe_model(model):
 
 
 def probe_free_bans(now=None, probe=probe_model):
-    """Lift the ban on each banned daily free tier that answers. A free tier's ban is a guess (its replenish time),
-    and a limit can land minutes after a replenish, so the tier's own answer decides: the ban is lifted at once when
-    the tier answers, and otherwise re-asked every PROBE_EVERY_S. Returns the models it lifted."""
+    """Lift the ban on each banned daily free tier that answers, and drop bans for models no longer in the pool.
+
+    A free tier's ban is a guess (its replenish time), and a limit can land minutes after a replenish, so the tier's
+    own answer decides: the ban is lifted at once when the tier answers, and otherwise re-asked every PROBE_EVERY_S.
+    A ban is keyed by MODEL, not by slot, so removing the slot never cleared it: a model removed from pool.json kept
+    its ledger row forever, and re-adding it inherited the old ban. Removing the model now means removing its ban.
+
+    Returns the models it lifted. Called by refill, so a free tier recovers without a human running `probe-free`."""
     now = time.time() if now is None else now
     d = _ledger()
-    daily = {sl["model"] for sl in load_pool()["slots"] if sl.get("replenish")}
-    lifted, changed = [], False
+    slots = load_pool()["slots"]
+    pool_models = {sl["model"] for sl in slots}
+    removed = [m for m in d if m not in pool_models]
+    for m in removed:
+        del d[m]
+    daily = {sl["model"] for sl in slots if sl.get("replenish")}
+    lifted, changed = [], bool(removed)
     for m, e in d.items():
         if m not in daily or e["until"] <= now or now - e.get("probed", 0) < PROBE_EVERY_S:
             continue
@@ -793,7 +837,7 @@ def dead_on_arrival(t):
     rate limit or an API connection failure. 2026-10-24: 'Go usage limit exceeded' killed every worker the second it
     started, refill and formal_feed replaced each one, and the loop minted ~2,000 worktrees and `work/formalNNNN-docs`
     branches (202 GB) holding no work at all."""
-    if state_of(t) != "exited-err" or verdict(t) or ahead(t):
+    if state_of(t) != "exited-err" or verdict(t) or ahead_since_base(t):
         return False
     lp = os.path.join(t["worktree"], "work.log")
     if not os.path.exists(lp):
@@ -1040,7 +1084,9 @@ def bounce(name, t):
     if tree_extras(wt):
         return False
     if t.get("pool") and limit_hit(t):
-        mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
+        _sl = find_slot(t["pool"])
+        if _sl is not None:          # the slot may have been removed from pool.json since the task started
+            mark_dead(t["model"], _sl, limit_reset(t))   # the ban ends at the printed reset, else the recovery time
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
@@ -1090,7 +1136,8 @@ def pick_slot(item, busy):
     """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
     if item.get("only"):                       # pinned: its slot or nothing
-        return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
+        _sl = find_slot(item["pool"]) if item.get("pool") else None
+        return _sl if _sl is not None and slot_free(_sl, busy) else None
     slots = load_pool()["slots"]
     # A slot whose class is not a work class (`orch`, the reserved Sonnet slot for orchestration reviews) takes only
     # tasks PINNED to it (`only`, above). Without this an UNCLASSED task (the verifier's fix-gate-*) overflowed into it
@@ -1229,8 +1276,7 @@ def cmd_gate(a):
 
 
 def gate_off_in(path, pattern, reason, doc, worker):
-    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` and the
-    integrator's automatic ungate both come through here)."""
+    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` comes through here)."""
     cfg = json.load(open(path))
     cfg.setdefault("off", {})[pattern] = dict(reason=reason, doc=doc, worker=worker, since=time.strftime("%F %T"))
     json.dump(cfg, open(path, "w"), indent=2)

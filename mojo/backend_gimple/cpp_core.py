@@ -8765,6 +8765,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # case not attempted here — stays False for that branch, matching
     # its existing (unchanged) refusal behavior.
     is_self_recursive = False
+    _nested_capture_arg_exprs = None
     # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
     # `Calendar.itermonthdates` doing `for y, m, d in self.
     # itermonthdays3(year, month):`), resolved via
@@ -8838,6 +8839,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
         # reordering), taking the whole module down with it.
         _self_name = getattr(gen, '_cpp_gen_self_name', None)
         is_self_recursive = (_self_name is not None and sub_name == _self_name)
+        _nested_capture_arg_exprs = None
         if is_self_recursive:
             # Same locally-tracked self-context `_cpp_yield_from` uses
             # — no premature/partial registration into the real
@@ -8861,7 +8863,9 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             # identical reason (this body references its own
             # not-yet-textually-defined extern "C" wrappers).
             gen._cpp_gen_self_recursed = True
+            receiver_exprs = []
         else:
+            receiver_exprs = []
             api = gen._generator_api.get(sub_name)
             if api is None or sub_name not in gen._supported_generators:
                 # ...or one IMPORTED by name (`from .iterutil import
@@ -8870,13 +8874,37 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 # extern "C" symbols drive it (registered just below).
                 api = getattr(gen, '_imported_generator_bindings', {}).get(sub_name)
             if api is None:
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"`for ... in {sub_name}(...)` does not consume a generator "
-                    "this compile has itself already translated via the "
-                    "C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER in this module — "
-                    "the consumed generator must be defined earlier)")
-        receiver_exprs = []
+                # A nested generator defined inside this same compiled
+                # generator/coroutine (claimed and compiled with its
+                # enclosing captures by cpp_async._compile_nested_generator_closures),
+                # registered in _nested_generator_api keyed (current generator
+                # name, nested name) — not in _generator_api. Its _start call
+                # takes the user positional arguments first, then each
+                # captured enclosing name as an ordinary identifier in scope.
+                _ng = getattr(gen, '_nested_generator_api', {})
+                api = _ng.get((getattr(gen, '_cpp_gen_self_name', None), sub_name))
+                if api is not None:
+                    _caps = api.get('captures') or []
+                    _user_n = len(api.get('params') or []) - len(_caps)
+                    if getattr(call, 'kwargs', None) or len(call.args) != _user_n:
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            f"call to nested generator {sub_name!r} with keyword "
+                            "or defaulted arguments is not supported (only the "
+                            "plain positional form is threaded, together with "
+                            "its enclosing-scope captures)")
+                    _nested_capture_arg_exprs = [
+                        _cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn))
+                        for _cn, _ in _caps]
+                else:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"`for ... in {sub_name}(...)` does not consume a generator "
+                        "this compile has itself already translated via the "
+                        "C++20-coroutine path (either it's not a generator this "
+                        "codegen supports, or it's defined LATER in this module — "
+                        "the consumed generator must be defined earlier)")
+    # `receiver_exprs` was populated above for method/self/cls cases.
+    # For a nested generator, capture values are appended after the user
+    # positional arguments (assembled below) to form its full _start args.
     sub_params = api.get('params') or []
     # Pad omitted trailing arguments from the callee's registered param
     # defaults (same convention the direct `<base>_start(...)` construction
@@ -8894,18 +8922,25 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
     arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
-    while len(arg_exprs) < len(sub_params):
+    # A nested generator's captures are appended AFTER its user positional
+    # arguments (never default-padded); emit_calls._emit_nested_generator_start_call
+    # assembles the same [user args] + [captures] sequence.
+    _expected = (len(sub_params) - len(_nested_capture_arg_exprs)
+                 if _nested_capture_arg_exprs is not None else len(sub_params))
+    while len(arg_exprs) < _expected:
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"`for ... in {sub_name}(...)`: expected "
-                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+                f"{_expected - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
         arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
+    if _nested_capture_arg_exprs is not None:
+        arg_exprs.extend(_nested_capture_arg_exprs)
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`for ... in {sub_name}(...)`: expected "
-            f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+            f"{_expected - len(receiver_exprs)} argument(s), "
             f"got {len(call.args)}")
     base = api['base']
     # Register this callee into the module-level extern-decl map, so the
@@ -9098,6 +9133,109 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         except Exception:
             _call_txt = gen._cpp_expr(s.iterable)
         _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+        # If this is a call through a tabled foreign callable with known iterator
+        # element type (e.g. csv.reader), bind the loop target accordingly.
+        _elem_ctype = None
+        _is_tabled_callable = False
+        try:
+            if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                    and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)):
+                _fcname = s.iterable.func.name
+                import mojo.middle.types as _mtypes_mod
+                _foreign = getattr(_mtypes_mod, '_FOREIGN_CALLABLES', {}) or {}
+                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
+                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
+                _pd = None
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_fcname)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _fcname:
+                                            _pd = _pair[1]; break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is None and getattr(gen, '_func_node', None) is not None:
+                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
+                    if isinstance(_fnd, dict):
+                        _pd = _fnd.get(_fcname)
+                _q = None
+                if _pd is not None and _get_qualified_name is not None:
+                    try:
+                        _q = _get_qualified_name(_pd)
+                    except Exception:
+                        _q = None
+                if (_q and (_q in _foreign or _q in _foreign_iter)) or (_fcname in _foreign or _fcname in _foreign_iter):
+                    _is_tabled_callable = True
+                if _q and _q in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_q]
+                if _elem_ctype is None and _fcname in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_fcname]
+        except Exception:
+            _elem_ctype = None
+        # An untabled callable-valued parameter/local must still be refused by
+        # name rather than miscompiled/silently mishandled. Do not refuse when
+        # the param resolves to a known/tabled foreign callable, or to a known
+        # compiled generator/async function (those have their own lowering).
+        _is_known_generator_callee = False
+        try:
+            if _pd is not None:
+                _pdname = None
+                if isinstance(_pd, gimple_ctypes.IdentExpr):
+                    _pdname = _pd.name
+                elif isinstance(_pd, gimple_ctypes.AttributeExpr):
+                    _pdname = f"{getattr(getattr(_pd, 'obj', None), 'name', '')}.{getattr(_pd, 'attr', '')}".strip('.')
+                if _pdname and (_pdname in getattr(gen, '_generator_api', {})
+                                or _pdname in getattr(gen, '_async_api', {})
+                                or _pdname.split('.')[-1] in getattr(gen, '_generator_api', {})
+                                or _pdname.split('.')[-1] in getattr(gen, '_async_api', {})):
+                    _is_known_generator_callee = True
+            # Direct name fallback
+            if (s.iterable.func.name in getattr(gen, '_generator_api', {})
+                    or s.iterable.func.name in getattr(gen, '_async_api', {})):
+                _is_known_generator_callee = True
+        except Exception:
+            pass
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
+                and not _is_tabled_callable
+                and not _is_known_generator_callee):
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"a `for` over a call through the callable-valued local/parameter "
+                f"'{s.iterable.func.name}(...)' is not supported in a compiled "
+                f"generator/coroutine body")
+        if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
+            _ctr = gen._cpp_fresh_name("_mg_i")
+            _tname = s.target
+            _lines = []
+            if _tname not in declared:
+                declared[_tname] = _elem_ctype
+                _ctype = _elem_ctype
+                _lines.append(f"{indent}{_ctype} {_tname};")
+            else:
+                _ctype = declared[_tname] or _elem_ctype
+            _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+            if _ctype == 'double':
+                _get = f"mojo_list_get_double({_wi}, {_ctr})"
+            elif _ctype in ('char *', 'const char *'):
+                _get = f"mojo_list_get_str({_wi}, {_ctr})"
+            else:
+                _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                    _get = f"({ _ctype })(intptr_t){_get}"
+            _lines.append(f"{indent}    {_tname} = {_get};")
+            for inner in s.body:
+                _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            _lines.append(f"{indent}}}")
+            return _pre + _lines
         _inner_for = gimple_ctypes.ForStmt(
             target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
             body=s.body, else_body=s.else_body)
@@ -9109,6 +9247,60 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())):
         _cdecl = declared.get(s.iterable.func.name) if declared else None
         if isinstance(_cdecl, str) and _cdecl.startswith('std::function'):
+            _fcname = s.iterable.func.name
+            _elem_ctype = None
+            try:
+                import mojo.middle.types as _mtypes_mod
+                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
+                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
+            except Exception:
+                _foreign_iter = {}
+                _get_qualified_name = None
+            # Try to resolve foreign callable iterator element type from param default.
+            try:
+                _pd = None
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                # param-keyed dict form
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_fcname)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        # function-keyed form: {func_name: [(param, default_node), ...]}
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _fcname:
+                                            _pd = _pair[1]
+                                            break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is None and getattr(gen, '_func_node', None) is not None:
+                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
+                    if isinstance(_fnd, dict):
+                        _pd = _fnd.get(_fcname)
+                    elif isinstance(_fnd, list):
+                        for _pair in _fnd:
+                            try:
+                                if _pair and _pair[0] == _fcname:
+                                    _pd = _pair[1]; break
+                            except Exception:
+                                pass
+                if _pd is not None and _get_qualified_name is not None:
+                    try:
+                        _q = _get_qualified_name(_pd)
+                        if _q and _q in _foreign_iter:
+                            _elem_ctype = _foreign_iter[_q]
+                    except Exception:
+                        pass
+                # fallback: if callee name itself is a known foreign iterable
+                if _elem_ctype is None and _fcname in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_fcname]
+            except Exception:
+                pass
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
             if not hasattr(gen, '_cpp_word_iter_locals'):
@@ -9121,6 +9313,30 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             except Exception:
                 _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tname = s.target
+                _lines = []
+                if _tname not in declared:
+                    declared[_tname] = _elem_ctype
+                    _ctype = _elem_ctype
+                    _lines.append(f"{indent}{_ctype} {_tname};")
+                else:
+                    _ctype = declared[_tname] or _elem_ctype
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                if _ctype == 'double':
+                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
+                elif _ctype in ('char *', 'const char *'):
+                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
+                else:
+                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                        _get = f"({ _ctype })(intptr_t){_get}"
+                _lines.append(f"{indent}    {_tname} = {_get};")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
             _inner_for = gimple_ctypes.ForStmt(
                 target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
                 body=s.body, else_body=s.else_body)
@@ -9298,12 +9514,30 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         elif _is_callable_local:
             # Look up param default
             try:
+                import mojo.middle.types as _mtypes_mod2
+                _get_qualified_name = getattr(_mtypes_mod2, '_get_qualified_name', None)
+            except Exception:
+                _get_qualified_name = None
+            try:
                 _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
-                _pd = _pdefaults.get(_cl_callee)
-                if _pd is not None:
-                    # Try to extract qualified name
+                _pd = None
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_cl_callee)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _cl_callee:
+                                            _pd = _pair[1]; break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is not None and _get_qualified_name is not None:
                     try:
-                        from mojo.middle.types import _get_qualified_name
                         _q = _get_qualified_name(_pd)
                         if _q and _q in _foreign_iter:
                             _resolved_foreign = _q
@@ -9314,10 +9548,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     try:
                         _fn = gen._func_node
                         _fdefaults = getattr(_fn, 'param_defaults', None) or {}
-                        _pd2 = _fdefaults.get(_cl_callee)
-                        if _pd2 is not None:
+                        _pd2 = None
+                        if isinstance(_fdefaults, dict):
+                            _pd2 = _fdefaults.get(_cl_callee)
+                        elif isinstance(_fdefaults, list):
+                            for _pair in _fdefaults:
+                                try:
+                                    if _pair and _pair[0] == _cl_callee:
+                                        _pd2 = _pair[1]; break
+                                except Exception:
+                                    pass
+                        if _pd2 is not None and _get_qualified_name is not None:
                             try:
-                                from mojo.middle.types import _get_qualified_name
                                 _q = _get_qualified_name(_pd2)
                                 if _q and _q in _foreign_iter:
                                     _resolved_foreign = _q
@@ -9330,6 +9572,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # If we have a resolved foreign table entry that gives iterator element ctype,
         # we need to handle it (step 4)
         if _resolved_foreign is not None and _resolved_foreign in _foreign_iter:
+            _elem_ctype = _foreign_iter[_resolved_foreign] or 'int64_t'
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
             if not hasattr(gen, '_cpp_word_iter_locals'):
@@ -9363,6 +9606,32 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                              + f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr});")
                 for _si, _nm in enumerate(_names):
                     _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
+            # Single-target iteration: bind element using table's element ctype.
+            if isinstance(s.target, str):
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tname = s.target
+                _lines = []
+                if _tname not in declared:
+                    declared[_tname] = _elem_ctype
+                    _ctype = _elem_ctype
+                    _lines.append(f"{indent}{_ctype} {_tname};")
+                else:
+                    _ctype = declared[_tname] or _elem_ctype
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                if _ctype == 'double':
+                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
+                elif _ctype in ('char *', 'const char *'):
+                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
+                else:
+                    # MojoList*/containers and word-typed values travel as int64_t slots.
+                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                        _get = f"({ _ctype })(intptr_t){_get}"
+                _lines.append(f"{indent}    {_tname} = {_get};")
                 for inner in s.body:
                     _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                 _lines.append(f"{indent}}}")

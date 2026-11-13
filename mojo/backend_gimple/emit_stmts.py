@@ -1608,14 +1608,27 @@ def _gen_stmt_AssignStmt(gen, node):
                      and v in getattr(gen, '_boxed_vals', ())
                      and gen.var_types.get(_copy_src) == 'int64_t'
                      and ginf.tagged_for_target_name(gen, _copy_src))
+        # A call to a float+pointer function is a tagged word too
+        # (`lower_expr` marks its temp in `_tagged_word_vals`), and binding it
+        # to a name must keep the box: `mojo_box_word` below would hand a
+        # double box on unchanged but a LIST box's word as an int, and the
+        # name would lose the kind every later consumer dispatches on. Unlike
+        # the generator cases the RHS itself is proof for THIS store, so the
+        # name-level "every binding is tagged" walk is not needed.
+        _call_tagged = (vtype == 'int64_t'
+                        and isinstance(node.value, gimple_ctypes.CallExpr)
+                        and isinstance(node.value.func, gimple_ctypes.IdentExpr)
+                        and _as_str(node.value.func.name) in getattr(
+                            gen, '_ret_may_hold_float', ()))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
         _keep_tagged_box = (vtype == 'int64_t'
                             and (v in getattr(gen, '_tagged_word_vals', ())
-                                 or _for_copy)
+                                 or _for_copy or _call_tagged)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
-                            and (ginf.tagged_next_bind_name(gen, _as_str(tname))
+                            and (_call_tagged
+                                 or ginf.tagged_next_bind_name(gen, _as_str(tname))
                                  or ginf.tagged_recv_name(gen, _as_str(tname))))
         # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a
         # box-holding local too, so every int64 store into it must be a box:
@@ -1625,7 +1638,8 @@ def _gen_stmt_AssignStmt(gen, node):
         # A tagged word and a non-int64 name never mix: see
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
-        _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
+        _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy
+                        or _call_tagged)
         # A float/str/bool/int store into a box-holding name is boxed by its
         # kind here, BEFORE any refusal below reads the value's C type, so it
         # is carried by the box rather than refused. A container stored into a
@@ -2819,6 +2833,18 @@ def _gen_stmt_AssignStmt(gen, node):
                             v_cast = gen._new_temp(elem_t)
                             gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
                             gen._emit(f"  *{addr} = {v_cast};")
+                    elif isinstance(ot, str) and ot in ('float', 'double', '__fp16'):
+                        # Scalar-erased SIMD/Scalar lane WRITE (same model and
+                        # reason as the read arm in `_lower_subscript`, and as
+                        # the MultiAssign chain's copy): the erased value IS the
+                        # lane, so assign the slot instead of emitting
+                        # `scalar[i] = x`, which gcc rejects.
+                        if vtype == ot:
+                            gen._emit(f"  {obj_v} = {v};")
+                        else:
+                            _wv = gen._new_temp(ot)
+                            gen._safe_coerce_emit(vtype, ot, v, _wv)
+                            gen._emit(f"  {obj_v} = {_wv};")
                     else:
                         gen._emit(f"  {obj_v}[{idx_v}] = {v};")
     elif isinstance(node.target, gimple_ctypes.SliceExpr):
@@ -3402,6 +3428,179 @@ def _redecl_upgrade_default(gen, name: str, ctype: str) -> None:
             return
 
 
+def _is_float_mixed_return(gen) -> bool:
+    """Is the body being emitted one whose return type inference widened to
+    the TAGGED WORD because its arms mix a float with a pointer?
+
+    The answer comes from `_float_mixed_return_bodies`, the set
+    `infra_infer._infer_return_type_core` records against the SAME body object,
+    so this emitter cannot disagree with the declared return type: the body is
+    only in the set because inference widened it to `int64_t`, and `func_ret_type`
+    is that answer here. A body not in the set keeps every arm's own spelling
+    exactly as before."""
+    if _as_str(getattr(gen, 'func_ret_type', '') or '') != 'int64_t':
+        return False
+    _body = getattr(gen, '_cur_func_body', None)
+    return _body is not None and id(_body) in getattr(
+        gen, '_float_mixed_return_bodies', ())
+
+
+def _box_float_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
+    """Box one return arm of a float+pointer function into the tagged word.
+
+    Every arm that has no `int64_t` spelling is boxed by its own kind, so a
+    consumer that only sees the word (`mojo_repr_boxed`, the list kind
+    reader) still renders the value: `double` -> kind 'd', `char *` -> 'p',
+    `MojoList *` (tuple or list) -> 'l', `MojoBytes *` -> 's'. An `int`/`_Bool`
+    arm is already a plain word and passes through unchanged.
+
+    Any OTHER pointer kind — a dict, a set, a struct — is refused rather than
+    guessed: a box's "container" kind renders through the LIST repr, so
+    reading a dict pointer out of it would walk dict memory as a slot array.
+    A diagnostic naming the function is the only honest answer; the shapes
+    that matter today (`comptime.eval_const`) return str/list/None/float."""
+    vt = _as_str(vtype)
+    if vt in ('int', 'int64_t'):
+        # A plain integer has an int64_t spelling, so it IS the word.
+        return vtype, v
+    if vt == '_Bool':
+        # A bool is its OWN kind in the tagged word: the raw 1/0 prints as an
+        # integer, and CPython prints True/False.
+        return 'int64_t', gen._call_expr(
+            'int64_t', 'mojo_box_from_bool',
+            [('int64_t', gen._to_int64('_Bool', v))])
+    if vt in ('double', 'float'):
+        dv = v if vt == 'double' else gen._new_val('double', f'(double){v}')
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_double',
+                                         [('double', dv)])
+    if vt == 'char *':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_str',
+                                         [('char *', v)])
+    if vt == 'MojoList *':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_list',
+                                         [('MojoList *', v)])
+    if vt == 'MojoBytes *':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_bytes',
+                                         [('void *', v)])
+    raise TypeError(
+        f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
+        f"returns a float beside a {vt!r}; a tagged word can carry a float "
+        f"beside an int/str/list/tuple/bytes/None, but not beside this pointer "
+        f"kind (a box of it would be rendered by the wrong repr)")
+
+
+_NON_POINTER_SCALAR_ARM_CTYPES = ('double', 'float', 'int', 'int64_t', '_Bool')
+
+# A declaration whose scalar arm is legitimate: the annotation ITSELF is a
+# scalar value type (Bool, Int, Codepoint, SIMD[...]). Its C type may still be
+# a struct pointer (`Bool *`), but a `_Bool`/int arm is the value, not a
+# mistyped pointer.
+_SCALAR_ANNOTATION_FAMILY = {
+    'Bool': 'bool', 'BoolLiteral': 'bool',
+    'Int': 'int', 'Int8': 'int', 'Int16': 'int', 'Int32': 'int',
+    'Int64': 'int', 'UInt': 'int', 'UInt8': 'int', 'UInt16': 'int',
+    'UInt32': 'int', 'UInt64': 'int', 'Codepoint': 'int', 'Byte': 'int',
+    'Index': 'int', 'c_int': 'int', 'c_uint': 'int', 'c_long': 'int',
+    'c_ulong': 'int', 'c_short': 'int', 'c_ushort': 'int',
+    'c_ssize_t': 'int', 'c_size_t': 'int', 'c_ptrdiff_t': 'int',
+    'Float16': 'float', 'Float32': 'float', 'Float64': 'float',
+    'FloatLiteral': 'float',
+}
+
+
+def _annotation_scalar_family(ann: str) -> str | None:
+    """The scalar family a return ANNOTATION names, or None when it is not a
+    scalar value type. `SIMD[DType.bool, 4]` and `Scalar[DType.int32]` are
+    scalars too: their bracket carries the dtype, so the base alone is not
+    enough."""
+    base = (ann or '').split('[', 1)[0].strip()
+    if base in _SCALAR_ANNOTATION_FAMILY:
+        return _SCALAR_ANNOTATION_FAMILY[base]
+    if base in ('SIMD', 'Scalar', 'DTypePointer'):
+        _inner = (ann or '').lower()
+        for name, fam in (('bool', 'bool'), ('float', 'float'),
+                          ('int', 'int'), ('uint', 'int')):
+            if name in _inner:
+                return fam
+    return None
+
+
+def _scalar_shape_arm_kind(node) -> str | None:
+    """The scalar family a return arm is BY ITS SOURCE SHAPE, or None.
+
+    The C type cannot answer this question, and that is the whole reason this
+    function exists: a String or container value is an erased `int64_t` box,
+    `None` is `int 0`, and a `Bool` value is `_Bool`, so on the C side a
+    legitimate pointer arm and a mistyped scalar arm are the same word. Only
+    shapes whose static Mojo type is a scalar in every context are named here
+    — literals, comparisons, `not`, and a sign applied to a literal. An
+    IdentExpr or a call is deliberately NOT named: `return result^` returning
+    a String is an `int64_t` on the C side and must stay legal.
+    """
+    while isinstance(node, gimple_ctypes.UnaryOp) and node.op in ('-', '+'):
+        node = node.operand
+    if isinstance(node, gimple_ctypes.IntLiteral):
+        return 'int'
+    if isinstance(node, gimple_ctypes.FloatLiteral):
+        return 'float'
+    if isinstance(node, gimple_ctypes.BoolLiteral):
+        return 'bool'
+    if isinstance(node, gimple_ctypes.CompareChain):
+        return 'bool'
+    if (isinstance(node, gimple_ctypes.BinaryOp)
+            and node.op in ('==', '!=', '<', '<=', '>', '>=')):
+        return 'bool'
+    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == 'not':
+        return 'bool'
+    return None
+
+
+def _check_float_arm_into_annotated_pointer(gen, vtype, node=None) -> None:
+    """Refuse a scalar return arm in a function whose return type is a pointer.
+
+    A pointer C return type reaches this emitter only from an ANNOTATION
+    (`-> String`, `-> MojoList *`, ...): an inferred scalar+pointer join is
+    widened to the tagged word before we get here (`_is_float_mixed_return`).
+    So a scalar arm is a contradiction of a static type, and Mojo rejects it
+    as a type error. The old spelling, `(char *)<scalar>` cast into the
+    pointer, compiled (gcc warns, not errors) and silently handed the caller
+    the raw bits as the pointer (`print(pick(0))` dereferenced address 7 for
+    `return 7`). The diagnostic is the honest answer: it names the function,
+    the arm's type and the annotated return type.
+
+    The C TYPE is authoritative for float arms only. For int/bool arms it is
+    not: `return result^` (String) and `return None` (a NULL pointer) both
+    emit int64_t/int, and a `-> Bool` method's comparison arm is `_Bool`; the
+    first two are ordinary pointer arms and the third matches its scalar
+    annotation. 2026-11-12: reading the C type for int/bool turned all of
+    those into errors and made 83 stdlib files fail. So an int/bool arm is
+    refused only when its SOURCE SHAPE is unambiguously scalar (see
+    `_scalar_shape_arm_kind`) and the annotation is not a scalar of that
+    family."""
+    _rt = _as_str(getattr(gen, 'func_ret_type', '') or '')
+    _vt = _as_str(vtype)
+    if not _rt.endswith(' *'):
+        return
+    if _vt in ('double', 'float'):
+        raise TypeError(
+            f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
+            f"is annotated to return {_rt!r} but has a return arm of type "
+            f"{_vt!r}; a float cannot be returned as a pointer "
+            f"(fix the annotation or the returned value)")
+    _kind = _scalar_shape_arm_kind(node) if node is not None else None
+    if _kind is None:
+        return
+    _ann_family = _annotation_scalar_family(
+        _as_str(getattr(gen, 'current_func_ret_ann', '') or ''))
+    if _ann_family == _kind:
+        return
+    raise TypeError(
+        f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
+        f"is annotated to return {_rt!r} but has a return arm of type "
+        f"{_vt!r}; a scalar of that type cannot be returned as a pointer "
+        f"(fix the annotation or the returned value)")
+
+
 def _gen_stmt_ReturnStmt(gen, node):
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
@@ -3430,6 +3629,13 @@ def _gen_stmt_ReturnStmt(gen, node):
     if node.value is None:
         ginf.emit_return_frees(gen)
         gmp._cattr_leave(gen)
+        # A bare `return` is `return None`, and in a tagged function a None is
+        # the shared None box, not the NULL word (which `mojo_repr_boxed` would
+        # read as the integer 0).
+        if _is_float_mixed_return(gen):
+            _nv = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._emit(f"  return {_nv};")
+            return
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -3471,6 +3677,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
+        _check_float_arm_into_annotated_pointer(gen, vtype, node.value)
         # A dict slot read whose runtime kind is on the slot: box it so the
         # kind survives a return (callers cannot see this frame's dict/key temps).
         _dsr = getattr(gen, '_dict_slot_reads', None)
@@ -3659,6 +3866,30 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]
+        # A float+pointer function returns the TAGGED WORD: box this arm by
+        # its kind so the declared `int64_t` return carries the value instead
+        # of truncating it into the pointer the old join chose. AFTER the
+        # bookkeeping above, which is about the value's own container shape and
+        # still wants the unboxed `v`.
+        if _is_float_mixed_return(gen):
+            if isinstance(node.value, gimple_ctypes.NoneLiteral) or (
+                    isinstance(node.value, gimple_ctypes.IdentExpr)
+                    and _as_str(node.value.name) == 'None'):
+                # `return None` lowers as the word 0, which is an int slot's
+                # value, not the shared None box the kind reader looks for.
+                # The parser spells it as either a NoneLiteral or the bare
+                # identifier `None` (the same pair `coro.py` checks).
+                vtype, v = 'int64_t', gen._call_expr('int64_t',
+                                                     'mojo_box_none', [])
+            elif isinstance(node.value, gimple_ctypes.BoolLiteral):
+                # A bool arm lowers to the same `int` 1/0 an int arm does, so
+                # without the kind the word prints `1` where CPython prints
+                # `True`. `mojo_box_from_bool` is the tagged-word spelling.
+                vtype, v = 'int64_t', gen._call_expr(
+                    'int64_t', 'mojo_box_from_bool',
+                    [('int64_t', gen._to_int64(vtype, v))])
+            else:
+                vtype, v = _box_float_mixed_return_arm(gen, vtype, v)
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)
@@ -5203,6 +5434,19 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     v_cast = gen._new_temp(elem_t)
                     gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
                     gen._emit(f"  *{addr} = {v_cast};")
+            elif ot in ('float', 'double', '__fp16'):
+                # Scalar-erased SIMD/Scalar lane WRITE, mirroring the read arm
+                # in `_lower_subscript` (and for the same reason: a scalar has
+                # no legal Mojo subscript, so this is a lane of the erased
+                # value). The erased value IS the lane, so assign the slot
+                # instead of emitting `scalar[i] = x`, which gcc rejects with
+                # "subscripted value is neither array nor pointer nor vector".
+                if vtype == ot:
+                    gen._emit(f"  {obj_v} = {v};")
+                else:
+                    _wv = gen._new_temp(ot)
+                    gen._safe_coerce_emit(vtype, ot, v, _wv)
+                    gen._emit(f"  {obj_v} = {_wv};")
             elif not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                 gen._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
@@ -5426,6 +5670,12 @@ def _gen_stmt_ContinueStmt(gen, node):
 def _gen_stmt_ExprStmt(gen, node):
     if isinstance(node.value, gimple_ctypes.CallExpr) and isinstance(node.value.func, gimple_ctypes.IdentExpr):
         raw_name = gen._ident_call_name(node.value.func)
+        # `constrained(cond, msg)` in statement position: this bare-call fast
+        # path never reaches _lower_call, so route through the shared
+        # compile-time checker before any other statement lowering.
+        _constrained_res = ggc._try_lower_constrained(gen, node.value)
+        if _constrained_res is not None:
+            return
         # A bare, value-discarding call to an offloaded DEVICE function.
         # This handler has its own fast path for statement-position calls and
         # never reaches _lower_call, so without this the launch hook only
@@ -5965,13 +6215,64 @@ def _comptime_assert_fail(gen, node, msg):
     raise RuntimeError(f'{loc}comptime assertion failed: {msg}')
 
 
+def _comptime_conforms_to_pred(gen):
+    try:
+        import mojo.middle.comptime as _comptime_eval
+        sb = getattr(gen, '_struct_bases', None) or {}
+        tb = getattr(gen, '_trait_bases', None) or {}
+        ex = getattr(gen, '_conformance_bases_extra', None) or {}
+        tbt = getattr(gen, '_conformance_trait_bases_text', None)
+        if tbt is None:
+            tbt = {}
+            try:
+                src = getattr(gen, '_source_text', '') or ''
+                if not src:
+                    fn = getattr(gen, '_current_filename', '') or ''
+                    if fn:
+                        with open(fn) as f:
+                            src = f.read()
+                if src:
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
+                        name = m.group(1)
+                        bstr = m.group(3) or ''
+                        blist = []
+                        for part in bstr.split(','):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            b = part.split('[')[0].split('.')[-1].strip()
+                            if b and re.match(r'^[A-Za-z_]\w*$', b):
+                                blist.append(b)
+                        tbt[name] = blist
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
+                        tbt.setdefault(m.group(1), [])
+            except Exception:
+                tbt = {}
+            try:
+                gen._conformance_trait_bases_text = tbt
+            except Exception:
+                pass
+        if not sb and not tb and not ex and not tbt:
+            return None
+        bases = dict(ex)
+        bases.update(sb)
+        bases.update(tb)
+        for k, v in (tbt or {}).items():
+            if v or k not in bases:
+                bases[k] = v
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
 def _eval_comptime_assert_msg(gen, node):
     msg = None
     msg_node = getattr(node, 'msg', None)
     if msg_node is not None:
         try:
             import mojo.middle.comptime as _comptime_eval
-            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {})
+            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {},
+                                          conforms_to_pred=_comptime_conforms_to_pred(gen))
             if isinstance(m, str):
                 msg = m
             elif m is not None:
@@ -6003,8 +6304,10 @@ def _gen_stmt_AssertStmt(gen, node):
     if getattr(node, 'is_comptime', False):
         import mojo.middle.comptime as _comptime_eval
         cvals = getattr(gen, '_comptime_vals', {}) or {}
+        _cpred = _comptime_conforms_to_pred(gen)
         try:
-            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), cvals)
+            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), cvals,
+                                                  conforms_to_pred=_cpred)
         except Exception:
             _res = None
         if _res is False:
@@ -6012,7 +6315,8 @@ def _gen_stmt_AssertStmt(gen, node):
                 return
         if _res is None:
             try:
-                _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), cvals)
+                _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), cvals,
+                                                           conforms_to_pred=_cpred)
             except Exception:
                 _st = None
             if _st == 0:  # CONST_FALSE

@@ -522,11 +522,14 @@ def _gen_stmt_FromImportStmt(gen, node):
         if isinstance(_fi_info, dict) and _fi_info.get('signature'):
             if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
                     and 'signature' in gen.imported_symbols[symbol_name]):
+                # The signature stays under the DEFINING name, exactly as
+                # the module-scope path (`_register_sym`) stores it: it
+                # describes the defining function, and the local alias is
+                # only a binding. The import-extern block renames the
+                # original identifier to the C symbol (`original_name` ->
+                # `csym` below); renaming it to the alias here made that
+                # rename a no-op and left the extern under the alias name.
                 _fi_sig = _fi_info['signature']
-                if symbol_name != name:
-                    import re as _re_fi
-                    _fi_sig = _re_fi.sub(r'\b' + _re_fi.escape(name) + r'\b',
-                                         symbol_name, _fi_sig, count=1)
                 gen.imported_symbols[symbol_name] = {
                     # `_fi_eff_mod`, not `node.module`: when the name only
                     # REACHES this module through a re-export, every reader
@@ -633,6 +636,16 @@ def _gen_stmt_FromImportStmt(gen, node):
                         ]
                 if _fi_pts:
                     gen._imported_home_param_types[_pair_key(_fi_home, symbol_name)] = list(_fi_pts)
+            if symbol_name != name:
+                # The C symbol every call site under this alias is emitted
+                # with, resolved HERE, inside the function-body scope whose
+                # `record_flat=False` home binding `_func_csym` reads. The
+                # module-level import-extern preamble runs after that scope
+                # is popped, so resolving it there drops the qualifier and
+                # declares the bare name (a second, independent mismatch
+                # with the call site). The preamble reads this instead.
+                gen.imported_symbols[symbol_name]['csym'] = _as_str(
+                    gen._func_csym(symbol_name))
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:
@@ -2444,7 +2457,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list | None:
+def _imported_def_pts(gen, bare_name: str) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2463,10 +2476,15 @@ def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list |
     vs mod.computer.network.get_energy -> call sites emitted
     computer_case_get_energy_77b31a against definition ..._0ed997).
 
-    `definer_only=True` skips the importer's own snapshot tier, so a hit means
-    a unit that DEFINES the name committed this signature (module_gen's extern
-    block uses it: an extern may only be re-typed from a definition that is
-    really in the translation unit).
+    Both tiers below are read for every caller. The import-extern block used
+    to pass `definer_only=True` so an extern could only be re-typed from a
+    definition really in the translation unit, but that left it with
+    `module_loader`'s text-scan arity whenever the definition belonged to
+    ANOTHER unit (the ordinary single-module compile): the scan drops
+    unannotated parameters, so the extern declared fewer arguments than the
+    call sites — whose mangled suffix comes from `_effective_param_types` —
+    passed. It now reads the same list the name was hashed from, which is
+    what both tiers exist to supply.
 
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
@@ -2531,7 +2549,7 @@ def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list |
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        if store and not definer_only:
+        if store:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
@@ -2554,7 +2572,44 @@ def _effective_param_types(gen, bare_name: str) -> list | None:
         pts = _imported_def_pts(gen, bare_name)
     if pts is None:
         pts = gen.func_param_types.get(bare_name)
+    if pts is None:
+        pts = _import_entry_param_types(gen, bare_name)
     return pts
+
+
+def _import_entry_param_types(gen, bare_name: str) -> list | None:
+    """Bare c parameter types read out of the symbol's OWN import entry.
+
+    The designated tiers above are all populated by registration passes that
+    run after gen_module's early `/* from <mod> */` extern block, so on that
+    first pass they are empty and `_overload_suffix` hashed the empty list —
+    the extern went out as `extern char * mojo_middle_types__mojo_type
+    (char * ann)` (right qualifier, NO suffix) while every call site,
+    resolved later, emitted `mojo_middle_types__mojo_type_d719e0`. Two spellings
+    of one function: gcc reports the call as an implicit declaration, then
+    "conflicting types" against the real prototype.
+
+    `imported_symbols[name]['c_parameters']` is the one store that IS filled by
+    then, but it keeps the parameter NAMES (`['char * ann']`) while the
+    overload hash is defined over the BARE types (`['char *']` -> `_d719e0`).
+    Strip the trailing identifier and the hash matches the defining module's
+    own compile. Guarded on a `'signature'` being present so a module ALIAS
+    entry (`{module, return_type: 'unknown'}`) can never be hashed as a
+    function.
+    """
+    _info = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
+    if not _info or not _as_str(_info.get('signature')):
+        return None
+    _cps = _info.get('c_parameters')
+    if not isinstance(_cps, list) or not _cps:
+        return None
+    _out = []
+    for _cp in _cps:
+        _s = _as_str(_cp)
+        if not _s:
+            continue
+        _out.append(re.sub(r'\s+[A-Za-z_][A-Za-z0-9_]*$', '', _s))
+    return _out or None
 
 
 def _overload_suffix(gen, bare_name: str) -> str:
@@ -3056,6 +3111,32 @@ def _func_qualifier(gen, bare_name: str) -> str:
                 if _sanitize_qualifier(_lq) != _cand:
                     raise RuntimeError(_ambiguous_func_import_error(bare_name))
         return _cand
+    # Tier 4 — the symbol's OWN import entry. Every writer that records a
+    # genuine imported function (`_register_sym`, `_gen_stmt_FromImportStmt`'s
+    # body pass, the re-export resolver) stores the DEFINING module in
+    # `imported_symbols[name]['module']`, and `_func_csym` needs that module
+    # to build the same mangled symbol the defining module's own compile
+    # emitted. Tiers 1-3 are all populated by the import scan, which runs
+    # AFTER gen_module's early `/* from <mod> */` extern block — so on that
+    # first pass every tier misses and this name used to come back
+    # unqualified. The extern was then emitted as `extern char * _mojo_type
+    # (...)` while the call sites, resolved later, emitted
+    # `mojo_middle_types__mojo_type_d719e0` — "implicit declaration of
+    # function ... did you mean ..." plus a conflicting weak
+    # `int64_t _mojo_type (...)` "unavailable in compiled mode" stub from the
+    # call sites that still saw the bare name.
+    #
+    # Guarded on a `'signature'` being present (and `return_type` not
+    # `unknown`) so a module ALIAS entry — `{module, return_type: 'unknown'}`,
+    # written by `_gen_stmt_ImportStmt`/the submodule-alias path — can never
+    # be mistaken for a function and inherit a bogus qualifier.
+    _imp4 = getattr(gen, 'imported_symbols', None)
+    if _imp4 and bare_name in _imp4:
+        _info4 = _as_dict(_imp4[bare_name])
+        if _as_str(_info4.get('signature')) and _info4.get('return_type') != 'unknown':
+            _mod4 = _as_str(_info4.get('module'))
+            if _mod4 and _mod4 != 'unknown':
+                return _sanitize_qualifier(_mod4)
     return ''
 
 
@@ -3599,6 +3680,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             ret_type = 'int64_t'
 
     gen.func_ret_type = ret_type
+    gen.current_func_ret_ann = (
+        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference
     gen.func_return_types[node.name] = ret_type
     # ...and so does every CALL SITE of this definition, which reaches this
@@ -3891,6 +3974,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     gen.current_func_name = fn_name
     gen._current_struct_name = ""   # top-level code is outside any method body
     gen.func_ret_type = 'void'
+    gen.current_func_ret_ann = ''
     gen.func_return_types[fn_name] = 'void'
 
     # Generate code for each top-level statement
@@ -4895,6 +4979,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             ret_type = 'void'
 
     gen.func_ret_type = ret_type
+    gen.current_func_ret_ann = (
+        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference.
     # Store BOTH the base name (for single-overload lookups) and the
     # per-overload keyed name (so multi-overload methods don't clobber each other).

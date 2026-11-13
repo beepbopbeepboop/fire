@@ -112,6 +112,35 @@ def test_part3_float_simd_ctor_keeps_dtype():
     assert 'int64_t v;' not in body, body
 
 
+SIMD_LANE_READ_SRC = (
+    'def f():\n'
+    '    var v = SIMD[DType.float64, 2](2.5)\n'
+    '    return v[1]\n'
+)
+SIMD_LANE_WRITE_SRC = (
+    'def f():\n'
+    '    var v = SIMD[DType.float32, 4]()\n'
+    '    v[2] = 1.5\n'
+    '    return v[2]\n'
+)
+
+
+def test_part3_erased_simd_lane_access_uses_the_value():
+    # `mlir.py` states the model: every SIMD[dtype, N] value is scalar-erased
+    # (width 1 IS the scalar; wider lanes are not stored). A lane of the erased
+    # value is therefore the value itself, and a scalar C type has no other
+    # legal Mojo subscript. Before 2026-11-12 the lane read emitted
+    # `_mojo_at_int64_t (double_value, i)` and the write emitted `v[2] = 1.5;`,
+    # both invalid C once a float SIMD constructor started producing its scalar
+    # C type, which is how test_simd/test_math failed to compile.
+    body = _body(_compile(SIMD_LANE_READ_SRC, 'simd_lane_read'), 'simd_lane_read_f')
+    assert '_mojo_at_' not in body, body
+    wbody = _body(_compile(SIMD_LANE_WRITE_SRC, 'simd_lane_write'), 'simd_lane_write_f')
+    assert '_mojo_at_' not in wbody, wbody
+    assert 'v[' not in wbody, wbody
+    assert 'v = ' in wbody, wbody
+
+
 # part4: a float SIMD value keeps its type through a call and a return.
 def test_part4_float_simd_survives_call_and_return():
     body = _body(_compile(SIMD_ARG_SRC, 'simd_arg'), 'simd_arg_f')
