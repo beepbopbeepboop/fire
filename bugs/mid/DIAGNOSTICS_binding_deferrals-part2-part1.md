@@ -70,8 +70,9 @@ and a `strict=False` keyword on `_constraint_implied_for_evidence`:
 
 ### Decision rules (each one is pinned by the test)
 
-1. No bound for `param`, or a bound that is not a trait-like name (a value
-   parameter such as `n: Int`) -> `'unknown'`. The caller accepts it.
+1. No bound for `param` -> `'proven'` (there is no requirement). A bound that
+   is not a trait-like name (a value parameter such as `n: Int`) ->
+   `'unknown'`; the caller accepts it.
 2. A bound may be a conjunction (`T: Movable & Deinitable`). Evaluate each
    conjunct: any `'unproven'` -> `'unproven'`; all `'proven'` -> `'proven'`;
    otherwise `'unknown'`.
