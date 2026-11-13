@@ -11861,6 +11861,51 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_attribute_to_def_write_invalidates_the_walk_memo():
+        """`_attribute_to_def` stamps the generator's `def` line/col onto
+        the synthesized prologue statements. The walk memo records scalar
+        field values as it descends, so a walk of the prologue taken BEFORE
+        the stamp still held the old `line` value. The stamp must invalidate
+        that entry, so the next walk sees the generator's line. This is the
+        behavioural half of `every_ast_mutation_site_invalidates_the_walk_memo`
+        for this one write site."""
+        global _PASS, _FAIL
+        name = "attribute_to_def_write_invalidates_the_walk_memo"
+        import mojo.middle.exprtypes as ET
+        import mojo.middle.coro as CO
+        from types import SimpleNamespace
+        from fire_compiler import AssignStmt, IdentExpr
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            prologue = [AssignStmt(target=IdentExpr(name="p"),
+                                   value=IdentExpr(name="q")),
+                        AssignStmt(target=IdentExpr(name="r"),
+                                   value=IdentExpr(name="s"))]
+            before = ET._walk_ast(prologue)
+            if any(isinstance(v, int) and v == 40 for v in before):
+                err = 'the test precondition is wrong: 40 is already in the walk'
+            else:
+                CO._attribute_to_def(prologue, SimpleNamespace(line=40, col=3))
+                after = ET._walk_ast(prologue)
+                lines = [v for v in after if isinstance(v, int) and not isinstance(v, bool)]
+                if prologue[0].line != 40 or prologue[1].col != 3:
+                    err = '_attribute_to_def did not stamp the def line/col'
+                elif 40 not in lines:
+                    err = ('the walk after the stamp still answers from the memo: '
+                           'the generator def line 40 is missing from it')
+        except Exception as e:  # noqa: BLE001
+            err = "%s: %s" % (type(e).__name__, e)
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -14102,6 +14147,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
     _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
+    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
