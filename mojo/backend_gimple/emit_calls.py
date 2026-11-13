@@ -1766,6 +1766,63 @@ _DTYPE_CAST_CTYPES = {
 }
 
 
+def _float_dtype_arg_ctype(e):
+    """The C float type named by a dtype bracket argument, in any of its
+    spellings — `DType.float32`, the dot-relative `.float32`, or the scalar
+    name `Float32` an elaborated instantiation substitutes for a dtype
+    parameter — or None when it is not a float dtype."""
+    if isinstance(e, gimple_ctypes.DottedLiteral):
+        key = _as_str(e.path)
+    elif (isinstance(e, gimple_ctypes.MemberExpr)
+            and isinstance(e.obj, gimple_ctypes.IdentExpr)
+            and _as_str(e.obj.name) == 'DType'):
+        key = 'DType.' + _as_str(e.member)
+    elif isinstance(e, gimple_ctypes.IdentExpr):
+        key = _as_str(e.name)
+    else:
+        return None
+    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(key)
+
+
+def _lower_bitcast_call(gen, node):
+    """`bitcast[Float32, 1](bits)` and its float-to-integer converse: a bit
+    REINTERPRETATION, not a conversion. Returns (ctype, value), or None when
+    the call is not a float bitcast (the caller keeps its catch-all).
+
+    The integer side is the int64_t word the codegen uses for every integer,
+    so an int-to-float bitcast reads that word's low bits through the
+    runtime (`mojo_float_from_bits` / `mojo_double_from_bits`), and a
+    float-to-int bitcast takes the pattern (`mojo_float_to_bits` /
+    `mojo_double_to_bits`). Before this, `bitcast[...]` fell into the
+    catch-all and produced `0`, which is a silently wrong answer."""
+    if not (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(node.func.obj.name) == 'bitcast'
+            and len(node.args) == 1 and not node.kwargs):
+        return None
+    _ix = node.func.index
+    _idxs = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
+    if not _idxs:
+        return None
+    target = _float_dtype_arg_ctype(_idxs[0])
+    if target is None:
+        return None
+    at, av = gen.lower_expr(node.args[0])
+    if at in ('float', 'double'):
+        # float -> float: the same bits, already the right type.
+        if at == target:
+            return target, av
+        return None
+    word = gen._coerce_to_type(at, 'int64_t', av) if hasattr(gen, '_coerce_to_type') else av
+    if target == 'double':
+        expr = f'mojo_double_from_bits ({word})'
+    else:
+        expr = f'mojo_float_from_bits ({word})'
+    t = gen._new_temp(target)
+    gen._emit(f'  {t} = ({target}){expr};')
+    return target, t
+
+
 def _dtype_cast_ctype(e):
     """C type named by a dtype bracket argument — `DType.int32` or the
     dot-relative `.int32` — or None when it is anything else (a parameter, an
@@ -3075,6 +3132,22 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _target = _dt_ctype
             else:
                 _target = 'int64_t'
+            # `SIMD[Float32, 1](from_bits=bits)`: the value whose IEEE pattern
+            # is `bits`. A float-typed scalar with no positional value, so a
+            # reinterpretation rather than a zero (see _lower_bitcast_call).
+            _from_bits = [_kv for _kv in (getattr(node, 'kwargs', None) or [])
+                          if _as_str(_kv[0]) == 'from_bits']
+            if _from_bits and _idxs and not node.args:
+                _fb_target = _float_dtype_arg_ctype(_idxs[0])
+                if _fb_target is not None:
+                    _fb_at, _fb_av = gen.lower_expr(_from_bits[0][1])
+                    _fb_word = (gen._coerce_to_type(_fb_at, 'int64_t', _fb_av)
+                                if hasattr(gen, '_coerce_to_type') else _fb_av)
+                    _fb_fn = ('mojo_double_from_bits' if _fb_target == 'double'
+                              else 'mojo_float_from_bits')
+                    _fb_t = gen._new_temp(_fb_target)
+                    gen._emit(f'  {_fb_t} = ({_fb_target}){_fb_fn} ({_fb_word});')
+                    return _fb_target, _fb_t
             if node.args:
                 _at, _av = gen.lower_expr(node.args[0])
                 for _a in node.args[1:]:
@@ -3517,6 +3590,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"cannot materialize instantiation of generic {_g!r}: "
                     f"its bracket arguments advance without converging, "
                     f"which would cause infinite recursion")
+        _bc = _lower_bitcast_call(gen, node)
+        if _bc is not None:
+            return _bc
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
