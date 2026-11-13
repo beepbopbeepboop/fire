@@ -280,7 +280,17 @@ def _re_sub_repl_is_callback(gen, cb_arg) -> bool:
     the only way to reference "a function" is by its bare, undeclared
     name — a closure (tracked in `_closure_envs`) or a plain top-level
     `def` name — so a bare identifier that's already a known local/
-    global *variable* can't be one; that's the tell used below."""
+    global *variable* can't be one; that's the tell used below.
+
+    A non-capturing LambdaExpr lifts to a bare top-level C function and
+    its address can be used directly as the callback pointer. A capturing
+    LambdaExpr carries a heap env in a MojoBoundMethod that cannot be
+    passed as a bare fn ptr; refuse those rather than read the wrong env
+    (the else branch will treat them as a replacement string, producing a
+    compile error or runtime failure instead of silent garbage)."""
+    if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
+        # Non-capturing lambda: no explicit captures field content.
+        return not cb_arg.captures
     if not isinstance(cb_arg, gimple_ctypes.IdentExpr):
         return False
     if cb_arg.name in gen._closure_envs:
@@ -294,7 +304,15 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
     """Resolve a re.sub(pattern, CALLBACK, src) callback argument to a
     (fn_ptr_temp, env_temp) pair of void* values, shared by both the
     POSIX-backed mojo_re_sub_fn path and the regex-engine-backed
-    mojo_regex_sub_fn path (identical callback ABI: char *(*)(void *, char *))."""
+    mojo_regex_sub_fn path (identical callback ABI: char *(*)(void *, char *)).
+
+    For LambdaExpr:
+    - If the lambda captures enclosing locals (detected by lower_expr adding it to
+      gen._closure_vals), we cannot pass a MojoBoundMethod as a bare fn ptr, so
+      refuse loudly. The module will fall back to interpreting from source.
+    - If the lambda is non-capturing, lower_expr returns a bare function pointer,
+      which the callback path uses with env=0.
+    """
     if isinstance(cb_arg, gimple_ctypes.IdentExpr) and cb_arg.name in gen._closure_envs:
         # _closure_envs maps inner_name → env_var (NOT lifted_name)
         # Get the actual lifted function name from _all_closures
@@ -314,6 +332,21 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
             gen._emit(f'  {env_t} = (void *){env_var};')
         else:
             gen._emit(f'  {env_t} = (void *)0;')
+        return fn_ptr_t, env_t
+    if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
+        # Lower the lambda; after lowering, we can check whether it produced
+        # a bound method (capturing) or a bare function pointer (non-capturing)
+        # by looking in gen._closure_vals: the capturing path adds its result
+        # to _closure_vals, the non-capturing path does not.
+        cb_type, cb_val = gen.lower_expr(cb_arg)
+        if cb_val in gen._closure_vals:
+            raise RuntimeError(
+                "re.sub(..., <capturing lambda>, ...) is not supported: a capturing "
+                "lambda is a MojoBoundMethod, not a bare function pointer, and this "
+                "codegen cannot wire its env into the regex callback ABI. Use a "
+                "non-capturing lambda or refer to a closure (IdentExpr) instead.")
+        fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
+        env_t = gen._new_val('void *', '(void *)0')
         return fn_ptr_t, env_t
     # Fallback: treat callback as a simple function pointer
     cb_type, cb_val = gen.lower_expr(cb_arg)
