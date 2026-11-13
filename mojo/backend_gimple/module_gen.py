@@ -4872,6 +4872,8 @@ def _gmi_transform_enum_classes(self, stmts: list) -> list:
 
 
 def gen_module_impl(self, stmts: list):
+    self._stmts = stmts
+    self._current_module_stmts = stmts
 
     # A class written INSIDE a function body is a type declaration like any
     # other, and the struct pipeline reads the module-level statement list, so
@@ -15564,6 +15566,9 @@ def gen_module_impl(self, stmts: list):
     # sibling's own `from c import K` says nothing about what this module's
     # `K` means.
     _gmi_scan_imported_global_homes(self, stmts)
+    # Phase 1.7 has typed every global, and each `do_imports` sibling has been
+    # compiled into this unit, so the definer's final accessor types are known.
+    self._reconcile_imported_global_accessors()
 
     func_parts: list[str] = []
 
