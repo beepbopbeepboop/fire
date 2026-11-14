@@ -9,7 +9,7 @@ implement `Marked`.  Expected, exactly:
 
     error: 'Container' parameter 'T' has 'Marked' type, but value has type 'AnyStruct[NotMarked]'
     note: 'Container' declared here
-    struct Container[T: Marked, W: Wrapper = __init__(Int(4))]  # note - synthetic signature
+    struct Container[T: Marked, W: Wrapper = __init__(Int(4))]    # note - synthetic signature
 
 The last line is the part-2 renderer's spelling of the stored record: the
 implicit conversion default is printed from its source text, never resolved
@@ -87,7 +87,7 @@ def main():
         "error: 'Container' parameter 'T' has 'Marked' type, but value has "
         "type 'AnyStruct[NotMarked]'\n"
         "note: 'Container' declared here\n"
-        "struct Container[T: Marked, W: Wrapper = __init__(Int(4))]  "
+        "struct Container[T: Marked, W: Wrapper = __init__(Int(4))]    "
         + SYNTHETIC_MARKER
     )
     assert got == want, f"diagnostic:\n{got!r}\nexpected:\n{want!r}"

@@ -1,9 +1,47 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2
+
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+
+## Status 2026-11-13 (part 1 DONE) — end-to-end build passes; its part doc deleted
+
+The end-to-end acceptance now passes on this tree, and the part doc that
+verified it is deleted with this entry. Measured:
+
+```sh
+mkdir -p .tmp/ca && cp -R /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/. .tmp/ca/
+python3 tools/memslot.py --gb 8 --label tables-build -- \
+  python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py
+.tmp/ca/tables_out
+```
+
+build exits 0 (peak 0.6 GB) and the binary exits 0.
+
+The last refusal was the cpp (C++20-coroutine) path dropping KEYWORD
+arguments at a delegated generator call, which the part doc recorded only as
+the end-to-end verifier. `read_table`'s self-recursive
+`yield from read_table(infile, header, sep=sep, fix=fix, _open=_open,
+_get_reader=_get_reader)` counted only the two positional arguments and
+refused ("expected 6 argument(s), got 2"); `fsutil.iter_files`' and
+`iterutil.iter_many`'s recursive `yield from`s were the same shape, and
+`for ... in <gen>(...)`/`<base>_start(...)` appended keywords positionally
+(only correct in declaration order). Fixed by one shared argument-to-slot
+binder, `cpp_core._cpp_generator_call_slot_pairs`, used by all three, with a
+`param_names` key recorded on every generator api (module_gen's
+free-function and method registrations, cpp_async's self-recursion snapshot,
+coro.py's stack-switch meta). Regressions
+`generator_recursive_yield_from_keywords_bind_by_name` and
+`generator_for_in_keywords_bind_by_name` in `test_gimple_generator_runner.py`
+(fail before the fix — arity refusal, and 46 where CPython prints 64 — pass
+after; that file 509 passed / 0 failed).
+
+Not fixed and not part of this acceptance: building a *consumer program*
+that imports `c_common.tables` still fails to link, because the imported
+module's generated `.cpp` does not compile (`_compile_imported_module`
+swallows the g++ failure). Filed separately rather than folded in here.
 
 ## Status 2026-11-13 — part 4 (module-qualified tuple-target `for`) fixed; doc deleted
 

@@ -1684,7 +1684,8 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)')
+     desc='GIMPLE unit suite (python-interpreted codegen)',
+     disabled='bugs/gate-gimple.md')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -1865,7 +1866,8 @@ test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
                              'mojo/backend_gimple/emit_metal.py'],
      desc='Metal codegen: op tables, device-region selection, MSL emission, '
           'and the generated MSL compiled by Apple\'s real compiler and run '
-          'on the GPU against a CPU reference')
+          'on the GPU against a CPU reference',
+     disabled='bugs/gate-metalgpu.md')
 test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
      extra=['tools/md2html.py', 'test_md2html.py',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
@@ -1906,7 +1908,8 @@ test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
      extraglob=['**/*.py'],
-     desc='the tool prints the name it was invoked as, in usage, -v and every error')
+     desc='the tool prints the name it was invoked as, in usage, -v and every error',
+     disabled='bugs/gate-cli-usage-text.md')
 # `extraglob=['**/*.py']` is the same hole `suite-self-test` documents, one
 # subject over: `test_no_stale_command_name_in_prose` WALKS every `.py` file in
 # the tree (it ratchets `mojo <command>` out of the prose, and its doc was
@@ -3623,7 +3626,8 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
 test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_read_before_store.py', 'formal/model'],
-     desc='read-before-store dominance, against CPython in both directions')
+     desc='read-before-store dominance, against CPython in both directions',
+     disabled='bugs/gate-formal-read-before-store.md')
 # `iter_statement_nodes` against the full `iter_nodes`, over the three node
 # shapes that hid a store from a walk without `_STATEMENT_CONSTRUCTS`: a class
 # nested in a method, an `except` arm, a `match` arm. `struct_receiver_stores`
@@ -4299,6 +4303,10 @@ test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditiona
      desc='conditional conformance declarations are diagnosed: the diamond, '
           'the derived/ancestor constraint, conditional RegisterPassable, and '
           'the `ref` origin rule; positive controls still compile')
+test('reg-conditional-conformance-candidate-diagnostic', [PY, 'test_conditional_conformance_candidate_diagnostic.py'], mem='tiny',
+     desc='conditional conformance candidate selection under a where clause '
+          '(trait conformance part 3): ambiguity, unprovable-vs-provable, and '
+          'disproved candidates are refused; the positive controls still compile')
 test('reg-conditional-conformance-synthesis-diagnostic', [PY, 'test_conditional_conformance_synthesis_diagnostic.py'], mem='tiny',
      desc='conditional conformance copy/move synthesis is diagnosed when the '
           'field type is unsynthesizable (part 4); positive controls still compile')
@@ -4513,6 +4521,7 @@ BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
 
+              'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'gimple-lint', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',

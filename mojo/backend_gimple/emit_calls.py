@@ -1854,6 +1854,19 @@ def _dtype_cast_ctype(e):
 def _comptime_conforms_to_pred(gen):
     try:
         import mojo.middle.comptime as _comptime_eval
+        bases = _comptime_conformance_map(gen)
+        if bases is None:
+            return None
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
+def _comptime_conformance_map(gen):
+    """The declared `{decl: [base, ...]}` map this generator knows, merged from
+    the struct bases, trait bases, the instantiation's extra bases and the
+    trait declarations read from the source text. None when it knows none."""
+    try:
         sb = getattr(gen, '_struct_bases', None) or {}
         tb = getattr(gen, '_trait_bases', None) or {}
         ex = getattr(gen, '_conformance_bases_extra', None) or {}
@@ -1896,7 +1909,7 @@ def _comptime_conforms_to_pred(gen):
         for k, v in (tbt or {}).items():
             if v or k not in bases:
                 bases[k] = v
-        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+        return bases
     except Exception:
         return None
 
@@ -2092,6 +2105,32 @@ _PROGRESSING_BRACKET_OPS = frozenset(
     ('+', '-', '*', '/', '//', '%', '**', '<<', '>>', '&', '|', '^'))
 
 
+def _is_simple_progression_operand(e) -> bool:
+    """Whether `e` is the kind of operand a stepping recursion index is built
+    from: a name/literal and arithmetic over them. A CallExpr, SubscriptExpr,
+    attribute/type-expression access, or any other non-stepping shape inside
+    an arithmetic bracket argument means the value is a fixed comptime
+    computation (e.g. `2 * Int(Self.length)`), not an index that advances
+    across recursive instantiations (`i + 1`)."""
+    if isinstance(e, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                      gimple_ctypes.BoolLiteral, gimple_ctypes.IdentExpr,
+                      gimple_ctypes.DottedLiteral)):
+        return True
+    if isinstance(e, gimple_ctypes.BinaryOp):
+        if _as_str(e.op) not in _PROGRESSING_BRACKET_OPS:
+            return False
+        return (_is_simple_progression_operand(e.left)
+                and _is_simple_progression_operand(e.right))
+    if isinstance(e, gimple_ctypes.UnaryOp):
+        if _as_str(e.op) not in ('-', '+', '~'):
+            return False
+        if isinstance(e.operand, (gimple_ctypes.IntLiteral,
+                                  gimple_ctypes.FloatLiteral)):
+            return True  # a negative literal
+        return _is_simple_progression_operand(e.operand)
+    return False
+
+
 def _progressing_bracket_arg(e) -> bool:
     """Whether one bracket argument at an elaborated call site is the
     progressing RECURSION shape the refusal below exists to catch (`i + 1`),
@@ -2113,14 +2152,18 @@ def _progressing_bracket_arg(e) -> bool:
     if isinstance(e, gimple_ctypes.BinaryOp):
         if _as_str(e.op) not in _PROGRESSING_BRACKET_OPS:
             return False
-        return not _spells_a_string(e)
+        if _spells_a_string(e):
+            return False
+        return _is_simple_progression_operand(e)
     if isinstance(e, gimple_ctypes.UnaryOp):
         if _as_str(e.op) not in ('-', '+', '~'):
             return False
         if isinstance(e.operand, (gimple_ctypes.IntLiteral,
                                   gimple_ctypes.FloatLiteral)):
             return False  # a negative literal, not arithmetic over a parameter
-        return not _spells_a_string(e)
+        if _spells_a_string(e):
+            return False
+        return _is_simple_progression_operand(e)
     return False
 
 
@@ -2640,36 +2683,30 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                             # Only check when we can identify a concrete struct context.
                             # Accept if undecidable/generic-like.
                             if is_known_struct or (_src_t_res and _src_t_res[:1].isupper()):
-                                pred = _comptime_conforms_to_pred(gen)
-                                ok = None
-                                if pred is not None and _trait_t:
-                                    try:
-                                        ok = pred(_src_t_res, _trait_t)
-                                    except Exception:
-                                        ok = None
-                                else:
-                                    # try direct
+                                # Closed-world decision over the declared bases
+                                # (module declarations, then stdlib trait
+                                # declarations). ok None = undecidable: accept.
+                                modname = (getattr(gen, '_diag_module_name', None)
+                                           or getattr(gen, '_module_name', None) or '')
+                                if not modname:
+                                    fnm = getattr(gen, '_current_filename', '') or 't.mojo'
+                                    modname = os.path.splitext(os.path.basename(fnm))[0]
+                                ok, trait_qual = None, None
+                                if _trait_t:
                                     try:
                                         import mojo.middle.comptime as _ce
-                                        sb2 = getattr(gen, '_struct_bases', None) or {}
-                                        tb2 = getattr(gen, '_trait_bases', None) or {}
-                                        ex2 = getattr(gen, '_conformance_bases_extra', None) or {}
-                                        bases = dict(ex2); bases.update(sb2); bases.update(tb2)
-                                        ok = _ce.conforms_to(_src_t_res, _trait_t, bases)
+                                        ok, trait_qual = _ce.conforms_to_closed(
+                                            _src_t_res, _trait_t,
+                                            _comptime_conformance_map(gen) or {}, modname)
                                     except Exception:
-                                        ok = None
-                                # ok False => missing witness; ok True/None => accept (None = undecidable)
+                                        ok, trait_qual = None, None
                                 if ok is False:
-                                    modname = getattr(gen, '_module_name', None) or ''
-                                    if not modname:
-                                        fnm = getattr(gen, '_current_filename', '') or 't.mojo'
-                                        modname = os.path.splitext(os.path.basename(fnm))[0]
                                     struct_q = f"{modname}::{_src_t_res}" if modname else _src_t_res
-                                    trait_q = _trait_t or 'Trait'
-                                    line = getattr(node, 'line', None)
-                                    loc = f" (line {line})" if line else ''
+                                    trait_q = trait_qual or _trait_t or 'Trait'
+                                    # No location: `node.line` is a line of the
+                                    # instantiated copy, not of the user's file.
                                     raise RuntimeError(
-                                        f"function instantiation failed{loc}\n"
+                                        "error: function instantiation failed\n"
                                         f"note: struct '{struct_q}' does not have witness table for trait '{trait_q}'"
                                     )
             # Lower as identity: return the (single) argument.

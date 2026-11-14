@@ -1,6 +1,6 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0, 1, 2a and 3a landed 2026-11-13. This file is the plan and the rules. Read it
+Status: stages 0, 1, 2a, 3a, 3b and 5a landed (2026-11-14). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
 
 ## 1. What is wrong today (measured 2026-11-13)
@@ -188,20 +188,37 @@ that is meant to be behaviour-preserving:
   Nothing matches `startswith('return ')` or slices a value out of a line any
   more, and `_emit_raw` no longer infers "terminal" from text. `gen._emit`
   REFUSES a jump or return spelled as text (it would skip the teardown).
-- **Stage 3b. Ownership is told, not recognised.** `_emit_raw` still finds
-  ` = mojo_` in the line to decide a value is a fresh container
-  (`_fresh_vals`, `_owned_str_elem_vals`). Move that into `_rt_call` /
-  `_rt_into` / `_emit_call`, which know the callee. Blocked on the calls
-  whose text is built from a computed callee name or by concatenation; when
-  `TEXT_CALL_BASELINE` is 0 and those are converted, delete the sniff.
+- **Stage 3b (landed 2026-11-14). Ownership is told, not recognised.**
+  `note_call_result(gen, dst, fname)` (`emit_infra.py`) records that a call
+  to a `_FRESH_CONTAINER_RETURNS` / `_FRESH_STRING_RETURNS` function hands
+  back a brand-new object. `_rt_call`, `_rt_into` and `_emit_call` call it;
+  they know the callee. `_emit_raw` no longer searches a line for ` = mojo_`.
+  It now appends the line and its `#line` directive and does nothing else.
+  CONSEQUENCE: a call with a result that is spelled as text
+  (`gen._new_val(t, f"{fn} ({x})")`) is never marked fresh, so its result
+  leaks. Use `gen._rt_call(t, fn, [x])` -- a computed callee name is fine.
 - **Stage 3c. Statements are `Instr`, not strings.** `gen.body_lines` becomes
   a list of `Instr`; the four function-assembly sites print it.
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet: counts of `.endswith(' *')` and `== 'int64_t'`.
-- **Stage 5. One value-info record.** The 57 name-keyed tables become fields
-  of one `ValueInfo` object per temp, with one `copy_info(dst, src)`.
-  `int64_t` splits into Int / Erased(T) / DynWord / Box in the value's info.
+- **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
+  `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
+  knows about a VALUE from one name to another, and `gen._copy` calls it for
+  every same-typed copy. It carries the 18 type tables (`_elem_types`,
+  `_dict_val_types`, `_actual_types`, `_tuple_slot_types`, the callable and
+  generator tables, ...), only FILLS (a fact already recorded for the
+  destination wins), and never carries ownership (`_fresh_vals`, `_owned_*`).
+  This CHANGES generated code: 33 compiler modules compile differently
+  (about 770 fewer statements; a boxed fallback read becomes a typed read
+  where the element type is now known). Small programs are unchanged.
+  NOT carried yet: the six dynamic-word SETS (`_boxed_vals`, `_dyn_word_vals`,
+  `_tagged_word_vals`, `_int_word_vals`, `_maybe_kinds_vals`,
+  `_boxed_container_vals`). Carrying them was measured and changes far more
+  (it adds ~1,200 box/repr calls); each needs its own look.
+- **Stage 5b. One value-info record.** The name-keyed tables become fields
+  of one `ValueInfo` object per temp. `int64_t` splits into
+  Int / Erased(T) / DynWord / Box in the value's info.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.

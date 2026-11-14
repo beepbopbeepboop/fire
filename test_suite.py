@@ -473,8 +473,8 @@ def test_an_exclusive_job_reserves_its_class_and_nothing_more():
               f'a 3.7 GB build that holds the whole machine is the queue this '
               f'used to be')
         check('admission: ...and an ordinary one reserves its class',
-              suite.reserved_gb(suite.REGISTRY['gimple'])
-              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['gimple'])],
+              suite.reserved_gb(suite.REGISTRY['formal-receiver-spelling'])
+              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['formal-receiver-spelling'])],
               'the class is the promise the ceiling has to keep')
     else:
         print('      admission: MEMLIMIT_GB is set, so the checks that compare a '
@@ -2719,24 +2719,35 @@ def test_a_disabled_test_is_registered_but_never_runs():
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
-    # The real-registry half, re-baselined 2026-10-28, gate triage. It used to
-    # run on `ab-native`, the live case: DISABLED since 2026-09-30, 20.5 GB,
-    # the `program` class (55), `excl` — the shape the synthetic half above
-    # reproduces at the same class ceiling, which is why the reserves-0
-    # property is still covered with no live case. `2f75609d` (2026-10-26)
-    # turned it back to `expect=` once the blowup its marker waited on closed
-    # (bugs/hard/CODEGEN_ab_native_fails.md: the run is 0.1 GB / ~10 s now), and the
-    # reason `disabled=` existed in the first place — a known outcome bought
-    # at a machine-sized price — is gone with it. So the state this half pins
-    # is the ABSENCE, stated rather than assumed: a disabled job that appears
-    # in the registry must be named here and its properties re-asserted on it,
-    # or the section above would stop saying anything about the live registry.
+    # The real-registry half: disabled jobs in the registry are known-red and
+    # too expensive or otherwise inappropriate to run, so each must be named
+    # here and have its reserves-0 / --list / --dry-run properties re-asserted.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
+    expected_disabled = ['cli-usage-text', 'formal-read-before-store', 'gimple', 'metalgpu']
     check('disabled: the real registry has no job that is not run',
-          real == [],
+          sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
           f'this section and its reserves-0 / --list / --dry-run properties '
-          f're-asserted on it, the way ab-native was until 2f75609d')
+          f're-asserted on it')
+    for name in real:
+        spec = suite.REGISTRY[name]
+        check(f'disabled: {name} reserves 0 while disabled',
+              suite.reserved_gb(spec) == 0.0,
+              f'reserved {suite.reserved_gb(spec)} GB')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_list()
+        listing = buf.getvalue()
+        check(f'disabled: {name} is listed with its doc',
+              name in listing and (spec.disabled or '') in listing,
+              f'missing from --list: {[l for l in listing.splitlines() if name in l]}')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_plan([name], _FakeOpts())
+        plan = buf.getvalue()
+        check(f'disabled: {name} planned as disabled and reserves 0',
+              'DISABLED: not run' in plan and 'reserves 0 GB' in plan,
+              plan[:200])
 
     # --list and --dry-run, because a decision a reader cannot see is not a
     # decision: both have to say DISABLED, and the plan has to say the
@@ -2849,23 +2860,12 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    # The vacuity this used to take from the real registry — at least one job
-    # is disabled, so the section above is saying something about the live
-    # tree — ended with the last disabled job: `ab-native` was the case until
-    # `2f75609d` turned it back to `expect=` on 2026-10-26 (the run is cheap
-    # now, which is the whole reason for the switch). The mechanism is not
-    # vacuous for that: the synthetic cases above run every time against the
-    # real runner code, the per-name loop below re-checks each marker against
-    # the tree the moment a job is disabled, and the guarded exec below
-    # proves the import-time refusal fires on a marker. What this check now
-    # pins is the STATE the section is written for, stated rather than
-    # assumed — the same re-baseline the sibling section above does.
+    expected_disabled = ['cli-usage-text', 'formal-read-before-store', 'gimple', 'metalgpu']
     check('disabled markers: the state the section is written for is stated, '
-          'not assumed: no registered job is disabled',
-          real == [],
+          'not assumed',
+          sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job must be named in this section and '
-          f'its marker re-checked against the tree, the way ab-native was '
-          f'until 2f75609d')
+          f'its marker re-checked against the tree')
     for name in real:
         spec = suite.REGISTRY[name]
         check(f'disabled markers: {name} names a doc that is in the tree',
@@ -2875,6 +2875,9 @@ def test_the_disabled_markers_in_the_registry_are_honest():
         check(f'disabled markers: {name} is not also marked expect=',
               not (getattr(spec, 'expect', '') or ''),
               'the two markers say opposite things about whether it runs')
+        check(f'disabled markers: {name} reserves 0 while disabled',
+              suite.reserved_gb(spec) == 0.0,
+              f'reserved {suite.reserved_gb(spec)} GB')
 
     # And the loudest half: the runner REFUSES TO START, rather than warning.
     # The bug-doc check is the one place in this mechanism where "loudly" is
@@ -4161,6 +4164,33 @@ UNREGISTERED = {
         '`arch -x86_64` and SKIPS where that is not available, which is why this '
         'is listed rather than registered — a registered job that skips its only '
         'substantive case is a green line that says nothing.',
+    'test_codegen_selfhost_link_two_unqualified_calls_part1.py':
+        'Standalone probe pin for the self-host link: a lifted closure must '
+        'see a plain function-body module alias import and lower the call to '
+        'the defining module\'s qualified symbol. Run directly; not registered.',
+    'test_codegen_simd_exp_statictuple.py':
+        'Standalone regression pin (unittest): std.simd elaboration must not '
+        'be refused as "advance without converging" for fixed comptime bracket '
+        'args. Run directly; not yet registered in a bucket.',
+    'test_codegen_yield_from_walk_ast_memo.py':
+        'Standalone probe: _cpp_yield_from rewrites must invalidate the walk '
+        'memo for the enclosing CallExpr. Run directly; not registered.',
+    'test_gimple_tables_consumer_link.py':
+        'Standalone repro/test for importing c_common.tables from a consumer '
+        'program (depends on external source tree; skips if absent). Run '
+        'directly; not registered.',
+    'test_mojoc_module_import_ambiguous.py':
+        'Standalone regression pin for ambiguous module-scope imports reported '
+        'at module scope with synthetic signatures. Run directly; not registered.',
+    'test_selfhost_cycle_sibling_call.py':
+        'Standalone probe for module-alias calls across import cycles in the '
+        'self-host sibling branch. Run directly inside a checkout; not registered.',
+    'test_stdlib_syntax_owned_pointer_asyncrt.py':
+        'Standalone pin: owned_pointer.mojo and _asyncrt.mojo must keep '
+        'transpiling. Run directly; not registered.',
+    'test_unknown_decl_check.py':
+        'Unit tests for the unknown-decl check/compiler-provided builtins '
+        'helper module. Run directly; not registered.',
 
     # `test_formal_doc_truth.py` was here (listed rather than registered, its
     # branch's task said not to touch the registry) and is REGISTERED as
@@ -5234,6 +5264,8 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
     # sub-second.
     ('trait-requirement-evidence-diagnostic',
      'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
+    ('reg-conditional-conformance-candidate-diagnostic',
+     'test_conditional_conformance_candidate_diagnostic.py', 'part 3'),
     ('reg-conditional-conformance-synthesis-diagnostic',
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
     ('trait-comptime-member-conformance-diagnostic',
