@@ -1,0 +1,142 @@
+Command: python3 tools/suite.py silentnoop
+Started: 2026-11-14 (see build/suite.log header)
+Working directory: /Users/mrs/net/chatgpt/claude/work-7203
+Observation: preflight completed (exit 0, ~1.1s). silentnoop job started but produced no completion within ~300s; suite emitted 30s/60s/90s heartbeats and was still running when evidence was captured. Worker terminated the running silentnoop process tree (started by this worker session) to record a definitive snapshot.
+Exit code: 124 (worker-terminated after timeout/no completion within observation window; suite did not report a final verdict)
+
+=== Captured stdout/stderr from suite invocation (as captured) ===
+suite: 2 tests, -j18, parallel, 96 GB memory budget
+  ... 1/2 jobs done, 1 running, 30s elapsed
+  ... 1/2 jobs done, 1 running, 60s elapsed
+  ... 1/2 jobs done, 1 running, 90s elapsed
+---EXIT:0---
+
+=== build/suite.log excerpt for this run ===
+    formal-pathlib                   0.08 GB measured -> tiny        4 GB   50.0x
+    formal-read-before-store         0.08 GB measured -> tiny        4 GB   50.0x
+    formal-receiver-spelling         0.08 GB measured -> tiny        4 GB   50.0x
+    formal-small-hosts               0.08 GB measured -> tiny        4 GB   50.0x
+    formal-struct                    0.08 GB measured -> tiny        4 GB   50.0x
+    formal-target-queries            0.08 GB measured -> tiny        4 GB   50.0x
+    formal-typed-flag                0.08 GB measured -> tiny        4 GB   50.0x
+    comprehension-parse-shape        0.09 GB measured -> tiny        4 GB   44.4x
+    examples-parse                   0.09 GB measured -> tiny        4 GB   44.4x
+    formal-math                      0.09 GB measured -> tiny        4 GB   44.4x
+    formal-shutil                    0.09 GB measured -> tiny        4 GB   44.4x
+    formal-x86-dylib                 0.09 GB measured -> tiny        4 GB   44.4x
+    returned-frame-layout            0.09 GB measured -> tiny        4 GB   44.4x
+    bootstrap-stage1-dumps           0.10 GB measured -> tiny        4 GB   40.0x
+    formal-ast                       0.10 GB measured -> tiny        4 GB   40.0x
+    formal-core-hostmods             0.10 GB measured -> tiny        4 GB   40.0x
+    formal-dataclasses               0.10 GB measured -> tiny        4 GB   40.0x
+    formal-globals                   0.10 GB measured -> tiny        4 GB   40.0x
+    formal-hashlib                   0.10 GB measured -> tiny        4 GB   40.0x
+    formal-interop                   0.10 GB measured -> tiny        4 GB   40.0x
+    formal-link-accounting           0.10 GB measured -> tiny        4 GB   40.0x
+    formal-monomorph                 0.10 GB measured -> tiny        4 GB   40.0x
+    formal-namedtuple                0.10 GB measured -> tiny        4 GB   40.0x
+    formal-optional                  0.10 GB measured -> tiny        4 GB   40.0x
+    formal-reproducible              0.10 GB measured -> tiny        4 GB   40.0x
+    formal-shlex                     0.10 GB measured -> tiny        4 GB   40.0x
+    formal-stat                      0.10 GB measured -> tiny        4 GB   40.0x
+    formal-sweep                     0.10 GB measured -> tiny        4 GB   40.0x
+    formal-x86-parity                0.10 GB measured -> tiny        4 GB   40.0x
+    interp-tokenizer-oracle          0.10 GB measured -> tiny        4 GB   40.0x
+    interporacle                     0.10 GB measured -> tiny        4 GB   40.0x
+    linkmode                         0.10 GB measured -> tiny        4 GB   40.0x
+    no-new-casts                     0.10 GB measured -> tiny        4 GB   40.0x
+    nonlocal                         0.10 GB measured -> tiny        4 GB   40.0x
+    runner                           0.10 GB measured -> tiny        4 GB   40.0x
+    silentnoop                       0.10 GB measured -> tiny        4 GB   40.0x
+    coro-detached-async              0.11 GB measured -> tiny        4 GB   36.4x
+    rthdrscan                        0.11 GB measured -> tiny        4 GB   36.4x
+    async-void-return                0.12 GB measured -> tiny        4 GB   33.3x
+    async-with-lock-guard            0.12 GB measured -> tiny        4 GB   33.3x
+    coro-future-await                0.12 GB measured -> tiny        4 GB   33.3x
+    nested-async-generic             0.12 GB measured -> tiny        4 GB   33.3x
+    formal-admitted                  0.13 GB measured -> tiny        4 GB   30.8x
+    formal-proof-breadth-tool        0.14 GB measured -> tiny        4 GB   29.6x
+    mutable-async-capture            0.14 GB measured -> tiny        4 GB   28.6x
+    taskgroup                        0.14 GB measured -> tiny        4 GB   28.6x
+    transitive-closure-capture       0.14 GB measured -> tiny        4 GB   28.6x
+    doc-refs                         0.15 GB measured -> tiny        4 GB   26.7x
+    async-runtime-scaffold           0.18 GB measured -> tiny        4 GB   22.2x
+    coro                             0.20 GB measured -> tiny        4 GB   20.0x
+    coro-nested-capture              0.20 GB measured -> tiny        4 GB   20.0x
+    formal-imports                   0.20 GB measured -> tiny        4 GB   20.0x
+    formal-re                        0.20 GB measured -> tiny        4 GB   20.0x
+    formal-run                       0.20 GB measured -> tiny        4 GB   20.0x
+    formal-runtime-link              0.20 GB measured -> tiny        4 GB   20.0x
+    gimplegenerators                 0.20 GB measured -> tiny        4 GB   20.0x
+    gimplerunner                     0.20 GB measured -> tiny        4 GB   20.0x
+    globcompiled                     0.20 GB estimated -> tiny        4 GB   20.0x
+    ptrreg-boxed-str                 0.20 GB measured -> tiny        4 GB   20.0x
+    refusal-taxonomy                 0.20 GB measured -> tiny        4 GB   20.0x
+    runtimere                        0.20 GB estimated -> tiny        4 GB   20.0x
+    stdlib-dylib                     0.20 GB measured -> tiny        4 GB   20.0x
+    formal-argparse                  0.21 GB measured -> tiny        4 GB   19.0x
+    formal-sweep-truth               1.50 GB measured -> module     24 GB   16.0x   MISMATCH: the ratchet assigns tiny
+    comptime-parity                  0.30 GB measured -> tiny        4 GB   13.3x
+    modcache                         0.30 GB measured -> tiny        4 GB   13.3x
+    runtimediff                      0.30 GB measured -> tiny        4 GB   13.3x
+    formal-json                      0.37 GB measured -> tiny        4 GB   10.8x
+    metalgpu                         0.37 GB measured -> tiny        4 GB   10.8x
+    gimple                           0.40 GB measured -> tiny        4 GB   10.0x
+    ptrreg                           0.40 GB measured -> tiny        4 GB   10.0x
+    runtimedylib                     0.40 GB measured -> tiny        4 GB   10.0x
+    gimple-lint                      0.50 GB measured -> tiny        4 GB    8.0x
+    memslot                          0.50 GB measured -> tiny        4 GB    8.0x
+    suite-self-test                  0.60 GB measured -> tiny        4 GB    6.7x
+    bootstrap-stage2-dumps           0.70 GB measured -> tiny        4 GB    5.7x
+    bootstrap-stage3-dumps           0.70 GB measured -> tiny        4 GB    5.7x
+    formal-x86-endtoend              6.10 GB measured -> module     24 GB    3.9x
+    formal-x86-model                 1.30 GB measured -> tiny        4 GB    3.1x
+    formal-x86-machine-model         1.40 GB measured -> tiny        4 GB    2.9x
+    ab-native                       20.50 GB measured -> program    55 GB    2.7x
+    prooflib                         9.00 GB measured -> module     24 GB    2.7x
+    stdlib-syntax                    1.50 GB measured -> tiny        4 GB    2.7x
+    native-dumpfull                 10.40 GB measured -> module     24 GB    2.3x
+    formal-x86                      24.80 GB measured -> program    55 GB    2.2x
+    bootstrap-stage2-transitive     30.00 GB measured -> program    55 GB    1.8x
+    bootstrap-stage3-transitive     30.00 GB derived  -> program    55 GB    1.8x
+    bootstrap-stage1-transitive      2.20 GB measured -> tiny        4 GB    1.8x
+    formal-dylib                     2.20 GB measured -> tiny        4 GB    1.8x
+    formal-proof-census              4.40 GB measured -> small       8 GB    1.8x
+    selfhost                         4.40 GB measured -> small       8 GB    1.8x
+    bootstrap-stage2-cc              2.30 GB measured -> tiny        4 GB    1.7x
+    sqliteruntime                    2.30 GB measured -> tiny        4 GB    1.7x
+    mojoc                            4.90 GB measured -> small       8 GB    1.6x
+    formal-call-proofgen             2.50 GB measured -> tiny        4 GB    1.6x
+    formal                          46.20 GB measured -> program    55 GB    1.2x   MISMATCH: the ratchet assigns stage
+    stdlib-tests                    52.20 GB measured -> program    55 GB    1.1x   MISMATCH: the ratchet assigns stage
+    0 over-provisioned (>8x, and not already at the smallest class): none
+    119 at the floor class (4 GB; the ladder has nothing smaller, so their ratio is the ladder's, not their fault): md2html 400x, ownership-destruct 400x, x86-decode 400x, new-syntax-parse 200x, formal-field-walk 133x, formal-blob-contract 111x, arm64-encoders 100x, cli-usage-text 100x, formal-per-struct-asks 100x, formal-toplevel 100x, gimple-async-runner 100x, formal-bracketed-method-field-set 80x, formal-frame-len 80x, formal-host-import-wall 80x, formal-proof-census-tool 80x, formal-textwrap 80x, x86-examples 80x, formal-tempfile 78x, formal-os 67x, formal-os-backing 67x, formal-sys 67x, formal-time 67x, preflight 67x, x86-containers 67x, doc-refs-stale-verdicts 57x, formal-fcntl 57x, formal-glob 57x, formal-method-param-field 57x, formal-module-attr 57x, formal-receiver-position 57x, formal-specialization 57x, formal-value-model 57x, llm-reference 57x, formal-doc-truth 50x, formal-external-call 50x, formal-pathlib 50x, formal-read-before-store 50x, formal-receiver-spelling 50x, formal-small-hosts 50x, formal-struct 50x, formal-target-queries 50x, formal-typed-flag 50x, comprehension-parse-shape 44x, examples-parse 44x, formal-math 44x, formal-shutil 44x, formal-x86-dylib 44x, returned-frame-layout 44x, bootstrap-stage1-dumps 40x, formal-ast 40x, formal-core-hostmods 40x, formal-dataclasses 40x, formal-globals 40x, formal-hashlib 40x, formal-interop 40x, formal-link-accounting 40x, formal-monomorph 40x, formal-namedtuple 40x, formal-optional 40x, formal-reproducible 40x, formal-shlex 40x, formal-stat 40x, formal-sweep 40x, formal-x86-parity 40x, interp-tokenizer-oracle 40x, interporacle 40x, linkmode 40x, no-new-casts 40x, nonlocal 40x, runner 40x, silentnoop 40x, coro-detached-async 36x, rthdrscan 36x, async-void-return 33x, async-with-lock-guard 33x, coro-future-await 33x, nested-async-generic 33x, formal-admitted 31x, formal-proof-breadth-tool 30x, mutable-async-capture 29x, taskgroup 29x, transitive-closure-capture 29x, doc-refs 27x, async-runtime-scaffold 22x, coro 20x, coro-nested-capture 20x, formal-imports 20x, formal-re 20x, formal-run 20x, formal-runtime-link 20x, gimplegenerators 20x, gimplerunner 20x, globcompiled 20x, ptrreg-boxed-str 20x, refusal-taxonomy 20x, runtimere 20x, stdlib-dylib 20x, formal-argparse 19x, comptime-parity 13x, modcache 13x, runtimediff 13x, formal-json 11x, metalgpu 11x, gimple 10x, ptrreg 10x, runtimedylib 10x, gimple-lint 8x, memslot 8x, suite-self-test 7x, bootstrap-stage2-dumps 6x, bootstrap-stage3-dumps 6x, formal-x86-model 3x, formal-x86-machine-model 3x, stdlib-syntax 3x, bootstrap-stage1-transitive 2x, formal-dylib 2x, bootstrap-stage2-cc 2x, sqliteruntime 2x, formal-call-proofgen 2x
+    140 unmeasured (keep their class): ab-aside, ab-bside, ab-clean, ab-compare, ambiguous-import-diagnostic, attr-error-messages, backtick-import-literals, bootstrap-clean, bootstrap-hotspots, bootstrap-validate, bootstrap-verify, compile-linked-result, comptime-assert-diagnostic, comptime-dtype-diagnostic, constrained-diagnostic, dead-worker-state, dict-none-key, done-ratchet-landing, downcast-witness-diagnostic, enum-desugar, floatliteral-special, foreign-callable-lambda-default, formal-eh-tables, formal-host-import-shapes, formal-once-bound-strings, formal-proof-gaps, formal-str-trim-runtime, formal-try-model, implicit-string-concat, import-missing-module-diagnostic, lean-hne-chain, lexer-double-slash-operator, linked-list-hash-step1, linked-list-link-symbols, linked-list-struct-element-step4, linked-list-struct-element-step4b, linked-list-struct-element-step4c, modular, module-loader-stdlib, mro, orch-chain-cap, orch-claim-release, orch-control-branch-retire, orch-control-cleanup, orch-control-norm-claim, orch-control-prune-unmerged, orch-control-retire-landed, orch-finishing-first, orch-gate-doc, orch-gate-ledger, orch-integrate-dryrun, orch-land-master-moved, orch-orch-fixes, orch-orch-review, orch-orchestration-formal-unlanded-task-state, orch-proof-review, orch-stash-ff, orch-swarm-log-quiet, orch-verify-lock, out-param-return-type-diagnostic, parser-param-for, python315-free-threaded-abi, python315-frozendict, python315-sentinel, qualified-member-no-leak, refill-claim-blocked, reg-align-decorator-literal-diagnostic, reg-align-decorator-parametric-diagnostic, reg-align-decorator-part1-storage, reg-analyzer-build, reg-binding-deferral-diagnostic, reg-class-rebind-late-binding, reg-codegen-drop-unreferenced-unimpl-stubs, reg-codegen-enumerate-unpack-shadow-store-cast, reg-codegen-erased-container-values, reg-codegen-import-extern-annotated-ptr-return, reg-codegen-import-extern-unannotated-param-dropped-arity, reg-codegen-local-bindings-cache, reg-codegen-local-generic-float-literal, reg-codegen-tuple-slot-scalar-beside-list, reg-comptime-float-condition-diagnostic, reg-conditional-conformance-candidate-diagnostic, reg-conditional-conformance-declaration-diagnostic, reg-conditional-conformance-synthesis-diagnostic, reg-conforms-to-condition-diagnostic, reg-constrained-paren-diagnostic, reg-contains-method-diagnostic, reg-dict-mixed-join, reg-dict-slot-read-bug, reg-dict-slot-read-bug-demo, reg-dict-slot-read-selfhost-modules, reg-docstring-mojo-blocks, reg-docstring-self-import, reg-elaboration-recursion-diagnostic, reg-float-return-beside-tuple-return, reg-formal-ast-bridge-two-arg, reg-gate-rthdrscan, reg-gimple-function-scoped-alias-extern, reg-inferred-param-dependency-diagnostic, reg-inferred-where-clause-diagnostic, reg-interp-list-ctor, reg-interpreter-assert-message, reg-interpreter-constrained-diagnostic, reg-line-directives-per-generated-line, reg-linked-list-hash-equality, reg-lsp-error-recovery-parser, reg-lsp-error-recovery-part2, reg-lsp-error-recovery-part3, reg-match-class-pattern-match-args, reg-mixed-kind-name-representation, reg-mlir-annotation-diagnostic, reg-module-globals-compiled, reg-mojoc-precompile-signature, reg-nested-generator-for-in-coroutine, reg-nested-generator-yield-from-in-coroutine, reg-os-path-split-word-truthy, reg-paren-ternary-gimple-operand, reg-parser-error-recovery-part1, reg-peek-result-print-link, reg-peekable-iterator-link, reg-python315-disjoint-bases, reg-python315-lazy-imports, reg-sibling-ast-name-collision, reg-tagged-container-corpus, reg-tagged-mixed-readsites, reg-where-alias-diagnostic, reg-where-message-diagnostic, selfhost-debug-flag, selfhost-memory, selfhost-memory-fire, swarm-reclass-busy-set, swarm-replan, swarm-why, sync-restart-guards, sys-utf8-default-encoding, trait-comptime-member-conformance-diagnostic, trait-requirement-evidence-diagnostic, tuple-enumerate-var-refinement, unpacking-in-comprehensions, where-clause-call-site-diagnostic
+  fan-out      43 tracked *.mojo items
+
+plan: preflight: 1 job(s), driver=cmd mem=tiny=4GB
+plan: silentnoop: 1 job(s), driver=cmd mem=tiny=4GB after preflight
+
+  RUN     preflight
+--- preflight
+  argv: /opt/homebrew/opt/python@3.15/bin/python3.15 /Users/mrs/net/chatgpt/claude/work-7203/tools/memcap.py --limit-gb 4.0 --label preflight -- /opt/homebrew/opt/python@3.15/bin/python3.15 -c 'import fire_compiler, gimple_codegen; assert fire_compiler.Parser; print("parser+codegen OK")'
+  memcap: tiny class, ceiling 4.0 GB
+  admitted:   reserved 4 GB, 92 GB left of 96 GB
+  exit: 0   secs: 1.1   peak: 0.1 GB
+[  1/2] ok       preflight                                        1.1s  (0 running)  [peak 0.1 GB]
+  RUN     silentnoop
+--- silentnoop
+  argv: /opt/homebrew/opt/python@3.15/bin/python3.15 /Users/mrs/net/chatgpt/claude/work-7203/tools/memcap.py --limit-gb 4.0 --label silentnoop -- /opt/homebrew/opt/python@3.15/bin/python3.15 checked_run.py silentnoop --extra gimple_codegen.py --extra ownership_check.py --extra ownership_destruct.py --extra mojo/middle/__init__.py --extra mojo/middle/boundnames.py --extra mojo/middle/calls_shared.py --extra mojo/middle/closures.py --extra mojo/middle/comptime.py --extra mojo/middle/coro.py --extra mojo/middle/docstring_blocks.py --extra mojo/middle/exprtypes.py --extra mojo/middle/funcs_shared.py --extra mojo/middle/infra_infer.py --extra mojo/middle/itcursor.py --extra mojo/middle/iter_factory.py --extra mojo/middle/lambdareduce.py --extra mojo/middle/literal_bindings.py --extra mojo/middle/loops_shared.py --extra mojo/middle/metal_ops.py --extra mojo/middle/methods_shared.py --extra mojo/middle/module_shared.py --extra mojo/middle/mojoc_artifact.py --extra mojo/middle/mojoc_conformance.py --extra mojo/middle/mojoc_signature.py --extra mojo/middle/offload.py --extra mojo/middle/resolve_shared.py --extra mojo/middle/rt_call.py --extra mojo/middle/rt_sigs.py --extra mojo/middle/simd_width.py --extra mojo/middle/solvers.py --extra mojo/middle/stmts_shared.py --extra mojo/middle/types.py --extra mojo/backend_gimple/__init__.py --extra mojo/backend_gimple/cpp_async.py --extra mojo/backend_gimple/cpp_core.py --extra mojo/backend_gimple/device_glue.py --extra mojo/backend_gimple/device_select.py --extra mojo/backend_gimple/elab_intu.py --extra mojo/backend_gimple/emit_calls.py --extra mojo/backend_gimple/emit_exprs.py --extra mojo/backend_gimple/emit_funcs.py --extra mojo/backend_gimple/emit_infra.py --extra mojo/backend_gimple/emit_loops.py --extra mojo/backend_gimple/emit_metal.py --extra mojo/backend_gimple/emit_methods.py --extra mojo/backend_gimple/emit_resolve.py --extra mojo/backend_gimple/emit_stmts.py --extra mojo/backend_gimple/module_gen.py --extra mojo/backend_gimple/spec_gen.py --extra test_silent_noop_iter.py --extra build_config.py --extra runtime/fire_runtime.c --extra runtime/fire_runtime.h --rerun-failures -- /opt/homebrew/opt/python@3.15/bin/python3.15 test_silent_noop_iter.py
+  memcap: tiny class, ceiling 4.0 GB
+  admitted:   reserved 4 GB, 92 GB left of 96 GB
+  ... 1/2 jobs done, 1 running, 30s elapsed
+  ... 1/2 jobs done, 1 running, 60s elapsed
+  ... 1/2 jobs done, 1 running, 90s elapsed
+
+=== Direct run attempt (additional evidence) ===
+Command: python3 tools/memslot.py --gb 8 --label silentnoop-direct -- python3 test_silent_noop_iter.py
+Outcome: started but did not complete within 120s tool window; produced memcap ceiling line then was interrupted (SIGTERM) before test output/completion.
+Captured output:
+memcap: silentnoop-direct -- ceiling 8.0 GB across the process tree
+
+memcap: interrupted by signal 15, killing silentnoop-direct -- nothing below this wrapper is left running, and this run was NOT accounted for by any ceiling

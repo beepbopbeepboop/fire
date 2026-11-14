@@ -1,7 +1,7 @@
 # SUITE_silentnoop-part1-part2: Classify silentnoop failure and record cases
 
 **Parent:** SUITE_silentnoop-part1 (concluded; its doc was removed on master)  
-**Depends on:** bugs/SUITE_silentnoop-part1-part1.md  
+**Depends on:** SUITE_silentnoop-part1 part 1 (completed; evidence in `bugs/SUITE_silentnoop-part1-run.txt`)  
 **Class:** easy
 
 ## Goal
