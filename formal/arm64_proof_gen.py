@@ -7001,7 +7001,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
 
 def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                    exit_pc: int, code_name: str = None, sr_name: str = None,
-                   leaders=frozenset()):
+                   leaders=frozenset(), svc_assumed: dict[int, str] | None = None):
     """Emit the pieces of a proof that a straight-line run ENDS the program.
 
     The run is a block whose last instruction is a statically-known exit `svc`
@@ -7031,12 +7031,20 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     if not _is_svc_exit(words, run_pcs[-1], leaders):
         return None
     svc_x16 = {}
+    dynamic_writes = set()
     for pc in run_pcs:
         if not _is_svc(words.get(pc, 0)):
             continue
         x = _svc_static_x16(words, pc, leaders)
         if x is None:
-            return None
+            if pc == run_pcs[-1]:
+                return None
+            if not (svc_assumed and pc in svc_assumed):
+                return None
+            if not _x0_reassigned_after_write(words, pc):
+                return None
+            dynamic_writes.add(pc)
+            continue
         svc_x16[pc] = x
     for pc, x in svc_x16.items():
         if pc != run_pcs[-1] and x == 1:
@@ -7080,6 +7088,8 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
 
     A = L.append
     A(f"theorem {S}_halts (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
+    if dynamic_writes:
+        A(f"    (svc_write_assumed : ¬ arm64_reg 16 st = 1)")
     A(f"    (f : Nat) (hf : {total} < f) :")
     A(f"    arm64_go_exit st {code_name} {exit_pc} f = none := by")
 
@@ -7088,10 +7098,37 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     for j, (kind, pcs) in enumerate(segs):
         if kind == "svc":
             pc = pcs
-            x = svc_x16[pc]
             hpc = f"hpc_svc_{j}"
             hpc_proof = cur_pc_fact
             A(f"  have {hpc} : ({cur_state}).pc = {pc} := {hpc_proof}")
+            if pc in dynamic_writes:
+                if pc == run_pcs[-1]:
+                    return None
+                hx = f"hx_svc_{j}"
+                # Binder is stated over the entry state `st`; dynamic writes are
+                # admitted only at the block entry (no preceding run), so the
+                # pre-svc state is `st`.
+                A(f"  have {hx} : ¬ arm64_reg 16 ({cur_state}) = 1 := svc_write_assumed")
+                i = (pc - base) // 4
+                tgt = f"{{ {cur_state} with pc := {pc + 4} }}"
+                A(f"  have hstep_w_{j} : arm64_step ({cur_state}) {code_name} = "
+                  f"some ({tgt} : Arm64State) := by")
+                A(f"    have hsr := {sr_name}_sr_{i} ({cur_state}) {hpc} {hx}")
+                A(f"    rw [hsr, {hpc}]")
+                A(f"    try rfl")
+                A(f"  have hne_w_{j} : ({tgt} : Arm64State).pc ≠ ({cur_state}).pc := by")
+                A(f"    rw [{hpc}]")
+                A(f"    change {pc + 4} ≠ {pc}")
+                A(f"    decide")
+                A(f"  have hgj_w_{j} := arm64_go_exit_step_jump_at ({cur_state}) "
+                  f"({tgt}) {code_name} {exit_pc} ({cur_fuel} - 1) {pc} "
+                  f"hstep_w_{j} hne_w_{j} {hpc} (by decide)")
+                A(f"  rw [show ({cur_fuel} - 1) + 1 = {cur_fuel} from by omega] at hgj_w_{j}")
+                A(f"  rw [hgj_w_{j}]")
+                cur_state, cur_pc, cur_fuel, cur_pc_fact = tgt, pc + 4, f"({cur_fuel} - 1)", "by rfl"
+                prev_run = None
+                continue
+            x = svc_x16[pc]
             if prev_run is None:
                 # The number is static in the IMAGE but not in this run: no
                 # preceding movz is in the segment, so there is no chain from
