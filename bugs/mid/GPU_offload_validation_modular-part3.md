@@ -46,12 +46,12 @@ Part 1 triage observation (this worktree): running the external Modular sources 
 
 ## Narrow verification
 
-- `python3 -m unittest /Users/mrs/net/chatgpt/claude/work-7035/test_gpu_offload_validation_part3.py -v` — focused regression asserting this doc records contract, hook points, blocker, and disposition for both cases (passes after this change).
+- `python3 tools/memslot.py --gb 8 --label p3test -- python3 -m unittest test_gpu_offload_validation_part3.py -v` — focused regression asserting this doc records contract, hook points, blocker, and disposition for both cases (passes after this change).
 - (pre-fix baseline for that test: `AssertionError: '## Contract' not found ...` — the doc lacked the required analysis/disposition sections.)
 
 ## Done when
 
-`python3 -m unittest /Users/mrs/net/chatgpt/claude/work-7035/test_gpu_offload_validation_part3.py -v` passes and this doc disposition remains accurate for both cases.
+`python3 tools/memslot.py --gb 8 --label p3test -- python3 -m unittest test_gpu_offload_validation_part3.py -v` passes and this doc disposition remains accurate for both cases.
 
 ## Status
 
