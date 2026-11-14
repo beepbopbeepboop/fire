@@ -27,26 +27,49 @@ precompiled module.
 **Acceptance:** one regression covering
 `import_mojoc_conformance_error.mojo` (its `error:` line is reproduced).
 
+## Done when
+
+File: `test_mojoc_import_conformance.py` (repo root; created by this part). It
+builds the modular `inputs/precompiled_conformance/pkg` fixture under `.tmp/`,
+runs `fire.py precompile` on it, deletes the package sources, and then compiles
+the modular consumer. It asserts the modular `error:` line exactly:
+
+    error: 'Container' parameter 'T' has 'Marked' type, but value has type 'AnyStruct[NotMarked]'
+
+in both compile pipelines (`compile_to_gimple` inline and
+`driver.compile_program` link mode), plus three controls: the artifact record
+carries the trait requirement, a conforming type argument is not refused, and
+live sources beside a stale `.mojoc` still win.
+
+Command: `python3 test_mojoc_import_conformance.py`
+
 ## Status
 
-- **Open (2026-11-13, worker bug-mid-diagnostics-mojoc-imports-part1-2).** Not
-  fixable as a focused change in this tree: there is no `.mojoc` / precompiled
-  module format, no `mojo precompile`-style pipeline, and no precompiled-module
-  import path in `module_loader.py` or the compiler front end (searched for
-  `mojoc`/`precompiled`/serialized module loading; `mojoc` in this repo names the
-  compiled compiler binary, not a module file format). The Modular reference test
-  (`modular/mojo/test/mojo-tool/run/import_mojoc_conformance_error.mojo` with
-  `inputs/precompiled_conformance/`) requires: (1) emitting/loading a `.mojoc`
-  package with stored signatures, (2) importing it after sources are removed,
-  (3) running trait/conformance checking (step 2 of the diagnostics plan) against
-  the stored signature and producing the ordinary diagnostic with a synthesized
-  note for a defaulted parameter whose underlying declaration is absent from the
-  bytecode. Root-cause fix therefore depends on implementing precompiled module
-  serialization/import and then applying conformance validation on load — a
-  multi-file feature project, not a single-bug patch. **Next step:** design and
-  land `.mojoc` (or equivalent) module serialization + load in `module_loader.py`/
-  compiler, persist trait/conformance-relevant signature info, and on import run
-  the same conformance checks the source path uses, emitting the Modular-shaped
-  diagnostic/note; only then can a regression for
-  `import_mojoc_conformance_error.mojo` be made to pass. No code/test added this
-  round (no verifiable slice without the precompiled-import infrastructure).
+- **Fixed (2026-11-13, worker bug-diagnostics-mojoc-imports-part1).** The
+  earlier round's blocker was true for that base: no `.mojoc` format and no
+  precompile step existed. Master has since landed the signature artifact and
+  `fire.py precompile` (`mojo/middle/mojoc_artifact.py`), so the remaining gap
+  was narrower and is now closed:
+
+  - the artifact stored traits as a bare name; it now stores each trait's
+    required method signatures (`elaborate.extract_trait`, the same extraction
+    the source path uses) — `mojoc_artifact._trait_record`;
+  - `.mojoc` is a search-path candidate, tried LAST in a directory so a stale
+    artifact never shadows live sources (`emit_resolve._module_candidate_paths`);
+  - both import pipelines register the artifact's struct/trait records
+    (`_compile_imported_module` inline, `_register_link_imports` link mode →
+    `gen._mojoc_structs`);
+  - an instantiation naming a `.mojoc` struct is checked against its stored
+    bracket-parameter bounds at the same place a source-defined generic struct
+    is checked (`emit_resolve._ensure_generic_struct`), through the new
+    `mojo/middle/mojoc_conformance.py`, which reuses
+    `elaborate.check_conformance` rather than adding a second checker.
+
+  Measured before the check: the modular fixture's consumer compiled silently
+  in both pipelines (`COMPILED OK` inline; `fire.py build` exited 0 with a
+  linked binary). After: both report the exact modular `error:` line and fail.
+  Regression: `test_mojoc_import_conformance.py` (fails at
+  `test_imported_struct_conformance_error_is_reported` with the hook disabled,
+  passes with it). Not in this part: the `note: '<Container>' declared here`
+  line and the synthesized-signature rendering (parts 2/3); the
+  dual-mount resolution case (part 3).

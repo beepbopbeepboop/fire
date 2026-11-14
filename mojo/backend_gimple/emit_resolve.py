@@ -201,6 +201,11 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 _base_dir, _flat, f"__init__.py"))
             rel_mojo_paths.append(gimple_ctypes.os.path.join(
                 _base_dir, _flat, f"__init__.mojo"))
+            # A precompiled signature artifact stands in for a package whose
+            # sources are gone (`fire.py precompile <pkg> -o <pkg>.mojoc`),
+            # so it is tried only after every real source spelling.
+            rel_mojo_paths.append(gimple_ctypes.os.path.join(
+                _base_dir, f"{_flat}.mojoc"))
         return rel_mojo_paths
     # Explicit `sys.path.insert(...)` directories win outright — the user
     # said "look here first" (see _record_sys_path_inserts) — then the
@@ -264,6 +269,11 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 # import worked interpreted.
                 mojo_paths.append(gimple_ctypes.os.path.join(
                     d, module_name, f"__init__{ext}"))
+        # Precompiled signature artifact for a package whose sources are
+        # gone. LAST in this directory, after every real source spelling
+        # (flat `.py`/`.mojo` and the package `__init__`): a stale `.mojoc`
+        # beside live sources must never shadow them.
+        mojo_paths.append(gimple_ctypes.os.path.join(d, f"{module_name}.mojoc"))
     # A DOTTED module_name (e.g. `import pkg.helper as m`, module_name ==
     # "pkg.helper") names a package-relative path, not a literal
     # filename with dots in it — the loop above only ever tried the
@@ -508,6 +518,28 @@ def publish_a3_generators(gen, meta) -> None:
             gen._generator_home_api[_key] = _api
 
 
+def _load_mojoc_signatures(gen, path: str) -> None:
+    """Register a precompiled `.mojoc` artifact's struct/trait records on
+    `gen`.
+
+    A `.mojoc` file stands in for a package whose sources are gone. It has no
+    AST to inline (it is a stored signature, not code), so the import itself
+    contributes no statements; what it does contribute is the signature an
+    instantiation must be checked against — `_ensure_generic_struct` reads
+    `gen._mojoc_structs` for that. Records keep their artifact spelling so
+    the one record reader (`mojo/middle/mojoc_artifact.py`) stays the only
+    reader of the format."""
+    try:
+        from mojo.middle import mojoc_artifact
+        art = mojoc_artifact.load_artifact(path)
+    except Exception as e:
+        gimple_ctypes._debug_note('mojoc artifact unreadable', e)
+        return
+    for _n, _rec in (art.get('structs') or {}).items():
+        if isinstance(_rec, dict):
+            gen._mojoc_structs.setdefault(_n, _rec)
+
+
 def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
@@ -527,6 +559,11 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
     mojo_paths = gen._module_candidate_paths(module_name)
     for path in mojo_paths:
         if gimple_ctypes.os.path.exists(path):
+            if isinstance(path, str) and path.endswith('.mojoc'):
+                # A precompiled signature artifact: read the signatures, no
+                # statements to inline (there is no code in the artifact).
+                _load_mojoc_signatures(gen, path)
+                return (None, [])
             _abspath = gimple_ctypes.os.path.abspath(path)
             # `_ap_key`: a fresh `_as_str`-typed local for the two
             # `_compiling_file_paths` set ops. `_abspath` derives from the
@@ -1707,6 +1744,12 @@ def _register_link_imports(gen, stmts: list) -> list:
         # does this resolution correctly (walking up from the current
         # file, same as _find_imported_struct/_resolve_test_relative_module).
         _sib_path = gen._parsed_import(module)[0]
+        # A precompiled `.mojoc` signature artifact: no bodies to link and no
+        # source-level exports to scan, but the stored struct/trait records
+        # are what an instantiation must be conformance-checked against.
+        if isinstance(_sib_path, str) and _sib_path.endswith('.mojoc'):
+            _load_mojoc_signatures(gen, _sib_path)
+            return {}, False, _sib_path
         # Guard BEFORE calling load_module, not just try/except around it:
         # this codegen's compiled try/except does not reliably catch a
         # raised exception, so a sibling `.py` compiler module (not under
@@ -3527,6 +3570,26 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     _known = _intu.get((base_name, tuple(type_args)))
     if _known:
         return _known
+    # A struct whose signature came from a precompiled `.mojoc` artifact has
+    # no source template to elaborate, but its stored bracket-parameter bound
+    # is still a constraint the instantiation must satisfy. Check it here,
+    # where a source-defined struct's own bound check would have run, and
+    # refuse with the ordinary diagnostic rather than fall through to the
+    # plain-constructor path (which is what made the modular
+    # `import_mojoc_conformance_error` import succeed silently).
+    _mojoc = getattr(gen, '_mojoc_structs', None) or {}
+    _mojoc_rec = _mojoc.get(base_name)
+    if _mojoc_rec is not None:
+        if _mojoc_rec.get('kind') == 'struct':
+            import mojo.middle.mojoc_conformance as _mojoc_conf
+            _diag = _mojoc_conf.conformance_diagnostic(
+                _mojoc_rec, [str(t) for t in type_args],
+                getattr(gen, '_source_text', '') or '', _mojoc)
+            if _diag:
+                raise RuntimeError(_diag)
+        # No template to monomorphize: the artifact carries a signature, not
+        # a body. Conforming instantiations fall through unchanged.
+        return None
     source = gen._imported_generic_structs.get(base_name)
     if not source:
         return None
