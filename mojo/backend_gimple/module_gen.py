@@ -10503,8 +10503,35 @@ def gen_module_impl(self, stmts: list):
             _xg_body = (gimple_gen_coro.generator_base_name(
                             _xg_hfn, _gmiq(_as_str(self.module_name)))
                         + '_body')
+            _xg_fn = None
+            for _s in all_functions:
+                if isinstance(_s, FunctionDef) and _as_str(_s.name) == _xg_hfn:
+                    _xg_fn = _s
+                    break
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
+                _xg_is_path_word = False
+                if _xg_fn is not None:
+                    _ptr_ev = getattr(_xg_fn, '_ptr_evidence', ())
+                    if (_xg_pn in _ptr_ev
+                            and any(isinstance(_n, gimple_ctypes.CallExpr)
+                                    and isinstance(_n.func, gimple_ctypes.IdentExpr)
+                                    and _n.func.name == 'isinstance' and len(_n.args) == 2
+                                    and isinstance(_n.args[0], gimple_ctypes.IdentExpr)
+                                    and _n.args[0].name == _xg_pn
+                                    and isinstance(_n.args[1], gimple_ctypes.IdentExpr)
+                                    and _n.args[1].name in ('str', 'bytes')
+                                    for _n in gimple_exprtypes._walk_ast(_xg_fn))):
+                        _xg_is_path_word = True
+                if _xg_is_path_word:
+                    # The function's own body proves this parameter is a runtime
+                    # word (e.g. `isinstance(p, str)` then rebound/used as a
+                    # file handle or other object). Call-site hints from a
+                    # particular importer must not narrow it to char* / a
+                    # container pointer; that typing is a property of the module.
+                    _xg_tgt[_xg_pn] = 'int64_t'
+                    self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
+                    continue
                 if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
                 if _xg_ct == 'char *':

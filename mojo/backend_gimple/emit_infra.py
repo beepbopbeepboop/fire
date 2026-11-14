@@ -1399,6 +1399,8 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         obj, _hit = cas.get_or_build(key, '.o', _build_fn)
         return obj
     except Exception as e:
+        msg = f'[gimple_codegen] failed to compile link-mode inline-module cpp unit: {e}'
+        print(msg, flush=True)
         gimple_ctypes._debug_note('failed to compile link-mode inline-module cpp unit', e)
         return None
 

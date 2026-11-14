@@ -748,7 +748,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # table: an unstamped node has no evidence of its own, and the
         # table's entry belongs to whichever module ran last.
         _ptr_ev = getattr(fn, '_ptr_evidence', ())
-        if (ctype == 'char *' and (pt is None or pt == '')
+        if ((ctype == 'char *' or ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'))
+                and (pt is None or pt == '')
                 and pn in _ptr_ev
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
                         and isinstance(_n.func, gimple_ctypes.IdentExpr)
@@ -758,8 +759,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                         and isinstance(_n.args[1], gimple_ctypes.IdentExpr)
                         and _n.args[1].name in ('str', 'bytes')
                         for _n in gimple_exprtypes._walk_ast(fn))):
-            # a path word the body asks `isinstance(p, bytes)` of: it may be a
-            # str OR a bytes at run time, so it is the word, not a `char *`
+            # A path/union word the body asks `isinstance(p, str|bytes)` of:
+            # it may be a str/bytes OR another runtime object at run time (e.g.
+            # a file handle or iterable passed in), so it is the runtime word,
+            # not a narrowed pointer type inferred from a particular call site.
             ctype = 'int64_t'
         if (ctype == 'int64_t' and (pt is None or pt == '')
                 and pn in gimple_exprtypes._list_method_params(fn)):
