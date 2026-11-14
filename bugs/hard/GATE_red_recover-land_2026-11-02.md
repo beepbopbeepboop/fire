@@ -1,4 +1,4 @@
-SPLIT: GATE_red_recover-land_2026-11-02-part2, (part3 fixed: container-annotated parameter membership diagnostic), GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
+SPLIT: GATE_red_recover-land_2026-11-02-part2, (part3 fixed: container-annotated parameter membership diagnostic), GATE_red_recover-land_2026-11-02-part4 (fixed 2026-11-14: issubclass lowered; doc deleted), GATE_red_recover-land_2026-11-02-part5
 
 # GATE red: 4 landing-gate job(s) red on `recover-land` (gate red)
 
@@ -109,7 +109,11 @@ Split into five parts, all under `bugs/`:
   diagnostic). It used to break the closure at `mojo/middle/exprtypes.py`:
   `# ERROR: compiling imported module … 'Int' does not implement the
   '__contains__' method`.
-- part 4 — `issubclass(...)` lowers instead of emitting a weak stub.
+- part 4 — `issubclass(...)` lowers instead of emitting a weak stub. **Fixed
+  2026-11-14** (doc deleted): the arm sits beside `_lower_builtin_isinstance`;
+  static classes answer from `_struct_bases`, a runtime word through
+  `mojo_issubclass_rtclass`/`_class_derives`, and a proven-non-class literal is
+  an honest refusal. Pinned by `test_issubclass_builtin.py`.
 - part 5 — re-enable the three bootstrap gate jobs once the closure is
   stub-free, and delete this doc.
 
