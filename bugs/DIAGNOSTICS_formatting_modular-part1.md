@@ -61,9 +61,10 @@ Ground truth is the real compiler via `tools/mojo`; FileCheck is at
    signatures.
 4. No `precompile` analogue exists in this tree (`grep -n precompile fire.py` is empty),
    so there is no source-less package path to test against.
-5. The compiled path (`fire.py build` on the same scratch file) was started in
-   the background and did not finish within the 120 s budget. Its output is not
-   recorded here, and it does not change the plan below.
+5. The compiled path (`timeout 300 python3 fire.py build` on the same scratch file, with
+   `diags_package` removed and the `@implicit` decorator dropped) hit the 300 s timeout
+   (exit 124) with no diagnostic output. The compiled path does not reach a diagnostic
+   for this program in 5 minutes. It does not change the plan below.
 
 **What the 11 expected diagnostic groups in this test require** (CHECK lines in the test,
 in file order):
