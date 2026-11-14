@@ -1,4 +1,4 @@
-SPLIT: FORMAL_svc_exit_handling_incomplete-part2, FORMAL_svc_exit_handling_incomplete-part4, FORMAL_svc_exit_handling_incomplete-part5
+SPLIT: FORMAL_svc_exit_handling_incomplete-part1, FORMAL_svc_exit_handling_incomplete-part2, FORMAL_svc_exit_handling_incomplete-part3, FORMAL_svc_exit_handling_incomplete-part4, FORMAL_svc_exit_handling_incomplete-part5
 
 # FORMAL: `svc` exit handling is not structurally complete
 
@@ -55,22 +55,12 @@ continues at `pc + 4`), `work_step_svc` / `_exit` / `_write`, the svc step's rig
 `_step_ok` lemma for an svc word, and the termination obligation's comment and pin. The dylib test is PASS=23 FAIL=6,
 the marker's count. Helper `_svc_static_x16` is on the archive (21b4a98cb), not yet called.
 
-STILL OPEN: nothing in the five parts -- all have landed, including part 1's
-census of every emitted `svc`'s x16 and x0 use.  What remains for the parent
-is its own final verify-and-delete, not a part.
-The dynamic-`svc` named hypothesis (design item 4) and the
-`svc_write_assumed` slot are landed across parts 2-5 (2026-11-14): a dynamic
-write `svc` is admitted under a caller-supplied hypothesis by the run and halt
-certificates, the universal walk states that hypothesis once on the top-level
-theorem and passes it to every certificate it uses, and `_dylib_total_proof`
-states the export's termination under it instead of applying `{ident}_halts`
-unconditionally.  Which sites are admissible is one helper
-(`_svc_write_assumed_sites`), shared by the walk, the refusal classifier and
-the dylib emitter.  Pinned by
-`test_formal_call_proof_gen.TestSvcWriteAssumedRunCertificate`,
-`…HaltCertificate`, `…UniversalWalk` and `…DylibTotal`; the static case is
-landed above, and a dynamic `svc` with no available assumption is still
-refused rather than guessed.
+STILL OPEN: the dynamic-`svc` named hypothesis (design item 4) and the
+`svc_write_assumed` slot; the dylib export paths already use their own
+guarded-obligation route.  The default walk's static case is landed above:
+static x16 is threaded at the application site, and a static write run
+certificate carries the x0-reassignment rule.  A dynamic `svc` on a walked
+path is still refused rather than guessed.
 
 ## Symptom (before 574813206)
 

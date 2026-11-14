@@ -1,7 +1,7 @@
 """Render a precompiled signature record as Mojo source text.
 
 The record shape is the JSON mapping produced and read by
-`mojo/middle/mojoc_artifact.py` (precompiled mojoc signature records):
+`mojo/middle/mojoc_artifact.py` (DIAGNOSTICS_mojoc_imports-part2 part 1):
 `kind`/`name`/`bracket_params`/`runtime_params`, each parameter being
 `{"name", "type", "default"}` with `default` holding the source text (or
 None).  This module is the single renderer for those records; the imported-
@@ -18,12 +18,10 @@ while printing it as written is exactly what the diagnostic must show
 
 SYNTHETIC_MARKER = "# note - synthetic signature"
 
-# Modular prints every free function as `def` in a diagnostic note, whatever
-# keyword the source spelled it with (`def helper(x: Int) -> Int`).
 _KIND_KEYWORDS = {
     "struct": "struct",
     "trait": "trait",
-    "function": "def",
+    "function": "fn",
 }
 
 
@@ -59,13 +57,7 @@ def render_signature(record, synthetic=True):
     runtime = record.get("runtime_params") or []
     if runtime:
         text += "(" + ", ".join(_param_text(p) for p in runtime) + ")"
-    elif kind == "function":
-        text += "()"
-
-    ret = (record.get("ret") or "").strip()
-    if ret:
-        text += " -> " + ret
 
     if synthetic:
-        text += "    " + SYNTHETIC_MARKER
+        text += "  " + SYNTHETIC_MARKER
     return text

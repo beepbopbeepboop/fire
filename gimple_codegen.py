@@ -36,7 +36,6 @@ _ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
 import ownership_check
-import unknown_decl_check
 import mlir
 import mojo.middle.coro as gimple_gen_coro
 import regex_compile
@@ -3246,15 +3245,6 @@ class GimpleGen:
         # case is reported instead of the instantiation silently falling
         # through to the un-elaborated template.
         self._mojoc_structs: dict = {}
-        # Dual-mount / alias resolution for precompiled packages: one
-        # artifact file reached under two different package names is the same
-        # package. realpath(artifact) -> canonical package name, and
-        # alias package name -> canonical package name.
-        self._mojoc_pkg_canonical: dict = {}
-        self._mojoc_pkg_alias: dict = {}
-        # Loaded mojoc package records (canonical/alias package name ->
-        # {'structs': {...}, 'functions': {...}}) for symbol lookup.
-        self._mojoc_pkg_records: dict = {}
         # Why an imported generic struct could NOT be elaborated for a
         # construction, one entry per occurrence. The codegen falls back to
         # the un-elaborated template (see
@@ -3401,8 +3391,6 @@ class GimpleGen:
         'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
         'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
         'mojo_isinstance_type': ('int', ['int64_t']),
-        'mojo_is_classword':   ('int', ['int64_t']),
-        'mojo_issubclass_rtclass': ('int', ['int64_t', 'int64_t']),
         'mojo_type_of':        ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
@@ -4594,9 +4582,6 @@ class GimpleGen:
     def _lower_builtin_isinstance(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_isinstance(self, node)
 
-    def _lower_builtin_issubclass(self, node: CallExpr) -> tuple[str, str]:
-        return ggc._lower_builtin_issubclass(self, node)
-
     def _lower_builtin_all_any(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_all_any(self, fname_raw, node)
 
@@ -5099,9 +5084,6 @@ class GimpleGen:
                                  depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
                                            depth=depth, want_abs=want_abs)
-    def _reexported_defining_qualifier(self, module: str, name: str,
-                                       kind: str = 'fn') -> str:
-        return gfn._reexported_defining_qualifier(self, module, name, kind)
     def _register_imported_symbol(self, name: str, info, original_name=None,
                                   write_param_types: bool = True):
         import mojo.middle.funcs_shared as _fn2
@@ -6480,7 +6462,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
-    unknown_decl_check.check_module(stmts, mojo_src, filename)
     # Early diagnostics: trait method requirement evidence (part 2).
     try:
         import elaborate as _elab_diag

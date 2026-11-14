@@ -3919,8 +3919,7 @@ def _materialize(work, key):
                  and 'struct alignment must be a positive power of 2' in _emsg)
                 or ('function instantiation failed' in _emsg
                     and 'use of unknown declaration' in _emsg
-                    and '@align' in _emsg)
-                or elaborate.is_downcast_witness_diagnostic(e)):
+                    and '@align' in _emsg)):
                 raise
         except Exception:
             pass

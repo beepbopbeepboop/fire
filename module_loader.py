@@ -1397,16 +1397,16 @@ class ModuleLoader:
         # into a DIFFERENT file's translation unit that has no reason to
         # have that typedef too -- "unknown type name 'Span'". Unlike
         # MojoList/MojoDict/MojoSet (always available via fire_runtime.h,
-        # included everywhere), Span has no globally-available typedef.
-        # The defining unit's real lowering for these parameter annotations
-        # is `char *` (see e.g. parsing_floats._atof(StringSlice) -> char *),
-        # which is parseable in any TU without a local typedef. Returning the
-        # real lowering here keeps the text-scan import signature's overload
-        # suffix in agreement with the defining unit (and the extern itself
-        # parseable); the old `int64_t *` opaque handle disagreed with the
-        # definition and made cross-module references undefined at link time.
+        # included everywhere), Span has no globally-available typedef, so
+        # box it to the same opaque-handle convention every other
+        # not-locally-declared struct type already uses in this codebase
+        # (see gimple_codegen.py's _lower_UnaryOp: "Struct types: return
+        # int64_t (opaque handle) -- can't cast struct to int64_t in
+        # GIMPLE"). Found via build_stdlib_dylib.py regressing to 12 skipped
+        # modules ("unknown type name 'Span'") the same day this method
+        # started delegating to _mojo_type.
         if mojo_type.split('[', 1)[0].strip() in ('Span', 'StringSlice'):
-            return 'char *'
+            return 'int64_t *'
         return _mojo_type(mojo_type)
 
     def get_symbol_type(self, module_name: str, symbol_name: str) -> str:
