@@ -2136,6 +2136,8 @@ def _register_link_imports(gen, stmts: list) -> list:
                     else:
                         ret = info.get('c_return_type', 'int64_t')
                         ptypes = _param_ctypes(info.get('c_parameters'))
+                    ret = gimple_ctypes.c_client_callable_ctype(ret)
+                    ptypes = [gimple_ctypes.c_client_callable_ctype(p) for p in ptypes]
                     gen.func_return_types[sym] = ret
                     gen.func_param_types[sym] = ptypes
                     # Record this function's home module (SB-1 fix,
@@ -2242,6 +2244,15 @@ def _register_reflected_struct(gen, name, type_info, exports, parse_c_sig):
         if not msig:
             continue
         mret, mptypes = parse_c_sig(msig)
+        # A reflected C++-typed callable parameter must be spelled as the
+        # runtime's boxed word in a C-side extern/prototype (client TU).
+        mret = gimple_ctypes.c_client_callable_ctype(mret)
+        mptypes = [gimple_ctypes.c_client_callable_ctype(p) for p in mptypes]
+        # Rebuild the extern signature from sanitized types so the
+        # declaration matches the stored param types (a `std::function<...>`
+        # in `msig` is not valid C).
+        _msig_name = msig.split('(', 1)[0].strip().split()[-1].lstrip('*')
+        msig = f"{mret} {_msig_name} ({', '.join(mptypes) if mptypes else 'void'})"
         # The C symbol is the function name inside the signature — this is
         # whatever the defining module's own compile actually emitted
         # (see GimpleGen._struct_method_csym_static / reflect.py's
@@ -2859,39 +2870,13 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         # immediate build-time error naming both types and the value.
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
-        if not line:
-            # `_current_line` is rarely set; the statement the failing store
-            # belongs to is named by the last `#line N "file"` directive
-            # already emitted above it.
-            _bl = getattr(gen, 'body_lines', None) or []
-            _k = len(_bl) - 1
-            while _k >= 0 and _k > len(_bl) - 400:
-                _ln = _bl[_k]
-                if _ln.startswith('#line '):
-                    _parts = _ln.split()
-                    if len(_parts) >= 2 and _parts[1].isdigit():
-                        line = int(_parts[1])
-                    break
-                _k -= 1
         loc = f'{filename}:{line}' if line else filename
         _fn = getattr(gen, 'current_func_name', None)
         if _fn:
             loc = f'{loc} in function `{_fn}`'
-        # The last few statements emitted for the failing store: the temps in
-        # the message (`_t111`) only mean something next to the C that made them.
-        _ctx = []
-        _bl2 = getattr(gen, 'body_lines', None) or []
-        _k2 = len(_bl2) - 1
-        while _k2 >= 0 and len(_ctx) < 6 and _k2 > len(_bl2) - 200:
-            _l2 = _bl2[_k2].strip()
-            if _l2 and not _l2.startswith('#'):
-                _ctx.append(_l2)
-            _k2 -= 1
-        _ctx.reverse()
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
-            f'at {loc}: value={v!r} dest={dest!r}; last emitted: '
-            + ' | '.join(_ctx))
+            f'at {loc}: value={v!r} dest={dest!r}')
     # part 4 (measured 2026-10-22): a RUNTIME (list-backed) tuple stored into
     # a synthesized by-value `MojoTuple_*` struct. A direct `(MojoTuple_...)
     # <ptr/word>` cast is invalid C ("conversion to non-scalar type requested"
@@ -3492,19 +3477,6 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
     return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
 
 
-def _constructed_struct_type(gen, arg, ctype):
-    """The Mojo type of a call argument that is a direct constructor call of a
-    concrete struct of this module (`Foo()` -> `Foo`), or None. The C type
-    `Foo *` alone cannot name it (it is equally a `Pointer[Foo]`), so type
-    inference for `x: T` is given the type only where the syntax proves it."""
-    if (isinstance(arg, gimple_ctypes.CallExpr)
-            and isinstance(arg.func, gimple_ctypes.IdentExpr)
-            and arg.func.name in gen.struct_field_types
-            and ctype == f'{arg.func.name} *'):
-        return arg.func.name
-    return None
-
-
 def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     """Elaborate a call to an imported generic into a concrete CAS-cached
     instantiation. Handles both the explicit form `Generic[TypeArgs](args)`
@@ -3749,9 +3721,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                             g, gen.current_func_name, _ann))
             info = el.elaborate_generic_call_inferred(
                 module_src, g, [ct for ct, _ in arg_pairs],
-                origin_module=elaborate.declaring_module_name(gen, module_src),
-                arg_mojo_types=[_constructed_struct_type(gen, a, ct)
-                                for a, (ct, _) in zip(node.args, arg_pairs)])
+                origin_module=elaborate.declaring_module_name(gen, module_src))
     except RuntimeError:
         # The nested-async-in-a-generic guard above raises RuntimeError
         # deliberately — an honest refusal, not a "try something else"

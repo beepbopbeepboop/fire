@@ -651,7 +651,7 @@ _SELFHOST_KWARGS_HAS_VARARG = {
 }
 
 
-def _selfhost_syms() -> list:
+def _selfhost_syms():
     """`[(qualified C symbol, return ctype, [param ctypes])]` for every
     `_SELFHOST_SIGS` entry, in a DETERMINISTIC order.
 
@@ -752,18 +752,13 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             by_name[_as_str(_sd0.name)] = _sd0
     resolved = set()
 
-    # NOT named `s`: the compiled path types a parameter/local per bare NAME
-    # across the module, and the other `s` in this file (the loop variable
-    # below, and the interpreter's `MojoClass`-typed ones in the closure) made
-    # `s.methods` a MojoDict read here (`cannot coerce MojoDict * to
-    # MojoList *` at `s.methods = inherited + s.methods`).
-    def resolve(sdef0):
-        sdef = _as_structdef_node(sdef0)
-        _sn = _as_str(sdef.name)
+    def resolve(s):
+        s = _as_structdef_node(s)
+        _sn = _as_str(s.name)
         if _sn in resolved:
             return
         resolved.add(_sn)  # mark first: guards against an inheritance cycle
-        _bases = getattr(sdef, 'bases', None) or []
+        _bases = getattr(s, 'bases', None) or []
         if not _bases:
             return
         merged_fields = []
@@ -778,16 +773,16 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             for m in base.methods:
                 merged_methods[_as_str(_as_funcdef_node(m).name)] = m
         own_names = set()
-        for m in sdef.methods:
+        for m in s.methods:
             own_names.add(_as_str(_as_funcdef_node(m).name))
         inherited = [m for name, m in sorted(merged_methods.items()) if name not in own_names]
-        sdef.fields = merged_fields + sdef.fields
-        sdef.methods = inherited + sdef.methods
+        s.fields = merged_fields + s.fields
+        s.methods = inherited + s.methods
         # An in-place AST mutation, so `_walk_ast`'s memo — keyed on node
         # identity, and therefore blind to "this node now reaches more
         # children than when it was last walked" — must not be able to answer
-        # for `sdef`, or for any node that contains it, again.
-        _walk_ast_invalidate(sdef)
+        # for `s`, or for any node that contains it, again.
+        _walk_ast_invalidate(s)
 
     for s in all_struct_defs:
         if isinstance(s, StructDef):
@@ -910,7 +905,7 @@ class GimpleGen:
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
                  emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False,
-                 no_mangle: set[str] = (), relaxed_imports: bool = False,
+                 no_mangle=(), relaxed_imports: bool = False,
                  auto_gpu: bool = True):
         # Function names that must NOT be overload-mangled in this TU — e.g. a
         # generic instantiation's own symbol, which is already uniquely named by
@@ -6497,15 +6492,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
-    # The multi-slot comprehension refusal rides BEFORE the unknown-
-    # declaration pass for the same reason the ownership check does: it is a
-    # structural refusal that knows the program cannot compile, and the
-    # unknown-decl pass would otherwise answer its own, less specific
-    # question first (`print([x for a, b in g()])` reports the element's
-    # undeclared `x` instead of the arity mismatch that makes the whole
-    # comprehension uncompilable — bug:
-    # SUITE_gimplegenerators_multi_slot_comprehension).
-    gimple_gen_coro.refuse_multi_slot_comprehension_over_nontuple_generator(stmts)
     unknown_decl_check.check_module(stmts, mojo_src, filename)
     # Early diagnostics: trait method requirement evidence (part 2).
     try:
@@ -6806,16 +6792,13 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                     except Exception: pass
     except Exception:
         pass
-    # This module's own caches, cleared by NAME. Not `globals().get(name)` over a
-    # tuple of names: `globals()` is a stub in the compiled compiler ("globals:
-    # unavailable in compiled mode", four hits per compile), which then returned
-    # 0 and cleared nothing, so the self-hosted binary kept every table across
-    # compiles.
     try:
-        _SELFHOST_FUNC_RETURN_TYPES.clear()
-        _SELFHOST_PARAM_TYPES.clear()
-        _SELFHOST_GG_CACHE.clear()
-        _compile_cache.clear()
+        for _c in ('_SELFHOST_FUNC_RETURN_TYPES', '_SELFHOST_PARAM_TYPES',
+                   '_SELFHOST_GG_CACHE', '_compile_cache'):
+            _v = globals().get(_c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
     except Exception:
         pass
     # Clear remaining module-level caches/accumulators (coro, types, monomorphize,
@@ -7459,6 +7442,13 @@ def compile_linked(mojo_src: str, filename: str = "",
     # declaration and `_compile_imported_module`'s matching write site for
     # the full reasoning (“COMPILE_FAIL: Tools/cases_generator/parser.py”).
     needs_cxx = gen._link_needs_cxx or gen._link_needs_cxx_box[0] or bool(gen.generated_cpp)
+    # A callable-valued slot is `std::function<...>` in cpp coroutine typing
+    # but the C translation unit (client.c) must spell it as the runtime's
+    # boxed `int64_t` word. Sanitize any residual form at the C-emission
+    # boundary so link-mode clients never see C++-only types in C output.
+    if 'std::function<' in code:
+        import mojo.middle.types as _mtypes
+        code = _mtypes.c_client_sanitize_signature_text(code)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),
             list(dict.fromkeys(gen._link_objects)),

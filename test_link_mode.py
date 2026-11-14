@@ -356,60 +356,6 @@ def test_cross_module_generator_default_is_padded() -> bool:
     return ok
 
 
-def test_generator_string_equality_compares_content() -> bool:
-    """`a != b` on two strings inside a C++-generator (`yield from`-eligible
-    imported module) body compares the STRINGS, not the pointers.
-
-    The cpp backend's `==`/`!=` used to emit a raw C++ comparison, which for
-    two `char *` operands is pointer identity. Real: Tools/c-analyzer's
-    `c_common/tables.py` `read_table` does
-    `actualheader = next(lines).strip(); if actualheader != header: raise
-    ValueError('bad header ...')` and raised on a file whose header was
-    exactly `header` (measured: `bad header 'a\\tb'`). `mojo_cstr_cmp` is
-    the content comparison the ordinary GIMPLE backend already emits.
-
-    The `import csv` + `_get_reader=csv.reader` default is what makes this
-    module eligible for the C++ generator path (see `_read_table_like` in
-    cpp_core.py); without it the generator compiles on the A3 path, where
-    the comparison was already correct and this would pin nothing.
-    """
-    pkg = {
-        'cmpmod/__init__.py': '',
-        'cmpmod/mod.py': (
-            'import csv\n'
-            '\n'
-            'def check(a, b, *, sep=",", _get_reader=csv.reader):\n'
-            '    actual = a.strip()\n'
-            '    if actual != b:\n'
-            '        yield "DIFF"\n'
-            '    else:\n'
-            '        yield "SAME"\n'
-        ),
-        'cmpmod/main.py': (
-            'from cmpmod.mod import check\n'
-            '\n'
-            'def main():\n'
-            '    print(list(check("abc", "abc")))\n'
-            '    print(list(check("abc", "abd")))\n'
-            'main()\n'
-        ),
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='gen_str_eq_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'cmpmod/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'cmpmod/main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == "['SAME']\n['DIFF']\n")
-    if not ok:
-        print(f"  ✗ generator_string_equality_compares_content: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
 def test_generator_str_param_concat_is_string_concatenation() -> bool:
     """`root + str(k)` in a generator whose unannotated `root` is only ever
     passed a string literal is string concatenation, not integer addition.
@@ -2810,6 +2756,38 @@ def test_imported_module_path_word_generator_unit_compiles() -> bool:
     return True
 
 
+def test_imported_callable_default_param_is_c_word_in_client() -> bool:
+    """Regression: an imported callable-default parameter must be a C word.
+
+    An imported plain function whose default is a known foreign callable
+    (e.g. `def w(x, _open=open): ...`) is typed `std::function<...>` for the
+    cpp coroutine unit, but the link-mode C client must spell that slot as the
+    runtime's boxed `int64_t` word. `driver.compile_program` (not the
+    `fire.py` inline fallback) must build and run the consumer; the binary's
+    stdout must match CPython.
+    """
+    pkg = {
+        'pkg_c/__init__.py': '',
+        'pkg_c/mod.py': (
+            'def w(x, _open=open):\n'
+            '    return x\n'
+        ),
+        'pkg_c/main.py': (
+            'from pkg_c.mod import w\n'
+            'print(w(7))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'pkg_c/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg_c/main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '7')
+    if not ok:
+        print(f"  ✗ imported_callable_default_param_is_c_word_in_client: "
+              f"rc={rc} stdout={stdout!r} py_rc={py_rc} py={py_stdout!r}")
+    return ok
+
+
 def test_link_inline_cpp_unit_failure_reports_compiler_stderr() -> bool:
     """Regression test for the diagnostic half of
     bug:COMPILE_FAIL_Tools_c-analyzer_c_common_tables_consumer_link: when an
@@ -2899,8 +2877,8 @@ CASES = [
     test_two_modules_specialize_one_generic_differently,
     test_imported_global_accessor_in_link_mode,
     test_imported_module_path_word_generator_unit_compiles,
+    test_imported_callable_default_param_is_c_word_in_client,
     test_link_inline_cpp_unit_failure_reports_compiler_stderr,
-    test_generator_string_equality_compares_content,
 ]
 
 

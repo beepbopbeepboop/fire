@@ -2392,7 +2392,8 @@ def _commit_home_def_pts(gen, node) -> None:
     call). See `_record_home_def_pts`'s docstring for the companion
     failure (a later NON-EMITTING re-compile clobbering the emitted
     value) that rules out blanket last-wins."""
-    sig = gen._signature_ctypes(node.params, node)
+    sig = [gimple_ctypes.c_client_callable_ctype(t)
+           for t in gen._signature_ctypes(node.params, node)]
     if not sig:
         return
     store = getattr(gen, '_home_def_param_types', None)
@@ -2588,6 +2589,8 @@ def _effective_param_types(gen, bare_name: str) -> list | None:
         pts = gen.func_param_types.get(bare_name)
     if pts is None:
         pts = _import_entry_param_types(gen, bare_name)
+    if pts:
+        pts = [gimple_ctypes.c_client_callable_ctype(p) for p in pts]
     return pts
 
 
@@ -3791,6 +3794,11 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             ctype = 'MojoList *'
         else:
             ctype = gen._param_ctype(pname, ptype, node)
+        # A callable-valued parameter is typed `std::function<...>` for C++
+        # coroutine units, but a C-emitted function spells it as the runtime's
+        # boxed word. `emit_funcs` writes C/GIMPLE output, so keep the C form
+        # in the signature, stored param types and the body's var type.
+        ctype = gimple_ctypes.c_client_callable_ctype(ctype)
         safe_bare = gen._param_safe_name(bare)
         gen.var_types[bare] = ctype
         if safe_bare != bare:
@@ -3831,7 +3839,10 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     params_str = ', '.join(param_strs) if param_strs else 'void'
     # Record that this function takes varargs so call sites can pack args
     if has_varargs:
-        gen.func_param_types[node.name] = gen._signature_ctypes(node.params, node)
+        gen.func_param_types[node.name] = [
+            gimple_ctypes.c_client_callable_ctype(t)
+            for t in gen._signature_ctypes(node.params, node)
+        ]
         gen._note_vararg_trailing_param_types(node)
     # The emit is the authority for the shared signature store: commit the
     # exact param types this definition's symbol/prototype were built from,
@@ -5073,7 +5084,10 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     if has_varargs:
         # Keep self + any fixed params before *args, then pack the rest; e.g.
         # __call__(self, interpreter, *args) must keep `interpreter`.
-        gen.func_param_types[method_full_name] = gen._signature_ctypes(node.params, node, struct_name)
+        gen.func_param_types[method_full_name] = [
+            gimple_ctypes.c_client_callable_ctype(t)
+            for t in gen._signature_ctypes(node.params, node, struct_name)
+        ]
     # Prefer THIS overload's own suffixed entry (registered in Pass 2b-bis,
     # gimple_codegen.py's per-struct-method overload-candidate pass) over
     # the bare/unsuffixed key. A later pre-pass (~line 10907, "CRITICAL:
@@ -5128,6 +5142,10 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                     ctype = gen._resolve_type(ptype)
             else:
                 ctype = gen._param_ctype(pname, ptype, node)
+        # A callable-valued parameter is typed `std::function<...>` for C++
+        # coroutine units, but a C-emitted method spells it as the runtime's
+        # boxed word.
+        ctype = gimple_ctypes.c_client_callable_ctype(ctype)
         gen.var_types[bare] = ctype
         # Register in _actual_types so _get_actual_type resolves the real
         # type for for-loop iterables and other dispatch paths. Must happen

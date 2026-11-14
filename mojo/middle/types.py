@@ -1315,45 +1315,6 @@ _SIMD_FLOAT_DTYPE_CTYPE = {
 }
 
 
-def _dtype_token_ctype(tok):
-    """Scalar C type for a dtype TOKEN, or None when it is not a float dtype.
-
-    One resolver for every spelling a dtype can reach these lookups in: a
-    `('DType', 'float32')` TUPLE, the REPR of that tuple as a string
-    (`gen._comptime_vals` stores `comptime dt = DType.float32` as
-    `"('DType', 'float32')"`), a `DType.float32` / `dtype.float32` / leading-dot
-    spelling, or a bare `float32` / `Float32` / `f32` / `f64`.  Reads the one
-    table `_SIMD_FLOAT_DTYPE_CTYPE`, so the annotation resolver
-    (`infra_infer._resolve_type`) and the constructor lowerer
-    (`emit_calls`' `SIMD`/`Scalar` arm) cannot drift apart.
-    """
-    if tok is None:
-        return None
-    if isinstance(tok, (list, tuple)) and len(tok) == 2:
-        if tok[0] in ('.', 'DType', 'dtype'):
-            tok = tok[1]
-        else:
-            return None
-    s = str(tok).strip()
-    if not s:
-        return None
-    if s.startswith('DType.'):
-        s = s[len('DType.'):]
-    elif s.startswith('dtype.'):
-        s = s[len('dtype.'):]
-    if s.startswith('.'):
-        s = s[1:]
-    m = re.match(r"^\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)$", s)
-    if m and m.group(1) in ('.', 'DType', 'dtype'):
-        s = m.group(2)
-    sl = s.lower()
-    if sl == 'f32':
-        sl = 'float32'
-    elif sl == 'f64':
-        sl = 'float64'
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl)
-
-
 def _simd_float_dtype_ctype(inner: str) -> str | None:
     """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
     `<dtype>` when it is a float dtype spelling, else None (integer or
@@ -2750,6 +2711,55 @@ def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
             ptypes.append(_c_type_to_cpp(_as_str(p)))
     ps = ', '.join(ptypes)
     return f'std::function<{_c_type_to_cpp(_as_str(ret))}({ps})>'
+
+
+def c_client_callable_ctype(ct):
+    """Map a C++-only callable value type to the C runtime word type.
+
+    A callable is boxed as an `int64_t` word in the C runtime
+    (`mojo_dyn_call((int64_t)(intptr_t)(callee), ...)`); `std::function<...>`
+    is only expressible in cpp coroutine units, where the callable is
+    actually invoked through C++ syntax. Imported-function signatures and
+    arg temporaries emitted into a C translation unit (the link-mode client,
+    extern prototypes) must therefore spell the slot as `int64_t`. Idempotent
+    and safe for any non-callable ctype."""
+    if isinstance(ct, str) and ct.startswith('std::function<'):
+        return 'int64_t'
+    return ct
+
+
+def c_client_sanitize_signature_text(sig: str) -> str:
+    """Replace `std::function<...>` parameter/return types in a C signature
+    string with the runtime's boxed word type (`int64_t`).
+
+    Used at the C-emission boundary for extern/prototype text that may have
+    been derived from a cpp-typed callable slot. A simple non-nested scan is
+    sufficient for the `std::function<R(P...)>` shapes this compiler emits.
+    """
+    if not isinstance(sig, str) or 'std::function<' not in sig:
+        return sig
+    out = []
+    i = 0
+    needle = 'std::function<'
+    n = len(sig)
+    while i < n:
+        j = sig.find(needle, i)
+        if j < 0:
+            out.append(sig[i:])
+            break
+        out.append(sig[i:j])
+        # consume balanced <...> of std::function (no nested templates in our shapes)
+        k = j + len(needle)
+        depth = 1
+        while k < n and depth > 0:
+            if sig[k] == '<':
+                depth += 1
+            elif sig[k] == '>':
+                depth -= 1
+            k += 1
+        out.append('int64_t')
+        i = k
+    return ''.join(out)
 
 
 _CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')

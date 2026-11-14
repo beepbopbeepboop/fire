@@ -1,6 +1,4 @@
-SPLIT: all three parts landed and their docs were deleted -- part1 the
-type-alias arm, part2 the alias as a constructor callee, part3 (2026-11-14,
-`a0f321f1c`) a `comptime`-bound float DType
+SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part1, CODEGEN_simd_and_array_values_erase_to_int64-part2, CODEGEN_simd_and_array_values_erase_to_int64-part3
 
 # CODEGEN: SIMD values and `Array`/`Span` elements erase to `int64_t`, so their real type is unknown
 
@@ -104,9 +102,9 @@ own mid part under `bugs/mid/`:
 - `CODEGEN_simd_and_array_values_erase_to_int64-part1.md` — a module-local
   `alias` of a type expands in annotations (parameter, return, local, element
   type).
-- part2 (landed; doc deleted) — the same alias expands when it is the
-  callee of a constructor (`F2(1.0)`, `A4(fill=...)`).
-- part3 (landed 2026-11-14 `a0f321f1c`; doc deleted) — a `comptime`-bound
+- `CODEGEN_simd_and_array_values_erase_to_int64-part2.md` — the same alias
+  expands when it is the callee of a constructor (`F2(1.0)`, `A4(fill=...)`).
+- `CODEGEN_simd_and_array_values_erase_to_int64-part3.md` — a `comptime`-bound
   float DType resolves in a signature, an annotated local, and a SIMD
   constructor's dtype argument.
 

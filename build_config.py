@@ -267,13 +267,9 @@ def optional_unit_symbols(unit: str, rt_dir: str = None) -> list:
     edit here to fall out of date.  (That scanner is also what `formal/`
     consumes for the same reason; forking it would give the three a
     different answer to the same question.)"""
-    # A function-body `from X import f`, not `import reflect` + `reflect.f(...)`:
-    # the module-qualified spelling reached the compiled compiler as
-    # "int64_t.collect_runtime_exports_h() stubbed" (the loop below then ran zero
-    # times: `mojo_unsupported_iter ... build_config.py:272`).
-    from reflect import collect_runtime_exports_h
+    import reflect
     out = []
-    for entry in collect_runtime_exports_h(optional_unit_header(unit, rt_dir)):
+    for entry in reflect.collect_runtime_exports_h(optional_unit_header(unit, rt_dir)):
         out.append(entry['name'])
     return out
 

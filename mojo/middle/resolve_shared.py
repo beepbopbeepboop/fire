@@ -430,27 +430,6 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.IdentExpr):
         fname: str
         fname = node.func.name
-        # `getattr(x, 'field', default)` on a receiver of a known struct type
-        # and a field that struct declares: the field's own C type (a CONTAINER
-        # field is a container whatever the default is). Without this the
-        # estimate was the unknown word, so `a or getattr(x, 'dict_field', None)`
-        # fixed the merged type from `a` alone and then refused the cast when
-        # the right operand lowered to a different container kind.
-        if (fname == 'getattr' and len(node.args) in (2, 3)
-                and isinstance(node.args[0], gimple_ctypes.IdentExpr)
-                and isinstance(node.args[1], gimple_ctypes.StringLiteral)
-                and not gen._locally_binds_name('getattr')):
-            _gt = gen.var_types.get(node.args[0].name)
-            # `isinstance(st, FunctionDef)` narrows `st` for the guarded body
-            # (a loop variable's own type is the boxed word).
-            _nrw = gen._narrowed_exprs.get(f'i:{node.args[0].name}')
-            if _nrw is not None:
-                _gt = _as_str(_nrw[0])
-            if isinstance(_gt, str) and _gt.endswith(' *'):
-                _gf = (gen.struct_field_types.get(_gt[:-2].strip()) or {}).get(
-                    node.args[1].value)
-                if isinstance(_gf, str) and _gf in gimple_ctypes._CONTAINER_KIND_TYPES:
-                    return _gf
         # Builtins whose VALUE is a real container. Every one of these
         # materialises a MojoList*/MojoSet*/MojoDict* at runtime, which is
         # what makes a module-level `z = sorted(...)` / `enumerate(...)` /
