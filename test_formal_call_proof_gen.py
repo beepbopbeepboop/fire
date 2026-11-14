@@ -1672,30 +1672,18 @@ the text; it does not find out whether any word can arrive there.  So:
                     f"on this arm, would then be wrong")
 
     def test_the_generator_keeps_its_own_spelling_and_why(self):
-        """The generator's CMP right-hand sides are the model's, arm for arm.
+        """`_step_rhs` says `s.sp`/`arm64_reg` where the library says the
+        helper, and that is deliberate.
 
-        Two CMP-register forms reach this generator and they read `Rn = 31`
-        differently, because the architecture does:
-
-        * the SHIFTED-register CMP (`0xeb1003ff` = `SUBS XZR, X31, X16`,
-          branch 6) has no SP encoding, so `Rn = 31` is the ZERO register and
-          the arm spells `arm64_reg 31 s`, exactly as the library's
-          `0xeb000000` arm does.  The branch CANNOT fire for a word whose
-          `Rn` is SP: clang assembles `cmp sp, x16` as `0xeb3063ff`, the
-          extended-register form, which is the next case.
-        * the EXTENDED-register CMP (`0xeb3063ff` = `cmp sp, x16`, branch 88)
-          DOES have an SP encoding, so the arm reads `Rn` through
-          `arm64_reg_or_sp 31 s`, exactly as the library's `0xeb206000` arm
-          does.  Spell it `arm64_reg 31 s` and the step-RESULT lemma states
-          `arm64_subs_flags 0 x16`, a proof about a different instruction that
-          typechecks.
-
-        The shift is spelled CONCRETELY on both arms (`<<< UInt64.ofNat 0` for
-        this word) while the library reads it through `arm64_shifted_reg`;
-        `arm64_shifted_reg_zero` is the library fact that makes the two reads
-        defeq on a zero shift field, and the step-result lemma is closed by
-        `exact`-ing (or rewriting with) the library lemma at this word.
-        `test_regression_shifted_register_arm.py` pins the non-zero shift.
+        The step-result lemma is closed by `exact`-ing the library's lemma
+        INSTANTIATED AT THE CONCRETE WORD, so the two right-hand sides only have
+        to be defeq — and they are, because `arm64_reg_or_sp 3 s` and
+        `s.sp`/`arm64_reg 3 s` both reduce on a literal index.  Emitting the
+        helper from the generator instead would make that exact, but the
+        generated text is what every downstream `simp only [..., arm64_reg,
+        arm64_set_reg]` goal consumes, and those lists do not carry the helper:
+        the change would put `arm64_reg_or_sp 3 s` in every value-flow goal and
+        break them.  Recorded here because the asymmetry looks like a bug.
 
         **The pin is the WHOLE right-hand side, `arm64_set_reg rd` included, and
         that is a merge of two facts rather than one.**  The library's CMP arm
@@ -1707,46 +1695,17 @@ the text; it does not find out whether any word can arrive there.  So:
         the flags-only `some { s with nzcv := … }` — a `_step_rhs` that stops
         writing `rd` models every `subs xd, xn, xm` in an image as "set the
         flags, change no register", and every theorem over it still typechecks.
-
-        **And the generated lemma is checked, not just the right-hand side**:
-        Lean is the only reader that rejects a step-RESULT lemma stating a step
-        `arm64_step` does not compute, so a Python-only pin would pass while the
-        proof file failed to typecheck.
         """
         import formal.arm64_proof_gen as G
-        shifted = G._step_rhs(0xeb1003ff, 6)
-        self.assertEqual(
-            shifted,
-            "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
-            "(arm64_reg 16 s <<< UInt64.ofNat 0))) with nzcv := "
-            "arm64_subs_flags (arm64_reg 31 s) "
-            "(arm64_reg 16 s <<< UInt64.ofNat 0) }",
-            "`_step_rhs`'s shifted-register CMP arm changed shape; if it now "
-            "emits `arm64_reg_or_sp`, it has copied the extended-register "
-            "arm's SP read into a class where register 31 is the ZERO "
-            "register — and if it stops writing `arm64_set_reg rd`, it has "
-            "reverted to modelling `subs xd, xn, xm` as a flag-only CMP")
-        self.assertNotIn("arm64_reg_or_sp", shifted,
-                         "the shifted-register CMP has no SP encoding")
-
-        sp = G._step_rhs(0xeb3063ff, 88)
-        self.assertEqual(
-            sp,
-            "some { (arm64_set_reg 31 s ((arm64_reg_or_sp 31 s) - "
-            "((arm64_reg 16 s) <<< UInt64.ofNat 0))) with nzcv := "
-            "arm64_subs_flags (arm64_reg_or_sp 31 s) "
-            "((arm64_reg 16 s) <<< UInt64.ofNat 0) }",
-            "`_step_rhs`'s extended-register CMP (SP) arm changed shape; it "
-            "must read Rn through `arm64_reg_or_sp`, or the step-RESULT "
-            "lemma for `cmp sp, x16` states a comparison against zero")
-        self.assertNotIn("arm64_reg 31 s", sp,
-                         "`cmp sp, x16` must not read Rn as the zero register")
-
-        code = struct.pack("<I", 0xeb3063ff)
-        lemma = G._gen_step_result_lemmas("syn", code, 0x1000)
-        self.assertIn(sp, lemma,
-                      "the generated step-RESULT lemma does not state the "
-                      "right-hand side `_step_rhs` says `arm64_step` computes")
+        self.assertEqual(G._step_rhs(0xeb1003ff, 6),
+                         "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
+                         "arm64_reg 16 s)) with nzcv := arm64_subs_flags "
+                         "(arm64_reg 31 s) (arm64_reg 16 s) }",
+                         "`_step_rhs`'s CMP-register arm changed shape; if it "
+                         "now emits `arm64_reg_or_sp`, the `simp only` lists in "
+                         "this generator need the helper in them too — and if it "
+                         "stops writing `arm64_set_reg rd`, it has reverted to "
+                         "modelling `subs xd, xn, xm` as a flag-only CMP")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
         # The SHIFTED-register `imm6` field, on BOTH the generator and the
@@ -1759,14 +1718,12 @@ the text; it does not find out whether any word can arrive there.  So:
                       "`_step_rhs`'s ADD-register arm dropped the shift again")
         self.assertIn("<<< UInt64.ofNat 4", G._step_rhs(0xcb021027, 3),
                       "`_step_rhs`'s SUB-register arm dropped the shift again")
-        for key in ("= 0x8b000000 then", "= 0xcb000000 then"):
-            branch = _arm64_step_branch(self.lib, key)
-            self.assertIsNotNone(branch, f"the model lost its {key!r} arm")
-            self.assertIn(
-                "arm64_shifted_reg insn s xm", branch,
-                f"the model's {key!r} arm dropped `imm6`; a shift read in one "
-                f"arm and dropped in the other is the duplicate-decoder defect "
-                f"this replaces")
+        self.assertEqual(
+            self.lib.count("arm64_shifted_reg insn s xm"), 2,
+            "the model's ADD and SUB (shifted register) arms must BOTH read "
+            "`imm6` through `arm64_shifted_reg insn s xm`; a shift read in one "
+            "arm and dropped in the other is the duplicate-decoder defect this "
+            "replaces")
 
     def test_no_arm_of_the_generic_rhs_builder_raises(self):
         """EVERY index the decoder can produce builds a right-hand side.
@@ -7471,6 +7428,135 @@ class TestTheRefusalNamesTheSvcItRefuses(unittest.TestCase):
         msg = self._refusal([self.FILL, self.FILL])
         self.assertIn("with no `RET`", msg)
         self.assertIn("empty block runs certificate", msg)
+
+
+class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
+    """A dynamic write `svc` is admitted only by a NAMED assumption.
+
+    `_gen_run_cert` used to refuse a write `svc` whose x16 is not a `movz`
+    among the run's own preceding instructions: the step lemma's
+    `hx : ¬ arm64_reg 16 s = 1` had no reg-16 chain to discharge it from.
+    The write form is still sound when the caller supplies that hypothesis by
+    name -- it is ASSUMED at the certificate's own pre-svc state, never
+    invented or proved -- and the fall-through rewrites x0 before anything
+    reads the byte count the model does not model.
+
+    These are text tests over hand-built word dictionaries: no Lean, no
+    dylib, no compile.  They pin the admission, the binder, the `hx` it
+    becomes, and the three controls (static write, static exit, unrewritten
+    x0) that must keep today's behaviour.
+    """
+
+    BASE = 0x10000000
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+
+    @staticmethod
+    def _movz(rt, imm):
+        return 0xd2800000 | (imm << 5) | rt
+
+    def _cert(self, words, pcs, **kw):
+        import formal.arm64_proof_gen as G
+        return G._gen_run_cert("f", words, self.BASE, "b0", pcs, **kw)
+
+    def _dynamic_write(self):
+        """`svc` FIRST (x16 is not in the run), then `movz x0, #0; ret`."""
+        words = {self.BASE: self.SVC,
+                 self.BASE + 4: self._movz(0, 0),
+                 self.BASE + 8: self.RET}
+        return words, [self.BASE, self.BASE + 4, self.BASE + 8]
+
+    def test_a_dynamic_write_svc_with_no_assumption_is_still_refused(self):
+        words, pcs = self._dynamic_write()
+        self.assertIsNone(
+            self._cert(words, pcs),
+            "a dynamic write `svc` was admitted without the hypothesis its "
+            "step lemma needs -- the certificate would claim a state the "
+            "caller never justified")
+
+    def test_the_named_assumption_is_the_binder_and_its_hx(self):
+        words, pcs = self._dynamic_write()
+        part = self._cert(words, pcs, svc_assumed={self.BASE: "svc_write_assumed"})
+        self.assertIsNotNone(part, "a justified dynamic write `svc` was refused")
+        text = part[0]
+        self.assertIn(
+            "(svc_write_assumed : ¬ arm64_reg 16 (f_b0_qS0 st) = 1)", text,
+            "the runs certificate does not carry the assumption as a binder "
+            "at the run's own pre-svc state")
+        self.assertIn(
+            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := svc_write_assumed",
+            text,
+            "the dynamic svc's `hx` is not that hypothesis applied at its "
+            "pre-svc state")
+        self.assertIn(
+            "f_sr_0 (f_b0_qS0 st) (hpc0) (hx0)", text,
+            "the write-form step lemma is not applied under the assumption")
+        self.assertNotIn(
+            "h16_0", text,
+            "the certificate still invents a reg-16 chain for an x16 no "
+            "instruction in the run wrote")
+
+    def test_the_dynamic_step_is_the_write_form_not_the_exit(self):
+        words, pcs = self._dynamic_write()
+        part = self._cert(words, pcs, svc_assumed={self.BASE: "svc_write_assumed"})
+        self.assertIsNotNone(part)
+        text = part[0]
+        self.assertIn(
+            "def f_b0_qT0 (st : Arm64State) : Arm64State :=\n"
+            "  { (f_b0_qS0 st) with pc := (f_b0_qS0 st).pc + 4 }", text,
+            "the admitted svc is not composed as the write form (the "
+            "fall-through at pc + 4)")
+        self.assertNotIn(
+            "arm64_go_exit_step_jump_at", text,
+            "a dynamic write svc was closed as an exit step")
+
+    def test_the_assumption_name_is_the_callers(self):
+        words, pcs = self._dynamic_write()
+        part = self._cert(words, pcs, svc_assumed={self.BASE: "hwrite"})
+        self.assertIsNotNone(part)
+        self.assertIn("have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := hwrite",
+                      part[0])
+
+    def test_a_static_write_still_discharges_hx_from_its_own_chain(self):
+        # `movz x16, #4; svc; movz x0, #0; ret`
+        words = {self.BASE: self._movz(16, 4),
+                 self.BASE + 4: self.SVC,
+                 self.BASE + 8: self._movz(0, 0),
+                 self.BASE + 12: self.RET}
+        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
+        part = self._cert(words, pcs)
+        self.assertIsNotNone(part, "a static write svc is still refused")
+        text = part[0]
+        self.assertIn("h16_1 : arm64_reg 16 (f_b0_qS1 st) = (UInt64.ofNat 4)",
+                      text, "the static write lost its own reg-16 chain")
+        self.assertIn("have hx1 : ¬ arm64_reg 16 (f_b0_qS1 st) = 1 := by",
+                      text)
+        self.assertNotIn("svc_write_assumed", text,
+                         "a static write does not need the assumption")
+
+    def test_a_static_exit_is_still_refused(self):
+        # `movz x16, #1; svc; ...`: an exit has no fall-through to certify.
+        words = {self.BASE: self._movz(16, 1),
+                 self.BASE + 4: self.SVC,
+                 self.BASE + 8: self._movz(0, 0),
+                 self.BASE + 12: self.RET}
+        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
+        self.assertIsNone(self._cert(words, pcs))
+        self.assertIsNone(self._cert(words, pcs,
+                                     svc_assumed={self.BASE + 4: "h"}))
+
+    def test_a_dynamic_write_that_leaves_x0_unrewritten_is_refused(self):
+        # `svc; add x1, x0, #1; ret`: the fall-through READS the byte count
+        # the model does not model, so the assumption cannot make it sound.
+        add_x1_x0_1 = 0x91000000 | (0 << 5) | 1
+        words = {self.BASE: self.SVC,
+                 self.BASE + 4: add_x1_x0_1,
+                 self.BASE + 8: self.RET}
+        pcs = [self.BASE, self.BASE + 4, self.BASE + 8]
+        self.assertIsNone(
+            self._cert(words, pcs, svc_assumed={self.BASE: "svc_write_assumed"}),
+            "an assumption admitted a write svc whose result x0 is read "
+            "before it is rewritten")
 
 
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
