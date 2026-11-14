@@ -2473,9 +2473,12 @@ def _copy(gen, dst: str, src: str) -> None:
     st = gen.var_types.get(src)
     if dt is not None and st is not None:
         dts: str = _as_str(dt)
-        if rt_call.copy_needs_cast(dts, _as_str(st)):
+        sts: str = _as_str(st)
+        if rt_call.copy_needs_cast(dts, sts):
             gen._emit('  ' + dst + ' = (' + dts + ')' + src + ';')
             return
+        if dts == sts:
+            ginf.carry_value_info(gen, dst, src)
     gen._emit('  ' + dst + ' = ' + src + ';')
 
 

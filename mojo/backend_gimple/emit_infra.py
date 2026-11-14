@@ -2260,6 +2260,68 @@ def _emit_cf(gen, kind: str, line: str, val: str, level: int) -> None:
     _emit_cf(gen, kind, line, val, level - 1)
 
 
+def carry_value_info(gen, dst: str, src: str) -> None:
+    """`dst` now holds the same VALUE as `src` (a plain copy, same declared
+    type): everything this backend knows about the value is true of `dst`.
+
+    What it knows lives in tables keyed by the variable's NAME -- what a
+    list's elements are, what a dict's values are, the pointer type an
+    `int64_t` really carries, whether a word is a float box or a dynamic word,
+    which generator API a handle belongs to.  A copy used to carry none of
+    it unless the call site remembered to (two sites carried two of the
+    tables), and a value whose facts are lost is read back with the int
+    accessor: 15% of sampled backend fixes are that bug.
+
+    `gen._copy` calls this, so the facts travel with every copy.
+
+    Rules:
+    - It only FILLS: a fact already recorded for `dst` is left alone, so a
+      caller that knows better (a declared annotation, a narrowing) wins.
+    - OWNERSHIP does not travel (`_fresh_vals`, `_owned_*`).  Those say which
+      NAME is responsible for freeing, and two names for one fresh value is a
+      double free.
+    - A table added to the backend that describes a value belongs in this
+      list; that is the whole cost of adding one."""
+    if src == dst:
+        return
+    if src in gen._elem_types and dst not in gen._elem_types:
+        gen._elem_types[dst] = gen._elem_types[src]
+    if src in gen._nested_elem_types and dst not in gen._nested_elem_types:
+        gen._nested_elem_types[dst] = gen._nested_elem_types[src]
+    if src in gen._dict_val_types and dst not in gen._dict_val_types:
+        gen._dict_val_types[dst] = gen._dict_val_types[src]
+    if src in gen._dict_nested_val_types and dst not in gen._dict_nested_val_types:
+        gen._dict_nested_val_types[dst] = gen._dict_nested_val_types[src]
+    if src in gen._actual_types and dst not in gen._actual_types:
+        gen._actual_types[dst] = gen._actual_types[src]
+    if src in gen._tuple_slot_types and dst not in gen._tuple_slot_types:
+        gen._tuple_slot_types[dst] = gen._tuple_slot_types[src]
+    if src in gen._struct_slot_kinds and dst not in gen._struct_slot_kinds:
+        gen._struct_slot_kinds[dst] = gen._struct_slot_kinds[src]
+    if src in gen._struct_formats and dst not in gen._struct_formats:
+        gen._struct_formats[dst] = gen._struct_formats[src]
+    if src in gen._callable_ret_types and dst not in gen._callable_ret_types:
+        gen._callable_ret_types[dst] = gen._callable_ret_types[src]
+    if src in gen._bound_method_ret_types and dst not in gen._bound_method_ret_types:
+        gen._bound_method_ret_types[dst] = gen._bound_method_ret_types[src]
+    if src in gen._container_callable_ret and dst not in gen._container_callable_ret:
+        gen._container_callable_ret[dst] = gen._container_callable_ret[src]
+    if src in gen._func_value_names and dst not in gen._func_value_names:
+        gen._func_value_names[dst] = gen._func_value_names[src]
+    if src in gen._builtin_method_values and dst not in gen._builtin_method_values:
+        gen._builtin_method_values[dst] = gen._builtin_method_values[src]
+    if src in gen._generator_var_api and dst not in gen._generator_var_api:
+        gen._generator_var_api[dst] = gen._generator_var_api[src]
+    if src in gen._async_var_api and dst not in gen._async_var_api:
+        gen._async_var_api[dst] = gen._async_var_api[src]
+    if src in gen._taskgroup_var_api and dst not in gen._taskgroup_var_api:
+        gen._taskgroup_var_api[dst] = gen._taskgroup_var_api[src]
+    if src in gen._rtobj_kinds and dst not in gen._rtobj_kinds:
+        gen._rtobj_kinds[dst] = gen._rtobj_kinds[src]
+    if src in gen._dict_items_val_elems and dst not in gen._dict_items_val_elems:
+        gen._dict_items_val_elems[dst] = gen._dict_items_val_elems[src]
+
+
 def note_call_result(gen, dst: str, fname: str) -> None:
     """`dst` is about to receive the result of a call to `fname`: record what
     that says about who owns it.

@@ -107,20 +107,13 @@ def discover_roots(base: Path) -> list:
 # FLOOR-GREEN-but-ladder-partial classification (the test_set precedent).
 
 EXPECTED_FAILURES = {
-    # std/simd.mojo — MEASURED 2026-11-14: its `SIMD[exp.dtype, self.length]`
-    # elaboration is refused ("its bracket arguments advance without
-    # converging"), so the module is lowered against the un-elaborated
-    # template. That refusal is a false positive with its own open codegen bug;
-    # the module's C parses, so the gcc syntax check alone would call it green.
-    # `transpile_file` now reads the degradation and reports the file FAILED,
-    # which is the honest verdict; it is listed here because the refusal is a
-    # tracked codegen bug, not a defect in this sweep. THIS ENTRY IS STALE THE
-    # MOMENT THE REFUSAL IS FIXED — the stale-entry check below will say so,
-    # and the fix that removes the refusal deletes this entry with it.
-    'std/simd.mojo':
-        "codegen refused to elaborate SIMD[exp.dtype, self.length] "
-        "('advance without converging'); the module's C is the "
-        "un-elaborated template. Separate open codegen bug.",
+    # std/simd.mojo was listed here on 2026-11-14 while its
+    # `SIMD[exp.dtype, self.length]` elaboration was refused ("advance without
+    # converging") and the degraded module still parsed, so the sweep reported
+    # it FAILED with that reason. The refusal was a false positive and is
+    # fixed (2026-11-14; only simple stepping operands count as a progressing
+    # bracket argument), so the entry went with it: the module is clean and
+    # `transpile_file` sees no degradation.
 
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(

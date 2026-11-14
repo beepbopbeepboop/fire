@@ -9177,6 +9177,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                             and (_self_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
                         _mname = _cand
                         call.func.member = _cand
+                        _walk_ast_invalidate(call.func)
                         break
             sub_name = f"{_self_struct}.{_mname}"
             api = gen._generator_method_api.get((_self_struct, _mname))
