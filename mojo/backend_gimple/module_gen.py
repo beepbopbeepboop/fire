@@ -117,8 +117,11 @@ from mojo.middle.module_shared import *  # noqa: F401,F403
 # `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
 # name would be unavailable at the moment the import ran.
 from mojo.middle.types import _COMPILE_TIME_CALL_MODULES, dispatch_table_global_ctype, _body_builds_struct_tuple
+# _LIST_RETURNING_METHODS / _STR_RETURNING_METHODS are defined in both
+# gimple_codegen and mojo.middle.types (re-exported by module_shared); keep the
+# gimple_codegen bindings from the import above to avoid a module-scope ambiguity.
 from mojo.middle.module_shared import (
-    _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
+    _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
     _collect_import_modules, _collect_import_modules_rec, _cpp_method_receiver_name, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
     _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_container_ctype, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime, _gmi_tuple_target_globals,
