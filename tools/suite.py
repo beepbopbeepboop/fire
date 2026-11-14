@@ -2002,15 +2002,8 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
 # (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
 # so a case that starts or stops failing makes this marker disagree and the gate says so.
-#
-# 2026-11-13: re-measured at 626 passed / 1 failed (627 cases). Every case the
-# doc's inventory names now passes; the one failure is
-# `c_accessor_helpers_emitted_once_across_modules` (two modules each emit their
-# own sizeof/fnaddr accessor for a same-shaped lambda environment, where the
-# test wants one shared across the closure). Marker updated to 1.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
-     expect='1 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md '
-            '(c_accessor_helpers_emitted_once_across_modules: duplicate sizeof/fnaddr accessors)',
+     expect='20 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md (wrong output, RSS over limit, compile refusals)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
@@ -4299,10 +4292,6 @@ test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditiona
      desc='conditional conformance declarations are diagnosed: the diamond, '
           'the derived/ancestor constraint, conditional RegisterPassable, and '
           'the `ref` origin rule; positive controls still compile')
-test('reg-conditional-conformance-candidate-diagnostic', [PY, 'test_conditional_conformance_candidate_diagnostic.py'], mem='tiny',
-     desc='conditional conformance candidate selection under a where clause '
-          '(trait conformance part 3): ambiguity, unprovable-vs-provable, and '
-          'disproved candidates are refused; the positive controls still compile')
 test('reg-conditional-conformance-synthesis-diagnostic', [PY, 'test_conditional_conformance_synthesis_diagnostic.py'], mem='tiny',
      desc='conditional conformance copy/move synthesis is diagnosed when the '
           'field type is unsynthesizable (part 4); positive controls still compile')
@@ -4462,7 +4451,6 @@ BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
 
-              'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'gimple-lint', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',

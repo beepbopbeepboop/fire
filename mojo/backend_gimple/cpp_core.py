@@ -12133,11 +12133,9 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             if _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
                 call.func.member = _self_method_name
                 _walk_ast_invalidate(call.func)
-                _walk_ast_invalidate(call)
     if is_self_gen_call and _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
         call.func.member = _self_method_name  # rewrite to actual generator method name
         _walk_ast_invalidate(call.func)
-        _walk_ast_invalidate(call)
     # A bare `yield from <nested>(...)` to a generator claimed by
     # cpp_async._compile_nested_generator_closures (registered in
     # _nested_generator_api, not _generator_api). Only the plain positional

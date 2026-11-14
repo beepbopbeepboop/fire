@@ -406,7 +406,7 @@ def _frame_enter(gen, node) -> None:
                 break
     _fname = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_fn_shown))}')
     _ffile = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(getattr(gen, "_current_filename", "") or "")))}')
-    _fline = gen._cast('int64_t', f'{int(getattr(node, "line", 0) or 0)}')
+    _fline = gen._new_val('int64_t', f'(int64_t){int(getattr(node, "line", 0) or 0)}')
     gen._void_call('mojo_frame_enter',
                    [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
     if _as_str(node.name).startswith('__mgco_') and _as_str(node.name).endswith('_body'):
@@ -2836,7 +2836,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # imported function became a weak stub. Build ONE
                     # MojoList of all parts (expanding spreads) and join it.
                     _jl = gen._new_temp('MojoList *')
-                    gen._rt_into(_jl, 'mojo_list_new', [])
+                    gen._emit(f'  {_jl} = mojo_list_new();')
                     for _ja in node.args:
                         if isinstance(_ja, UnaryOp) and _ja.op == '*':
                             _jat, _jav = gen.lower_expr(_ja.operand)
@@ -3214,22 +3214,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     t = gen._new_temp('char *')
                     if is_callback:
                         fn_ptr_t, env_t = gen._lower_re_sub_callback(cb_arg)
-                        gen._rt_into(t, 'mojo_regex_sub_fn',
-                                     [f"{prog_local}", f"{ranges_local}",
-                                      f"{classinfo_local}", f'{info["root"]}',
-                                      f'{info["ngroups"]}', f"{fn_ptr_t}",
-                                      f"{env_t}", f"{src_val}"])
+                        gen._emit(f'  {t} = mojo_regex_sub_fn ({prog_local}, {ranges_local}, {classinfo_local}, '
+                                   f'{info["root"]}, {info["ngroups"]}, {fn_ptr_t}, {env_t}, {src_val});')
                     else:
                         repl_type, repl_val = gen.lower_expr(cb_arg)
                         if repl_type not in ('char *', 'void *'):
                             repl_cast = gen._new_temp('char *')
                             gen._cast_into(repl_cast, 'char *', f"{repl_val}")
                             repl_val = repl_cast
-                        gen._rt_into(t, 'mojo_regex_sub_str',
-                                     [f"{prog_local}", f"{ranges_local}",
-                                      f"{classinfo_local}", f'{info["root"]}',
-                                      f'{info["ngroups"]}', f"{repl_val}",
-                                      f"{src_val}"])
+                        gen._emit(f'  {t} = mojo_regex_sub_str ({prog_local}, {ranges_local}, {classinfo_local}, '
+                                   f'{info["root"]}, {info["ngroups"]}, {repl_val}, {src_val});')
                     return 'char *', t
                 pat_type, pat_val = gen.lower_expr(node.args[0])
                 # pattern/src may arrive as int64_t string handles; mojo_re_sub_fn
@@ -6188,7 +6182,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                 gen._dyn_word_vals.add(raw)
             return 'int64_t', raw
     if method == 'update' and args:
-        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"update"'])
+        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "update");')
         other_type, other_val = gen.lower_expr(args[0])
         # `d1.update(d2)` where d2 is itself a builtin-`dict` subclass
         # instance — the real dict lives in its hidden `_data` field, not
@@ -6202,7 +6196,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._rt_void('mojo_dict_update', [ov_cast, other_val_cast])
         return 'int', gen._new_val('int', '0')
     if method == 'pop' and args:
-        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"pop"'])
+        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "pop");')
         # `d.pop(k)` / `d.pop(k, default)`. Two things were lost here and both
         # were silent wrong answers rather than refusals:
         #
@@ -6326,11 +6320,11 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._copy_dict_metadata(t, ov)
         return 'MojoDict *', t
     if method == 'clear':
-        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"clear"'])
+        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "clear");')
         gen._rt_void('mojo_dict_clear', [ov])
         return 'int', gen._new_val('int', '0')
     if method == 'setdefault' and args:
-        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"setdefault"'])
+        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "setdefault");')
         # `d.setdefault(key[, default])` — real Python: insert `default`
         # (None if omitted) under `key` when absent, then return the current
         # value. The previous lowering was just `mojo_dict_get_int`, which
@@ -6368,39 +6362,17 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             return dt, typed
         return 'int64_t', raw
     if method == 'popitem':
-        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"popitem"'])
+        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "popitem");')
         return 'int64_t', gen._new_val('int64_t', '0')
     if method == '__setitem__':
-        _dict = gen._cast('MojoDict *', f"{ov}")
-        _isnull = gen._bool_not('MojoDict *', f"{_dict}")
-        _bb_chk = gen._new_bb()
-        _bb_raise = gen._new_bb()
-        _bb_after = gen._new_bb()
-        gen._cond_goto(_isnull, _bb_after, _bb_chk)
-        gen._emit_label(_bb_chk)
-        _frozen = gen._new_val('int', f"{_dict}->frozen")
-        _is_frozen = gen._new_val('_Bool', f"{_frozen} != 0")
-        gen._cond_goto(_is_frozen, _bb_raise, _bb_after)
-        gen._emit_label(_bb_raise)
-        gen._rt_void('mojo_raise_type_error',
-                     ['"\'frozendict\' object does not support item assignment"'])
-        gen._emit_label(_bb_after)
+        gen._emit(
+            f"  if ({ov} && ((MojoDict*){ov})->frozen) "
+            f"mojo_raise_type_error((char*)\"'frozendict' object does not support item assignment\");")
         return 'int64_t', gen._new_val('int64_t', '0')
     if method == '__delitem__':
-        _dict = gen._cast('MojoDict *', f"{ov}")
-        _isnull = gen._bool_not('MojoDict *', f"{_dict}")
-        _bb_chk = gen._new_bb()
-        _bb_raise = gen._new_bb()
-        _bb_after = gen._new_bb()
-        gen._cond_goto(_isnull, _bb_after, _bb_chk)
-        gen._emit_label(_bb_chk)
-        _frozen = gen._new_val('int', f"{_dict}->frozen")
-        _is_frozen = gen._new_val('_Bool', f"{_frozen} != 0")
-        gen._cond_goto(_is_frozen, _bb_raise, _bb_after)
-        gen._emit_label(_bb_raise)
-        gen._rt_void('mojo_raise_type_error',
-                     ['"\'frozendict\' object does not support item deletion"'])
-        gen._emit_label(_bb_after)
+        gen._emit(
+            f"  if ({ov} && ((MojoDict*){ov})->frozen) "
+            f"mojo_raise_type_error((char*)\"'frozendict' object does not support item deletion\");")
         return 'int64_t', gen._new_val('int64_t', '0')
     if method == '__or__' and args:
         ot2, ov2 = gen.lower_expr(args[0])
@@ -6419,7 +6391,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             gen._dict_val_types[t] = gen._dict_val_types[ov]
         return 'MojoDict *', t
     if method == '__ior__':
-        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"__ior__"'])
+        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "__ior__");')
         return 'MojoDict *', ov
     return 'int64_t', gen._new_val('int64_t', '0')
 
@@ -7763,8 +7735,7 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             _jc = gen._new_val('_Bool', f"{_ji} < {_jlen}")
             gen._cond_goto(_jc, _bb, _ba)
             gen._emit_label(_bb)
-            _raw = gen._cast(
-                _je, gen._rt_call('int64_t', 'mojo_list_get_int', [f"{it}", f"{_ji}"]))
+            _raw = gen._new_val(_je, f"({_je}) mojo_list_get_int ({it}, {_ji})")
             _pl = gen._new_val('int64_t', f"(int64_t) {_raw}->_data")
             gen._emit_call('void', '', 'mojo_list_append_int',
                            [('MojoList *', _conv), ('int64_t', _pl)])

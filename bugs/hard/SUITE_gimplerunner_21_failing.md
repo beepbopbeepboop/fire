@@ -18,16 +18,6 @@ done-checks having been unreliable (see Status).
 - Not done: the 20 below are still failing.
 - The part-1 triage doc's done-check matches the heading text inside its own Acceptance section,
   so it passes without an inventory. No inventory has been recorded anywhere; this section is it.
-- **2026-11-13: 626 passed, 1 failed (627 cases).** Every case in the
-  inventory below now passes except one that the inventory never listed:
-  `c_accessor_helpers_emitted_once_across_modules` — "expected exactly one
-  definition of each sizeof/fnaddr accessor across the closure, got 2 sizeof
-  and 2 fnaddr", the two being
-  `_mojo_sizeof_xhelp_a_pick_lambda_1_env` / `_mojo_sizeof_xhelp_b_pick_lambda_1_env`
-  and the matching `_mojo_fnaddr_*`. Two modules each emit their own accessor
-  for a same-shaped lambda environment; the test wants one shared across the
-  closure. That is the whole of the remaining work; the `expect=` marker in
-  `tools/suite.py` is updated to 1 to match.
 
 ## Inventory
 

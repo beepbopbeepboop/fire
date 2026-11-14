@@ -1347,7 +1347,9 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
                 # mangled struct (the pyobj-list unbox's scale).
                 if not (_cont_t is not None and _cont_t.endswith(' *')):
                     if _cont_t == 'int64_t' and _ainf.get('sname_mangled'):
-                        _cont_v = gen._cast(f"{_ainf['sname_mangled']} *", f"{_cont_v}")
+                        _cont_v = gen._new_val(
+                            f"{_ainf['sname_mangled']} *",
+                            f"({_ainf['sname_mangled']} *){_cont_v}")
                         _cont_t = f"{_ainf['sname_mangled']} *"
                     else:
                         return None
@@ -1368,8 +1370,9 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
                     # (its `Self.<member>` return annotation erases); the
                     # word IS the pointer - the same type-accurate cast
                     # the single-container branch applies
-                    _inner_v = gen._cast(
-                        f"{_ainf['inner_mangled']} *", f"{_inner_v}")
+                    _inner_v = gen._new_val(
+                        f"{_ainf['inner_mangled']} *",
+                        f"({_ainf['inner_mangled']} *){_inner_v}")
             elif _ainf['moved']:
                 if not (_cont_t is not None and _cont_t.endswith(' *')):
                     return None
@@ -1444,7 +1447,9 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
         # seed's determined mangled struct (the pyobj-list unbox's scale).
         if not (cont_t is not None and cont_t.endswith(' *')):
             if cont_t == 'int64_t' and rec.get('sname_mangled'):
-                cont_v = gen._cast(f"{rec['sname_mangled']} *", f"{cont_v}")
+                cont_v = gen._new_val(
+                    f"{rec['sname_mangled']} *",
+                    f"({rec['sname_mangled']} *){cont_v}")
                 cont_t = f"{rec['sname_mangled']} *"
             else:
                 return None
@@ -1468,8 +1473,9 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
             # established convention - every materialized `__iter__` in the
             # iterator protocol answers a word), so the type-accurate cast
             # to the seed's determined inner mangle recovers it.
-            inner_v = gen._cast(
-                f"{rec['inner_mangled']} *", f"{inner_v}")
+            inner_v = gen._new_val(
+                f"{rec['inner_mangled']} *",
+                f"({rec['inner_mangled']} *){inner_v}")
             inner_t = f"{rec['inner_mangled']} *"
         else:
             return None
@@ -6339,9 +6345,7 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
 
 def _lower_builtin_dir(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     for a in node.args: gen.lower_expr(a)
-    _dir_list = gen._rt_call('MojoList *', 'mojo_list_new', [])
-    gen._emit('  /* dir() stubbed */')
-    return 'MojoList *', _dir_list
+    return 'MojoList *', gen._new_val('MojoList *', 'mojo_list_new ()  /* dir() stubbed */')
 
 
 def _callable_return_elem_type(gen, fn_expr) -> str:
@@ -9575,7 +9579,7 @@ def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes
         elif _is_spread:
             _kw_spreads.append(_w)
         elif _t == 'double':
-            gen._rt_void('mojo_list_append_double_kinded', [f"{_a}", f"{_v}", "'i'"])
+            gen._emit(f"  mojo_list_append_double_kinded ({_a}, {_v}, 'i');")
         else:
             _w = _v if _t == 'int64_t' else gen._cast('int64_t', f"{_v}")
             gen._rt_void('mojo_list_append_int', [_a, f"{_w}"])
@@ -12078,9 +12082,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 if _sct == 'MojoBytes *':
                     return _list_slot_bytes(gen, ov, idx64)
                 if _sct == '_Bool':
-                    return '_Bool', gen._cast(
-                        '_Bool',
-                        gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64]))
+                    return '_Bool', gen._new_val(
+                        '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")
                 t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
                 if _sct and _sct.endswith(' *'):
                     gen._actual_types[t] = _sct

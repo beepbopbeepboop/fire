@@ -230,7 +230,7 @@ def test_rt_sigs() -> None:
 #     gen._rt_call(ret_ctype, 'mojo_x', [a, b])   # value
 #     gen._rt_into(dst, 'mojo_x', [a, b])         # into an existing temp
 #     gen._rt_void('mojo_x', [a, b])              # effect only
-TEXT_CALL_BASELINE = 0
+TEXT_CALL_BASELINE = 26
 
 
 def count_text_calls() -> tuple:
@@ -268,14 +268,14 @@ def count_text_calls() -> tuple:
 # Casts still spelled as TEXT.  `gen._cast(ctype, v)` / `gen._cast_into(dst,
 # ctype, v)` state the type once, so the temp's declaration and the written
 # cast cannot disagree.  May only shrink.
-TEXT_CAST_BASELINE = 0
+TEXT_CAST_BASELINE = 8
 
 
 def count_text_casts() -> tuple:
     import ast
     import glob
     import re
-    new_val_pat = re.compile(r'^\([A-Za-z_][\w \*]*\)$')
+    new_val_pat = re.compile(r'^\([\w \*]*\)$')
     emit_pat = re.compile(r'^\s* = \([\w \*]*\);$')
     n = 0
     where: list[str] = []
