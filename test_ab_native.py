@@ -75,6 +75,7 @@ import tempfile
 import shutil
 import textwrap
 import uuid
+from exec_budget import COMPILE_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOJOC = os.path.join(HERE, 'mojoc')
@@ -469,7 +470,7 @@ def run_python_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
     """
     src_path = os.path.abspath(src_path)
     cmd = [sys.executable, os.path.join(HERE, 'fire.py'), flag, src_path]
-    subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, timeout=60)
+    subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     return _collect_artifacts(src_path, out_dir)
 
 
@@ -495,7 +496,7 @@ def run_native_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
     # rebuilding the list (list.remove is broken in the compiled binary).
     cmd = [MOJOC, src_path, flag]
     result = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True,
-                            timeout=120, env=env)
+                            timeout=COMPILE_TIMEOUT_S, env=env)
     if result.returncode != 0:
         print(f"  NATIVE STDERR: {result.stderr[:2000]}", file=sys.stderr)
     # The binary writes the .ci to ITS cwd (HERE); _collect_artifacts moves it.

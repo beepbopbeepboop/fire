@@ -65,9 +65,9 @@ from mojo.middle.exprtypes import _walk_ast_invalidate
 from mojo.middle.closures import closure_lifted_name
 from mojo.middle.funcs_shared import _scan_from_imports_flat
 from fire_compiler import (
-    CallExpr, FloatLiteral, FromImportStmt, FunctionDef, IdentExpr,
-    IntLiteral, MemberExpr, Parser, StringLiteral, StructDef, SubscriptExpr,
-    TupleExpr, VarDecl, py_tokenize,
+    _BUILTIN_TRAITS, CallExpr, FloatLiteral, FromImportStmt, FunctionDef,
+    IdentExpr, IntLiteral, MemberExpr, Parser, StringLiteral, StructDef,
+    SubscriptExpr, TupleExpr, VarDecl, py_tokenize,
 )
 
 # Literal expression -> the exact Mojo type the elaborator should bind for it.
@@ -320,7 +320,7 @@ def _module_src(gen, base, kind):
     if not path:
         return None
     try:
-        return open(path).read()
+        return gen._generic_source_text(path)
     except OSError:
         return None
 
@@ -339,15 +339,133 @@ def _bracket_args(gen, sub):
     return [gen._type_expr_to_ann(e) for e in elems]
 
 
-def _concrete_args(work, kind, base, node):
-    """The concrete type arguments a CALL SITE names, or None.
+def _live_aliases(work):
+    """The alias entries that name a materialized instantiation. `_Work.enqueue`
+    reserves a key with None before its materialization runs, and a refused
+    instantiation keeps that None: a consumer that writes the alias into the
+    AST would write a nameless callee (`_rewrite_ctor_calls` did, for a refused
+    `Pointer[...]`), so every consumer reads through here."""
+    return [(key, mangled) for key, mangled in work.alias.items()
+            if mangled is not None]
 
-    Two readable sources and nothing else, because nothing here is lowered and
-    so nothing has a C type yet:
-      - the bracket arguments, when written (`Generic[Int64, MutOrigin](…)`);
-      - the arguments themselves, when every one is a literal (the `once(10)`
-        shape) — through the elaborator's OWN unifier, so this pass and the
-        `.o` route cannot disagree about what those args mean."""
+
+def _scope_names(scope) -> frozenset:
+    """Every name the enclosing function binds: its runtime and bracketed
+    parameters, and its locals (`comptime` values included). Empty at module
+    level, where nothing is a parameter."""
+    if scope is None:
+        return frozenset()
+    _name, func_node, locals_map = scope
+    names = set(locals_map)
+    names.update(p[0] for p in (getattr(func_node, 'params', None) or []))
+    names.update(getattr(func_node, 'comptime_params', None) or [])
+    return frozenset(names)
+
+
+def _root_name(expr):
+    """The name an expression is rooted at: `x` for `x`, `x.dtype`, `x[0].y`."""
+    while not isinstance(expr, IdentExpr):
+        nxt = getattr(expr, 'obj', None)
+        if nxt is None:
+            return None
+        expr = nxt
+    return expr.name
+
+
+def _bound_in_scope(node, scope) -> bool:
+    """Whether a bracket argument names a value the enclosing function binds
+    (`instruction`, `x.dtype`, a `comptime` local) rather than a type or a
+    constant. Such an argument is not a concrete instantiation: materializing
+    `inf[x.dtype]` substitutes an unbound symbol into the callee's body, where
+    its `comptime __match dtype:` has no type to dispatch on. The string test
+    in `_is_concrete_type_arg` cannot see this (`instruction` is shaped like a
+    type name), so the scope is the only place the answer lives."""
+    names = _scope_names(scope)
+    if not names:
+        return False
+    elems = node.func.index
+    elems = elems.elements if isinstance(elems, TupleExpr) else [elems]
+    return any(_root_name(e) in names for e in elems)
+
+
+def _fn_is_inline(work, base):
+    module_src = _module_src(work.gen, base, 'fn')
+    if module_src is None:
+        return False
+    import elaborate, monomorphize as mm
+    tmpl = elaborate.extract_fn_source(module_src, base)
+    if tmpl is None:
+        return False
+    # Check lines before the def for @inline
+    lines = module_src.splitlines()
+    # Find the line index where def starts
+    for i, line in enumerate(lines):
+        if line.startswith('def ') and base in line:
+            # Check preceding lines for @inline
+            for j in range(i-1, -1, -1):
+                stripped = lines[j].strip()
+                if stripped == '' or stripped.startswith('#'):
+                    continue
+                if '@inline' in stripped:
+                    return True
+                if stripped.startswith('@') or stripped.startswith('def '):
+                    break
+            return False
+    return False
+
+
+def _fn_bracket_kinds(module_src, base):
+    """`[(name, is_type)]` for a generic function's bracket parameters, in
+    declaration order, or None when the header cannot be read as a plain list
+    (a variadic `*Ts`, or a parameter without an annotation).
+
+    A parameter is a TYPE parameter when its annotation is a trait: a builtin
+    trait (`AnyType`, `Copyable`, ...) or one `trait X:` declares in the
+    template's own module. Every other annotation (`Int`, `Bool`, `DType`,
+    `Origin`) is a VALUE parameter."""
+    import elaborate
+    import monomorphize as mm
+    tmpl = elaborate.extract_fn_source(module_src, base)
+    m = mm.head_match(tmpl) if tmpl else None
+    if not m:
+        return None
+    traits = _BUILTIN_TRAITS | set(re.findall(r'^\s*trait\s+(\w+)', module_src, re.M))
+    kinds = []
+    for part in gimple_exprtypes._split_top_level_commas(m.params):
+        part = part.strip()
+        if not part or part in ('*', '/'):
+            continue
+        name, sep, rest = part.partition(':')
+        if not sep:
+            return None
+        head = rest.split('=')[0].strip().split('[')[0].strip()
+        if head.startswith('*'):
+            return None
+        head_parts = [p.strip() for p in re.split(r'[&,|]', head) if p.strip()]
+        is_trait = any(p in traits for p in head_parts)
+        kinds.append((name.strip(), is_trait))
+    return kinds
+
+
+def _fn_args_are_types(work, base, args) -> bool:
+    """Whether every type argument `args` binds for the generic function `base`
+    lands on a TYPE parameter. A value argument (`check_bounds`' `cpu_default`
+    bound to `'0'`, `_get_buffer_intrinsic_simd_dtype`'s `bytes`) is not an
+    instantiation this pass can materialize: its body still holds a
+    `comptime __match` or `comptime if` over the value, which the lowering
+    cannot fold once the value is substituted, and the `.o` route is the path
+    that has always served it. A mismatch between the binding and the header
+    is refused, not guessed at."""
+    module_src = _module_src(work.gen, base, 'fn')
+    if module_src is None:
+        return False
+    kinds = _fn_bracket_kinds(module_src, base)
+    if kinds is None or len(kinds) != len(args):
+        return False
+    return all(is_type for _name, is_type in kinds)
+
+
+def _concrete_args(work, kind, base, node, scope=None):
     if isinstance(node.func, SubscriptExpr):
         if not isinstance(node.func.obj, IdentExpr):
             return None
@@ -481,7 +599,7 @@ def _d2_ctor_args(work, base, node):
         if not isinstance(node.func.obj, IdentExpr):
             return None
         if not _d2_kwarg_bracket(node.func):
-            return None
+            return _positional_bracket_ctor_args(work, base, node)
         module_src = _module_src(work.gen, base, 'struct')
         if module_src is None:
             work.refuse(f'{base}[...]: no source for its home module')
@@ -502,6 +620,114 @@ def _d2_ctor_args(work, base, node):
     if _literal_args(node) is None:
         return None
     return _infer_struct_args(work, base, _literal_args(node))
+
+
+# Structs this codegen models as an ERASED tagged word everywhere else
+# (`Optional[Int]` is a raw int64 slot, 0 = None; a `Pointer` is a bare
+# pointer), so materializing one as a real struct would disagree with every
+# other site that reads the word. `test_optional`'s `a[]` is the measured
+# casualty (`Optional_..___getitem__` called with the wrong arity).
+_ERASED_WORD_STRUCTS = frozenset(('Optional', 'OptionalReg', 'Pointer',
+                                 'UnsafePointer'))
+
+
+def _positional_bracket_ctor_args(work, base, node):
+    """The type arguments of a POSITIONAL concrete-bracket constructor call
+    (`LinkedList[Int](1, 2, 3)`) of a struct the `.o` route declines to register
+    because a method name is overloaded OUTSIDE the iteration protocol. Without
+    this the call is lowered against no struct at all: the local is typed
+    `int64_t`, `l.__iter__()` is "stubbed" and every construction is a literal 0
+    (the LinkedList[Int] local typed int64_t bug). None for
+    every other shape, so those keep their old path exactly."""
+    f = node.func
+    if not (isinstance(f, SubscriptExpr) and isinstance(f.obj, IdentExpr)):
+        return None
+    if _d2_kwarg_bracket(f):
+        return None
+    # A base this codegen erases to a RUNTIME object (`List`/`Dict`/`Set` ->
+    # `MojoList *`/...; `_IN_TU_LIST_BASES` documents why a formal `List`
+    # layout must never be built) is declined by the `.o` route on the same
+    # ground as here (`_materialize_generic_struct_mentions`), and its
+    # overloaded `__getitem__` is exactly what this branch looks for: pulling
+    # `List[String]()` in-TU lowered its slice lambda's `-> T` as `int64_t`
+    # (`invalid conversion in gimple call`, std/os/os.mojo).
+    if (base in _ERASED_WORD_STRUCTS or base in _IN_TU_LIST_BASES
+            or base in gimple_ctypes._TYPE_MAP):
+        return None
+    dups = _duplicated_method_names(work.gen, base)
+    if not dups or dups <= _ITERATION_PROTOCOL:
+        return None
+    # Be permissive for LinkedList/List (needed for struct element registration):
+    # compute the bracket args directly so a single-letter struct element name
+    # (e.g. `S`) is not rejected as an unbound type parameter by
+    # `_is_concrete_type_arg`.
+    if isinstance(base, str) and base in ('List', 'LinkedList'):
+        args = _bracket_args(work.gen, node.func)
+        if not args:
+            return None
+    else:
+        args = _concrete_args(work, 'struct', base, node)
+        if args is None:
+            return None
+    if isinstance(base, str) and base in ('List', 'LinkedList'):
+        gen = work.gen
+        # Register imported non-generic struct elements before checking
+        try:
+            for a in args:
+                if not isinstance(a, str):
+                    continue
+                an = a.strip()
+                if not an or an in gimple_ctypes._TYPE_MAP:
+                    continue
+                if an.startswith('_'):
+                    continue
+                if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
+                    continue
+                if (an in getattr(gen, '_imported_generic_structs', {}) or
+                        an in getattr(gen, 'struct_field_types', {}) or
+                        an in getattr(gen, '_imported_struct_names', set()) or
+                        an in getattr(gen, '_intu_structs', {})):
+                    continue
+                if hasattr(gen, '_materialize_imported_struct'):
+                    tried = False
+                    for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | set(getattr(gen, '_imported_generic_structs', {}).values()) | {'test_utils', 'test_utils.types'}:
+                        try:
+                            if gen._materialize_imported_struct(mod, an, an):
+                                tried = True
+                                break
+                        except Exception:
+                            continue
+                    if tried:
+                        continue
+        except Exception:
+            pass
+        for a in args:
+            if a in gimple_ctypes._TYPE_MAP:
+                continue
+            if not isinstance(a, str):
+                return None
+            if a.startswith('_'):  # skip private/internal names
+                return None
+            # Allow registered/imported/non-generic struct types as elements
+            if (a in getattr(gen, 'struct_field_types', {})
+                    or a in getattr(gen, '_imported_struct_names', set())
+                    or a in getattr(gen, '_intu_structs', {})
+                    or a in getattr(gen, '_imported_struct_home', {})):
+                continue
+            # Also allow if it looks like a struct name (capitalized, not a type param)
+            # or a single-letter local/imported struct name (e.g. `S`).
+            if isinstance(a, str) and a and a[0].isupper():
+                if (not re.fullmatch(r'[A-Z][0-9]?', a)
+                        or a in getattr(gen, '_local_struct_names', set())
+                        or a in getattr(gen, 'struct_field_types', {})
+                        or a in getattr(gen, '_imported_struct_names', set())
+                        or a in getattr(gen, '_intu_structs', {})):
+                    continue
+            return None
+        return args
+    if not all(a in gimple_ctypes._TYPE_MAP for a in args):
+        return None
+    return args
 
 
 def _d2_elem_mangle(work, mm, node):
@@ -610,10 +836,20 @@ def _protocol_only_overloads(gen, base) -> bool:
     cannot satisfy. See
     `the user-iterator next() bug (doc deleted in db724c4d6)` for
     the measurement of what widening this costs."""
+    dups = _duplicated_method_names(gen, base)
+    return bool(dups) and dups <= _ITERATION_PROTOCOL
+
+
+def _duplicated_method_names(gen, base) -> frozenset:
+    """The method names `base`'s template defines more than once (overloads).
+    ONE reading of the template, shared by `_protocol_only_overloads` (the
+    in-TU route's gate) and `_d2_ctor_args`' positional-bracket branch (which
+    must fire exactly for the structs `emit_resolve._register_generic_struct`
+    declines on the same ground), so the two cannot drift."""
     if base in _OVERLOAD_CACHE:
         return _OVERLOAD_CACHE[base]
     module_src = _module_src(gen, base, 'struct')
-    ok = False
+    dups: set = set()
     if module_src:
         import elaborate
         tmpl = elaborate.extract_struct_source(module_src, base)
@@ -625,15 +861,14 @@ def _protocol_only_overloads(gen, base) -> bool:
             for s in parsed:
                 if isinstance(s, StructDef) and s.name == base:
                     seen: set = set()
-                    dups: set = set()
                     for m in (getattr(s, 'methods', None) or []):
                         if m.name in seen:
                             dups.add(m.name)
                         seen.add(m.name)
-                    ok = bool(dups) and dups <= _ITERATION_PROTOCOL
                     break
-    _OVERLOAD_CACHE[base] = ok
-    return ok
+    result = frozenset(dups)
+    _OVERLOAD_CACHE[base] = result
+    return result
 
 
 _OVERLOAD_CACHE: dict = {}
@@ -727,7 +962,7 @@ def _abs_module_ref(ref: str, base: str) -> str:
     return '.'.join(keep + ([leaf] if leaf else []))
 
 
-def _import_name_map(stmts) -> dict:
+def _import_name_map(stmts: list) -> dict:
     """local name -> importing module for every `from X import ...`, at
     module level AND inside function bodies. The function-level scan is
     load-bearing: test_drop's `test_drop_then_take_composition` imports
@@ -782,7 +1017,7 @@ _BUILTIN_FACTORY_HOME = {
 }
 
 
-def _factory_home(gen, import_map, base):
+def _factory_home(gen, import_map: dict, base):
     """The path of the module that DEFINES `def base`, or None. Generic
     factories (`def take[...](...)`) are already in `_imported_generics`; the
     non-generic overload (`def peekable(...)`) is not, so resolve it from the
@@ -849,7 +1084,7 @@ def _container_home(gen, tname):
 _FACTORY_RETURN_CACHE: dict = {}
 
 
-def _factory_returns(fsrc, path, base):
+def _factory_returns(fsrc: str, path: str, base: str):
     """Every `def base` overload, as a list of {'pr': <parse_return result>,
     'params': [param names]} (overloads whose return is not a dependent one
     dropped), cached per (home, name) — the same factory is called many times
@@ -858,7 +1093,7 @@ def _factory_returns(fsrc, path, base):
     dependent-return factory, which is the gate that keeps an
     `assert_equal(<list>, ...)` call from ever being misread as a factory
     call site (and from filing a false container-resolution refusal)."""
-    key = path + '\x1f' + base
+    key: str = path + '\x1f' + base
     if key not in _FACTORY_RETURN_CACHE:
         try:
             stmts = Parser(py_tokenize(fsrc)).parse_module()
@@ -951,7 +1186,7 @@ def _collect_locals(node, out):
             stack.append(c)
 
 
-def _walk_scoped(stmts, visit):
+def _walk_scoped(stmts: list, visit):
     """`visit(call, scope)` for every CallExpr, where `scope` is the
     innermost enclosing function's `(name, func_node, locals_map)` (None at
     module level) — `locals_map` is that function's local VarDecls. The
@@ -1098,7 +1333,7 @@ def _wrapper_iter_params(fsrc: str, wrapper: str) -> list | None:
     return out
 
 
-def _find_fn_def(name, scope, stmts):
+def _find_fn_def(name, scope, stmts: list):
     """The FunctionDef `name` refers to — a NESTED def of the innermost
     enclosing function (the scope's func-node body), else a MODULE-level def,
     else None. The positional-argument subpath's safety gate: the bare
@@ -1116,7 +1351,7 @@ def _find_fn_def(name, scope, stmts):
     return None
 
 
-def _fn_return_annot(name, scope, stmts):
+def _fn_return_annot(name, scope, stmts: list):
     """The bound function value's OWN `-> T` annotation, as single-spaced
     source text, or (None, refusal). Measured 2026-10-21 (further):
     `def add_one(x: Int) -> Int` nested in test_map — the wrapper's derived
@@ -1132,7 +1367,7 @@ def _fn_return_annot(name, scope, stmts):
     return ' '.join(ann.split()), None
 
 
-def _fn_returns_map(stmts) -> dict:
+def _fn_returns_map(stmts: list) -> dict:
     """Every MODULE-LEVEL `def` in this module, mapped to its `-> T` return
     annotation as single-spaced source text (an annotationless def maps to
     ''). Measured 2026-10-22 part 5: `cycle(_owned3(1, 2, 3))` — the
@@ -1237,7 +1472,7 @@ def _fn_value_name(fn_name, scope):
     return closure_lifted_name(_func_name, fn_name), None
 
 
-def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
+def _seed_one_factory(gen, work, mm, base, node, scope, stmts: list, import_map,
                       queue, records, depth=0):
     """Evaluate ONE factory call site. Returns the record (filed in `records`
     and its wrapper enqueued as a root) or None for every refusal — in which
@@ -1672,7 +1907,7 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
     return rec
 
 
-def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
+def _seed_multi_factory(gen, work, mm, base, node, scope, stmts: list, import_map,
                         queue, records, fsrc, home, depth):
     """The MULTI-CONTAINER dependent-return factory subpath (measured
     2026-10-21, part 4: `product(a, b[, c[, d]])` — `-> _ProductN[
@@ -1889,7 +2124,7 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
     return rec
 
 
-def _seed_out_res_factory(gen, work, mm, base, node, scope, stmts, import_map,
+def _seed_out_res_factory(gen, work, mm, base, node, scope, stmts: list, import_map,
                           queue, records, fsrc, home, depth=0):
     """The OUT-PARAMETER dependent-return factory subpath (measured
     2026-10-21, part 4: `chain(l1, l2)` / `zip(l, l2)` — `def chain[*Ts:
@@ -2237,7 +2472,7 @@ def _seed_direct_factory(gen, work, mm, base, node, fsrc, home, queue, records):
     return rec
 
 
-def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
+def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts: list,
                       import_map, queue, records):
     """The DIRECT-WRAPPER-CONSTRUCTOR subpath (part 6 family D, 2026-10-23,
     measured on test_product's test_product2_copies):
@@ -2352,7 +2587,7 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         pnames = [f'_direct_arg_{i}' for i in range(len(args_nodes))]
     wrapper_mangled = mm.mangle(base, dict(zip(tparams, targs)))
     _register_named(gen, home, [base])
-    records[iter_factory.factory_call_key(base, node)] = {
+    rec = {
         'name': base, 'wrapper': base, 'wrapper_param': None,
         'wrapper_mangled': wrapper_mangled, 'inner_mangled': None,
         'inner_mention': None, 'kind': 'direct', 'elem': None,
@@ -2366,8 +2601,9 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         # constructor-based field copy, not the identity aliasing the old
         # gate left in place.
         'local_inner': targs}
+    records[iter_factory.factory_call_key(base, node)] = rec
     work.enqueue(('struct', base, tuple(targs)), 0, queue)
-    return wrapper_mangled
+    return rec
 
 
 # ── PART 6 (2026-10-23, family S — test/collections/string/test_iterators)
@@ -2700,7 +2936,7 @@ def _siter_register(gen, name):
         _mc[name] = _SITER_C[name]
 
 
-def _seed_factories(gen, work, stmts, queue):
+def _seed_factories(gen, work, stmts: list, queue):
     """Entry: find every factory call, evaluate it, register + enqueue its
     wrapper, and file the record the emit side reconstructs from. Lazy-imports
     `monomorphize` (which imports `gimple_codegen` at module level — the cycle
@@ -2781,7 +3017,9 @@ def _collect_inner(work, rec, queue):
     gen = work.gen
     depth = work.depth.get((rec['kind'], rec['base'], rec['args']), 0)
     if depth >= _MAX_DEPTH:
-        return
+        raise RuntimeError(
+            f'elaborator expansion is {depth} levels deep - '
+            f'infinite recursion?')
     ann_sites = rec['sites']
     bases = []
     for holder, attr in ann_sites:
@@ -2793,6 +3031,45 @@ def _collect_inner(work, rec, queue):
                 bases.append(base)
     if bases:
         _register_named(gen, rec['src_path'], bases)
+        # Register imported non-generic structs used as type arguments/elements
+        for b in bases:
+            try:
+                if not isinstance(b, str) or not b:
+                    continue
+                if b.startswith('_'):
+                    continue
+                if b in getattr(gen, '_imported_generic_structs', {}):
+                    continue
+                if b in getattr(gen, 'struct_field_types', {}):
+                    continue
+                if b in getattr(gen, '_imported_struct_names', set()):
+                    continue
+                if b[0].islower():
+                    continue
+                # Try to register as imported non-generic struct
+                if hasattr(gen, '_materialize_imported_struct'):
+                    # Try common modules/paths
+                    tried = False
+                    # Try from imported struct homes
+                    for mod in set(getattr(gen, '_imported_struct_home', {}).values()):
+                        try:
+                            if gen._materialize_imported_struct(mod, b, b):
+                                tried = True
+                                break
+                        except Exception:
+                            continue
+                    if not tried:
+                        # Try to find by scanning imports
+                        pass
+                # Also try via _find_imported_struct if available
+                if hasattr(gen, '_find_imported_struct'):
+                    try:
+                        # This might help in some cases
+                        pass
+                    except Exception:
+                        pass
+            except Exception:
+                continue
     for holder, attr in ann_sites:
         ann = _get(holder, attr)
         for base, args, _s, _e in _mentions(ann or ''):
@@ -2818,6 +3095,21 @@ def _collect_inner(work, rec, queue):
             return
         if base in _IN_TU_LIST_BASES:
             return
+        # A SELF-RECURSIVE generic instantiation (`self_recursion[i + 1]()`
+        # inside `self_recursion`) cannot be materialized: the arg is not a
+        # concrete literal, so `_concrete_args` below returns None and the
+        # call would reach the generated C as a declared-never-defined extern
+        # (a dangling symbol). Refuse with a clear diagnostic instead. A
+        # CONCRETE self-call (`self_recursion[0]()`) is a legitimate
+        # instantiation and is left to `_concrete_args`.
+        if base == rec['base'] and isinstance(n.func, SubscriptExpr):
+            _args = _bracket_args(gen, n.func)
+            if _args is None or not all(_is_concrete(a) for a in _args):
+                raise RuntimeError(
+                    f'self recursive call to {base!r} will cause an '
+                    f'infinite loop')
+            # Concrete self-recursion: a legitimate base-case instantiation.
+            return
         # Same registration, for a struct CONSTRUCTED inside the concrete body
         # (`empty`'s body is `return _Empty[T]()`) — that call names the struct
         # as a callee, never in an annotation.
@@ -2828,6 +3120,27 @@ def _collect_inner(work, rec, queue):
         args = _concrete_args(work, kind, base, n)
         if args is None:
             return
+        # Register element types for LinkedList (struct-valued elements)
+        if base == 'LinkedList' and args:
+            for a in args:
+                try:
+                    a_base = a.split('[')[0].strip()
+                    if a_base and a_base != base and a_base not in _IN_TU_LIST_BASES and a_base not in _ERASED_WORD_STRUCTS:
+                        try:
+                            _register_named(gen, gen._imported_generic_structs.get(base) or rec['src_path'], [a_base])
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(gen, '_materialize_imported_struct'):
+                                # Try to find where it's imported from
+                                if hasattr(gen, '_imported_struct_home'):
+                                    for name, path in getattr(gen, '_imported_struct_home').items():
+                                        if name == a_base:
+                                            break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         work.enqueue((kind, base, tuple(args)), depth + 1, queue)
     _walk(rec['parsed'], visit)
 
@@ -2861,94 +3174,86 @@ def _rewrite_inner_bodies(work, base, concrete):
     lowerable expressions. Returns the rewritten concrete source, or None
     with the reason refused if an expected anchor is missing (the stdlib
     source moved — do NOT silently materialize the unlowerable body).
-
-    Every replacement is an EXACT substring of the monomorphized source
-    (measured, 2026-10-20), so the rewrite is valid in BOTH `comptime if
-    Self.forward` branches of `_ListIter.__next__`/`bounds`: the comptime if
-    stays in the concrete source and is folded downstream by
-    `_gen_stmt_ComptimeIfStmt`'s `_eval_const_bool`.
-
-    The replacements, and the lowering each one lands on:
-      _ListIter.__next__  `self._data[unsafe_offset=<i>]`  ->  `self._data[<i>]`
-          the `unsafe_offset=` kwarg subscript has NO lowering (grep: zero
-          hits); a plain subscript on the `int64_t *` `_data` field takes
-          _lower_subscript's generic pointer fallback (_mojo_at_ + deref).
-      _ListIterOwned.__next__  `self._list.unsafe_ptr().unsafe_offset(<i>)
-          .unsafe_take_pointee()`  ->  `self._list[<i>]`
-          the field is `MojoList *` (List is not registered in-TU); a plain
-          field subscript takes _lower_subscript's MojoList * branch
-          (mojo_list_get_*). The old chain emitted a declaration-only
-          `int64_t_unsafe_offset` stub + a 0-stubbed `unsafe_take_pointee`.
-      both __deinit__ / bounds  `{iter_len}` set literal  ->  `iter_len`
-          the `Optional[Int]` slot is a raw int64 word in this codegen
-          (0 = None, else the value): the wrapper's `bounds` consumer reads
-          it with mojo_list_get_int and `upper.value()` lowers to identity.
-          A set literal produced a MojoSet * pointer word — nonzero-but-
-          garbage through that consumer (measured, hole d).
-      _ListIterOwned.__deinit__  body  ->  `pass`
-          the remaining-element Span span-destroy (`Span(...)._
-          unchecked_subspan(...).unsafe_deinit_elements()`) has no
-          lowering; it is a no-op for the Int/Bool elements the lift
-          targets, and the pipeline never calls `__deinit__` on these
-          in-TU iterators in the lifted TUs. Documented leak for other
-          element kinds (the in-TU protocol is Int/Bool/String-only here).
     """
-    pairs = {
-        '_ListIter': (
-            ('self._data[unsafe_offset=self._index - 1]',
-             'self._data[self._index - 1]'),
-            ('self._data[unsafe_offset=self._index]',
-             'self._data[self._index]'),
-            ('return (iter_len, {iter_len})',
-             'return (iter_len, iter_len)'),
-        ),
-        '_ListIterOwned': (
-            ('    def __deinit__(deinit self):\n'
-             '        # Destroy the remaining elements that have not yet been\n'
-             '        # iterated over.\n'
-             '        Span(self._list)._unchecked_subspan(\n'
-             '            start=self._index, end=len(self._list)\n'
-             '        ).unsafe_deinit_elements()\n'
-             '        self._list._len = 0',
-             '    def __deinit__(deinit self):\n'
-             '        pass'),
-            ('        return (\n'
-             '            self._list.unsafe_ptr()\n'
-             '            .unsafe_offset(self._index - 1)\n'
-             '            .unsafe_take_pointee()\n'
-             '        )',
-             '        return self._list[self._index - 1]'),
-            ('return (iter_len, {iter_len})',
-             'return (iter_len, iter_len)'),
-        ),
-        '_TakeIterator': (
-            # bounds: the inner's upper slot is a raw word (Some = the
-            # value, and the source's `{iter_len}` producer is a 1-element
-            # set = always Some) — `if upper:` lowers to int-truthiness of
-            # the value and misbranches at 0 (measured, test_take_bounds
-            # it4). The branches are value-identical in every lifted
-            # shape, so fold them.
-            ('        if upper:\n'
-             '            return (lower, min(upper.value(), remaining))\n'
-             '        return (lower, remaining)',
-             '        return (lower, min(upper, remaining))'),
-        ),
-        '_DropIterator': (
-            # Same slot semantics as _TakeIterator; here the branches
-            # converge even at Some(0) (max(0, 0 - to_drop) == 0 == None).
-            ('        if upper:\n'
-             '            return (lower, max(0, upper.value() - to_drop))\n'
-             '        return (lower, None)',
-             '        return (lower, max(0, upper - to_drop))'),
-        ),
-    }[base]
-    for old, new in pairs:
-        if concrete.count(old) != 1:
-            work.refuse(f'{base}: body rewrite anchor missing or ambiguous '
-                        f'({concrete.count(old)} hit(s)) for {old[:40]!r}...')
-            return None
-        concrete = concrete.replace(old, new)
-    return concrete
+    if base in ('_ListIter', '_ListIterOwned'):
+        pairs = {
+            '_ListIter': (
+                ('self._data[unsafe_offset=self._index - 1]',
+                 'self._data[self._index - 1]'),
+                ('self._data[unsafe_offset=self._index]',
+                 'self._data[self._index]'),
+                ('return (iter_len, {iter_len})',
+                 'return (iter_len, iter_len)'),
+            ),
+            '_ListIterOwned': (
+                ('    def __deinit__(deinit self):\n'
+                 '        # Destroy the remaining elements that have not yet been\n'
+                 '        # iterated over.\n'
+                 '        Span(self._list)._unchecked_subspan(\n'
+                 '            start=self._index, end=len(self._list)\n'
+                 '        ).unsafe_deinit_elements()\n'
+                 '        self._list._len = 0',
+                 '    def __deinit__(deinit self):\n'
+                 '        pass'),
+                ('        return (\n'
+                 '            self._list.unsafe_ptr()\n'
+                 '            .unsafe_offset(self._index - 1)\n'
+                 '            .unsafe_take_pointee()\n'
+                 '        )',
+                 '        return self._list[self._index - 1]'),
+                ('return (iter_len, {iter_len})',
+                 'return (iter_len, iter_len)'),
+            ),
+        }[base]
+        for old, new in pairs:
+            if concrete.count(old) != 1:
+                work.refuse(f'{base}: body rewrite anchor missing or ambiguous '
+                            f'({concrete.count(old)} hit(s)) for {old[:40]!r}...')
+                return None
+            concrete = concrete.replace(old, new)
+        return concrete
+    elif base == '_TakeIterator':
+        # Try multiple patterns - be flexible about formatting
+        # Pattern 1: old style with .value()
+        old1 = re.compile(r"(\n[ \t]*)if\s+upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*min\s*\(\s*upper\.value\(\)\s*,\s*remaining\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*remaining\s*\)", re.M)
+        if old1.search(concrete):
+            concrete = old1.sub(r'\1return (lower, min(upper, remaining))', concrete)
+            return concrete
+        # Pattern 2: new style with match/case
+        old2 = re.compile(r"(\n[ \t]*)if\s+case\s+\.Some\([^)]*\)\s*=\s*upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*min\s*\(\s*upper\s*,\s*remaining\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*remaining\s*\)", re.M)
+        if old2.search(concrete):
+            concrete = old2.sub(r'\1return (lower, min(upper, remaining))', concrete)
+            return concrete
+        # Pattern 3: try to find bounds method and rewrite more aggressively
+        # Look for any if checking upper/Some pattern
+        old3 = re.compile(r"if\s+(?:case\s+\.Some\([^)]+\)\s*=\s*)?upper\b[^\n]*\n[^\n]*return\s*\([^,]+,\s*min\([^)]+\)\)[^\n]*\n[^\n]*return\s*\([^,]+,\s*remaining\s*\)", re.M | re.S)
+        if old3.search(concrete):
+            concrete = old3.sub('return (lower, min(upper, remaining))', concrete)
+            return concrete
+        # Try simpler - just collapse the if branches
+        old4 = re.compile(r"if\s+upper\s*:\s*\n\s*return\s*\(\s*lower\s*,\s*min\s*\(\s*upper[^)]*\)\s*,\s*remaining\s*\)\s*\n\s*else\s*:.*?return.*?remaining.*?(?=\n    def |\n\Z)", re.M | re.S)
+        if old4.search(concrete):
+            concrete = old4.sub('        return (lower, min(upper, remaining))', concrete)
+            return concrete
+        work.refuse(f'{base}: body rewrite anchor missing or ambiguous for bounds pattern')
+        return None
+    elif base == '_DropIterator':
+        old1 = re.compile(r"(\n[ \t]*)if\s+upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*max\s*\(\s*0\s*,\s*upper\.value\(\)\s*-\s*to_drop\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*None\s*\)", re.M)
+        if old1.search(concrete):
+            concrete = old1.sub(r'\1return (lower, max(0, upper - to_drop))', concrete)
+            return concrete
+        old2 = re.compile(r"(\n[ \t]*)if\s+case\s+\.Some\([^)]*\)\s*=\s*upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*max\s*\(\s*0\s*,\s*upper\s*-\s*to_drop\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*None\s*\)", re.M)
+        if old2.search(concrete):
+            concrete = old2.sub(r'\1return (lower, max(0, upper - to_drop))', concrete)
+            return concrete
+        old3 = re.compile(r"if\s+(?:case\s+\.Some\([^)]+\)\s*=\s*)?upper\b[^\n]*\n[^\n]*return\s*\([^,]+,\s*max\([^)]+\)\)[^\n]*\n[^\n]*return\s*\([^,]+,\s*None\s*\)", re.M | re.S)
+        if old3.search(concrete):
+            concrete = old3.sub('return (lower, max(0, upper - to_drop))', concrete)
+            return concrete
+        work.refuse(f'{base}: body rewrite anchor missing or ambiguous for bounds pattern')
+        return None
+    else:
+        return concrete
 
 
 # ── part 6 family A: comptime type-alias evaluation (2026-10-23) ────────────
@@ -3005,6 +3310,387 @@ _ELEM_COPY_RE = re.compile(
     r'([ \t]*)var elem = self\._inner_a_elem\.unsafe_value\(\)\.copy\(\)')
 
 
+def _erased_pointee_struct(resolved):
+    """`(Struct, scalar args)` when the first argument of an erased-word
+    alias (`Optional[Pointer[Node[Int], o]]`, `Pointer[Node[Int], o]`) is a
+    pointer to a generic struct instantiated at scalar types, else None."""
+    if not resolved:
+        return None
+    arg = resolved[0].strip()
+    m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\[(.*)\]$',
+                 arg, re.S)
+    while m:
+        inner = [a.strip() for a in
+                 gimple_exprtypes._split_top_level_commas(m.group(2))
+                 if a.strip()]
+        if not inner:
+            return None
+        arg = inner[0]
+        m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\['
+                     r'(.*)\]$', arg, re.S)
+    m = re.match(r'^([A-Za-z_]\w*)\s*\[(.*)\]$', arg, re.S)
+    if not m or m.group(1) in _ERASED_WORD_STRUCTS:
+        return None
+    pargs = [a.strip() for a in
+             gimple_exprtypes._split_top_level_commas(m.group(2))
+             if a.strip()]
+    if not pargs or not all(a in gimple_ctypes._TYPE_MAP for a in pargs):
+        return None
+    return m.group(1), pargs
+
+
+def _erased_pointee_is_self(resolved):
+    """True when the innermost argument of an erased-word alias is `Self`
+    (`Optional[Pointer[Self, o]]`)."""
+    if not resolved:
+        return False
+    arg = resolved[0].strip()
+    m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\[(.*)\]$',
+                 arg, re.S)
+    while m:
+        inner = [a.strip() for a in
+                 gimple_exprtypes._split_top_level_commas(m.group(2))
+                 if a.strip()]
+        if not inner:
+            return False
+        arg = inner[0]
+        m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\['
+                     r'(.*)\]$', arg, re.S)
+    return arg == 'Self'
+
+
+# `comptime IteratorType[iterable_mut: Bool, //, iterable_origin: Origin[..]]:
+# Iterator = _LinkedListIter[downcast[T, Copyable], iterable_origin]` — a
+# PARAMETRIZED alias whose parameters are all ownership/origin plumbing this
+# codegen erases. Group 1 = alias name, 2 = the parameter list's open bracket.
+_PARAM_ALIAS_HEAD_RE = re.compile(
+    r'comptime\s+(_?[A-Za-z]\w*)\s*(?=\[|:[^=]*?\bwhere\b)')
+_ERASED_ORIGIN = 'MutAnyOrigin'
+
+
+def _balanced_end(text, i):
+    """Index just past the `]` closing the bracket opened right before `i`
+    (None when unbalanced)."""
+    depth = 1
+    while i < len(text) and depth:
+        if text[i] == '[':
+            depth += 1
+        elif text[i] == ']':
+            depth -= 1
+        i += 1
+    return None if depth else i
+
+
+def _replace_bracketed_mentions(text, head, repl):
+    """`text` with every `<head>[ ...balanced... ]` replaced by `repl`."""
+    out, i = [], 0
+    pat = re.compile(re.escape(head) + r'\[')
+    while True:
+        m = pat.search(text, i)
+        if not m:
+            out.append(text[i:])
+            return ''.join(out)
+        e = _balanced_end(text, m.end())
+        if e is None:
+            out.append(text[i:])
+            return ''.join(out)
+        out.append(text[i:m.start()])
+        out.append(repl)
+        i = e
+
+
+def _struct_bind_args(tmpl, written, origin_arg):
+    """Positional type arguments for `tmpl`'s bracket head from the arguments
+    `written` after the infer-only `//` group: infer-only `Bool` parameters
+    (`mut: Bool, //`) take `True`, an `Origin[..]` parameter takes
+    `origin_arg` where the alias passed its own origin parameter, and
+    trailing defaulted parameters are left to `bind_type_args`."""
+    import elaborate
+    import monomorphize as mm
+    hm = mm.head_match(tmpl)
+    if not hm:
+        return None
+    plist = [p.strip() for p in
+             gimple_exprtypes._split_top_level_commas(hm.params) if p.strip()]
+    marker = -1
+    for k, p in enumerate(plist):
+        if p.startswith('//'):
+            marker = k
+    infer_only = [p for p in plist[:marker] if marker >= 0]
+    explicit = [p for p in plist[marker + 1:]
+                if not elaborate._is_param_marker(p)]
+    out = ['True' for _p in infer_only]
+    if len(written) > len(explicit):
+        return None
+    for p, a in zip(explicit, written):
+        ann = p.split(':', 1)[1].strip() if ':' in p else ''
+        out.append(origin_arg if ann.startswith('Origin') else a)
+    return out
+
+
+def _eval_parametrized_aliases(work, mm, base, concrete):
+    """Evaluate `comptime <alias>[<origin plumbing>]: Trait = Struct[args]`
+    aliases (LinkedList's `IteratorType`), rewriting every
+    `Self.<alias>[<origin>]` mention to the mangled instantiation and
+    enqueueing it. `downcast[X, Trait]` evaluates to `X`; the alias's own
+    parameters are erased origins. Refusal leaves `concrete` unchanged.
+    Returns (concrete, nested_keys or None)."""
+    import elaborate
+    nested = []
+    for m in list(_PARAM_ALIAS_HEAD_RE.finditer(concrete)):
+        aname = m.group(1)
+        # Parametrized `comptime X[params]: Trait = Base[...]`, or bracketless
+        # `comptime X: Trait where ... = Base[...]` (LinkedList's
+        # `IteratorOwnedType`): no parameter list, so the annotation starts at
+        # the colon.
+        bracketed = concrete[m.end()] == '['
+        # The lookahead leaves m.end() ON the '['; _balanced_end wants the index after it.
+        pend = _balanced_end(concrete, m.end() + 1) if bracketed else m.end()
+        if pend is None:
+            continue
+        hm = re.match((r'\s*:\s*[^=\n]+=\s*' if bracketed else r'\s*:\s*[^=]+=\s*')
+                      + r'([A-Za-z_]\w*)\s*\[', concrete[pend:])
+        if not hm or hm.group(1) in _ERASED_WORD_STRUCTS:
+            continue
+        abase = hm.group(1)
+        astart = pend + hm.end()
+        aend = _balanced_end(concrete, astart)
+        if aend is None:
+            continue
+        alias_params = {
+            p.split(':')[0].strip() for p in
+            gimple_exprtypes._split_top_level_commas(
+                concrete[m.end() + 1:pend - 1])
+            if p.strip() and not elaborate._is_param_marker(p.strip())} \
+            if bracketed else set()
+        written = []
+        origin_arg = _ERASED_ORIGIN
+        for a in gimple_exprtypes._split_top_level_commas(
+                concrete[astart:aend - 1]):
+            a = a.strip()
+            if not a:
+                continue
+            dm = re.match(r'^downcast\s*\[(.*)\]$', a, re.S)
+            if dm:
+                a = gimple_exprtypes._split_top_level_commas(
+                    dm.group(1))[0].strip()
+            written.append(_ERASED_ORIGIN if a in alias_params else a)
+        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
+                        [abase])
+        asrc = _module_src(work.gen, abase, 'struct')
+        atmpl = elaborate.extract_struct_source(asrc, abase) if asrc else None
+        if not atmpl:
+            work.refuse(f'{base}: comptime alias {aname} names {abase} '
+                        'with no struct template')
+            continue
+        bound = _struct_bind_args(atmpl, written, origin_arg)
+        targs = elaborate.bind_type_args(atmpl, bound) if bound else None
+        if targs is None or not all(
+                isinstance(v, str) and v for v in targs.values()):
+            work.refuse(f'{base}: comptime alias {aname} names {abase}[...] '
+                        'whose arguments do not bind')
+            continue
+        # The alias's own `[...] = Struct[...]` text and every
+        # `Self.<alias>[...]` mention name the instantiation.
+        name = mm.mangle(abase, targs)
+        key = ('struct', abase, tuple(
+            targs[p] for p in elaborate.type_param_names(atmpl)))
+        concrete = _replace_bracketed_mentions(
+            concrete, 'Self.' + aname, name)
+        if not bracketed:
+            # A bare mention (`Self.IteratorOwnedType(self^)`, `-> Self.X`) names
+            # the same instantiation as the bracketed spelling.
+            concrete = re.sub(r'\bSelf\.' + re.escape(aname) + r'\b', name, concrete)
+        nested.append(key)
+    return concrete, nested or None
+
+
+_PTR_FIELD_HEAD_RE = re.compile(
+    r'^([ \t]*var\s+\w+\s*:\s*)((?:Optional|OptionalReg|Pointer|UnsafePointer)'
+    r'\s*\[)', re.M)
+
+
+def _comptime_alias_values(work, mm, module_src, base, targs, concrete):
+    """The value of every `comptime <alias> = <Base>[...]` type alias of the
+    spliced struct `concrete` (`base` at `targs`): `(aliases, paired)` where
+    `aliases` maps alias name -> the text its `Self.<alias>` mentions become
+    and `paired` lists `(alias, ('struct', name, args))` for the instantiations
+    it names. None on refusal (already recorded on `work`)."""
+    import elaborate
+    aliases = {}
+    paired = []
+    for m in _COMPTIME_ALIAS_HEAD_RE.finditer(concrete):
+        aname, abase = m.group(1), m.group(2)
+        i = m.end()
+        depth = 1
+        while i < len(concrete) and depth:
+            c = concrete[i]
+            if c == '[':
+                depth += 1
+            elif c == ']':
+                depth -= 1
+            i += 1
+        if depth:
+            work.refuse(f'{base}: comptime alias {aname} has unbalanced '
+                        'brackets in its right-hand side')
+            return None
+        args = [a.strip() for a in
+                gimple_exprtypes._split_top_level_commas(
+                    concrete[m.end():i - 1]) if a.strip()]
+        resolved = []
+        bad = None
+        for a in args:
+            if a.startswith('Self.'):
+                ref = a[len('Self.'):]
+                if ref in aliases:
+                    resolved.append(aliases[ref])
+                else:
+                    bad = f'references {ref} without a prior alias'
+            elif 'Self.' in a:
+                bad = 'carries an unbound Self. mention in its argument'
+            else:
+                resolved.append(a)
+        if bad:
+            work.refuse(f'{base}: comptime alias {aname} {bad}')
+            return None
+        if abase in _ERASED_WORD_STRUCTS:
+            # An erased-word base (`Optional[Pointer[Node[T], o]]`) is not a
+            # struct this codegen builds: every other site reads it as the
+            # tagged word. The alias therefore names its own spelling, which
+            # the layout/type readers already erase, and nothing is enqueued
+            # (materializing `Optional` is the regression
+            # `_protocol_only_overloads` documents).
+            pointee = _erased_pointee_struct(resolved)
+            if pointee is None and _erased_pointee_is_self(resolved):
+                # `Optional[Pointer[Self, o]]` (a node's own link): the
+                # pointee is the struct being spliced; nothing to enqueue.
+                aliases[aname] = mm.mangle(base, targs)
+                continue
+            if pointee is not None:
+                pbase, pargs = pointee
+                # The pointee usually lives in the SAME module as the struct
+                # being spliced (`Node` beside `LinkedList`), so it is not
+                # registered yet: register it from this struct's own file.
+                _register_named(work.gen,
+                                work.gen._imported_generic_structs.get(base),
+                                [pbase])
+                psrc = _module_src(work.gen, pbase, 'struct')
+                ptmpl = (elaborate.extract_struct_source(psrc, pbase)
+                         if psrc else None)
+                pn = elaborate.type_param_names(ptmpl) if ptmpl else None
+                if pn and len(pn) == len(pargs):
+                    aliases[aname] = mm.mangle(pbase, dict(zip(pn, pargs)))
+                    paired.append((aname, ('struct', pbase, tuple(pargs))))
+                    continue
+            aliases[aname] = f'{abase}[{", ".join(resolved)}]'
+            continue
+        tmpl = (elaborate.extract_struct_source(module_src, abase)
+                if module_src else None)
+        pnames = elaborate.type_param_names(tmpl) if tmpl else None
+        if not pnames or len(pnames) != len(resolved):
+            work.refuse(f'{base}: comptime alias {aname} names {abase}[...] '
+                        'whose template does not bind positionally')
+            return None
+        aliases[aname] = mm.mangle(abase, dict(zip(pnames, resolved)))
+        paired.append((aname, ('struct', abase, tuple(resolved))))
+    return aliases, paired
+
+
+# `Other[args]._Alias` — a mention of ANOTHER generic struct's private comptime
+# alias, spelled through the struct's name (LinkedList's owning iterator reads
+# `LinkedList[Self.T]._NodePointer()`). Group 1 = struct name.
+_FOREIGN_ALIAS_MENTION_RE = re.compile(r'(?<![\w.])([A-Za-z_]\w*)\[')
+
+
+def _eval_foreign_alias_mentions(work, mm, base, concrete):
+    """Replace every `Other[args]._Alias` mention in `concrete` with the value
+    the NAMED instantiation's own struct gives that alias: its template is
+    monomorphized at `args` and its aliases evaluated by
+    `_comptime_alias_values`, the same reading it gets when it is itself
+    materialized, so the two spellings cannot disagree. A mention that does
+    not name a generic struct, or whose alias does not evaluate, is left as
+    it is. Returns (concrete, nested_keys or None)."""
+    import elaborate
+    out, i, nested = [], 0, []
+    for m in _FOREIGN_ALIAS_MENTION_RE.finditer(concrete):
+        if m.start() < i or m.group(1) in _ERASED_WORD_STRUCTS:
+            continue
+        name = m.group(1)
+        end = _balanced_end(concrete, m.end())
+        if end is None:
+            continue
+        am = re.match(r'\.(_[A-Za-z_]\w*)\b', concrete[end:])
+        if not am:
+            continue
+        aname = am.group(1)
+        asrc = _module_src(work.gen, name, 'struct')
+        atmpl = elaborate.extract_struct_source(asrc, name) if asrc else None
+        if not atmpl:
+            continue
+        written = [a.strip() for a in
+                   gimple_exprtypes._split_top_level_commas(
+                       concrete[m.end():end - 1]) if a.strip()]
+        bound = _struct_bind_args(atmpl, written, _ERASED_ORIGIN)
+        targs = elaborate.bind_type_args(atmpl, bound) if bound else None
+        if targs is None or not all(
+                isinstance(v, str) and v for v in targs.values()):
+            continue
+        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
+                        [name])
+        try:
+            _mangled, fcon = mm.monomorphize_source(atmpl, targs)
+        except Exception as e:
+            work.refuse(f'{base}: {name}[...].{aname} did not monomorphize: '
+                        f'{type(e).__name__}: {e}')
+            continue
+        got = _comptime_alias_values(work, mm, asrc, name, targs, fcon)
+        if got is None or aname not in got[0]:
+            continue
+        out.append(concrete[i:m.start()])
+        out.append(got[0][aname])
+        i = end + am.end()
+        nested.extend(k for a, k in got[1] if a == aname)
+    out.append(concrete[i:])
+    return ''.join(out), nested or None
+
+
+def _eval_pointer_fields(work, mm, base, concrete):
+    """A `var f: Optional[UnsafePointer[Node[Int], o]]` / `Pointer[LinkedList[
+    Int], o]` FIELD of a materialized struct names a pointer to a generic
+    struct at scalar types: spell it as that struct's mangled name (the
+    registered-name branch of the field loop types it `<S> *`, NULL = None)
+    and enqueue the pointee — the same reading `_eval_comptime_type_aliases`
+    gives an erased-word ALIAS (`_NodePointer`), here for the annotation
+    written inline (`_LinkedListIter.curr`). Annotation sites only: an
+    expression-position spelling is left alone. Returns (concrete, keys)."""
+    import elaborate
+    out, i, keys = [], 0, []
+    for m in _PTR_FIELD_HEAD_RE.finditer(concrete):
+        if m.start() < i:
+            continue
+        end = _balanced_end(concrete, m.end())
+        if end is None:
+            continue
+        ann = concrete[m.start(2):end].strip()
+        pointee = _erased_pointee_struct([ann])
+        if pointee is None:
+            continue
+        pbase, pargs = pointee
+        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
+                        [pbase])
+        psrc = _module_src(work.gen, pbase, 'struct')
+        ptmpl = elaborate.extract_struct_source(psrc, pbase) if psrc else None
+        pn = elaborate.type_param_names(ptmpl) if ptmpl else None
+        if not pn or len(pn) != len(pargs):
+            continue
+        out.append(concrete[i:m.start(2)])
+        out.append(mm.mangle(pbase, dict(zip(pn, pargs))))
+        i = end
+        keys.append(('struct', pbase, tuple(pargs)))
+    out.append(concrete[i:])
+    return ''.join(out), keys or None
+
+
 def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
     """Evaluate the `comptime <alias> = <Base>[<concrete args>]` type
     aliases of a spliced generic struct. Returns (concrete, nested_keys):
@@ -3051,6 +3737,37 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
         if bad:
             work.refuse(f'{base}: comptime alias {aname} {bad}')
             return concrete, None
+        if abase in _ERASED_WORD_STRUCTS:
+            # An erased-word base (`Optional[Pointer[Node[T], o]]`) is not a
+            # struct this codegen builds: every other site reads it as the
+            # tagged word. The alias therefore names its own spelling, which
+            # the layout/type readers already erase, and nothing is enqueued
+            # (materializing `Optional` is the regression
+            # `_protocol_only_overloads` documents).
+            pointee = _erased_pointee_struct(resolved)
+            if pointee is None and _erased_pointee_is_self(resolved):
+                # `Optional[Pointer[Self, o]]` (a node's own link): the
+                # pointee is the struct being spliced; nothing to enqueue.
+                aliases[aname] = mm.mangle(base, targs)
+                continue
+            if pointee is not None:
+                pbase, pargs = pointee
+                # The pointee usually lives in the SAME module as the struct
+                # being spliced (`Node` beside `LinkedList`), so it is not
+                # registered yet: register it from this struct's own file.
+                _register_named(work.gen,
+                                work.gen._imported_generic_structs.get(base),
+                                [pbase])
+                psrc = _module_src(work.gen, pbase, 'struct')
+                ptmpl = (elaborate.extract_struct_source(psrc, pbase)
+                         if psrc else None)
+                pn = elaborate.type_param_names(ptmpl) if ptmpl else None
+                if pn and len(pn) == len(pargs):
+                    aliases[aname] = mm.mangle(pbase, dict(zip(pn, pargs)))
+                    paired.append((aname, ('struct', pbase, tuple(pargs))))
+                    continue
+            aliases[aname] = f'{abase}[{", ".join(resolved)}]'
+            continue
         tmpl = (elaborate.extract_struct_source(module_src, abase)
                 if module_src else None)
         pnames = elaborate.type_param_names(tmpl) if tmpl else None
@@ -3060,12 +3777,13 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
             return concrete, None
         aliases[aname] = mm.mangle(abase, dict(zip(pnames, resolved)))
         paired.append((aname, ('struct', abase, tuple(resolved))))
-    used = [n for n, _ in paired
+    used = [n for n in aliases
             if re.search(r'Self\.' + re.escape(n) + r'\b', concrete)]
     if not used:
         return concrete, None
     for n in used:
-        concrete = concrete.replace(f'Self.{n}', aliases[n])
+        concrete = re.sub(r'Self\.' + re.escape(n) + r'\b',
+                          lambda _m, _a=aliases[n]: _a, concrete)
     return concrete, [k for n, k in paired if n in used] or None
 
 
@@ -3134,6 +3852,20 @@ def _materialize(work, key):
     import elaborate
     import monomorphize as mm
     kind, base, args = key
+    # Register element types for LinkedList before materializing
+    if base == 'LinkedList' and args:
+        for a in args:
+            try:
+                a_base = str(a).split('[')[0].strip()
+                if a_base and a_base not in _IN_TU_LIST_BASES and a_base not in _ERASED_WORD_STRUCTS and a_base not in gimple_ctypes._TYPE_MAP:
+                    try:
+                        if hasattr(work.gen, '_imported_generic_structs'):
+                            # Try to register as generic if it is
+                            _register_named(work.gen, work.gen._imported_generic_structs.get(a_base) or _module_src(work.gen, a_base, 'struct'), [a_base])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
     module_src = _module_src(work.gen, base, kind)
     if module_src is None:
         work.refuse(f'no source for {base!r}')
@@ -3165,6 +3897,34 @@ def _materialize(work, key):
         if targs is None:
             work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
             return None
+        # A bounded type parameter must conform before this instantiation is
+        # materialized in-TU. Without this the `.o` route's own check
+        # (`elaborate_generic_call` -> `check_bounds`) is bypassed — `_intu_func_args`
+        # then holds the name and `_elaborate_generic_call` declines — so an
+        # unsatisfiable `where` clause or trait bound compiles silently
+        # (modular: `error: invalid call to '<fn>': violated constraint`).
+        try:
+            elaborate.check_bounds(module_src, tmpl, targs)
+        except elaborate.WhereConformanceError as _we:
+            # A struct's violated `where` is the same diagnostic whichever path
+            # instantiates it (emit_resolve reports it the same way).
+            if kind == 'struct':
+                raise elaborate.where_violation_error('instantiation', base, _we)
+            raise
+        except elaborate.ConformanceError:
+            raise
+        except RuntimeError as e:
+            _emsg = str(e)
+            if (('function instantiation failed' in _emsg
+                 and 'struct alignment must be a positive power of 2' in _emsg)
+                or ('function instantiation failed' in _emsg
+                    and 'use of unknown declaration' in _emsg
+                    and '@align' in _emsg)):
+                raise
+        except Exception:
+            pass
+        if kind == 'struct':
+            elaborate._validate_align_decorators_for_struct(module_src, tmpl, base, targs)
         # A VARIADIC binding (part 4: the chain/zip out-res wrapper's `*Ts`
         # consumes every inner) takes `monomorphize_source`'s dedicated
         # pass; its seed-only splice knowledge (each inner's element
@@ -3199,6 +3959,17 @@ def _materialize(work, key):
     if kind == 'struct' and targs:
         concrete, _nested = _eval_comptime_type_aliases(
             work, mm, module_src, base, targs, concrete)
+        concrete, _pnested = _eval_parametrized_aliases(
+            work, mm, base, concrete)
+        if _pnested:
+            _nested = (_nested or []) + _pnested
+        concrete, _fanested = _eval_foreign_alias_mentions(
+            work, mm, base, concrete)
+        if _fanested:
+            _nested = (_nested or []) + _fanested
+        concrete, _fnested = _eval_pointer_fields(work, mm, base, concrete)
+        if _fnested:
+            _nested = (_nested or []) + _fnested
         concrete = _rewrite_product_next(base, targs, concrete)
         concrete = _rewrite_product2_elem_copy(base, targs, concrete)
     if kind == 'struct' and base in _IN_TU_ITER_BODIES:
@@ -3217,7 +3988,7 @@ def _materialize(work, key):
 
 # ── the entry point ────────────────────────────────────────────────────────
 
-def run(gen, stmts):
+def run(gen, stmts: list):
     """Materialize in-TU instantiations for `stmts`; returns the extra
     top-level statements to append to them, and fills `gen._intu_funcs` /
     `_intu_structs` (what this compile DEFINES) and `gen._intu_func_args` /
@@ -3237,7 +4008,7 @@ def run(gen, stmts):
     # iterator are materialized in the same closure as everything else.
     _seed_factories(gen, work, stmts, queue)
 
-    def seed(n):
+    def seed(n, scope):
         """ROOTS. A struct root is one the `.o` route provably cannot register
         (a duplicated method name outside the iteration protocol); a function root
         is one whose return annotation names such a struct
@@ -3255,8 +4026,10 @@ def run(gen, stmts):
         if kind is None:
             return
         if kind == 'struct':
+            if isinstance(base, str) and base.startswith('_'):
+                pass  # skip internal structs
             if _protocol_only_overloads(gen, base):
-                args = _concrete_args(work, kind, base, n)
+                args = _concrete_args(work, kind, base, n, scope)
             else:
                 # PART 6 (2026-10-23, family D piece 2): an imported generic
                 # struct the `.o` route cannot serve as a ROOT (a duplicated
@@ -3271,14 +4044,67 @@ def run(gen, stmts):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
-        elif not _fn_returns_unbuildable_struct(work, base):
+            if args is not None and not (isinstance(base, str) and base.startswith('_')):
+                # Register imported non-generic struct elements before materializing
+                try:
+                    for a in args:
+                        if not isinstance(a, str):
+                            continue
+                        an = a.strip()
+                        if not an or an in gimple_ctypes._TYPE_MAP:
+                            continue
+                        if an.startswith('_'):
+                            continue
+                        if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
+                            continue
+                        if (an in getattr(gen, '_imported_generic_structs', {}) or
+                                an in getattr(gen, 'struct_field_types', {}) or
+                                an in getattr(gen, '_imported_struct_names', set())):
+                            continue
+                        if hasattr(gen, '_materialize_imported_struct'):
+                            for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | {'test_utils', 'test_utils.types'}:
+                                try:
+                                    if gen._materialize_imported_struct(mod, an, an):
+                                        break
+                                except Exception:
+                                    continue
+                except Exception:
+                    pass
+                work.enqueue((kind, base, tuple(args)), 0, queue)
+        elif kind == 'fn':
+            # ROOT for generic function instantiation: either the return is
+            # unbuildable (old path) OR the function has type params that
+            # need a per-T body (new path for shared-symbol fix).
+            if _fn_returns_unbuildable_struct(work, base):
+                args = _concrete_args(work, kind, base, n, scope)
+                if args is not None:
+                    work.enqueue((kind, base, tuple(args)), 0, queue)
+                return
+            # NEW (bug-codegen-dylib-generic-inline-copies-370): enqueue
+            # any generic fn with non-empty template whose args are all
+            # type params (value params stay on .o route).
+            import elaborate as el
+            module_src = _module_src(work.gen, base, 'fn')
+            if module_src is None:
+                return
+            tmpl = el.extract_fn_source(module_src, base)
+            if tmpl is None:
+                return
+            params = el.type_param_names(tmpl) if hasattr(el, 'type_param_names') else []
+            if not params:
+                return
+            args = _concrete_args(work, kind, base, n, scope)
+            if args is None:
+                args = _infer_fn_args(work, base, n)
+            if args is None:
+                return
+            if not _fn_args_are_types(work, base, args):
+                return
+            work.enqueue((kind, base, tuple(args)), 0, queue)
             return
-        if kind == 'fn':
-            args = _concrete_args(work, kind, base, n)
-        if args is None:
+        else:
             return
-        work.enqueue((kind, base, tuple(args)), 0, queue)
-    _walk(stmts, seed)
+    _walk_scoped(stmts, seed)
     if not queue:
         return []
 
@@ -3388,6 +4214,84 @@ def run(gen, stmts):
     for _rec in gen._intu_factory_records.values():
         if _rec.get('kind') == 'direct':
             _lcs.update(_rec.get('local_inner') or ())
+    # Register imported non-generic structs used as elements in materialized types
+    try:
+        _to_register = set()
+        for rec in work.records.values():
+            for holder, attr in getattr(rec, 'sites', []):
+                try:
+                    ann = _get(holder, attr)
+                    if not isinstance(ann, str):
+                        continue
+                    for base, args, _s, _e in _mentions(ann):
+                        if base in _IN_TU_LIST_BASES:
+                            continue
+                        for a in args:
+                            if not isinstance(a, str):
+                                continue
+                            an = a.strip()
+                            if not an or an in gimple_ctypes._TYPE_MAP:
+                                continue
+                            if an.startswith('_'):
+                                continue
+                            if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
+                                continue
+                            if (an in getattr(gen, '_imported_generic_structs', {}) or
+                                    an in getattr(gen, 'struct_field_types', {}) or
+                                    an in getattr(gen, '_imported_struct_names', set())):
+                                continue
+                            _to_register.add(an)
+                except Exception:
+                    continue
+        for an in _to_register:
+            if hasattr(gen, '_materialize_imported_struct'):
+                for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | set(getattr(gen, '_imported_generic_structs', {}).values()):
+                    try:
+                        if gen._materialize_imported_struct(mod, an, an):
+                            break
+                    except Exception:
+                        continue
+            # Try to find in current module's imports
+            try:
+                cur = getattr(gen, '_current_filename', None)
+                if cur and os.path.exists(cur):
+                    with open(cur) as f:
+                        csrc = f.read()
+                    # look for from X import ... an ...
+                    import re as _re
+                    found_import = False
+                    for m in _re.finditer(r'from\s+([^\s]+)\s+import\s+([^\n]+)', csrc):
+                        mod = m.group(1)
+                        names = m.group(2)
+                        if re.search(r'\b' + re.escape(an) + r'\b', names):
+                            found_import = True
+                            if hasattr(gen, '_materialize_imported_struct'):
+                                try:
+                                    if gen._materialize_imported_struct(mod, an, an):
+                                        break
+                                except Exception:
+                                    pass
+                                # Try common re-export patterns
+                                for suffix in ['.types', '._types', '.utils']:
+                                    try:
+                                        if gen._materialize_imported_struct(mod + suffix, an, an):
+                                            break
+                                    except Exception:
+                                        continue
+                                else:
+                                    pass
+                    # If not found via direct import scan, try to be more aggressive
+                    if hasattr(gen, '_materialize_imported_struct'):
+                        for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | {'test_utils', 'test_utils.types', 'test_utils.utils'}:
+                            try:
+                                if gen._materialize_imported_struct(mod, an, an):
+                                    break
+                            except Exception:
+                                continue
+            except Exception:
+                pass
+    except Exception:
+        pass
     _rewrite_annotations(work)
     _rewrite_callees(work, stmts)
     _rewrite_ctor_calls(work, stmts)
@@ -3418,7 +4322,7 @@ def _skip(gen) -> bool:
         os.path.join('mojo', 'backend_gimple', 'elab_intu.py'))
 
 
-def _synthesize_inner_defaults(work, stmts):
+def _synthesize_inner_defaults(work, stmts: list):
     """A materialized wrapper's SPLICED body calls the inner's protocol
     methods; for a LOCAL inner struct (this module's own StructDef) that does
     not override one, the call must reach the TRAIT'S DEFAULT implementation.
@@ -3492,6 +4396,8 @@ def _rewrite_annotations(work):
     # mention whose argument was never rewritten is untouched.
     mangled_raw = {}
     for (kind, base, args), mangled in work.alias.items():
+        if mangled is None:
+            continue
         if kind == 'struct':
             mangled_raw[mangled] = f"{base}[{', '.join(args)}]"
     for rec in work.records.values():
@@ -3525,7 +4431,7 @@ def _rewrite_ann(work, ann, mangled_raw):
     return ann
 
 
-def _rewrite_callees(work, stmts):
+def _rewrite_callees(work, stmts: list):
     """Point every call site of a materialized generic at the concrete name.
 
     Both spellings need it. `Base[Args](...)` and bare `Base(...)` both route
@@ -3537,6 +4443,22 @@ def _rewrite_callees(work, stmts):
     gen = work.gen
 
     def visit(n):
+        if (isinstance(n, SubscriptExpr) and isinstance(n.obj, IdentExpr)
+                and n.obj.name == 'Layout' and isinstance(n.index, SubscriptExpr)
+                and isinstance(n.index.obj, IdentExpr)):
+            # `Layout[Node[Int]]` (`alloc(Layout[Node[T]].single())`): the
+            # element is a TYPE expression in an expression body, so it is not
+            # one of the annotation sites `_rewrite_annotations` walks. Name
+            # the materialized struct, or the allocation's element type
+            # erases to `int64_t` and `alloc` hands back a scalar word.
+            _b = n.index.obj.name
+            _targs = _bracket_args(gen, n.index)
+            _m = (work.alias.get(('struct', _b, tuple(_targs)))
+                  if _targs else None)
+            if _m:
+                n.index = IdentExpr(name=_m)
+                _walk_ast_invalidate(n)
+            return
         if not isinstance(n, CallExpr):
             return
         base = (n.func.obj.name if isinstance(n.func, SubscriptExpr)
@@ -3569,7 +4491,7 @@ def _rewrite_callees(work, stmts):
         _walk(rec['parsed'], visit)
 
 
-def _rewrite_local_struct_anns(work, stmts):
+def _rewrite_local_struct_anns(work, stmts: list):
     """Rewrite LOCAL-struct field annotations naming a materialized in-TU
     base to the base's MANGLED name alone (part 6 family D piece 2,
     2026-10-23, measured on test_product's local TestCopyIterator:
@@ -3590,8 +4512,9 @@ def _rewrite_local_struct_anns(work, stmts):
     """
     by_base = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            by_base.setdefault(base, []).append(mangled)
+        if mangled is None or kind != 'struct':
+            continue
+        by_base.setdefault(base, []).append(mangled)
     solo = {base: ms[0] for base, ms in by_base.items() if len(ms) == 1}
     if not solo:
         return
@@ -3610,7 +4533,7 @@ def _rewrite_local_struct_anns(work, stmts):
                     break
 
 
-def _rewrite_ctor_calls(work, stmts):
+def _rewrite_ctor_calls(work, stmts: list):
     """Rewrite a module function's OWN bare `Base(args)` constructor call to
     the base's in-TU MANGLED name (part 5, 2026-10-22, measured on
     test_cycle/test_product: `def _owned3(...) -> _CopyableOwned[3]` whose
@@ -3648,15 +4571,16 @@ def _rewrite_ctor_calls(work, stmts):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+        if mangled is None or kind != 'struct':
+            continue
+        _akey = _US.join(args)
+        _lst = by_base.get(base)
+        if _lst is None:
+            _lst = []
+            by_base[base] = _lst
+        if _akey not in _lst:
+            _lst.append(_akey)
+        mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for st in stmts or ():
@@ -3752,15 +4676,16 @@ def _rewrite_intu_ctor_calls(work):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+        if mangled is None or kind != 'struct':
+            continue
+        _akey = _US.join(args)
+        _lst = by_base.get(base)
+        if _lst is None:
+            _lst = []
+            by_base[base] = _lst
+        if _akey not in _lst:
+            _lst.append(_akey)
+        mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for rec in work.records.values():

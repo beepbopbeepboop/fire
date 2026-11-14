@@ -17,6 +17,16 @@ sentences, and rows whose subject was three refusals deeper than the row said.
 This tool computes the index instead, from two facts about the tree rather than
 from a person's memory:
 
+**WHICH DOCUMENTS** is every formal document under `bugs/`, the class
+subdirectories (`mid/`, `hard/`, `sweeps/`) included. That is a walk and not a
+directory list because the reorg that moves documents by class is ongoing, and a
+hard-coded list is how the queue came to render two rows for a tree carrying
+five: 35e261a02 moved three formal documents into `bugs/mid/` and the scan read
+one directory. The walk is the same set `find bugs -name 'FORMAL_*.md' -o -name
+'LEAN_*.md'` returns, and each row names the path it resolves to, so a document
+moving between class directories changes the block rather than disappearing
+from it.
+
 **CLAIM STATUS** comes from `tools/control.py`'s registry (`<git-common-dir>/
 control/tasks.json`), read directly rather than by parsing `claims` output. A
 task in a terminal state (`integrated`, `abandoned`, `superseded`) has released
@@ -70,6 +80,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+sys.path.append(ROOT)
+import checked_run  # noqa: E402  — after the sys.path lines that find it
 
 BUGS = os.path.join(ROOT, 'bugs')
 OPEN_WORK = os.path.join(BUGS, 'OPEN_WORK.md')
@@ -210,24 +222,67 @@ def live_claims():
             if key.endswith('.md'):
                 key = key[:-3]
             out.setdefault(key, []).append(name)
+    # Claims held by work control did not start (a Claude Code session, a
+    # hand-run worker): `control.py claim`. They lapse with their pid / hours,
+    # exactly like `claims` shows them, so a stale one reads `unclaimed`.
+    for name, ext in sorted(control.external().items()):
+        for claim in ext.get('claims') or ():
+            parts = claim.split(':', 1)
+            key = parts[1] if len(parts) > 1 else parts[0]
+            if key.endswith('.md'):
+                key = key[:-3]
+            who = ext.get('who') or 'external'
+            out.setdefault(key, []).append(f'{name} [{who}]')
     return out
 
 
 def rows():
-    """[(name, area, runner_up, how, claimed_by, title)] — sorted."""
+    """[(name, area, runner_up, how, claimed_by, title)] — sorted.
+
+    **The scope is the walk, not a directory list.** The formal documents live
+    under `bugs/`, and since the swarm's reorg they live in its CLASS
+    subdirectories — `bugs/mid/`, `bugs/hard/`, `bugs/sweeps/` — which is a
+    moving target: 35e261a02 and its siblings moved three formal documents into
+    `bugs/mid/`, and a one-directory scan kept rendering a two-row queue for a
+    five-document tree, green throughout because `--check` compared the block
+    against the same truncated rows(). A `FORMAL_*` sweep map is work and a
+    `hard/` document is work, so the queue is meant to curate nothing: it shows
+    every formal document `find bugs -name 'FORMAL_*.md' -o -name 'LEAN_*.md'`
+    finds. A list of class-directory names would be the same rot one reorg
+    later, so the directory set is derived with the rest of the tree's
+    (`checked_run.is_derived_dir` — the one answer to "which directories are
+    not inputs", rather than a second one here).
+
+    A row names the document's path from the repository root
+    (`bugs/<class>/<name>.md`), not its bare stem, for two measured reasons: a
+    reader can open what the row names, and a document MOVING between class
+    directories changes the row, so
+    `--check` reports the move instead of silently following the file. The
+    path is what `tools/dangling_doc_refs.py` counts as a citation, so a deleted
+    document left in a stale block is a ratchet regression as well as a
+    `--check` failure.
+
+    The claim lookup stays on the STEM, because that is the identity
+    `tools/control.py` registers (`bug:<name>`, `norm_claim`), and a claim is
+    about the document rather than about the directory it currently sits in.
+    """
     claims = live_claims()
     out = []
-    for name in sorted(os.listdir(BUGS)):
-        if not name.endswith('.md') or name == 'OPEN_WORK.md':
-            continue
-        path = os.path.join(BUGS, name)
-        text = doc_text(path)
-        if not is_formal(name[:-3], text):
-            continue
-        area, second, how = area_of(text)
-        out.append((name[:-3], area, second, how,
-                    sorted(claims.get(name[:-3], ())), headline(text)))
-    return out
+    for dirpath, dirnames, filenames in os.walk(BUGS):
+        dirnames[:] = sorted(d for d in dirnames
+                             if not checked_run.is_derived_dir(d))
+        for name in sorted(filenames):
+            if not name.endswith('.md') or name == 'OPEN_WORK.md':
+                continue
+            path = os.path.join(dirpath, name)
+            text = doc_text(path)
+            if not is_formal(name[:-3], text):
+                continue
+            area, second, how = area_of(text)
+            label = os.path.relpath(path, ROOT).replace(os.sep, '/')[:-3]
+            out.append((label, area, second, how,
+                        sorted(claims.get(name[:-3], ())), headline(text)))
+    return sorted(out)
 
 
 def render():
@@ -322,7 +377,7 @@ def conflict_markers(text):
 # STRUCTURAL, not a regex over the whole line. A regex was tried and it is wrong
 # in two ways at once: it blanks the doc-name cell (which is also a backticked
 # token followed by a `|`), and it blanks backticked words inside the TITLE
-# column — so "neither is in `FORMAL_x86_64_end_to_end_proof`" became "neither is
+# column — so "neither is in the formal x86-64 end-to-end proof bug doc" became "neither is
 # in `—`" and the comparison stopped being about the claim column. Only a table
 # row's SECOND cell is the claim, so only that cell is replaced.
 def _is_row(line):

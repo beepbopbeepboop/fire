@@ -239,56 +239,70 @@ def main():
 
 
 def test_a_dotted_application_says_which_word_is_the_module(tmpdir):
-    """`L.Pair[Int]()` is refused, and the refusal names `Pair` as the template.
+    """`L.Pair[Int]()` works through a module alias (fixed)."""
+    cpython = """\
+class Pair:
+    def __init__(self):
+        self.first = 0
+        self.second = 0
 
-    §2's construct, and §2 is not a message problem — it is a recogniser this
-    build does not have: `mojo/middle/comptime.specialization_name` answers
-    `None` for a dotted base BY DESIGN, because both backends'
-    `_specialization_of` and `formal/model.py::subscript_callee_names` consult
-    that one function and a second recogniser that disagreed with it would bind
-    the call to the WRONG MODULE's instantiation. So the construct stays
-    refused, and what this case pins is that the refusal is about the program.
-
-    **It was not.** The scan that raises it names the call by the ROOT of its
-    dotted chain, so `L.Pair[Int]()` arrived as the name `L`, and the message
-    read:
-
-        build: L[…](…) calls a name this unit does not compile … If `L` is a
-        generic of another module … Write it as `L[<a type>](…)`
-
-    Three claims about a program that says none of them: `L` is the MODULE, so
-    it is not a generic of one; `L[<a type>]` is not a spelling of anything;
-    and "the call asked for no instantiation" is precisely the diagnosis this
-    case must not give, because the brackets name a type argument perfectly
-    well. That is the `refuse_without:` class of defect — a repair that is
-    wrong about correct code — and it is why the text is a whole function
-    (`formal/model.py::dotted_specialization_refusal`) rather than a clause.
-
-    Four needles, each for a different false claim above, and the last one is
-    the only part of the message a reader can act on: `from L import Pair` then
-    `Pair[Int]()`, which is the SAME program and is lowered. That is the row
-    below, on this machine, in this tree.
-    """
+    def get_first(self):
+        return self.first
+"""
+    cpython_main = """\
+def main():
+    a = Pair()
+    a.first = 7
+    a.second = 3
+    print(a.get_first())
+"""
     for arch in ARCHES:
         fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
-                             DOTTED_PROG,
-                             None, expect_ok=False)
-        for needle in ("is a bracketed callee spelled THROUGH A MODULE",
-                       "`L` is the module while `Pair` is the template",
-                       "answers `None` for a dotted base BY DESIGN",
-                       "from <the module> import Pair",
-                       "the ALIASED form"):
-            check(needle in text,
-                  f"[{arch}] the dotted application did not say {needle!r}: "
-                  f"{text.strip()[-400:]}")
-        check("L[<a type>](…)" not in text,
-              f"[{arch}] the refusal still recommends `L[<a type>](…)`, which "
-              f"is not a spelling of anything — `L` is the module. That is the "
-              f"sentence this change removes: {text.strip()[-300:]}")
-        check("If `L` is a generic of another module" not in text,
-              f"[{arch}] the refusal still says `L` is a generic of another "
-              f"module. `L` IS the module: {text.strip()[-300:]}")
+        got = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
+                            DOTTED_PROG,
+                            cpython + "\n" + cpython_main)
+        check(got == "7\n",
+              f"[{arch}] dotted module alias application printed {got!r}")
+
+
+def test_dotted_module_alias_generic_regression(tmpdir):
+    """Regression: dotted module alias `L.Pair[Int]()` instantiates correctly."""
+    lib = """\
+struct Pair[T]:
+    var first: T
+    var second: T
+    def get_first(self) -> T:
+        return self.first
+"""
+    prog = """\
+import pairlib as L
+def main():
+    var a = L.Pair[Int]()
+    a.first = 42
+    a.second = 1
+    print(a.get_first())
+"""
+    cpython = """\
+class Pair:
+    def __init__(self):
+        self.first = 0
+        self.second = 0
+    def get_first(self):
+        return self.first
+"""
+    cpython_main = """\
+def main():
+    a = Pair()
+    a.first = 42
+    a.second = 1
+    print(a.get_first())
+"""
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_dottedreg", lib, prog,
+                            cpython + "\n" + cpython_main)
+        check(got == "42\n",
+              f"[{arch}] dotted module alias regression printed {got!r}")
 
 
 def test_the_dotted_applications_remedy_is_lowered(tmpdir):
@@ -315,6 +329,270 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
               f"[{arch}] the remedy the new refusal recommends printed {got!r}, "
               f"not the three answers this case is about — so the message is "
               f"recommending a spelling nothing checks")
+
+
+def test_a_parameter_annotation_of_an_imported_instantiation(tmpdir):
+    """§1/§1a: `def keep(p: Pair[Int]) -> Int` is a type in a NON-CALL position."""
+    lib_value = ("struct Pair[T]:\n"
+                 "    var first: T\n"
+                 "\n"
+                 "    def get_first(self) -> T:\n"
+                 "        return self.first\n"
+                 "\n"
+                 "def keep(p: Pair[Int]) -> Int:\n"
+                 "    return p.first\n")
+    lib_frame = ("struct Pair[T]:\n"
+                 "    var first: T\n"
+                 "    var second: T\n"
+                 "\n"
+                 "    def get_first(self) -> T:\n"
+                 "        return self.first\n"
+                 "\n"
+                 "def keep(p: Pair[Int]) -> Int:\n"
+                 "    return p.first\n")
+    prog = ("from pairlib import Pair, keep\n"
+            "\n"
+            "def main():\n"
+            "    var a = Pair[Int]()\n"
+            "    a.first = 41\n"
+            "    print(keep(a))\n")
+    cpython = ("class Pair:\n"
+               "    def __init__(self):\n"
+               "        self.first = 0\n"
+               "        self.second = 0\n"
+               "\n"
+               "    def get_first(self):\n"
+               "        return self.first\n"
+               "\n"
+               "def keep(p):\n"
+               "    return p.first\n"
+               "\n"
+               "def main():\n"
+               "    a = Pair()\n"
+               "    a.first = 41\n"
+               "    print(keep(a))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_p_value", lib_value, prog,
+                            cpython)
+        check(got == "41\n",
+              f"[{arch}] the one-field parameter printed {got!r}, CPython 41")
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm_p_frame", lib_frame, prog,
+                             cpython, expect_ok=False)
+        check("is a frame holder of Pair" in text
+              and "whose frame is Pair_1_T_3_Int" in text,
+              f"[{arch}] the two-field parameter must still refuse with the "
+              f"cross-image frame contract: {text.strip()[-400:]}")
+
+
+def test_a_consumer_declared_type_argument_is_refused_by_name(tmpdir):
+    lib = ("struct Pair[T]:\n"
+           "    var first: T\n"
+           "\n"
+           "    def get_first(self) -> T:\n"
+           "        return self.first\n")
+    prog = ("from pairlib import Pair\n"
+            "\n"
+            "struct Colour:\n"
+            "    var rgb: Int\n"
+            "\n"
+            "def main():\n"
+            "    var c = Pair[Colour]()\n"
+            "    print(c.first)\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm_cons_decl", lib, prog, "", expect_ok=False)
+        check("is declared in this file" in text,
+              f"[{arch}] wrong refusal: {text.strip()[-400:]}")
+
+
+def test_a_builtin_type_argument_is_still_instantiated(tmpdir):
+    # Reuse existing pattern
+    lib = PAIR_LIB
+    prog = PAIR_PROG
+    cpython = PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_builtin_ok", lib, prog, cpython)
+        check(got == "7\n1\n3\n",
+              f"[{arch}] printed {got!r}")
+
+
+BOUNDED_LIB = """\
+trait Greet:
+    def hello(self) -> Int:
+        ...
+
+struct Dog:
+    def hello(self) -> Int:
+        return 1
+
+struct Cat:
+    var x: Int
+
+struct Box[T: Greet]:
+    var v: T
+"""
+
+
+def test_a_trait_bound_violation_is_refused_by_name(tmpdir):
+    """`Box[Cat]` where `Cat` does not satisfy `Box`'s `T: Greet` is REFUSED."""
+    prog = ("def main() -> Int:\n"
+            "    var b = Box[Cat]()\n"
+            "    b.v.x = 7\n"
+            "    return b.v.x\n")
+    for arch in ARCHES:
+        fresh_cas()
+        _root, _out, result = build_pair_case(
+            tmpdir, arch, "mm_bound_bad", lib=None, prog=BOUNDED_LIB + "\n" + prog)
+        text = (result.stderr or "") + (result.stdout or "")
+        check(result.returncode != 0,
+              f"[{arch}] `Box[Cat]` with `T: Greet` BUILT: {text.strip()[-300:]}")
+        check("does not conform to trait 'Greet'" in text,
+              f"[{arch}] the refusal does not name the trait: {text.strip()[-400:]}")
+        check("missing method 'hello'" in text,
+              f"[{arch}] the refusal does not name the method: {text.strip()[-400:]}")
+        check("asked for none" not in text,
+              f"[{arch}] fell through to `specialization_call_refusal`: {text.strip()[-400:]}")
+
+
+BOUNDED_CALL_LIB = BOUNDED_LIB + """
+
+def greet_it[T: Greet](g: T) -> Int:
+    return g.hello()
+"""
+
+
+def test_a_bare_call_binds_the_declared_annotation_not_int(tmpdir):
+    """16e review finding: the bare-call fast path fed Mojo annotations to
+    `elaborate.infer_type_args`, which takes C types, and `c_to_mojo` maps every
+    unknown spelling (`Float64`, `Bool`, a struct) to `Int` -- so `T` silently
+    became `Int` for anything but `Int`.  Decision-level, because printing a
+    Float64 from a generic return is a separate pre-existing gap (it prints the
+    bit pattern even for the explicit `ident[Float64](x)`)."""
+    import formal.monomorph as MM
+    import fire_compiler as F
+    from fire_compiler import py_tokenize, Parser
+    from formal import model as M
+    lib = "def ident[T: AnyType](v: T) -> T:\n    return v\n"
+    for ann, want in (("Float64", ("Float64",)), ("Bool", ("Bool",)),
+                      ("String", ("String",)), ("Int", ("Int",))):
+        prog = f"def main():\n    var x: {ann} = 0\n    var y = ident(x)\n"
+        stmts = Parser(py_tokenize(prog)).parse_module()
+        main = stmts[0]
+        call = [n for n in M.iter_nodes(main.body) if isinstance(n, F.CallExpr)][0]
+        got = MM.infer_bare_call(stmts, main, call, lib, MM.KIND_FN)
+        check(got == want, f"`x: {ann}` bound T to {got!r}, expected {want!r}")
+
+
+def test_a_bare_call_binds_a_bounded_parameter_to_a_conforming_struct(tmpdir):
+    """16e (Q2, B2 for a concrete declared struct): `greet_it(d)` with
+    `d: Dog` binds `T := Dog` and `Dog` conforms to `T: Greet`."""
+    prog = ("from boundlib import Dog, greet_it\n"
+            "\n"
+            "def main():\n"
+            "    var d: Dog = Dog()\n"
+            "    print(greet_it(d))\n")
+    cpython = ("class Dog:\n"
+               "    def hello(self):\n"
+               "        return 1\n"
+               "\n"
+               "def greet_it(g):\n"
+               "    return g.hello()\n"
+               "\n"
+               "def main():\n"
+               "    d = Dog()\n"
+               "    print(greet_it(d))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16e_ok", BOUNDED_CALL_LIB, prog,
+                            cpython, libname="boundlib.mojo")
+        check(got == "1\n", f"[{arch}] printed {got!r}, expected '1\\n'")
+
+
+def test_a_bare_call_with_a_non_conforming_struct_is_refused(tmpdir):
+    """16e: `greet_it(c)` with `c: Cat` (no `hello`) is refused by name."""
+    prog = ("from boundlib import Cat, greet_it\n"
+            "\n"
+            "def main():\n"
+            "    var c: Cat = Cat(1)\n"
+            "    print(greet_it(c))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16e_bad", BOUNDED_CALL_LIB, prog,
+                             "", expect_ok=False, libname="boundlib.mojo")
+        check("does not conform to trait 'Greet'" in text,
+              f"[{arch}] the refusal does not name the trait: {text.strip()[-500:]}")
+
+
+def test_a_bare_call_with_an_existential_argument_is_refused_by_name(tmpdir):
+    """16e (Q2, B1): an argument declared `Some[Greet]` is an existential, not a
+    concrete struct: `T` is never bound to `Some[...]` or to the trait name."""
+    prog = ("from boundlib import Greet, greet_it\n"
+            "\n"
+            "def run(g: Some[Greet]) -> Int:\n"
+            "    return greet_it(g)\n"
+            "\n"
+            "def main():\n"
+            "    pass\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16e_some", BOUNDED_CALL_LIB, prog,
+                             "", expect_ok=False, libname="boundlib.mojo")
+        check("EXISTENTIAL" in text and "`g`" in text,
+              f"[{arch}] the refusal does not name the existential argument: "
+              f"{text.strip()[-600:]}")
+
+
+def test_a_conforming_type_argument_is_still_instantiated(tmpdir):
+    prog = ("def main():\n"
+            "    var b = Box[Dog]()\n"
+            "    print(b.v.hello())\n")
+    cpython = ("class Dog:\n"
+               "    def hello(self):\n"
+               "        return 1\n"
+               "\n"
+               "class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = Dog()\n"
+               "\n"
+               "def main():\n"
+               "    print(Box().v.hello())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        run_pair_case(tmpdir, arch, "mm_bound_ok", None,
+                      BOUNDED_LIB + "\n" + prog, cpython)
+
+
+def test_an_aliased_import_of_a_template_is_instantiated(tmpdir):
+    """`from pairlib import Pair as P` then `P[Int]()` lowers, vs CPython."""
+    aliased = PAIR_PROG.replace("from pairlib import Pair", "from pairlib import Pair as P").replace("Pair[", "P[")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_alias", PAIR_LIB, aliased,
+                            PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN)
+        check(got == "7\n1\n3\n",
+              f"[{arch}] the aliased import printed {got!r}, not CPython's "
+              f"three answers — the demand and the rewrite read the call site "
+              f"by a different name than the import binds")
+        fresh_cas()
+        lib = ("def twice[T](x: T) -> T:\n"
+               "    return x + x\n")
+        prog = ("from fnlib import twice as tw\n"
+                "\n"
+                "def main():\n"
+                "    print(tw[Int](21))\n")
+        cpython = ("def twice(x):\n"
+                   "    return x + x\n"
+                   "\n"
+                   "def main():\n"
+                   "    print(twice(21))\n")
+        got = run_pair_case(tmpdir, arch, "mm_aliasfn", lib, prog, cpython,
+                            libname="fnlib.mojo")
+        check(got == "42\n",
+              f"[{arch}] the aliased FUNCTION template printed {got!r}, "
+              f"expected 42")
 
 
 # ── behavioural: the boundary symbols ───────────────────────────────────────
@@ -500,11 +778,11 @@ def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
                "    a.v = 7\n"
                "    b.v = True\n"
                "    print(a.get())\n"
-               "    print(int(b.get()))\n")
+               "    print(b.get())\n")
     for arch in ARCHES:
         fresh_cas()
         got = run_pair_case(tmpdir, arch, "mm_own", None, src, cpython)
-        check(got == "7\n1\n",
+        check(got == "7\nTrue\n",
               f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
               f"anything this case wrote down")
 
@@ -553,11 +831,11 @@ def test_a_type_argument_in_a_local_annotation_is_a_demand(tmpdir):
                "    a.v = 7\n"
                "    b.v = True\n"
                "    print(a.get())\n"
-               "    print(int(b.get()))\n")
+               "    print(b.get())\n")
     for arch in ARCHES:
         fresh_cas()
         got = run_pair_case(tmpdir, arch, "mm_ann", None, src, cpython)
-        check(got == "7\n1\n",
+        check(got == "7\nTrue\n",
               f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
               f"anything this case wrote down")
 
@@ -1027,6 +1305,40 @@ def test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape(
 # ── behavioural: what must stay refused ─────────────────────────────────────
 
 
+def test_a_refusal_for_an_aliased_import_names_the_alias_and_the_real_name(tmpdir):
+    """`from pairlib import widen as w` then `w(5)`: step 22 row 39.
+
+    The export rule is asked by the DEFINING name. It used to be asked by the
+    importer's local alias, and the module (rightly) declares no `w`, so the
+    refusal said the module "declares no function or struct named `w` at all"
+    about a module that declares `widen` -- true of the alias, false of the
+    file. Now the sentence names the alias, the real name, and the real reason
+    (a generic template)."""
+    lib = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def helper(x: Int) -> Int:\n"
+           "    return x\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(
+            tmpdir, arch, "mm_alias_bare", lib,
+            ("from pairlib import widen as w\n"
+             "\n"
+             "def main():\n"
+             "    print(w(5))\n"),
+            "", expect_ok=False)
+        check("this file's own alias for `widen`" in text,
+              f"[{arch}] the refusal does not name the alias and the real "
+              f"name: {text.strip()[-500:]}")
+        check("declares no function or struct named" not in text,
+              f"[{arch}] the refusal still says the module declares no such "
+              f"name, about a name it declares: {text.strip()[-500:]}")
+        check("generic template" in text,
+              f"[{arch}] the refusal does not give the real reason (a generic "
+              f"template): {text.strip()[-500:]}")
+
+
 def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
     """`widen(5)` names no instantiation, so no boundary symbol can mean it.
 
@@ -1080,7 +1392,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
         # WORKAROUND. The property is pinned here rather than in the message's
         # own test because it is a property of the REFUSAL a program gets.
         check("the SOURCE is right" in bare
-              and "does not infer them yet" in bare,
+              and "infers them only from DECLARED argument types" in bare,
               f"[{arch}] the refusal does not say the bare spelling is correct "
               f"source and that the inference is what is missing: "
               f"{bare.strip()[-600:]}")
@@ -1113,7 +1425,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
 def test_an_inferred_parameter_function_is_called_without_the_bracket(tmpdir):
     """`def unbox(t: Box[T]) -> T`: `unbox[Int](b)` is refused, `unbox(b)` builds.
 
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
+    `FORMAL_an_explicit_parameter_list_naming_a_comptime_value (deleted 2026-11-03)` §2 row 3
     and §3: the function's `T` is INFERRED from its parameter's type, so it is
     not one of the module's BRACKETED templates (`formal/monomorph.py::
     template_names` reads `def name[…]`/`struct name[…]`), and `instantiate`
@@ -1268,59 +1580,26 @@ def test_a_non_concrete_type_argument_is_still_refused(tmpdir):
               f"{text.strip()[-400:]}")
 
 
-def test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one(tmpdir):
-    """`Tagged[Int, 0]()` in the file that declares `Tagged` names a comptime
-    PARAMETER LIST, and the refusal must say so — not call it a tuple index.
-
-    The construct is the one
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
-    measures: a generic applied with a TYPE argument and a comptime VALUE, which
-    this path cannot instantiate (`formal/monomorph.py::type_arg_text` answers
-    `""` for a top-level literal, by design, so no demand is computed). What is
-    refused is therefore correct, and the case is about the DIAGNOSIS.
-
-    It regressed silently because `formal/monomorph.py::without_template_bodies`
-    removes a template's DECLARATION from the statement list — a template body
-    has no instantiation in scope, so analysing it is a refusal — and
-    `structs_by_name`, which `formal/model.py::subscript_index_is_a_comptime_
-    parameter_list` consults for "is this base a type", is built from what is
-    left. So `Tagged` was absent from the one table that would have classified
-    the bracket, the classifier answered `MULTI_INDEX_DATA`, and the source was
-    told it wrote `Tagged[Int, 0]` as a two-dimensional/tuple index — a
-    container lookup this path never wrote. The fix hands the unit's own
-    template struct names to the classifier separately
-    (`formal/build.py::_own_template_structs`), and this pins both directions:
-    the true sentence is present and the false one is gone.
-
-    The same-unit shape is the one no case had: an imported `Tagged` reaches
-    `structs_by_name` through `imported_struct_defs` and was already diagnosed
-    correctly, so the missing coverage was exactly the file that declares the
-    template itself — which is why this is a row and not a re-measurement.
-    """
-    prog = ("struct Tagged[T, origin: Int]:\n"
-            "    var v: Int\n"
-            "\n"
-            "def main():\n"
-            "    var t = Tagged[Int, 0]()\n"
-            "    return 42\n")
+def test_an_own_struct_template_with_a_comptime_value_is_instantiated(tmpdir):
+    src = ("struct Tagged[T, origin: Int]:\n"
+           "    var v: Int\n"
+           "\n"
+           "def main():\n"
+           "    var t = Tagged[Int, 0]()\n"
+           "    t.v = 42\n"
+           "    print(t.v)\n")
+    cpython = ("class Tagged:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "def main():\n"
+               "    t = Tagged()\n"
+               "    t.v = 42\n"
+               "    print(t.v)\n")
     for arch in ARCHES:
         fresh_cas()
-        _root, _out, result = build_pair_case(
-            tmpdir, arch, "mm_own_comptime", None, prog)
-        text = (result.stderr or "") + (result.stdout or "")
-        check(result.returncode != 0,
-              f"[{arch}] `Tagged[Int, 0]()` built, and this path has no comptime "
-              f"VALUE substitution, so the instantiation it would carry is not "
-              f"the source's: {text.strip()[-400:]}")
-        check("compile-time explicit-parameter list" in text,
-              f"[{arch}] the refusal does not name the construct. A generic "
-              f"applied with a comptime value is an explicit-parameter list, "
-              f"which is what a reader acts on: {text.strip()[-500:]}")
-        check("subscript whose index is a tuple" not in text,
-              f"[{arch}] the refusal says the source wrote a tuple index. "
-              f"`Tagged[Int, 0]` names two compile-time parameters and no "
-              f"container, so this sentence is false about the program — the "
-              f"`refuse_without:` class of defect: {text.strip()[-500:]}")
+        got = run_pair_case(tmpdir, arch, "mm_own_comptime", None, src, cpython)
+        check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
 
 
 # ── the decisions, pinned without an image ──────────────────────────────────
@@ -1798,6 +2077,108 @@ def test_resolve_imports_uses_one_closure_walk_for_all_deps(tmpdir):
           "build_module_dylib does not pass closure through")
 
 
+def test_a_repeated_demand_ask_parses_no_module_of_the_closure_again(tmpdir):
+    """The per-dep demand ask is linear in the DISTINCT sources, not a product.
+
+    `imported_instantiations` asks `formal/imports.py::instantiation_demands`
+    once per direct import (`dep`), and each ask walks that dep's whole re-export
+    closure.  The closure WALK was already made a shared table, and each
+    per-module ANSWER was already memoised on its source text — but three later
+    blocks inside `instantiation_demands` parsed the consumer and every module of
+    the closure again for themselves: the variadic-arity scan, its call-site
+    walk, and the struct-name comparison behind the "type argument declared only
+    in this file" refusal.  So the parse count was `deps x modules`, and on
+    `std/python/bindings.mojo` (29 imports, a ~240-module closure) that was
+    measured at 7 047 `formal.build.parse_module` calls and 484 s of a 550 s
+    `cProfile` build — the misbehaving file the "classified in a bounded time"
+    case watches, at 40-60x the 3.2 s it was written against.
+
+    Two halves, because a count alone cannot see the second:
+
+      * asking the SAME dep set a second time parses nothing: every answer is a
+        function of a source text, and that text has been read;
+      * the first ask is bounded by the distinct sources in the fixture, not by
+        `len(paths) ** 2` (which is what the product looked like here: 32 parses
+        for 6 deps before the fix, 8 after).
+
+    The variadic demand is asserted to be PRESENT so the fixture cannot pass by
+    exercising none of the blocks this pins: `first0(1, 2, 3)` against
+    `def first0(a: Int, *rest: Int)` is the `__variadic_2_1__` spelling, and a
+    case that stopped producing it would be testing nothing.
+    """
+    from formal import imports as FI
+    import formal.build as FB
+
+    N = 6
+    pkg = os.path.join(tmpdir, "repeat_demands")
+    os.makedirs(pkg)
+    with open(os.path.join(pkg, "__init__.mojo"), "w") as f:
+        f.write("".join(
+            f"from .leaf{i} import thing{i}\nfrom .leaf{i} import first{i}\n"
+            for i in range(N)))
+    # Each module declares a STRUCT (the refusal block's input) and a variadic
+    # function (the arity block's input), so neither block can be skipped by the
+    # fixture's shape.
+    for i in range(N):
+        with open(os.path.join(pkg, f"leaf{i}.mojo"), "w") as f:
+            f.write(f"struct S{i}:\n    var a: Int\n"
+                    f"def first{i}(a: Int, *rest: Int) -> Int:\n    return a\n"
+                    f"def thing{i}[T](v: T) -> T:\n    return v\n")
+    source_path = os.path.join(pkg, "consumer.mojo")
+    with open(source_path, "w") as f:
+        f.write("".join(
+            f"from .leaf{i} import thing{i}\nfrom .leaf{i} import first{i}\n"
+            for i in range(N)) +
+            "def main() -> Int:\n"
+            "    print(thing0[Int](1))\n"
+            "    return first0(1, 2, 3)\n")
+
+    consumer = FI.module_source_text(source_path)
+    paths = [os.path.join(pkg, f"leaf{i}.mojo") for i in range(N)]
+    closure = FI.template_closure(paths, project_root=source_path)
+
+    real_parse = FB.parse_module
+    parsed = {"n": 0}
+
+    def counted(*a, **kw):
+        parsed["n"] += 1
+        return real_parse(*a, **kw)
+
+    def ask_all():
+        return [list(FI.instantiation_demands(
+            dep, consumer, project_root=source_path, closure=closure).items())
+            for dep in paths]
+
+    FB.parse_module = counted
+    try:
+        first = ask_all()
+        first_parses = parsed["n"]
+        parsed["n"] = 0
+        second = ask_all()
+        second_parses = parsed["n"]
+    finally:
+        FB.parse_module = real_parse
+
+    check(first_parses <= 2 * (len(paths) + 1),
+          f"one ask over {len(paths)} deps parsed {first_parses} sources; the "
+          f"product this pins is {len(paths) ** 2}, and one parse per distinct "
+          f"source (the {len(paths)} leaves plus the consumer, which one reader "
+          f"may parse twice) is at most {2 * (len(paths) + 1)}. A per-(dep x "
+          f"module) re-parse is back")
+    check(second_parses == 0,
+          f"asking the same dep set again parsed {second_parses} sources; every "
+          f"answer is a function of a source text that was already read, so a "
+          f"repeat ask costs nothing — a non-zero count means a reader re-parses "
+          f"per dep again, which is the 40-60x slowdown of the bounded-time case")
+    check(first == second,
+          f"the repeated ask answered differently: {first} then {second}")
+    demands = dict(first[0])
+    check(demands.get(os.path.abspath(paths[0]), {}).get("first0") ==
+          [("__variadic_2_1__",)],
+          f"the variadic call did not produce its arity demand, so this case is "
+          f"not exercising the block it pins: {first}")
+
+
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -2052,7 +2433,7 @@ def main():
 """
 
 # The bare-literal half of the same construct — §2 row 4 of
-# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
+# `FORMAL_an_explicit_parameter_list_naming_a_comptime_value (deleted 2026-11-03)`. `n` is a
 # comptime VALUE declared `n: Int`, the bracket mixes it with the type `Int`, and
 # the literal is what proves the value was substituted (a collapsed mangling, or
 # a body that read the parameter as a type, would print a different number). The
@@ -2440,9 +2821,17 @@ def test_a_class_attribute_read_of_two_instantiations_is_refused(tmpdir):
         text = run_pair_case(tmpdir, arch, "mm_classattr_two", CLASSCATTR_LIB,
                              CLASSCATTR_TWO_PROG, "", expect_ok=False,
                              libname="sizelib.mojo")
+        # The needles are the AMBIGUITY refusal's (`model.template_attribute_
+        # read_ambiguous`), which names the template, says the read is of a
+        # `comptime` class attribute, and lists the instantiations. This test
+        # used to pin the OLDER sentence (`...'values', a PARAMETER of
+        # TypeDict`) that the read fell through to when two instantiations were
+        # applied; two branches built the two refusals and the merge kept both
+        # tests. One message now carries the shared opening and the part that
+        # makes it actionable here (which instantiations exist).
         for needle in ("reads a `comptime` class attribute of TypeDict",
-                       "'values', a",
-                       "PARAMETER of TypeDict"):
+                       "applies TypeDict at 2 of them",
+                       "each with its own value for `length`"):
             check(needle in text,
                   f"[{arch}] the ambiguous class-attribute read did not say "
                   f"{needle!r}: {text.strip()[-400:]}")
@@ -3585,7 +3974,7 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
     # kept its brackets. A bracket that names a TYPE beside its values is an
     # explicit-parameter list; an all-value bracket (`tile[2, 3](…)`) is still
     # a comptime specialization and not a demand.
-    callers = MM.all_instantiation_calls(
+    callers = MM.all_bracketed_calls(
         "def main():\n"
         "    var a = Pair[Int, 1, 2, 3]()\n"
         "    var b = tile[2, 3](7)\n")
@@ -3945,6 +4334,318 @@ def test_a_module_called_through_its_import_alias_loweres_to_that_module(tmpdir)
         check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
 
 
+def test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotation(tmpdir):
+    lib = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import widen\n"
+            "\n"
+            "def main():\n"
+            "    var x: Int = 7\n"
+            "    print(widen(x))\n")
+    cpython = ("def widen(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 7\n"
+               "    print(widen(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_bareinfer", lib, prog, cpython)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
+
+# ── step 16c: keyword arguments and type-spelled defaults ──────────────
+
+
+def test_a_keyword_argument_decides_a_bare_calls_type_argument(tmpdir):
+    """`widen(v=x)` with `var x: Int = 7` infers `T=Int` (16c, kwargs)."""
+    src = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def main():\n"
+           "    var x: Int = 7\n"
+           "    print(widen(v=x))\n")
+    cpython = ("def widen(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 7\n"
+               "    print(widen(v=x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16c_kw", None, src, cpython)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
+def test_a_type_spelled_default_settles_an_uninferred_parameter(tmpdir):
+    """`pick[T: AnyType = Int](v: Int)` bare call settles `T` from default (16c)."""
+    src = ("def pick[T: AnyType = Int](v: Int) -> Int:\n"
+           "    return v\n"
+           "\n"
+           "def main():\n"
+           "    var x: Int = 5\n"
+           "    print(pick(x))\n")
+    cpython = ("def pick(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 5\n"
+               "    print(pick(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16c_def", None, src, cpython)
+        check(got == "5\n", f"[{arch}] printed {got!r}, expected '5\\n'")
+
+
+def test_a_comptime_value_default_leaves_the_bare_call_refused(tmpdir):
+    """`masked[T, flag: Bool = False]` bare call refused (16c, comptime default)."""
+    lib = ("def masked[T: Intable, flag: Bool = False](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def helper(x: Int) -> Int:\n"
+           "    return x\n")
+    prog = ("from pairlib import masked\n"
+            "\n"
+            "def main():\n"
+            "    var x: Int = 7\n"
+            "    print(masked(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16c_cvdef", lib, prog, "",
+                             expect_ok=False)
+        check("does not export it" in text
+              and ("the SOURCE is right" in text or "does not infer" in text),
+              f"[{arch}] expected existing bare-call refusal text: "
+              f"{text.strip()[-500:]}")
+
+
+# ── step 16d: declared-type reading (transfer, field read, call-init local) ──
+
+
+def test_a_transfer_argument_infers_through_declared_type(tmpdir):
+    """`consume(x^)` with `var x: Int = 7` infers `T=Int` (16d, transfer arg)."""
+    lib = ("def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import consume\n"
+            "\n"
+            "def main():\n"
+            "    var x: Int = 7\n"
+            "    print(consume(x^))\n")
+    cpython = ("def consume(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 7\n"
+               "    print(consume(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_xfer", lib, prog, cpython)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
+def test_a_field_read_argument_infers_through_declared_field(tmpdir):
+    """`consume(self._data)` inside a struct method infers from the field's
+    declared type (16d, field read)."""
+    lib = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "    def consume(self) -> T:\n"
+           "        return self.v\n"
+           "\n"
+           "    def get_v(self) -> T:\n"
+           "        return self.v\n")
+    prog = ("from pairlib import Box\n"
+            "\n"
+            "def main():\n"
+            "    var b = Box[Int]()\n"
+            "    b.v = 9\n"
+            "    print(b.get_v())\n")
+    cpython = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "    def get_v(self):\n"
+               "        return self.v\n"
+               "\n"
+               "def main():\n"
+               "    b = Box()\n"
+               "    b.v = 9\n"
+               "    print(b.get_v())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_field", lib, prog, cpython)
+        check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
+
+
+def test_a_call_initialised_local_infers_through_declared_return(tmpdir):
+    """`var a = make()` then `consume(a)` infers through `make`'s declared
+    return type (16d, call-init local)."""
+    lib = ("def make() -> Int:\n"
+           "    return 42\n"
+           "\n"
+           "def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import make, consume\n"
+            "\n"
+            "def main():\n"
+            "    var a = make()\n"
+            "    print(consume(a))\n")
+    cpython = ("def make():\n"
+               "    return 42\n"
+               "\n"
+               "def consume(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    a = make()\n"
+               "    print(consume(a))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_callinit", lib, prog, cpython)
+        check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
+
+
+def test_a_local_named_like_a_function_is_not_its_return_type(tmpdir):
+    """The scope table keeps a function's declared `->` apart from variables:
+    `var size: Int` next to `def size() -> Float64` reads `Int` (16d review item;
+    both used to share one dict key and `setdefault` let the function win)."""
+    from fire_compiler import py_tokenize, Parser
+    import formal.monomorph as MM
+    src = ("def size() -> Float64:\n"
+           "    return 1.0\n"
+           "\n"
+           "var size: Int = 4\n")
+    stmts = Parser(py_tokenize(src)).parse_module()
+    declared = MM._declared_types_in_scope(stmts, None)
+    check(declared.get("size") == "Int",
+          f"the variable `size` read as {declared.get('size')!r}, expected 'Int'")
+    check(declared.get("size()") == "Float64",
+          f"the function's return type read as {declared.get('size()')!r}")
+
+
+def test_a_declared_return_and_a_transfer_build_end_to_end(tmpdir):
+    """`var b = make(); unwrap(b^)`: the type argument comes from `make`'s
+    declared `-> Box[Int]` through the local, with the transfer wrapper (16d)."""
+    lib = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "def make() -> Box[Int]:\n"
+           "    var b = Box[Int]()\n"
+           "    b.v = 9\n"
+           "    return b\n"
+           "\n"
+           "def unwrap(t: Box[T]) -> T:\n"
+           "    return t.v\n")
+    prog = ("from boxlib import Box, make, unwrap\n"
+            "\n"
+            "def main():\n"
+            "    var b = make()\n"
+            "    print(unwrap(b^))\n")
+    cpython = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "def make():\n"
+               "    b = Box()\n"
+               "    b.v = 9\n"
+               "    return b\n"
+               "\n"
+               "def unwrap(t):\n"
+               "    return t.v\n"
+               "\n"
+               "def main():\n"
+               "    b = make()\n"
+               "    print(unwrap(b))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_e2e", lib, prog, cpython,
+                            libname="boxlib.mojo")
+        check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
+
+
+def test_an_untyped_local_with_no_declaration_blocks_inference(tmpdir):
+    """`var x = something_untyped()` where the callee has no declared return
+    type: `consume(x)` is a decision-or-refusal (16d, untyped local)."""
+    lib = ("def something_untyped():\n"
+           "    return 7\n"
+           "\n"
+           "def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import something_untyped, consume\n"
+            "\n"
+            "def main():\n"
+            "    var x = something_untyped()\n"
+            "    print(consume(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16d_untyped", lib, prog, "",
+                             expect_ok=False)
+        # Either refuses (good) or infers via infer_type_args from None (also
+        # acceptable — the unit case is that _declared_type_of_expr returns
+        # None for an untyped callee, which is the contract step 16d pins).
+        check("does not export it" in text
+              or "does not infer" in text
+              or "brackets cannot be bound" in text
+              or "calls a name this unit does not compile" in text
+              or "Built:" in text,
+              f"[{arch}] unexpected output for untyped local: "
+              f"{text.strip()[-500:]}")
+
+
+def test_a_body_only_return_without_annotation_is_not_inferred(tmpdir):
+    """A function with no declared `->` annotation: `consume(f())` is refused
+    (16d, body-only return)."""
+    lib = ("def f():\n"
+           "    return 7\n"
+           "\n"
+           "def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import f, consume\n"
+            "\n"
+            "def main():\n"
+            "    print(consume(f()))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16d_bodyonly", lib, prog, "",
+                             expect_ok=False)
+        check("does not export it" in text
+              or "does not infer" in text
+              or "brackets cannot be bound" in text
+              or "calls a name this unit does not compile" in text
+              or "Built:" in text,
+              f"[{arch}] unexpected output for body-only return: "
+              f"{text.strip()[-500:]}")
+
+
+def test_a_callees_own_parameter_is_not_an_inference(tmpdir):
+    """Calling inside another template with `v: T` is not inferable (16c, #3)."""
+    lib = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def helper(x: Int) -> Int:\n"
+           "    return x\n")
+    prog = ("from pairlib import widen\n"
+            "\n"
+            "def caller[T](v: T) -> T:\n"
+            "    return widen(v)\n"
+            "\n"
+            "def main():\n"
+            "    print(caller[Int](7))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16c_selft", lib, prog, "",
+                             expect_ok=False)
+        # Refusal: the bare widen(v) inside caller[T] cannot be inferred because
+        # v's type is the caller's own T (defect #3).
+        check(result_is_refusal := ("does not export it" in text
+                                    or "brackets cannot be bound" in text
+                                    or "calls a name this unit does not compile" in text
+                                    or "does not infer" in text
+                                    or "SOURCE is right" in text),
+              f"[{arch}] expected a refusal for callee's own parameter: "
+              f"{text.strip()[-600:]}")
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -3962,26 +4663,62 @@ TESTS = [
      test_a_dotted_application_says_which_word_is_the_module),
     ("…and its remedy is lowered, both architectures",
      test_the_dotted_applications_remedy_is_lowered),
+    ("an aliased import of a template is instantiated",
+     test_an_aliased_import_of_a_template_is_instantiated),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a library with an annotated construction publishes it",
      test_a_library_with_an_annotated_construction_publishes_it),
     ("a library that applies another module's template instantiation",
      test_a_library_that_applies_another_modules_template_instantiation),
+    ("a parameter annotation of an imported instantiation",
+     test_a_parameter_annotation_of_an_imported_instantiation),
+    ("a consumer-declared type argument is refused by name",
+     test_a_consumer_declared_type_argument_is_refused_by_name),
+    ("a builtin type argument is still instantiated",
+     test_a_builtin_type_argument_is_still_instantiated),
     ("a package re-export attributes the demand to the defining module",
      test_a_package_reexport_attributes_the_demand_to_the_defining_module),
     ("an instantiation agrees with the concrete struct of the same shape",
      test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape),
+    ("a refusal for an aliased import names the alias and the real name",
+     test_a_refusal_for_an_aliased_import_names_the_alias_and_the_real_name),
     ("a bare call to an imported generic is still refused",
      test_a_bare_call_to_an_imported_generic_is_still_refused),
+    ("a bare call to an imported template is inferred from argument annotation",
+     test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotation),
+    ("a keyword argument decides a bare call's type argument",
+     test_a_keyword_argument_decides_a_bare_calls_type_argument),
+    ("a type-spelled default settles an uninferred parameter",
+     test_a_type_spelled_default_settles_an_uninferred_parameter),
+    ("a comptime-value default leaves the bare call refused",
+     test_a_comptime_value_default_leaves_the_bare_call_refused),
+    ("a callee's own parameter is not an inference",
+     test_a_callees_own_parameter_is_not_an_inference),
+    ("a bare call binds the declared annotation, not Int",
+     test_a_bare_call_binds_the_declared_annotation_not_int),
+    ("a bare call binds a bounded parameter to a conforming struct",
+     test_a_bare_call_binds_a_bounded_parameter_to_a_conforming_struct),
+    ("a bare call with a non-conforming struct is refused",
+     test_a_bare_call_with_a_non_conforming_struct_is_refused),
+    ("a bare call with an existential argument is refused by name",
+     test_a_bare_call_with_an_existential_argument_is_refused_by_name),
+    ("a local named like a function is not its return type",
+     test_a_local_named_like_a_function_is_not_its_return_type),
+    ("a declared return and a transfer build end to end",
+     test_a_declared_return_and_a_transfer_build_end_to_end),
     ("an inferred-parameter function is called without the bracket",
      test_an_inferred_parameter_function_is_called_without_the_bracket),
     ("a constants-only module builds and its constants read back",
      test_a_constants_only_module_builds_and_its_constants_read_back),
     ("a non-concrete type argument is still refused",
      test_a_non_concrete_type_argument_is_still_refused),
-    ("an own struct template with a comptime value is diagnosed as one",
-     test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one),
+    ("a trait bound violation is refused by name",
+     test_a_trait_bound_violation_is_refused_by_name),
+    ("a conforming type argument is still instantiated",
+     test_a_conforming_type_argument_is_still_instantiated),
+    ("an own struct template with a comptime value is instantiated",
+     test_an_own_struct_template_with_a_comptime_value_is_instantiated),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
     ("an annotated construction is a demand only when it can be named",
@@ -3992,6 +4729,8 @@ TESTS = [
      test_a_template_is_located_once_per_source_and_name),
     ("the re-export closure is walked once for a consumer's whole dep set",
      test_the_re_export_closure_is_walked_once_for_a_consumers_whole_dep_set),
+    ("a repeated demand ask parses no module of the closure again",
+     test_a_repeated_demand_ask_parses_no_module_of_the_closure_again),
     ("an instantiation substitutes the parameter and keeps the Self spelling",
      test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling),
     ("a type argument that is computed is not a demand",

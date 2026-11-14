@@ -14,7 +14,7 @@ CPython's `json` is a MARSHALLER: `json.loads(text)` builds a Python object
 graph out of the text, and `json.dump(obj, fp)` walks one. Neither direction
 is expressible here, and the reason is the one that shapes every module in
 this directory: **a value cannot cross a dylib boundary unless it is one
-64-bit word** (`bugs/FORMAL_module_state_no_storage.md`), while a dict is a
+64-bit word** (module state is not stored in the formal model), while a dict is a
 blob carved out of the frame that built it. So `loads`, `load`, `dump` and
 `dumps` of a container are ABSENT rather than approximated — see "WHAT IS NOT
 HERE" below, where each is named.
@@ -40,8 +40,8 @@ container read. And `valid`, `top_kind` and `member_kind` are named at their
 definitions as names CPython's `json` does not have, for the same reason
 `sys.write_stdout` is not one: CPython spells "this text is malformed" by
 raising, and this path has no exceptions to raise
-(`bugs/FORMAL_no_exceptions.md`), so the question has to become a return
-value to be asked at all.
+(there are no exceptions on this path), so the question has to become a return
+value to be asked at all. Status convention: hoststatus.mojo.
 
 THE PRIMITIVE THIS FILE IS BUILT ON
 -----------------------------------
@@ -90,7 +90,7 @@ TWO CONSEQUENCES OF THIS PATH THAT THE CODE BELOW IS WRITTEN AROUND
     `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`.)
   * **THERE ARE NO EXCEPTIONS AND NO MODULE STATE.** Every failure is a
     return value — `-1` for "no such index", `0` for "not valid", and for
-    `loads_*` a documented sentinel. A module-level name is a value inlined
+    `loads_*` a documented sentinel (hoststatus.mojo). A module-level name is a value inlined
     at its use site and crosses no boundary, so this module has nothing to
     remember between calls and nothing to free but what it `malloc`s.
 
@@ -104,7 +104,7 @@ WHAT IS NOT HERE, AND WHY
     function that answers something plausible.
   * `JSONDecodeError`, `JSONEncoder`, `JSONDecoder`, `detect_encoding` — a
     type, two factories and one spelling rule. A type is not a value
-    (`bugs/FORMAL_module_state_no_storage.md`).
+    (module state is not stored in the formal model).
   * `NaN`, `Infinity`, `-Infinity` as INPUT — CPython's `json.loads` accepts
     all three, because its default `parse_constant` does, even though RFC
     8259 does not mention them. This module follows CPython rather than the
@@ -126,6 +126,8 @@ WHAT IS NOT HERE, AND WHY
     `test_formal_json.py`'s corpora have no NUL in them. That is a property of
     the value model and not something this file can route around.
 """
+
+from hoststatus import status_ok, status_err
 
 HEX = "0123456789abcdef"
 
@@ -617,7 +619,7 @@ def number_kind(s, p) -> int:
 
 
 def valid(s) -> int:
-    """1 if `json.loads(s)` would succeed, 0 if it would raise.
+    """1 if `json.loads(s)` would succeed, 0 if it would raise (hoststatus.mojo).
 
     A NAME CPYTHON'S `json` DOES NOT HAVE — CPython spells this by raising
     `JSONDecodeError`, and this path has no exceptions, so the question has to
@@ -628,14 +630,14 @@ def valid(s) -> int:
 
 
 def top_kind(s) -> int:
-    """The kind of the whole document, or -1. See `kind_at`.
+    """The kind of the whole document, or -1 (hoststatus.mojo). See `kind_at`.
 
     The whole document, so trailing junk counts: `top_kind("1 2")` is -1
     because CPython raises on it, and a kind for a document the reader cannot
     read is a kind nobody asked for.
     """
     if scan_text(s) == 0:
-        return 0 - 1
+        return status_err()
     return _kind_shape(s, 0)
 
 
@@ -741,7 +743,7 @@ def string_eq(s, i, e, key) -> int:
 
 
 def member_kind(s, key) -> int:
-    """The kind of top-level member `key`, or -1. See `kind_at`.
+    """The kind of top-level member `key`, or -1 (hoststatus.mojo). See `kind_at`.
 
     -1 for an absent key, for a document that is not an object, and for a
     member whose value is not well formed — the three cases a caller cannot
@@ -749,7 +751,7 @@ def member_kind(s, key) -> int:
     """
     var p = member_value(s, key)
     if p < 0:
-        return 0 - 1
+        return status_err()
     return kind_at(s, p)
 
 
@@ -1172,8 +1174,7 @@ def dumps_int(n) -> str:
 
     `%lld` and NOT `%d`, which is measured and not a matter of taste: a `%d`
     conversion is 32 bits wide on this path, so `snprintf("%d", 4294967296)`
-    writes `-2147483648` (`bugs/FORMAL_string_value_model.md` §2, "the `-1` a
-    `%d` prints for `~2**62` is the formatter, not the operator"). Every
+    writes `-2147483648` (the `-1` a `%d` prints for `~2**62` is the formatter, not the operator). Every
     other `printf` in this tree that prints a number a caller could have made
     large is `%d` and is therefore only right below 2**31 — a 24-byte buffer
     is 20 digits plus a sign, which is the widest `-2^63` needs.

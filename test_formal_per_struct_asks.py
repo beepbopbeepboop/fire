@@ -48,8 +48,8 @@ deletes a table makes them grow too, because the fallback path is the predicate.
 The counts are the assertion rather than a wall clock on purpose — the cost of a
 redundant ask is proportional to the struct's body, so whether it shows up in
 seconds depends on the file, and an ask count is the same fact on every file.
-(`bugs/FORMAL_build_cost_2026-10-03.md` §6.1 has the clock numbers, and they are
-a wash outside the outlier.)
+(The clock numbers for the one-field threading are in the 2026-10-03 build-cost
+measurement, whose doc is in git history; they are a wash outside the outlier.)
 
 No Lean, no build, no sweep: a parse and `_prepare_functions`.
 """
@@ -112,6 +112,22 @@ def module_with(nfuncs: int, nmeths: int = 12) -> str:
     return '\n'.join(out)
 
 
+_MODEL_MODS = ('formal.model', 'formal.model.cfg', 'formal.model.methods',
+                'formal.model.values', 'formal.model.strings',
+                'formal.model.structs', 'formal.model.builtins',
+                'formal.model.calls', 'formal.model.types',
+                'formal.model.eh', 'formal.model.init',
+                'formal.model.frames', 'formal.model.module',
+                'formal.model.layout')
+
+
+def _set_everywhere(name, fn):
+    for modname in _MODEL_MODS:
+        mod = sys.modules.get(modname)
+        if mod is not None and hasattr(mod, name):
+            setattr(mod, name, fn)
+
+
 def ask_counts(source: str):
     """{predicate: calls} for one `_prepare_functions` run over `source`."""
     counts = collections.Counter()
@@ -123,7 +139,7 @@ def ask_counts(source: str):
             counts[_n] += 1
             return _fn(*a, **k)
         saved[name] = fn
-        setattr(M, name, timed)
+        _set_everywhere(name, timed)
     try:
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, 'asks.mojo')
@@ -133,7 +149,7 @@ def ask_counts(source: str):
             B._prepare_functions(stmts, synthetic=True, source_path=path)
     finally:
         for name, fn in saved.items():
-            setattr(M, name, fn)
+            _set_everywhere(name, fn)
     return counts
 
 

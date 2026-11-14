@@ -191,6 +191,63 @@ def main(fn):
     x = 1
     fn(x, x)
 """),
+    # Triviality gate (2026-11-06): real Mojo's lifetime checker does NOT
+    # liveness-track a value whose type is trivially register-passable, so a
+    # use after `x^` is legal for those. Every case below is ACCEPTED by the
+    # real compiler (the first mirrors Modular's own positive parser test
+    # mojo/test/mojo-parser/decls/structs.mojo::testCopyMoveSynth verbatim)
+    # but was REJECTED by this pass before the gate (regression fixtures for
+    # the triviality false positive; the bugs doc that tracked it was
+    # deleted when this fix landed).
+    ("trivial_struct_copy_after_move", """
+struct IntPair:
+    a: Int
+    b: Int
+
+def main():
+    var a: IntPair
+    var aMove = a^
+    var aExCopy = a.copy()
+"""),
+    ("declared_scalar_param_use_after_move", """
+def main(p: Int):
+    q = p^
+    print(p)
+"""),
+    ("declared_scalar_vardecl_use_after_move", """
+def main():
+    var a: Int
+    t = a^
+    print(a)
+"""),
+    ("declared_pointer_typed_use_after_move", """
+def main():
+    var p: Pointer[Int]
+    m = p^
+    print(p)
+"""),
+    ("struct_with_pointer_field_use_after_move", """
+struct PtrBox:
+    p: Pointer[Int]
+
+def main():
+    var b: PtrBox
+    m = b^
+    print(b)
+"""),
+    ("nested_trivial_struct_use_after_move", """
+struct Inner:
+    x: Int
+
+struct Outer:
+    inner: Inner
+    y: Int
+
+def main():
+    var o: Outer
+    m = o^
+    print(o)
+"""),
 ]
 
 REJECT = [
@@ -288,6 +345,81 @@ def fill(out dst: Int, imm src: Int):
 def main():
     x = 1
     fill(x, x)
+"""),
+    # Triviality gate: the suppression must never leak past decided-trivial
+    # types. Each case below must STAY flagged — a too-eager gate (e.g. one
+    # that treats a `**` parameter's element type as the binding's type, or
+    # that suppresses on a non-trivial struct) would silence these.
+    ("struct_with_string_field_use_after_move", """
+struct Box:
+    s: String
+
+def main():
+    var b: Box
+    m = b^
+    print(b)
+"""),
+    ("struct_with_user_deinit_use_after_move", """
+struct Box:
+    x: Int
+    def __deinit__(deinit self):
+        pass
+
+def main():
+    var b: Box
+    m = b^
+    print(b)
+"""),
+    ("struct_with_user_copy_ctor_use_after_move", """
+struct Box:
+    x: Int
+    def __init__(out self, *, copy: Self):
+        pass
+
+def main():
+    var b: Box
+    m = b^
+    print(b)
+"""),
+    ("struct_with_user_move_ctor_use_after_move", """
+struct Box:
+    x: Int
+    def __init__(out self, *, deinit move: Self):
+        pass
+
+def main():
+    var b: Box
+    m = b^
+    print(b)
+"""),
+    ("nested_nontrivial_struct_field_use_after_move", """
+# Decided (not merely unresolved) non-trivial: Holder's field type resolves
+# to a same-module struct with a user __deinit__, so Holder is decided
+# non-trivial, exactly as the real compiler would track it.
+struct NonTrivial:
+    def __deinit__(deinit self):
+        pass
+
+struct Holder:
+    nt: NonTrivial
+    x: Int
+
+def main():
+    var h: Holder
+    m = h^
+    print(h)
+"""),
+    ("variadic_pack_double_move_still_flagged", """
+# A `**` parameter's annotation ('Int' here) names the pack's ELEMENT type;
+# the binding is the pack itself, which real Mojo tracks. Mirrors Modular's
+# mojo-parser test decls/pack_errors.mojo::test_two_kwargs_unpacks — the
+# genuine double-move the element-type mistake would have silenced.
+def forward(**kwargs: Int):
+    pass
+
+def main(**kwargs: Int):
+    forward(**kwargs^)
+    forward(**kwargs^)
 """),
 ]
 

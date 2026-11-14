@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _pair_key
+from fire_compiler import ExceptHandler, MatchCase, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _pair_key
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -48,7 +48,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     decimal pointers. Resolve the actual type first, then pick the
     accessor from the element type, mirroring the MojoList* branch."""
     real = gen._get_actual_type(vtype, v)
-    idx64 = gen._new_val('int64_t', f"(int64_t){idx}")
+    idx64 = gen._cast('int64_t', f"{idx}")
     if real == 'MojoList *':
         elem = gen._elem_of(v)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -59,6 +59,18 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             # MojoList* temp before the accessor call, or GIMPLE rejects
             # "passing int64_t where MojoList * expected".
             lp = gen._coerce_to_type('int64_t', 'MojoList *', v)
+        # If the list is marked as having per-slot kinds that must be read
+        # via mojo_list_get_boxed (e.g. a dict's keys materialized through
+        # the opaque boxed path), use the boxed reader for every slot.
+        _mkv = (v in getattr(gen, '_maybe_kinds_vals', ()) or
+                lp in getattr(gen, '_maybe_kinds_vals', ()) or
+                _as_str(v) in getattr(gen, '_maybe_kinds_vals', ()) or
+                _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
+        if _mkv:
+            _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
+            gen._boxed_vals.add(_ev)
+            gen._dyn_word_vals.add(_ev)
+            return 'int64_t', _ev
         # A `struct.unpack(...)` result has ONE container ctype but a
         # per-slot real kind, statically known from the format string. The
         # subscript path already prefers that per-slot kind (emit_calls.py's
@@ -72,14 +84,13 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         _sk = gen._struct_slot_kinds.get(v)
         if _sk is not None and 0 <= idx < len(_sk):
             if _sk[idx] == 'double':
-                return 'double', gen._new_val(
-                    'double', f"mojo_list_get_double ({lp}, {idx64})")
+                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if _sk[idx] == 'bytes':
                 # A bytes slot is a `MojoBytes *` stored in the raw int64_t
                 # slot (see fire_runtime.h's MojoList comment), so the read
                 # goes back through the coercion chokepoint rather than an
                 # ad-hoc pointer cast — DESIGN.html R2/R3.
-                _bp = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+                _bp = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
                 return 'MojoBytes *', gen._coerce_to_type(
                     'int64_t', 'MojoBytes *', _bp)
             if _sk[idx] == 'str':
@@ -89,10 +100,8 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
                 # `struct.unpack` format cannot — including one that reached
                 # this value through a `return`
                 # (`gen._return_value_slot_kinds`).
-                return 'char *', gen._new_val(
-                    'char *', f"mojo_list_get_str ({lp}, {idx64})")
-            return 'int64_t', gen._new_val(
-                'int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
         # Per-slot types recorded for this exact value, when it has them:
         # a heterogeneous tuple literal, or a multi-value return's tuple
         # re-keyed onto the call result (see gen._return_slot_types). Each
@@ -104,22 +113,22 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         if _pst is not None and 0 <= idx < len(_pst):
             _pc = _pst[idx]
             if _pc == 'double':
-                return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
+                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if _pc == 'char *':
-                return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
             if _pc in ('int64_t', 'int', '_Bool', 'double', 'char', '', 'unknown'):
-                return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+                return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             # Any other slot type is a boxed pointer: read the raw slot and
             # put it back through the coercion chokepoint rather than an
             # ad-hoc cast (same rule as the bytes slot above).
-            _pr = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _pr = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             return _pc, gen._coerce_to_type('int64_t', _pc, _pr)
         if suf == 'str':
-            return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+            return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
         if suf == 'double':
-            return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
+            return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
         if elem in ('int64_t', 'int', '_Bool'):
-            _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             # `_elem_of`'s int64_t is also its "nothing recorded" default: a
             # value with no element record at all is a word whose kind only
             # the runtime knows (see `_dyn_word_vals`).
@@ -134,11 +143,11 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # (`a = ()_t5;` — not even valid C; repro:
         # std/test/builtin/test_int.mojo's `a, b = divmod(...)`).
         if not elem or elem == 'unknown':
-            _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             gen._dyn_word_vals.add(_ev)
             return 'int64_t', _ev
-        raw = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
-        return elem, gen._new_val(elem, f"({elem}){raw}")
+        raw = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
+        return elem, gen._cast(elem, raw)
     # Non-container / untracked: despite this function's name, its real
     # callers include plain multi-assign unpacking (`a, b = x`) over ANY
     # iterable, not just a syntactic tuple/call-return — `a, b = some_dict`
@@ -147,13 +156,20 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     # R1/R5, shares _materialize_as_list with all()/any()/enumerate()/
     # *.join()/the list-pattern-target branch above in gimple_gen_stmts.py).
     lp = gen._materialize_as_list(vtype, v)
+    _mkv = (lp in getattr(gen, '_maybe_kinds_vals', ()) or
+            _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
+    if _mkv:
+        _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
+        gen._boxed_vals.add(_ev)
+        gen._dyn_word_vals.add(_ev)
+        return 'int64_t', _ev
     elem = gen._elem_of(lp)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     if suf == 'str':
-        return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+        return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
     if suf == 'double':
-        return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
-    _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+        return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
+    _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
     if lp not in gen._elem_types:
         gen._dyn_word_vals.add(_ev)
     return 'int64_t', _ev
@@ -266,28 +282,28 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
         gen._elem_types[_nm] = slot_elem
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
-    gen._emit(f"  {_lst} = mojo_list_new ();")
-    gen._emit(f"  {_dst} = {_lst};")
+    gen._rt_into(_lst, 'mojo_list_new', [])
+    gen._copy(f"{_dst}", _lst)
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
-    gen._emit(f"  goto {_cond};")
+    gen._goto(_cond)
     gen._emit_label(_cond)
     _c = gen._new_val('_Bool', f"{_i} < {_as_str(stop)}")
-    gen._emit(f"  if ({_c}) goto {_body}; else goto {_after};")
+    gen._cond_goto(_c, _body, _after)
     gen._emit_label(_body)
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
-        _rd = gen._new_val('char *', f"mojo_list_get_str ({_lp}, {_i})")
+        _rd = gen._rt_call('char *', 'mojo_list_get_str', [_lp, _i])
         gen._void_call('mojo_list_append_str', [('MojoList *', _dst), ('char *', _rd)])
     elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
-        _rd = gen._new_val('double', f"mojo_list_get_double ({_lp}, {_i})")
+        _rd = gen._rt_call('double', 'mojo_list_get_double', [_lp, _i])
         gen._void_call('mojo_list_append_double', [('MojoList *', _dst), ('double', _rd)])
     else:
-        _rd = gen._new_val('int64_t', f"mojo_list_get_int ({_lp}, {_i})")
+        _rd = gen._rt_call('int64_t', 'mojo_list_get_int', [_lp, _i])
         gen._void_call('mojo_list_append_int', [('MojoList *', _dst), ('int64_t', _rd)])
     _one = gen._new_val('int64_t', "1LL")
     _nxt = gen._new_val('int64_t', f"{_i} + {_one}")
-    gen._emit(f"  {_i} = {_nxt};")
-    gen._emit(f"  goto {_cond};")
+    gen._copy(_i, _nxt)
+    gen._goto(_cond)
     gen._emit_label(_after)
 
 
@@ -313,8 +329,8 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
         gen._elem_types[_nm] = slot_elem
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
-    gen._emit(f"  {_lst} = mojo_list_new ();")
-    gen._emit(f"  {_dst} = {_lst};")
+    gen._rt_into(_lst, 'mojo_list_new', [])
+    gen._copy(f"{_dst}", _lst)
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', _dst), ('char *', _as_str(value))])
@@ -322,7 +338,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
         gen._void_call('mojo_list_append_double',
                        [('MojoList *', _dst), ('double', _as_str(value))])
     else:
-        _iv = gen._new_val('int64_t', f"(int64_t){_as_str(value)}")
+        _iv = gen._cast('int64_t', _as_str(value))
         gen._void_call('mojo_list_append_int',
                        [('MojoList *', _dst), ('int64_t', _iv)])
 
@@ -388,25 +404,24 @@ def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None
     gen._elem_types[_nm] = 'char *'
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
-    gen._emit(f"  {_lst} = mojo_list_new ();")
-    gen._emit(f"  {_dst} = {_lst};")
-    _src = gen._new_val('char *', f"(char *){_as_str(cstr)}")
+    gen._rt_into(_lst, 'mojo_list_new', [])
+    gen._copy(f"{_dst}", _lst)
+    _src = gen._cast('char *', _as_str(cstr))
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
-    gen._emit(f"  goto {_cond};")
+    gen._goto(_cond)
     gen._emit_label(_cond)
     _c = gen._new_val('_Bool', f"{_i} < {_as_str(stop)}")
-    gen._emit(f"  if ({_c}) goto {_body}; else goto {_after};")
+    gen._cond_goto(_c, _body, _after)
     gen._emit_label(_body)
     _one = gen._new_val('int64_t', "1LL")
     _next = gen._new_val('int64_t', f"{_i} + {_one}")
     _stop = gen._new_val('int64_t', f"{_next}")
-    _chr = gen._new_val('char *', f"mojo_cstr_slice ({_as_str(_src)}, {_i}, "
-                                  f"{_as_str(_stop)})")
+    _chr = gen._rt_call('char *', 'mojo_cstr_slice', [_as_str(_src), _i, _as_str(_stop)])
     gen._void_call('mojo_list_append_str',
                    [('MojoList *', _dst), ('char *', _as_str(_chr))])
-    gen._emit(f"  {_i} = {_next};")
-    gen._emit(f"  goto {_cond};")
+    gen._copy(_i, _next)
+    gen._goto(_cond)
     gen._emit_label(_after)
 
 
@@ -443,3 +458,108 @@ class ZipLongestFillRefusal(ValueError):
     `emit_loops.py`), so a slot whose own sequence is long enough that the
     fill is never selected raises nothing.
     """
+
+
+# ── `for ... else` / `while ... else` ─────────────────────────────────────────
+# The `else` clause of a loop runs when the loop ends WITHOUT a `break`. The lowerings of
+# the loop forms never emitted it (a list/dict/str/range/while loop with an `else` ran its
+# body and silently dropped the clause), so it is desugared here, once, ahead of all of
+# them:
+#
+#     ok = True
+#     for x in it:            # every `break` OWNED by this loop becomes `ok = False; break`
+#         ...
+#     if ok:
+#         <else clause>
+#
+# `break`s owned by this loop are those not inside a nested loop's BODY (they belong to
+# that loop), a nested def, or a lambda; a `break` in a nested loop's own `else` clause
+# does belong to this loop. The original nodes are never mutated (a module can be compiled
+# twice): new statement nodes are built.
+
+_LOOP_ELSE_COUNTER: list = [0]
+
+
+def _loop_else_flag_name() -> str:
+    _LOOP_ELSE_COUNTER[0] = _LOOP_ELSE_COUNTER[0] + 1
+    return '_loop_ok_' + str(_LOOP_ELSE_COUNTER[0])
+
+
+def _loop_else_rewrite_breaks(stmts: list, flag: str) -> list:
+    out: list = []
+    for st in (stmts or []):
+        out.append(_loop_else_rewrite_stmt(st, flag))
+    return out
+
+
+def _loop_else_rewrite_stmt(st, flag: str):
+    if isinstance(st, BreakStmt):
+        return IfStmt(condition=BoolLiteral(value=True, line=st.line, col=st.col),
+                      then_body=[AssignStmt(target=IdentExpr(name=flag, line=st.line, col=st.col),
+                                            value=BoolLiteral(value=False, line=st.line, col=st.col),
+                                            line=st.line, col=st.col),
+                                 BreakStmt(line=st.line, col=st.col)],
+                      elifs=[], else_body=None, line=st.line, col=st.col)
+    if isinstance(st, IfStmt):
+        new_elifs: list = []
+        for _el in (st.elifs or []):
+            new_elifs.append((_el[0], _loop_else_rewrite_breaks(_el[1], flag)))
+        return IfStmt(condition=st.condition,
+                      then_body=_loop_else_rewrite_breaks(st.then_body, flag),
+                      elifs=new_elifs,
+                      else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
+                                 if st.else_body else st.else_body),
+                      line=st.line, col=st.col)
+    if isinstance(st, TryStmt):
+        new_handlers: list = []
+        for _h in (st.handlers or []):
+            new_handlers.append(ExceptHandler(exc_type=_h.exc_type, name=_h.name,
+                                              body=_loop_else_rewrite_breaks(_h.body, flag),
+                                              line=_h.line, col=_h.col))
+        return TryStmt(body=_loop_else_rewrite_breaks(st.body, flag), handlers=new_handlers,
+                       else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
+                                  if st.else_body else st.else_body),
+                       finally_body=(_loop_else_rewrite_breaks(st.finally_body, flag)
+                                     if st.finally_body else st.finally_body),
+                       line=st.line, col=st.col)
+    if isinstance(st, WithStmt):
+        return WithStmt(items=st.items, body=_loop_else_rewrite_breaks(st.body, flag),
+                        is_async=st.is_async, line=st.line, col=st.col)
+    if isinstance(st, MatchStmt):
+        new_cases: list = []
+        for _c in (st.cases or []):
+            new_cases.append(MatchCase(patterns=_c.patterns,
+                                       body=_loop_else_rewrite_breaks(_c.body, flag),
+                                       guard=_c.guard, line=_c.line, col=_c.col))
+        return MatchStmt(subject=st.subject, cases=new_cases, line=st.line, col=st.col)
+    if isinstance(st, ForStmt):
+        # its body's breaks are its own; a break in its ELSE clause is ours
+        return ForStmt(target=st.target, iterable=st.iterable, body=st.body,
+                       else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
+                                  if st.else_body else st.else_body),
+                       is_async=st.is_async, line=st.line, col=st.col)
+    if isinstance(st, WhileStmt):
+        return WhileStmt(condition=st.condition, body=st.body,
+                         else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
+                                    if st.else_body else st.else_body),
+                         line=st.line, col=st.col)
+    return st
+
+
+def desugar_loop_else(node) -> list:
+    """The statements a `for`/`while` WITH an `else` clause stands for (see above); the loop
+    inside has no `else` of its own."""
+    flag = _loop_else_flag_name()
+    line = node.line
+    col = node.col
+    body = _loop_else_rewrite_breaks(node.body, flag)
+    if isinstance(node, ForStmt):
+        loop = ForStmt(target=node.target, iterable=node.iterable, body=body, else_body=None,
+                       is_async=node.is_async, line=line, col=col)
+    else:
+        loop = WhileStmt(condition=node.condition, body=body, else_body=None, line=line, col=col)
+    return [AssignStmt(target=IdentExpr(name=flag, line=line, col=col),
+                       value=BoolLiteral(value=True, line=line, col=col), line=line, col=col),
+            loop,
+            IfStmt(condition=IdentExpr(name=flag, line=line, col=col),
+                   then_body=node.else_body, elifs=[], else_body=None, line=line, col=col)]

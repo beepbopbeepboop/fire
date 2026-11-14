@@ -68,22 +68,57 @@ anywhere else), these rules override any instinct to move on quickly:
   different angle, accept it as a real feature project, or hand it to a
   more capable model). Do not manufacture a stopping point at a fixed
   effort level.
-- **Batch bugs specifically to amortize the quality gate below**, not to
-  cap total effort. The full gate (steps 0-4) is the expensive part in
-  TOKEN terms (not wall-clock/CPU, which is free to spend) — running it
+- **Batch bugs specifically to amortize the verification below**, not to
+  cap total effort. The verification (stdlib compile + quick tests, see
+  `## The quality gate`) is the expensive part in TOKEN terms — running it
   after every single small fix wastes tokens re-deriving the same green
-  result. Group related fixes and run the full gate once per group and
-  once at the end, per the batching guidance already in that section.
-- **No mid-batch check-ins and no mid-batch gate runs.** While working
-  through a batch, do not stop to summarize progress, ask "should I keep
-  going?", or run any gate step (make check, compile_stdlib.py, bootstrap,
-  etc.) as a status check between fixes. Land the whole batch of intended
-  work first; run the full gate exactly once, at the end, covering
-  everything accumulated. Explicitly requested by the user 2026-09-13 —
-  interim gate runs and interim check-ins were seen as wasted tokens/time
-  when the intent was always to gate once at the end anyway.
+  result. Group related fixes and verify once per group and once at the end.
+- **No mid-batch check-ins and no mid-batch verification runs.** While
+  working through a batch, do not stop to summarize progress, ask "should I
+  keep going?", or run any verification step (stdlib compile, quick tests)
+  as a status check between fixes. Land the whole batch of intended work
+  first; verify exactly once, at the end, covering everything accumulated.
+  Explicitly requested by the user 2026-09-13 — interim runs and interim
+  check-ins were seen as wasted tokens/time when the intent was always to
+  verify once at the end anyway.
+
+## Process safety — agents do not kill processes; the OWNER may authorise it
+The user's machine runs many other worktrees and lanes at the same time.
+By default agents in this tree must NOT run `pkill`, `kill`, `killall`, or any
+process-kill — not on `fire`/`python`/`lean` processes, not on orphaned
+processes from a previous session, not "to free memory". A still-running
+process belongs to someone (the user, another lane, a verification the user
+is watching): wait on it, work around it, or REPORT it in the round's
+output (pid, age, memory, what started it). The only sanctioned automatic
+killing mechanism is `tools/memcap.py`'s own ceiling, and only inside the
+`tools/memslot.py` wrappers the tree's tests use.
+
+**The owner can authorise a kill.** When the user (the owner of the machine)
+explicitly tells an agent to kill a process, that is permission for exactly
+what they named, and nothing wider:
+- kill only the pid(s) the user pointed at, or the ones the agent started
+  itself and the user told it to stop; look at `ps -o pid,etime,rss,command`
+  first so the target is the one reported;
+- use a plain `kill <pid>` (SIGTERM) and confirm it exited; never `kill -9`,
+  `pkill`, `killall` or a pattern/name match, which can reach another lane's
+  processes;
+- the authorisation is for that request only; the next stray process is
+  reported again, not killed.
+Recorded 2026-11-02 after a near-miss report; the owner exception added
+2026-11-05, when the user asked for a runaway 46 GB `fire.py --dump-full`
+(left by an agent's own aborted build) to be killed.
+
+## Landings carry your uncommitted edits across (tools/stash_ff.py)
+The integrator gates in `../work-integ` (branch `integ`) and then moves master, which is checked out here. The final
+merge stashes your uncommitted tracked edits (by sha, never by stash position), merges, re-applies and drops the stash
+only when the re-apply was clean. A landing therefore waits only for a real textual conflict with your edits; then the
+merge is undone, your files are exactly as they were, and the next pass retries. Untracked files are not stashed.
 
 ## Bug rounds — every round must move us closer to the end
+Base directive (user, 2026-10-31): one work round handles ONE bug, fully
+finished (including its commit) before the next round starts. Earlier batches
+of three were relaxed away on 2026-11-01: the extra scope is where rounds die
+mid-flight and leave in-flight state for the next session to reconstruct.
 Base directive (user, 2026-10-29): every work round on a bug must move the work
 forward. A round's output may not be "re-verified, still open" with no tree or
 doc change. The valid outputs of a round, in descending order of preference:
@@ -118,6 +153,11 @@ is in, close the sorries and admits. A round that lands structural theorems
 whose leaves are named sorries, or discharges sorries an already-landed
 structure carries, is forward progress either way (see `FORMAL.md` §11.3).
 
+**Scaffold holes.** Scaffold holes live only in `lib/Scaffold.lean` and are
+ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES`, counted by
+`test_formal_proof_gaps.py` via `formal.lean::library_census`. No other library
+module may contain `sorry`.
+
 ## Running the checks — one runner, named buckets
 `tools/suite.py` runs everything: the buckets, each test's driver, the memory
 ceilings, the ordering, and one pass/fail count. The Makefile's targets are
@@ -126,6 +166,9 @@ one-line recipes that call it, so `make check-<x>` and
 
     make check              # the everyday SUBSET of the gate, -j ncpu, one tally
     make gate               # THE gate: check plus coro/stdlib/native/bootstrap
+    make check-orchestrator # the swarm/registry/reclass/landing tests. NOT in
+                            # check: they exercise git-facing fleet passes, and
+                            # the everyday loop spawns no git and needs no git
     make bootstrap          # just the 3-stage self-host chain
     gmake -j1 check         # strictly serial, every job's output streamed live
     make check J=4          # 4 at a time (works with either make; Apple's 3.81
@@ -236,12 +279,32 @@ different jobs:
   gate would pass by construction and stop detecting the byte-identity
   divergence it exists to detect. Do not "fix" this by adding a cache; if
   bootstrap is too slow, fix the memory blowup
-  (`bugs/CODEGEN_bootstrap_resource_blowup.md`), which is the actual cause.
+  (`CODEGEN_bootstrap_resource_blowup`), which is the actual cause.
   For scale: the 45-file per-stage sweeps measure **1.8 s** in total, so all
   of bootstrap's ~32 minutes is the three whole-closure dumps plus the
   `gcc -O0` compile between them. Per-file caching would buy nothing.
 
-## The quality gate — one command: `make gate`
+## Verification policy — stdlib compile and quick tests only
+
+**The full `make gate` is not run by agents.** It is the owner's call, and
+it is not a precondition for finishing a change. The required verification
+for any change is:
+
+1. **Stdlib compile** — `compile_stdlib.py` and `build_stdlib_dylib.py`
+   (the `stdlib-syntax` and `stdlib-dylib` steps). Apply the two verdict
+   checks below: the `skip <module>:` count must not increase, and the
+   `FAILED: N (E expected, U unexpected)` `U` must not increase.
+2. **Quick tests** — the targeted test files for what changed (for example
+   the `test_gimple.py` cases that cover the touched code path), run
+   individually or through `make check` if that is the smaller set. Report
+   what ran and what passed or failed.
+
+Do not run `make gate`, `make bootstrap`, `make native`, or the full
+`make check` as a closing step. If a change needs one of those, say so in
+the final message and let the owner decide.
+
+The rest of this section describes the gate as the owner runs it. It is
+reference material, not a checklist for agents.
 
     make gate          # THE gate. == python3 tools/suite.py gate
     make check         # a strict SUBSET of gate (see below) — for the
@@ -264,11 +327,11 @@ run `gate` once, at the end, over everything that has accumulated.
 
 Anything touching `fire_compiler.py` (the shared parser/AST),
 `gimple_codegen.py`, `module_loader.py`, `mojo/backend_gimple/*` or
-`mojo/middle/*` — including subagent work — owes a full `make gate`. This is
-not "extra"; it is the definition of done for that class of change. A change
-passing `test_gimple.py`/`test_module_cache.py`/`selfhost` alone is NOT
-sufficient evidence the compiled path is unaffected, and the reason is
-structural rather than a matter of testing harder:
+`mojo/middle/*` — including subagent work — owes stdlib compile and the
+targeted quick tests (see `## Verification policy`). The full `make gate`
+is the owner's to run; agents do not run it. Quick tests alone do not cover
+the compiled path, and the reasons below are why the stdlib compile step is
+required and why the owner may still want the full gate before shipping:
 
 - `gimple_codegen.py`'s lowering of an AST node shape is a separate,
   independently-maintained implementation from `myinterpreter.py`'s
@@ -382,11 +445,11 @@ mark it with a reason and a bug-doc link.
   compiled path ignored decorators too, so the diff was clean). A new
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
-Current `EXPECTED` entries, and the one `DISABLED` entry. **`python3
-tools/suite.py --list` is the census**, not this table — and since 2026-10-01 it
-is the only census that can be: every registered test is now in a bucket unless
-it declares `dep=True` (one does, `prooflib`), which `test_suite.py` checks in
-both directions. So the `[]` column the eleven ungated `expect=` jobs used to
+Current `EXPECTED` entries. **`python3 tools/suite.py --list` is the census** for
+both markers, not this table — and since 2026-10-01 it is the only census that
+can be: every registered test is now in a bucket unless it declares `dep=True`
+(one does, `prooflib`), which `test_suite.py` checks in both directions. So the
+`[]` column the eleven ungated `expect=` jobs used to
 print cannot be produced again by accident, which is what the two bugs about
 gated-but-never-run registrations were about; both of their docs are deleted
 with their fixes.
@@ -407,20 +470,24 @@ restated here.
 carry and, like `formal-struct` before it, lost its `expect=` on 2026-10-02:
 both failures each named were rewrites of an assertion that could no longer see
 the case it was watching, and the cases are now build-and-RUN comparisons
-against CPython. The remaining `expect=` jobs besides the two heavyweight steps
-and the formal host-module rows are the compiled-path async/await cluster, all
-cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
-measured one at a time before being named, with the measurement at its
-registration. (A FANOUT can state a count too, checked against the per-item
+against CPython. The remaining `expect=` jobs besides the two heavyweight steps,
+the formal host-module rows, and the `doc-refs` ratchet (marked 2026-11-09 with
+a whole-job condition while the citation campaign is open; the first `expect=`
+in `check`, deliberate — the alternative was an undeclared red there, and a
+marked job that starts passing reports loudly when the campaign lands) are the
+compiled-path async/await cluster, all cheap (0.0-0.2 GB, 1.2-11.6 s each) and
+all in `coroutine` and `x86`, each measured one at a time before being named,
+with the measurement at its registration. (A FANOUT can state a count too, checked against the per-item
 verdicts rather than a summary line; see `observed_fanout_failures` in
-`tools/suite.py`.) `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
+`tools/suite.py`.) `CODEGEN_ab_native_fails` §4 carries the full inventory
 and the reasoning for `expect=` rather than `disabled=` on each.
 
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
-| `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
-| `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
+| `x86-containers` | `expect=`, count checked (1) | the x86_64 formal backend over the container examples (the `with-statement` case) | `tiny`; `proofs`, `x86` |
+| `formal-x86-endtoend` | `expect=`, count checked (1) | x86_64 end-to-end proofs (`wide_recv`: a `lean` memory ceiling) | `module`; `proofs`, `x86` |
+| `formal-x86-machine-model` | `expect=` | the x86_64 machine model against the examples (3 NO-RUN rows, no WRONG ones) | `tiny`; `proofs`, `x86` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any
 more: both markers were dropped on this tree, so `--list` reports neither and a
@@ -449,7 +516,7 @@ regex over a child's output and a child that writes a wrong artifact prints
 nothing. Residual divergence class, if one reappears:
 commit e8a7135b8; the whole-closure
 compile costs 12-15 GB and ~7.5 min per stage
-(`bugs/CODEGEN_bootstrap_resource_blowup.md`).
+(`CODEGEN_bootstrap_resource_blowup`).
 
 **The gate is otherwise clean, and deliberately no file here says how many.**
 Every `expect=` and `disabled=` registration in the registry is accounted for

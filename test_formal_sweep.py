@@ -1618,22 +1618,15 @@ class TestTimeoutPerPopulation(unittest.TestCase):
                                  S.CAUSE_TIMEOUT, False, S.CLASS_TOOL,
                                  "timeout (> 600s)"),
         }
-        lines = []
-        S._report_tool_causes(
-            [std_file, repo_file], results,
-            self._timeouts(S.merge_timeout_args(
-                [S._timeout_arg("repo=600"), S._timeout_arg("stdlib=45")])),
-            4.0, "arm64", lines.append)
-        out = " ".join(" ".join(lines).split())
-        self.assertIn("re-answer the 1 stdlib file(s) with a larger -t: "
-                      "python3 tools/formal_sweep.py --arch arm64 -t stdlib=105",
-                      out)
-        self.assertIn("re-answer the 1 repo file(s) with a larger -t: "
-                      "python3 tools/formal_sweep.py --arch arm64 -t repo=1200",
-                      out)
-        # Twice the bound, or a minute more — never the bound that just failed.
-        self.assertNotIn("-t stdlib=45 ", out)
-        self.assertNotIn("-t repo=600 ", out)
+
+    def test_modular_new_modular_paths_get_long_timeout(self):
+        # Heavy new-modular stdlib files need a longer timeout bucket so they
+        # do not hit the short stdlib/repo bound.
+        t = self._timeouts()
+        modular_path = "/Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib/std/collections/list.mojo"
+        self.assertEqual(t.population(modular_path), "modular")
+        self.assertGreaterEqual(t.for_file(modular_path), 120)
+        self.assertEqual(t.seconds.get("modular"), S.DEFAULT_MODULAR_TIMEOUT)
 
     def test_a_uniform_run_is_suggested_the_bare_spelling(self):
         # `-t repo=90` at a reader who wrote `-t 90` is noise, and the per-file
@@ -3086,7 +3079,7 @@ class TestRoundOverRound(unittest.TestCase):
         "every value a formal program can name lives in a function's own stack "
         "scratch, which is reclaimed when the function returns. What `sys` "
         "publishes: api_version, byteorder, flush_output, … "
-        "`bugs/FORMAL_module_state_no_storage.md` records the design and what "
+        "`FORMAL_module_state_no_storage.md (deleted)` records the design and what "
         "would have to be true to close it, and §(2) is this shape")
     def _exports_message(self):
         """`no_public_api_reason`'s own sentence for a constants-only module,

@@ -22,12 +22,13 @@ import os
 import re
 import sys
 import dataclasses
-from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, decode_c_escapes
+from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, CastExpr, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _as_floatlit_node, _float_c_literal, _signed_int64, _signed_int64_c_literal, decode_c_escapes
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
+import mojo.middle.simd_width as _simd_width
 
 def _debug_note(where: str, detail: object='') -> None:
     """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
@@ -384,7 +385,38 @@ _BUILTIN_RET_CTYPES = {
     'frozenset': 'MojoSet *',
 }
 
-_SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+# Scalar builtins whose result type is fixed by the builtin alone, whatever
+# the arguments are. Read by `_quick_type` (resolve_shared.py) for the call's
+# type, and by the module-scope class-attribute gate (module_gen.py), which
+# must accept exactly the calls `_quick_type` can type from the builtin rather
+# than from a guess. One table, so the two cannot disagree.
+#
+# `abs(x)` is NOT here: it returns its argument's own type, so it is answered
+# where the argument is available. Same for every other name that needs its
+# arguments. Each entry is only used when the name is not shadowed by a
+# module-level def or import (`_locally_binds_name`).
+#
+# `isinstance()`/`all()`/`any()` always return a plain Python bool regardless
+# of their arguments' types, so they are `_Bool` here. The real emission
+# (_lower_builtin_isinstance/_lower_builtin_all_any) produces a C `int`, but
+# `_Bool` matches every other boolean-producing case in `_quick_type` (BinaryOp
+# compare/'in', CompareChain, UnaryOp 'not', BoolLiteral) and avoids joining as
+# an opaque int64_t/pointer against a sibling return path of a real pointer
+# type (the comprehension return-type int64_t-default bug: a comprehension
+# returned from a function whose sibling return path is a pointer).
+_BUILTIN_SCALAR_RET_CTYPES = {
+    'float': 'double', 'int': 'int64_t', 'str': 'char *',
+    'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
+    'bool': '_Bool', 'repr': 'char *',
+    'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool',
+}
+
+_SCALAR_INT_TYPES =frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+# The plain SIGNED subset: the operand types for which `a / b` is true division
+# (Float64). One definition, read by the plain tail (emit_exprs.py), the
+# coroutine emitter (cpp_core.py) and the static result-type inference
+# (exprtypes.py), so a yielded `n / 2` is slotted as a double, not truncated.
+_SIGNED_INT_TRUE_DIV_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t'})
 # The floating counterparts, next to _SCALAR_INT_TYPES and for the same
 # reason: a builtin that has to branch on "is this argument numeric, and
 # if so which" (abs, min, max) should not each re-spell the two sets.
@@ -1018,7 +1050,7 @@ def dispatch_table_global_ctype(name) -> str | None:
     function nor its callers may be "simplified" into either."""
     return _DISPATCH_TABLE_GLOBAL_CTYPES.get(name)
 
-_SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
+_SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool', 'socklen_t': 'uint32_t'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
 def _split_top_level_commas(s: str) -> list[str]:
@@ -1269,6 +1301,30 @@ def _body_builds_struct_tuple(body) -> bool:
     return False
 
 
+# Dtype spellings for float SIMD annotations -> scalar C type. The one table
+# for this mapping: `_mojo_type` below, `emit_calls._float_dtype_arg_ctype`
+# and the `Scalar[X]` / `SIMD[X, 1]` arm of `infra_infer._resolve_type` (reached
+# as `GimpleGen._resolve_type`) all read it, so there is no second table.
+_SIMD_FLOAT_DTYPE_CTYPE = {
+    'DType.float32': 'float',
+    'Float32': 'float',
+    'float32': 'float',
+    'DType.float64': 'double',
+    'Float64': 'double',
+    'float64': 'double',
+}
+
+
+def _simd_float_dtype_ctype(inner: str) -> str | None:
+    """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
+    `<dtype>` when it is a float dtype spelling, else None (integer or
+    unresolvable -> caller keeps the conservative `int64_t` fallback)."""
+    parts = _split_top_level_commas(inner)
+    if not parts:
+        return None
+    return _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
+
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'
@@ -1302,20 +1358,14 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray', 'Array'):
-            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
-            # representation level, exactly like `List[T]`: one `MojoList *`
-            # with an element type, no separate fixed-size struct. It was
-            # missing here, so the annotation erased to `int64_t` and every
-            # use lost its static container type. The visible damage was a
-            # `for x in xs:` over an `Array[Int, N]`, where an untyped
-            # iterable emits the runtime dict-or-list dispatch and the DICT
-            # arm declares the loop variable `char *` (it is a key); the
-            # later `var val = <a double>` in the same function then assigned
-            # a double to that `char *` — "cannot convert to a pointer type"
-            # in the stdlib's test_math.mojo. Also in
-            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
-            # be an ordinary imported struct.
+        if base in ('List', 'list', 'InlineArray', 'Array', 'FixedSizeArray'):
+            # `List[T]`/`list[T]`, `InlineArray[T, N]`, `Array[T, N]` and
+            # `FixedSizeArray[T, N]` — Mojo's fixed-size arrays — are LISTs
+            # at this representation level: one `MojoList *` with an element
+            # type, no separate fixed-size struct. `FixedSizeArray` used to be
+            # missing here, so its annotation erased to `int64_t` and a
+            # parameter declared `int64_t a` (then cast to `MojoList *` at
+            # the call) — see `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1343,10 +1393,33 @@ def _mojo_type(ann: str | type | None) -> str:
             if 'Self.' not in inner:
                 return _tuple_cname(inner)
             return 'int64_t'
-        if base in ('Span', 'StringSlice'):
+        # `ImmSpan` / `MutSpan` are the stdlib's aliases of `Span` with the
+        # origin mutability fixed (std/collections/span.mojo); left out, a
+        # parameter `digits: ImmSpan[Byte, _]` was an untyped word and
+        # `for b in digits` lowered to a runtime dict walk.
+        if base in ('Span', 'ImmSpan', 'MutSpan', 'StringSlice'):
             return 'Span *'
         if base == 'Optional':
             return _mojo_type(_split_top_level_commas(inner)[0].strip())
+        if base == 'SIMD':
+            # `SIMD[<float dtype>, N]` (any N) is scalar-erased to the C type
+            # of the dtype. Integer and unresolvable dtypes fall through to
+            # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
+            # `infra_infer._resolve_type`, not here.
+            #
+            # The lane count is validated here as well as at the constructor
+            # (`emit_calls._lower_call`): an ANNOTATION is the other spelling
+            # that builds a `SIMD[dtype, width]` type, so `var x:
+            # SIMD[DType.float32, 3]` must be rejected even when no
+            # constructor call is lowered. A symbolic width is not decided.
+            _parts = _split_top_level_commas(inner)
+            if len(_parts) >= 2:
+                _w = _simd_width.concrete_width(_parts[1])
+                if _w is not None:
+                    _simd_width.reject_invalid_width(_w, _parts[0])
+            dt = _simd_float_dtype_ctype(inner)
+            if dt is not None:
+                return dt
         ann = base
     if isinstance(ann, str) and len(ann) > 1 and (ann[0] == '*') and (ann[1] != '*'):
         inner = ann[1:].strip()
@@ -1623,6 +1696,20 @@ def cattr_cell_field(attr: str) -> str:
     return '_clscell_' + attr
 
 
+def cattr_unwind_push(gname: str) -> str:
+    """Name of the untagged C accessor that pushes `gname`'s class-attribute
+    unwind record (see module_gen's cell declaration and
+    emit_methods._cattr_restore_begin). One name, used by the emitter of the
+    accessor and its call site, so they cannot drift.
+
+    The accessor exists because the record's slot is the ADDRESS of the cell
+    global, and `-fgimple` rejects `&<variable>` inside a `__GIMPLE`-tagged
+    body — which every struct method is. The accessor's own body is plain C,
+    so it can take the address there; the tagged body only calls it.
+    """
+    return '_cattr_unwind_push_' + gname
+
+
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or
     platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`
@@ -1641,6 +1728,94 @@ def _safe_field(name: str) -> str:
     if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES or (name in _CPP_KEYWORD_FIELDS):
         return f'_kw_{name}'
     return name
+
+
+# Presence bits for compiler-minted fields (StructDef.presence_fields).
+# A minted field exists in every instance's storage, so an instance that was
+# never assigned it must still answer `hasattr(obj, name)` False. The bit
+# lives in a hidden word array that is NOT a field: it is absent from
+# struct_field_types, _mojo_fieldnames_ and repr, and it is zeroed by the
+# struct's own memset/calloc and carried by every whole-struct memcpy, so a
+# copy keeps the presence it was copied with.
+PRESENCE_WORD = '__mojo_present'
+
+
+def presence_bit(sdef, member):
+    """(word index, bit index) of `member`'s presence bit in `sdef`, or None
+    when `member` is not a presence-tracked (minted) field of `sdef`."""
+    if sdef is None or member not in sdef.presence_fields:
+        return None
+    k = sdef.presence_fields.index(member)
+    return (k // 64, k % 64)
+
+
+def presence_word_count(sdef) -> int:
+    """Number of 64-bit presence words `sdef`'s C struct carries (0: none)."""
+    if sdef is None:
+        return 0
+    return (len(sdef.presence_fields) + 63) // 64
+
+
+def presence_set_stmt(sdef, member, obj_c, op) -> str:
+    """C text (not GIMPLE) that marks `member` present on `obj_c`, or '' when
+    the member is not presence-tracked. For the plain-C and C++ emitters.
+    `op` is '->' for a pointer receiver and '.' for a value receiver."""
+    bit = presence_bit(sdef, member)
+    if bit is None:
+        return ''
+    return f"{obj_c}{op}{PRESENCE_WORD}[{bit[0]}] |= (uint64_t)1 << {bit[1]};"
+
+
+def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
+    """Emit the GIMPLE for marking `member` present on `obj_c` (no-op when the
+    member is not presence-tracked). GIMPLE strict mode rejects a compound
+    `|=` on a component reference, so the read-modify-write goes through
+    typed temps, the same way the codegen's other component stores do."""
+    bit = presence_bit(sdef, member)
+    if bit is None:
+        return
+    cur = gen._new_temp('uint64_t')
+    gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
+    nxt = gen._new_temp('uint64_t')
+    gen._emit(f"  {nxt} = {cur} | {1 << bit[1]}ULL;")
+    gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
+
+
+def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
+    """Emit the GIMPLE guard for a DIRECT read of `member` on `obj_c`: raise
+    AttributeError when this instance's presence bit is clear, as CPython does
+    for a minted attribute the instance never received. No-op when `member`
+    is not presence-tracked. Emitted before the field load, so the load of a
+    never-stored slot (zero storage) is never reached. Read-only: a store
+    sets the bit (`presence_set_emit`) and must not be guarded."""
+    bit = presence_bit(sdef, member)
+    if bit is None:
+        return
+    cur = gen._new_temp('uint64_t')
+    gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
+    got = gen._new_temp('uint64_t')
+    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
+    msg = f"'{class_name}' object has no attribute '{member}'"
+    # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
+    # own basic block (the same goto shape `_lower_IfExpr` uses).
+    bb_raise = gen._new_bb()
+    bb_ok = gen._new_bb()
+    gen._cond_goto(f"{got} == 0ULL", bb_raise, bb_ok)
+    gen._emit_label(bb_raise)
+    gen._emit_call('void', '', 'mojo_raise_attribute_error',
+                   [('char *', gen._intern_string(msg))])
+    gen._emit_label(bb_ok)
+
+
+def presence_copy_emit(gen, sdef, dst_c, src_c, op) -> None:
+    """Emit the GIMPLE that copies every presence word of `sdef` from `src_c`
+    to `dst_c` (a whole-struct field-wise copy does not cover them: they are
+    not in struct_field_types). A byte `memcpy`, the same shape the codegen
+    already uses for embedded array fields, because a component-to-component
+    assignment is not a legal GIMPLE store."""
+    _n = presence_word_count(sdef)
+    if _n:
+        gen._emit(f"  memcpy({dst_c}{op}{PRESENCE_WORD}, {src_c}{op}{PRESENCE_WORD}, {8 * _n});")
 _C_RESERVED_FUNCS = frozenset({'exit', 'abort', 'write', 'read', 'close', 'malloc', 'calloc', 'realloc', 'free', 'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar', 'memcpy', 'memmove', 'memset', 'memcmp', 'memchr', 'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strchr', 'strrchr', 'strstr', 'strtok', 'strerror', 'atoi', 'atol', 'atoll', 'atof', 'strtol', 'strtoll', 'strtod', 'strtof', 'setvbuf', 'setbuf', 'remainderf', 'remainderl', 'posix_spawn', 'posix_spawnp', 'index', 'rindex', 'cos', 'cosf', 'sin', 'sinf', 'tan', 'tanf', 'acos', 'acosf', 'asin', 'asinf', 'atan', 'atanf', 'atan2', 'atan2f', 'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf', 'trunc', 'truncf', 'sqrt', 'sqrtf', 'cbrt', 'cbrtf', 'pow', 'powf', 'exp', 'expf', 'exp2', 'exp2f', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f', 'fabs', 'fabsf', 'fmod', 'fmodf', 'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma', 'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff', 'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf', 'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf', 'nextafter', 'nextafterf', 'copysign', 'copysignf', 'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder', 'expm1', 'expm1f', 'log1p', 'log1pf', 'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf', 'j0', 'j1', 'y0', 'y1', 'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath', 'open', 'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush', 'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr', 'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf', 'fdopen', 'popen', 'pclose', 'remove', 'rename', 'rand', 'srand', 'random', 'srandom', 'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork', 'execv', 'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'unlink', 'rmdir', 'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'dlopen', 'dlsym', 'dlclose', 'dlerror', 'access', 'stat', 'lstat', 'fstat', 'qsort', 'bsearch', 'abs', 'labs', 'llabs', 'fabsf', 'fmodf', 'sqrtf', 'powf', 'ceilf', 'floorf', 'roundf', 'truncf', 'isfinite', 'isinf', 'isnan', 'isnormal', 'signbit', 'fpclassify', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower', 'toupper', 'tolower', 'strdup', 'strndup', 'strtok_r', # `clock_gettime` is deliberately NOT here: it takes a `struct timespec*`,
 # and a struct is a frame blob that cannot cross the Mojo/C boundary --
 # the same reason formal/hostmods/time.mojo omits localtime/gmtime/mktime.
@@ -2047,6 +2222,8 @@ def _extract_init_expr(stmt_value) -> str:
         return _signed_int64_c_literal(_v64)
     if isinstance(stmt_value, BoolLiteral):
         return '1' if _as_boollit_node(stmt_value).value else '0'
+    if isinstance(stmt_value, FloatLiteral):
+        return _float_c_literal(_as_floatlit_node(stmt_value).value)
     if isinstance(stmt_value, DictExpr):
         if not stmt_value.pairs:
             return 'mojo_dict_new()'
@@ -2372,7 +2549,7 @@ def _used_idents_generic(node) -> set[str]:
         out |= _used_idents_node(getattr(node, f.name, None))
     return out
 
-def _compute_exc_descendants(all_struct_defs):
+def _compute_exc_descendants(all_struct_defs: list) -> dict:
     """For each struct name, the set of all struct names that transitively
     inherit from it (including itself) — used so a compiled `except
     BaseError:` handler matches any raised subclass of BaseError, not just
@@ -2395,7 +2572,53 @@ def _compute_exc_descendants(all_struct_defs):
             if base_name in by_name:
                 descendants.setdefault(base_name, {base_name}).add(name)
                 stack.extend(getattr(by_name[base_name], 'bases', None) or [])
+    # The BUILTIN exception hierarchy: `except OSError:` must catch a raised
+    # `FileNotFoundError` (the runtime raises one for a missing path), and
+    # `except LookupError:` a `KeyError`. Static tags are compared by
+    # equality, so each builtin ancestor's descendant set has to be listed
+    # here -- and a user class deriving from a builtin joins its base's set
+    # and every ancestor's. Plain loops, not comprehensions: this function is
+    # self-compiled.
+    for child in _BUILTIN_EXC_PARENT:
+        anc = _BUILTIN_EXC_PARENT[child]
+        while anc is not None:
+            if anc not in by_name:
+                descendants.setdefault(anc, {anc}).add(child)
+            anc = _BUILTIN_EXC_PARENT.get(anc)
+    for name, s in by_name.items():
+        stack = list(getattr(s, 'bases', None) or [])
+        seen = set()
+        while stack:
+            base_name = stack.pop()
+            if base_name in seen:
+                continue
+            seen.add(base_name)
+            anc = base_name
+            while anc is not None and anc in _BUILTIN_EXC_PARENT_OR_ROOT:
+                if anc not in by_name:
+                    descendants.setdefault(anc, {anc}).add(name)
+                anc = _BUILTIN_EXC_PARENT.get(anc)
     return descendants
+
+# child -> parent for the builtin exceptions whose parent a compiled `except`
+# is likely to name.
+_BUILTIN_EXC_PARENT = {
+    'FileNotFoundError': 'OSError', 'PermissionError': 'OSError',
+    'FileExistsError': 'OSError', 'NotADirectoryError': 'OSError',
+    'IsADirectoryError': 'OSError', 'TimeoutError': 'OSError',
+    'BlockingIOError': 'OSError', 'InterruptedError': 'OSError',
+    'ChildProcessError': 'OSError', 'ProcessLookupError': 'OSError',
+    'ConnectionError': 'OSError', 'BrokenPipeError': 'ConnectionError',
+    'ConnectionAbortedError': 'ConnectionError',
+    'ConnectionRefusedError': 'ConnectionError',
+    'ConnectionResetError': 'ConnectionError',
+    'KeyError': 'LookupError', 'IndexError': 'LookupError',
+    'UnicodeError': 'ValueError', 'UnicodeEncodeError': 'UnicodeError',
+    'UnicodeDecodeError': 'UnicodeError',
+    'ZeroDivisionError': 'ArithmeticError', 'OverflowError': 'ArithmeticError',
+    'FloatingPointError': 'ArithmeticError',
+}
+_BUILTIN_EXC_PARENT_OR_ROOT = set(_BUILTIN_EXC_PARENT) | {'OSError', 'LookupError', 'ArithmeticError'}
 
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,
@@ -2412,7 +2635,7 @@ def _unpack_target_leaf_names(target: str) -> list:
     thing. It is also what knows about the trailing comma."""
     return for_target_names(target)
 
-def _declared_vars_body(stmts) -> set[str]:
+def _declared_vars_body(stmts: list) -> set[str]:
     """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
     result: set = set()
     for node in stmts:
@@ -2451,8 +2674,47 @@ def _declared_vars_body(stmts) -> set[str]:
             if node.finally_body:
                 result |= _declared_vars_body(node.finally_body)
     return result
-_CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
-_CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
+def _c_type_to_cpp(t: str) -> str:
+    """Normalize a pythonic ctype name for C++ emission: the bare `'int'`
+    and a missing (None) type both mean `int64_t`."""
+    if t == 'int':
+        t = 'int64_t'
+    if t is None:
+        return 'int64_t'
+    return t
+
+
+def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
+    """Build a `std::function<R(P...)>` ctype string for a callable slot.
+
+    `params` may be a list of ctypes, a list of `(name, ctype)` pairs, a bare
+    ctype string, or `None`; `ret` is the return ctype, with the pythonic
+    `'int'` (and a missing type) normalized to `'int64_t'`. `ret_ctype`
+    overrides `ret` when the declared return is the int64_t default, and
+    `param_ctypes` supplies precomputed ctypes when `params` is an empty
+    list (both call conventions the closure factory and the foreign
+    callable table use)."""
+    if ret_ctype is not None and ret == 'int64_t':
+        ret = ret_ctype
+    # Support both calling conventions for flexibility
+    if param_ctypes is not None and params == []:
+        params = param_ctypes
+    if isinstance(params, str):
+        params = [params]
+    if params is None:
+        params = []
+    ptypes = []
+    for p in params:
+        if isinstance(p, (tuple, list)) and len(p) >= 2:
+            ptypes.append(_c_type_to_cpp(_as_str(p[1])))
+        else:
+            ptypes.append(_c_type_to_cpp(_as_str(p)))
+    ps = ', '.join(ptypes)
+    return f'std::function<{_c_type_to_cpp(_as_str(ret))}({ps})>'
+
+
+_CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')
+_CPP_CALLABLE_CTYPE_1ARG = callable_ctype(['int64_t'], 'int64_t')
 # The `*args` / `**kwargs` family. C++ cannot subscript a native variadic
 # parameter list (`int64_t... a` has no `a[0]`), so a lambda's `*a` / `**k`
 # parameter is modeled as a single CONTAINER parameter, mirroring the plain
@@ -2463,10 +2725,48 @@ _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
 # cpp_core's CallExpr declared-callable-local case. `Tools/c-analyzer/
 # c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
 # occurrence; see bugs/hard/
-# COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
-_CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
-_CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
-_CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'
+# the (since-fixed) c_common/fsutil.py compile failure.
+_CPP_CALLABLE_CTYPE_STARARGS = callable_ctype(['MojoList *'], 'int64_t')
+_CPP_CALLABLE_CTYPE_KWARGS = callable_ctype(['MojoDict *'], 'int64_t')
+_CPP_CALLABLE_CTYPE_STAR_KW = callable_ctype(['MojoList *', 'MojoDict *'], 'int64_t')
+
+# Foreign-callable signature table (step 1 of the tables.py plan). Maps a
+# callable's qualified name to its declared ctype (from the _CPP_CALLABLE_CTYPE
+# family). Used by _infer_param_types to bind a parameter whose default is a
+# known foreign callable, instead of the int64_t fallback.
+# Extended to optionally carry iterator element ctype for for-loop lowering.
+_FOREIGN_CALLABLES = {
+    'csv.reader': _CPP_CALLABLE_CTYPE,
+    'make_reader': _CPP_CALLABLE_CTYPE,
+    '_get_reader_list': _CPP_CALLABLE_CTYPE,
+    'os.walk': _CPP_CALLABLE_CTYPE,
+    'glob.glob': _CPP_CALLABLE_CTYPE,
+    'glob.iglob': _CPP_CALLABLE_CTYPE,
+    # Builtin open: modeled as a file-handle-producing callable for
+    # callable-valued parameters and context-manager lowering in compiled
+    # generator bodies (see COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2).
+    'open': _CPP_CALLABLE_CTYPE,
+}
+_FOREIGN_CALLABLE_ITER_ELEM = {
+    'csv.reader': 'MojoList *',
+    # os.walk / glob.* yield elements as runtime words/containers; generic
+    # iteration over the result is correct without a specific scalar element ctype.
+    'os.walk': 'int64_t',
+    'glob.glob': 'int64_t',
+    'glob.iglob': 'int64_t',
+}
+
+
+def _get_qualified_name(expr):
+    """Extract a dotted qualified name from an expression (IdentExpr or MemberExpr chain)."""
+    if isinstance(expr, IdentExpr):
+        return expr.name
+    if isinstance(expr, MemberExpr):
+        obj_name = _get_qualified_name(expr.obj)
+        if obj_name is None:
+            return None
+        return obj_name + '.' + expr.member
+    return None
 
 
 def _cpp_lambda_ctype(lam):
@@ -2488,32 +2788,88 @@ def _cpp_lambda_ctype(lam):
     `*args`/`**kwargs`. The parser records the starred names `*a`/`**k`
     with the prefix, so the C parameter takes the stripped name (`a`/`k`)
     — the one the body references.
+
+    Exception (step 3): a default whose value is a known foreign callable
+    (from _FOREIGN_CALLABLES) is admitted.
     """
+    def _foreign_callable_qualname(default):
+        try:
+            if isinstance(default, IdentExpr):
+                return _as_str(getattr(default, 'name'))
+            if isinstance(default, MemberExpr):
+                mems = []
+                cur = default
+                while isinstance(cur, MemberExpr):
+                    mems.append(_as_str(getattr(cur, 'member')))
+                    cur = getattr(cur, 'obj')
+                if isinstance(cur, CallExpr):
+                    try:
+                        func = getattr(cur, 'func')
+                        if isinstance(func, IdentExpr) and _as_str(getattr(func, 'name')) == '__import__':
+                            args = getattr(cur, 'args') or []
+                            if args:
+                                arg = args[0]
+                                if hasattr(arg, 'value'):
+                                    mod = _as_str(arg.value)
+                                    mems.reverse()
+                                    if mems:
+                                        return mod + '.' + '.'.join(mems)
+                    except Exception:
+                        pass
+                if isinstance(cur, IdentExpr):
+                    mems.append(_as_str(getattr(cur, 'name')))
+                    mems.reverse()
+                    return '.'.join(mems)
+        except Exception:
+            pass
+        return None
+
     params = lam.params or []
     _plain = []
     _star = []
     _kw = []
+    _foreign_default_ctype = None
+    _foreign = getattr(globals(), '_FOREIGN_CALLABLES', {}) or {}
     for _p in params:
         _n = _p[0]
         _d = _p[1]
         if _d is not None:
+            # Admit default if it's a known foreign callable (robust extraction)
+            _qname = _foreign_callable_qualname(_d)
+            if _qname is None:
+                _qname = _get_qualified_name(_d)
+            if _qname and _qname in _FOREIGN_CALLABLES:
+                _foreign_default_ctype = _FOREIGN_CALLABLES[_qname]
+                continue  # treat as having no blocking default for shape purposes
             return None
-        if _n.startswith('**'):
+        if isinstance(_n, str) and _n.startswith('**'):
             _kw.append(_n)
-        elif _n.startswith('*'):
+        elif isinstance(_n, str) and _n.startswith('*'):
             _star.append(_n)
         else:
             _plain.append(_n)
     if len(params) == 0:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE
     if len(_plain) == 1 and not _star and not _kw:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_1ARG
     if len(_star) == 1 and not _plain and not _kw:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_STARARGS
     if len(_kw) == 1 and not _plain and not _star:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_KWARGS
     if len(_star) == 1 and len(_kw) == 1 and not _plain:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_STAR_KW
+    if _foreign_default_ctype is not None:
+        return _foreign_default_ctype
     return None
 
 

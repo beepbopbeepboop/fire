@@ -63,6 +63,7 @@ sys.path.insert(0, REPO)
 import formal.build as B
 import formal.imports as I
 import formal.model as M
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S  # per-child budgets
 
 RESULTS = []
 
@@ -412,6 +413,12 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     # — so its test pins both halves: the three names that build, against
     # CPython's own `random`, and the absent ones refused naming themselves.
     "random": "test_formal_random.py",
+    # These left the pre-split claim tiers by being WRITTEN. `test_formal_admitted`
+    # ratchets each module's @admitted declaration count (zero for these).
+    "collections": "test_formal_admitted.py",
+    "copy": "test_formal_admitted.py",
+    "functools": "test_formal_admitted.py",
+    "importlib": "test_formal_admitted.py",
 }
 
 # A module this tree now provides that was NEVER in the host set, so it cannot
@@ -499,6 +506,14 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # file's docstring gives: a handful of names whose answers are CPython's to
     # give.
     "operator": "test_formal_core_hostmods.py",
+    # Never in the pre-split host set; written with source in this tree and
+    # ratcheted by test_formal_admitted (zero @admitted declarations), except
+    # builtins which has its own conformance test.
+    "builtins": "test_formal_builtins_conformance.py",
+    "contextvars": "test_formal_admitted.py",
+    "hoststatus": "test_formal_admitted.py",
+    "keyword": "test_formal_admitted.py",
+    "multiprocessing": "test_formal_admitted.py",
 }
 
 # The two `os` SUBMODULES, which are provided and are named by the file they are
@@ -595,17 +610,12 @@ ADMITTED_HOST_MODULE_TESTS = {
 # and in a tier, so writing `formal/hostmods/glob.mojo` took it out of both and
 # `IMPLEMENTED_HOST_MODULE_TESTS` is where its test belongs.
 HOST_SET_ADDED_TIERS = {
-    # `set(dir(builtins))` asks the interpreter to enumerate ITSELF.  A formal
-    # image is a Mach-O binary with an embedded CPython to compile it and none to
-    # run in, so the object is missing and permanently so.
-    "builtins": "unreachable",
     # Where an EMBEDDED CPython would be installed -- the same missing object,
     # named from the other side.  `fire.py` imports `sysconfig` and never uses
     # it, so nothing this tree can write would move a file.
     "sysconfig": "unreachable",
     # A clock `formal/hostmods/time.mojo` already reads, plus calendar
-    # arithmetic.  The answer is a shaped record, which is
-    # `bugs/FORMAL_time_struct_shaped_answers.md`'s to design.
+    # arithmetic.  The answer is a shaped record.
     "datetime": "modelled",
     # `getrusage(2)` is libSystem and `struct rusage` is a fixed layout.
     "resource": "modelled",
@@ -660,6 +670,32 @@ HOST_SET_ADDED_TIERS = {
     "_tkinter": "unreachable",
     "_winapi": "unreachable",
     "_wmi": "unreachable",
+    # ── and the EIGHT the doc's §"The next step" terminal reading names,
+    # added 2026-11-03 by the worker holding `FORMAL_stdlib_module_names_are_
+    # not_classified.md`.  The object each needs is a TERMINAL — `getpass` and
+    # `webbrowser` are this heading's pre-existing rows — and a freestanding
+    # image that links libSystem and nothing else has none.  A spec EXISTS for
+    # every one here, so the no-spec oracle that placed the five above does not
+    # decide these: the placement is the per-name reading the doc's list is,
+    # with the evidence row for each in `formal/imports.py`'s own comment.
+    # `_curses` leaves the queue with `curses` by `capability_sibling_tier` —
+    # a derivation, not a row, which is why it is not in this table.
+    "cmd": "unreachable",
+    "curses": "unreachable",
+    "pty": "unreachable",
+    "readline": "unreachable",
+    "rlcompleter": "unreachable",
+    "tkinter": "unreachable",
+    "tty": "unreachable",
+    "turtle": "unreachable",
+    # …and the ONE the same list carried there that the reading CORRECTS, the
+    # way `posix` was corrected into `HOST_MODELLED`: the doc's list had
+    # `wsgiref` under terminal, but the load-bearing half of the package is
+    # the reference SERVER — `wsgiref.simple_server.WSGIServer` is a subclass
+    # of `http.server.HTTPServer` — so it sits under the SOCKET heading for
+    # the same object as `http`.  Recorded in `formal/imports.py` at the
+    # name, so the correction and the entry cannot drift apart.
+    "wsgiref": "unreachable",
 }
 
 
@@ -1019,6 +1055,119 @@ def test_libsystem_provider():
           'a memoised negative answer is still correct')
 
 
+def test_libsystem_handle_racing_callers_read_the_settled_answer():
+    """The sentinel regression, in its measured shape.
+
+    The first load attempt used to publish `False` as an in-flight marker, and
+    a caller that entered during the load read that marker as the ANSWER —
+    "not a C library symbol" — and memoised it for the whole process. `snprintf`
+    and `strtod` (the float-repr helper's externs, bound by every image) dropped
+    out of the provided set, and every later build in the process refused with
+    "the image would bind 2 symbol(s) that nothing provides": the 93/93 SKIP
+    run. Eight threads on one cold state, and the settled answer is what every
+    one of them must get.
+    """
+    import threading
+
+    def race():
+        M._LIBSYSTEM_HANDLE = None
+        M._LIBSYSTEM_MEMO.clear()
+        answers = [None] * 8
+
+        def worker(i):
+            answers[i] = M._is_libsystem('snprintf')
+
+        ts = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        return answers, M._is_libsystem('snprintf')
+
+    # MEASURED, the reason for the rounds: on this host the load window is a
+    # few milliseconds, and a single round caught the pre-fix marker once in
+    # twenty — one round would pass the old code most of the time. Twenty-five
+    # rounds is the same test with the window re-opened, and it is under a
+    # second.
+    bad = []
+    for _ in range(25):
+        answers, settled = race()
+        if B._libsystem_handle() is False:
+            good = all(a == settled for a in answers)
+            want = f'every racing caller reads the settled fallback, got {answers}'
+        else:
+            good = settled is True and all(a is True for a in answers)
+            want = f'every racing caller reads the settled True, got {answers}'
+        if not good:
+            bad.append(want)
+    if B._libsystem_handle() is False:
+        check(not bad,
+              'every racing caller reads the settled fallback in every round'
+              + (f'; first: {bad[0]}' if bad else ''))
+    else:
+        check(not bad,
+              'every racing caller reads the settled True in every round'
+              + (f'; first: {bad[0]}' if bad else ''))
+
+
+def test_concurrent_compile_formal_calls_agree_with_the_serial_answer():
+    """The reentrancy contract, direct: `compile_formal` returns the same
+    result running once, or running concurrently with another `compile_formal`
+    in the same process.
+
+    Two sources, one of them a module-constant program, because the measured
+    leak ran across exactly that pair: a process that had just built a program
+    defining `LIMIT` at module level reported `'LIMIT' has no home` for the
+    next program in it. The reference builds run serially first; the
+    concurrent round resets the libsystem state to cold, so the first audit in
+    the round re-loads the C library — the window the old in-flight marker was
+    read from — and the round's images must be the serial bytes.
+    """
+    import concurrent.futures
+    import hashlib
+
+    d = tempfile.mkdtemp(prefix='reentrant_')
+    a = os.path.join(d, 'a.mojo')
+    open(a, 'w').write('LIMIT = 12\n\n'
+                       'def main(n):\n'
+                       '    if n > LIMIT:\n'
+                       '        print(n - LIMIT)\n'
+                       '    return 0\n')
+    b = os.path.join(d, 'b.mojo')
+    open(b, 'w').write('SEED = 3\n'
+                       'LIMIT = SEED + 4\n\n'
+                       'def main(n):\n'
+                       '    if n > LIMIT:\n'
+                       '        print(LIMIT)\n'
+                       '    return 0\n')
+
+    def build(src, out):
+        return B.compile_formal(src, output=out, prove=False, arch='arm64')
+
+    ref_a = build(a, os.path.join(d, 'a_serial.aout'))
+    ref_b = build(b, os.path.join(d, 'b_serial.aout'))
+    M._LIBSYSTEM_HANDLE = None
+    M._LIBSYSTEM_MEMO.clear()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            fa = pool.submit(build, a, os.path.join(d, 'a_conc.aout'))
+            fb = pool.submit(build, b, os.path.join(d, 'b_conc.aout'))
+            got_a, got_b = fa.result(), fb.result()
+    except Exception as e:                                  # noqa: BLE001
+        check(False, f'concurrent builds raised: {type(e).__name__}: {e}')
+        return
+    check(hashlib.sha256(got_a['code']).hexdigest()
+          == hashlib.sha256(ref_a['code']).hexdigest(),
+          'a concurrent build answers the same image as the serial one')
+    check(hashlib.sha256(got_b['code']).hexdigest()
+          == hashlib.sha256(ref_b['code']).hexdigest(),
+          'the other concurrent build agrees too')
+    check(got_a['linked_dylibs'] == ref_a['linked_dylibs'],
+          'the link line of the concurrent build is the serial one')
+    check(got_b['linked_dylibs'] == ref_b['linked_dylibs'],
+          'the other concurrent build keeps the serial link line')
+
+
 # ── 4. one bind audit, both paths ───────────────────────────────────────────
 
 def test_bind_audit():
@@ -1084,7 +1233,7 @@ def test_audit_fires_on_a_real_build():
             [sys.executable, os.path.join(REPO, 'fire.py'), 'build', '--formal',
              '--no-prove', '--backend=arm64', '-o', os.path.join(d, 'sound'),
              sound],
-            capture_output=True, text=True, timeout=600, cwd=REPO)
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
         check(r.returncode == 0, 'a sound program still builds',
               (r.stdout + r.stderr)[-300:])
         check('nothing provides' not in (r.stdout + r.stderr),
@@ -1097,7 +1246,7 @@ def test_audit_fires_on_a_real_build():
         r2 = subprocess.run(
             [sys.executable, os.path.join(REPO, 'fire.py'), 'build', '--formal',
              '--no-prove', '--backend=arm64', '-o', os.path.join(d, 'bad'), bad],
-            capture_output=True, text=True, timeout=600, cwd=REPO)
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
         out = r2.stdout + r2.stderr
         check(r2.returncode != 0,
               'an image binding an unprovided symbol is REFUSED, not built', out)
@@ -1410,13 +1559,13 @@ def test_raise_flushes_stdout():
                     [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
                      '--formal', '--no-prove', f'--backend={backend}',
                      '-o', out, program],
-                    capture_output=True, text=True, timeout=600, cwd=REPO)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
                 check(r.returncode == 0,
                       f'{name} builds on {backend}', (r.stdout + r.stderr)[-300:])
                 if r.returncode != 0:
                     continue
                 run = subprocess.run([out], capture_output=True, text=True,
-                                     timeout=60)
+                                     timeout=RUN_TIMEOUT_S)
                 check(run.stdout == 'before@@',
                       f'a `{name}` on {backend} keeps the bytes it printed '
                       f'(got {run.stdout!r})', run.stdout)

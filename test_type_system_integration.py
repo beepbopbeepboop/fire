@@ -1,8 +1,12 @@
 """
-Integration tests: Type system catches violations during compilation.
+Integration tests: snippets run through the gimple_codegen.py compilation
+pipeline.
 
-These tests verify that the type system catches real violations when
-integrated into the gimple_codegen.py compilation pipeline.
+The type checker these were written for was removed from gimple_codegen.py
+(b05dc1111, its checks were inert), so nothing in the pipeline detects a
+type-system violation. What these tests DO establish is that each snippet
+compiles; they cannot fail on a violation, because no violation is reported.
+Whether they should be rewritten against a real check or deleted is open.
 """
 
 from gimple_codegen import GimpleGen
@@ -11,27 +15,18 @@ import sys
 from io import StringIO
 
 
-def compile_with_type_checking(mojo_code, strict=False):
-    """Compile code and return (success: bool, gimple: str, errors: str)"""
+def compile_with_type_checking(mojo_code):
+    """Compile code and return (success: bool, gimple: str, errors: str).
+
+    gimple_codegen no longer carries a type checker (removed in b05dc1111, the
+    checks were inert), so there are no diagnostics to collect: `errors` is
+    always "" and a failure to compile is reported through `success`.
+    """
     try:
         tokens = py_tokenize(mojo_code)
         stmts = Parser(tokens).parse_module()
-
-        gen = GimpleGen()
-        if hasattr(gen, '_strict_type_checking'):
-            gen._strict_type_checking = strict
-
-        gimple = gen.gen_module(stmts)
-
-        # Capture any type checker errors
-        errors = ""
-        if gen.type_checker and gen.type_checker.has_errors():
-            errors = gen.type_checker.format_errors()
-
-        return True, gimple or "", errors
-    except ValueError as e:
-        # Type checking error in strict mode
-        return False, "", str(e)
+        gimple = GimpleGen().gen_module(stmts)
+        return True, gimple or "", ""
     except Exception as e:
         return False, "", f"Compilation error: {str(e)}"
 
@@ -147,21 +142,17 @@ def test():
     print("✓ Type checking integration: Valid code compiles without errors")
 
 
-def test_strict_mode_stops_on_errors():
-    """Strict mode should stop compilation on type violations"""
+def test_valid_single_assignment_compiles():
+    """A valid single-assignment function compiles to GIMPLE"""
     code = """
 def test():
     x = 1
-    # If we had a real violation, strict mode would catch it
     return x
 """
-    success_relaxed, gimple_relaxed, errors_relaxed = compile_with_type_checking(code, strict=False)
-    success_strict, gimple_strict, errors_strict = compile_with_type_checking(code, strict=True)
-
-    # Both should succeed for valid code
-    assert success_relaxed
-    assert success_strict
-    print("✓ Strict mode: Configuration works correctly")
+    success, gimple, errors = compile_with_type_checking(code)
+    assert success, errors
+    assert gimple
+    print("✓ Valid single-assignment function compiles")
 
 
 def test_complex_type_flow():
@@ -197,22 +188,16 @@ if __name__ == "__main__":
         test_nested_list_element_tracking()
         test_inference_idempotence_check()
         test_type_checking_doesnt_break_compilation()
-        test_strict_mode_stops_on_errors()
+        test_valid_single_assignment_compiles()
         test_complex_type_flow()
 
         print("\n" + "=" * 70)
         print("✅ All integration tests passed!")
         print("=" * 70)
         print("""
-Type System Status:
-  - 5 invariants fully implemented and integrated
-  - Error reporting active and configurable
-  - Strict mode available for enforcement
-  - All existing tests pass (53/53)
-  - Integration test suite passes (9/9)
-
-The type system is production-ready and fully operational.
-        """)
+Note: type_system.py's invariants are NOT wired into gimple_codegen.py
+(the checks were removed as inert in b05dc1111). These tests confirm the
+snippets compile; they do not confirm any violation is detected.""")
     except AssertionError as e:
         print(f"\n❌ Test failed: {e}")
         sys.exit(1)

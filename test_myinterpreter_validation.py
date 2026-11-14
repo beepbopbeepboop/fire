@@ -17,7 +17,7 @@ mis-evaluates an expression makes the interpreted `py_tokenize` compute
 something different from the same code running on CPython, and the difference
 is a wrong answer rather than an exception: the compiled path is then wrong in
 the same direction, so every engine-vs-engine diff in the tree stays clean.
-`bugs/UNTESTED.md` §3.2 records the two real instances — `@classmethod`'s `cls`
+`bug:UNTESTED` §3.2 records the two real instances — `@classmethod`'s `cls`
 binding the first real ARGUMENT, and `@deco` being parsed and then never
 applied at all — and both were invisible for exactly that reason.
 
@@ -34,7 +34,7 @@ its first `open()`, printed a `FileNotFoundError`, and nothing noticed for as
 long as it existed — which is the `coro` story from CLAUDE.md, one file over:
 a suite reporting green over a test that cannot run.
 
-`bugs/UNTESTED.md` §3.2 called this file "the strongest cheap parity check in
+`bug:UNTESTED` §3.2 called this file "the strongest cheap parity check in
 the tree and nothing runs it", and said the choice was between moving it to
 what the interpreter actually loads and deleting it. Moved. The corpus also
 grew, because the point is the interpreter and the natural corpus for that is
@@ -44,7 +44,7 @@ Exit status is the verdict: 0 iff every corpus text tokenizes identically
 through both routes. (The three sibling files that could not make that claim —
 `test_myinterpreter_simple.py`, `test_phase2_parser.py`,
 `test_phase2_parser_simple.py` — were deleted rather than repaired, for the
-reason in `bugs/UNTESTED.md` Tier 3: a test of a module that no longer exists
+reason in `bug:UNTESTED` Tier 3: a test of a module that no longer exists
 is not a slow test, it is a wrong claim, and `test_myinterpreter.py` already
 runs the interpreter end to end and passes.)
 

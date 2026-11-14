@@ -104,9 +104,19 @@ ROWS = [
      ("value", 3037000499 * 3037000499)),
     ("mul_over", "print(4000000000 * 4000000000)",
      ("refuse", "16000000000000000000")),
+    # The high-word test must be the FULL one (high == low asr 63). A product
+    # whose high word is nonzero but whose low word's top bit equals it was
+    # missed by a bit-63-only test: 2**63 - 1 times 3 wrapped and exited 0.
+    ("mul_over_missed", "print(9223372036854775807 * 3)",
+     ("refuse", "27670116110564327421")),
+    # The multiply is evaluated first and overflows positively: 3074457345618258603 * 3.
+    ("mul_neg_over", "print(0 - 3074457345618258603 * 3)",
+     ("refuse", "9223372036854775809")),
+    ("mul_fits_edge", "print(3074457345618258602 * 3)",
+     ("value", 9223372036854775806)),
     # A multiply by 0 and by 1 are the two that must NOT trap at the edge, and
-    # they are here because the run-time check that is still missing (see
-    # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`) is a
+    # they are here because the run-time check (`_emit_int_alu_checked`, landed
+    # with the deleted FORMAL integer-overflow-untrapped doc's step 3) is a
     # high-half compare, and `high == low` is not the test that gets it right.
     ("mul_by_one", "print(9223372036854775807 * 1)",
      ("value", 9223372036854775807)),
@@ -294,42 +304,79 @@ ROWS = [
 # failure never written down at all.
 #
 # Each of these asserts the CURRENT answer, with the CPython answer in the
-# comment, and each names the bug doc. When the run-time trap lands they become
-# `("trapped", TRAP)` and this section is deleted with the doc.
+# comment, and each names the bug doc. The `+`/`-`/`*` half of the table is no
+# longer this: the run-time check landed (the emission flip, 2026-11-02) and
+# those three rows now pin `("trapped", TRAP)` — the run takes the trap instead
+# of the hardware's wrapped word — while `var_mul_fits` stays the control that
+# keeps the check from trapping a product that FITS. `//` landed the same way
+# (2026-11-03, this round): `var_floordiv_min` pins `("trapped", TRAP)`
+# on both backends and `var_floordiv_fits` is its control. What is left in this
+# section is the table's other half, the operators whose variable cases the
+# flip does not reach: `<<`, `**` and `int()` still answer, and the doc names
+# what each of them needs.
 # `INT64_MIN` is 2**63 past the small end, so these are the WRAPPED answers and
 # not zeros: an addition of 2**62 + 2**62 is 2**63, which lands on the
 # smallest word, and `3000000000 * 3000000000` FITS (9e18 < 9.223e18) so the
 # multiply row uses a base just past the boundary.
 VARIABLE_ROWS = [
+    # The three `+`/`-`/`*` rows the run-time check landed for (2026-11-02,
+    # the doc's step 3): the build cannot fold a name, so the image carries
+    # the flag-setting instruction and the branch into the trap, and the run
+    # that leaves the signed 64-bit range stops with `TRAP` instead of
+    # printing the wrapped word and exiting 0. Both backends, one status.
     ("var_add_over", "a = 4611686018427387904\nprint(a + a)",
-     ("value", -9223372036854775808), "9223372036854775808"),
+     ("trapped", TRAP), "9223372036854775808"),
     ("var_sub_over", "a = 9223372036854775807\nb = 5\nprint(0 - a - b)",
-     ("value", 9223372036854775804), "-9223372036854775809"),
+     ("trapped", TRAP), "-9223372036854775809"),
     ("var_mul_over", "a = 4000000001\nprint(a * a)",
-     ("value", -2446744065709551615), "16000000008000000001"),
+     ("trapped", TRAP), "16000000008000000001"),
+    # …and the control the flip must not break: the product FITS, so the check
+    # reads no overflow and the exact value prints. This is the row a
+    # `high == low` spelling of the multiply check fails (it traps here), and
+    # it is the doc's own measurement of "right on the edges".
     ("var_mul_fits", "a = 3000000000\nprint(a * a)",
      ("value", 9000000000000000000), "9000000000000000000"),
+    # `<<` and `**` are the two operators whose run-time trap landed on x86-64
+    # first (`_emit_shift_reg` and the `**` loop both end in the shared
+    # overflow diagnostic) and has NOT landed on arm64, which still answers the
+    # wrapped word. The expectation is per-backend so the divergence is pinned
+    # as a divergence: when arm64 gains the trap, this row fails until the
+    # `arm64` entry flips to ("trapped", TRAP), which is the reminder.
     ("var_shl_over", "a = 1\nb = 63\nprint(a << b)",
-     ("value", -9223372036854775808), "9223372036854775808"),
-    # The two architectures do not even fail this one the same way, which is
-    # why the expectation is a per-backend dict: arm64's `SDIV` defines the
-    # overflowing case as the dividend and answers a number, x86-64's `IDIV`
-    # raises `#DE` and the image dies.
+     {"arm64": ("value", -9223372036854775808), "x86_64": ("trapped", TRAP)},
+     "9223372036854775808"),
+    # The run-time half landed for this row (2026-11-03, the doc's step 3
+    # shape): the build cannot fold the names, so the image carries the
+    # overflow PRE-check — `divisor == -1 and dividend == INT64_MIN`, the one
+    # exact pair — and the run that hits it stops with `TRAP` on BOTH
+    # backends, one status, where the two architectures used to answer a
+    # wrapped word and a SIGFPE. Measured rather than assumed, and the reason
+    # is a pre-check on arm64 too: `SDIV` of the pair answers the dividend and
+    # leaves V CLEAR (the same flags `INT64_MIN, 1` leaves, so no flag a
+    # post-check could read names the case), and `IDIV` raises `#DE` before
+    # any flag exists at all.
     ("var_floordiv_min", "a = 0 - 9223372036854775807 - 1\nb = 0 - 1\n"
      "print(a // b)",
-     {"default": ("value", -9223372036854775808),
-      "x86_64": ("trapped", None)}, "9223372036854775808"),
+     ("trapped", TRAP), "9223372036854775808"),
+    # …and the control the check must not break: `m == -1` with a dividend that
+    # IS NOT `INT64_MIN` — the pre-check's first half fires and the second
+    # does not, and the exact quotient prints. It is the row a `m == -1`-alone
+    # spelling of the check fails, the same role `var_mul_fits` plays for the
+    # multiply. (`floordiv_literal_pair` above pins the other half: the
+    # divisor that is not -1.)
+    ("var_floordiv_fits", "a = 9223372036854775807\nb = 0 - 1\nprint(a // b)",
+     ("value", -9223372036854775807), "-9223372036854775807"),
     # `strtoll` CLAMPS rather than wrapping: the value that comes back for a
     # string past the top of the range is `LLONG_MAX`, and both of the parse's
     # own checks (no digits consumed / trailing rubbish) pass, so the clamp is
     # the answer. Measured, both backends, exit 0.
     ("var_int_str_over", 's = "9223372036854775808"\nprint(int(s))',
      ("value", 9223372036854775807), "9223372036854775808"),
-    ("var_pow_neg", "a = 2\nb = 0 - 1\nprint(a ** b)", ("value", 0), "0.5"),
+    ("var_pow_neg", "a = 2\nb = 0 - 1\nprint(a ** b)",
+     {"arm64": ("value", 0), "x86_64": ("trapped", TRAP)}, "0.5"),
 ]
 
-STILL_UNTRAPPED_DOC = (
-    "bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md")
+STILL_UNTRAPPED_DOC = "(deleted FORMAL doc: integer overflow at run time still untrapped)"
 
 # ── `FORMAT_ROWS`: the OUTPUT spelling, with CPython as the oracle ──────────
 #

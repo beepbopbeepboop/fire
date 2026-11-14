@@ -62,7 +62,7 @@ WHAT IS NOT HERE, AND WHY
     repeat it:** `len(html.entities.html5)` is 2231 on this interpreter.
   * `html.parser` and `HTMLParser` — a CLASS with `feed()`, a buffer and a
     `handle_*` method per tag. `test_md2html.py` subclasses it, and a value on
-    this path is one 64-bit word (`formal/model.py`), so a configured parser is
+    this path is one 64-bit word (`formal/model/builtins.py`), so a configured parser is
     at least three. `test_md2html.py` therefore still does not build and this
     module does not pretend otherwise: the one file that moves is
     `tools/md2html.py`, which imports `html` for `escape` alone.

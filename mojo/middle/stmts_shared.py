@@ -275,6 +275,16 @@ def _seed_genexp_list_narrowing(gen, func_node):
         if ok_iter:
             gen._genexp_narrow_names.add(name)
 
+def _note_rtobj_binding(gen, name, vtype, val):
+    """A local bound to a class made at run time, or to an instance of one, keeps that kind
+    (`gen._rtobj_kinds`); any other value rebinding the name drops it, because the name is no
+    longer known to hold one."""
+    kind = gen._rtobj_kinds.get(('v', val))
+    if kind is not None and vtype == 'int64_t':
+        gen._rtobj_kinds[('l', name)] = kind
+    else:
+        gen._rtobj_kinds.pop(('l', name), None)
+
 def _assign_target(gen, tgt, et, ev):
     """Assign a lowered value (et, ev) to one unpack target, which may be a
     plain name or a nested tuple (e.g. (a, b), (c, d) = ...). Recurses for
@@ -310,12 +320,56 @@ def _assign_target(gen, tgt, et, ev):
             # must yield to any type that is not the default itself.
             _decl_t = et if et and et not in ('int64_t', 'int') else (hint or et or 'int64_t')
             gen._declare_var(tgt.name, _decl_t)
+        # A `None` / `False` / `True` / NULL-string slot read out of a
+        # kind-mixed tuple is a BOX, a non-zero heap cell, but the local that
+        # receives it is a plain word whose consumers (`x is None`, `if x:`,
+        # `x or d`, a parameter test in the callee) read it as 0 / 1. Bind the
+        # plain word and leave every other box as it was (a double or a string
+        # keeps its kind). The compiled compiler's own `is_generator, ids =
+        # _detect_generator(body)` bound a False box, so every function it
+        # parsed was a generator; `for pn, pt in params: self._param_ctype(pn,
+        # pt, s)` handed an unannotated parameter's None annotation to
+        # `strdup` as a "type".
+        if et == 'int64_t' and ev in getattr(gen, '_boxed_vals', ()):
+            _un = gen._new_temp('int64_t')
+            gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
+            if ev in gen._dyn_word_vals:
+                gen._dyn_word_vals.add(_un)
+            gen._boxed_vals.add(_un)
+            # A tagged word stays tagged through the bind: the local holds the
+            # same box, and the arithmetic/comparison selectors key off
+            # `_tagged_word_vals` to read it by kind. Without this a call
+            # result bound to a name (`l = eval_const(x)`) was boxed for
+            # printing but read as a plain integer by `l + r`. The NAME is
+            # recorded too, not just the temp: a later read of a plain local
+            # lowers to the name itself, so a temp-only marker never reached
+            # the operand (`a = f(0); print(a * 2)` printed the box address).
+            if ev in getattr(gen, '_tagged_word_vals', ()):
+                gen._tagged_word_vals.add(_un)
+                if (isinstance(tgt, IdentExpr)
+                        and gen.var_types.get(_as_str(tgt.name), 'int64_t')
+                        == 'int64_t'):
+                    _tn = _as_str(tgt.name)
+                    gen._tagged_word_vals.add(_tn)
+                    gen._boxed_vals.add(_tn)
+            ev = _un
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
         # A word of unknown kind landing in an int64_t local: the local is
         # that word now (see `_dyn_word_locals`).
         if ev in gen._dyn_word_vals and gen.var_types[tgt.name] == 'int64_t':
             gen._dyn_word_locals.add(tgt.name)
+        else:
+            gen._dyn_word_locals.discard(tgt.name)
+        # A `d[k]` read whose value kind lives on the slot: keep the mapping
+        # only when this assignment forwards that exact temp/word.
+        _dsr = getattr(gen, '_dict_slot_reads', None)
+        if _dsr is not None:
+            if ev in _dsr:
+                _dsr[tgt.name] = _dsr[ev]
+            else:
+                _dsr.pop(tgt.name, None)
+        _note_rtobj_binding(gen, tgt.name, et, ev)
         # A `MojoBoundMethod *` value stored into a local whose declared C
         # type is NOT `MojoBoundMethod *` (a var-type-inference join with
         # another branch's plain fn-pointer / lambda value collapsed it to
@@ -339,7 +393,7 @@ def _assign_target(gen, tgt, et, ev):
         # (unpacks the dict's keys), not just an ambiguous boxed handle.
         lp = gen._materialize_as_list(et, ev)
         for i, sub in enumerate(tgt.elements):
-            idx64 = gen._new_val('int64_t', f"(int64_t){i}")
+            idx64 = gen._cast('int64_t', f"{i}")
             elem_type = gen._elem_of(lp)
             suf = gimple_ctypes.TypeLattice.list_suffix(elem_type)
             set_et = elem_type if elem_type != 'unknown' else 'int64_t'

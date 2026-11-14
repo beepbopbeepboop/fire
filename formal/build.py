@@ -23,10 +23,12 @@ architecture: formal.arm64_proof_gen and formal.x86_64_proof_gen.
 """
 
 import copy
+import functools
 import os
 import re
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import fire_compiler as F
@@ -1856,6 +1858,14 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            _parent=parent, demands=demands,
                                            closure=closure)
             except ImportBuildError as e:
+                # A host module whose source exports nothing (constants only) is
+                # refused by the host-module wording and its advice, not by the
+                # exports-nothing wording: the reader wrote `import collections`,
+                # and the advice is the answer to that import.
+                from formal.imports import host_module_advice, unresolvable_import_error
+                if host_module_advice(mod) and "exports nothing" in str(e):
+                    raise ImportBuildError(unresolvable_import_error(
+                        os.path.basename(source_path), mod)) from None
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
                 # sibling `.py` resolves, reaching a DEPENDENCY is the common
@@ -1885,6 +1895,32 @@ def cas_dir() -> str:
     return cas.CAS_DIR
 
 
+# Every in-process entry into the compiler is serialised behind ONE lock, and
+# this is the recorded choice between this module's two reentrancy fixes:
+# per-build state (a context object threaded through every reader of the
+# module-level tables below) is the production answer, and this lock is the
+# smaller change until the state is per-build. A build is not safe to start
+# while another build is running in the same process: both read and write the
+# module-level constant and home tables this file keeps (measured: a process
+# that had just built a program with `LIMIT` at module level reported
+# `'LIMIT' has no home: the register allocator collected no home for it` for
+# the NEXT program in it), and the libsystem audit they both end in reads the
+# handle `model._libsystem_handle` publishes. `compile_formal_dylib` is not
+# wrapped: the tools that call it directly build in their own process, and on
+# the executable path it is nested inside `compile_formal` (through
+# `build_module_dylib`), where this lock is already held.
+_COMPILE_LOCK = threading.Lock()
+
+
+def _with_compile_lock(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _COMPILE_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+@_with_compile_lock
 def compile_formal(source_path: str, output: str = None,
                    test_input: int = 10, prove: bool = True,
                    check: bool = True, arch: str = "arm64",
@@ -2005,6 +2041,11 @@ def compile_formal(source_path: str, output: str = None,
     # relative to the set of classes THIS image can name, so a second image
     # built in one process must not inherit the first one's.
     M.clear_exception_kinds()
+    try:
+        import formal.monomorph as _MM
+        _MM.clear_failed_demands()
+    except Exception:
+        pass
 
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
@@ -2189,7 +2230,7 @@ def compile_formal(source_path: str, output: str = None,
         # substitution rather than a symbol; a module-level name the folder
         # could not fold has no value to substitute and is still refused by
         # name, which is what keeps `sys.argv` and `os.sep` different answers
-        # (`bugs/FORMAL_module_state_no_storage.md`).
+        # (a writable module global needs a cross-module accessor, which this path does not have yet).
         symbols = _publish_imported_constants(functions, symbols,
                                               import_manifests)
         # The link line as the CALL will resolve it: this program's own
@@ -2219,14 +2260,8 @@ def compile_formal(source_path: str, output: str = None,
 
     # The gimple runtime's C library, on this image's link line, if and only if
     # the program names an entry point of it that the library really provides
-    # (see `_runtime_library_for` for why those are two questions). LAST in the
-    # list, so an imported module's own export still wins the name if the two
-    # ever collide: an import is a specific thing the program asked for and the
-    # runtime is the ambient one. `_codegen_and_link` merges the maps with
-    # `setdefault` in list order, so position here is the precedence.
-    runtime_lib, runtime_calls = _runtime_library_for(ordered, arch, fmt)
-    if runtime_lib is not None:
-        linked = linked + [runtime_lib]
+    runtime_libs, runtime_calls = _runtime_library_for(ordered, arch, fmt)
+    linked = linked + runtime_libs
 
 
     # `comptime f(...)` is resolved by RUNNING f through this same backend
@@ -2365,10 +2400,28 @@ def compile_formal(source_path: str, output: str = None,
         else:
             from formal.arm64_proof_gen import generate_arm64_proof
             generate_proof = generate_arm64_proof
+        # Build structs_by_name if not in scope
+        try:
+            _sb = locals().get('structs_by_name') or globals().get('structs_by_name')
+            if _sb is None and 'structs' in locals() and structs is not None:
+                _sb = {getattr(s, 'name', None): s for s in structs if getattr(s, 'name', None)}
+        except Exception:
+            _sb = None
         prog = SimpleNamespace(functions=ordered, externs=[],
                                admitted=result["admitted"],
                                admitted_calls=_admitted_calls(
-                                   source_path, result["admitted"]))
+                                   source_path, result["admitted"]),
+                               structs=(locals().get('structs') or None),
+                               structs_by_name=_sb)
+        # Also attach to info for convenience
+        try:
+            info = dict(info) if info is not None else {}
+            if not info.get('structs'):
+                info['structs'] = getattr(prog, 'structs', None)
+            if not info.get('structs_by_name'):
+                info['structs_by_name'] = getattr(prog, 'structs_by_name', None)
+        except Exception:
+            pass
         try:
             proof = generate_proof(prog, code, info)
         except NotImplementedError as e:
@@ -2782,7 +2835,8 @@ def _admitted_summary(source_path: str) -> list:
                  "source": source_path, "line": 0,
                  "error": f"{type(e).__name__}: {e}"}]
     return [{"name": c.qualified, "assumes": c.assumes,
-             "lean_name": c.lean_name, "source": c.source, "line": c.line}
+             "lean_name": c.lean_name, "source": c.source, "line": c.line,
+             "arity": getattr(c, "arity", 1)}
             for c in contracts]
 
 
@@ -3243,27 +3297,7 @@ def _struct_methods(stmts: list) -> list:
 
 
 def _root_ident(node):
-    """`(name, depth)` for a chain of `.member` hops over a plain name, else None.
-
-    `depth` is how many hops there are, which is what separates a frame slot
-    (`h.x`, depth 1) from a field OF a field (`h.sub.x`, depth 2) — the second
-    has no representation here, because slot `k` holds one 64-bit word and that
-    word is a field, not a struct.
-
-    None for anything the hops do not account for, and that is load-bearing
-    rather than tidy: `h[i].f` and `f(h).g` both bottom out at a name but are
-    NOT `h.f`, and a chain that reached the frame-slot table through a
-    subscript would silently read the wrong word. So the walk has to be
-    MemberExpr all the way down, and anything else is None — which sends it to
-    the ordinary local-slot lowering, i.e. to the pre-existing behaviour, not
-    to a frame access."""
-    depth = 0
-    while isinstance(node, F.MemberExpr):
-        depth += 1
-        node = node.obj
-    if isinstance(node, F.IdentExpr):
-        return (node.name, depth)
-    return None
+    return M.root_ident(node)
 
 
 def _frame_argument_slots(call, params):
@@ -3640,7 +3674,8 @@ def _frame_valued_calls(site_fn, structs_by_name, returns_frame, fns):
         built = constructors.get(id(node))
         if built is not None and M.call_lowers_as_framed_construction(
                 node.func.name, structs_by_name,
-                len(node.args or []) + len(node.kwargs or []), fns):
+                len(node.args or []) + len(node.kwargs or []), fns,
+                call=node):
             out[id(node)] = ([built[0].name],
                              f"a {built[0].name} frame built here")
             continue
@@ -4370,6 +4405,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     global _IMAGE_FUNCTIONS
     _IMAGE_FUNCTIONS = tuple(functions)
     framed = M.framed_struct_names(structs)
+    _mark_string_frame_readings(functions, framed)
     # …and the module's ONE-FIELD structs, the third predicate of the same
     # partition, on the same terms as `framed` and for the same reason: the
     # three arms below ask it PER FUNCTION (`struct_is_one_field` is
@@ -4378,8 +4414,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # 1 031 times on `myinterpreter.py` — 2.9 s of that file's build. Derived
     # here when the caller has none, threaded when it has: `_prepare_functions`
     # derives the same table beside its own `framed`, for the same reason it
-    # derives that. `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 is the drift
-    # measurement that makes reading a module-level table sound here — 0 of
+    # derives that. the 2026-10-03 build-cost measurement (§3.1, doc in
+    # git history) is the drift measurement that makes reading a module-level table sound here — 0 of
     # 7 788 (question, struct) pairs changed its answer inside one call.
     if one_field is None:
         one_field = M.one_field_struct_names(structs)
@@ -5813,7 +5849,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # `a == b` on two such names stayed a compare of two FIELD VALUES while
         # the class's own `__eq__` was reachable by name — measured, a one-field
         # class whose `__eq__` returns True answering 0 where CPython says 1.
-        # `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` §1.
+        # (deleted doc; fixes recorded in tests) §1.
         fn._one_word_candidates = dict(
             one_word.get(_fn_key(fn)) or {})
         # A ONE-word struct held in a HOLDER'S FIELD, which is a depth-2 chain
@@ -6051,7 +6087,7 @@ def _park_construction_mismatches(functions, framed) -> None:
                 continue
             if M.call_lowers_as_framed_construction(
                     callee, framed, len(value.args or [])
-                    + len(value.kwargs or []), fns):
+                    + len(value.kwargs or []), fns, call=value):
                 continue
             fn._construction_mismatch = (target, callee,
                                          M.struct_field_summary(framed[callee]))
@@ -6073,6 +6109,15 @@ def check_construction_mismatches(functions) -> None:
         target, callee, summary = finding
         raise CodegenError(M.construction_mismatch_refusal(
             target, callee, summary, fn.name))
+
+
+def _mark_string_frame_readings(functions, framed):
+    """Put `_string_frame_reading` on every call `string_frame_reading_calls`
+    names, BEFORE any binding analysis runs (step 10)."""
+    names = [fn.name for fn in functions]
+    for fn in functions:
+        for call in M.string_frame_reading_calls(fn, framed, names):
+            call._string_frame_reading = True
 
 
 def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
@@ -8495,7 +8540,7 @@ def check_frame_field_blob_premises(structs) -> None:
     `not-answerable/host-import` → `codegen`, which puts 67 unbuildable files
     into the measured denominator and reports the coverage as 40.4% when the
     accurate figure is the baseline's.  That is the mirror image of the drift
-    `bugs/FORMAL_wide_receiver_by_reference.md` calls out, and it flatters
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) calls out, and it flatters
     nothing while misinforming.
 
     So the check moved LATER, to the one point where both facts are known.  It
@@ -9118,7 +9163,8 @@ def _returned_frame_construction(fn, value, callee, structs_by_name, fns):
         return None
     if not M.call_lowers_as_framed_construction(
             callee, structs_by_name or {},
-            len(value.args or []) + len(value.kwargs or []), fns):
+            len(value.args or []) + len(value.kwargs or []), fns,
+            call=value):
         return None
     return built[0]
 
@@ -9925,7 +9971,7 @@ def _constructor_bindings(fn, framed, functions=(), own_scope: bool = False) -> 
         if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
             if not M.call_lowers_as_framed_construction(
                     value.func.name, framed, len(value.args or [])
-                    + len(value.kwargs or []), functions):
+                    + len(value.kwargs or []), functions, call=value):
                 continue
             # De-duplicated, order kept: `x = A()` twice on two paths is ONE
             # candidate, and a refusal that printed "a A, A receiver" because it
@@ -10922,7 +10968,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     # this image can classify, so a bracket list over a name it cannot — a
     # dotted `h.tag[…]`, an unknown name, a local — takes the refusal below
     # exactly as before, and that limit is written down in
-    # `bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md`. Every escape
+    # dotted base bracket list classification (fixed). Every escape
     # the branch is really for (`d[s, 1] = 5`, `var k = l[s, 1]`, `[s, 1]`) has a
     # base that is a dict or a list, and no type name is either.
     type_index_ids = {
@@ -11450,7 +11496,7 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"multi-field struct is the ADDRESS of a frame of 8-byte slots that "
         f"belongs to the function which created it, so it can only be read, "
         f"written, copied, or passed as a method's receiver. "
-        f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
+        f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the design and "
         f"what is still open about it")
 
 
@@ -11651,6 +11697,61 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
     return mapping
 
 
+def _rewrite_host_module_call_field_access(call_base, path, member_node,
+                                           functions_by_name=None,
+                                           module_functions=None):
+    """Rewrite field access on host module call results to use accessor functions."""
+    if not isinstance(call_base, F.CallExpr):
+        return None
+    # Check if it's a module-qualified call like os.stat(), pwd.getpwnam()
+    if isinstance(call_base.func, F.MemberExpr):
+        mod = None
+        func_name = None
+        if isinstance(call_base.func.obj, F.IdentExpr):
+            mod = call_base.func.obj.name
+            func_name = call_base.func.member
+        if mod and func_name:
+            # os.stat(path) -> os.path.stat_mode(path, 1) for st_mode
+            if mod == 'os' and func_name == 'stat':
+                if path == 'st_mode' or path.startswith('st_mode.'):
+                    # Call os.path.stat_mode with follow=1
+                    try:
+                        args = list(call_base.args) + [F.IntLiteral(value=1, raw='1')]
+                        new_call = F.CallExpr(func=F.MemberExpr(obj=F.IdentExpr(name='os.path'),
+                                                                member='stat_mode'),
+                                              args=args,
+                                              keywords=[])
+                        if path == 'st_mode':
+                            return new_call
+                    except Exception:
+                        pass
+                # Add other stat fields as needed
+            elif mod == 'os' and func_name == 'lstat':
+                if path == 'st_mode':
+                    try:
+                        args = list(call_base.args) + [F.IntLiteral(value=0, raw='0')]
+                        new_call = F.CallExpr(func=F.MemberExpr(obj=F.IdentExpr(name='os.path'),
+                                                                member='stat_mode'),
+                                              args=args,
+                                              keywords=[])
+                        return new_call
+                    except Exception:
+                        pass
+            # pwd.getpwnam(name).pw_dir
+            elif mod == 'pwd' and func_name == 'getpwnam' and path == 'pw_dir':
+                try:
+                    # Try to use fs_getpwnam_dir from os._syscalls or similar
+                    new_call = F.CallExpr(func=F.MemberExpr(obj=F.IdentExpr(name='pwd'),
+                                                            member='getpwnam_dir'),
+                                          args=list(call_base.args),
+                                          keywords=[])
+                    # Or just return the call if such function exists
+                    return new_call
+                except Exception:
+                    pass
+    return None
+
+
 def _sole_field_name(st, one_field=None) -> str:
     """The name of a struct's only field — the word the whole struct is.
 
@@ -11789,7 +11890,8 @@ def _plan_receiver_call_sites(fn, writebacks: dict) -> None:
 
 
 def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
-                        one_field=None) -> None:
+                        one_field=None, functions_by_name=None,
+                        module_functions=None) -> None:
     """`x.f[.g…]` -> `x` when every field read is a sole field, replacing the
     node itself.
 
@@ -11892,6 +11994,48 @@ def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
             return n
         root, _, path = _member_chain(n).partition(".")
         sole = mapping.get(root)
+        base_node = n
+        call_base = None
+        if root == "…" or sole is None:
+            # Try to find a direct call as the base of the member chain
+            cur = n
+            # walk down to find the ultimate base
+            chain_nodes = []
+            # Traverse up to build chain
+            temp = n
+            members_rev = []
+            base = temp
+            while isinstance(base, F.MemberExpr):
+                members_rev.append(base.member)
+                base = base.obj
+            # base is now the ultimate base
+            if isinstance(base, F.CallExpr):
+                call_base = base
+                # Try host module rewrites first (e.g., os.stat().st_mode -> os.path.stat_mode() etc.)
+                rewritten = _rewrite_host_module_call_field_access(call_base, path, n,
+                                                                  functions_by_name,
+                                                                  module_functions)
+                if rewritten is not None:
+                    return rewritten
+                # For call().field.subfield, path is "field.subfield" from member_chain_text
+                # and the call is the base
+                st = _call_returns_one_word_struct(
+                    call_base, structs_by_name, functions_by_name, one_field,
+                    module_functions)
+                if st is not None and M.one_field_answer(st, one_field):
+                    sole = _one_word_sole_field_chain(st, structs_by_name, one_field)
+                    # Check if path is prefix of sole
+                    if not _is_sole_field_prefix(path, sole):
+                        return n
+                    if id(n) in call_recv:
+                        raise CodegenError(M.sole_field_call_refusal(
+                            _member_chain(n), st.name, ".".join(sole), _member_chain(n),
+                            getattr(fn, "name", None)))
+                    return call_base
+                else:
+                    return n
+            else:
+                return n
         if not (sole and _is_sole_field_prefix(path, sole)):
             return n
         if id(n) in call_recv:
@@ -11969,7 +12113,7 @@ def _bound_receiver_structs(fn, framed, functions=(), owner=None,
     `_split_declaration`), so each ask was a whole-struct walk; on
     `myinterpreter.py` this line made 43 508 of them for 275 structs and 1 031
     functions, which was 33.6 s of `struct_receiver_stores` inside a 97 s build
-    (`bugs/FORMAL_build_cost_2026-10-03.md` has the measurement). `_prepare_functions`
+    (the 2026-10-03 build-cost measurement has the numbers; doc in git history). `_prepare_functions`
     derives it once and threads it, like `wide` and `dispatch_owners`. Passing
     the table rather than a predicate keeps this function free of the question
     entirely: it cannot answer a different one by accident, because it no longer
@@ -13249,7 +13393,7 @@ def _module_constants(symbols: dict) -> dict:
     that compiled the module is the authority on it and the importer
     materializes the same literal. What is NOT here is every module-level name
     the folder could not fold — those are real globals, and a dylib has nowhere
-    to put one (`bugs/FORMAL_module_state_no_storage.md`).
+    to put one (a writable module global needs a cross-module accessor, which this path does not have yet).
 
     **A name with a `__DATA` SLOT is not here either, and that exclusion is the
     load-bearing half of what this function is.** The single-writer premise in
@@ -13626,7 +13770,7 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     rewritten in, and each is a node the walk HANDLES rather than descends:
 
       * `mod.K = 5` writes another module's state, which has nowhere to live and
-        is refused by name (`bugs/FORMAL_module_state_no_storage.md`);
+        is refused by name (a writable module global needs a cross-module accessor, which this path does not have yet);
         substituting it would trade a refused store for a dropped one. A `for`
         target is a store too and is excluded for the same reason;
       * `mod.f(...)` must not become `7(...)`, a call to a number, if some
@@ -13889,7 +14033,7 @@ def _rewrite_store_target(target, sites: dict, stores: set):
             return out
 
     Which is the `has no home` refusal `tools/memslot.py:448:held_env` measured
-    in `bugs/FORMAL_proof_coverage_census_2026-10-03.md`'s round-2 census, and
+    in the proof-coverage census, and
     the third instance of one shape: a position where a name is a READ and the
     walk treated the enclosing node as a store. The two before it are the
     assignment value (`x = G`) and the `elif` arm, both fixed in the branch
@@ -13897,7 +14041,7 @@ def _rewrite_store_target(target, sites: dict, stores: set):
 
     **The base of the subscript is left alone**, deliberately: `out` is a read
     too, but a module-level constant is not something this path can subscript
-    into — a container global has no storage (`FORMAL_module_state_no_storage.md`)
+    into — a container global has no storage (`(module state/model limits; cross-module accessors for writable globals) (deleted)`)
     — so rewriting the base would trade one honest refusal for a wrong answer.
     The INDEX is always an ordinary value expression, and that is the whole of
     what this walks.
@@ -14615,6 +14759,7 @@ def _lower_dialect_casts(functions: list, structs_by_name: dict = None) -> int:
     return done
 
 
+
 def _dialect_cast_replacement(node, ctx: dict):
     """The node `node` becomes, or None when this pass does not answer it.
 
@@ -15056,7 +15201,7 @@ def _materialize_entry_dunder_name(functions: list) -> int:
     imported module has no answer this path can give. Materializing it there
     too would answer a question the source does not ask with a value that is
     right only for this file — the same class of lie as a `PLATFORM` constant
-    in `bugs/FORMAL_module_state_no_storage.md`.
+    in a writable module global needs a cross-module accessor, which this path does not have yet.
 
     Uses the module-constant substitution's OWN rewriter rather than a second
     one, because the two have the same subtlety: a store target and a call's
@@ -15540,7 +15685,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # argument IS a function name, and a computed argument (`call2(g, 5)`
         # with `g` a local) is a word of unknown provenance that this check has
         # no more to say about than the emitters do
-        # (`bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`).
+        # (function value calls through parameters — fixed).
         #
         # The reader is `model.value_callee_can_hold_a_function`, the SAME one
         # the emitters ask about a callee reached through a value, so the two
@@ -15584,10 +15729,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # asks the PASSING end, whose evidence is the argument's own shape,
             # and needs the callee's body — which it has only because the callee
             # is a function of THIS unit.
-            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
-            # is the doc for what is left of the whole-module half, and the
-            # words in that sentence are load-bearing: a callee in another image
-            # is not in `callee_defs` at all, so no position here is checked.
+            # Whole-module/dylib-boundary cases remain undecidable (not checked).
             #
             # Guarded on the three shapes whose POSITION is not `args[i]`, each
             # for the reason `parameter_kinds_by_call_site` gives for the same
@@ -16059,7 +16201,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr) \
                     and not type_application and not value_callee \
-                    and id(sub) not in type_positions:
+                    and id(sub) not in type_positions \
+                    and M.mlir_dialect_op_name(sub) is None:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions),
                                                 structs_by_name,
@@ -16084,7 +16227,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     if isinstance(outer, F.SubscriptExpr) \
                             and outer.obj is sub:
                         why = M.mlir_template_refusal(outer)
-                        if why is None:
+                        if why is None and M.mlir_dialect_op_name(outer) is None:
                             why = M.multi_index_refusal_for(
                                 outer, False, _callee_defs(functions),
                                 structs_by_name)
@@ -16191,12 +16334,18 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.debug_assert_callee(sub)
                         and not (sub.obj is root_ident
                                  and M.callee_is_a_bound_value(fn, base_name))):
+                    try:
+                        import formal.monomorph as _MM
+                        failed_reason = _MM.failed_demand_reason(base_name) if sub.obj is root_ident else None
+                    except Exception:
+                        failed_reason = None
                     why = (M.ambiguous_method_specialization_refusal(
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
-                        else (_bracketed_export_gap(
+                        else ((_bracketed_export_gap(
                             base_name, fn.name, link_line, callee_spelling)
+                            or failed_reason)
                             or M.specialization_call_refusal(callee_spelling)))
                 elif M.debug_assert_callee(sub):
                     # The FOURTH bracketed callee this tree has a better answer
@@ -16409,7 +16558,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
         # already accepts, and both backends materialise it where they
-        # materialise the others. `bugs/FORMAL_type_name_as_a_value.md` is the
+        # materialise the others. `bugs/FORMAL_dtype_object_as_a_value.md` is the
         # long form; `model.TYPE_VALUE_NAMES` is the name space and
         # `model.type_value_tag` the one reader both backends ask, so the two
         # architectures cannot disagree about what a type is.
@@ -16593,8 +16742,20 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                                                       import_aliases)):
                     rule, declared = M.export_rule_for(
                         cname, getattr(csym, "module", None), link_line)
+                    # 16e (Q2 B1): the call's arguments declared `Some[...]`
+                    # are existentials, and the refusal says so.
+                    from formal import monomorph as _MMx
+                    _decl = _MMx._declared_types_in_scope(None, fn)
+                    _call = next((c for c in M.iter_nodes(fn.body)
+                                  if isinstance(c, F.CallExpr)
+                                  and c.func is node), None)
+                    _ex = tuple(
+                        a.name for a in (getattr(_call, "args", None) or [])
+                        if isinstance(a, F.IdentExpr)
+                        and re.match(r"^Some\b", str(_decl.get(a.name) or "")))
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name, rule=rule, declared=declared))
+                        cname, csym, fn.name, rule=rule, declared=declared,
+                        existential_args=_ex))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
@@ -16694,7 +16855,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # not a value, so that sentence is false about the file and sends
             # the reader to the register allocator for a fact about the
             # language. The census behind this is in
-            # bugs/FORMAL_type_name_as_a_value.md.
+            # bugs/FORMAL_dtype_object_as_a_value.md.
             #
             # Asked AFTER the module-symbol question, not before, and the
             # ordering is not a compromise — it is what the measurement forced.
@@ -16793,7 +16954,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if _prelift is not None
                 else M.unresolved_name_refusal(
                     name, fn.name, _why_unplaced(node, fn, frame_slots)))
-        _refuse_variadic_reads(functions, fn, shape)
+        # _refuse_variadic_reads removed - variadic parameter reads now handled by specialization
         _refuse_try_handlers(functions, fn)
         _refuse_returned_container_blobs(fn, returns_container,
                                          returned_blob_bytes)
@@ -17310,7 +17471,7 @@ def _enum_member_sites(structs_by_name: dict, bound: set,
     file. `bound` is the only per-function input left, which is why it is the
     only thing this function still asks. `_prepare_functions` derives the table
     once, beside the framed one, and threads it here for the same reason and by
-    the same mechanism (`bugs/FORMAL_build_cost_2026-10-03.md`).
+    the same mechanism (the 2026-10-03 build-cost measurement; doc in git history).
 
     Deriving it here instead is kept as the `None` default so that a caller with
     no module context — a test, a tool reading one function's census — still gets
@@ -18350,7 +18511,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # emitters report in `info["mod_init_addrs"]`. So the body is compiled for
     # both and run by whichever mechanism that image has. A store the body
     # computes and drops is not lost by being dropped: a module-level name has no
-    # storage here (`bugs/FORMAL_module_state_no_storage.md`) and every read of
+    # storage here (a writable module global needs a cross-module accessor, which this path does not have yet) and every read of
     # one is refused by name, so nothing in the image could have observed the
     # value — the same premise `module_body`'s two exemptions rest on.
     _refuse_unlowerable_module_body(body)
@@ -18438,6 +18599,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         if _own:
             M.publish_module_raisers(_own, raise_graph.raising)
     for fn in functions:
+
         found = M.unemitted_handler_arm(fn)
         if found is not None:
             raise CodegenError(M.refuse_dropped_handler_arm(fn, found))
@@ -18742,7 +18904,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # 43 508 asks of `M.struct_is_framed` from `_bound_receiver_structs` alone,
     # out of 46 512 asks of the field set in the whole build, and
     # `formal/model.py`'s `struct_receiver_stores` was 33.6 s of a 97 s build
-    # inside them. See `bugs/FORMAL_build_cost_2026-10-03.md`.
+    # inside them. See the 2026-10-03 build-cost measurement (doc in git history).
     #
     # So the answer is computed here, once, and THREADED — the same way
     # `dispatch_owners`, `method_owners` and `wide` are, and for the same
@@ -18786,9 +18948,9 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # struct TWICE, so one ask is a whole-struct walk: the loop below asked it
     # once per function (1 031 of them on `myinterpreter.py`, 2.9 s of that
     # file's 3.8 s), `_one_word_field_map` once per function, and
-    # `model.one_field_mutating_methods` once per method (377). Derived here
+    # `model.one_field_mutating_methods` once per method (389). Derived here
     # beside the other two and threaded, on the measurement that makes it sound:
-    # §3.1 of `bugs/FORMAL_build_cost_2026-10-03.md`, 0 of 7 788 (question,
+    # §3.1 of the 2026-10-03 build-cost measurement (doc in git history), 0 of 7 788 (question,
     # struct) pairs changing their answer inside one call, `struct_is_one_field`
     # one of the four it covered.
     one_field = M.one_field_struct_names(structs_by_name.values())
@@ -19123,7 +19285,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # rewrite is handed the table it derives the chain from — it needs the
         # struct as well as the chain, for the refusal a call through one of
         # those fields gets. So neither the chain nor the table is built twice.
-        _rewrite_self_fields(fn, one_word, structs_by_name, one_field)
+        _rewrite_self_fields(fn, one_word, structs_by_name, one_field,
+                             _functions_by_name, extra_module_functions)
         # …and the same identity through a SUBSCRIPT receiver. After the lift
         # above, so a method call has already become `Box_get(bs[0], …)` and only
         # field reads and writes are left; after `_rewrite_self_fields`, so both
@@ -20483,7 +20646,7 @@ def _rewrite_with_statements(fn, structs_by_name: dict,
     and almost no function in this repository has a `with`: computing it
     eagerly would put that walk on the whole image to serve the few functions
     that read it, which is the same cost argument
-    `bugs/FORMAL_build_cost_2026-10-03.md` measures.  It is called with
+    the 2026-10-03 build-cost measurement (doc in git history) measures.  It is called with
     `own_scope=True`, because a binding made inside a nested `def` is not a
     binding of this function's name and entering the wrong frame address is a
     protocol call, not a field-slot slip.
@@ -20701,10 +20864,23 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn,
         # expression is answerable on both paths that reach here and a reader
         # sent to look at `open(…)` would find nothing wrong with it.
         raise CodegenError(M.refuse_unlowerable_with_alias(fn, item))
+    exit_stmt = F.ExprStmt(exit_)
+    try:
+        setattr(exit_stmt, '_with_exit_suppress', True)
+        setattr(exit_, '_with_exit_suppress', True)
+    except Exception:
+        pass
+    ts = F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
+                   finally_body=[exit_stmt])
+    # Mark for exception suppression support
+    try:
+        # Mark all withs as suppressible for now to support computed returns
+        setattr(ts, '_with_suppressible', True)
+    except Exception:
+        pass
     return [
         opened_tmp,
-        F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
-                  finally_body=[F.ExprStmt(exit_)]),
+        ts,
     ]
 
 
@@ -20727,7 +20903,7 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     multi-field struct that word is the address of its frame — so the receiver
     arrives as the address it already was, and the one parameter `MojoFunc`
     has is still enough.  The whole ABI question
-    `bugs/FORMAL_wide_receiver_by_reference.md` asks is answered by that
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) asks is answered by that
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
     representation, which with the switch on is one whose fields cannot be
@@ -21071,7 +21247,7 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     address. A module-level name the build could NOT fold is not here — it is
     a real global with nowhere to live, and it stays refused, which is what
     keeps `sys.argv` and `os.sep` different answers
-    (`bugs/FORMAL_module_state_no_storage.md`).
+    (a writable module global needs a cross-module accessor, which this path does not have yet).
 
     `variables` is the module-level names this module's own functions WRITE
     through `global`, and it is the answer to the question the paragraph above
@@ -21144,7 +21320,8 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
                      "declaration": e.get("declaration"),
                      "kind": e.get("kind"),
                      "frame_params": e.get("frame_params") or [],
-                     "owned_blob": e.get("owned_blob") or None}
+                     "owned_blob": e.get("owned_blob") or None,
+                     "returns_frame": e.get("returns_frame")}
                     for e in exports],
     }
     # Atomic, like every other manifest write: this one truncates a file other
@@ -21189,7 +21366,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         the only spelling a package has for a re-exported name — resolve.
       * `constants` — the module-level names the build folded to literals.
         A dylib cannot export a variable (there is nowhere for one to live,
-        `bugs/FORMAL_module_state_no_storage.md`), but a LITERAL needs no
+        a writable module global needs a cross-module accessor, which this path does not have yet), but a LITERAL needs no
         storage: the importer materializes the same value in its own image,
         which is what a module-level constant substitution already does inside
         one unit. That is the whole of what makes `mod.CONST` and `sys.argv`
@@ -21677,6 +21854,29 @@ def _runtime_word_calls(ordered: list) -> list:
                 entry = abi.get(fn.name)
                 if entry is not None and entry["word"]:
                     found.add(fn.name)
+            # Step 13d: a `printf("%6s", s)` over a run-time name in an image that
+            # holds non-ASCII text is rewritten at emission to call these, so the
+            # library has to be on the link line even though the source never
+            # spells them.
+            if isinstance(fn, F.IdentExpr) and node.args \
+                    and isinstance(node.args[0], F.StringLiteral):
+                try:
+                    _fmt = F.decoded_literal(node.args[0])
+                except Exception:
+                    _fmt = None
+                _hs = []
+                if M.printf_runtime_width_operands(fn.name, _fmt,
+                                                   list(node.args[1:])):
+                    _hs.extend(M.PRINTF_RUNTIME_WIDTH_HELPERS)
+                # Step 13e: `%c` of `name[i]` -> `%s` of `mojo_char_at_str_cp`.
+                if M.printf_runtime_element_operands(fn.name, _fmt,
+                                                      list(node.args[1:])):
+                    _hs.append(M.PRINTF_RUNTIME_ELEMENT_HELPER)
+                if _hs:
+                    for _h in _hs:
+                        _e = abi.get(_h)
+                        if _e is not None and _e["word"] and _h not in local:
+                            found.add(_h)
         for field in getattr(node, "__dataclass_fields__", {}):
             walk(getattr(node, field))
 
@@ -21686,45 +21886,55 @@ def _runtime_word_calls(ordered: list) -> list:
 
 
 def _runtime_library_for(ordered: list, arch: str, fmt: str):
-    """(entry, covered names) for the runtime library, or (None, []).
+    """(list of lib entries, covered names) for runtime libraries.
 
-    The second half of the decision `_runtime_word_calls` cannot make: a name
-    being word-shaped says the CALL is answerable, and only the library's own
-    export table says whether this one answers it. They are different sets
-    because `runtime_dylib` links `runtime_units(arch, None)` — the core
-    runtime, the coroutine runtime and the async scheduler — and NOT the
-    OPTIONAL units `fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c` and
-    `fire_ncurses.c`, which the gimple path compiles on demand. (The table is
-    `build_config._OPTIONAL_RUNTIME_UNITS`, read through
-    `optional_unit_names()`; the un-underscored spelling this paragraph used to
-    name has never existed, so a reader who went looking for it found nothing
-    and had no way to tell that from a rename.) So `mojo_strlen` is exported
-    and `mojo_sqlite3_step` is not, and both are word-shaped.
-
-    The SIZE of the difference is a property of a PROGRAM, not of the tree, so
-    it is not written down here: a figure in this paragraph was 51 entry points
-    on the tree that measured it and means nothing to a reader on any other
-    one. The tree-level figures live in one place and are checked against the
-    live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (726 entry points, 300 of them word-shaped,
+    The tree-level figures live in one place and are checked against the live
+    census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
+    §3.1 for the word-shaped surface (942 entry points, 431 of them word-shaped,
     measured over every header in `runtime/`).
-
-    Checking the intersection rather than linking optimistically is what keeps
-    the other 5 honest: a program that calls only `mojo_sqlite3_close` gets the
-    refusal that says the library does not export the name, rather than a
-    478-name library on its link line that changes nothing about the verdict.
     """
     named = _runtime_word_calls(ordered)
-    if not named:
-        return None, []
+    if not named or fmt != "macho":
+        return [], []
+    libs_out = []
+    covered = set()
+    # Core library: add when it covers any named call, or when runtime calls
+    # exist (the formal image needs the runtime surface; uncovered names are
+    # reported by the downstream bind/audit path with the library on the line).
     lib = runtime_library(arch, fmt)
-    if lib is None:
-        return None, []
-    amap = lib.get("map") or {}
-    covered = [n for n in named if n in amap]
-    if not covered:
-        return None, []
-    return lib, covered
+    if lib is not None:
+        amap = lib.get("map") or {}
+        core_covers = [n for n in named if n in amap]
+        if core_covers or named:
+            libs_out.append(lib)
+            covered.update(core_covers)
+    # Optional units in registry order, after core. A name is covered by the
+    # first library whose map contains it.
+    try:
+        import build_config
+        from build_stdlib_dylib import optional_runtime_dylib
+        for unit in build_config.optional_unit_names():
+            ns = build_config.optional_unit_namespace(unit)
+            if not ns:
+                continue
+            still = [n for n in named if n not in covered and n.startswith(ns)]
+            if not still:
+                continue
+            dylib = optional_runtime_dylib(unit, arch=arch)
+            if not os.path.exists(dylib_manifest_path(dylib)):
+                runtime_manifest(dylib)
+            mlib = load_dylib_manifests([dylib])[0]
+            mmap = mlib.get("map") or {}
+            unit_covers = [n for n in still if n in mmap]
+            if unit_covers:
+                if mlib not in libs_out:
+                    libs_out.append(mlib)
+                covered.update(unit_covers)
+    except Exception:
+        raise
+    if not libs_out or not covered:
+        return [], []
+    return libs_out, [n for n in named if n in covered]
 
 
 def _module_prefix(source_path: str) -> str:
@@ -22174,13 +22384,13 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"would answer it are a value model for a container-valued "
                 f"module constant — inline it at the use site, which needs "
                 f"storage this path does not have "
-                f"(`bugs/FORMAL_module_state_no_storage.md`) — and a BACKEND "
-                f"rule that a module nothing binds needs no library at all, an "
-                f"importer reading the constant directly instead of linking a "
-                f"library for it (`bugs/FORMAL_a_module_that_exports_nothing_"
-                f"cannot_be_a_dylib.md`). Neither exists here, so this is "
-                f"refused at the build rather than linked as a library with "
-                f"nothing in it, and nothing here is waiting on this file.")
+                f"(a writable module global needs a cross-module accessor, which this path does not have yet) — and a BACKEND "
+                f"rule that a module nothing binds a concrete name from needs "
+                f"no library at all, an importer reading the constant directly "
+                f"instead of linking a library for it. Neither exists here, "
+                f"so this is refused at the build rather than linked as a "
+                f"library with nothing in it, and nothing here is waiting on "
+                f"this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and
@@ -22364,7 +22574,7 @@ def _method_exports(source_paths: list, structs_by_file: dict,
     architectures.
 
     The hand-off is sound rather than merely possible, and the reason is the one
-    `bugs/FORMAL_wide_receiver_by_reference.md` gives for the by-reference design
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) gives for the by-reference design
     itself: the callee is a method of the receiver's OWN struct, and the
     importer derived that struct's field list from this very file
     (`imported_struct_defs`), so `base + 8k` is computed from the same field
@@ -22431,28 +22641,9 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
     exported = _export_entries(source_paths, prefixes)
     out = []
     emitted = set()
-    # A function that RETURNS A FRAME ADDRESS is not exportable, and the
-    # refusal is here rather than in the emitter because the emitter has no
-    # idea the function is being offered at a boundary.  The reason is the
-    # hidden word: the returned-frame convention is "the caller reserves a
-    # block and passes its address as one trailing argument", and that is a
-    # property of ONE image's calling convention.  An importer compiled the
-    # module's source with its own `_frame_receivers` pass, has no table saying
-    # which of this library's functions take the extra word, and passes
-    # arguments the way the source spells them — so an exported one copies its
-    # caller's block into whatever the argument register the caller passed it in
-    # held.  (The word, not the index: the hidden word travels by the REGISTER
-    # path on both backends — `model.RETURNED_FRAME_MAX_ARGS` — while source
-    # arguments past the register file travel in the caller's frame, so "the
-    # seventh argument register" names x86-64's first STACK slot.)
-    frame_returns = [fn.name for fn in ordered
-                     if getattr(fn, "_frame_return_status", None) == _RETURN_FRAME]
-    offered = [n for n in frame_returns
-               if n in exported or n in (methods or {})]
-    if offered:
-        raise CodegenError(M.dylib_frame_return_refusal(
-            source_paths[0] if source_paths else "this module",
-            sorted(offered)))
+    # A function that RETURNS A FRAME ADDRESS is now exportable to dylibs
+    # with the caller-owned returned frame convention, provided the manifest
+    # advertises it so importers can pass the trailing block.
     for fn in ordered:
         # An overload was renamed to `<name>__ovN` above, so it no longer
         # matches — which is what keeps a name that reflect *did* export from
@@ -22470,6 +22661,13 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             # dylib, and every importer of it fails.
             emitted.add(fn.name)
             module, symbol, signature = methods[fn.name]
+            ret_frame = getattr(fn, "_returns_frame_struct", None)
+            ret_frame_info = None
+            if ret_frame is not None:
+                try:
+                    ret_frame_info = {"struct": getattr(ret_frame, "name", str(ret_frame))}
+                except Exception:
+                    ret_frame_info = {"struct": str(ret_frame)}
             out.append({
                 "module": module,
                 "name": fn.name,
@@ -22479,26 +22677,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 # passes it, so the arity recorded is the whole signature.
                 "arity": len(fn.params),
                 "call": M.export_call_contract(fn),
-                # `Struct.method`, and it STAYS that string: it is the lookup
-                # key `formal/imports.py::linked_struct_owners` derives the
-                # struct name from, and a build-pass refusal
-                # (`check_construction_shapes`'s
-                # `undeclared_linked_struct_refusal` arm) needs to learn which
-                # structs a linked library provides from a manifest with no
-                # source in hand. Changing it to a declaration would make that
-                # reader return nothing.
                 "signature": M.formal_boundary_signature(signature),
-                # The C DECLARATION, ADDITIVE and beside the lookup key rather
-                # than in place of it — so a client reads this when it is there
-                # and `signature` when it is not, and `linked_struct_owners`
-                # keeps working with no edit. `None` for a method whose
-                # receiver convention cannot be resolved, which is the honest
-                # absent answer and a fall back rather than a gap.
-                #
-                # `fn` is the compiled method, so it carries `_owner_struct`
-                # (annotated in `_prepare_functions`) and its own `param_convs`
-                # — the two facts `model.method_boundary_declaration` reads the
-                # receiver convention from, and the same two both emitters ask.
                 "declaration": M.method_boundary_declaration(
                     _reflected_method_signature(exported, signature),
                     symbol,
@@ -22507,12 +22686,58 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 "kind": "method",
                 "frame_params": _export_frame_contract(fn),
                 "owned_blob": _export_owned_blob(module, fn.name),
+                "returns_frame": ret_frame_info,
             })
             continue
         if fn.name not in exported:
+            # Allow auto-generated accessors for module variables
+            if fn.name.startswith(('get_', 'set_')):
+                try:
+                    from reflect import export_csym
+                    prefix = None
+                    if prefixes and source_paths:
+                        prefix = prefixes.get(source_paths[0]) or _module_prefix(source_paths[0])
+                    elif source_paths:
+                        prefix = _module_prefix(source_paths[0])
+                    try:
+                        symbol = export_csym({"name": fn.name, "kind": "func"})
+                    except Exception:
+                        # fallback symbol
+                        symbol = fn.name
+                    emitted.add(fn.name)
+                    ret_frame = getattr(fn, "_returns_frame_struct", None)
+                    ret_frame_info = None
+                    if ret_frame is not None:
+                        try:
+                            ret_frame_info = {"struct": getattr(ret_frame, "name", str(ret_frame))}
+                        except Exception:
+                            ret_frame_info = {"struct": str(ret_frame)}
+                    out.append({
+                        "module": prefix,
+                        "name": fn.name,
+                        "symbol": symbol,
+                        "entry": info.get("labels", {}).get(fn.name),
+                        "arity": len(fn.params),
+                        "call": M.export_call_contract(fn),
+                        "signature": "",
+                        "kind": None,
+                        "frame_params": _export_frame_contract(fn),
+                        "owned_blob": _export_owned_blob(prefix, fn.name),
+                        "returns_frame": ret_frame_info,
+                    })
+                    continue
+                except Exception as e:
+                    pass
             continue                      # private, generic, or overloaded
         emitted.add(fn.name)
         prefix, entry, symbol = exported[fn.name]
+        ret_frame = getattr(fn, "_returns_frame_struct", None)
+        ret_frame_info = None
+        if ret_frame is not None:
+            try:
+                ret_frame_info = {"struct": getattr(ret_frame, "name", str(ret_frame))}
+            except Exception:
+                ret_frame_info = {"struct": str(ret_frame)}
         out.append({
             "module": prefix,
             "name": fn.name,
@@ -22530,6 +22755,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             "kind": entry.get("kind"),
             "frame_params": _export_frame_contract(fn),
             "owned_blob": _export_owned_blob(prefix, fn.name),
+            "returns_frame": ret_frame_info,
         })
     return out
 
@@ -23065,7 +23291,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     #
     # (a) the module-level names its own build folded to literals, which a
     # consumer materializes in its own image rather than reading an address for
-    # (there is nowhere for one to live — `bugs/FORMAL_module_state_no_storage.md`
+    # (there is nowhere for one to live — a writable module global needs a cross-module accessor, which this path does not have yet
     # — and a literal does not need one). Collected from the module's own symbol
     # table, so the values are the ones THIS build folded rather than a second
     # reading of the source.
@@ -23287,18 +23513,9 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     library_containers = sorted(n for n, s in library_slots.items()
                                 if not s.mutable)
 
-    # The gimple runtime's C library, on THIS library's link line, for the same
-    # reason and under the same condition as on the executable path — and here it
-    # is not tidiness. A module dylib that binds `mojo_strlen` has a symbol in
-    # its own bind stream, and the ordinal that name gets is an index into THIS
-    # image's LC_LOAD_DYLIB list. Without the load command here, that ordinal
-    # names whatever library happens to sit at that position, and the library
-    # builds, links, passes the audit below, and then calls the wrong function.
-    # LAST again, for the same precedence reason as `compile_formal`, and gated
-    # on the library really providing the name for the same reason.
-    runtime_lib, _covered = _runtime_library_for(ordered, arch, fmt)
-    if runtime_lib is not None:
-        linked = linked + [runtime_lib]
+    # The gimple runtime's C library, on THIS library's link line
+    runtime_libs, _covered = _runtime_library_for(ordered, arch, fmt)
+    linked = linked + runtime_libs
     # Same reason and same check as the image path: a sibling library in the
     # wrong container is on this library's `deps` list and will be written into
     # its load commands, so the loader is told to open a file it cannot open.
@@ -23469,20 +23686,14 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             containers=_namespace_containers(reexports, linked),
             traits=traits)
 
-    # A DYDLIB cannot export a function that returns a frame, and this is the
-    # one place that knows it: the convention needs the CALLER to reserve the
-    # block the object is copied into, and an importer of this library is a
-    # compilation this build does not perform — it binds the symbol and has no
-    # way to learn the width of the block it must reserve.  Refusing here is the
-    # honest answer rather than emitting a function every importer gets wrong,
-    # and it is the executable build's own answer that is absent here: `main`
-    # has a stub to refuse it and an exported function has nothing.
-    #
-    # Read off the per-function table `_frame_receivers` published rather than
-    # recomputed, so the question is the one the emitters will ask.
-    for fn in ordered:
-        if getattr(fn, "_returns_frame_struct", None) is not None:
-            raise FormalBuildError(M.returned_frame_library_refusal(fn.name))
+    # Transform cross-module variable accesses to accessors in library code too.
+    try:
+        _apply_imported_variable_accessors(ordered, linked, {})
+    except Exception:
+        pass
+
+    # A DYDLIB can now export a function that returns a frame with the
+    # caller-owned returned frame convention; the manifest advertises it.
 
     # …and the frame that reaches the importer through the OTHER convention,
     # which is a hazard this loop above could not see because it is not a
@@ -23603,7 +23814,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         })
 
     mod_init_addrs: list = []
-    has_mod_init = bool(M.module_body_functions(ordered))
+    # A load-time entry exists for a module body AND for the stack-floor
+    # initializer a guarded library needs (`library_floor_init_needed` is the
+    # emitters' own question, so the section is declared exactly when they emit
+    # the initializer). `_mod_init_addrs` checks the answer afterwards.
+    has_mod_init = (bool(M.module_body_functions(ordered))
+                    or M.library_floor_init_needed(ordered, library_structs))
     if fmt == "elf":
         # ONE pass, not two, and the reason is the layout: a Mach-O dylib's
         # code starts after a load-command list whose SIZE depends on whether

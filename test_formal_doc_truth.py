@@ -55,6 +55,7 @@ which is what makes it cheap enough to belong in `check`.
 ## Groups
 
   census     FORMAL.md §2.2's runtime-ABI census, read out of the document
+  phase2     FORMAL.md §6 phase 2's measured rows and the prose gaps derived from them
   decisions  §4's decisions, and the tests they say pin them
   constants  the limits and budgets FORMAL.md and OPUS.md publish
   closed     the holes FORMAL.md §7 struck, and the ones it must not re-publish
@@ -154,6 +155,21 @@ def group_census():
           f'FORMAL.md §2.2 publishes {got_box} non-word entry points, '
           f'runtime_abi() says {total - word}')
 
+    # The percentage in the same sentence is a fourth copy of the ratio, and
+    # `test_runtime_header_scan.py --fix` rewrites the two counts it can see
+    # and not this — so a census refresh moved the counts and left `45.4%`
+    # describing the old pair, which no other check looked at. Read it and
+    # require the arithmetic to agree.
+    pct = re.search(r'So \*\*\d+ of \d+ \(([\d.]+)%\)\*\* is the '
+                    r'reachable-surface ceiling', text)
+    check(pct is not None,
+          'FORMAL.md §2.2 states the word share as a percentage')
+    if pct is not None and total:
+        want = round(100 * word / total, 1)
+        check(abs(float(pct.group(1)) - want) <= 0.05,
+              f'FORMAL.md §2.2 publishes {pct.group(1)}% word-shaped, '
+              f'{word} of {total} is {want}%')
+
     # The per-header breakdown, which is the part a reader uses to find the file
     # to go read. Checked one row at a time so a wrong row names itself.
     row = re.search(r'\| entry points across.*?\n', text)
@@ -161,8 +177,11 @@ def group_census():
     if row is not None:
         note = row.group(0)
         counted = 0
+        from formal.model.builtins import _OPT_IN_RUNTIME_HEADERS
         for path in sorted(glob.glob(os.path.join(HERE, 'runtime', '*.h'))):
             base = os.path.basename(path)
+            if base in _OPT_IN_RUNTIME_HEADERS:
+                continue          # not part of the default ABI; runtime_abi() leaves it out too
             real = len(reflect.collect_runtime_exports_h(path))
             counted += real
             m = re.search(re.escape(f'`{base}`') + r'\s+(\d+)', note)
@@ -272,7 +291,7 @@ def group_constants():
     # document that publishes a stale bound is worse than one that publishes
     # none -- an operator sizing a decision against it reads the wrong number.
     for name, want in (('PROOF_WALL_S', 1500), ('PROOF_CPU_S', 1500),
-                       ('LIBRARY_WALL_S', 1800), ('LIBRARY_CPU_S', 1800)):
+                       ('LIBRARY_WALL_S', 10800), ('LIBRARY_CPU_S', 30000)):
         got = getattr(L, name)
         check(got == want,
               f'formal/lean.py::{name} is {got}, FORMAL.md §12 publishes {want}')
@@ -287,13 +306,13 @@ def group_constants():
           f'Lean runs with -j {L.LEAN_THREADS}, FORMAL.md §12 publishes -j 4')
 
     # §7 row 7: the CFG leaves that admit. Named in the document, and the
-    # document says fifteen; the generator stamps each name into the Lean, so a
+    # document says seventeen; the generator stamps each name into the Lean, so a
     # site added here is a site a reader is told about.
-    check(len(AP.CFG_LEAF_SITES) == 15,
+    check(len(AP.CFG_LEAF_SITES) == 17,
           f'CFG_LEAF_SITES has {len(AP.CFG_LEAF_SITES)} sites, FORMAL.md §7 row 7 '
-          f'publishes fifteen')
-    check('**fifteen named sites**' in text,
-          "FORMAL.md §7 row 7 states the CFG_LEAF_SITES count as 'fifteen'")
+          f'publishes seventeen')
+    check('**seventeen named sites**' in text,
+          "FORMAL.md §7 row 7 states the CFG_LEAF_SITES count as 'seventeen'")
 
     # §1: the runtime translation unit's size, which is the one figure in the
     # thesis paragraph and was 299 KB when written.
@@ -365,10 +384,14 @@ def group_closed():
         return out
 
     holes = {f: live_holes(s) for f, s in sorted(lib.items())}
-    total = sum(len(v) for v in holes.values())
+    # The scaffold design (CLAUDE.md "Scaffold holes"): `lib/Scaffold.lean` is
+    # the ONE home of a hole, ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES`
+    # and counted by test_formal_proof_gaps.py. Every OTHER module has none.
+    total = sum(len(v) for f, v in holes.items() if f != 'Scaffold.lean')
     check(total == 0,
-          f'lib/ has {total} live sorry/admit outside comments ({holes}), and '
-          f"FORMAL.md §5 and §7 both rest on it having none")
+          f'lib/ has {total} live sorry/admit outside comments and outside '
+          f"Scaffold.lean ({holes}), and FORMAL.md §5 and §7 both rest on it "
+          f"having none")
 
     # The three rows §7 struck, by name. A struck row that stops being struck is
     # a hole re-published as live; a name that leaves the document entirely is
@@ -564,22 +587,36 @@ CITATION_LINES = [
     ('FORMAL.md', 'runtime/fire_python.c:7', 'runtime/fire_python.c', 'USE_PYTHON'),
     ('FORMAL.md', 'runtime/fire_sqlite3.c:156-157', 'runtime/fire_sqlite3.c',
      'int64_t'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:512', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:550', 'runtime/fire_runtime.h',
      'setjmp is emitted directly'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:513', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:551', 'runtime/fire_runtime.h',
      'no setjmp, safe to wrap'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:520', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:558', 'runtime/fire_runtime.h',
      'void mojo_raise'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:532-534', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:572', 'runtime/fire_runtime.h',
      'mojo_exc_type_get'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:612-614', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:667-669', 'runtime/fire_runtime.h',
      'mojo_exc_pending_get'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:585-610', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:667-669', 'runtime/fire_runtime.h',
      '_mojo_exc_pending'),
 ]
 
 
 def _lines_of(path):
+    # The model is a package now (`formal/model/`), so `formal/model.py` is a
+    # VIRTUAL file: every citation of it reads the union of its modules.  The
+    # documents still name `formal/model.py`, and that is what these checks are
+    # about, so the path stays and only the reader resolves it.
+    if path == 'formal/model.py':
+        out = []
+        for dirpath, dirnames, filenames in os.walk(
+                os.path.join(HERE, 'formal', 'model')):
+            dirnames[:] = [d for d in dirnames if d != '__pycache__']
+            for fn in sorted(filenames):
+                if fn.endswith('.py'):
+                    out += open(os.path.join(dirpath, fn), encoding='utf-8',
+                                errors='replace').read().splitlines()
+        return out
     return open(os.path.join(HERE, path), encoding='utf-8',
                 errors='replace').read().splitlines()
 
@@ -601,8 +638,15 @@ def group_citations():
             cache[path] = _lines_of(path)
         return cache[path]
 
+    def source_exists(path):
+        # `formal/model.py` is the model package's virtual file (see
+        # `_lines_of`): it exists as long as the package does.
+        if path == 'formal/model.py':
+            return os.path.isdir(os.path.join(HERE, 'formal', 'model'))
+        return os.path.exists(os.path.join(HERE, path))
+
     for document, symbol, path in CITATIONS:
-        check(os.path.exists(os.path.join(HERE, path)),
+        check(source_exists(path),
               f'{document} names {path}, which exists')
         if f'`{symbol}`' not in docs[document] and symbol not in docs[document]:
             check(False, f'{document} still names `{symbol}`',
@@ -858,9 +902,9 @@ def group_opus():
     body = gen[gen.index('def _gen_universal_e2e_cfg'):]
     body = body[:body.index('\ndef ')]
     for clause, snippet, said in (
-            ('recursive', 'if (recursive or not _acyclic',
+            ('recursive', 'if (recursive or (not _acyclic and not _has_loop)',
              '**not recursive**'),
-            ('acyclic', '_acyclic = all(', '**acyclic**'),
+            ('acyclic/loop', '_acyclic = all(', '**acyclic**'),
             ('no `bl`', 'b["kind"] == "bl"', 'no `bl` block'),
             ('a `fuel` at or above the instruction count', 'fuel < _TOTAL',
              'a `fuel` at or above the instruction count')):
@@ -948,8 +992,98 @@ def group_decisions():
               f"FORMAL.md §4.7's `_emit_try` is in {path}")
 
 
+# ── 1b. FORMAL.md §6 phase 2's prose, against its own measured rows ─────────
+
+def _phase2_row(text, label):
+    """`(arm64, x86_64)` for a §6 phase 2 table row, or None if it is gone.
+
+    The rows are `| label | arm64 | x86_64 |`, with the reachable row's figures
+    in bold. `label` is a regex matched against the raw text (the rows carry the
+    `…` and backtick characters and must not be flattened).
+    """
+    m = re.search(label + r' \| \**(\d+)\** \| \**(\d+)\**', text)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def group_phase2():
+    """The §6 phase 2 measured triple, and the two gaps the prose derives from it.
+
+    §6 publishes three rows (word-shaped, exported, reachable) and then states
+    two gaps in prose: how many of the word-shaped entry points the dylib does
+    not export at all, and how many of the exported ones take a `void *`. Both
+    are arithmetic on the rows, so both are checked against the rows here and
+    not against a second hand-kept copy. The rows themselves are measured by
+    `test_formal_runtime_link.py`, which builds the runtime dylib and is
+    `proofs`-only, so this group checks that the PROSE agrees with the rows
+    as published; it cannot tell whether the rows are current. That half is
+    `test_formal_runtime_link.py`'s — its 2026-11-13 re-measure moved the rows
+    to 375 / 328, and this group is what held the prose to them while the rows
+    sat stale at 369 / 323.
+
+    Like every group here, a published figure that cannot be found is a
+    FAILURE and not a skip: a reworded sentence must not quietly stop being
+    checked.
+    """
+    text = doc('FORMAL.md')
+    flat_text = flat(text)
+
+    word_row = _phase2_row(text, r'\| word-shaped entry points \(`runtime_abi`\)')
+    exp_row = _phase2_row(text, r'actually \*\*exports\*\*')
+    reach_row = _phase2_row(text, r'reachable with no heap handle the formal path cannot obtain')
+    check(word_row is not None, 'FORMAL.md §6 phase 2 has its word-shaped row')
+    check(exp_row is not None, 'FORMAL.md §6 phase 2 has its exported row')
+    check(reach_row is not None, 'FORMAL.md §6 phase 2 has its reachable row')
+    if word_row is None or exp_row is None or reach_row is None:
+        return
+    check(word_row[0] == word_row[1] and exp_row[0] == exp_row[1]
+          and reach_row[0] == reach_row[1],
+          'FORMAL.md §6 phase 2: arm64 and x86_64 publish the same triple',
+          f'{word_row} {exp_row} {reach_row}')
+    word, exported, reachable = word_row[0], exp_row[0], reach_row[0]
+
+    # §2.2 publishes the same word-shaped total. "not the N of §2.2" is a copy of
+    # it, so it must be the §2.2 figure and not a previous revision of it.
+    s22 = re.search(r'\*\*word in, word out\*\* \| \*\*(\d+)\*\*', text)
+    check(s22 is not None, 'FORMAL.md §2.2 still states a word-shaped total')
+    not_the = re.search(r'not the \**(\d+)\** of §2\.2', flat_text)
+    check(not_the is not None,
+          'FORMAL.md §6 phase 2 still compares its total with §2.2')
+    if s22 is not None and not_the is not None:
+        check(int(not_the.group(1)) == int(s22.group(1)),
+              f'FORMAL.md §6 phase 2 says "not the {not_the.group(1)} of §2.2", '
+              f'§2.2 publishes {s22.group(1)}')
+
+    # "N of the M the dylib does not export at all": M is the word-shaped total,
+    # and N is the gap the rows imply, word − exported.
+    gap = re.search(r'\*\*(\d+) of the (\d+)\*\* the dylib does not export at all',
+                    flat_text)
+    check(gap is not None, 'FORMAL.md §6 phase 2 still states the unexported gap')
+    if gap is not None:
+        check(int(gap.group(2)) == word,
+              f'FORMAL.md §6 phase 2 measures the unexported gap of '
+              f'{gap.group(2)}, its own word row says {word}')
+        check(int(gap.group(1)) == word - exported,
+              f'FORMAL.md §6 phase 2 says {gap.group(1)} are not exported, its rows '
+              f'say {word} - {exported} = {word - exported}')
+
+    # "N of the M the library exports take a `void *`": M is the exported total,
+    # and the reachable row is the exported total less that N.
+    void = re.search(r'\*\*(\d+) of the (\d+)\*\* the library exports take a '
+                     r'`void \*`', flat_text)
+    check(void is not None, 'FORMAL.md §6 phase 2 still states the void-pointer count')
+    if void is not None:
+        check(int(void.group(2)) == exported,
+              f'FORMAL.md §6 phase 2 measures the void-pointer count over '
+              f'{void.group(2)} exports, its exported row says {exported}')
+        check(exported - int(void.group(1)) == reachable,
+              f'FORMAL.md §6 phase 2 says {void.group(1)} of {exported} take a void *, '
+              f'so {exported - int(void.group(1))} are reachable; its reachable row '
+              f'says {reachable}')
+
+
 GROUPS = {
     'census': group_census,
+    'phase2': group_phase2,
     'decisions': group_decisions,
     'constants': group_constants,
     'closed': group_closed,

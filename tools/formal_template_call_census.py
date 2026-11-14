@@ -107,6 +107,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+from module_loader import STDLIB_PATH  # noqa: E402
 
 import checked_run                                           # noqa: E402
 import elaborate                                             # noqa: E402
@@ -120,7 +121,7 @@ import formal.monomorph as MM                                # noqa: E402
 DEFAULT_PATHS = [
     os.path.join(ROOT, "formal", "hostmods"),
     ROOT,
-    os.path.join(ROOT, "..", "new-modular", "Mojo", "stdlib", "std"),
+    (os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(ROOT, "..", "..", "modular", "mojo", "stdlib", "std")),
 ]
 
 # Bounds that unification can satisfy WITHOUT choosing between candidates, in
@@ -205,9 +206,39 @@ def _strip_comments(text: str) -> str:
     """
     out = []
     for line in text.split("\n"):
-        at = line.find("#")
+        at = _comment_start(line)
         out.append(line if at < 0 else line[:at])
     return "\n".join(out)
+
+
+def _comment_start(line: str) -> int:
+    """Index of the `#` that starts a comment on `line`, or -1.
+
+    A `#` inside a string or a BACKTICK literal is not a comment. The backtick
+    case is real: `std/sys/info.mojo` writes MLIR attributes as
+    `` `#kgen.param.expr<target_get_field,` `` and cutting the line at that `#`
+    removed the closing backtick, which `py_tokenize` then rejected as an
+    "unterminated backtick string literal" (the census failed on
+    `is_amd_gpu`). Scanned per line, left to right; a quote opened and not
+    closed on the line (a triple-quoted docstring) simply runs to its end,
+    which is what the naive `find("#")` effectively assumed.
+    """
+    quote = None
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\" and quote != "`":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "\"'`":
+            quote = c
+        elif c == "#":
+            return i
+        i += 1
+    return -1
 
 
 def _is_type_spelling(text) -> bool:

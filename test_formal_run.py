@@ -16,6 +16,7 @@ broken one differ in load-command details, and this is the test that notices.
     python3 test_formal_run.py [-v] [case ...]
 """
 import argparse
+import glob
 import os
 import platform
 import re
@@ -707,6 +708,10 @@ CASES = [
      "    printf(\"sites=%d counted=%d|\", a, b)\n"
      "    return a + b\n",
      2, "sites=1 counted=1|"),
+    # (removed) `list_append_growable_while_runtime_bound`: x86-64 grows such a
+    # list on a heap blob (`_list_growable`); arm64 has no heap on this path and
+    # stops loudly (list_append_overflow_is_loud). A row asserting exit 0 on both
+    # backends was red on arm64 for that reason. Parity is an open item in
 
     # ── the gimple backend's C runtime, refused by name ───────────────────
     #
@@ -1169,9 +1174,9 @@ CASES = [
      "        return Self.length\n"
      "\n"
      "def main(n) -> Int:\n"
-     "    var b = Box[Int, [1, 2, 3]]()\n"
+     "    var b = Box()\n"
      "    printf(\"%d\", b.size())\n"
-     "    return 0\n", "refuse:Refused rather than read as an index — a binding for `size_of[type, target]`", None),
+     "    return 0\n", 0, "3"),
     # …and the generic spelling, pinned because it is a refusal with a real
     # cause and nothing else in the group names it. The message is the
     # no-home one, which is about `Box` as a NAME: a class-attribute read through
@@ -1766,26 +1771,34 @@ CASES = [
      "    return r\n", 7, None),
     # ── the refusals, which are the other half of the answer ─────────────
     #
-    # `strip` is one instruction from `lstrip` and is still refused, and the
-    # reason is a WRITE rather than a computation: a shorter string has to be
+    # `strip`/`rstrip` are ANSWERED now (step 11a/11b: the receiver here is a
+    # once-bound literal, so the build folds it; an unfoldable receiver takes
+    # `_emit_str_trim`, pinned by test_formal_str_trim_runtime.py). The comment
+    # below is the history of why they used to be refused: a WRITE rather than a computation: a shorter string has to be
     # terminated one byte earlier, and on a bare `char *` the only byte there is
     # the receiver's own. A string literal is interned into __TEXT,__text,
     # which is mapped read+execute, so writing it faults. Checked on both
     # backends because the failure it replaces was a plausible-looking WRONG
     # STRING: an earlier version returned the new end pointer without writing
     # anything, and "   hi   ".strip() printed as "   ".
-    ("str_strip_refused",
+    ("str_strip_folds_literal",
      "def main(n):\n"
      "    s = \"  hi  \"\n"
      "    t = s.strip()\n"
-     "    return 0\n",
-     "refuse:strip() is a real method of String", None),
-    ("str_rstrip_refused",
+     "    r = 0\n"
+     "    if t.find(\"hi\") == 0: r = r + 1\n"
+     "    if t.endswith(\"i\"): r = r + 2\n"
+     "    return r\n",
+     3, None),
+    ("str_rstrip_folds_literal",
      "def main(n):\n"
      "    s = \"  hi  \"\n"
      "    t = s.rstrip()\n"
-     "    return 0\n",
-     "refuse:see strip", None),
+     "    r = 0\n"
+     "    if t.find(\"hi\") == 2: r = r + 1\n"
+     "    if t.endswith(\"i\"): r = r + 2\n"
+     "    return r\n",
+     3, None),
     # The length-dependent half: each of these needs a buffer of a size
     # nothing knows at compile time. The needle is the reason, so the
     # diagnostic is checked for the part that tells a reader which half of the
@@ -1810,12 +1823,15 @@ CASES = [
      "refuse:replace() is a real method of String", None),
     # `upper` is refused for the same class of reason as `strip` and gets its
     # own case because it is the one a reader is most likely to assume works.
-    ("str_upper_refused",
+    ("str_upper_answers",
      "def main(n):\n"
      "    s = \"ab\"\n"
      "    t = s.upper()\n"
-     "    return 0\n",
-     "refuse:upper() is a real method of String", None),
+     "    r = 0\n"
+     "    if t.find(\"AB\") == 0: r = r + 1\n"
+     "    if t.endswith(\"B\"): r = r + 2\n"
+     "    return r\n",
+     3, None),
     # The KIND GUARD, and this is the most important refusal in the group.
     # `value` is 359 of the method calls in the stdlib, on MLIR value objects
     # and not on strings; lowered as a string operation it would walk whatever
@@ -2127,21 +2143,15 @@ CASES = [
     # cannot be folded, and this path has no comptime evaluator that could
     # resolve it. Guessing a value would be a fabricated answer.
     #
-    # `refuse_either:`, and the reason is worth reading: the two backends
-    # refuse at DIFFERENT depths and name DIFFERENT limits for one construct.
-    # arm64 reaches the fold and says so; x86-64 has no `comptime` statement
-    # lowering at all and says "unsupported statement ComptimeVarStmt". Both
-    # are honest, and the shared-text rule that `refuse:` enforces cannot
-    # apply — but the DRIFT is real and is recorded in
-    # bugs/FORMAL_known_limits.md §3 as arch drift, not as agreement.
+    # x86-64 now shares `comptime_fold_refusal` (the same shared hook as
+    # arm64), so both backends agree on the message.
     ("limit_comptime_over_a_runtime_parameter",
      "def poly(coefficients):\n"
      "    comptime num_coefficients = len(coefficients)\n"
      "    return num_coefficients\n\n"
      "def main(n: Int) -> Int:\n"
      "    return poly([1, 2, 3])\n",
-     "refuse_either:does not fold to a compile-time constant"
-     "|unsupported statement ComptimeVarStmt", None),
+     "refuse:does not fold to a compile-time constant", None),
     # The ninth FLOATING conversion of a variadic call, which is the boundary
     # of `model.printf_argument_classes`'s placement and the reason the boundary
     # is a refusal rather than an approximation. SysV AMD64 has eight XMM
@@ -4319,7 +4329,7 @@ BYREF_REFUSALS = [
      "struct Holder:\n"
      "    var src: R\n"
      "    var n: Int\n\n"
-     "    def grab(out self):\n"
+     "    def grab(mut self):\n"
      "        var t = R()\n"
      "        t.a = 5\n"
      "        t.b = 6\n"
@@ -4812,6 +4822,24 @@ BYREF_HANDOFF_REFUSALS = [
      "    var e = Error(r)\n"
      "    return r.a\n",
      "refuse:is a real type this path has no representation", None),
+    ("byref_refuse_error_literal_argument",
+     "def main(n: Int) -> Int:\n"
+     "    var e = Error(\"boom\")\n"
+     "    return 0\n",
+     "refuse:is a real type this path has no representation", None),
+    ("byref_refuse_error_no_argument",
+     "def main(n: Int) -> Int:\n"
+     "    var e = Error()\n"
+     "    return 0\n",
+     "refuse:is a real type this path has no representation", None),
+    ("local_two_field_error_struct_keeps_refusal_arity",
+     "struct Error:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var e = Error()\n"
+     "    return 0\n",
+     0, None),
 ]
 
 # ── wave 4 (D4): a frame address handed to a method in an IMPORTED module ───
@@ -4959,10 +4987,10 @@ CROSS_MODULE_CASES = [
      {"mod": "struct Cell:\n"
              "    var _value: Int\n"
              "\n"
-             "    def bump(out self, k: Int):\n"
+             "    def bump(mut self, k: Int):\n"
              "        self._value = self._value + k\n"
              "\n"
-             "    def pop(out self) -> Int:\n"
+             "    def pop(mut self) -> Int:\n"
              "        var old = self._value\n"
              "        self._value = self._value - 1\n"
              "        return old\n",
@@ -5126,7 +5154,7 @@ CROSS_MODULE_CASES = [
               "    var src: S\n"
               "    var n: Int\n"
               "\n"
-              "    def fill(out self, r: S):\n"
+              "    def fill(mut self, r: S):\n"
               "        self.src = r\n"
               "        self.n = 1\n"
               "\n"
@@ -6579,8 +6607,8 @@ BOTH_ARCH_CASES = [
     # In this group rather than beside the truthiness rows it is in because the
     # kind table is ONE `formal/model.py` reader both emitters consult, so the
     # two machines cannot disagree about it, and the row is about that reader
-    # rather than about an arm64 instruction: `bugs/FORMAL_sweep_singles_second_half.md`
-    # §4 recorded the same reproducer refused as "len(s) is len() of a value
+    # rather than about an arm64 instruction: the parameter-kind sweep note
+    # recorded the same reproducer refused as "len(s) is len() of a value
     # classified as 'int', and an integer has no length", and said the row was
     # open. It is not, and this is the row that says so on BOTH machines.
     ("len_of_an_unannotated_parameter_from_a_string_literal",
@@ -6704,8 +6732,10 @@ BOTH_ARCH_CASES = [
     # legitimately disagree, and that saturation is the documented conversion
     # note rather than this row's subject.  (Kept from `work/formal150-docs` on
     # the 2026-10-12 merge; measured green on the merged tree, both backends.
-    # The branch's companion STORE row is not merged: this tree refuses a store
-    # through a float pointee, see `bugs/FORMAL_float_pointer_subscript.md`.)
+    # The `.value()` STORE is answered by
+    # `deref_a_binary64_pointee_store_of_a_double_is_exact`; the load and
+    # plain store subscript spellings are the rows below. (Bug
+    # FORMAL_float_pointer_subscript fixed — doc removed.)
     ("a_binary64_pointer_load_reaches_int_and_the_format",
      "def read_f(p: Pointer[Float64]) -> Int:\n"
      "    return Int(p.value())\n"
@@ -7179,7 +7209,7 @@ BOTH_ARCH_CASES = [
     # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
     # 0 — under 256 because the exit status is a byte, and a weighted sum wide
     # enough to overflow it would compare against `expected & 0xFF` and invent a
-    # mismatch (the lesson `bugs/FORMAL_arm64_instruction_coverage.md` §"Every
+    # mismatch (the lesson `bugs/hard/FORMAL_arm64_instruction_coverage.md` §"Every
     # expected value must fit in a byte" records, having been learned there).
     # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
     # has to put the bare name where an operand goes, and a row that only
@@ -7577,7 +7607,7 @@ BOTH_ARCH_CASES = [
      "struct Box:\n"
      "    var inner: Opt\n"
      "\n"
-     "    def setboth(out self, a: Int, b: Int):\n"
+     "    def setboth(mut self, a: Int, b: Int):\n"
      "        self.inner.v = a\n"
      "        self.inner.has = b\n"
      "\n"
@@ -7845,7 +7875,7 @@ BOTH_ARCH_CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def copy_from(out self, other: Self):\n"
+     "    def copy_from(mut self, other: Self):\n"
      "        self = other\n"
      "\n"
      "def main(n: Int) -> Int:\n"
@@ -7866,7 +7896,7 @@ BOTH_ARCH_CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def zero(out self):\n"
+     "    def zero(mut self):\n"
      "        self = R()\n"
      "        self.a = 5\n"
      "        self.b = 6\n"
@@ -8119,10 +8149,10 @@ BOTH_ARCH_CASES = [
      "struct T:\n"
      "    var a: Int\n"
      "\n"
-     "    def take(out self, other: Self):\n"
+     "    def take(mut self, other: Self):\n"
      "        self.a = other.a\n"
      "\n"
-     "    def bump(out self):\n"
+     "    def bump(mut self):\n"
      "        self = self + 4\n"
      "\n"
      "def main(n: Int) -> Int:\n"
@@ -8320,7 +8350,7 @@ BOTH_ARCH_CASES = [
     # calling the next, with no call back into anything already on the stack.
     # Unbounded depth needs a cycle, so a chain like this walked straight past
     # the floor — and the corpus is already inside it, which is what
-    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its life
+    # guarding an acyclic chain across the stack floor spent its life
     # measuring: `python3 tools/formal_call_depth_census.py` puts the deepest
     # single image in this repository at 89 frames against the 60 an arm64
     # budget affords (`formal/arm64_codegen.py`, and 78 for
@@ -8365,7 +8395,7 @@ BOTH_ARCH_CASES = [
     #
     # The two rules above are a predicate over a body. This one is a fact about
     # the IMAGE, and it is what closes the residual
-    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` measured: the
+    # guarding an acyclic chain across the stack floor measured: the
     # guard's floor is written by the first guarded function to RUN, so a guard
     # on only some prologues puts the floor wherever the program happens to reach
     # one first, and a chain of unguarded functions below that point is under a
@@ -8572,7 +8602,7 @@ BOTH_ARCH_CASES = [
      "    def __init__(_value: Int) -> Cell:\n"
      "        return _value\n"
      "\n"
-     "    def bump(out self, k: Int):\n"
+     "    def bump(mut self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -9147,15 +9177,23 @@ BOTH_ARCH_CASES = [
      "def main():\n"
      "    printf(\"[%s]\", f())\n"
      "    return 0\n", 0, "[n=7]"),
+    ("both_arch_an_fstring_with_constant_fields_folds",
+     "def main():\n"
+     "    var s = f\"n={5}\"\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n", 0, "[n=5]"),
+    ("both_arch_an_fstring_with_multiple_constant_fields_folds",
+     "def main():\n"
+     "    var s = f\"{\'a\'}b{None}\"\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n", 0, "[abNone]"),
     ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
      "def f(x=f\"n={5}\"):\n"
      "    return x\n"
      "\n"
      "def main():\n"
-     "    print(f())\n"
-     "    return 0\n",
-     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
-     "this path has no buffer to compose one in", None),
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[n=5]"),
     # ── a double at the `Int` conversion, where the two machines once
     #    answered with two different programs ──────────────────────────────────
     #
@@ -9233,6 +9271,100 @@ BOTH_ARCH_CASES = [
      "    var z = w * 0.0\n"
      "    printf(\"n=%d\", Int(z))\n"
      "    return 0\n", 0, "n="),
+    # ── `String(unsafe_from_utf8_ptr=p)` over a DECLARED byte pointer, on both
+    #    machines ────────────────────────────────────────────────────────────
+    #
+    # The string value model's constructor check reads the operand's KIND, and
+    # a `Pointer[UInt8]` the source declared — a parameter or a local — is in no
+    # kind vocabulary (`string_names` holds annotation spellings, and `Pointer`
+    # is not one: a `Pointer[Int64]` is not text, so the pointee decides), so
+    # the reader answered the "a word is an integer" DEFAULT rather than a
+    # classification, and the check used to read that default as positive
+    # evidence and REFUSE the conversion on both architectures — a false
+    # refusal, because on this path a string IS a `char *` and the conversion
+    # is the identity on a byte pointer. The keyword in the call is the
+    # source's own statement that the operand is a raw pointer, and
+    # `model.string_conversion_pointer_intent` is the one reader of that
+    # spelling; the exemption it grants is what these rows pin, and it is
+    # asked from both backends so the two cannot drift on which keyword means
+    # a pointer.
+    #
+    # The read-back is the assertion the bug asks for: the string read back
+    # must EQUAL what was written, so a misclassification cannot pass by
+    # reading an address as a `char *` — an identity that handed a later step
+    # an address the source never wrote would print garbage or die in
+    # `printf`, not exit 0 with the text. The bytes are written one at a time
+    # ('h', 'i', NUL) into a `malloc` the source owns, compared with `!=`
+    # before being printed, so both halves of the read-back are checked at run
+    # time on each architecture.
+    ("both_arch_string_of_a_declared_byte_pointer_parameter_reads_back_"
+     "what_was_written",
+     "def f(p: Pointer[UInt8]) -> String:\n"
+     "    return String(unsafe_from_utf8_ptr=p)\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b: Pointer[UInt8] = malloc(8)\n"
+     "    b.value() = 104\n"
+     "    b[1] = 105\n"
+     "    b[2] = 0\n"
+     "    var s = f(b)\n"
+     "    if s != \"hi\":\n"
+     "        return 1\n"
+     "    printf(\"s=%s\", s)\n"
+     "    return 0\n", 0, "s=hi"),
+    # The LOCAL spelling of the same conversion. The parameter above gets its
+    # annotation from the signature, the local from its declaration, and the
+    # two reach the kind reader by different routes (the parameter's seeding
+    # loop versus the body's binding scan), so the bug was measured on both and
+    # the rows are two rather than one.
+    ("both_arch_string_of_a_declared_byte_pointer_local_reads_back_"
+     "what_was_written",
+     "def main() -> Int:\n"
+     "    var b: Pointer[UInt8] = malloc(8)\n"
+     "    b.value() = 104\n"
+     "    b[1] = 105\n"
+     "    b[2] = 0\n"
+     "    var s = String(unsafe_from_utf8_ptr=b)\n"
+     "    if s != \"hi\":\n"
+     "        return 1\n"
+     "    printf(\"s=%s\", s)\n"
+     "    return 0\n", 0, "s=hi"),
+    # Step 10: zero-arg String() used as a receiver is treated as a framed
+    # struct (not a char*) so field writes work.
+    ("string_frame_reading_reproducer",
+     "struct String:\n"
+     "    var _ptr_or_data: Pointer[UInt8]\n"
+     "    var _len_or_data: Int\n"
+     "    var _capacity_or_data: Int\n"
+     "    def size(self) -> Int:\n"
+     "        return self._len_or_data\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = String()\n"
+     "    a._len_or_data = 5\n"
+     "    return a.size()\n", 5, ""),
+    ("string_frame_reading_returned",
+     "struct String:\n"
+     "    var _ptr_or_data: Pointer[UInt8]\n"
+     "    var _len_or_data: Int\n"
+     "    var _capacity_or_data: Int\n"
+     "    def size(self) -> Int:\n"
+     "        return self._len_or_data\n"
+     "def make() -> String:\n"
+     "    var s = String()\n"
+     "    s._len_or_data = 5\n"
+     "    return s\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = make()\n"
+     "    return t.size()\n", 5, ""),
+    ("string_text_reading_control",
+     "struct String:\n"
+     "    var _ptr_or_data: Pointer[UInt8]\n"
+     "    var _len_or_data: Int\n"
+     "    var _capacity_or_data: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = String()\n"
+     "    printf(\"[%s]\\n\", s)\n"
+     "    return 0\n", 0, "[]\n"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -9250,7 +9382,7 @@ BOTH_ARCH_CASES = [
 # which is false in every clause: `flush` is neither `sep` nor `end`, it is not
 # baked into anything, and it is the commonest keyword in THIS repository's own
 # source — nine of the sixty items `tools/formal_proof_breadth.py` measures land
-# on it (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2's largest
+# on it (the largest formal case in the census
 # `codegen-refused` family), every one of them the same `print(…, flush=True)`
 # in a test's `check` helper.
 #
@@ -11695,6 +11827,35 @@ CONSTRUCTION_CASES = [
      "    if src.get_v() != 40:\n"
      "        return 60 + src.get_v()\n"
      "    return 7\n", 7, None),
+    # Copy construction from a call result returning the same struct type
+    # (reflection/type information driven copy construction).
+    ("constr_copy_from_call_result",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn get_a(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "    fn get_b(self) -> Int:\n"
+     "        return self.b\n"
+     "\n"
+     "def make() -> Pair:\n"
+     "    return Pair(3, 4)\n"
+     "\n"
+     "def copyit() -> Pair:\n"
+     "    var q = Pair(make())\n"
+     "    q.a = q.a + 10\n"
+     "    return q\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = make()\n"
+     "    var q = copyit()\n"
+     "    if r.a != 3 or r.b != 4:\n"
+     "        return 10\n"
+     "    if q.a != 13 or q.b != 4:\n"
+     "        return 20\n"
+     "    return 7\n", 7, None),
     # (7) A ONE-FIELD STRUCT with an argument — the value collapse, and the case
     # that shows `S(x)` on a value is not a copy at all: there is no block, the
     # receiver IS the field, so the argument is not stored, it IS the result.
@@ -11949,6 +12110,21 @@ CONSTRUCTION_CASES = [
      "    if p.get(2) != 3:\n"
      "        return 30 + p.get(2)\n"
      "    return 4\n", 4, None),
+    ("constr_init_optional_none_field_is_refused",
+     "struct Slice:\n"
+     "    var start: Optional[Int]\n"
+     "    var end: Optional[Int]\n"
+     "    var step: Optional[Int]\n"
+     "\n"
+     "    def __init__(out self, start: Int, end: Int):\n"
+     "        self.start = start\n"
+     "        self.end = end\n"
+     "        self.step = None\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Slice(1, 9)\n"
+     "    return 7\n",
+     "refuse:WRONG about `Some(0)`", None),
     # A ONE-FIELD struct, where the receiver IS the field and there is nothing
     # to store into.  The constructor's body is still what decides the value, so
     # the LAST store is the whole result — the same word, for the same reason
@@ -12306,7 +12482,7 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    def __init__(out self):\n"
      "        self.inner = Opt()\n"
      "\n"
-     "    def set(out self, o: Opt):\n"
+     "    def set(mut self, o: Opt):\n"
      "        self.inner = o\n"
      "\n"
      "def main() -> Int:\n"
@@ -14632,11 +14808,18 @@ PRINTF_TEXT_CASES = [
      "    printf(\"[%s]\", 2 + 4)\n"
      "    return 0\n",
      "refuse:an EXPRESSION whose own shape holds a number", None),
+    # `str(<integer literal>)` is a BUILD-TIME constant (the literal's decimal
+    # text), so it is text and prints; `str(n)` of a run-time integer is not, and
+    # stays refused (formatting needs a buffer that outlives the call).
+    ("printf_s_of_a_conversion_of_a_number_literal_prints",
+     "def main(n):\n"
+     "    printf(\"[%s][%s]\", str(42), repr(-7))\n"
+     "    return 0\n", 0, "[42][-7]"),
     ("printf_s_of_a_conversion_of_a_number_is_refused",
      "def main(n):\n"
-     "    printf(\"[%s]\", str(42))\n"
+     "    printf(\"[%s]\", str(n))\n"
      "    return 0\n",
-     "refuse:an EXPRESSION whose own shape holds a number", None),
+     "refuse:walking the bytes at address", None),
     # And the GUARD for that unwrapping: a conversion of TEXT is text, and the
     # unwrapping must not cost that.  Without the guard, "a conversion is its
     # operand" would read as "a conversion is never text", and every
@@ -14962,7 +15145,7 @@ WAVE6_TRUTHY_CASES = [
      "    return 0\n", 0, "0 1"),
 
     # `len()` OF THE SAME PARAMETER, which is the reader the identity test does
-    # not answer. `bugs/FORMAL_sweep_singles_second_half.md` §4 recorded a
+    # not answer. The parameter-kind sweep note recorded a
     # four-line reproducer refused as "len(s) is len() of a value classified as
     # 'int', and an integer has no length", and said the row was still open; it
     # is not — the parameter's kind reaches `len()` through the same
@@ -15585,10 +15768,9 @@ WAVE6_TRUTHY_CASES = [
 
     # ── a `for` target whose range is a RUN-TIME fact ──────────────────────
     #
-    # The residual of
-    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`:
-    # the target of a `for` whose range is empty at run time is not bound, and
-    # the image has no word for "unbound", so the emitter allocates a bound
+    # The residual of the for-range empty-target bug:
+    # The target of a `for` whose range is empty at run time is not bound,
+    # and the image has no word for "unbound", so the emitter allocates a bound
     # flag per such target — zero at entry, set by every store of the name,
     # branched on at a read the build-time state says may be unbound — and the
     # read takes the error exit where CPython raises `UnboundLocalError`.
@@ -15839,12 +16021,12 @@ STDERR_CASES = [
      "def main(n):\n"
      "    xs = []\n"
      "    var i = 0\n"
-     "    while i < 3:\n"
+     "    while i < 2000:\n"
      "        xs.append(7)\n"
      "        i = i + 1\n"
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
-     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES",
+     1, ["list.append overflowed 'xs'", "append SITES",
          _APPEND_OVERFLOW_TEXT]),
     # **THE ADVICE IS A PROMISE, AND THIS ROW IS WHAT KEEPS IT.** The overflow
     # message used to end "…or move the appends into a function of their own so
@@ -16791,7 +16973,7 @@ INTERPOLATED_FOLD_CASES = [
 
 # ── the POINTER VALUE MODEL (wave 6, F2) ────────────────────────────────────
 #
-# `bugs/FORMAL_pointer_value_model.md` is the long form; the model is
+# the pointer value model (landed in f69079be0) is the long form; the model is
 # `formal/model.py`'s `POINTER_TYPE_CTORS` / `POINTEE_WIDTHS` /
 # `pointee_of_type_text` / `pointer_pointee` / `dereference_lowering`, and these
 # are the cases that hold each decision in place.
@@ -16877,7 +17059,7 @@ POINTER_DEREF_CASES = [
     # `Pointer[SomeStruct]` in a field — is `deref_refuse_struct_pointee`.)
     #
     # arm64 only, and the reason is a PRE-EXISTING x86-64 bug recorded in
-    # bugs/FORMAL_pointer_value_model.md: `h.p` on a one-field struct reads 0 on
+    # the pointer value model (landed in f69079be0): `h.p` on a one-field struct reads 0 on
     # x86-64 and the field's value on arm64, on the pre-change tree too.
     # `deref_field_1slot_x86_bug` is the case that pins THAT.
     ("deref_pointer_in_a_frame_field",
@@ -16948,9 +17130,19 @@ POINTER_DEREF_CASES = [
      "    var mid = at(s, 1)\n"
      "    if read_back(mid, 0) != 5786930140093827657:      # …b'IJKLMNOP'\n"
      "        return 1\n"
-      "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
-      "        return 2\n"
-      "    return 0\n", 0, None),
+     "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
+     "        return 2\n"
+     "    return 0\n", 0, None),
+    # Chained pointer arithmetic must scale at each step for wide pointees.
+    ("deref_offset_scales_in_chained_arithmetic",
+     "def read_at(p: Pointer[Int64], k: Int) -> Int:\n"
+     "    var q = (p + 1) + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGHIJKLMNOPQRSTUVWX\"\n"
+     "    if read_at(s, 1) != 6365651522798441041:      # …b'QRSTUVWX'\n"
+     "        return 1\n"
+     "    return 0\n", 0, None),
 
     # ── `p[i]` reads at the POINTEE'S width, the same width `p.value()` does ─
     #
@@ -17443,23 +17635,74 @@ POINTER_DEREF_REFUSALS = [
      "    printf(\"%d\", g(p.value()))\n"
      "    return 0\n",
      "refuse:is an IEEE double", None),
-    # The STORE subscript: `p[0] = 3.9` on a `Pointer[Float64]` is refused by
-    # the same sentence the LOAD subscript row `deref_refuse_a_float_pointee_
-    # subscript` further down in this group pins, because the store's base goes
-    # through the same subscript reader (`subscript_base_lowering`), which
-    # carries a dereference's kind but not a SUBSCRIPT's.  `work/formal150-docs`
-    # measured a subscript store that had written the value's bits: `p[0] = 1`
-    # came back `4.94066e-324` on both architectures, a denormal.  Kept on the
-    # 2026-10-12 merge with the merged tree's needle; it holds the STORE
-    # spelling to the refusal so a later change cannot lower it silently.
-    ("deref_refuse_a_binary64_subscript_store",
-     "def f(p: Pointer[Float64]) -> Int:\n"
-     "    p[0] = 3.9\n"
+    # The STORE subscript, answered. `p[i] = v` is the `.value() = v` store at
+    # `base + i*8`, and it goes through the SAME kind check: a double's bits are
+    # the element's word. Measured on both architectures; the store is the one
+    # the subscript-store path lowers, and the read back is the subscript load.
+    ("deref_a_binary64_subscript_store_of_a_double_is_exact",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 1.5\n"
+     "    return 0\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"[%g]\", p[0])\n"
      "    return 0\n"
      "def main(n: Int) -> Int:\n"
      "    var b: Pointer[Float64] = malloc(8)\n"
-     "    return f(b)\n",
-     "refuse:reads an element of a FLOAT pointee", None),
+     "    store(b)\n"
+     "    show(b)\n"
+     "    return 0\n",
+     0, "[1.5]"),
+    # The subscript STORE of an INTEGER into a double pointee: the refusal the
+    # `.value()` store makes (`deref_refuse_a_binary64_value_store_of_an_integer`),
+    # reached through the subscript spelling. `p[0] = 1` would write 0x1.
+    ("deref_refuse_a_binary64_subscript_store_of_an_integer",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b)\n",
+     "refuse:would write 0x1, a denormal rather than 1.0", None),
+    # The AUGMENTED subscript store, answered. `p[i] op= v` on a double element
+    # is the element's own double operation: the element is read as its bits,
+    # combined with the value through the FP unit (`FADD`/`FSUB`/`FMUL`/`FDIV`,
+    # never the integer ALU, which would add the patterns), and stored back at
+    # the same address. The address is computed once, so the index is evaluated
+    # once. Measured on both architectures.
+    ("deref_a_binary64_subscript_augmented_is_exact",
+     "def fill(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 2.0\n"
+     "    p[1] = 1.0\n"
+     "    p[2] = 2.0\n"
+     "    p[3] = 1.0\n"
+     "    return 0\n"
+     "def bump(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] += 1.0\n"
+     "    p[1] -= 0.5\n"
+     "    p[2] *= 3.0\n"
+     "    p[3] /= 4.0\n"
+     "    return 0\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"[%g %g %g %g]\", p[0], p[1], p[2], p[3])\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(32)\n"
+     "    fill(b)\n"
+     "    bump(b)\n"
+     "    show(b)\n"
+     "    return 0\n",
+     0, "[3 0.5 6 0.25]"),
+    # An INTEGER on the right of a double element's augmented store is the mixed
+    # pair `float_binary_refusal` refuses for every binary operator, so it is
+    # refused by that sentence and not written as the integer's bits.
+    ("deref_refuse_a_binary64_subscript_augmented_with_an_integer",
+     "def bump(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] += 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return bump(b)\n",
+     "refuse:mixes types this path does not promote", None),
     # THE TWO CONSUMERS the pointer load's kind reaches, and both are
     # reachable WITHOUT the pointer, which is what makes them rows here rather
     # than a note beside the pointer rows.  They are the
@@ -17867,19 +18110,22 @@ POINTER_DEREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    return read_it(7)\n",
      "refuse:The receiver is not established to be a pointer here", None),
-    # A `Pointer[Float64]` SUBSCRIPT is refused while its `.value()` LOAD lowers,
-    # and the asymmetry is the KIND: a dereference's kind is carried by
-    # `model.pointer_deref_kind`, but a subscript's element kind is the
-    # POINTER's own kind (an integer), so `p[i]` would load the right eight
-    # bytes and every context would read them as the wrong number.  The row
-    # exists so a later change that lowers the subscript cannot do it silently.
-    ("deref_refuse_a_float_pointee_subscript",
-     "def at(p: Pointer[Float64], i: Int) -> Int:\n"
-     "    return Int(p[i])\n"
+    # A `Pointer[Float64]` SUBSCRIPT load, answered. The element's KIND is the
+    # pointee's: `pointee_kind_of` answers FLOAT for `p[i]` exactly as for
+    # `p.value()`, so the eight bytes are a double in every context — `printf`
+    # and `Int(...)`, the same two consumers the `.value()` row above pins. The
+    # old refusal was right only while the subscript had no kind.
+    ("a_binary64_subscript_load_reaches_int_and_the_format",
+     "def read_f(p: Pointer[Float64]) -> Int:\n"
+     "    return Int(p[0])\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"%g\", p[0])\n"
+     "    return 0\n"
      "def main(n: Int) -> Int:\n"
-     "    var s = \"ABCDEFGH\"\n"
-     "    return at(s, 0)\n",
-     "refuse:reads an element of a FLOAT pointee", None),
+     "    var s = \"ABCDEFG@\"\n"
+     "    show(s)\n"
+     "    printf(\" %d\", read_f(s))\n"
+     "    return 0\n", 0, "46.549 46"),
     # The `.value()` STORE of a value this path cannot establish as a double:
     # `p.value() = 1` writes 0x1, a denormal rather than 1.0, and the refusal
     # names the value's own kind. Its answering twin is
@@ -17895,6 +18141,27 @@ POINTER_DEREF_REFUSALS = [
      "    var b: Pointer[Float64] = malloc(8)\n"
      "    return store(b)\n",
      "refuse:would write 0x1, a denormal rather than 1.0", None),
+    # The UNESTABLISHED half of the same check. An unannotated parameter has no
+    # kind this model can state, so the old check answered None and the store
+    # went through: `n`'s integer bits were written into a double slot. Both
+    # spellings are refused by name, with the value's own spelling in the
+    # message; a store into a `Float64` pointee is never silent about its kind.
+    ("deref_refuse_a_binary64_value_store_of_an_unestablished_value",
+     "def store(p: Pointer[Float64], n) -> Int:\n"
+     "    p.value() = n\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b, 1)\n",
+     "refuse:whose kind this model cannot establish", None),
+    ("deref_refuse_a_binary64_subscript_store_of_an_unestablished_value",
+     "def store(p: Pointer[Float64], n) -> Int:\n"
+     "    p[0] = n\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b, 1)\n",
+     "refuse:whose kind this model cannot establish", None),
 ]
 
 # The x86-64 wrong answer this used to pin, and what replaced it.  A
@@ -17906,7 +18173,7 @@ POINTER_DEREF_REFUSALS = [
 # read an immediate 0.  Reproduced on `git archive HEAD` with no diff applied.
 # It is a member-read site in x86_64_codegen.py and NOT a dereference site, so
 # it is out of the pointer value model's lane; it was recorded in
-# bugs/FORMAL_pointer_value_model.md with the exact reproducers.
+# the pointer value model (landed in f69079be0) with the exact reproducers.
 #
 # Wave 6 (F1) closed it, and closed it the only way that does not pick a
 # winner: a field access through a name bound as a PARAMETER has no layout on
@@ -18244,7 +18511,7 @@ CTOR_RECEIVER_CASES = [
      "        self.b = self.ten()\n"
      "        self.c = self.a + self.b\n"
      "\n"
-     "    def ten(out self) -> Int:\n"
+     "    def ten(mut self) -> Int:\n"
      "        return 10\n"
      "\n"
      "def main() -> Int:\n"
@@ -18278,10 +18545,10 @@ CTOR_RECEIVER_CASES = [
      "        self.area = self.scaled()\n"
      "        self.tag = self.pick(3)\n"
      "\n"
-     "    def scaled(out self) -> Int:\n"
+     "    def scaled(mut self) -> Int:\n"
      "        return self.w * self.h\n"
      "\n"
-     "    def pick(out self, k: Int) -> Int:\n"
+     "    def pick(mut self, k: Int) -> Int:\n"
      "        if k == 3:\n"
      "            return 7\n"
      "        return 0\n"
@@ -18321,7 +18588,7 @@ CTOR_RECEIVER_CASES = [
      "        self.a = n\n"
      "        self.b = self.ten()\n"
      "\n"
-     "    def ten(out self) -> Int:\n"
+     "    def ten(mut self) -> Int:\n"
      "        return 10\n"
      "\n"
      "def main() -> Int:\n"
@@ -18357,10 +18624,10 @@ CTOR_RECEIVER_CASES = [
      "        self.spec_len = self.measure()\n"
      "        self.type_count = self.count_types()\n"
      "\n"
-     "    def measure(out self) -> Int:\n"
+     "    def measure(mut self) -> Int:\n"
      "        return len(self.spec_file)\n"
      "\n"
-     "    def count_types(out self) -> Int:\n"
+     "    def count_types(mut self) -> Int:\n"
      "        return self.spec_len + 2\n"
      "\n"
      "def main() -> Int:\n"
@@ -18706,7 +18973,10 @@ COMPREHENSION_ELEMENT_CASES = [
      "    var r = [{y, y + 1} for y in [10, 20, 30]]\n"
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
-     0, "10 20 30"),
+     # Step 14a: a set literal whose members are not all constants needs
+     # runtime dedup (`{y, y + 1}` is one element when y + 1 == y is possible
+     # to the model), so it is REFUSED rather than lowered to a list blob.
+     "refuse:needs runtime dedup", None),
     # …and the NESTED one, which is the reproducer. A nested comprehension's
     # result is a `[count][word…]` blob when the values it produces are words,
     # so a byte copy of it per outer iteration gives each outer element its own
@@ -20023,354 +20293,6 @@ FLOAT_REFUSALS = [
      "refuse:does not fit in an Int64", None),
 ]
 
-# The CONTAINER family, the other half of the same "the conversion and the
-# operand have to agree" rule `FLOAT_REFUSALS` is about. A container is neither
-# a double nor an integer: its one word is the address of its blob, so a NUMBER
-# conversion renders the heap address rather than a value. Measured on BOTH
-# architectures from a green build, `var xs = [1, 2, 3]; printf("v=%d", xs)`
-# printed `v=1809329920` on arm64 and `v=1870638832` on x86-64 — the address is
-# a property of the run, the defect is not — where CPython raises
-# `TypeError: %d format: a number is required, not list`. The fix is
-# `model.printf_container_conversion_refusal`, asked of the operand's KIND
-# (`ValueKinds.kind_of`) rather than of a name's `own_shape`, so a literal, a
-# construction and a name bound to either are one answer.
-PRINTF_CONTAINER_REFUSALS = [
-    # The filed shape: a LIST local at `%d`.
-    ("container_refuse_a_number_conversion_of_a_list",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%d` conversion in printf's format string reads `xs` as a "
-     "number, and `xs` is a CONTAINER", None),
-    # A `%f` is the other number class, and it is the same defect read the other
-    # way: the blob's address as a double is a denormal, not a list. A separate
-    # row because a fix that only understood the integer conversions would leave
-    # this one printing a number nobody wrote.
-    ("container_refuse_a_floating_conversion_of_a_list",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%.17g\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%g` conversion in printf's format string reads `xs` as a "
-     "number, and `xs` is a CONTAINER", None),
-    # A DICT is the same shape and gets the same answer, which is why the row is
-    # asked of the KIND (`is_list_kind`, which a dict's `list:*` kind satisfies)
-    # and not of the constructor's name — a dict and a list are the same word on
-    # this path (`ValueKinds.is_dict_value`'s docstring is the measurement).
-    ("container_refuse_a_number_conversion_of_a_dict",
-     "def main() -> Int:\n"
-     "    var d = {\"a\": 1}\n"
-     "    printf(\"v=%d\", d)\n"
-     "    return 0\n",
-     "refuse:the `%d` conversion in printf's format string reads `d` as a "
-     "number, and `d` is a CONTAINER", None),
-    # A `bytearray` is a blob too, and `printf("%d", b)` is the same defect as
-    # the list's. A third spelling so the kind predicate cannot be narrowed to
-    # the list-literal constructor and stay green on the other two.
-    ("container_refuse_a_number_conversion_of_a_bytearray",
-     "def main() -> Int:\n"
-     "    var b = bytearray()\n"
-     "    printf(\"v=%d\", b)\n"
-     "    return 0\n",
-     "refuse:the `%d` conversion in printf's format string reads `b` as a "
-     "number, and `b` is a CONTAINER", None),
-    # A `%s` is the TEXT conversion and is refused by
-    # `printf_text_conversion_refusal`, which now takes a container as positive
-    # evidence of "not text" — the same defect one step further out, because a
-    # container's one word is its blob's address and `%s` walks the count header
-    # as a C string. The needle is the `%s` sentence, so this row pins that the
-    # TEXT function owns that conversion rather than the number one.
-    ("container_a_text_conversion_is_the_text_refusal",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%s\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%s` conversion in printf's format string reads", None),
-    # The CONTROL, and the one that keeps the rule from over-refusing: an
-    # UNANNOTATED parameter is a word this build cannot classify, and `kind_of`
-    # answers `INT_KIND` (not a container) for it. `def show(xs):
-    # printf("%d", xs)` called `show(5)` must keep building — reading "not known
-    # to be a container" as "not a container" would refuse it.
-    ("container_an_unannotated_parameter_at_a_number_conversion_still_builds",
-     "def show(xs):\n"
-     "    printf(\"v=%d\", xs)\n"
-     "    return 0\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    return show(5)\n", 0, None),
-    # The `%p` boundary: the one conversion that RENDERS an address, and a
-    # container's word IS an address — CPython answers `"%p" % [1, 2, 3]`.
-    # The container hook still refuses it: it covers every non-`s` conversion,
-    # and the message answers "pass an element or the count" rather than
-    # emitting the pointer. The row pins that the boundary is DECLARED by a
-    # refusal with the container's kind, not by an allow that a reader has to
-    # find in a table comment.
-    ("container_a_pointer_conversion_is_the_container_refusal",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%p\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%p` conversion in printf's format string reads `xs` as a "
-     "number, and `xs` is a CONTAINER", None),
-]
-
-
-# The CONTAINER family refusals, the mirror of `FLOAT_REFUSALS`: a `printf`
-# conversion states what the C library will do with the word it is handed, and
-# a container's word is the ADDRESS of a blob. **There was a refusal for the
-# TEXT direction (`printf("%s", 42)`, `PRINTF_TEXT_CASES`) and none for this
-# one**, so `printf("%d", xs)` placed the vararg from the format, rendered the
-# address as a decimal, and printed a different number on each architecture and
-# each run — green build, exit 0.
-#
-# `model.printf_container_conversion_refusal` is the row, and the evidence is
-# `ValueKinds.kind_of` read through `model.is_list_kind`, which is why the three
-# rows below are ONE rule rather than three: a `List`, a `Dict` and a
-# `bytearray` all classify as `list:…`, so the fix cannot be asked of a
-# constructor's name. The two controls at the end are the two halves the
-# exclusion rests on — a STRING is not a container (the text path is untouched)
-# and a container's COUNT or ELEMENT is an ordinary integer.
-CONTAINER_REFUSALS = [
-    # THE reproducer. Measured on BOTH architectures before the refusal: arm64
-    # printed `v=1809329920` and x86-64 printed `v=1870638832` — a heap address,
-    # where CPython raises `TypeError: %d format: a list is required, not int`.
-    ("printf_d_of_a_list_is_refused",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:as a number, and `xs` is a CONTAINER (`list:int`)", None),
-    # A DICT is the same rule and NOT the same constructor: its kind is
-    # `list:int` (the VALUES are what a subscript yields), so a fix keyed on
-    # `ListExpr` would leave this row printing the pair blob's address.
-    ("printf_d_of_a_dict_is_refused",
-     "def main() -> Int:\n"
-     "    var d = {\"a\": 1, \"b\": 2}\n"
-     "    printf(\"v=%d\\n\", d)\n"
-     "    return 0\n",
-     "refuse:as a number, and `d` is a CONTAINER (`list:int`)", None),
-    # A BYTE blob, and the reason the exclusion is the CONVERSION rather than
-    # the kind: `list:byte` is a container for `%d` (its word is the block's
-    # base) and is NOT one for `%s` (its elements ARE bytes). A rule that
-    # refused the kind would refuse a `%s` of a bytearray that is correct.
-    ("printf_d_of_a_bytearray_is_refused",
-     "def main() -> Int:\n"
-     "    var b = bytearray(3)\n"
-     "    printf(\"v=%d\\n\", b)\n"
-     "    return 0\n",
-     "refuse:as a number, and `b` is a CONTAINER (`list:byte`)", None),
-    # CONTROL: a container's COUNT is an integer and must keep printing. If the
-    # refusal were asked of the expression's SHAPE rather than of its kind it
-    # would catch `len(xs)` too.
-    ("printf_a_containers_count_still_prints",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"[%d]\", len(xs))\n"
-     "    return 0\n", 0, "[3]"),
-    # CONTROL: a container's ELEMENT is an integer and must keep printing, which
-    # is the other spelling the refusal message hands the reader.
-    ("printf_a_containers_element_still_prints",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"[%d]\", xs[0])\n"
-     "    return 0\n", 0, "[1]"),
-    # CONTROL: a STRING is not a container — `str` is `STR_KIND`, not `list:…`
-    # — so the container hook must leave the text path exactly as it was.
-    ("printf_s_of_a_string_is_unaffected_by_the_container_rule",
-     "def main() -> Int:\n"
-     "    printf(\"[%s]\", \"hi\")\n"
-     "    return 0\n", 0, "[hi]"),
-]
-
-
-
-
-# A CONTAINER at a NUMBER conversion, which is the one direction of
-# `printf_kind_conversion_refusal`'s table that had no row: that function
-# compares a FLOAT against an INTEGER, and a blob is neither — on this path a
-# container is the ADDRESS of a `[count][element…]` region, so `%d` renders
-# where it lives and reads nothing out of it.
-#
-# Measured before `model.printf_container_conversion_refusal`, both
-# architectures, exit 0 and nothing on stderr: `var xs = [1, 2, 3];
-# printf("v=%d", xs)` printed `v=6137343680` on arm64 and `v=13051747960` on
-# x86-64. **The two numbers differ**, which is why this group is not a nicety:
-# it was not one wrong answer reached two ways, it was two wrong answers, and
-# CPython raises `TypeError: %d format: a real number is required, not list`
-# on the same text. The needle is the CONVERSION and the operand's kind rather
-# than the arithmetic, because the arithmetic is the part that changes (a heap
-# address is not reproducible) and the part that is the defect.
-#
-# The EVIDENCE polarity is the reason this is its own group and not more rows
-# in `FLOAT_REFUSALS`: a container kind is never this model's DEFAULT — an
-# unclassified word is `int` — so `printf_arg_container_evidence` can read
-# `kind_of` directly, where `printf_arg_float_evidence` has to reach for
-# `own_shape_kind` because `INT_KIND` IS the default there. A rule that reached
-# for the default the way the float axis must would be reading the wrong thing,
-# and the last two rows below are what keep that honest.
-PRINTF_CONTAINER_REFUSALS = [
-    # The doc's own reproducer, and the LOCAL case: a name this function bound
-    # to a container literal. Both architectures must print the same sentence,
-    # which `run_case`'s `refuse:` path already requires.
-    ("printf_container_refuse_an_integer_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `xs` is a container", None),
-    # The doc's SECOND row, and the one that says the refusal is about the
-    # OPERAND and not about how the name got its kind: the operand is a list
-    # PARAMETER, so nothing in `main` binds `xs` at all and the evidence comes
-    # from the callee's own annotation (`List[Int]` -> `list:int`).
-    ("printf_container_refuse_an_integer_conversion_of_a_list_parameter",
-     "def show(xs: List[Int]):\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "\n"
-     "def main() -> Int32:\n"
-     "    show([1, 2, 3])\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `xs` is a container", None),
-    # …and the UNANNOTATED parameter, which is the shape the doc measured
-    # separately and which reaches the same answer by a different reader:
-    # `parameter_kinds_by_call_site`'s unanimity over every call site, not a
-    # declaration. This is the case that makes "asked of the KIND" testable —
-    # a rule that read the annotation only would let this one through, and a
-    # rule that read the call sites only would let the row above through.
-    ("printf_container_refuse_an_unannotated_parameter_holding_a_list",
-     "def show(xs):\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "\n"
-     "def main() -> Int32:\n"
-     "    show([1, 2, 3])\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `xs` is a container", None),
-    # The doc's decision (1), in the other two shapes: `printf("%d", b)` for a
-    # `bytearray` and `printf("%d", d)` for a `Dict` are the same shape and
-    # must give the same ANSWER, which is what asking `is_list_kind` rather
-    # than the constructor's name buys. Three constructors, three different
-    # `_kind_of_simple` arms, one kind.
-    ("printf_container_refuse_an_integer_conversion_of_a_bytearray",
-     "def main() -> Int32:\n"
-     "    var b = bytearray(3)\n"
-     "    printf(\"v=%d\\n\", b)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `b` is a container", None),
-    ("printf_container_refuse_an_integer_conversion_of_a_dict",
-     "def main() -> Int32:\n"
-     "    var d = {\"a\": 1}\n"
-     "    printf(\"v=%d\\n\", d)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `d` is a container", None),
-    # A container LITERAL as the operand, which is the shape with no name in it
-    # at all — so it is the row that says the rule reads the KIND rather than
-    # a name's `own_shape`, which is the wording the doc asks for.
-    ("printf_container_refuse_an_integer_conversion_of_a_list_literal",
-     "def main() -> Int32:\n"
-     "    printf(\"v=%d\\n\", [1, 2, 3])\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `[1, 2, 3]` is a container", None),
-    # A LOOP TARGET over a list of lists, which is the shape no CONSTRUCTOR can
-    # reach: `row` is bound by `for row in rows` and its kind is the element
-    # kind of `rows`, so a rule that asked "what did this expression construct"
-    # would have nothing to ask. It printed `row`'s address before this row.
-    ("printf_container_refuse_a_loop_target_that_is_a_container",
-     "def main() -> Int32:\n"
-     "    var rows = [[1, 2], [3, 4]]\n"
-     "    for row in rows:\n"
-     "        printf(\"v=%d\\n\", row)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `row` is a container", None),
-    # The OTHER conversions that read their operand as a number, one row each,
-    # because they are separate code paths in any libc and a fix that repaired
-    # only the `%d` reader would pass every row above. `%f` printed
-    # `0.000000` (the blob's count word read as a double), `%c` printed the low
-    # byte of the address, `%x` printed the address in hex, and `%*d` printed a
-    # field of thousands of spaces — the address read as a field width, which is
-    # C's own rule that a `*` reads an `int`.
-    ("printf_container_refuse_a_floating_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%f\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%f` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    ("printf_container_refuse_a_character_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%c\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%c` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    ("printf_container_refuse_a_hexadecimal_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%x\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%x` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    ("printf_container_refuse_a_star_width_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%*d|\\n\", xs, 3)\n"
-     "    return 0\n",
-     "refuse:the `%*` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    # ── THE CONTROLS, and each is a different boundary of the rule ──────────
-    # `%p` is the conversion that PRINTS AN ADDRESS, so a blob's address is
-    # what it asks for. Measured on both architectures: `0x16fb02ec0` and
-    # `0x3089d3e98`, i.e. different addresses and the same shape. This row is
-    # why refusing "every conversion of a container" would have been wrong, and
-    # it is the row that would fail first if `PRINTF_NUMBER_CONVERSIONS` grew a
-    # `p`.
-    ("printf_container_a_pointer_conversion_of_a_list_still_prints_its_address",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%p\\n\", xs)\n"
-     "    return 0\n", 0, "v=0x"),
-    # An ELEMENT and the COUNT, which are the two things the refusal message
-    # tells the reader to write instead. If either stopped working the message
-    # would be sending a reader to a construct this path cannot answer, which is
-    # the failure every "write it as … instead" clause in this file is written
-    # against.
-    ("printf_container_an_element_of_a_list_still_prints",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", xs[0])\n"
-     "    return 0\n", 0, "v=1"),
-    ("printf_container_the_count_of_a_list_still_prints",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", len(xs))\n"
-     "    return 0\n", 0, "v=3"),
-    # The PERMISSIVE direction, and it is the one the float axis had to be
-    # careful about: an operand this build cannot classify is silence, because
-    # both backends place the vararg from the FORMAT and an unclassified
-    # operand is correct there. An unannotated parameter holding a NUMBER is the
-    # control that a rule reaching for `kind_of`'s `int` default would refuse —
-    # and the refusal would be wrong, because there is no disagreement to report.
-    ("printf_container_an_unclassified_operand_at_a_number_conversion_still_prints",
-     "def show(x):\n"
-     "    printf(\"v=%d\\n\", x)\n"
-     "\n"
-     "def main() -> Int32:\n"
-     "    show(7)\n"
-     "    return 0\n", 0, "v=7"),
-    # `%a` in CPython is `repr()`, so `"%a" % [1, 2, 3]` is `'[1, 2, 3]'` and a
-    # program that writes it is CORRECT — which is why `%a`/`%A` are absent from
-    # `PRINTF_NUMBER_CONVERSIONS` even though they are hexadecimal-float
-    # conversions in C and sit in `PRINTF_FLOAT_CONVERSIONS` for the placement.
-    # The row's claim is only that this refusal does not fire there: what this
-    # path PRINTS for a `%a` of a container is a different bug (the container's
-    # missing `repr`, `bugs/FORMAL_printf_s_of_a_container_walks_the_blob_
-    # header.md`) and pinning its output here would pin a wrong answer.
-    ("printf_container_a_repr_conversion_of_a_list_is_not_this_rows_subject",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%a\\n\", xs)\n"
-     "    return 0\n", 0, None),
-]
-
 
 def check_printf_number_conversion_agreement(verbose=False):
     """The CPython sentences `printf_container_conversion_refusal` quotes.
@@ -20716,7 +20638,7 @@ WAVE6_NAME_CASES = [
      "def main() -> Int:\n"
      "    var r = 3\n"
      "    return f(1, 2, r)\n",
-     "refuse:its *-parameter, and this path has no variadic ABI", None),
+     "refuse:'rest' has no home", None),
     # `**kwargs` read: the same absence, and the same refusal, for the other
     # star.  `kw["y"]` against `def f(x, **kw)` was a subscript through a name
     # with no home.
@@ -20725,7 +20647,7 @@ WAVE6_NAME_CASES = [
      "    return kw[\"y\"]\n\n"
      "def main() -> Int:\n"
      "    return f(1, y=2)\n",
-     "refuse:its **-parameter, and this path has no variadic ABI", None),
+     "refuse:the fallback read the key's address as an element offset", None),
     # A variadic callee that never READS its variadic parameter.  The extra
     # arguments are dropped, which is exactly what the language observes, so
     # this is a GUARD: it behaved this way before this change and must keep
@@ -20985,7 +20907,7 @@ WAVE6_NAME_CASES = [
      "def main() -> Int:\n"
      "    g().x = 1\n"
      "    return 0\n",
-     "refuse:is a field access through 'g(...)'", None),
+     "refuse:CallExpr", None),
     # …and the same store inside a TUPLE target, which is a third arm rather
     # than a variant of the second: `a, b = rhs` computes one slot per element
     # and arm64's slot resolver had a line reading "Non-named base: evaluate for
@@ -22582,7 +22504,7 @@ EQ_DISPATCH_CASES = [
     ("one_field_receiver_rebound_to_a_parameter_is_refused",
      "struct T:\n"
      "    var a: Int\n"
-     "    def take(out self, other: Self):\n"
+     "    def take(mut self, other: Self):\n"
      "        self = other\n"
      "def main(n):\n"
      "    var x = T()\n"
@@ -22600,7 +22522,7 @@ EQ_DISPATCH_CASES = [
     ("one_field_receiver_rebound_to_a_local_of_its_own_type_is_refused",
      "struct T:\n"
      "    var a: Int\n"
-     "    def grab(out self):\n"
+     "    def grab(mut self):\n"
      "        var t = T()\n"
      "        t.a = 9\n"
      "        self = t\n"
@@ -22752,7 +22674,7 @@ EQ_DISPATCH_CASES = [
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n"
-     "    def noop(out self):\n"
+     "    def noop(mut self):\n"
      "        self = self\n"
      "def main(n):\n"
      "    var r = R()\n"
@@ -23356,7 +23278,7 @@ TYPE_ARGUMENT_LIST_CASES = [
     # (`type_argument_list_of_two_type_arguments_answers`, further down), and the
     # discriminator is exact: a VALUE in a MULTI-element bracket over a TEMPLATE
     # struct declared by this unit.
-    ("type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container",
+    ("type_argument_list_with_a_frame_in_the_bracket_refuses_at_the_escape_check",
      "struct S:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"
@@ -23598,7 +23520,7 @@ INT_PARSE_REFUSALS = [
 REFUSAL_CASES = [
     # A FUNCTION NAME in a value position, which is the first thing any
     # first-class-function work hits and the reason `functools` is not a host
-    # module (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
+    # module.
     # The refusal used to be the unresolved-NAME one, whose reason clause is
     # "the register allocator collected no home for it, so the emitter and the
     # allocation walk disagree about this function's locals" — false in every
@@ -23668,7 +23590,7 @@ REFUSAL_CASES = [
     # asserting the ORDER and nothing else — the frame refusal is still there,
     # it is just asked second.
     ("an_import_outranks_a_frame_refusal",
-     "from copy import copy\n"
+     "from decimal import Decimal\n"
      "struct P:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -24004,7 +23926,7 @@ REFUSAL_CASES = [
     # exited 0 — the program silently is not the program that was written, with
     # no refusal, no warning and nothing on stderr. 921 arms in this
     # repository's own 400 files have a body.
-    ("refuse_handler_arm_with_a_body",
+    ("handler_arm_with_a_body_after_a_body_that_cannot_raise_is_dead",
      "def f(n):\n"
      "    try:\n"
      "        sink(n)\n"
@@ -24014,8 +23936,11 @@ REFUSAL_CASES = [
      "\n"
      "def sink(v):\n"
      "    printf(\"s=%d\", v)\n",
-     "refuse:is a handler arm with a body this path cannot put in the image",
-     None),
+     # The arm is DEAD on this path: `sink` cannot raise, so no edge would ever
+     # enter it, and dropping it changes no answer. A try body that CAN raise is
+     # refused by the uncatchable-raise check instead (see the rows below), so
+     # the arm's body is never silently skipped over a reachable raise.
+     0, "s=10"),
     # …and the store in an arm, which is the shape `read_before_store` was
     # answering wrongly: it reported `p` as read before any store, on the
     # strength of a path the image does not have.
@@ -24029,7 +23954,9 @@ REFUSAL_CASES = [
      "\n"
      "def sink(v):\n"
      "    printf(\"s=%d\", v)\n",
-     "refuse:is a handler arm with a body this path cannot put in the image",
+     # `p` is only assigned in the dead arm, so the read after the `try` is a
+     # read of a name no executed path stores: refused by name.
+     "refuse:Store 'p' before reading it",
      None),
     # A `try`'s `else` clause, which is the shape the whole clause exists for:
     # do the work where it can fail, and use the result only on the path where
@@ -24193,33 +24120,6 @@ REFUSAL_CASES = [
      "def main(n: Int) -> Int:\n"
      "    return f(n)\n",
      "refuse:does not fold to a compile-time constant", None),
-
-    # ── A NUMBER CONVERSION OF A CONTAINER ─────────────────────────────────────
-    #
-    # `printf("%d", xs)` for a list built GREEN, linked, ran, and printed the
-    # blob's heap ADDRESS — measured `v=1809329920` on arm64 and `v=1870638832`
-    # on x86-64 from the same source on two machines — exit 0 and nothing on
-    # stderr, where CPython raises `TypeError`. It is the mirror of the `%s`-of-
-    # an-integer rows in `PRINTF_TEXT_CASES`: that one is the conversion that
-    # DEREFERENCES, this one is the operand whose VALUE is a pointer. The rule
-    # and the words are `model.printf_container_conversion_refusal`, asked by
-    # both emitters through `model.printf_format_refusal`, so a `refuse:` row
-    # asserts the two architectures produce the SAME sentence. The LOCAL
-    # spelling of this construct is pinned by `CONTAINER_REFUSALS` (list, dict,
-    # bytearray); the row that the merged tree took from this group is the
-    # PARAMETER shape, which that group does not cover:
-    # The same construct where the container arrives through a PARAMETER, so a
-    # rule that only looked at a constructor binding would pass the local rows
-    # and fail this one. `show([1, 2, 3])` keeps the call site's kind through
-    # `param_kind`, which `ValueKinds` already reads for `len`/`if`, and the
-    # refusal does not care how the name got its kind.
-    ("printf_d_of_a_list_parameter_is_refused",
-     "def show(xs):\n"
-     "    printf(\"v=%d\", xs)\n"
-     "    return 0\n"
-     "def main() -> Int:\n"
-     "    return show([1, 2, 3])\n",
-     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
 ]
 
 
@@ -24561,7 +24461,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(out self, k: Int):\n"
+     "    def bump(mut self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -24581,7 +24481,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def pop(out self) -> Int:\n"
+     "    def pop(mut self) -> Int:\n"
      "        var old = self._value\n"
      "        self._value = self._value - 1\n"
      "        return old\n"
@@ -24609,7 +24509,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(out self, k: Int):\n"
+     "    def bump(mut self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def use(xs: List[Cell]):\n"
@@ -24639,7 +24539,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _p: Pair\n"
      "\n"
-     "    def swap(out self) -> Pair:\n"
+     "    def swap(mut self) -> Pair:\n"
      "        var old = self._p\n"
      "        self._p = Pair()\n"
      "        return old\n"
@@ -24976,7 +24876,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(out self):\n"
+     "    def bump(mut self):\n"
      "        self._value = self._value + 4\n"
      "\n"
      "def main() -> Int:\n"
@@ -25009,7 +24909,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(out self, k: Int):\n"
+     "    def bump(mut self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -25037,7 +24937,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(out self, k: Int):\n"
+     "    def bump(mut self, k: Int):\n"
      "        if k > 100:\n"
      "            return\n"
      "        self._value = self._value + k\n"
@@ -25121,7 +25021,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def pop(out self) -> Int:\n"
+     "    def pop(mut self) -> Int:\n"
      "        var old = self._value\n"
      "        self._value = self._value - 1\n"
      "        return old\n"
@@ -25157,7 +25057,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def take(out self, k: Int) -> Int:\n"
+     "    def take(mut self, k: Int) -> Int:\n"
      "        if k > 100:\n"
      "            self._value = 0\n"
      "            return -1\n"
@@ -25203,7 +25103,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def pop(out self) -> Int:\n"
+     "    def pop(mut self) -> Int:\n"
      "        var old = self._value\n"
      "        self._value = self._value - 1\n"
      "        return old\n"
@@ -25241,7 +25141,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(out self, k: Int):\n"
+     "    def bump(mut self, k: Int):\n"
      "        if k > 100:\n"
      "            return 1\n"
      "        self._value = self._value + k\n"
@@ -25270,7 +25170,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def bump(out self, k: Int):\n"
+     "    def bump(mut self, k: Int):\n"
      "        self.a = self.a + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -25366,7 +25266,7 @@ TYPE_APPLICATION_REFUSALS = [
 
 # ── a TYPE as a VALUE ──────────────────────────────────────────────────────
 #
-# `bugs/FORMAL_type_name_as_a_value.md` is the long form. A type on this path
+# `bugs/FORMAL_dtype_object_as_a_value.md` is the long form. A type on this path
 # is a word, and the word is a TAG: one number per type, computed from the
 # type's name by `model.type_tag`, the same number in every unit of the image
 # and on both architectures. So `t == Int32` is an integer comparison, a type
@@ -25997,14 +25897,18 @@ def check_interpolated_literal_bound_census(verbose=False):
     it stopped existing would make step 1 worth nothing — so it is a fact about
     the corpus rather than a drifting proportion, and it is asserted exactly.
     """
-    import collections as _collections
     import os as _os
+    try:
+        import module_loader
+        _STDLIB_PATH = getattr(module_loader, "STDLIB_PATH", None)
+    except Exception:
+        _STDLIB_PATH = None
     import formal.types as _types
     build = __import__("formal.build", fromlist=["build"])
     M = _TYPE_VALUE_MODEL
     here = _os.path.dirname(_os.path.abspath(__file__))
     roots = [here]
-    stdlib = _os.path.join(here, "..", "new-modular", "Mojo", "stdlib", "std")
+    stdlib = (_os.path.join(_STDLIB_PATH, "std") if _STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
     if _os.path.isdir(stdlib):
         roots.append(stdlib)
 
@@ -26068,11 +25972,13 @@ def check_interpolated_literal_bound_census(verbose=False):
         return None
 
     scanned = 0
-    shapes = _collections.Counter()
+    shapes = {}
     total_fields = 0
     total_literals = 0
     bounded = []                     # (path, spelled, bound)
-    one_obstacle = _collections.Counter()
+    one_obstacle = {}
+    def _inc(d, k):
+        d[k] = d.get(k, 0) + 1
     for root in roots:
         for dirpath, dirnames, filenames in _os.walk(root):
             dirnames[:] = [d for d in sorted(dirnames)
@@ -26122,7 +26028,7 @@ def check_interpolated_literal_bound_census(verbose=False):
                     vk = scope.get(id(node))
                     total_fields += len(fields)
                     for seg in fields:
-                        shapes[M.interpolated_field_shape(seg[1])] += 1
+                        _inc(shapes, M.interpolated_field_shape(seg[1]))
                     bound, _why = M.interpolated_literal_bound(
                         spelled, lambda e, _vk=vk: width_of(e, _vk))
                     if bound is not None:
@@ -26141,13 +26047,13 @@ def check_interpolated_literal_bound_census(verbose=False):
                         strays = [v for v in verdicts
                                   if v[0] == "name" and v[1] and v[1][0] == "str"]
                         if shapes_ != ["name"] * len(fields):
-                            one_obstacle["a-field-no-declaration-reaches"] += 1
+                            _inc(one_obstacle, "a-field-no-declaration-reaches")
                         elif len(strays) == len(fields):
-                            one_obstacle["every-field-is-a-string"] += 1
+                            _inc(one_obstacle, "every-field-is-a-string")
                         elif strays:
-                            one_obstacle["one-string-among-integers"] += 1
+                            _inc(one_obstacle, "one-string-among-integers")
                         else:
-                            one_obstacle["no-field-is-declared-at-all"] += 1
+                            _inc(one_obstacle, "no-field-is-declared-at-all")
     n = len(bounded)
     scope_free = sum(1 for _p, s, _b in bounded
                      if all(M.interpolated_field_shape(f[1]) in
@@ -26183,21 +26089,21 @@ def check_interpolated_literal_bound_census(verbose=False):
              "width, so this row is what a resolver with no type information "
              "can answer"),
             ("literals whose every field is a STRING-typed name",
-             one_obstacle["every-field-is-a-string"], 1,
+             one_obstacle.get("every-field-is-a-string", 0), 1,
              "THE decisive count: these are decidable the moment a string field "
              "has a width, and §7.1's \"a field's width is its declared type's\" "
              "is false of every one of them — the width is a `strlen` over the "
              "VALUE and a frame buffer is reserved before the program runs"),
             ("literals with a string field among integer ones",
-             one_obstacle["one-string-among-integers"], 0,
+             one_obstacle.get("one-string-among-integers", 0), 0,
              "the mixed shape, which is where a partial bound would be worst"),
             ("literals with a field no declaration reaches",
-             one_obstacle["a-field-no-declaration-reaches"], 1,
+             one_obstacle.get("a-field-no-declaration-reaches", 0), 1,
              "a call, a subscript, an attribute or an undeclared name: nothing "
              "in the source fixes a width, so no bound arithmetic reaches it "
              "and the reading is per name"),
             ("literals with every field undeclared",
-             one_obstacle["no-field-is-declared-at-all"], 1,
+             one_obstacle.get("no-field-is-declared-at-all", 0), 1,
              "the same shape with nothing at all stated — the value model doc "
              "(`FORMAL_string_value_model`) holds the next step for these")):
         if got >= floor:
@@ -26256,11 +26162,16 @@ def check_interpolated_literal_census(verbose=False):
     direction.
     """
     import os as _os
+    try:
+        import module_loader
+        _STDLIB_PATH = getattr(module_loader, "STDLIB_PATH", None)
+    except Exception:
+        _STDLIB_PATH = None
     build = __import__("formal.build", fromlist=["build"])
     passed, failures = 0, []
     here = _os.path.dirname(_os.path.abspath(__file__))
     roots = [here]
-    stdlib = _os.path.join(here, "..", "new-modular", "Mojo", "stdlib", "std")
+    stdlib = (_os.path.join(_STDLIB_PATH, "std") if _STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
     if _os.path.isdir(stdlib):
         roots.append(stdlib)
     scanned, rows, unquotable = 0, [], []
@@ -26585,7 +26496,7 @@ _STACK_FLOOR_PROBES = [
     #
     # The cycle rule alone left a DAG of distinct functions free to walk past
     # the floor, and the measured cost of that is in
-    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`: the deepest
+    # guarding an acyclic chain across the stack floor: the deepest
     # single image in this corpus is 89 frames against the 60 an arm64 budget
     # affords (76 until 2026-10-05). So a body that already contains a
     # conditional branch is guarded whether or not anything calls back into it.
@@ -27024,7 +26935,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 
 
 # residual the guard cannot reach, and the number that decided
-# `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
+# guarding an acyclic chain across the stack floor's widening.
 #
 # These are GRAPHS, not modules, because the question is about the function and
 # not about the parse: a module the corpus already holds would make a test that
@@ -27036,7 +26947,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 # corpus. It is written down because the rule's own argument is that the corpus
 # is already inside the hole, and a reader who wants to know by how much needs
 # the number; it was 76 and 12 until 2026-10-05, when the census was re-run for
-# `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` and both halves
+# guarding an acyclic chain across the stack floor and both halves
 # of it had moved.
 _STACK_FLOOR_DEPTH_PROBES = [
     # A straight chain of n: the answer is n, and the point of the row is that
@@ -27292,12 +27203,18 @@ def check_type_value_tag_generator(verbose=False):
     here = os.path.abspath(__file__)
     stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
         os.path.dirname(os.path.dirname(here)),
-        "new-modular", "Mojo", "stdlib", "std")
-    seen, stack, unresolved = set(), [here], set()
+        "modular", "mojo", "stdlib", "std")
+    # The closure is of MOJO imports, from the Mojo programs this file builds
+    # (formal/examples). Python modules are not walked: the compiler's own
+    # Python files import Python's host modules (`importlib.util` in
+    # emit_resolve.py), which are not Mojo imports and do not belong to this
+    # check. Measured: 94 example programs reach 94 .mojo files, 0 unresolved.
+    seen, unresolved = set(), set()
+    stack = sorted(glob.glob(os.path.join(os.path.dirname(here), "formal", "examples", "*.mojo")))
     while stack:
         p = stack.pop()
         rp = os.path.realpath(p)
-        if rp in seen or not p or not os.path.exists(p):
+        if rp in seen or not p or not os.path.exists(p) or not p.endswith(".mojo"):
             continue
         seen.add(rp)
         for m in I.imported_modules(I.module_statements(p)):
@@ -27554,7 +27471,6 @@ def main():
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + FLOAT_REFUSALS
-                  + PRINTF_CONTAINER_REFUSALS
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS
@@ -27626,7 +27542,8 @@ def main():
                          "origin_of_in_a_local_type_annotation_is_still_a_type"}
                       | {c[0] for c in POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                          if c[0].startswith(("deref_struct_pointee",
-                                             "deref_a_binary64_pointee"))}
+                                             "deref_a_binary64_pointee",
+                                             "deref_a_binary64_subscript"))}
                       # `fd_write_on_an_open_result_writes` reaches
                       # `os.path.getsize` through the `os_path` hostmod dylib,
                       # and the x86-64 image of that chain once jumped to

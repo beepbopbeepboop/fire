@@ -16,7 +16,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from module_loader import STDLIB_PATH
 from build_config import find_gcc
-from build_stdlib_dylib import compile_module_to_c_cached
+from build_stdlib_dylib import compile_module_to_c_cached, stdlib_codegen_key
 
 import cas
 
@@ -668,15 +668,8 @@ EXPECTED_FAILURES = {
     # those plus runtime/libc, none stat-related. See
     # bug:CODEGEN_imported_generic_never_elaborated_calls_nothing_
     # defines.md (2026-10-23 closing section).
-    # The four `case .PASS:` enum-case patterns: the spelling is type-relative,
-    # and resolving it needs the matched value's type, which this lowering does
-    # not have. Recorded, not hidden: the landing gate fails on any NEW failing
-    # file, and an entry that starts passing is reported as stale. Doc:
-    # bugs/CODEGEN_gate_stdlib_syntax_red.md.
-    "std/builtin/dtype.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
-    "std/logger/logger.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
-    "std/memory/address_space.mojo": "enum-case `case .NOTSET:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
-    "std/testing/suite.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
+    # (The four `case .PASS:` enum-case files were recorded here until the enum-case lowering landed; they compile now,
+    # so the entries are removed. the stdlib-syntax gate-red row.)
 }
 
 def get_stdlib_path():
@@ -815,7 +808,7 @@ def transpile_file(mojo_file):
         # Pre-check codegen CAS key so we can report hit-or-miss (the
         # pre-check stat call is ~1 ms; the actual function reads/writes
         # the same key, so the cost is negligible compared to codegen).
-        codegen_key = cas.stdlib_compile_key(src, str(mojo_file), name)
+        codegen_key = stdlib_codegen_key(src, str(mojo_file), name, linkable=False)
         cg_was_hit = cas.lookup(codegen_key, '.ci') is not None
 
         # Stage 1: Python codegen (CAS-cached)

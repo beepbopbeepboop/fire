@@ -48,6 +48,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import platform
 import shutil
 import struct
@@ -1571,8 +1572,6 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
     import formal.imports as I
     placed = {
         # name: (tier, why that tier, in one line)
-        "builtins": ("unreachable",
-                     "`set(dir(builtins))`: the interpreter's own namespace"),
         "sysconfig": ("unreachable",
                       "where an embedded CPython would be installed"),
         "datetime": ("modelled", "a clock this tree reads, plus arithmetic"),
@@ -1584,6 +1583,9 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
     # the tree \u2014 `formal/imports.py`'s rule fires by itself and this row is
     # what checks that it did.
     written = {
+        "builtins": ("the interpreter's own namespace, which the hostmod now answers "
+                     "for the three files that spell `set(dir(builtins))`",
+                     "formal/hostmods/builtins.mojo"),
         "html": ("five character replacements over a string",
                  "formal/hostmods/html.mojo"),
         "posixpath": ("`os/path/__init__.mojo` IS CPython's posixpath",
@@ -1810,10 +1812,8 @@ def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     `collections.namedtuple("Census", "ok detail …")`
     (`formal/lean.py:816`, `formal/model.py:13195`, `tools/formal_sweep.py`),
     and the answer for a compile-time-known record with readable fields is a
-    `struct`. Without that sentence the refusal reads as "this target cannot do
-    records", and the next thing a reader does is file the next bug document
-    about `collections` — which is what
-    `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` is.
+    `struct`. The advice explains how compile-time-known records map to
+    `struct`s rather than run-time type construction.
 
     **BOTH DIRECTIONS, because advice on every host module is the same noise in a
     different place.** The second row is a host module with no entry: its
@@ -2016,8 +2016,9 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
           "names are in no tier, so this row is about the names in no tier "
           "only if there are many of them")
     roots = [(HERE, "this repository")]
-    stdlib = os.path.join(HERE, "..", "new-modular", "Mojo", "stdlib", "std")
-    if os.path.isdir(stdlib):
+    from module_loader import STDLIB_PATH
+    stdlib = os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else None
+    if stdlib and os.path.isdir(stdlib):
         roots.append((stdlib, "the stdlib"))
     consumers = []
     scanned = 0
@@ -2283,8 +2284,7 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
         ("subprocess", "admitted",
          "a source AND `@admitted` contracts for the operations whose answer is "
          "a host fact"),
-        ("copy", "modelled", "in HOST_MODELLED and unwritten: a gap with an "
-                             "owner"),
+        ("copy", "written", "formal/hostmods/copy.mojo answers it"),
         ("asyncio", "unreachable",
          "in HOST_UNREACHABLE: an event loop and a thread are objects this "
          "image does not have"),
@@ -2412,6 +2412,59 @@ def test_the_five_find_spec_decided_names_are_unreachable(tmpdir, _shared):
               "no-spec measurement this placement rests on does not hold")
 
 
+def test_the_terminal_reading_names_are_unreachable(tmpdir, _shared):
+    """The EIGHT of the doc's §"The next step" terminal reading, and the one
+    CORRECTION the reading made on the way in.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s next step
+    listed `curses`, `tty`, `pty`, `readline`, `rlcompleter`, `tkinter`,
+    `turtle` and `cmd` under `unreachable` — "a terminal" — with `wsgiref` in
+    the same list.  The object each one needs is a terminal, the object
+    `HOST_UNREACHABLE`'s own heading names (`getpass` and `webbrowser` are its
+    pre-existing rows) and which a freestanding image that links libSystem and
+    nothing else does not have; `wsgiref` is the one the reading CORRECTS, the
+    way `posix` was corrected into `HOST_MODELLED`: its load-bearing half is
+    the reference SERVER — `wsgiref.simple_server.WSGIServer` is a subclass of
+    `http.server.HTTPServer` — so it is a SOCKET, and it sits under the socket
+    heading for the same object as `http`.
+
+    A spec EXISTS for every one of the nine here, so the no-spec oracle that
+    placed the five 2026-10-07 names does not decide these: the placement is
+    the per-name reading the doc's list is, with the evidence row for each in
+    `formal/imports.py`'s own comment.  The precondition that keeps the row
+    about the queue is that every name is a CPython standard-library module
+    with no source in this tree.
+    """
+    import sys as _sys
+    import formal.imports as I
+    terminal = ("cmd", "curses", "pty", "readline", "rlcompleter",
+                "tkinter", "tty", "turtle")
+    socket = ("wsgiref",)
+    for name in terminal + socket:
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library "
+              "module, so this row is not about the queue")
+        check(name in I.HOST_UNREACHABLE,
+              f"{name} is not in HOST_UNREACHABLE, so the rule at the top of "
+              "formal/imports.py has not been applied to it")
+        answer, _detail = I.host_module_verdict(name)
+        check(answer == "unreachable",
+              f"host_module_verdict({name!r}) answered {answer!r}, not "
+              "'unreachable'")
+    # The placement carries its private accelerator WITHOUT a second entry:
+    # `curses` in a claim tier is what `capability_sibling_tier` answers for
+    # `_curses`, the CPython internal that binds libncurses (outside
+    # libSystem) — a derivation, not a remembered row, so it is pinned rather
+    # than written into a table.
+    check(I.host_module_tier("_curses") == "unreachable",
+          "`curses` is unreachable, so its accelerator `_curses` answers with "
+          "the same tier by capability_sibling_tier; an empty answer would "
+          "mean the placement did not carry the private half")
+    check(I.host_module_verdict("_curses")[0] == "unreachable",
+          "host_module_verdict('_curses') must answer with the derived tier, "
+          "so the reach accounting sees it")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -2481,8 +2534,9 @@ def test_a_host_module_refusal_carries_its_measured_next_step(tmpdir, _shared):
     # the append safe for `formal_sweep.py`'s message families.
     base = I.unresolvable_import_error("prog.mojo", "collections")
     check(base.startswith("prog.mojo imports 'collections', which is a host "
-                          "module (CPython standard library), which has no Mojo "
-                          "source for this backend to compile"),
+                          "module (CPython standard library), whose Mojo source "
+                          "in this tree declares only module-level constants, so "
+                          "it has no function or type an importer could bind"),
           f"the generated wording changed shape, so anything matching on it "
           f"moves: {base!r}")
 
@@ -2500,34 +2554,34 @@ def test_host_module_advice_is_honest(tmpdir, _shared):
     not name the thing the module is wanted FOR is a generic sentence, and a
     generic sentence in a generated message is noise."""
     import formal.imports as I
+    # A written module keeps its advice only when its source exports NOTHING
+    # (constants only): the refusal still happens, so the advice is still the
+    # next step. Today that is `collections`, whose source has module-level
+    # constants and no function or type, which `formal/build.py`'s
+    # exports-nothing refusal names. Checked against the file, not trusted.
+    CONSTANT_ONLY_SOURCES = {"collections"}
     for name, advice in I.HOST_MODULE_ADVICE.items():
         src = I.resolve_module_path(name, relative_to=os.path.join(HERE, "x"),
                                     project_root=HERE)
-        check(src is None,
-              f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
-              f"resolves to {src!r} — a module source exists, so the advice is "
-              f"telling a reader to write what is already in the tree")
+        if src is not None:
+            check(name in CONSTANT_ONLY_SOURCES,
+                  f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
+                  f"resolves to {src!r} — a module source exists, so the advice "
+                  f"is telling a reader to write what is already in the tree")
+            with open(src) as _f:
+                _decls = [l for l in _f if re.match(r"\s*(def|fn|struct|trait)\b", l)]
+            check(not _decls,
+                  f"{name!r} is exempt from the advice check as a constants-only "
+                  f"source, but {src!r} declares "
+                  f"{_decls[0].strip() if _decls else ''!r}")
         check(len(advice) > 40,
               f"the advice for {name!r} is too short to be a next step: "
               f"{advice!r}")
     check("collections" in I.HOST_MODULE_ADVICE,
           "the `collections` advice was deleted; the five files that stop there "
           "are back to a message that names the module and nothing else")
-    # The `functools` advice named a missing capability that EXISTS. A function
-    # value is a CODE ADDRESS on this path, and `reduce`'s own shape builds and
-    # answers CPython on both architectures (test_formal_specialization.py's
-    # `functools.reduce's own shape runs, on both`), so "a callable this path has
-    # no representation for" sends a reader to add what is already there. The
-    # gate on the module is the DECORATOR half, which is a real and different
-    # defect — checked here because a message that names the wrong capability is
-    # the failure this whole table exists to avoid.
-    _ft = I.HOST_MODULE_ADVICE["functools"]
-    check("callable this path has no representation" not in _ft,
-          f"the `functools` advice claims a callable has no representation, "
-          f"which is false: {_ft!r}")
-    check("decorator" in _ft.lower(),
-          f"the `functools` advice does not name the decorator gate, which is "
-          f"what actually stops the module: {_ft!r}")
+    # `functools` now has a host module in the tree (formal/hostmods/functools.mojo),
+    # so its advice entry was removed as part of merge coherence.
     # A dotted name asks for the same answer, which is the rule that makes a
     # per-spelling table wrong by omission.
     check(I.host_module_advice("collections.abc") ==
@@ -4327,15 +4381,13 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     The constants are already inlined at their use sites by the
     module-constant substitution; what is absent is a RULE that a module with
     nothing to export needs no dylib at all, so an importer reading the
-    constant directly needs no library. That is one feature, and
-    `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
-    it is written down — so the message now says which feature it is and where
-    it lives, rather than telling a reader that nothing would help.
+    constant directly needs no library. That is one feature and the refusal
+    must name it, rather than telling a reader that nothing would help.
 
-    **The assertion is on the false clause and on the owner being named**, and
-    both directions matter: a message that merely stopped saying the false thing
-    would leave the 6 files with no next step, which is the same dead end in a
-    quieter form.
+    **The assertion is on the false clause and on the missing rule being
+    named**, and both directions matter: a message that merely stopped saying
+    the false thing would leave the 6 files with no next step, which is the
+    same dead end in a quieter form.
     """
     sys.path.insert(0, HERE)
     from formal.build import no_public_api_reason
@@ -4350,14 +4402,15 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
           f"which is false — the constants are already inlined at their use "
           f"sites and the missing thing is a rule, not an implementation: "
           f"{reason}")
-    check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
-          "the refusal does not name the feature that would remove it, so the "
-          f"6 files behind this row still have no next step: {reason}")
-    check("a BACKEND rule that a module nothing binds needs no library "
-          "at all" in reason,
-          "the refusal does not say the missing thing is a backend RULE "
-          f"rather than work on the module, which is the part a reader acts "
-          f"on: {reason}")
+    check("a BACKEND rule that a module nothing binds" in reason
+          and "needs no library at all" in reason,
+          "the refusal does not name the feature that would remove it (a "
+          f"backend rule that a module nothing binds needs no library at all, "
+          f"and a value model for container-valued module constants), so the "
+          f"files behind this row still have no next step: {reason}")
+    check("value model for a container-valued module constant" in reason,
+          "the refusal does not say why a container-valued module constant "
+          f"cannot be inlined today: {reason}")
     # …and the branch's own judgement is untouched: there really is nothing an
     # importer could bind, and the refusal is still correct.
     check("nothing an importer could bind" in reason,
@@ -4930,9 +4983,8 @@ def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
 # names, which is the question a sweep's `not-answerable/host-import` class
 # cannot answer: the class is one bucket over a queue of unrelated capabilities,
 # and a module landing unmasks the row behind it. The doc that asked for the
-# tool is `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5, and
-# these are its pins — the properties that make the ranking a MEASUREMENT rather
-# than a second description to drift.
+# tool's behavior is pinned here — the properties that make the ranking a
+# MEASUREMENT rather than a second description to drift.
 #
 # Everything here is Lean-free and builds nothing: the instrument reads the
 # backend's own readers, so a bug in it is a wrong TABLE, not a wrong image, and
@@ -5221,6 +5273,24 @@ def test_the_wall_instrument_reads_the_sweep_column_with_its_own_peel(tmpdir, _s
           "a missing sweep log must be an empty column, not an error")
 
 
+
+def _default_stdlib_dir():
+    """`$MOJO_STDLIB`, else `module_loader.STDLIB_PATH/std`, else the sibling
+    `modular` checkout. One definition: two rows had each spelled this with an
+    unimported `STDLIB_PATH` (a NameError, so both rows ERRORed)."""
+    env = os.environ.get("MOJO_STDLIB")
+    if env:
+        return env
+    try:
+        from module_loader import STDLIB_PATH
+    except ImportError:
+        STDLIB_PATH = None
+    if STDLIB_PATH:
+        return os.path.join(STDLIB_PATH, "std")
+    return os.path.join(os.path.dirname(os.path.dirname(HERE)),
+                        "modular", "mojo", "stdlib", "std")
+
+
 def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
     """A module in the file's closure that the file never READS is not a wall.
 
@@ -5241,8 +5311,7 @@ def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
     straight back on the wall with nothing failing here.
     """
     root = HERE
-    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
-        os.path.dirname(HERE), "new-modular", "Mojo", "stdlib", "std")
+    stdlib = _default_stdlib_dir()
 
     def closure_unresolved(path):
         seen, stack, out = set(), [path], set()
@@ -5346,8 +5415,7 @@ def test_a_memo_replaces_the_decorator_the_corpus_cannot_climb(tmpdir, _shared):
          regression in every caller.
     """
     root = HERE
-    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
-        os.path.dirname(HERE), "new-modular", "Mojo", "stdlib", "std")
+    stdlib = _default_stdlib_dir()
 
     def closure_unresolved(path):
         seen, stack, out = set(), [path], set()
@@ -5636,6 +5704,9 @@ TESTS = [
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
     ("the five find_spec-decided names are unreachable",
      test_the_five_find_spec_decided_names_are_unreachable),
+    ("the terminal reading's eight names are unreachable, and wsgiref is a "
+     "socket",
+     test_the_terminal_reading_names_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",

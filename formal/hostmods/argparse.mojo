@@ -1,5 +1,7 @@
 """`argparse` — command-line parsing, for the formal backend.
 
+Status convention: hoststatus.mojo.
+
 CPython's `argparse` is "a shape over the source language rather than a runtime
 facility" (`formal/imports.py`'s HOST_MODELLED comment, which names `argparse`
 among the reachable-in-principle modules). Nothing in it needs a second
@@ -25,7 +27,7 @@ rather than assumed — the reproductions are in the bug doc named at each.
      A module dylib can return one 64-bit word and nothing else: a struct or a
      list is a blob carved out of the frame that made it, so handing one back
      hands over an address that is dead on return
-     (`bugs/FORMAL_module_state_no_storage.md`, measurements (2) and (3)).
+     (module state is not stored in the formal model, measurements (2) and (3)).
   2. A module has no state of its own. A module-level name that is not a
      literal-only constant has nowhere to live, so a parser cannot be a module
      global either (same document, measurement (1)). Every function here is a
@@ -88,8 +90,8 @@ into a spec, so the escape rule does not reach it.
 
 `add(spec, record)` appends one record and returns a new spec, which
 is the alternative to one long literal — string `+` is refused on this path
-(`bugs/FORMAL_string_value_model.md`), so a spec cannot be concatenated in the
-source.
+(a string here is a bare `char *`, not a value that concatenates), so a spec
+cannot be built by concatenation in the source.
 
 `add_argument` on the CPython side also takes `prog`, `description` and
 `formatter_class`. `prog` is `basename(argv[0])` here, which is what CPython
@@ -137,7 +139,7 @@ WHAT IS NOT HERE, AND WHY
   * **`type=float` is REFUSED, and that is not an oversight.** A value on this
     path is one 64-bit word holding an INTEGER: `2.5` as a literal is the
     integer 2, `1.0` is 1, and `atof("3.5")` is 1 — measured, and the reason is
-    in `formal/model.py`'s `_FLOAT_SCALARS`. An `argparse` that accepted
+    in `formal/model/builtins.py`'s `_FLOAT_SCALARS`. An `argparse` that accepted
     `--limit-gb 2.5` and answered 2 would be a module computing something other
     than what its name says, so `parse` returns `ST_UNSUPPORTED` and says why.
     One file in the corpus (`tools/memcap.py`) wants it.
@@ -172,7 +174,7 @@ ERRORS
 ------
 CPython raises `SystemExit(2)` from `ArgumentParser.error`, printing the usage
 line and then `prog: error: message`. There is no `raise` on this path and no
-`sys.exit` (a settled decision, `bugs/FORMAL_known_limits.md` 1.1), so `parse`
+`sys.exit` (a settled decision: the target has no working spelling for it), so `parse`
 RETURNS 2 with the same text in its `err` buffer, and the caller ends the
 process with the one spelling that works on this target:
 
@@ -188,6 +190,8 @@ Every message and every exit status below is checked against CPython's own
 `argparse` on the same command lines by `test_formal_argparse.py`, which builds
 the arm64 image, RUNS it, and diffs its output and status against a CPython
 program generated from the same declarations.
+
+Status convention: hoststatus.mojo.
 """
 
 from os._syscalls import str_alloc, str_len, str_put, str_copy, str_prefix
@@ -714,7 +718,7 @@ def _name_len(rec, k) -> int:
     `return n` below classifies this callee's result as neither a number nor a
     string, and `_name_len(rec, k) == nlen` in `_lookup` then reads as a
     comparison of two unclassified words — which lowers to an ADDRESS compare
-    and is refused (`formal/model.py`'s `string_compare_word_refusal`). Both
+    and is refused (`formal/model/values.py`'s `string_compare_word_refusal`). Both
     operands really are lengths, so `-> int` is what lets the call site classify
     the result.
     """
@@ -2840,7 +2844,7 @@ def add(spec, record):
     """`spec` with `record` appended as one more action, as a new buffer.
 
     The way to build a spec without writing one long literal, because string `+`
-    is refused on this path (`bugs/FORMAL_string_value_model.md`) — so a caller
+    is refused on this path (a string is a bare `char *`, not a concatenable value) — so a caller
     writes `s = argparse.add(s, "--jobs|-j|store|int|||8")` once per action. The
     result is a `malloc`'d buffer the caller owns, like every other string this
     backend's modules return. A `record` containing `;` is returned unchanged:
@@ -2886,7 +2890,7 @@ def error(spec, argv, msg, err):
 
     Returns `ST_ERROR`, which is 2 — the status CPython exits with. The caller
     ends the process with `exit(2)`, the only spelling that works on this target
-    (`bugs/FORMAL_known_limits.md` 1.1); this function does not exit because a
+    (the target has no working `sys.exit`); this function does not exit because a
     module that ends its caller's process cannot also be tested against CPython.
     """
     _compose(spec, argv, msg, err)
@@ -2899,7 +2903,7 @@ def parse(spec, argv, argc, out, err, desc):
     `argv[0]` is the program name and is never consumed as an argument, which is
     the one respect in which `argv` differs from what CPython's `parse_args`
     takes: there is no `sys.argv` here to default to
-    (`bugs/FORMAL_module_state_no_storage.md`, measurement (4)), and passing the
+    (module state is not stored in the formal model, measurement (4)), and passing the
     whole vector is what lets `prog` be `basename(argv[0])` as it is there.
 
     `out` and `err` are caller buffers of at least `BUF_CAP` bytes each. `out`
@@ -3285,7 +3289,7 @@ def _check(spec, na, err):
         if t == T_FLOAT:
             _refuse(err, "type=float is not available on this target: a value "
                       "is one 64-bit integer word, so a float would be "
-                      "silently truncated. See formal/model.py's "
+                      "silently truncated. See formal/model/builtins.py's "
                       "_FLOAT_SCALARS.")
             return ST_UNSUPPORTED
         if t == T_BAD:

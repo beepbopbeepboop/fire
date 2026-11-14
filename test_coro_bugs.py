@@ -20,7 +20,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC_RE = re.compile(r'^Source file:\s*(\S+)', re.M)
+SRC_RE = re.compile(r'^Source file:\s*`?([^\s`]+)`?', re.M)
 
 
 def _bugs():
@@ -41,6 +41,19 @@ def _bugs():
 
 
 DO_IMPORTS = os.environ.get('CORO_BUGS_IMPORTS') == '1'
+
+
+def exit_code(rows):
+    """The verdict this diagnostic's exit status reports.
+
+    CFAIL means the generated C does not syntax-check: a defect in emitted code,
+    never an expected blocker, so it fails the run. RAISE is a known compile
+    blocker and stays informational. A run that diagnosed nothing (no bug doc
+    with a live Source file matched) has verified nothing, so it is not green.
+    """
+    if not rows:
+        return 2
+    return 1 if any(st == 'CFAIL' for st, *_ in rows) else 0
 
 
 def main():
@@ -83,8 +96,11 @@ def main():
     counts = {}
     for st, *_ in rows:
         counts[st] = counts.get(st, 0) + 1
+    if not rows:
+        print('no bug doc with a live Source file matched: nothing diagnosed')
     print('\n' + '  '.join(f'{k}={v}' for k, v in sorted(counts.items())))
+    return exit_code(rows)
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

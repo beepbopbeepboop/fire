@@ -87,6 +87,7 @@ class Insn:
     mem_disp: int = 0
     rip_rel: int = 0
     xmm: int = 0            # SSE register number, REX.R NOT applied (0-7)
+    has_sib: bool = False
 
     @property
     def next_offset(self) -> int:
@@ -108,14 +109,18 @@ def _i32(code: bytes, at: int) -> int:
 def _modrm_fields(modrm: int, rex: int, code: bytes, at: int):
     """Decode the ModRM byte (and what follows it) at `at`.
 
-    Returns `(mod, reg, rm, extra, mem_base, mem_disp)` where `extra` counts
+    Returns `(mod, reg, rm, extra, mem_base, mem_disp, has_sib)` where `extra` counts
     the bytes AFTER the ModRM byte — the SIB byte when rm=4 selects one,
     then the displacement. Order in the stream is ModRM, SIB, disp; getting
     that wrong reads a displacement out of the SIB, which is the kind of bug
     that produces plausible addresses.
 
     `mem_base` is the register an r/m operand addresses through, or None when
-    the operand is a register or RIP-relative.
+    the operand is a register or RIP-relative.  For a SIB operand with an index
+    (`mov [base + index], r`), `mem_base` is the base register; the index and
+    scale live in the SIB byte and are read by the model (`lib/X86.lean`'s
+    `x86_mem_addr`) from the bytes, which is the one place the effective address
+    is computed.
     """
     mod = modrm >> 6
     reg = ((modrm >> 3) & 7) | (8 if rex & R else 0)
@@ -123,14 +128,19 @@ def _modrm_fields(modrm: int, rex: int, code: bytes, at: int):
     extra = 0
     mem_base = None
     disp = 0
+    has_sib = False
     if mod == 3:
-        return mod, reg, rm | (8 if rex & B else 0), extra, None, 0
+        return mod, reg, rm | (8 if rex & B else 0), extra, None, 0, False
     if rm == 4:                                   # a SIB byte follows
         sib = code[at + 1]
         extra = 1
-        index = (sib >> 3) & 7
-        if index != 4:                            # index field 4 = no index
-            raise DecodeError(f"SIB with index {index} is not emitted")
+        has_sib = True
+        # The index field: 4 means "no index" (a base+displacement address);
+        # anything else is an index register, REX.X-extended, contributing
+        # index * 2^scale to the address.  The float-repr helper emits the
+        # indexed form (`encode_mov_rm8_r8_idx`, `encode_movzx_r64_rm8_idx`),
+        # and this decoder is the encoder's inverse, so it reads it here rather
+        # than refusing: `mem_base` is the base, as for every other SIB form.
         base = (sib & 7) | (8 if rex & B else 0)
         mem_base, rm = base, base
     elif rm == 5 and mod == 0:
@@ -144,14 +154,14 @@ def _modrm_fields(modrm: int, rex: int, code: bytes, at: int):
     elif mod == 2 or (mod == 0 and rm == 5):
         disp = _i32(code, at + 1 + extra)
         extra += 4
-    return mod, reg, rm, extra, mem_base, disp
+    return mod, reg, rm, extra, mem_base, disp, has_sib
 
 
 def decode_one(code: bytes, off: int) -> Insn:
     """Decode the single instruction starting at `off`."""
     def byte(i):
         if off + i >= len(code):
-            raise DecodeError(f"truncated instruction at {off}")
+            raise DecodeError("truncated instruction at " + off)
         return code[off + i]
 
     p = 0
@@ -188,16 +198,30 @@ def decode_one(code: bytes, off: int) -> Insn:
             rex = byte(p)
             p += 1
     op = byte(p)
-    w = bool(rex & W)
+    w = (rex & W) != 0
 
     def insn(length, form, **kw):
-        return Insn(offset=off, length=length, form=form, rex=rex, op=op, **kw)
+        mod = kw.get("mod")
+        reg = kw.get("reg")
+        rm = kw.get("rm")
+        mem_base = kw.get("mem_base")
+        mem_disp = kw.get("mem_disp", 0)
+        imm = kw.get("imm", 0)
+        digit = kw.get("digit", 0)
+        cc = kw.get("cc", 0)
+        rip_rel = kw.get("rip_rel", 0)
+        xmm = kw.get("xmm", 0)
+        has_sib = kw.get("has_sib", False)
+        return Insn(offset=off, length=length, form=form, rex=rex, op=op,
+                    mod=mod, reg=reg, rm=rm,
+                    mem_base=mem_base, mem_disp=mem_disp, imm=imm, digit=digit,
+                    cc=cc, rip_rel=rip_rel, xmm=xmm, has_sib=has_sib)
 
     def modrm_at(i, at_mod=None):
         """(fields..., length) for a ModRM instruction whose ModRM is at p+i."""
-        mod, reg, rm, extra, base, disp = _modrm_fields(
+        mod, reg, rm, extra, base, disp, has_sib = _modrm_fields(
             byte(p + i), rex, code, off + p + i)
-        return mod, reg, rm, extra, base, disp, p + i + 1 + extra
+        return mod, reg, rm, extra, base, disp, has_sib, p + i + 1 + extra
 
     # ── register-only forms, REX or not ───────────────────────────
     if 0x50 <= op <= 0x57:
@@ -237,11 +261,11 @@ def decode_one(code: bytes, off: int) -> Insn:
         # is a separate decoder for the same reason, and it takes `0x66` at
         # `rip` and the ModRM at `rip + 3` — one byte further along than the
         # same opcode without the prefix.
-        mod, _reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, _reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         return insn(length, "mov_rm16_r16", mod=mod, rm=rm,
-                    mem_base=base, mem_disp=disp)
+                    mem_base=base, mem_disp=disp, has_sib=has_sib)
     if op66 and op == 0x0F and byte(p + 1) == 0x6E and w:
-        mod, _reg, rm, extra, _b, _d, length = modrm_at(2)
+        mod, _reg, rm, extra, _b, _d, has_sib, length = modrm_at(2)
         if mod != 3:
             raise DecodeError("movq xmm, m64 with a memory operand is not emitted")
         return insn(length, "movq_xmm_rm64", mod=mod,
@@ -252,7 +276,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         # (`encode_movq_r64_xmm`). The ModRM halves are the REVERSE of `0F 6E`'s
         # and it is the instruction that decides it: `0F 7E` is `MOVQ r/m64,
         # xmm`, so the XMM is `reg` (raw, no REX.R) and the GPR is `rm` (REX.B).
-        mod, _reg, rm, extra, _b, _d, length = modrm_at(2)
+        mod, _reg, rm, extra, _b, _d, has_sib, length = modrm_at(2)
         if mod != 3:
             raise DecodeError("movq r64, m64 with a memory operand is not emitted")
         return insn(length, "movq_r64_xmm", mod=mod,
@@ -265,7 +289,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         #   * `0x2E` — `ucomisd dst, src` (`encode_ucomisd_xmm`), flags only.
         # Neither carries a REX byte, so `p` is 1 and the ModRM is at `p + 2`.
         op2 = byte(p + 1)
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(2)
         if mod != 3:
             raise DecodeError("the scalar-double compare/xor form with a memory "
                               "operand is not emitted")
@@ -281,7 +305,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         # both operands XMM, `dst` in ModRM.reg and `src` in ModRM.rm, no REX.
         name = {0x58: "addsd", 0x5C: "subsd", 0x59: "mulsd",
                 0x5E: "divsd"}[byte(p + 1)]
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(2)
         if mod != 3:
             raise DecodeError("a scalar-double arithmetic form with a memory "
                               "operand is not emitted")
@@ -291,7 +315,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         # `F2 REX.W 0F 2A /r` — `cvtsi2sd xmm, r/m64`
         # (`encode_cvtsi2sd_xmm_r64`). The XMM is `reg` with NO REX.R — there is
         # no XMM8 — and the GPR is `rm` with REX.B.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(2)
         if mod != 3:
             raise DecodeError("cvtsi2sd with a memory operand is not emitted")
         return insn(length, "cvtsi2sd_xmm_r64", mod=mod, xmm=reg & 7,
@@ -303,7 +327,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         # with REX.R and the XMM is `rm` with NO REX.B (there is no XMM8).  A
         # decoder that shared `cvtsi2sd`'s reading would convert the XMM's
         # number as if it were the GPR's.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+        mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(2)
         if mod != 3:
             raise DecodeError("cvttsd2si with a memory operand is not emitted")
         return insn(length, "cvttsd2si_r64_xmm", mod=mod, xmm=rm & 7,
@@ -312,7 +336,7 @@ def decode_one(code: bytes, off: int) -> Insn:
     # ── REX-less forms the backend emits ──────────────────────────
     if op == 0x31 and not w:
         # xor rm32, r32 — the REX-less ALU form (`xor edx, edx` before a div).
-        mod, reg, rm, extra, _b, _d, length = modrm_at(1)
+        mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("REX-less xor with a memory operand is not emitted")
         return insn(length, "alu_rr32:xor", mod=mod, reg=reg, rm=rm)
@@ -328,7 +352,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         # write, while this is a one-byte write that leaves the rest of the
         # register alone.  A form name that cannot carry the width is the
         # `mov_rm32_r32` / `mov_rm32_r32_mem` split above, one level up.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(1)
+        mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("the byte-wise ALU form with a memory operand "
                               "is not emitted")
@@ -357,11 +381,11 @@ def decode_one(code: bytes, off: int) -> Insn:
             # with no operand-size prefix (the 16-bit spelling is the operand-
             # size `0x66` form, which this backend does not emit).  REX.B still
             # extends `rm` to r8-r15, which `_modrm_fields` applies.
-            mod, _reg, rm, _extra, _b, _d, length = modrm_at(1)
+            mod, _reg, rm, _extra, _b, _d, has_sib, length = modrm_at(1)
             return insn(length, "call_r64", mod=mod, digit=2, rm=rm)
         form = {0x15: "call_rm64", 0x25: "jmp_rm64"}.get(modrm)
         if form is None:
-            raise DecodeError(f"unsupported 0xFF /{modrm & 7} at {off}")
+            raise DecodeError("unsupported 0xFF")
         return insn(p + 6, form, digit=2, rip_rel=_i32(code, off + p + 2))
 
     # ── REX.W forms ────────────────────────────────────────────────
@@ -377,11 +401,11 @@ def decode_one(code: bytes, off: int) -> Insn:
         # byte, so the prefix that would say "64-bit" is the wrong one — and a
         # REX prefix is still emitted when either register is r8-r15, so `rm`
         # and `reg` both come through `_modrm_fields` with REX.B/REX.R applied.
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         return insn(length, "mov_rm8_r8", mod=mod, reg=reg, rm=rm,
-                    mem_base=base, mem_disp=disp)
+                    mem_base=base, mem_disp=disp, has_sib=has_sib)
     if op == 0x89:
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         if w:
             form = "mov_rm64_r64"
         elif mod == 3:
@@ -395,7 +419,7 @@ def decode_one(code: bytes, off: int) -> Insn:
             # instruction.
             form = "mov_rm32_r32_mem"
         return insn(length, form, mod=mod, reg=reg, rm=rm,
-                    mem_base=base, mem_disp=disp)
+                    mem_base=base, mem_disp=disp, has_sib=has_sib)
     if op == 0x8B:
         # Both widths, and the width is what REX.W decides: with it the load is
         # the 8-byte one, without it `8B /r` is `mov dst32, m32` and ZERO
@@ -403,28 +427,28 @@ def decode_one(code: bytes, off: int) -> Insn:
         # counterpart of `mov_rm32_r32`).  Two separate names rather than one
         # name and a flag, because a 4-byte load that reads eight is the hazard
         # this whole family exists to avoid.
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         form = "mov_r64_rm64" if w else "mov_r32_rm32"
         return insn(length, form, mod=mod, reg=reg, rm=rm,
-                    mem_base=base, mem_disp=disp)
+                    mem_base=base, mem_disp=disp, has_sib=has_sib)
     if op == 0x8D and w:
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         # mod=00 with rm=101 is the RIP-relative form of the r/m field (and
         # carries NO SIB byte); anything else is a base+disp address.
         rip = (mod == 0 and (byte(p + 1) & 7) == 5)
         return insn(length, "lea_r64_rip" if rip else "lea_r64_rm64",
-                    mod=mod, reg=reg, rm=rm, mem_base=base, mem_disp=disp,
+                    mod=mod, reg=reg, rm=rm, mem_base=base, mem_disp=disp, has_sib=has_sib,
                     rip_rel=disp if rip else 0)
     if op == 0x63 and w:
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         # The register form is `movsxd_r64_r32`; the memory form is named after
         # its encoder, `encode_movsx_r64_rm32`, and is a different instruction
         # to the model (it is a DEREFERENCE).
         form = "movsxd_r64_r32" if mod == 3 else "movsx_r64_rm32"
         return insn(length, form, mod=mod, reg=reg, rm=rm,
-                    mem_base=base, mem_disp=disp)
+                    mem_base=base, mem_disp=disp, has_sib=has_sib)
     if op == 0xC7 and w:
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("mov rm64, imm32 with a memory operand "
                               "is not emitted")
@@ -437,7 +461,7 @@ def decode_one(code: bytes, off: int) -> Insn:
     if op == 0x0F:
         op2 = byte(p + 1)
         if 0x90 <= op2 <= 0x9F and not w:
-            mod, reg, rm, extra, base, disp, length = modrm_at(2)
+            mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(2)
             if mod != 3:
                 raise DecodeError("setcc with a memory operand is not emitted")
             return insn(length, "setcc", cc=op2 - 0x90, mod=mod, rm=rm)
@@ -476,12 +500,12 @@ def decode_one(code: bytes, off: int) -> Insn:
                      0xB7: ("movzx_r64_r16", "movzx_r64_rm16"),
                      0xBE: ("movsx_r64_r8", "movsx_r64_rm8"),
                      0xBF: ("movsx_r64_r16", "movsx_r64_rm16")}[op2]
-            mod, reg, rm, extra, base, disp, length = modrm_at(2)
+            mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(2)
             form = names[0] if mod == 3 else names[1]
             return insn(length, form, mod=mod, reg=reg, rm=rm,
-                        mem_base=base, mem_disp=disp)
+                        mem_base=base, mem_disp=disp, has_sib=has_sib)
         if op2 == 0xAF and w:
-            mod, reg, rm, extra, _b, _d, length = modrm_at(2)
+            mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(2)
             if mod != 3:
                 raise DecodeError("imul with a memory operand is not emitted")
             return insn(length, "imul_r64_r64", mod=mod, reg=reg, rm=rm)
@@ -496,7 +520,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         # which is all `_shapes` needs to name the step lemma. `w` is required
         # because the encoder only ever emits the REX.W 64-bit form.
         if 0x40 <= op2 <= 0x4F and w:
-            mod, reg, rm, extra, base, disp, length = modrm_at(2)
+            mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(2)
             if mod != 3:
                 raise DecodeError("cmov with a memory operand is not emitted")
             return insn(length, "cmov_r64_r64", mod=mod, reg=reg, rm=rm,
@@ -523,7 +547,7 @@ def decode_one(code: bytes, off: int) -> Insn:
         # field in both, but this one reads an immediate out of the stream
         # and that changes its LENGTH, which is the field every caller of
         # this decoder uses to find the next instruction.
-        mod, reg, rm, extra, _b, _d, length = modrm_at(1)
+        mod, reg, rm, extra, _b, _d, has_sib, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("imul with a memory operand is not emitted")
         # `+ 1` for the immediate byte itself, which is what separates this
@@ -536,39 +560,39 @@ def decode_one(code: bytes, off: int) -> Insn:
         return insn(length + 1, "imul_r64_r64_imm", mod=mod, reg=reg, rm=rm,
                     imm=_s8(byte(p + 2)))
     if w and (alu := _ALU_RR.get(op)) is not None:
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         if mod != 3:
-            raise DecodeError(f"ALU {alu} with a memory operand is not emitted")
-        return insn(length, f"alu_rr:{alu}", mod=mod, reg=reg, rm=rm)
+            raise DecodeError("ALU with a memory operand is not emitted")
+        return insn(length, "alu_rr:" + alu, mod=mod, reg=reg, rm=rm)
     if w and op in (0x81, 0x83):
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("ALU with an immediate and a memory operand "
                               "is not emitted")
         digit = (byte(p + 1) >> 3) & 7
         if op == 0x81:
-            return insn(p + 6, f"alu_ri32:{_DIGIT[digit]}", mod=mod, rm=rm,
+            return insn(p + 6, "alu_ri32:" + _DIGIT[digit], mod=mod, rm=rm,
                         digit=digit, imm=_i32(code, off + p + 2))
-        return insn(p + 3, f"alu_ri8:{_DIGIT[digit]}", mod=mod, rm=rm,
+        return insn(p + 3, "alu_ri8:" + _DIGIT[digit], mod=mod, rm=rm,
                     digit=digit, imm=_s8(byte(p + 2)))
     if w and op in (0xC1, 0xD3):
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("shift with a memory operand is not emitted")
         digit = (byte(p + 1) >> 3) & 7
         if op == 0xC1:
-            return insn(p + 3, f"shift_imm8:{_SHIFT[digit]}", mod=mod, rm=rm,
+            return insn(p + 3, "shift_imm8:" + _SHIFT[digit], mod=mod, rm=rm,
                         digit=digit, imm=byte(p + 2))
-        return insn(p + 2, f"shift_cl:{_SHIFT[digit]}", mod=mod, rm=rm,
+        return insn(p + 2, "shift_cl:" + _SHIFT[digit], mod=mod, rm=rm,
                     digit=digit)
     if w and op == 0xF7:
-        mod, reg, rm, extra, base, disp, length = modrm_at(1)
+        mod, reg, rm, extra, base, disp, has_sib, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("group3 with a memory operand is not emitted")
         digit = (byte(p + 1) >> 3) & 7
-        return insn(length, f"group3:{_GROUP3[digit]}", mod=mod, rm=rm, digit=digit)
+        return insn(length, "group3:" + _GROUP3[digit], mod=mod, rm=rm, digit=digit)
 
-    raise DecodeError(f"undecodable byte 0x{op:02x} (rex 0x{rex:02x}) at {off}")
+    raise DecodeError("undecodable byte")
 
 
 def decode_all(code: bytes, start: int = 0, end: int = None) -> list:
@@ -585,8 +609,7 @@ def decode_all(code: bytes, start: int = 0, end: int = None) -> list:
     while off < end:
         insn = decode_one(code, off)
         if off + insn.length > end:
-            raise DecodeError(
-                f"instruction at {off} runs {insn.length} bytes past the end {end}")
+            raise DecodeError("instruction at " + off + " runs bytes past the end")
         out.append(insn)
         off = insn.next_offset
     return out
@@ -596,7 +619,8 @@ def body_end(info: dict) -> int:
     """The offset into `code` at which a linear sweep of a body must stop.
 
     Every function body comes before the string pool and before the float-repr
-    helper, and the helper follows the bodies. Neither is an instruction a
+    helper (present only when a float is printed), and the helper follows the
+    bodies. With neither after them the image's end is the bound. Neither is an instruction a
     body's chain reaches (a body calls the helper, and the chain does not follow
     a `call`), and the helper's SIB-indexed byte stores are not a form this
     decoder reads. So the sweep ends at the first of them. Both consumers of a
@@ -606,8 +630,16 @@ def body_end(info: dict) -> int:
     base = info["base_addr"]
     ends = [a for name, a in (info.get("labels") or {}).items()
             if name.startswith("str_")]
-    ends.append(info["float_repr_addr"])
-    return min(ends) - base
+    if info.get("float_repr_addr") is not None:
+        ends.append(info["float_repr_addr"])
+    ends.append(info["image_end"])
+    m = ends[0]
+    i = 1
+    while i < len(ends):
+        if ends[i] < m:
+            m = ends[i]
+        i += 1
+    return m - base
 
 
 def forms(insns: list) -> set:

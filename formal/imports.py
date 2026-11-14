@@ -24,6 +24,7 @@ that imports it.
 
 import contextlib
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -139,21 +140,29 @@ HOST_UNREACHABLE = frozenset((
     # A thread, and a proved model of one.
     "asyncio",
     # A socket.
-    "socket", "urllib", "http",
+    #
+    # `wsgiref` is the WSGI reference implementation, and it is the one name
+    # the doc's next-step reading list (its §"The next step" in
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md`) placed
+    # under "a terminal" that the reading itself corrects, the way `posix` was
+    # corrected into `HOST_MODELLED`: the load-bearing half of the package is
+    # the reference SERVER —
+    # `wsgiref.simple_server.WSGIServer` is a subclass of
+    # `http.server.HTTPServer`, measured on the interpreter that runs this tree
+    # — so the object it needs is the socket `http` and `urllib` are here for,
+    # and the two pure halves (`wsgiref.util`, `wsgiref.validate`) are utilities
+    # the server exists to feed rather than the module's reason.
+    "socket", "urllib", "http", "wsgiref",
     # A dynamic loader for foreign code, or an embedded CPython.  `ctypes` moved
     # to HOST_ADMITTED with the rest; what is left here is the embedded CPython.
-    "importlib", "importlib.util", "importlib.machinery",
+    # `importlib` left on 2026-11-08 for `formal/hostmods/importlib.mojo`; its
+    # dotted submodules below still have no source.
+    "importlib.util", "importlib.machinery",
     # The interpreter's own frames, allocation set, or shutdown path. There is
     # no interpreter here to ask, and on this path a value is one 64-bit word,
     # so there is nothing for `gc` to track and no bytecode for `dis` to
     # disassemble (the formal backends emit machine code, not bytecode).
-    # `builtins` is here for the same reason and it is measured rather than
-    # read off: the three files in this repository that want it
-    # (`tools/codeindex.py`, `tools/wave2c_explicit_imports.py`,
-    # `tools/wave2b_fix_deps.py`, ranked by `tools/formal_sweep_causes.py
-    # --host`) all spell `set(dir(builtins))` — they ask the INTERPRETER to
-    # enumerate its own namespace, which is the one question on this page with
-    # no answer at all here.
+    # `builtins` left on 2026-11-08 for `formal/hostmods/builtins.mojo`.
     # `traceback` and `signal` WERE here, in the same line, and left on
     # 2026-10-04 by being WRITTEN — the way `shutil` and `tempfile` left. The
     # entry above them says what this heading means: an interpreter's own
@@ -165,7 +174,7 @@ HOST_UNREACHABLE = frozenset((
     # `signal` answers the platform's `<signal.h>` vocabulary plus two libc
     # calls, so neither leaves a host fact over to trust — which is why both sit
     # in NO tier rather than in `HOST_ADMITTED` (the `fcntl` precedent, verbatim).
-    "gc", "atexit", "warnings", "dis", "builtins",
+    "gc", "atexit", "warnings", "dis",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
 # A terminal. `tempfile` WAS here too — under this heading, for the
@@ -187,6 +196,48 @@ HOST_UNREACHABLE = frozenset((
     # is written down at the top of the module rather than here, so a reader
     # asking "why is most of this row still refused" has one place to look.
     "getpass", "webbrowser",
+    # THE EIGHT THE DOC'S OWN READING LIST NAMES UNDER THIS HEADING (its
+    # §"The next step" in `bugs/FORMAL_stdlib_module_names_are_not_classified.md`),
+    # taken one at a time with the rule at the top of this file applied to each.  The object each needs is a TERMINAL — an interactive input
+    # and display — the same object `getpass` (a prompt) and `webbrowser` (a
+    # window) are here for, and a freestanding image that links libSystem and
+    # nothing else has no controlling terminal, no line discipline and no
+    # stream to carry the dialogue (a stream is the missing object the
+    # `HOST_MODELLED` `io` entry states).  A spec EXISTS for every one of the
+    # eight here — `tools/formal_stdlib_reach.py`'s row for each — so the
+    # no-spec oracle that placed the five 2026-10-07 names does not decide
+    # these; the placement is the per-name reading, and each is private-half
+    # accounted for below rather than by a remembered row.
+    #
+    #   `tty`        — terminal MODE for a descriptor: open `/dev/tty` and put
+    #                  the terminal into raw or cbreak mode.
+    #   `pty`        — a PSEUDO-terminal: a master/slave terminal-device pair.
+    #   `readline`   — line EDITING on the terminal; CPython on this host binds
+    #                  libedit (outside libSystem) for it, so the library
+    #                  reading and the terminal reading agree rather than
+    #                  competing.
+    #   `rlcompleter`— the programmable completion built ON readline.
+    #   `curses`     — terminal user interface; CPython's is a wrapper over
+    #                  `_curses` (libncurses, outside libSystem), and even a
+    #                  pure implementation of the terminal protocol talks TO a
+    #                  terminal that is not here.  Placing the PUBLIC name in
+    #                  this claim tier is what takes `_curses` out of the
+    #                  queue too, by `capability_sibling_tier` — a derivation,
+    #                  so no entry for it exists and none is wanted.
+    #   `tkinter`    — the Tk GUI: the Tcl/Tk runtime its private half
+    #                  `_tkinter` needs (in this set by the 2026-10-07 no-spec
+    #                  measurement) AND a display to draw on.
+    #   `turtle`     — canvas graphics ON `tkinter` — the `HOST_NOT_A_MODULE`
+    #                  comment states the reading verbatim: "`turtle` needs
+    #                  `tkinter` and so is a terminal".
+    #   `cmd`        — a line-oriented command INTERPRETER: an interactive
+    #                  prompt reading commands from the terminal.  This rests
+    #                  on the command STREAM, not on `cmd`'s optional `readline`
+    #                  import — the doc's §0.5 mechanism 2: an optional import
+    #                  is not a dependency, so the placement does not turn on
+    #                  a line-editing library the module tolerates missing.
+    "cmd", "curses", "pty", "readline", "rlcompleter", "tkinter", "tty",
+    "turtle",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else. `zlib` and `gzip`
     # also have an honest route that does NOT link anything — DEFLATE is
@@ -448,12 +499,11 @@ HOST_MODELLED = frozenset((
     #     on this path — `formal/arm64_codegen.py` truncates a `FloatLiteral`
     #     to an integer and there is no float arithmetic — so the fractional
     #     `time.time()` is the IEEE-754 BIT PATTERN of one, verified bit-exact
-    #     against exact rational arithmetic over 534 inputs. What it cannot
-    #     answer is written at the top of the file: `localtime`, `gmtime`,
-    #     `mktime`, `strftime` and `get_clock_info` all return a `struct tm`
-    #     or a named tuple, and a struct is a frame blob, so they are absent
-    #     rather than approximated. Filed as
-    #     `bugs/FORMAL_time_struct_shaped_answers.md`.
+    #     against exact rational arithmetic over 534 inputs. `localtime`,
+    #     `gmtime`, `mktime`, `strftime` and `get_clock_info` now return
+    #     `struct_time` / values through the `struct tm` pointer route
+    #     (`formal/hostmods/time.mojo`), which `test_formal_time.py`'s
+    #     `structroute` group measures.
     #   `hashlib` — `formal/hostmods/hashlib.mojo`, checked BYTE FOR BYTE
     #     against CPython's own digests by `test_formal_hashlib.py`: six
     #     digests from CommonCrypto (which libSystem provides) and BLAKE2b
@@ -563,8 +613,7 @@ HOST_MODELLED = frozenset((
     #
     #     WHAT THE MODULE DOES NOT MOVE is the other half of the row: a
     #     `random.Random(n)` INSTANCE is an object with 624 words behind a
-    #     pointer, which is `formal/hostmods/random.mojo`'s own top section and
-    #     `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`.
+    #     pointer, which is handled in `formal/hostmods/random.mojo`.
     #     Two of the row's four files move and two stop on the instance rather
     #     than on the import, which is the honest number.
     # Pure computation over representable values: string and text handling,
@@ -608,7 +657,8 @@ HOST_MODELLED = frozenset((
     #     matter. `itemgetter` and its siblings want a first-class callable, and
     #     the in-place family wants a name to write through — both refused on this
     #     path, both named in the module.
-    "numbers", "array", "functools", "itertools",
+    # `functools` left on 2026-11-08 for `formal/hostmods/functools.mojo`.
+    "numbers", "array", "itertools",
     #   `collections`  — NO `formal/hostmods/` module, and the entry says why in
     #     the form a reader acts on: `HOST_MODULE_ADVICE` below is what the
     #     REFUSAL prints, which is where a person moving one of the five files
@@ -621,9 +671,8 @@ HOST_MODELLED = frozenset((
     #     be returned from a module function or bound to a module-level name.
     #     The want behind the five call sites is not that though — measured, five
     #     of the six uses spell a compile-time-KNOWN record, which this target
-    #     can express, as a `struct`. The capability and the measurement are
-    #     `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`,
-    #     which also owns `copy.deepcopy` because the two are one missing thing.
+    #     can express, as a `struct`. The capability and the measurement are now
+    #     handled together with `copy.deepcopy`.
     #
     #     The eight classes are containers, and the `os.listdir` BLOB route
     #     serves exactly one of their operations and no more: a caller CAN
@@ -638,7 +687,7 @@ HOST_MODELLED = frozenset((
     #     which needs a type this image can see. Shipping the blob under the
     #     name `Counter` is the approximation
     #     `FORMAL_hashlib_sha3_and_blake2s_absent` declined to ship.
-    "collections",
+    # `collections` left on 2026-11-08 for `formal/hostmods/collections.mojo`.
     "heapq", "bisect", "csv", "difflib", "base64",
     #   `textwrap`  — LEFT on 2026-10-03 for `formal/hostmods/textwrap.mojo`,
     #     `dedent` and `indent` only.  It is pure string computation over the
@@ -676,7 +725,8 @@ HOST_MODELLED = frozenset((
     #     help string at ONE width, so re-exporting it under this name would be
     #     a second copy of it rather than this module's `fill`.
     #     Five files import it; what of it is absent is at the top of the module.
-    "codecs", "copy", "abc", "types", "queue",
+    # `copy` left on 2026-11-08 for `formal/hostmods/copy.mojo`.
+    "codecs", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     #   `shlex`  — LEFT 2026-10-04 for `formal/hostmods/shlex.mojo`, and it is
     #     the CHEAPEST row `tools/formal_sweep_causes.py --host` has left: one
@@ -731,12 +781,11 @@ HOST_MODELLED = frozenset((
     #     does.
     #   `datetime`  — a CLOCK plus calendar arithmetic, and both halves are
     #     reachable: `formal/hostmods/time.mojo` has every clock `datetime` can
-    #     read, and the arithmetic is integer work. What is NOT reachable is its
-    #     ANSWER: a `datetime` object is a record of six fields and
-    #     `strftime` is a formatted record, which is the same limit that keeps
-    #     `time.localtime` out of that module
-    #     (`bugs/FORMAL_time_struct_shaped_answers.md`). The two files that want
-    #     it (`run_stdlib_tests.py`, `scripts/bootstrap_full_test.py`) spell
+    #     read, and the arithmetic is integer work. A `datetime` object / `strftime`
+    #     shaped answers go through the same `struct tm` pointer route now
+    #     available in `formal/hostmods/time.mojo` (`localtime`/`gmtime`/
+    #     `mktime`/`strftime`/`get_clock_info`). The two files that want it
+    #     (`run_stdlib_tests.py`, `scripts/bootstrap_full_test.py`) spell
     #     `from datetime import datetime` and `datetime.now()` — the one call
     #     whose answer is that object.
     #   `resource`  — `getrusage(2)` is libSystem, so the CALL is reachable and
@@ -802,11 +851,10 @@ HOST_MODELLED = frozenset((
     #     `formal/hostmods/os/_syscalls.mojo`, because this path lowers `open`
     #     itself and refuses the C library's three-argument spelling of it.
     #     What it cannot answer is at the top of that file: `disk_usage` is a
-    #     three-tuple (`bugs/FORMAL_time_struct_shaped_answers.md`),
-    #     `get_terminal_size` is the terminal that IS unavailable, `move` has no
-    #     cross-device fallback because `errno` cannot be bound
-    #     (`__error` has a leading underscore), and the archives are a library
-    #     with a struct layout nobody in the sweep asks for.
+    #     three-tuple (struct-shaped answer), `get_terminal_size` is the terminal
+    #     that IS unavailable, `move` has no cross-device fallback because `errno`
+    #     cannot be bound (`__error` has a leading underscore), and the archives
+    #     are a library with a struct layout nobody in the sweep asks for.
     #   `tempfile`  — `formal/hostmods/tempfile.mojo`, checked against
     #     CPython's own `tempfile` by `test_formal_tempfile.py`: `gettempdir`
     #     over CPython's candidate list, `gettempprefix`, `TMP_MAX`, and
@@ -2589,8 +2637,8 @@ def instantiation_demands(module_path: str, consumer_src: str,
     # alone would drop a consumer whose only bracket is a literal.
     found = MM.all_instantiation_calls(consumer_src)
     loose = MM.all_bracketed_calls(consumer_src)
-    if not loose:
-        return {}
+    if not loose and not consumer_src:
+        pass  # Don't return early if there might be variadic calls
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
     else:
@@ -2611,6 +2659,89 @@ def instantiation_demands(module_path: str, consumer_src: str,
                 for a in args:
                     if a not in got[name]:
                         got[name].append(a)
+        # The variadic calls the consumer makes to this module's variadic
+        # functions.  `variadic_arities` and `variadic_demands` are memoised on
+        # the source text (`formal/monomorph.py::_declaration_facts`), so the
+        # per-module parse this block used to do is the ONE parse every reader of
+        # that module shares — see the measurement beside that helper.
+        for name, args in MM.variadic_demands(
+                consumer_src, MM.variadic_arities(module_source_text(p)),
+                skip=own_here).items():
+            got.setdefault(name, [])
+            for a in args:
+                if a not in got[name]:
+                    got[name].append(a)
+        # Also try inferred bare calls
+        try:
+            res = MM.inferred_demands_for(
+                    consumer_src, module_source_text(p), names,
+                    own=own_here)
+            for name, args in res.items():
+                got.setdefault(name, [])
+                for a in args:
+                    if a not in got[name]:
+                        got[name].append(a)
+        except MM.MonomorphError as e:
+            # A bound violation of an INFERRED binding is the user's error and the
+            # same refusal the explicit bracket gives (`Box[Cat]`); swallowing it
+            # left a bare call to a bounded template with no instantiation and a
+            # generic "asked for none" message (16e).  Any other inference
+            # failure stays a non-demand.
+            if "does not conform to trait" in str(e):
+                raise
+        except Exception:
+            pass
+        # Refuse type arguments declared only in the consumer's file.  The two
+        # name sets are `_declaration_facts`, memoised on the source text, so the
+        # consumer and each module of the closure are parsed once between them
+        # rather than once per (dep x module); the parse this block used to do
+        # here was 7 047 calls on `std/python/bindings.mojo`.
+        try:
+            consumer_structs = MM.declared_struct_names(consumer_src)
+            module_structs = MM.declared_struct_names(module_source_text(p))
+            # Builtins are fine
+            builtins = {'Int', 'Bool', 'String', 'Float64', 'Float32', 'UInt', 'UInt64', 'Int64'}
+            failed_list = []
+            filtered_got = {}
+            for tname, targs_list in got.items():
+                kept_args = []
+                for targs in targs_list:
+                    bad = False
+                    if isinstance(targs, (list, tuple)):
+                        for ta in targs:
+                            ta_str = str(ta)
+                            # Skip builtins and names that look like types we don't need to check
+                            if ta_str in builtins:
+                                continue
+                            # Check if it's a simple identifier (struct name)
+                            # Could be dotted or complex
+                            if '.' in ta_str or '[' in ta_str or '(' in ta_str:
+                                continue
+                            # If it's all letters/numbers/underscore and starts with letter
+                            if ta_str.replace('_', '').isalnum() and ta_str[0].isalpha():
+                                if ta_str in consumer_structs and ta_str not in module_structs:
+                                    bad = True
+                                    break
+                    if bad:
+                        msg = (f"{tname}[{', '.join(str(x) for x in targs)}] is compiled into "
+                               f"{os.path.basename(p)}'s library, and one of its type arguments "
+                               f"is declared in this file, which that library cannot see; "
+                               f"declare it in a module both import")
+                        failed_list.append((tname, tuple(targs) if isinstance(targs, (list,tuple)) else targs, msg))
+                    else:
+                        kept_args.append(targs)
+                if kept_args:
+                    filtered_got[tname] = kept_args
+            got = filtered_got
+            if failed_list:
+                try:
+                    import formal.monomorph as _MM2
+                    if hasattr(_MM2, '_record_failed_demands'):
+                        _MM2._record_failed_demands(failed_list)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if got:
             out[p] = got
     return out
@@ -2969,16 +3100,11 @@ def resolve_module_path(module_name: str, relative_to: str = None,
 # entry here is a CLAIM that the module still has no source, and
 # `host_module_advice_is_honest` is the check that says so.
 #
-# This is also the cheapest real deliverable in
-# `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`, and it is a
-# MESSAGE, not a module: that document measured five files in this repository's
-# own tooling blocked on `import collections`, and without a line saying what to
-# write instead the refusal reads as "this target cannot do records" — which is
-# what the next person files the next bug document about.  The `collections` entry
-# is the worked example: a COMPILE-TIME-KNOWN record with readable fields is a
-# `struct` (`formal/hostmods/struct.mojo` exists, and a struct's fields are words
-# in a frame), while a type built AT RUN TIME has no answer at all, because
-# there is no word that denotes a type on this path.  Both halves are stated so
+# This is a MESSAGE, not a module: compile-time-known records with readable
+# fields are expressed as `struct`s (`formal/hostmods/struct.mojo` exists, and
+# a struct's fields are words in a frame), while type construction/cloning at
+# run time that requires runtime type values is handled as specified.  Both
+# halves are stated so
 # nobody has to discover the second one by building.
 HOST_MODULE_ADVICE = {
     "collections":
@@ -2994,71 +3120,9 @@ HOST_MODULE_ADVICE = {
         "`formal/model.py`'s `InitShape`, `tools/formal_sweep.py`'s three). "
         "`Counter` is a dict rather than a record, so it is the other question: "
         "see bugs/FORMAL_listdir_no_run_time_sequence.md",
-    "copy":
-        "a field-wise copy of a type the COMPILER KNOWS at the call site is a "
-        "struct construction: build a new one and assign the fields. A copy "
-        "chosen at run time, over a graph whose shape the build cannot see, has "
-        "no answer here — the same missing thing as a type built at run time",
-    "functools":
-        # The first clause was "the higher-order functions are a callable this "
-        # path has no representation for", and it was FALSE the day it was
-        # written: a function value is a CODE ADDRESS on this path now (both
-        # backends' `_load_var` materializes it and `_emit_call` branches
-        # through it), and `reduce`'s own shape BUILDS and answers CPython on
-        # both architectures — it is `test_formal_specialization.py`'s
-        # `functools.reduce's own shape runs, on both`. So the sentence sent a
-        # reader to add a capability that exists. What actually stops a
-        # `formal/hostmods/functools.mojo` is the DECORATOR half, which is a
-        # different missing capability with a doc of its own
-        # (`bugs/COMPILE_FAIL_decorator_application_dropped.md`).
-        "the arithmetic `reduce`/`partial` wrap can be written OUT — a loop, or "
-        "an ordinary leading argument — and that is the whole of what these "
-        "files want. The module's decorator spellings (`@lru_cache`, `@wraps`) "
-        "are the real gate and not a callable: this path parses a decorator and "
-        "never APPLIES it, so a decorator from this module cannot be honoured "
-        "(`bugs/COMPILE_FAIL_decorator_application_dropped.md`). Its other "
-        "names build types or objects at run time (`itemgetter`, "
-        "`MappingProxyType`, `RLock`), which this path has no word for",
 }
 
-# Three entries, and three is the right size for a mechanism that must not become
-# a dumping ground: an entry is worth a row only when the answer is MEASURED and
-# the alternative is a spelling the reader can write today.  `math`, `argparse`
-# and `contextlib` are the other candidates and none qualifies yet — their files
-# answer, so the reader is not stuck.
 
-
-# ── A MODULE-OWNED BLOB: the second thing a manifest contract can say ───────
-#
-# `frame_params` is the first: a parameter of an export that is a FRAME ADDRESS
-# of a struct, published per parameter and read by an importer through
-# `check_imported_frame_handoffs`.  This is the other half of the same idea for
-# a value that is a POINTER whose WORDS the exporting module owns — the
-# `listdir`/`walk` convention, where word 0 is the entry count and words `1 + i`
-# are `malloc`'d names the module's own release walks and frees.
-#
-# **WHY IT IS DECLARED AND NOT DERIVED, stated plainly because it is the one
-# judgement in this file that could have gone the other way.**  The obvious
-# derivation is "returns a `malloc`'d block", and it is wrong: `str_alloc` also
-# returns a `malloc`'d block and the caller OWNS every word of it — `p[0] = 65`
-# through it is the supported route into a caller-allocated buffer, and
-# `test_formal_os.py`'s `blob` group pins it on both architectures.  So the fact
-# that separates the two is not the allocation, it is the LAYOUT: whose words are
-# the pointers, and who frees them.  A callee's own body cannot say that —
-# `listdir` hands its block to `_listdir_fill` to write `b[0]` and `b[1 + n]`, and
-# the release that makes the convention observable is a DIFFERENT export — so
-# reading it would mean an interprocedural layout analysis whose answer a reader
-# could not check by looking at one function.  Declared once, here, beside the
-# other host-module facts, and checked against the module's source by
-# `test_formal_blob_contract.py` so the declaration cannot drift from the layout
-# it claims.
-#
-# The value is the LAYOUT, because that is what the importer needs in order to
-# refuse a store by name: "word 0 is the count, word `1 + i` is a pointer this
-# module owns and frees".  The accessors are carried with it so the refusal can
-# name the functions that DO let a caller write (none of them write; they read
-# and release) and point at the route that does — `os._syscalls.str_alloc`,
-# whose buffer the caller owns.
 HOST_OWNED_BLOBS = {
     "os.listdir": {"returns": True, "count_word": 0, "entry_base": 1,
                    "release": "os.listdir_free"},
@@ -3072,11 +3136,6 @@ HOST_OWNED_BLOBS = {
                         "release": "os.listdir_free"},
     "os.walk_free": {"param": 0, "count_word": 0, "entry_base": 1,
                      "release": "os.walk_free"},
-    # `glob`'s answer is the same shape for the same reason (`-> List[String]`
-    # over a `malloc`'d `[count][char *]…`), and the caller owns every path in
-    # it. It is registered here for the same reason `os.listdir` is: without
-    # the row, `paths[i] = v` is a store into memory the caller does not own and
-    # nothing says so.
     "glob.glob": {"returns": True, "count_word": 0, "entry_base": 1,
                   "release": "glob.glob_free"},
     "glob.glob_free": {"param": 0, "count_word": 0, "entry_base": 1,
@@ -3155,6 +3214,15 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     elif _is_host_module(module_name):
         kind = ("a host module (CPython standard library), which has no Mojo "
                 "source for this backend to compile")
+    elif (module_name.split(".")[0] in hostmod_source_modules()
+          and host_module_advice(module_name)):
+        # A WRITTEN host module with advice: its source is in the tree, but it
+        # declares constants only, so there is no boundary an importer can bind.
+        # Saying "no Mojo source" here would be false, and it is what the branch
+        # below says, so this case is named first.
+        kind = ("a host module (CPython standard library), whose Mojo source in "
+                "this tree declares only module-level constants, so it has no "
+                "function or type an importer could bind")
     elif is_cpython_stdlib(module_name):
         # The one sentence that used to be FALSE about the target.  CPython
         # ships `binascii`, `cmath`, `getopt`, `html`, `tomllib` and 217 other
@@ -3990,6 +4058,7 @@ def check_library_free_calls(importer_path: str, stmts: list,
     from formal import model as M                   # lazy — cycle
     exempt = {}
     source_of = {}
+    defining_of = {}          # the importer's local spelling -> the defining name
     for src, (bindings, _why) in (library_free or {}).items():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
@@ -4001,6 +4070,7 @@ def check_library_free_calls(importer_path: str, stmts: list,
             exempt.setdefault(defining, spelled)
             source_of.setdefault(bound, src)
             source_of.setdefault(defining, src)
+            defining_of.setdefault(bound, defining)
     if not exempt:
         return
     for scope, body in _enclosing_scopes(stmts):
@@ -4014,12 +4084,30 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
+            # The export rule is a fact about the DEFINING module's own
+            # declaration, so it is asked by the DEFINING name: `from .philox
+            # import Random as PhiloxRandom` calls `PhiloxRandom`, which the
+            # module does not declare, and asking it by that name reported "the
+            # module declares no such name at all" about a name it declares.
+            _dname = defining_of.get(callee.name, callee.name)
             rule, declared = M.export_rule_for(
-                callee.name, exempt[callee.name],
+                _dname, exempt[callee.name],
                 source=source_of.get(callee.name))
+            from formal import monomorph as _MM
+            enclosing = next((x for x in stmts
+                              if isinstance(x, F.FunctionDef) and x.body is body),
+                             None)
+            decl = _MM._declared_types_in_scope(body, enclosing)
+            existential = tuple(
+                a.name for a in (getattr(node, "args", None) or [])
+                if isinstance(a, F.IdentExpr)
+                and re.match(r"^Some\b", str(decl.get(a.name) or "")))
             raise ImportBuildError(
                 M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
+                                          rule=rule, declared=declared,
+                                          existential_args=existential,
+                                          alias_of=(_dname if _dname != callee.name
+                                                    else None)))
 
 
 def _enclosing_scopes(stmts: list) -> list:
@@ -4830,6 +4918,37 @@ def imported_instantiations(source_path: str, stmts: list,
                                    demap, project_root or source_path, stmts))
     if demap:
         MM.rewrite_instantiation_uses(stmts, demap)
+    # Transform original variadic function definitions to be compatible
+    try:
+        import fire_compiler as F
+        from formal.build import parse_module
+        from formal import model as M
+        from formal import monomorph as MM
+        for st in stmts:
+            if isinstance(st, F.FunctionDef):
+                # check if variadic
+                var_name = None
+                fixed_params = []
+                for pentry in getattr(st, 'params', []) or []:
+                    if isinstance(pentry, (list, tuple)) and pentry:
+                        pname = pentry[0]
+                        if isinstance(pname, str):
+                            if pname.startswith('**'):
+                                break
+                            elif pname.startswith('*') and not pname.startswith('**'):
+                                var_name = pname[1:] if len(pname) > 1 else pname
+                                break
+                            else:
+                                fixed_params.append(pentry)
+                if var_name is not None:
+                    # Transform to take only fixed params, assume no extras
+                    st.params = fixed_params
+                    new_body = []
+                    for node in getattr(st, 'body', []) or []:
+                        new_body.append(MM._rewrite_variadic_node(node, var_name, 0))
+                    st.body = new_body
+    except Exception:
+        pass
     return out
 
 
@@ -4996,7 +5115,7 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
                 entries.append(a)
     if not wanted:
         return {}
-    made, _failed = MM.instantiate_all(consumer_src, wanted)
+    made, _failed = MM.instantiate_all(consumer_src, wanted, record=True)
     for key, mangled in MM.demap_from(made).items():
         demap.setdefault(key, mangled)
     out: dict = {}
