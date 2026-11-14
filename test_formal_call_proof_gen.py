@@ -11196,6 +11196,46 @@ class TestExtendRefusalNamesTheOption(unittest.TestCase):
                 self.assertEqual(name, want_name)
                 self.assertIn(want_decode, why)
 
+    def test_all_eight_option_names_are_the_architecture_spelling(self):
+        """Every option value decodes by the name A64 gives it (UXTB..SXTX).
+
+        The decode must read the option field from the word, so each case is
+        assembled by clang and the field checked before the message is.
+        64-bit UXTX is modelled (rows 86-88) and never reaches the refusal;
+        its 32-bit spelling carries the same name into the decode.
+        """
+        import formal.arm64_proof_gen as G
+        options = (
+            ("uxtb", 0b000, "UXTB"),
+            ("uxth", 0b001, "UXTH"),
+            ("uxtw", 0b010, "UXTW"),
+            ("uxtx", 0b011, "UXTX"),
+            ("sxtb", 0b100, "SXTB"),
+            ("sxth", 0b101, "SXTH"),
+            ("sxtw", 0b110, "SXTW"),
+            ("sxtx", 0b111, "SXTX"),
+        )
+        for mnemonic, bits, arch_name in options:
+            with self.subTest(option=arch_name):
+                src = "x" if bits in (0b011, 0b111) else "w"
+                form = f"add x0, x1, {src}2, {mnemonic}"
+                word = _assembler_word(form)
+                self.assertIsNotNone(word, f"clang refuses `{form}`")
+                self.assertEqual(
+                    (word >> 13) & 0x7, bits,
+                    f"`{form}` is not option={bits:03b}")
+                if bits == 0b011:
+                    # The only modelled option: ask the decoder what a word of
+                    # this class does NOT reach, rather than mislabel a row.
+                    form = "add w0, w1, w2, uxtx"
+                    word = _assembler_word(form)
+                    self.assertIsNotNone(word, f"clang refuses `{form}`")
+                self.assertIsNone(G._step_branch_index(word),
+                                  f"`{form}` should be unmodelled")
+                name, why = G._unmodelled_instruction(word)
+                self.assertEqual(name, "ADD extended")
+                self.assertIn(f"option={bits:03b} ({arch_name}), imm3=0", why)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
