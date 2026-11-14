@@ -21,7 +21,6 @@ deleted in the same commit, as for any bug.
 | `DIAGNOSTICS_formatting_modular.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
 | `DIAGNOSTICS_mojoc_imports.md` | see doc | workers |
-| `DIAGNOSTICS_mojoc_imports-part2.md` | see doc | workers |
 | `DIAGNOSTICS_trait_conformance.md` | see doc | workers |
 | `FORMAL_arm64_instruction_coverage.md` | see doc | workers |
 | `FORMAL_svc_exit_handling_incomplete.md` | see doc | workers |
