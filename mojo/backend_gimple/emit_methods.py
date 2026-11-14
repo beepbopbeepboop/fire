@@ -539,6 +539,79 @@ def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):
     return 'other'
 
 
+def _register_sibling_module_member(gen, module_name: str, method_name: str,
+                                    sub_ref=None):
+    """Record `<module_name>.<method_name>` as an imported top-level FUNCTION
+    of the sibling module the alias names, so re-dispatching the call on the
+    bare name resolves to that definition's real mangled symbol.
+
+    Two steps, and BOTH are required:
+
+    1. `_note_own_func_home` pins the name's home module, so `_func_qualifier`
+       can qualify a bare name the caller's own flat tables don't know yet
+       (the defining module may be compiled LATER in an import cycle —
+       `emit_infra <-> emit_stmts`, `emit_infra -> emit_calls -> emit_exprs ->
+       emit_infra`).
+    2. Register the MEMBER itself. `_note_own_func_home` alone is NOT enough
+       and is recorded here so nobody re-lands it: a bare `import X as alias`
+       records `imported_symbols[alias]` for the MODULE, never for its
+       members, and `_func_mangleable`/`_func_csym` key off the SYMBOL's own
+       entry. Without it the re-dispatched bare call has no signature, emits
+       `__attribute__((weak)) ... "unavailable in compiled mode"`, returns 0,
+       and exits 0 — a silent wrong value, which is what lets the whole-
+       closure dump link and produce a wrong `.ci`.
+
+    The signature is rebuilt from the DEFINING module's own parsed
+    `FunctionDef` through `_resolved_export_entry`, NOT from
+    `module_loader`'s text scan: the scan answers `int64_t f (void)` for an
+    unannotated `def f(x)`, which as the only prototype in the file would
+    reject its own call site.
+
+    Registration happens ONLY when nothing has registered the name already.
+    An import this compile already resolved properly — `_emit_stdlib_import_
+    externs` for a stdlib/test module, `_register_link_imports` for a
+    `from X import Y` — has an entry whose signature came from the DEFINING
+    module's own compile, and overwriting it with a locally rebuilt one
+    produced `non-trivial conversion in 'function_decl'` across
+    `std/builtin/dtype.mojo` and `std/python/_cpython.mojo` (measured). A
+    missing entry is the whole bug; an existing one is not this code's to
+    improve.
+
+    Shared by the two module-qualified-call branches — the self-host sibling
+    one (`_selfhost_sibling_member_kind`, above) and the generic local-
+    project one (further down) — instead of each keeping its own copy of
+    these steps.
+
+    Returns `(sub_ref, raw_export_entry)`: the module ref the alias names, as
+    written in the import, and the scan's (un-upgraded) entry when the member
+    was not registered yet AND the defining module exports it, else None.
+    The generic branch's factory-value accessor still keys on that raw entry.
+    """
+    if sub_ref is None:
+        _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
+        sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
+                   or module_name)
+    try:
+        gen._note_own_func_home(method_name, sub_ref, record_scope=False)
+    except Exception:
+        pass
+    if method_name in (getattr(gen, 'imported_symbols', None) or {}):
+        return sub_ref, None
+    try:
+        _exps, _qual = gen._local_sibling_module_exports(sub_ref)
+    except Exception:
+        _exps, _qual = None, None
+    _raw = (_exps or {}).get(method_name)
+    if _raw:
+        _entry = gen._resolved_export_entry(sub_ref, method_name, _raw)
+        if _entry:
+            _entry = dict(_entry)
+            _entry['module'] = sub_ref
+            gen._register_imported_symbol(method_name, _entry, method_name,
+                                          write_param_types=True)
+    return sub_ref, _raw
+
+
 def _lower_bound_method_value(gen, struct_name: str, method: str,
                                self_type: str, self_val: str) -> tuple[str, str]:
     """Lower a method referenced as a plain value (not called at this
@@ -3096,22 +3169,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # generalized). Gated to this compiler's own `gimple*.py` sources
         # so it can never intercept a real stdlib module method.
         if _selfhost_sibling_member_kind(gen, module_name, method_name) is not None:
-            # Pin the member's home to the sibling module the alias names so
-            # bare-name resolution below can qualify it even when that
-            # module is compiled later in a cycle (emit_infra <-> emit_stmts)
-            # and the member is not yet present in this gen's flat
-            # func_param_types/func_return_types tables. Without this, the
-            # re-dispatch resolves to an unqualified bare symbol and emits a
-            # weak "unavailable in compiled mode" stub while the real
-            # definition is emitted under its qualified mangled name.
-            _sh_info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
-            _sh_sub_ref = ((_sh_info.get('module')
-                            if isinstance(_sh_info, dict) else None)
-                           or module_name)
-            try:
-                gen._note_own_func_home(method_name, _sh_sub_ref, record_scope=False)
-            except Exception:
-                pass
+            # Pin the member's home to the sibling module the alias names AND
+            # register the member itself, so bare-name resolution below can
+            # qualify it even when that module is compiled later in a cycle
+            # (emit_infra <-> emit_stmts) and the member is not yet present
+            # in this gen's flat func_param_types/func_return_types tables.
+            # Without the member registration, the re-dispatch resolves to
+            # an unqualified bare symbol and emits a weak "unavailable in
+            # compiled mode" stub while the real definition is emitted under
+            # its qualified mangled name. The steps are shared with the
+            # generic module-qualified branch — see
+            # `_register_sibling_module_member`'s own docstring for why
+            # `_note_own_func_home` alone is not enough.
+            _register_sibling_module_member(gen, module_name, method_name)
             # Re-dispatch as a BARE-name call: the alias qualifier is a
             # Python-import artifact only. `_lower_call` owns struct-ctor
             # allocation, default-argument padding, keyword ordering and
@@ -3724,71 +3794,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # symbol-resolution half and skipping the rest is
                     # exactly what caused the self-host regression noted
                     # above.
-                    gen._note_own_func_home(method_name, _mgc_sub_ref, record_scope=False)
-                    # …and register the MEMBER, which a bare `import X`
-                    # never did. `_note_own_func_home` alone is not enough
-                    # and this document's own next step says why: the entry
-                    # `_note_own_func_home` writes is the module's, and a
-                    # bare `import X` records only `imported_symbols['X']`
-                    # -- for the MODULE, not its members. So the re-dispatched
-                    # BARE call found no `imported_symbols['deep_fn']`,
-                    # `_func_mangleable('deep_fn')` was False,
-                    # `_func_csym` produced the bare `_safe_name('deep_fn')`
-                    # with no qualifier and no overload suffix, and
-                    # `_lower_named_call`'s `_is_unknown` branch emitted its
-                    # weak 0-returning stub:
-                    #
-                    #   __attribute__((weak)) int64_t deep_fn (...) {
-                    #     mojo_print ((char *)"deep_fn: unavailable in
-                    #                   compiled mode"); return (int64_t)0; }
-                    #   _t2 = deep_fn (1);
-                    #
-                    # exit 0, no diagnostic beyond the stub's own message,
-                    # and 0 where CPython prints 8. The inline
-                    # (`do_imports`) path emits `deep_deep_fn_9f63a2` for the
-                    # same two files, so the two paths disagreed about the
-                    # same symbol's NAME as well as about whether it exists.
-                    #
-                    # The signature comes from the DEFINING module's own
-                    # parsed FunctionDef via `_resolved_export_entry`, NOT
-                    # from `module_loader`'s text scan: the scan answers
-                    # `int64_t deep_fn (void)` for an unannotated
-                    # `def deep_fn(x)` (it reads signatures off the text),
-                    # which as the only prototype in the file would reject
-                    # its own call site. That is the same upgrade the
-                    # `from X import Y` path performs, through the same two
-                    # helpers -- `bugs/CODEGEN_bare_import_module_
-                    # qualified_call_answers_zero.md`, whose "partial fix
-                    # that is NOT enough, recorded so nobody re-lands it"
-                    # section is the `_note_own_func_home`-only version.
-                    try:
-                        _mgc_exps, _mgc_qual = gen._local_sibling_module_exports(
-                            _mgc_sub_ref)
-                    except Exception:
-                        _mgc_exps, _mgc_qual = None, None
-                    # ONLY when nothing has registered it already. An
-                    # import this compile already resolved properly --
-                    # `_emit_stdlib_import_externs` for a stdlib/test
-                    # module, `_register_link_imports` for a `from X import
-                    # Y` -- has an entry whose signature came from the
-                    # DEFINING module's own compile, and overwriting it with
-                    # a locally rebuilt one produced
-                    # `non-trivial conversion in 'function_decl'` across
-                    # `std/builtin/dtype.mojo` and `std/python/_cpython.mojo`
-                    # (measured). A missing entry is the whole bug; an
-                    # existing one is not this code's to improve.
-                    _mgc_raw = None
-                    if method_name not in gen.imported_symbols:
-                        _mgc_raw = (_mgc_exps or {}).get(method_name)
-                    if _mgc_raw:
-                        _mgc_entry = gen._resolved_export_entry(
-                            _mgc_sub_ref, method_name, _mgc_raw)
-                        if _mgc_entry:
-                            _mgc_entry = dict(_mgc_entry)
-                            _mgc_entry['module'] = _mgc_sub_ref
-                            gen._register_imported_symbol(
-                                method_name, _mgc_entry, method_name,
-                                write_param_types=True)
+                    # The two steps this bare re-dispatch needs — pin the
+                    # member's home module, then register the MEMBER itself,
+                    # which a bare `import X` never did — are ONE shared
+                    # helper (see `_register_sibling_module_member`'s
+                    # docstring for the measured failure and why
+                    # `_note_own_func_home` alone is the "partial fix that
+                    # is NOT enough, recorded so nobody re-lands it" in
+                    # `bugs/CODEGEN_bare_import_module_qualified_call_
+                    # answers_zero.md`). `_mgc_raw` is the un-registered
+                    # export entry, when there was one, for the factory-value
+                    # accessor below.
+                    _mgc_sub_ref, _mgc_raw = _register_sibling_module_member(
+                        gen, module_name, method_name, _mgc_sub_ref)
                     # The factory-value shape (the 2026-10-24 os.py shadow
                     # class, its ENTRY-side half): `f = _mk()` is a VALUE,
                     # not a top-level `def`, so the export scan carries no
