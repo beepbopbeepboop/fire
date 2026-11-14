@@ -137,7 +137,7 @@ unannotated receiver compile to runtime dispatch (0 stubs); `class A(object)`,
 clean; a nested `_walk_lists` defined and called in one module resolves; and a
 module-level `from rootmod import helper` called across modules resolves. They
 are expected to be downstream of part 1 (or of the lifted-lambda placeholder
-filed in `bugs/mid/CODEGEN_selfhost_link_two_unqualified_calls.md`); any
+filed in `bugs/hard/CODEGEN_selfhost_link_two_unqualified_calls.md`); any
 survivor is part 5's inventory.
 
 Also recorded: `mojoc` is no longer in this doc's OFF entry. It, and
