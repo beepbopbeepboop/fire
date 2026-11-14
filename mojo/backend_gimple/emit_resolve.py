@@ -2642,11 +2642,7 @@ def _loop_head(gen, idx: str, n: str, bb_cond: str, bb_body: str,
     `bb_after`) or `continue` (to `bb_post`): the loop is then pushed on
     `gen.loop_stack`, the depth is counted, and the body label carries the
     iteration-count hint.  It is False for a comprehension or an internal
-    loop.  Pass the same `stmt` to `_loop_tail`.
-
-    `bb_post` is `''` for an internal loop that needs no `continue` target:
-    the increment then sits at the end of the body block and no extra block
-    is made.  Pass `''` to `_loop_tail` as well; `stmt` must be False."""
+    loop.  Pass the same `stmt` to `_loop_tail`."""
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond_t = gen._cmp(idx, '<', n)
@@ -2666,9 +2662,8 @@ def _loop_tail(gen, idx: str, bb_cond: str, bb_post: str, bb_after: str,
     if stmt:
         gen.loop_stack.pop()
         gen._loop_depth -= 1
-    if bb_post != '':
-        gen._goto(bb_post)
-        gen._emit_label(bb_post)
+    gen._goto(bb_post)
+    gen._emit_label(bb_post)
     one = gen._new_val('int64_t', "(int64_t)1")
     nxt = gen._binop('int64_t', idx, '+', one)
     gen._copy(idx, nxt)

@@ -42,6 +42,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
+import mojo.middle.coro as coro_mod
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
@@ -5275,7 +5276,11 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         idx = gen._new_temp('int64_t')
         gen._emit(f"  {idx} = (int64_t)0;")
         bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-        gen._loop_head(idx, len_t, bb_cond, bb_body, '', bb_after, False)
+        gen._goto(bb_cond)
+        gen._emit_label(bb_cond)
+        cond = gen._cmp(idx, '<', len_t)
+        gen._cond_goto(cond, bb_body, bb_after)
+        gen._emit_label(bb_body)
         byte = gen._rt_call('int64_t', 'mojo_bytes_get', [value, idx])
         gen._void_call('mojo_list_append_int',
                        [('MojoList *', res), ('int64_t', byte)])
@@ -5284,7 +5289,11 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # declaration at the current point, so calling it before the loop
         # would compute `idx + 1` once, re-assign that same value every
         # iteration, and the loop would never terminate.
-        gen._loop_tail(idx, bb_cond, '', bb_after, False)
+        one = gen._new_val('int64_t', '(int64_t)1')
+        nidx = gen._binop('int64_t', idx, '+', one)
+        gen._copy(idx, nidx)
+        gen._goto(bb_cond)
+        gen._emit_label(bb_after)
         # Bytes elements are always ints — record it so a consumer that
         # asks (enumerate's pair slot, set.update, star-unpack, ...) reads
         # the slots with the int accessor.
@@ -6851,13 +6860,12 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     else:
         var_names = None
         if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
-            raise RuntimeError(
-                "cannot compile a multi-slot comprehension target over a "
-                f"generator whose yield arity is not a tuple (`{gen0.target} "
-                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
-                "yields one value per resume, and unpacking that value needs a "
-                "runtime iterator protocol this scalar generator model does "
-                "not have")
+            # The message lives in mojo/middle/coro.py beside the pipeline
+            # pre-pass that raises the same refusal earlier (before the
+            # unknown-declaration pass can answer with a less-specific
+            # diagnostic for the same program): one builder, one wording.
+            raise coro_mod.multi_slot_comprehension_refusal(gen0.target,
+                                                             api.get('base'))
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()

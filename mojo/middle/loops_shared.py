@@ -286,7 +286,11 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     gen._copy(f"{_dst}", _lst)
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
-    gen._loop_head(_i, _as_str(stop), _cond, _body, '', _after, False)
+    gen._goto(_cond)
+    gen._emit_label(_cond)
+    _c = gen._cmp(_i, '<', _as_str(stop))
+    gen._cond_goto(_c, _body, _after)
+    gen._emit_label(_body)
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         _rd = gen._rt_call('char *', 'mojo_list_get_str', [_lp, _i])
         gen._void_call('mojo_list_append_str', [('MojoList *', _dst), ('char *', _rd)])
@@ -296,7 +300,11 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     else:
         _rd = gen._rt_call('int64_t', 'mojo_list_get_int', [_lp, _i])
         gen._void_call('mojo_list_append_int', [('MojoList *', _dst), ('int64_t', _rd)])
-    gen._loop_tail(_i, _cond, '', _after, False)
+    _one = gen._new_val('int64_t', "1LL")
+    _nxt = gen._binop('int64_t', _i, '+', _one)
+    gen._copy(_i, _nxt)
+    gen._goto(_cond)
+    gen._emit_label(_after)
 
 
 def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
