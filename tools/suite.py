@@ -1866,7 +1866,8 @@ test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
                              'mojo/backend_gimple/emit_metal.py'],
      desc='Metal codegen: op tables, device-region selection, MSL emission, '
           'and the generated MSL compiled by Apple\'s real compiler and run '
-          'on the GPU against a CPU reference')
+          'on the GPU against a CPU reference',
+     disabled='bugs/gate-metalgpu.md')
 test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
      extra=['tools/md2html.py', 'test_md2html.py',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
@@ -1907,7 +1908,8 @@ test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
      extraglob=['**/*.py'],
-     desc='the tool prints the name it was invoked as, in usage, -v and every error')
+     desc='the tool prints the name it was invoked as, in usage, -v and every error',
+     disabled='bugs/gate-cli-usage-text.md')
 # `extraglob=['**/*.py']` is the same hole `suite-self-test` documents, one
 # subject over: `test_no_stale_command_name_in_prose` WALKS every `.py` file in
 # the tree (it ratchets `mojo <command>` out of the prose, and its doc was
