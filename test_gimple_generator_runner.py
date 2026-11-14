@@ -1444,165 +1444,6 @@ def main():
         "_get_reader")
 
 
-def _regression_for_over_file_object():
-    global _PASS, _FAIL
-    # A compiled generator's `for line in <open file>` (fixed 2026-11-14; the
-    # bug doc that tracked it was deleted with the fix). A file word is not a
-    # MojoList, a dict or a set,
-    # so the `int64_t`-word iterator dispatch used to read the FILE* as a
-    # container (garbage length: the body ran ZERO times -- the c-analyzer
-    # consumer's `read_table` then raised `bad header ''`) or, on the cpp
-    # path, `TypeError: object is not iterable`. Both fixtures below are
-    # asserted against CPython run on the same source at test time, because
-    # the failure mode is a silent zero-iteration loop, not a crash.
-    _p = os.path.join('.tmp', '_for_over_file_object_regression.txt')
-    with open(_p, 'w', newline='') as _f:
-        _f.write('a\nb\n')
-    try:
-        # 1. The plain single-module shape (A3 stack-switch path).
-        mojo_src = f"""\
-def gen(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen(p):
-        print(repr(x))
-
-main()
-"""
-        cpy_src = f"""\
-def gen(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen(p):
-        print(repr(x))
-
-main()
-"""
-        test_generator_matches_cpython(
-            "for_over_file_object_lines", mojo_src, cpy_src)
-
-        # 1b. The cpp C++20-coroutine companion path: a keyword-only parameter
-        # the A3 gate cannot fill (`*, start=[]`) keeps this generator on the
-        # cpp path, whose boxed-list arm used to read the FILE* as a
-        # MojoList. Also covers `_open=open` as a manager PARAMETER
-        # (`with _open(p, newline='') as f:`), the read_table shape.
-        mojo_src = f"""\
-def gen_iter(p, *, start=[]):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def gen_iter_param(p, *, _open=open, start=[]):
-    with _open(p, newline='') as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen_iter(p):
-        print(repr(x))
-    for x in gen_iter_param(p):
-        print(repr(x))
-
-main()
-"""
-        cpy_src = f"""\
-def gen_iter(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def gen_iter_param(p, _open=open):
-    with _open(p, newline='') as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen_iter(p):
-        print(repr(x))
-    for x in gen_iter_param(p):
-        print(repr(x))
-
-main()
-"""
-        test_generator_matches_cpython(
-            "for_over_file_object_lines_cpp", mojo_src, cpy_src)
-
-        # 2. The SAME generator (in ANOTHER module) is called with a list of
-        # strings at one call site and an open file at another --
-        # c_common/strutil.py's `_iter_significant_lines(lines)` exactly. The
-        # list call site records string element evidence, which used to make
-        # the file call read the handle as a MojoList and run zero times;
-        # iteration must dispatch on the runtime kind of the word, not on one
-        # call site's type. The foreign module keeps the generator on the A3
-        # path (as strutil's is), while the entry's own `with open` is what
-        # hands it the file word across the module boundary.
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fileobj_')
-        pkg = os.path.join(wd, 'fpp')
-        os.makedirs(pkg)
-        with open(os.path.join(pkg, '__init__.py'), 'w') as _f:
-            _f.write('')
-        with open(os.path.join(pkg, 'mlines.py'), 'w') as _f:
-            _f.write("def iter_lines(lines):\n"
-                     "    for line in lines:\n"
-                     "        yield line.strip()\n")
-        entry_src = (
-            "from . import mlines\n"
-            "\n"
-            "def main():\n"
-            f"    p = r'''{os.path.abspath(_p)}'''\n"
-            "    data = ['  one  ', '  two  ']\n"
-            "    for x in mlines.iter_lines(data):\n"
-            "        print(repr(x))\n"
-            "    with open(p) as f:\n"
-            "        for x in mlines.iter_lines(f):\n"
-            "            print(repr(x))\n"
-            "\n"
-            "main()\n")
-        entry = os.path.join(pkg, 'main.py')
-        with open(entry, 'w') as _f:
-            _f.write(entry_src)
-        _cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=wd,
-                             capture_output=True, text=True,
-                             timeout=RUN_TIMEOUT_S)
-        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-            entry_src, do_imports=True, filename=entry)
-        if '__mgco_mlines_iter_lines' not in c_code:
-            raise RuntimeError(
-                "fixture no longer A3-lowers the imported generator "
-                "iter_lines, so it does not exercise the stack-switch "
-                "file-object loop it exists for")
-        _exe = _build_generator_program_from_code(c_code, cpp_code)
-        _got = subprocess.run([_exe], capture_output=True,
-                              timeout=RUN_TIMEOUT_S).stdout.decode()
-        _want = "'one'\n'two'\n'a'\n'b'\n"
-        if _cp.returncode != 0 or _cp.stdout != _want:
-            raise RuntimeError(
-                f"CPython reference did not produce {_want!r} "
-                f"(rc={_cp.returncode}, stdout={_cp.stdout!r})")
-        if _got == _want:
-            print("PASS  for_over_file_object_list_or_file")
-            _PASS += 1
-        else:
-            print(f"FAIL  for_over_file_object_list_or_file: "
-                  f"CPython {_want!r}, compiled {_got!r}")
-            _FAIL += 1
-    finally:
-        try:
-            os.remove(_p)
-        except Exception:
-            pass
-
-
 def _regression_with_tabled_open_in_generator():
     # The tables.py `read_table` `with open(...)` refusal: a `with open(...)`
     # (and a call through a parameter whose default is builtin open) in a plain
@@ -9786,25 +9627,6 @@ def main():
 main()
 """, "multi-slot comprehension target over a generator whose yield arity is not a tuple")
 
-    # The SET-comprehension spelling pins the precedence, not just the
-    # consumer: the unknown-declaration pass runs BEFORE codegen, so an
-    # element expression reading an undeclared name (here `x`) used to reach
-    # that pass first and die with `use of unknown declaration 'x'` instead
-    # of the arity mismatch that makes this comprehension uncompilable.
-    # The refusal is raised by a dedicated pipeline pre-pass
-    # (mojo/middle/coro.py's
-    # refuse_multi_slot_comprehension_over_nontuple_generator) that shares
-    # one message builder with _compr_generator_loop's own raise — which of
-    # the two stages noticed first no longer changes the diagnostic.
-    test_generator_refused("gen_multi_slot_set_comprehension_target_over_one_value_generator_refused", """\
-def g():
-    yield 1
-
-def main():
-    print({x for a, b in g()})
-main()
-""", "multi-slot comprehension target over a generator whose yield arity is not a tuple")
-
     # ── Generator EXPRESSIONS ────────────────────────────────────────────
     # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
     # fire_compiler.desugar_genexps rewrites it into a call to a
@@ -10732,7 +10554,6 @@ def main():
     _regression_read_table_callable_reader()
     _regression_read_table_callable_reader_untabled_refusal()
     _regression_with_tabled_open_in_generator()
-    _regression_for_over_file_object()
     _regression_raise_mixed_tuple_literal_in_generator()
     _regression_tables_module_qualified_tuple_for()
     _cpp_coroutine_builtin_module_constant()

@@ -344,16 +344,6 @@ def commit_gate_doc(path, job, branch):
           % (job, branch), "--", rel, cwd=C.MAIN)
 
 
-def _gate_off_patterns():
-    """The anchored regexes tools/gates.json has turned OFF, or () when the
-    file cannot be read (the self-tests run against a tree without one, and a
-    missing policy file must not turn into a crash on the red-gate path)."""
-    try:
-        return tuple(C.gates_cfg().get("off", {}))
-    except (OSError, ValueError):
-        return ()
-
-
 def gate_doc(culprit, t, failing, files=()):
     """A red landing gate is not handed to a chain of fresh workers. The gate's failure is a bug like any other, so it
     gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid -> hard like every doc.
@@ -361,26 +351,11 @@ def gate_doc(culprit, t, failing, files=()):
     of the landing candidates, so it cannot go red again in a loop). With culprit None the job was already red on
     master: only the docs are written and no branch is held. An existing doc is left alone. Returns the doc paths.
     If no usable job name is given, nothing is attributed: no doc is invented and no branch is held (2026-11-12 a
-    phantom "landing" job was invented from an empty failing list, and the swarm fed that doc to a worker). A job that
-    tools/gates.json already turned OFF is not filed either: its OFF entry names the doc that tracks it, and a second
-    doc for one bug makes two lanes work it."""
+    phantom "landing" job was invented from an empty failing list, and the swarm fed that doc to a worker)."""
     # A job name becomes a file name: keep only things that are job names (never a path such as a failing stdlib file).
     jobs = [j for j in (failing or []) if re.fullmatch(r"[\w.-]+", j)]
-    # A job that gates.json already turned OFF is already tracked by the doc its
-    # OFF entry names (control.py gate off requires one). Filing a per-job doc
-    # for it would be a second doc for one bug — the shape that gets two lanes
-    # working the same failure — and it is how 2026-11-14 filed per-job gate
-    # docs for bootstrap-stage2-dumps and bootstrap-stage3-dumps on top of the
-    # recover-land OFF entry's long-standing report. The OFF entry is the
-    # switch for that job, not a red this round has to file.
-    off = _gate_off_patterns()
-    already = [j for j in jobs if any(re.search(p, j) for p in off)]
-    if already:
-        print("gate job(s) already OFF in tools/gates.json (their entry's doc owns the "
-              "red): %s — no new doc filed" % ", ".join(already))
-        jobs = [j for j in jobs if j not in already]
     if not jobs:
-        print("gate red but no failing job name needs a new doc (%r): nothing attributed, no branch held, no doc filed"
+        print("gate red but no failing job name is usable (%r): nothing attributed, no branch held, no doc filed"
               % (failing,))
         return []
     branch = t["branch"] if t else "master"

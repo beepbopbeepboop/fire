@@ -501,7 +501,8 @@ def run_lean(lean: str, args, cwd: str | None = None, env: dict | None = None,
         return res
 
 
-class scratch_dir:
+@contextlib.contextmanager
+def scratch_dir(prefix: str, base: str | None = None):
     """A PRIVATE directory for a generated `.lean` file, removed afterwards.
 
     `run_lean` above is the one launcher, and this is the one place a generated
@@ -528,35 +529,13 @@ class scratch_dir:
     that must land inside the checkout (a sandbox with no writable `/tmp`, or a
     worker whose `TMPDIR` is the worktree's `.tmp`) needs no argument here; the
     parameter exists for the caller that wants a specific parent.
-    
-    **A class, not a `@contextlib.contextmanager` generator.** The generator
-    form is one the self-host cannot link: `mojo/middle/coro.py::_eligible`
-    refuses a decorated generator, so the C++20 coroutine path claimed it and its
-    definitions went into a companion `.cpp` the per-module compile discards
-    (see `build_stdlib_dylib.py`'s `_OutputLock` for the measured chain and
-    `test_selfhost.py::closure_coroutines_are_lowerable`, which keeps it out).
-    Every caller is a `with scratch_dir(...) as path:`; the `as` is load-bearing
-    for the compiled path, where a `with` item with no target never runs
-    `__exit__`.
     """
-
-    path: str
-
-    def __init__(self, prefix: str, base: str | None = None) -> None:
-        self.prefix = prefix
-        self.base = base
-        self.path = ""
-
-    def __enter__(self) -> str:
-        root = self.base if self.base else (os.environ.get("TMPDIR") or None)
-        self.path = tempfile.mkdtemp(prefix=self.prefix + "-", dir=root)
-        return self.path
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        # Always False: an exception from the body propagates, the directory is
-        # removed either way.
-        shutil.rmtree(self.path, ignore_errors=True)
-        return False
+    root = base if base else (os.environ.get("TMPDIR") or None)
+    path = tempfile.mkdtemp(prefix=prefix + "-", dir=root)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _sha256_file(path: str) -> str:

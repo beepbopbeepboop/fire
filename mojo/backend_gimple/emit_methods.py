@@ -591,20 +591,6 @@ def _register_sibling_module_member(gen, module_name: str, method_name: str,
         _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
         sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
                    or module_name)
-    # A function the alias's module only RE-EXPORTS (`emit_resolve` does `from
-    # mojo.middle.resolve_shared import _calls_in_stmts`; the thin GimpleGen
-    # wrapper calls `grsl._calls_in_stmts(...)`) is DEFINED in another module,
-    # under that module's qualifier. Pinning the home to the alias's module left
-    # the re-dispatched bare call unqualified -- a weak "unavailable in compiled
-    # mode" stub while the real definition sat under its mangled name -- which
-    # is why the self-hosted compiler ran every wrapper as a no-op (~100 stubs).
-    # `_find_symbol_home_module` follows re-exports (memoised, cycle-guarded).
-    try:
-        _defining = gen._find_symbol_home_module(sub_ref, method_name, 'fn')
-    except Exception:
-        _defining = None
-    if _defining and _defining != sub_ref:
-        sub_ref = _defining
     try:
         gen._note_own_func_home(method_name, sub_ref, record_scope=False)
     except Exception:
@@ -817,83 +803,6 @@ def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
     return ret_type, gen._cast(ret_type, raw_t)
 
 
-def _dunder_ctype_family(ct) -> str:
-    """The coarse C-type family two spellings of one value can share.
-
-    `_lower_struct_subscript_dunder` receives ALREADY-LOWERED argument
-    ctypes, and a literal's lowered type (`int` for `0`) is not spelled the
-    way the parameter's declaration is (`int64_t`). Discriminating same-arity
-    overloads needs the family, not the exact spelling; `char *` (a string)
-    and a container pointer stay distinct from the numeric families.
-    """
-    t = _gmm_as_str(ct or '').strip()
-    if not t:
-        return ''
-    if t.endswith(' *'):
-        return 'char *' if t == 'char *' else 'ptr'
-    if t in ('float', 'double'):
-        return 'float'
-    if t == '_Bool':
-        return 'bool'
-    if t.startswith('int') or t.startswith('uint') or t.endswith('_t'):
-        return 'int'
-    return t
-
-
-def _struct_method_candidates(gen, sn, method):
-    """The registered overloads for a struct method, or None.
-
-    Shared by the subscript dispatch and the comparison lowering: both need
-    the same candidate set before they can name a concrete overload.
-    """
-    sms = getattr(gen, '_struct_method_signatures', None) or {}
-    cands = sms.get(_gmm_sms_key(sn, method))
-    if not cands:
-        for key_try in (f"{sn}:{method}", f"{sn}_{method}",
-                        f"{sn}.{method}", f"{sn}__{method}"):
-            cands = sms.get(key_try)
-            if cands:
-                break
-    if not cands:
-        for k in sms:
-            if isinstance(k, str):
-                if k == f'{sn}_{method}' or (k.endswith(':' + method)
-                                             and sn in k.split(':')[0]):
-                    return sms[k]
-                if method == '__setitem__' and sn in k and '__setitem__' in k:
-                    return sms[k]
-    return cands or None
-
-
-def _pick_overload_by_ctype(cands, arg_ctypes):
-    """The candidate whose declared parameter ctypes best match arg_ctypes.
-
-    Compares by FAMILY: the lowered `int` of a literal must match a declared
-    `int64_t`, while `char *` (a string) and a container pointer stay
-    distinct. Returns None when nothing matches, so a caller keeps its
-    existing refusal/fallback instead of guessing.
-    """
-    if not cands:
-        return None
-    if len(cands) == 1:
-        return cands[0]
-    _best = None
-    _best_score = 0
-    for _c in cands:
-        _score = 0
-        _pcs = _c.get('param_ctypes') or []
-        for _i in range(len(arg_ctypes)):
-            if _i >= len(_pcs):
-                break
-            if (_dunder_ctype_family(arg_ctypes[_i])
-                    == _dunder_ctype_family(_pcs[_i])):
-                _score += 1
-        if _score > _best_score:
-            _best = _c
-            _best_score = _score
-    return _best
-
-
 def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
                                    arg_pairs: list) -> tuple[str, str] | None:
     """Dispatch `obj[key]` / `obj[key] = v` protocol on a USER-STRUCT
@@ -917,9 +826,33 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     sn = gimple_exprtypes._struct_name_of(ot)
     if not sn or not ot.endswith(' *'):
         return None
-    cands = _struct_method_candidates(gen, sn, method)
+    cands = gen._struct_method_signatures.get(_gmm_sms_key(sn, method))
+    # Also try alternate key forms
+    if not cands:
+        try:
+            for key_try in [f"{sn}:{method}", f"{sn}_{method}", f"{sn}.{method}", f"{sn}__{method}"]:
+                cands = gen._struct_method_signatures.get(key_try)
+                if cands:
+                    break
+        except Exception:
+            pass
+    # Try to find by scanning all signatures if still not found
+    if not cands and hasattr(gen, '_struct_method_signatures'):
+        try:
+            for k, v in gen._struct_method_signatures.items():
+                if isinstance(k, str):
+                    if k == f'{sn}_{method}' or k.endswith(':' + method) and sn in k.split(':')[0]:
+                        cands = v
+                        break
+                    elif method == '__setitem__' and sn in k and '__setitem__' in k:
+                        cands = v
+                        break
+        except Exception:
+            pass
+    # Be more lenient: if it's a user struct and has the method registered anywhere, try to dispatch
     if not cands:
         return None
+    # Even if not in struct_field_types, some structs might still need dispatch
     chosen = None
     if len(cands) == 1:
         chosen = cands[0]
@@ -931,12 +864,6 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
                    [c for c in cands if c.get('min_arity', 0) <= n]
         if len(matching) == 1:
             chosen = matching[0]
-        elif len(matching) > 1:
-            # Same-arity overloads: the reference must name ONE concrete
-            # overload, never the suffix-less catch-all. The bare-name twin
-            # of this dispatch scores the same way in `_resolve_overload`.
-            chosen = _pick_overload_by_ctype(
-                matching, [p[0] for p in arg_pairs])
     overload_id = (chosen or {}).get('overload_id', '') or ''
     mangled = _gmm_as_str(_ggf._struct_method_csym(gen, sn, method, overload_id))
     ret_type = (chosen or {}).get('ret_type') or gen.func_return_types.get(
