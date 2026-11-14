@@ -295,3 +295,23 @@ with `where pk.foldable_predicate(x)` gives `violated constraint` with
 For a package member callee (`_ = pk.unprovable[0]()`) the error marker is
 `~~^~~~~~~~~~~` and the last note's caret sits on the `.`. Needs: foldability
 by decorator, evaluation of a builtin predicate's body, a three-valued result.
+
+### 2026-11-14 (night, later): groups E and F landed (predicate in a where clause)
+
+`where p(x)` with provable integer arguments: a non-`@always_inline("builtin")`
+predicate gives `lacking evidence to prove correctness` with the four notes; a
+builtin one is evaluated from its `return <comparison>` body and reported as
+`violated constraint` (`expected 'p(x)'`). Byte-identical to `tools/mojo build
+-I`, same-module and package callees (`_predicate_call_record`,
+`test_predicate_where_diagnostic.py`).
+
+With the package source present, the real `diagnostics_in_missing_locs.mojo`
+now matches the real compiler except two blocks: C (line 63, `no matching
+function in initialization` for `PosOnlyStruct[1, c=9]()`: the notes are the
+struct's SYNTHESIZED `__init__` overloads, `def __init__(out self, *, deinit
+move: Self)    # note - generated function` etc.) and K (line 137, ambiguous
+candidate selection with `conforms_to(T, ...)`: needs `Trait where cond` bases
+and provable/unprovable/valid candidate classification against `T: Movable`).
+Full ground truth for both is in `tools/mojo build -I` output on that file.
+The source-less run (the test's real shape: precompile, delete the source) is
+still unmet: there is no `precompile` here.

@@ -857,6 +857,12 @@ def _constraint_text(e):
         if l is None or r is None:
             return None
         return f"({l} {e.op} {r})"
+    if hasattr(e, 'func') and hasattr(e, 'args') and not getattr(e, 'kwargs', None):
+        fn = e.func.name if hasattr(e.func, 'name') else getattr(e.func, 'member', None)
+        parts = [_constraint_text(a) for a in e.args]
+        if fn is None or any(p is None for p in parts):
+            return None
+        return f"{fn}({', '.join(parts)})"
     if hasattr(e, 'name') and not hasattr(e, 'args'):
         return e.name
     if hasattr(e, 'value') and hasattr(e, 'raw') and isinstance(e.value, int):
@@ -1136,6 +1142,154 @@ def _static_cond_false(cond, env):
     return not ok
 
 
+_STATIC_SCOPES = {}
+
+
+def _scope_from_stmts(stmts, filename):
+    """Names a module can call: its own top-level functions, modules it
+    imports (`import m [as q]` -> q.f), and `from m import f [as g]`."""
+    sc = {'local': _top_level_functions(stmts), 'mods': {}, 'froms': {}}
+    for st in stmts:
+        if isinstance(st, N.ImportStmt):
+            path = _static_module_file(st.module, filename)
+            if path is not None:
+                sc['mods'][st.alias if st.alias else st.module] = path
+        elif isinstance(st, N.FromImportStmt):
+            path = _static_module_file(st.module, filename)
+            if path is not None:
+                for (nm, al) in st.names:
+                    sc['froms'][al if al else nm] = (path, nm)
+    return sc
+
+
+def _scope_of_file(path):
+    key = os.path.abspath(path)
+    if key not in _STATIC_SCOPES:
+        _STATIC_SCOPES[key] = {'local': {}, 'mods': {}, 'froms': {}}
+        try:
+            with open(path, encoding='utf-8') as fh:
+                text = fh.read()
+            stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
+            _STATIC_SCOPES[key] = _scope_from_stmts(stmts, path)
+        except Exception:
+            pass
+    return _STATIC_SCOPES[key]
+
+
+def _resolve_callee(callee, sc, filename, bound):
+    """([FunctionDef], declaring file) a plain `f` or `pkg.f` callee names, or
+    (None, None). `bound` are names a local binding could shadow."""
+    if isinstance(callee, N.IdentExpr):
+        nm = callee.name
+        if nm in bound:
+            return None, None
+        if nm in sc['local'] and nm not in sc['froms']:
+            return sc['local'][nm], filename
+        if nm in sc['froms'] and nm not in sc['local']:
+            path = sc['froms'][nm][0]
+            return _static_funcs_of_file(path).get(sc['froms'][nm][1]), path
+    elif (isinstance(callee, N.MemberExpr) and isinstance(callee.obj, N.IdentExpr)
+            and callee.obj.name in sc['mods'] and callee.obj.name not in bound
+            and callee.obj.name not in sc['local']):
+        path = sc['mods'][callee.obj.name]
+        return _static_funcs_of_file(path).get(callee.member), path
+    return None, None
+
+
+def _is_builtin_predicate(fn):
+    """`@always_inline("builtin")`: the compiler can fold calls to it."""
+    for d in fn.decorators:
+        if (isinstance(d, N.CallExpr) and isinstance(d.func, N.IdentExpr)
+                and d.func.name == 'always_inline'):
+            for a in d.args:
+                if isinstance(a, N.StringLiteral) and a.value == 'builtin':
+                    return True
+    return False
+
+
+def _static_cmp(cond, env):
+    """True/False for a comparison of provable integers, else None."""
+    if not (isinstance(cond, N.BinaryOp)
+            and cond.op in ('>', '<', '>=', '<=', '==', '!=')):
+        return None
+    a = _static_const(cond.left, env)
+    b = _static_const(cond.right, env)
+    if a is None or b is None:
+        return None
+    return (a > b if cond.op == '>' else a < b if cond.op == '<' else
+            a >= b if cond.op == '>=' else a <= b if cond.op == '<=' else
+            a == b if cond.op == '==' else a != b)
+
+
+def _predicate_call_record(filename, c, cfile, cond, env, site, bare):
+    """Record for a where clause that CALLS a function with provable integer
+    arguments, or None. A predicate that is not `@always_inline("builtin")`
+    cannot be folded: `lacking evidence to prove correctness`. A builtin one is
+    evaluated from its `return <comparison>` body and, when False, is the usual
+    `violated constraint`."""
+    if not (isinstance(cond, N.CallExpr)
+            and isinstance(cond.func, (N.IdentExpr, N.MemberExpr))):
+        return None
+    vals = []
+    for a in cond.args:
+        v = _static_const(a, env)
+        if v is None:
+            return None
+        vals.append(v)
+    sc = _scope_from_stmts_cached(cfile)
+    preds, pfile = _resolve_callee(cond.func, sc, cfile, set())
+    if not preds or len(preds) != 1:
+        return None
+    pred = preds[0]
+    pname = pred.name
+    if _is_builtin_predicate(pred):
+        if len(pred.body) != 1 or not isinstance(pred.body[0], N.ReturnStmt):
+            return None
+        penv = {}
+        names = [str(p[0] if isinstance(p, tuple) else p) for p in pred.params]
+        if len(names) != len(vals):
+            return None
+        for nm, v in zip(names, vals):
+            penv[nm] = v
+        if _static_cmp(pred.body[0].value, penv) is not False:
+            return None
+        return where_violation_record(filename, c, (cfile, c.line), cond, site, bare)[1]
+    # Not foldable: lacking evidence.
+    if bare or site is None or not hasattr(site, 'func'):
+        return None
+    cl, cc = _callee_start(site.func)
+    if cl != site.line or cc < 1:
+        return None
+    callee = site.func
+    while hasattr(callee, 'index') and hasattr(callee, 'obj'):
+        callee = callee.obj
+    caret, tilde_from, after, call_note_col = cc, 0, 0, cc
+    if hasattr(callee, 'member') and getattr(callee, 'col', 0) > cc:
+        caret, tilde_from, after = callee.col, cc, len(callee.member)
+        call_note_col = callee.col
+    elif hasattr(callee, 'name'):
+        after = len(callee.name) - 1
+    wl, wc = _expr_start(cond)
+    shown = ', '.join(f"Int({v})" for v in vals)
+    return {
+        'file': filename, 'line': site.line, 'caret': caret,
+        'tilde_from': tilde_from, 'after': after,
+        'message': f"invalid call to '{c.name}': lacking evidence to prove correctness",
+        'notes': [
+            {'file': cfile, 'line': c.line, 'name': c.name,
+             'message': 'cannot prove constraint for candidate'},
+            {'file': cfile, 'line': wl, 'col': wc, 'name': None,
+             'message': f"constraint declared here needs evidence for '{pname}({shown})'"},
+            {'file': pfile, 'line': pred.line, 'name': pname,
+             'message': 'cannot evaluate call to non-builtin function declared here'},
+            {'file': filename, 'line': site.line, 'col': call_note_col, 'name': None,
+             'message': 'provide evidence for the constraint here to aid in candidate selection'}]}
+
+
+def _scope_from_stmts_cached(path):
+    return _scope_of_file(path)
+
+
 def _static_call_records(stmts, filename):
     """Records for calls the module's own text proves wrong, so they are
     reported before anything runs and together with the declaration errors, in
@@ -1143,25 +1297,15 @@ def _static_call_records(stmts, filename):
 
     * a call no overload of a same-module or imported-package function can
       take (the shapes `overload_rejection` has verified);
-    * a bracketed call `f[1, 2]()` whose `where` clause is provably False for
-      its integer-literal arguments.
+    * a bracketed `f[1, 2]()` (or `comptime x = f[1, 2]`) whose `where` clause
+      is provably False for its integer-literal arguments, or calls a
+      predicate (`where p(x)`): foldable (`@always_inline("builtin")`) ones
+      are evaluated, others are `lacking evidence to prove correctness`.
 
     Deliberately narrow: only a plain or `pkg.`-qualified callee that no local
     binding in the enclosing function can shadow, candidates without
     decorators, no `*`/`**` arguments."""
-    local = _top_level_functions(stmts)
-    mods = {}
-    froms = {}
-    for st in stmts:
-        if isinstance(st, N.ImportStmt):
-            path = _static_module_file(st.module, filename)
-            if path is not None:
-                mods[st.alias if st.alias else st.module] = path
-        elif isinstance(st, N.FromImportStmt):
-            path = _static_module_file(st.module, filename)
-            if path is not None:
-                for (nm, al) in st.names:
-                    froms[al if al else nm] = (path, nm)
+    sc = _scope_from_stmts(stmts, filename)
     out = []
     for top in stmts:
         if not isinstance(top, N.FunctionDef):
@@ -1199,22 +1343,7 @@ def _static_call_records(stmts, filename):
             if isinstance(callee, N.SubscriptExpr):
                 sub = callee
                 callee = callee.obj
-            cands = None
-            cfile = filename
-            if isinstance(callee, N.IdentExpr):
-                nm = callee.name
-                if nm in bound:
-                    continue
-                if nm in local and nm not in froms:
-                    cands = local[nm]
-                elif nm in froms and nm not in local:
-                    cfile = froms[nm][0]
-                    cands = _static_funcs_of_file(cfile).get(froms[nm][1])
-            elif (isinstance(callee, N.MemberExpr) and isinstance(callee.obj, N.IdentExpr)
-                    and callee.obj.name in mods and callee.obj.name not in bound
-                    and callee.obj.name not in local):
-                cfile = mods[callee.obj.name]
-                cands = _static_funcs_of_file(cfile).get(callee.member)
+            cands, cfile = _resolve_callee(callee, sc, filename, bound)
             if not cands or any(c.decorators for c in cands):
                 continue
             name = cands[0].name
@@ -1250,11 +1379,14 @@ def _static_call_records(stmts, filename):
                     env[pn] = e.value
                 clause = c.where_clause
                 for cond in (clause if isinstance(clause, list) else [clause]):
+                    rec = None
                     if _static_cond_false(cond, env):
-                        msg, rec = where_violation_record(filename, c, (cfile, c.line),
-                                                          cond, n, bare)
-                        if rec is not None:
-                            out.append(((n.line, rec['caret']), rec))
+                        rec = where_violation_record(filename, c, (cfile, c.line),
+                                                     cond, n, bare)[1]
+                    else:
+                        rec = _predicate_call_record(filename, c, cfile, cond, env, n, bare)
+                    if rec is not None:
+                        out.append(((n.line, rec['caret']), rec))
                         break
     return out
 
