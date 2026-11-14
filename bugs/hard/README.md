@@ -19,7 +19,6 @@ deleted in the same commit, as for any bug.
 | `DIAGNOSTICS_binding_deferrals.md` | see doc | workers |
 | `DIAGNOSTICS_binding_deferrals-part2.md` | see doc | workers |
 | `DIAGNOSTICS_formatting_modular.md` | see doc | workers |
-| `DIAGNOSTICS_lsp_error_recovery.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
 | `DIAGNOSTICS_mlir_annotations.md` | see doc | workers |
 | `DIAGNOSTICS_mojoc_imports.md` | see doc | workers |
