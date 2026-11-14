@@ -1,7 +1,13 @@
-SPLIT: FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
+SPLIT: parts 1-3; part 1 (the CMP-register SP-form spelling) landed on master
+with 3049e7aa7, part 2 (the UXTX SP-form branches 86-88) landed on master with
+2a3ab7d27, and part 3 (the scalar-double FP class, entries 70-79) landed with
+aca4f2bbf. No part remains open; the still-unmodelled extend options below are
+not one the step table claims.
+
 # FORMAL: the extended-register class is claimed by the step table but the generator has no right-hand side for it; the coverage census this doc is is missing
 
-**Status: OPEN.** Measured 2026-11-12 on the merge of the
+**Status: RESOLVED 2026-11-14 -- all three parts landed** (part 1 and part 2 on
+master, part 3 on the branch this merge brings in). Measured 2026-11-12 on the merge of the
 `gate:reg-formal-ast-bridge-two-arg` lane (work-6818). The svc fix
 (90cce42a5) let guarded programs generate again, which un-masked the rows
 below: until then the same classes errored in `setUpClass` on the svc
@@ -17,16 +23,20 @@ rests on is only half true (below).
 
 ## Measured
 
-- The Python step table (`_STEP_CONDS`, 89 entries) claims entries 70-79
+- The Python step table (`_STEP_CONDS`, 89 entries) claimed entries 70-79
   for the extended-register / 3-source / LDRSW class (representative words
-  `0x1e602000` .. `0x9e780000`). `_step_branch_index` resolves those words
-  to idx 70-79, `_step_rhs` answers `None` for every one of them, and
-  `_step_result_plan` excludes them. So a block containing such a word gets
-  no step-RESULT lemma, and `_gen_run_cert` refuses the run with an `rhs is
+  `0x1e602000` .. `0x9e780000`). `_step_branch_index` resolved those words
+  to idx 70-79, `_step_rhs` answered `None` for every one of them, and
+  `_step_result_plan` excluded them. So a block containing such a word got
+  no step-RESULT lemma, and `_gen_run_cert` refused the run with an `rhs is
   None` that `_cfg_decomposition_refusal` does NOT name: the word "has a
-  step" (idx 70-79), so the unmodelled-word search skips it and the reader
-  gets the generic "empty block runs certificate" sentence. The same
+  step" (idx 70-79), so the unmodelled-word search skipped it and the reader
+  got the generic "empty block runs certificate" sentence. The same
   misleading-message defect the svc fix closed for idx 35, one class over.
+  **Fixed 2026-11-13 (part3):** every entry 70-79 has a `_step_rhs` arm and a
+  word-relative twin whose spelling is the model's (`work_step_fcmp` ..
+  `work_step_fcvtzs`), so the plan covers them and the step-OK lemma derives
+  from the step-RESULT lemma.
 - `TestRegister31.test_every_row_is_reachable` fails on the three SP forms:
   `add x0, sp, x16` assembles to `0x8b3063e0` (the model decodes it, branch
   86), `sub x0, sp, x16` to `0xcb3063e0` (branch 87), `cmp sp, x16` to
@@ -34,20 +44,27 @@ rests on is only half true (below).
   each says "the extended-register class, which no branch claims". Table
   and model disagree about the same word; the test says "one of the rows
   lies" and does not say which.
+  **Fixed 2026-11-13 (part 2, 2a3ab7d27 on master):** the model decodes all
+  three words to branches 86-88 with `Rn` read as SP, the table, the model
+  and the test rows now agree, and the test is green.
 - `_step_rhs(0xeb3063ff, 88)` DOES return a right-hand side, and it reads
   Rn through `arm64_reg_or_sp 31 s` (the SP form). So the extended-register
   CMP form IS modelled, which contradicts the docstring's "nothing in
   `arm64_step` decodes the extended-register class" -- at least for that
   form. The census must be redone per entry; the blanket statement cannot
   stand.
+  **Fixed 2026-11-13:** `lib/ProofLib.lean`'s `arm64_reg_or_sp` coverage note
+  now states that the UXTX SP forms are modelled (branches 86-88) and names
+  the other extend options as refused rather than mis-read.
 - Part 1's spelling half is RESOLVED (2026-11-13): `_step_rhs` already
   spells the extended-register SP CMP (`0xeb3063ff`, branch 88) as
   `arm64_reg_or_sp 31 s`, while the shifted-register CMP (`0xeb1003ff`,
   branch 6) correctly keeps `arm64_reg 31 s` (that class has no SP encoding).
   The test was red because its pin still contained the pre-`imm6` shift
   text; it now pins both words and the generated step-RESULT lemma, which
-  states the model's `arm64_step` result. Its doc is deleted; the remaining
-  rows here are the 86-88 reachability/census and the 70-79 class.
+  states the model's `arm64_step` result. Its doc is deleted; the rows still
+  open at the time were the 86-88 reachability/census and the 70-79 class,
+  both landed since (below).
 - The gap is DORMANT in current emitter output: the image of
   `def plain(a, b): return a + b` (arm64) carries ZERO words of the class in
   its executable region (measured over `_exec_code_limit`), so the gate job
@@ -56,14 +73,16 @@ rests on is only half true (below).
   that spelling: `cmp sp, x16` as clang assembles it is `0xeb3063ff`, the
   extended-register form.
 
-## Red rows that measure it (all in `test_formal_call_proof_gen.py`)
+## The rows that measured it (all in `test_formal_call_proof_gen.py`)
 
 - `TestRegister31.test_every_row_is_reachable` (forms: `add x0, sp, x16`,
-  `sub x0, sp, x16`, `cmp sp, x16`) -- red on master, red here.
+  `sub x0, sp, x16`, `cmp sp, x16`) -- RED until 2a3ab7d27 (part 2, master)
+  modelled branches 86-88; GREEN on the merged tree.
 - `TestStepOkDerivesFromStepResult.test_the_derivation_is_total_over_the_step_table`
   (entries 70-79) and `...test_the_step_result_of_every_covered_word_is_still_emitted`
   (entries 70-79) -- un-masked 2026-11-12 by the svc fix (before it, the
-  whole class errored in `setUpClass` on the svc refusal).
+  whole class errored in `setUpClass` on the svc refusal). **Both GREEN since
+  the part3 fix (2026-11-13).**
 
 ## What is expected
 
@@ -74,19 +93,34 @@ against), and the generator's spelling is the model's spelling arm for arm.
 
 ## Exact next step
 
-1. Redo the per-entry census for 70-79 (and the 86-88 branches): assemble
-   the representative word, ask the model's `arm64_step` in Lean, and read
-   `_step_rhs`. Decide per entry: (a) modelled -> the generator must emit
-   the matching step-RESULT lemma (an arm in `_step_rhs` /
+All four landed, on both sides of this merge; the list is the record of what
+closed them:
+
+1. Per-entry census for 70-79 AND for the 86-88 branches: assemble the
+   representative word, ask the model's `arm64_step` in Lean, and read
+   `_step_rhs`. Decided per entry as modelled, so the generator emits the
+   matching step-RESULT lemma (an arm in `_step_rhs` /
    `_WORK_STEP_BY_IDX`, spelling identical to the model, including the
-   `arm64_reg_or_sp` read and the shift spelling); (b) not modelled -> drop
-   the table entry so `_step_branch_index` stops claiming the word, so the
-   refusal NAMES it as unmodelled instead of the generic sentence.
-2. Reconcile the `arm64_reg_or_sp` docstring in `lib/ProofLib.lean` with the
+   `arm64_reg_or_sp` read and the shift spelling). 70-79 landed with
+   aca4f2bbf (part 3, this branch: `work_step_fcmp` .. `work_step_fcvtzs`);
+   86-88 landed with 2a3ab7d27 (part 2, master).
+2. `_step_rhs` CMP-register spelling to the model's, arm for arm (`cmp sp,
+   x16` reads Rn through `arm64_reg_or_sp 31 s`; the shifted-register CMP
+   correctly keeps `arm64_reg 31 s`): landed with 3049e7aa7 (part 1,
+   master); `test_the_generator_keeps_its_own_spelling_and_why` pins both
+   words and the generated lemma.
+3. Reconcile the `arm64_reg_or_sp` docstring in `lib/ProofLib.lean` with the
    census (it says the class is unmodelled; the extended-register CMP form
-   is).
-3. Re-run `TestRegister31` and `TestStepOkDerivesFromStepResult`; both
-   classes green before the next formal sweep.
+   is): landed with 2a3ab7d27's coverage note -- the UXTX SP forms are
+   modelled, the other extend options are refused rather than mis-read.
+4. Re-run `TestRegister31` and `TestStepOkDerivesFromStepResult`; both
+   classes green before the next formal sweep: done on the merged tree
+   2026-11-14, both green.
+
+Remaining, and deliberately NOT a part: the other extend options in the same
+class (UXTW/SXTW/SXTX) are still refused rather than modelled, and the step
+table claims none of them, so there is no row to reconcile yet; the ProofLib
+coverage note names this doc as where their census belongs.
 
 Related: `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` (the svc fix that
 un-masked this; its remaining item is the dynamic `svc`, a different gap).
