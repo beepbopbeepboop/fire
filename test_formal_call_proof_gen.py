@@ -1313,13 +1313,14 @@ SP_IN_RN_FORMS = (
     # reached, which is the whole point: the old table named the NEG arm, checked
     # its source text, and said nothing about the word.
     ("neg x0, x7", "= 0xcb000000 then", "zr", "lands here"),
-    # The three SP spellings the assembler DOES accept in the register class.
-    # Each reaches the extended-register class instead, which no branch decodes,
-    # so the model makes no claim about it — asserted as exactly that, because
-    # "the model's branch for this form" was never a question about these.
-    ("add x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
-    ("sub x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
-    ("cmp sp, x16", "= 0x91000000 then", "sp", "extended"),
+    # The three SP spellings the assembler accepts in the EXTENDED-register
+    # class (UXTX, option=011, bit 21 set).  These words are modelled by
+    # branches 86-88 (`0x8b206000`/`0xcb206000`/`0xeb206000`, mask
+    # `0xffe0e000`): `Rn` is read as SP in that class, and the shifted-register
+    # class (bit 21 clear) reads register 31 as the zero register instead.
+    ("add x0, sp, x16", "= 0x8b206000 then", "sp", "lands here"),
+    ("sub x0, sp, x16", "= 0xcb206000 then", "sp", "lands here"),
+    ("cmp sp, x16", "= 0xeb206000 then", "sp", "lands here"),
     # …and the five whose 31 is the ZERO register with no SP encoding at all.
     # They are in the table because they are the direction a "31 means SP
     # everywhere" change gets wrong, and a test that only checked the accepting
@@ -1671,18 +1672,30 @@ the text; it does not find out whether any word can arrive there.  So:
                     f"on this arm, would then be wrong")
 
     def test_the_generator_keeps_its_own_spelling_and_why(self):
-        """`_step_rhs` says `s.sp`/`arm64_reg` where the library says the
-        helper, and that is deliberate.
+        """The generator's CMP right-hand sides are the model's, arm for arm.
 
-        The step-result lemma is closed by `exact`-ing the library's lemma
-        INSTANTIATED AT THE CONCRETE WORD, so the two right-hand sides only have
-        to be defeq — and they are, because `arm64_reg_or_sp 3 s` and
-        `s.sp`/`arm64_reg 3 s` both reduce on a literal index.  Emitting the
-        helper from the generator instead would make that exact, but the
-        generated text is what every downstream `simp only [..., arm64_reg,
-        arm64_set_reg]` goal consumes, and those lists do not carry the helper:
-        the change would put `arm64_reg_or_sp 3 s` in every value-flow goal and
-        break them.  Recorded here because the asymmetry looks like a bug.
+        Two CMP-register forms reach this generator and they read `Rn = 31`
+        differently, because the architecture does:
+
+        * the SHIFTED-register CMP (`0xeb1003ff` = `SUBS XZR, X31, X16`,
+          branch 6) has no SP encoding, so `Rn = 31` is the ZERO register and
+          the arm spells `arm64_reg 31 s`, exactly as the library's
+          `0xeb000000` arm does.  The branch CANNOT fire for a word whose
+          `Rn` is SP: clang assembles `cmp sp, x16` as `0xeb3063ff`, the
+          extended-register form, which is the next case.
+        * the EXTENDED-register CMP (`0xeb3063ff` = `cmp sp, x16`, branch 88)
+          DOES have an SP encoding, so the arm reads `Rn` through
+          `arm64_reg_or_sp 31 s`, exactly as the library's `0xeb206000` arm
+          does.  Spell it `arm64_reg 31 s` and the step-RESULT lemma states
+          `arm64_subs_flags 0 x16`, a proof about a different instruction that
+          typechecks.
+
+        The shift is spelled CONCRETELY on both arms (`<<< UInt64.ofNat 0` for
+        this word) while the library reads it through `arm64_shifted_reg`;
+        `arm64_shifted_reg_zero` is the library fact that makes the two reads
+        defeq on a zero shift field, and the step-result lemma is closed by
+        `exact`-ing (or rewriting with) the library lemma at this word.
+        `test_regression_shifted_register_arm.py` pins the non-zero shift.
 
         **The pin is the WHOLE right-hand side, `arm64_set_reg rd` included, and
         that is a merge of two facts rather than one.**  The library's CMP arm
@@ -1694,17 +1707,46 @@ the text; it does not find out whether any word can arrive there.  So:
         the flags-only `some { s with nzcv := … }` — a `_step_rhs` that stops
         writing `rd` models every `subs xd, xn, xm` in an image as "set the
         flags, change no register", and every theorem over it still typechecks.
+
+        **And the generated lemma is checked, not just the right-hand side**:
+        Lean is the only reader that rejects a step-RESULT lemma stating a step
+        `arm64_step` does not compute, so a Python-only pin would pass while the
+        proof file failed to typecheck.
         """
         import formal.arm64_proof_gen as G
-        self.assertEqual(G._step_rhs(0xeb1003ff, 6),
-                         "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
-                         "arm64_reg 16 s)) with nzcv := arm64_subs_flags "
-                         "(arm64_reg 31 s) (arm64_reg 16 s) }",
-                         "`_step_rhs`'s CMP-register arm changed shape; if it "
-                         "now emits `arm64_reg_or_sp`, the `simp only` lists in "
-                         "this generator need the helper in them too — and if it "
-                         "stops writing `arm64_set_reg rd`, it has reverted to "
-                         "modelling `subs xd, xn, xm` as a flag-only CMP")
+        shifted = G._step_rhs(0xeb1003ff, 6)
+        self.assertEqual(
+            shifted,
+            "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
+            "(arm64_reg 16 s <<< UInt64.ofNat 0))) with nzcv := "
+            "arm64_subs_flags (arm64_reg 31 s) "
+            "(arm64_reg 16 s <<< UInt64.ofNat 0) }",
+            "`_step_rhs`'s shifted-register CMP arm changed shape; if it now "
+            "emits `arm64_reg_or_sp`, it has copied the extended-register "
+            "arm's SP read into a class where register 31 is the ZERO "
+            "register — and if it stops writing `arm64_set_reg rd`, it has "
+            "reverted to modelling `subs xd, xn, xm` as a flag-only CMP")
+        self.assertNotIn("arm64_reg_or_sp", shifted,
+                         "the shifted-register CMP has no SP encoding")
+
+        sp = G._step_rhs(0xeb3063ff, 88)
+        self.assertEqual(
+            sp,
+            "some { (arm64_set_reg 31 s ((arm64_reg_or_sp 31 s) - "
+            "((arm64_reg 16 s) <<< UInt64.ofNat 0))) with nzcv := "
+            "arm64_subs_flags (arm64_reg_or_sp 31 s) "
+            "((arm64_reg 16 s) <<< UInt64.ofNat 0) }",
+            "`_step_rhs`'s extended-register CMP (SP) arm changed shape; it "
+            "must read Rn through `arm64_reg_or_sp`, or the step-RESULT "
+            "lemma for `cmp sp, x16` states a comparison against zero")
+        self.assertNotIn("arm64_reg 31 s", sp,
+                         "`cmp sp, x16` must not read Rn as the zero register")
+
+        code = struct.pack("<I", 0xeb3063ff)
+        lemma = G._gen_step_result_lemmas("syn", code, 0x1000)
+        self.assertIn(sp, lemma,
+                      "the generated step-RESULT lemma does not state the "
+                      "right-hand side `_step_rhs` says `arm64_step` computes")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
         # The SHIFTED-register `imm6` field, on BOTH the generator and the
@@ -1717,12 +1759,14 @@ the text; it does not find out whether any word can arrive there.  So:
                       "`_step_rhs`'s ADD-register arm dropped the shift again")
         self.assertIn("<<< UInt64.ofNat 4", G._step_rhs(0xcb021027, 3),
                       "`_step_rhs`'s SUB-register arm dropped the shift again")
-        self.assertEqual(
-            self.lib.count("arm64_shifted_reg insn s xm"), 2,
-            "the model's ADD and SUB (shifted register) arms must BOTH read "
-            "`imm6` through `arm64_shifted_reg insn s xm`; a shift read in one "
-            "arm and dropped in the other is the duplicate-decoder defect this "
-            "replaces")
+        for key in ("= 0x8b000000 then", "= 0xcb000000 then"):
+            branch = _arm64_step_branch(self.lib, key)
+            self.assertIsNotNone(branch, f"the model lost its {key!r} arm")
+            self.assertIn(
+                "arm64_shifted_reg insn s xm", branch,
+                f"the model's {key!r} arm dropped `imm6`; a shift read in one "
+                f"arm and dropped in the other is the duplicate-decoder defect "
+                f"this replaces")
 
     def test_no_arm_of_the_generic_rhs_builder_raises(self):
         """EVERY index the decoder can produce builds a right-hand side.

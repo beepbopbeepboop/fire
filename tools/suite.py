@@ -4299,6 +4299,10 @@ test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditiona
      desc='conditional conformance declarations are diagnosed: the diamond, '
           'the derived/ancestor constraint, conditional RegisterPassable, and '
           'the `ref` origin rule; positive controls still compile')
+test('reg-conditional-conformance-candidate-diagnostic', [PY, 'test_conditional_conformance_candidate_diagnostic.py'], mem='tiny',
+     desc='conditional conformance candidate selection under a where clause '
+          '(trait conformance part 3): ambiguity, unprovable-vs-provable, and '
+          'disproved candidates are refused; the positive controls still compile')
 test('reg-conditional-conformance-synthesis-diagnostic', [PY, 'test_conditional_conformance_synthesis_diagnostic.py'], mem='tiny',
      desc='conditional conformance copy/move synthesis is diagnosed when the '
           'field type is unsynthesizable (part 4); positive controls still compile')
@@ -4458,6 +4462,7 @@ BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
 
+              'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'gimple-lint', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
