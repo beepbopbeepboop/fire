@@ -57,15 +57,3 @@ is deleted with its acceptance met.
 If part 1 shows the diverging case is a deep compiler defect (not a timeout, not a
 one-line lowering fix), stop and file the specific defect as its own `bugs/<AREA>_<slug>.md`
 (see `bugs/hard/` for the class) rather than forcing a shallow fix here.
-## Status
-
-- **Landed 2026-11-14.** The job is green: `python3 tools/suite.py silentnoop`
-  -> 2 passed, 0 failed. Part 1's refusal was already fixed (`e4a2cc2ed`);
-  the remaining case, `zip_nested_tuple_target`, was a second and unrelated
-  defect — `gen._zip_bind_slot` passed a Python int loop index into
-  `_rt_call`, whose `_rt_args` joins its arguments with `', '.join(...)`
-  while `_as_str` is deliberately identity, so the transactional zip branch
-  swallowed `sequence item 1: expected str instance, int found` and fell
-  back to the zero-iteration `mojo_unsupported_iter` path. Fixed in
-  `6461fdf4c`. Per this doc's own Acceptance the parent is not deleted; its
-  Status records the closure.

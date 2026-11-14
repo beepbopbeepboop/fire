@@ -4321,38 +4321,6 @@ test('reg-conforms-to-condition-diagnostic', [PY, 'test_conforms_to_condition_di
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-constrained-paren-diagnostic', [PY, 'test_constrained_paren_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-candidate-selection-diagnostic', [PY, 'test_candidate_selection_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-diagnostic-format-modular', [PY, 'test_diagnostic_format_modular.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-diagnostics-in-missing-locs', [PY, 'test_diagnostics_in_missing_locs.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-fieldwise-init-and-deprecated-conversion', [PY, 'test_fieldwise_init_and_deprecated_conversion.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-inferred-generic-statement-call', [PY, 'test_inferred_generic_statement_call.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-invalid-downcast-build', [PY, 'test_invalid_downcast_build.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-overload-diagnostic', [PY, 'test_overload_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-predicate-where-diagnostic', [PY, 'test_predicate_where_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-srcless-package-diagnostics', [PY, 'test_srcless_package_diagnostics.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-static-call-diagnostics', [PY, 'test_static_call_diagnostics.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-trait-comptime-member-untyped', [PY, 'test_trait_comptime_member_untyped.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-trait-generic-method-alpha-rename', [PY, 'test_trait_generic_method_alpha_rename.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-trait-imported-diagnostic', [PY, 'test_trait_imported_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-trait-members-diagnostic', [PY, 'test_trait_members_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-trait-requirements-diagnostic', [PY, 'test_trait_requirements_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-where-clause-diagnostic', [PY, 'test_where_clause_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
 test('reg-gates-off-entries-name-a-doc', [PY, 'test_gates_off_entries_name_a_doc.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
 test('reg-selfhost-closure-parses', [PY, 'test_selfhost_closure_parses.py'], mem='tiny',
@@ -4373,8 +4341,6 @@ test('reg-mojoc-dual-mount-import', [PY, 'test_mojoc_dual_mount_import.py'], mem
 # — it is a per-part Done-when probe harness, red until parts 2 and 3 land,
 # and is in `test_suite.py`'s UNREGISTERED with that reason.
 test('reg-binding-evidence', [PY, 'test_binding_evidence.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-bool-or-mixed-containers', [PY, 'test_bool_or_mixed_containers.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
 test('reg-codegen-yield-from-walk-ast-memo', [PY, 'test_codegen_yield_from_walk_ast_memo.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
@@ -4793,7 +4759,7 @@ BUCKETS = {
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
@@ -5771,8 +5737,28 @@ def select(names, opts):
             if not kept:
                 raise SystemExit(f"suite.py: --only {pat!r} matched nothing")
             chosen = kept
-    for pat in getattr(opts, 'skip', None) or []:
-        chosen = [n for n in chosen if not re.search(pat, n)]
+    skip = getattr(opts, 'skip', None) or []
+    if skip:
+        chosen = [n for n in chosen if not any(re.search(p, n) for p in skip)]
+        # A dependent of a skipped test is skipped too. `--skip` is how
+        # tools/gates.json turns a known-red job OFF for a backlog, and a
+        # dependent cannot run without it; leaving it selected made `execute`
+        # report `ERROR dependency not selected` against the dependent, so the
+        # gate was RED BY CONSTRUCTION on a policy that is supposed to make it
+        # green. Worse, the integrator's confirm step then re-ran that
+        # dependent by name — which selects its deps, the OFF job among them —
+        # the real red job ran after all, and a fresh `bugs/gate-<job>.md` was
+        # filed for a job gates.json already tracks (2026-11-14:
+        # bootstrap-stage2-dumps and bootstrap-stage3-dumps, duplicates of the
+        # recover-land OFF entry's doc). Dropping the dependent here is what
+        # make does when a prerequisite is excluded: the target is not remade.
+        while True:
+            present = set(chosen)
+            kept = [n for n in chosen
+                    if all(d in present for d in REGISTRY[n].deps)]
+            if len(kept) == len(chosen):
+                break
+            chosen = kept
     if not chosen:
         raise SystemExit("suite.py: nothing selected")
     return chosen
@@ -6765,7 +6751,7 @@ def main(argv=None):
                     help='re-run cached tests instead of replaying them '
                          '(fresh results are still published)')
     ap.add_argument('--skip', action='append', metavar='RE', default=[],
-                    help='drop tests whose name matches RE (repeatable): a gate turned OFF for a backlog, see tools/gates.json')
+                    help='drop tests whose name matches RE (repeatable), and every test that depends on one: a gate turned OFF for a backlog, see tools/gates.json')
     ap.add_argument('--only', action='append', metavar='RE',
                     help='within the selected buckets, keep only tests whose '
                          'name matches RE (repeatable)')

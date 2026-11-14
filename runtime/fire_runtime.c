@@ -940,12 +940,6 @@ void mojo_print_stderr(char *str) {
 }
 
 /* File I/O — via Python (if enabled) or via C stdio */
-/* The open-file registry's definition is below (`_reg_file`, next to the
- * container registries); the opaque open/close pair above it needs these
- * first. See `mojo_is_registered_file`'s comment for why the registry
- * exists. */
-void mojo_file_register(int64_t fh);
-void mojo_file_unregister(int64_t fh);
 #if USE_PYTHON
 MojoFileHandle mojo_open(char *filename, char *mode) {
     PyObject *open_func = PyObject_GetAttrString(
@@ -963,14 +957,12 @@ MojoFileHandle mojo_open(char *filename, char *mode) {
         return NULL;
     }
 
-    mojo_file_register((int64_t)(intptr_t)fh);
     return (MojoFileHandle)fh;
 }
 
 void mojo_close(MojoFileHandle fh) {
     if (!fh) return;
 
-    mojo_file_unregister((int64_t)(intptr_t)fh);
     PyObject *file_obj = (PyObject *)fh;
     PyObject *close_result = PyObject_CallMethod(file_obj, "close", NULL);
 
@@ -1103,15 +1095,11 @@ MojoFileHandle mojo_open(char *filename, char *mode) {
         mojo_exc_obj_set(heap_msg);
         mojo_raise();
     }
-    mojo_file_register((int64_t)(intptr_t)f);
     return (MojoFileHandle)f;
 }
 
 void mojo_close(MojoFileHandle fh) {
-    if (fh) {
-        mojo_file_unregister((int64_t)(intptr_t)fh);
-        fclose((FILE *)fh);
-    }
+    if (fh) fclose((FILE *)fh);
 }
 
 int64_t mojo_write(MojoFileHandle fh, char *data, int64_t len) {
@@ -1267,37 +1255,6 @@ static _PtrReg _reg_list;
 int mojo_is_registered_list(int64_t addr) {
     if (addr < 65536) return 0;
     return _pr_has(&_reg_list, (uint64_t)addr);
-}
-
-/* Registry of every OPEN FILE word this runtime handed out (`mojo_open`,
- * `mojo_open_file`, `mojo_open_file_ex`), so a `for line in <file>:` over a
- * value whose C type is the untyped `int64_t` word can tell a file handle
- * from a container at run time. A word of unknown kind is iterable as a
- * list, a dict or a set (`mojo_iter_word`), and a file is the fourth kind:
- * without this registry the only answers were to read the FILE* as a
- * MojoList (garbage length, body silently ran zero times — the c-analyzer
- * `c_common/tables.py` consumer's `bad header ''`) or to report "object is
- * not iterable". Membership is positive evidence, like `_reg_list`: only an
- * address this runtime itself returned for an open is registered, so a plain
- * integer/pointer word can never be mistaken for a file. `mojo_close`
- * removes the entry; a handle the program never closes (the A3 path's
- * `with open(...)` has no teardown) stays registered, which keeps it
- * iterable for as long as the word exists. */
-static _PtrReg _reg_file;
-
-void mojo_file_register(int64_t fh) {
-    if (fh < 65536) return;
-    _pr_add(&_reg_file, (uint64_t)fh);
-}
-
-void mojo_file_unregister(int64_t fh) {
-    if (fh < 65536) return;
-    _pr_del(&_reg_file, (uint64_t)fh);
-}
-
-int mojo_is_registered_file(int64_t addr) {
-    if (addr < 65536) return 0;
-    return _pr_has(&_reg_file, (uint64_t)addr);
 }
 
 /* Registry of every `char *` string this runtime is responsible for that is
@@ -2313,18 +2270,6 @@ int mojo_truthy_word(int64_t w)
  * address decimal. */
 char *mojo_repr_boxed(int64_t v)
 {
-    /* A registered LIST is a container, not an integer: a value of
-     * compile-time-unknown kind holding one (a compiled generator's
-     * yielded word, a dict slot) must render as the list/tuple it is.
-     * Without this arm it fell to `mojo_str_from_int` and printed the
-     * container's ADDRESS. Real: Tools/c-analyzer's `read_table` yields
-     * `tuple(...)` out of a C++ generator whose signature can only call the
-     * yield an int word, so a consumer's `print(row)` printed
-     * `4363506656` instead of `('1', '2')`. Per-slot kinds are read from
-     * the list itself when it carries them (mojo_repr_list_kinds), which is
-     * how a tuple of strings renders each slot as a string. */
-    if (mojo_is_registered_list(v))
-        return mojo_repr_list_kinds((MojoList *)(intptr_t)v, NULL);
     if (mojo_is_boxed(v)) {
         MojoBox *bx = (MojoBox *)(intptr_t)v;
         switch (bx->kind) {
@@ -3381,66 +3326,6 @@ void mojo_list_append_double(MojoList *l, double v)
 void mojo_list_append_str(MojoList *l, const char *v)
 {
     mojo_list_append_int(l, (int64_t)(uintptr_t)v);
-}
-
-/* The LINES of an open-file word, for `for line in <file>:` where the word's
- * C type is the untyped `int64_t` (the A3 generator ABI and this codegen's
- * scalar body model both keep a file as just a word). Returns a fresh
- * `MojoList *` of fresh strings — one per line, WITH the trailing newline,
- * exactly like Python's `for line in f` — or NULL when `v` is not an open
- * file this runtime handed out.
- *
- * NULL is the "not a file" answer, not an error: the caller is a `for` over
- * a word of unknown kind, which may equally be a list/dict/set, and the
- * generated code falls back to those arms on NULL. That is why this is a
- * runtime question at all: `_iter_significant_lines(lines)` in the c-analyzer
- * sources is called BOTH with `infile.read().splitlines()` (a list of
- * strings) and with an open file object, so no single static type is right
- * at both call sites.
- *
- * The list owns its strings (`mojo_list_free_owned_strs`), which is what
- * codegen registers for the temp this returns. Lines are materialized
- * eagerly: this runtime's iteration protocol is a list, and a file whose
- * lines are iterated is a table/small text file in every caller this
- * lowering exists for (the alternative — a lazy iterator struct — would add
- * an ownership shape for every `for` arm to know about). */
-MojoList *mojo_file_lines(int64_t v)
-{
-    if (!mojo_is_registered_file(v)) return NULL;
-    MojoList *lines = mojo_list_new();
-    if (!lines) return NULL;
-#if USE_PYTHON
-    PyObject *file_obj = (PyObject *)(intptr_t)v;
-    for (;;) {
-        PyObject *line = PyObject_CallMethod(file_obj, "readline", NULL);
-        if (!line) { PyErr_Clear(); break; }
-        Py_ssize_t n = 0;
-        const char *s = PyUnicode_AsUTF8AndSize(line, &n);
-        if (!s || n <= 0) { Py_DECREF(line); break; }
-        char *copy = (char *)malloc((size_t)n + 1);
-        if (copy) {
-            memcpy(copy, s, (size_t)n);
-            copy[n] = '\0';
-            mojo_list_append_str(lines, copy);
-        }
-        Py_DECREF(line);
-    }
-#else
-    FILE *f = (FILE *)(intptr_t)v;
-    char *buf = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    while ((n = getline(&buf, &cap, f)) != -1) {
-        char *copy = (char *)malloc((size_t)n + 1);
-        if (copy) {
-            memcpy(copy, buf, (size_t)n);
-            copy[n] = '\0';
-            mojo_list_append_str(lines, copy);
-        }
-    }
-    free(buf);
-#endif
-    return lines;
 }
 
 /* Python negative-index semantics (list[-1] == list[len-1]) — none of the
@@ -11456,7 +11341,6 @@ int64_t mojo_open_file(char *path) {
      * real Python's builtin open() — see mojo_raise_file_not_found. */
     FILE *f = fopen(path, "r");
     if (!f) mojo_raise_file_not_found(path);
-    mojo_file_register((int64_t)(intptr_t)f);
     return (int64_t)(intptr_t)f;
 }
 
@@ -11493,7 +11377,6 @@ int64_t mojo_open_file_ex(char *path, char *mode, char *newline) {
         PyErr_Print();
         return 0;
     }
-    mojo_file_register((int64_t)(intptr_t)fh);
     return (int64_t)(intptr_t)fh;
 #else
     const char *eff_mode = mode;
@@ -11527,25 +11410,8 @@ int64_t mojo_open_file_ex(char *path, char *mode, char *newline) {
         mojo_raise();
         return 0;
     }
-    mojo_file_register((int64_t)(intptr_t)f);
     return (int64_t)(intptr_t)f;
 #endif
-}
-
-/* The builtin `open` as a dynamic-call WORD, i.e. the default of a parameter
- * spelled `_open=open` (Tools/c-analyzer's `read_table`). A compiled
- * generator that takes `_open=open` gets its signature registered so calls by
- * value can bind the other defaults by name (`csv.reader` for `_get_reader`,
- * the tab for `sep`); `_cpp_sig_default_word` refuses to spell a default it
- * does not know, and refusing ONE default used to drop the WHOLE signature,
- * so `_get_reader` arrived as 0 and `read_table` jumped to address 0.
- * `mojo_dyn_call` passes plain functions integer words, so the three
- * positional/keyword values arrive as (path, mode, newline). */
-int64_t mojo_open_default(int64_t path, int64_t mode, int64_t newline)
-{
-    return mojo_open_file_ex((char *)(intptr_t)path,
-                             mode ? (char *)(intptr_t)mode : NULL,
-                             newline ? (char *)(intptr_t)newline : NULL);
 }
 
 /* ── REPL and utility functions ──────────────────────────────────────*/
@@ -12303,7 +12169,6 @@ MojoList *mojo_str_chars(char *s)
 MojoList *mojo_iter_word(int64_t v)
 {
     if (mojo_is_registered_list(v)) return (MojoList *)(intptr_t)v;
-    { MojoList *fl = mojo_file_lines(v); if (fl) return fl; }
     if (mojo_is_listiter(v)) {
         /* the REMAINING elements; the iterator is exhausted by the loop */
         MojoListIter *it = (MojoListIter *)(intptr_t)v;

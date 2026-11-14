@@ -1243,19 +1243,12 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
     return [k == 'tuple' for k in kinds]
 
 
-def _yield_nodes_of(fn: N.FunctionDef) -> list:
-    """Every `YieldExpr`/`YieldFromExpr` lexically inside `fn`, not inside a
-    nested `def`/`lambda`/comprehension — a yield there belongs to a different
-    scope, exactly the nesting rule `fire_compiler._scan_yield_bearing` uses for
-    `is_generator`. Own stack-based walk (the shared `_walk` cannot express "skip
-    this subtree, keep the rest").
-
-    An EAGER list, not a generator: this module is in the self-host closure and
-    the compiler's own generators must be ones the A3 pass (this very module)
-    claims, and a module that holds one it cannot lower is refused whole
-    (`test_selfhost.py::closure_coroutines_are_lowerable`; the same fix as
-    `_walk_lists`)."""
-    found = []
+def _yield_nodes_of(fn: N.FunctionDef):
+    """Yield every `YieldExpr`/`YieldFromExpr` lexically inside `fn`, not
+    inside a nested `def`/`lambda`/comprehension — a yield there belongs to a
+    different scope, exactly the nesting rule `fire_compiler._scan_yield_bearing`
+    uses for `is_generator`. Own stack-based walk (the shared `_walk` cannot
+    express "skip this subtree, keep the rest")."""
     stack = list(getattr(fn, 'body', None) or [])
     while stack:
         cur = stack.pop()
@@ -1266,7 +1259,7 @@ def _yield_nodes_of(fn: N.FunctionDef) -> list:
             # `fn`'s yield.)
             continue
         if isinstance(cur, (N.YieldExpr, N.YieldFromExpr)):
-            found.append(cur)
+            yield cur
             continue
         d = getattr(cur, '__dict__', None)
         if not d:
@@ -1276,7 +1269,6 @@ def _yield_nodes_of(fn: N.FunctionDef) -> list:
                 stack.extend(x for x in v if hasattr(x, '__dict__'))
             elif hasattr(v, '__dict__'):
                 stack.append(v)
-    return found
 
 
 def _yields_provably_nontuple(fn: N.FunctionDef) -> bool:
@@ -3013,21 +3005,12 @@ def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str, struct_def=None) 
     return None
 
 
-# The most argument slots (a method's receiver included) the runtime's
-# `__mojo_gen_new_<n>` constructors cover (runtime/fire_coro_gen.c). A generator
-# with more used to lower fine and then reference `__mojo_gen_new_9`, which does
-# not exist, at LINK (the compiler's own `_trait_method_requirements`).
-MAX_GEN_SLOTS = 12
-
-
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
         return False, 'comptime params'
-    if len(getattr(fn, 'params', None) or []) > MAX_GEN_SLOTS:
-        return False, f'too many parameters (the runtime constructs at most {MAX_GEN_SLOTS} slots)'
     _decos = getattr(fn, 'decorators', None) or []
     # `@contextlib.contextmanager` (dotted or bare) is the ONE decorator a
     # generator may carry without changing what this backend has to emit, so

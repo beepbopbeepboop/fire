@@ -209,7 +209,7 @@ def _binds_from_args(template_src: str, arg_ctypes) -> bool:
 
 
 def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None,
-                      arg_ctypes: list | None = None):
+                      arg_ctypes=None):
     """Pull the source text of a single `fn fn_name[...](...): body` from a
     module, by indentation (the generic template we'll instantiate). None if
     not found.
@@ -312,7 +312,7 @@ def _is_param_marker(p: str) -> bool:
     return bool(p) and all(ch in '/*' for ch in p)
 
 
-def type_param_names(template_src: str) -> list:
+def type_param_names(template_src: str):
     """The generic's type-parameter names — for `fn` or `struct`, e.g.
     `struct Box[T, U]` -> ['T', 'U']. Skips the positional-only / keyword-only
     separators (`/`, `//`, `*`, `**`), which are not parameter names — see
@@ -1328,24 +1328,14 @@ def _constraint_implies_text(derived_text, base_text, trait_bases, cache):
     return _atom_implies(da, ba, trait_bases, cache)
 
 
-def _ancestors_with_paths(base_name, base_where, trait_bases, cache, path=None) -> list:
-    """[(ancestor, where_text, path_names)] for all reachable ancestors including
-    base, preorder. An eager LIST, not a generator: this module is in the
-    self-host closure, and a recursive `yield from` generator is one neither the
-    stack-switch lowering nor (in the whole-program build) the C++20 path leaves
-    in a linkable state (`_mojogen_elaborate__ancestors_with_paths_*` undefined at
-    link)."""
-    out = []
-    _collect_ancestors(base_name, base_where, trait_bases,
-                       [base_name] if path is None else path, out)
-    return out
-
-
-def _collect_ancestors(name, where_text, trait_bases, path: list, out: list) -> None:
-    out.append((name, where_text, list(path)))
-    for parent in (trait_bases.get(name) or []):
+def _ancestors_with_paths(base_name, base_where, trait_bases, cache, path=None):
+    """Yield (ancestor, where_text, path_names) for all reachable ancestors including base."""
+    if path is None:
+        path = [base_name]
+    yield (base_name, base_where, list(path))
+    for parent in (trait_bases.get(base_name) or []):
         # Parent traits are unconditional in this part's model.
-        _collect_ancestors(parent, where_text, trait_bases, path + [parent], out)
+        yield from _ancestors_with_paths(parent, base_where, trait_bases, cache, path + [parent])
 
 
 def _as_str(x):
@@ -1621,7 +1611,7 @@ def _iter_function_defs(stmts):
                     yield m
 
 
-def check_conditional_rp_origin(stmts: list, struct_defs: list) -> None:
+def check_conditional_rp_origin(stmts, struct_defs):
     """Reject returning ref[x] tied to a conditionally-RegisterPassable arg."""
     cond_rp = {}
     for sd in (struct_defs or []):
@@ -1719,7 +1709,7 @@ def _check_decl_trait_methods(struct_defs, trait_defs):
     return errors
 
 
-def check_conformance_declarations(struct_defs: list, trait_defs: list) -> None:
+def check_conformance_declarations(struct_defs, trait_defs):
     """Declaration-time checks for conditional trait conformance (parts 1, 4, 6)."""
     trait_bases = {}
     for td in (trait_defs or []):
@@ -1958,8 +1948,7 @@ def _flatten_and_assumptions(a_atoms):
     return assumptions
 
 
-def check_conditional_conformance_candidates(struct_defs: list, trait_defs: list,
-                                             module_src: str = '') -> None:
+def check_conditional_conformance_candidates(struct_defs, trait_defs, module_src=''):
     """Declaration-time candidate selection for conditional trait conformance
     (part 3)."""
     trait_by_name = {}
@@ -2357,7 +2346,7 @@ def _field_copy_move_problem(enclosing, fname, ftype_text, want_trait, struct_ma
     return ('cond', needed)
 
 
-def check_copy_move_synthesis(struct_defs: list, trait_defs: list) -> None:
+def check_copy_move_synthesis(struct_defs, trait_defs):
     """Declaration-time synthesized copy/move constructor diagnostics (part 4)."""
     trait_bases = {}
     for td in (trait_defs or []):
@@ -2532,7 +2521,7 @@ def _where_conforms_to_pred(module_src: str, targs: dict):
     return pred
 
 
-def check_where_clauses(module_src: str, template_src: str, targs: dict) -> None:
+def check_where_clauses(module_src: str, template_src: str, targs: dict):
     """Enforce the template's `where` clauses for the concrete `targs`.
 
     Each clause is folded by the shared constant folder
@@ -3852,32 +3841,23 @@ def gimple_exprtypes_split_commas(s):
     return out
 
 
-def _walk_nodes(node) -> list:
-    """Every node under `node` (lists and dicts descended, the node itself
-    included), preorder. An eager LIST for the reason `_ancestors_with_paths`
-    gives (a recursive generator is not linkable in the self-host build)."""
-    out = []
-    _walk_nodes_into(node, out)
-    return out
-
-
-def _walk_nodes_into(node, out: list) -> None:
+def _walk_nodes(node):
     if node is None:
         return
     if isinstance(node, list):
         for x in node:
-            _walk_nodes_into(x, out)
+            yield from _walk_nodes(x)
         return
-    out.append(node)
+    yield node
     if isinstance(node, dict):
         for v in node.values():
-            _walk_nodes_into(v, out)
+            yield from _walk_nodes(v)
         return
     try:
         fields = getattr(node, '__dataclass_fields__', None)
         if fields:
             for f in fields:
-                _walk_nodes_into(getattr(node, f), out)
+                yield from _walk_nodes(getattr(node, f))
             return
     except Exception:
         pass
@@ -3885,7 +3865,7 @@ def _walk_nodes_into(node, out: list) -> None:
     for attr in ('body','then_body','else_body','elifs','value','args','kwargs','func','obj','target','iterable','condition','left','right','operand','elements'):
         if hasattr(node, attr):
             try:
-                _walk_nodes_into(getattr(node, attr), out)
+                yield from _walk_nodes(getattr(node, attr))
             except Exception:
                 pass
 

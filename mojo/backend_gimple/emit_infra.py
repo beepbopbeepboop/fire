@@ -1399,8 +1399,6 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         obj, _hit = cas.get_or_build(key, '.o', _build_fn)
         return obj
     except Exception as e:
-        msg = f'[gimple_codegen] failed to compile link-mode inline-module cpp unit: {e}'
-        print(msg, flush=True)
         gimple_ctypes._debug_note('failed to compile link-mode inline-module cpp unit', e)
         return None
 
@@ -7080,7 +7078,7 @@ def _bind_local_decl(gen, name, ctype):
         gen._block_scope_frames[-1].append((name, saved))
 
 
-def _open_block_scope(gen) -> list:
+def _open_block_scope(gen):
     """Open a block body (an if/else/elif, loop, with, try/except/finally or
     match-case body). Returns the frame `_close_block_scope` needs."""
     frame = []
@@ -7088,7 +7086,7 @@ def _open_block_scope(gen) -> list:
     return frame
 
 
-def _close_block_scope(gen, frame: list) -> None:
+def _close_block_scope(gen, frame: list):
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""
