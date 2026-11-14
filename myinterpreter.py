@@ -928,16 +928,90 @@ def _is_required_method(m):
     return seen_ellipsis
 
 
-def _trait_closure(name, traits, out, seen):
-    """`name`'s trait and its bases, bases first, each once, restricted to the
-    traits this module defines."""
+def _trait_closure(name, scope, out, seen):
+    """`name`'s trait and its bases, bases first, each once, as trait entries
+    (`_static_traits`); a name that `scope` does not resolve is skipped."""
     base = name.split('[')[0].strip()
-    if base in seen or base not in traits:
+    ent = scope.get(base)
+    if ent is None:
+        # The parser keeps only the last component of a qualified base
+        # (`pk.T` -> `T`), so an imported trait is found by that suffix.
+        cands = {}
+        for k, v in scope.items():
+            if k.endswith('.' + base):
+                cands[id(v)] = v
+        if len(cands) == 1:
+            ent = list(cands.values())[0]
+    if ent is None or id(ent) in seen:
         return
-    seen.add(base)
-    for b in traits[base].bases:
-        _trait_closure(b, traits, out, seen)
-    out.append(base)
+    seen.add(id(ent))
+    for b in ent['def'].bases:
+        _trait_closure(b, ent['scope'], out, seen)
+    out.append(ent)
+
+
+_STATIC_MODULES = {}
+
+
+def _static_module_file(module, from_file):
+    """Path of the .mojo file or package `module` names, looked up beside the
+    importing file; None when it is not there (a stdlib or unknown module)."""
+    base = os.path.dirname(os.path.abspath(from_file)) if from_file else os.getcwd()
+    rel = os.path.join(*module.split('.'))
+    for cand in (os.path.join(base, rel + '.mojo'),
+                 os.path.join(base, rel, '__init__.mojo')):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _static_traits(stmts, filename, source, depth):
+    """The trait entries visible in a module: the traits it defines plus those
+    it imports from modules found beside it (`import pk` -> `pk.T`; `import
+    pk as q` -> `q.T`; `from pk import T [as U]` -> `T`/`U`). An entry is
+    {'def': TraitDef, 'file', 'src', 'scope'}, where `scope` is the scope of
+    the module the trait is DEFINED in (its own bases resolve there)."""
+    scope = {}
+    for st in stmts:
+        if isinstance(st, N.TraitDef):
+            scope[st.name] = {'def': st, 'file': filename, 'src': source, 'scope': scope}
+    if depth >= 4:
+        return scope
+    for st in stmts:
+        mod = None
+        if isinstance(st, (N.ImportStmt, N.FromImportStmt)):
+            path = _static_module_file(st.module, filename)
+            if path is None:
+                continue
+            mod = _static_load_module(path, depth + 1)
+        if mod is None:
+            continue
+        if isinstance(st, N.ImportStmt):
+            prefix = st.alias if st.alias else st.module
+            for k, ent in mod.items():
+                if ent['file'] == _static_module_file(st.module, filename):
+                    scope[prefix + '.' + k] = ent
+        else:
+            for (nm, al) in st.names:
+                if nm in mod:
+                    scope[al if al else nm] = mod[nm]
+    return scope
+
+
+def _static_load_module(path, depth):
+    key = os.path.abspath(path)
+    if key in _STATIC_MODULES:
+        return _STATIC_MODULES[key]
+    _STATIC_MODULES[key] = {}
+    try:
+        with open(path, encoding='utf-8') as fh:
+            text = fh.read()
+        stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
+        scope = _static_traits(stmts, path, text, depth)
+    except Exception:
+        scope = {}
+    _STATIC_MODULES[key] = scope
+    return scope
 
 
 def _trait_member_line(source, trait, member):
@@ -960,9 +1034,10 @@ def static_module_diagnostics(stmts, filename, source):
     anything runs -- the modular compiler reports these statically and reports
     every one, in source order. Text form, or None when there are none.
 
-    For a struct that names traits of this same module as bases, in the order
-    the real compiler stops at (measured against `tools/mojo build`; a struct
-    gets the errors of the FIRST phase that finds any):
+    For a struct that names traits (defined in this module or in a module
+    found beside it) as bases, in the order the real compiler stops at
+    (measured against `tools/mojo build`; a struct gets the errors of the FIRST
+    phase that finds any):
 
     1. a bracket parameter of the struct that a DEFAULT trait method also
        declares: `name conflict between parameter 'a' in the default trait
@@ -975,10 +1050,7 @@ def static_module_diagnostics(stmts, filename, source):
        implement all requirements for 'T'` with a note per missing required
        function and per missing/mistyped required `comptime` member (in the
        trait's declaration order), then `trait 'T' declared here`."""
-    traits = {}
-    for st in stmts:
-        if isinstance(st, N.TraitDef):
-            traits[st.name] = st
+    scope = _static_traits(stmts, filename, source, 0)
     records = []
 
     def record(st, msg, notes):
@@ -992,15 +1064,15 @@ def static_module_diagnostics(stmts, filename, source):
         order = []
         seen = set()
         for b in st.bases:
-            _trait_closure(b, traits, order, seen)
+            _trait_closure(b, scope, order, seen)
         if not order:
             continue
         own = {m.name for m in st.methods}
 
         # 1. parameter name conflicts with a default trait method
         found = False
-        for tn in order:
-            for m in traits[tn].methods:
+        for ent in order:
+            for m in ent['def'].methods:
                 if _is_required_method(m):
                     continue
                 for pname in m.comptime_params:
@@ -1008,50 +1080,52 @@ def static_module_diagnostics(stmts, filename, source):
                         found = True
                         record(st, f"name conflict between parameter '{pname}' in the "
                                    f"default trait method and a parameter in the struct",
-                               [{'file': filename, 'line': m.line, 'name': m.name,
+                               [{'file': ent['file'], 'line': m.line, 'name': m.name,
                                  'message': 'trait method declared here'}])
         if found:
             continue
 
         # 2. the same default method in two traits, not implemented here
         defaults = {}
-        for tn in order:
-            for m in traits[tn].methods:
+        for ent in order:
+            for m in ent['def'].methods:
                 if not _is_required_method(m):
-                    defaults.setdefault(m.name, []).append((tn, m))
+                    defaults.setdefault(m.name, []).append((ent, m))
         for mname, defs in defaults.items():
             if len(defs) >= 2 and mname not in own:
                 found = True
-                (t1, m1), (t2, m2) = defs[0], defs[1]
+                (e1, m1), (e2, m2) = defs[0], defs[1]
+                t1, t2 = e1['def'].name, e2['def'].name
                 record(st, f"trait method requirement '{mname}' has conflicting default "
                            f"implementations in '{t1}' and '{t2}'; you must implement it "
                            f"manually",
-                       [{'file': filename, 'line': m1.line, 'name': mname,
+                       [{'file': e1['file'], 'line': m1.line, 'name': mname,
                          'message': f"original default implementation from trait '{t1}' here"},
-                        {'file': filename, 'line': m2.line, 'name': mname,
+                        {'file': e2['file'], 'line': m2.line, 'name': mname,
                          'message': f"conflicting implementation from trait '{t2}' here"}])
         if found:
             continue
 
         # 3. unmet requirements
         have = set(own)
-        for tn in order:
-            for m in traits[tn].methods:
+        for ent in order:
+            for m in ent['def'].methods:
                 if not _is_required_method(m):
                     have.add(m.name)
-        src_lines = source.splitlines() if source else []
-        for tn in order:
-            tr = traits[tn]
+        for ent in order:
+            tr = ent['def']
+            tn = tr.name
+            tsrc = ent['src'].splitlines() if ent['src'] else []
             items = []   # (line, note)
             for m in tr.methods:
                 if _is_required_method(m) and m.name not in have:
-                    items.append((m.line, {'file': filename, 'line': m.line, 'name': m.name,
+                    items.append((m.line, {'file': ent['file'], 'line': m.line, 'name': m.name,
                                            'message': f"required function '{m.name}' is not implemented"}))
             for (mn, mt, _w) in getattr(tr, 'comptime_members', []):
-                pos = _trait_member_line(source, tr, mn)
+                pos = _trait_member_line(ent['src'], tr, mn)
                 if pos is None:
                     continue
-                if '=' in src_lines[pos[0] - 1]:
+                if '=' in tsrc[pos[0] - 1]:
                     continue    # the trait supplies a default
                 have_t = st.comptime_member_types.get(mn)
                 if mn not in st.comptime_aliases and have_t is None:
@@ -1061,13 +1135,13 @@ def static_module_diagnostics(stmts, filename, source):
                            f"to trait's required type '{mt}'")
                 else:
                     continue
-                items.append((pos[0], {'file': filename, 'line': pos[0], 'col': pos[1],
+                items.append((pos[0], {'file': ent['file'], 'line': pos[0], 'col': pos[1],
                                        'name': None, 'message': msg}))
             if not items:
                 continue
             items.sort(key=lambda it: it[0])
             notes = [it[1] for it in items]
-            notes.append({'file': filename, 'line': tr.line, 'name': tn,
+            notes.append({'file': ent['file'], 'line': tr.line, 'name': tn,
                           'message': f"trait '{tn}' declared here"})
             record(st, f"'{st.name}' does not implement all requirements for '{tn}'", notes)
     if not records:

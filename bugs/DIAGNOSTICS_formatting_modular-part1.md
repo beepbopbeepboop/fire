@@ -215,10 +215,25 @@ trait's declaration order; a trait's own default `comptime` member is not a
 requirement. Byte-identical to `tools/mojo build` on the shapes in
 `test_trait_members_diagnostic.py` (3 cases) and `test_trait_requirements_diagnostic.py`.
 
-Still open for this doc: traits and structs from an IMPORTED module (every
-group above only looks at the module's own declarations — the test's real
-shapes live in `diags_package`), K (candidate selection with `conforms_to`
+Still open for this doc: K (candidate selection with `conforms_to`
 evidence), C (`@fieldwise_init` / positional-only parameter inference), D
 (`@implicit(deprecated=True)`), E/F (`lacking evidence`), G (`comptime _ =
 pkg.f[0, 1]` where-violation), `where`-conditional trait conformance, and the
 source-less rendering (precompiled package with the source deleted).
+
+### 2026-11-14 (same day): the static trait checks follow imports
+
+Traits imported from a module beside the file (`import pk`, `import pk as q`,
+`from pk import T [as U]`) are checked like same-module ones, with the
+`Imported from <file>:<line>:` line before each note from the package.
+Byte-identical to `tools/mojo build -I` on the trait shapes of the real
+`diags_package` (`test_trait_imported_diagnostic.py`). The parser keeps only
+the last component of a qualified base (`pk.T` -> `T`), so the resolver matches
+imported traits by that suffix when it is unambiguous.
+
+Why the real test still cannot pass end to end: its main body holds the
+runtime-only groups (A, B, ...), and ours reports declaration errors BEFORE
+running anything and stops, so the main-body diagnostics (which the real
+compiler prints first, by source position) never appear. Closing that needs the
+static pass to also check calls (where clauses, overloads) rather than the
+interpreter discovering them at run time.
