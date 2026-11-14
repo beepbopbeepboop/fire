@@ -4461,6 +4461,61 @@ test('orch-swarm-log-quiet', [PY, 'tools/test_swarm_log_quiet.py'], mem='tiny',
 test('orch-verify-lock', [PY, 'tools/test_verify_lock.py'], mem='tiny',
      desc='orchestrator unit test (estate backlog, 2026-11-13)')
 
+# Registered with this branch's suite-self-test fix: five test files landed on
+# master with no `test(...)` entry, no bucket row, and no `UNREGISTERED` note,
+# which is exactly what the estate check exists to catch. Each is a small,
+# self-contained unit or pin test; `mem='tiny'` and `cache=True` follow the
+# pattern of the other cheap `check` members.
+test('binding-evidence', [PY, 'test_binding_evidence.py'], cache=True, mem='tiny',
+     extra=['test_binding_evidence.py'],
+     desc='type-argument bound evidence parse/decision checks (no compilation)')
+test('interp-list-ctor', [PY, 'test_interp_list_ctor.py'], cache=True, mem='tiny',
+     extra=['test_interp_list_ctor.py'],
+     desc='interpreter List(...) copies its iterable, length=/fill= build')
+test('module-globals-compiled', [PY, 'test_module_globals_compiled.py'],
+     cache=True, mem='tiny', extra=['test_module_globals_compiled.py'],
+     desc='module-scope globals() matches CPython in the compiled path')
+test('mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'],
+     cache=True, mem='tiny', extra=['test_mojoc_precompile_signature.py'],
+     desc='precompile a package to a .mojoc signature artifact and read it back')
+test('stdlib-syntax-variant', [PY, 'test_stdlib_syntax_variant.py'],
+     cache=True, mem='tiny', extra=['test_stdlib_syntax_variant.py'],
+     desc='std/utils/variant.mojo must transpile')
+
+# The same hole, one merge later: master landed four more runnable test files
+# with no `test(...)` entry while this branch was open, which put
+# `suite-self-test` straight back to red (bug:SUITE_self_test_red). All four are
+# cheap in-process pins (measured: 0.0-0.1 GB, sub-second to ~1 s, no build), so
+# the everyday loop is where they run.
+test('function-body-alias-class-import',
+     [PY, 'test_function_body_alias_class_import.py'], cache=True, mem='tiny',
+     extra=['test_function_body_alias_class_import.py'],
+     desc='a function-body `from M import Class as Alias` binds the class, '
+          'not an "unavailable in compiled mode" stub')
+test('gpu-offload-validation-part3',
+     [PY, 'test_gpu_offload_validation_part3.py'], cache=True, mem='tiny',
+     extra=['test_gpu_offload_validation_part3.py'],
+     desc='the GPU offload device-passable closure part-3 doc still records '
+          'its contract, hook points and blocker')
+test('mojoc-import-conformance', [PY, 'test_mojoc_import_conformance.py'],
+     cache=True, mem='tiny', extra=['test_mojoc_import_conformance.py'],
+     desc='a `.mojoc` import whose stored signature violates a trait bound is '
+          'reported, not accepted silently')
+test('mojoc-synthetic-signature-default',
+     [PY, 'test_mojoc_synthetic_signature_default.py'], cache=True, mem='tiny',
+     extra=['test_mojoc_synthetic_signature_default.py'],
+     desc='a synthetic signature renders an implicit conversion default '
+          'without materializing it')
+# Landed on master after this branch's last merge, with no `test(...)` entry,
+# which put `suite-self-test`'s estate row back to red (bug:SUITE_self_test_red).
+# In-process (writes and reads a `.mojoc`, runs the import-time checker); no
+# native build, so it belongs in the everyday loop.
+test('mojoc-implicit-default-conformance',
+     [PY, 'test_mojoc_implicit_default_conformance.py'], cache=True, mem='tiny',
+     extra=['test_mojoc_implicit_default_conformance.py'],
+     desc='a `.mojoc` implicit-default bracket parameter reports the full '
+          'three-line conformance diagnostic from the stored signature')
+
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
@@ -4966,6 +5021,16 @@ BUCKETS = {
 # inside the `check` literal because that literal is a single ~4 KB line every
 # parallel branch rewrites, so an edit there is a guaranteed merge conflict
 # for the one entry it adds.
+BUCKETS['check'].append('binding-evidence')
+BUCKETS['check'].append('interp-list-ctor')
+BUCKETS['check'].append('module-globals-compiled')
+BUCKETS['check'].append('mojoc-precompile-signature')
+BUCKETS['check'].append('stdlib-syntax-variant')
+BUCKETS['check'].append('function-body-alias-class-import')
+BUCKETS['check'].append('gpu-offload-validation-part3')
+BUCKETS['check'].append('mojoc-import-conformance')
+BUCKETS['check'].append('mojoc-synthetic-signature-default')
+BUCKETS['check'].append('mojoc-implicit-default-conformance')
 BUCKETS['check'].append('trait-comptime-member-conformance-diagnostic')
 
 # A name that is both a bucket and a test would make `suite.py <name>` mean

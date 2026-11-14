@@ -24,7 +24,7 @@ class TestStdlibSyntaxOwnedPointerAsyncrt(unittest.TestCase):
         for rel in ("std/memory/owned_pointer.mojo",
                     "std/runtime/_asyncrt.mojo"):
             with self.subTest(module=rel):
-                ok, msg, _cg, _gcc = transpile_file(str(stdlib / rel))
+                ok, msg, _cg, _gcc, _ref = transpile_file(str(stdlib / rel))
                 self.assertTrue(ok, f"{rel} failed to transpile: {msg}")
 
 

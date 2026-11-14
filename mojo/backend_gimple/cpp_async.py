@@ -738,8 +738,18 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                         ctype = 'int64_t'
         except Exception:
             pass
+        # Read the evidence off THIS FunctionDef, not the module-level table:
+        # by the time an imported module's generator unit is emitted, the
+        # module's own imports have been compiled (each a `lower()` that
+        # refills the bare-name table), so the table describes the last
+        # nested module rather than this one. See
+        # `coro._compute_pointer_evidence`, which stamps `_ptr_evidence` on
+        # every FunctionDef for exactly this reader. No fallback to the
+        # table: an unstamped node has no evidence of its own, and the
+        # table's entry belongs to whichever module ran last.
+        _ptr_ev = getattr(fn, '_ptr_evidence', ())
         if (ctype == 'char *' and (pt is None or pt == '')
-                and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
+                and pn in _ptr_ev
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
                         and isinstance(_n.func, gimple_ctypes.IdentExpr)
                         and _n.func.name == 'isinstance' and len(_n.args) == 2
