@@ -1,7 +1,7 @@
 SPLIT: parts 1-3; part 1 (conformance error on a precompiled import) landed
 with `test_mojoc_import_conformance.py`, so its doc is deleted. Remaining:
 `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`,
-`bugs/DIAGNOSTICS_mojoc_imports-part3.md`.
+`bugs/mid/DIAGNOSTICS_mojoc_imports-part3.md`.
 
 # DIAGNOSTICS step 10: mojoc / precompiled import errors
 
