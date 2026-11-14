@@ -114,8 +114,8 @@ rows in module_gen's HARDCODED AST layout maps (the same class as item 1);
 `align_value_error` was unannotated, so its parameter and return types drifted
 (`conflicting types ... have 'char *(int64_t)'`) — now `(val: int) ->
 str | None`; `Parser_parse_module` needed its second parameter in BOTH
-hand-written signature tables (`_SELFHOST_SIGS` and `_LIBC_SIGS`, the
-sig-table parse_module recovery bug fixed in 32d9c79c7); and lifted
+hand-written signature tables (`_SELFHOST_SIGS` and `_LIBC_SIGS`, per the
+selfhost sig-table parse_module recover fix, doc since deleted); and lifted
 lambdas were named `<enclosing>_lambda_<n>` with a PER-GEN counter, so two
 inlined modules lifting from a same-named comptime function collided
 (`redefinition of '_comptime_conforms_to_pred_lambda_1'`) — now qualified with

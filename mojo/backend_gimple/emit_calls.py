@@ -3224,6 +3224,40 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # an honest null pointer rather than aliasing dead storage.
             ptr_ctype = f'{at} *'
             return ptr_ctype, gen._new_val(ptr_ctype, f'({ptr_ctype})0')
+    # A module-local `alias` naming a constructible type, used as the callee
+    # of a constructor call (`F2(1.0)`): expand to the aliased type's text
+    # and dispatch through the existing SIMD/Scalar and Array/FixedSizeArray
+    # constructor arms below. Scoped to the callee position; a local variable
+    # of the same name shadows the alias and must not be rewritten.
+    if isinstance(node.func, gimple_ctypes.IdentExpr):
+        _alias_name = _as_str(node.func.name)
+        _type_aliases = getattr(gen, '_type_aliases', None)
+        if (_alias_name and _type_aliases and _alias_name in _type_aliases
+                and _alias_name not in getattr(gen, 'var_types', {})):
+            _alias_target = _type_aliases.get(_alias_name)
+            if _alias_target:
+                try:
+                    _alias_stmts = N.Parser(N.py_tokenize(str(_alias_target))).parse_module()
+                    if (_alias_stmts and isinstance(_alias_stmts[0], gimple_ctypes.ExprStmt)):
+                        _alias_func = _alias_stmts[0].value
+                        if (isinstance(_alias_func, gimple_ctypes.SubscriptExpr)
+                                and isinstance(_alias_func.obj, gimple_ctypes.IdentExpr)
+                                and _as_str(_alias_func.obj.name) in (
+                                    'SIMD', 'Scalar', 'Array', 'FixedSizeArray')):
+                            try:
+                                import dataclasses as _dc
+                                node = _dc.replace(node, func=_alias_func)
+                            except Exception:
+                                _node2 = gimple_ctypes.CallExpr(
+                                    func=_alias_func,
+                                    args=getattr(node, 'args', None),
+                                    kwargs=getattr(node, 'kwargs', None),
+                                    line=getattr(node, 'line', 0),
+                                    col=getattr(node, 'col', 0),
+                                )
+                                node = _node2
+                except Exception:
+                    pass
     # Generic container constructors: List[T](...), Dict[K,V](...), Set[T](...), Optional[T](...)
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
         base = node.func.obj.name
