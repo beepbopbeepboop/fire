@@ -2626,6 +2626,51 @@ def _binop_into(gen, dst: str, a: str, op: str, b: str) -> None:
     gen._emit('  ' + dst + ' = ' + _binop_text(gen, dts, a, op, b) + ';')
 
 
+def _loop_head(gen, idx: str, n: str, bb_cond: str, bb_body: str,
+               bb_post: str, bb_after: str, stmt: bool) -> None:
+    """The head of a counted loop `while idx < n:` -- THE spelling of it.
+
+        bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+        bb_post = gen._new_bb(); bb_after = gen._new_bb()
+        gen._loop_head(idx, n, bb_cond, bb_body, bb_post, bb_after, True)
+        ... bind the element, lower the body ...
+        gen._loop_tail(idx, bb_cond, bb_post, bb_after, True)
+
+    `idx` is an `int64_t` variable the caller has set to its start value.
+    Emits the jump to the test, the test, the branch, and the body's label.
+    `stmt` is True for a `for` STATEMENT, whose body may `break` (to
+    `bb_after`) or `continue` (to `bb_post`): the loop is then pushed on
+    `gen.loop_stack`, the depth is counted, and the body label carries the
+    iteration-count hint.  It is False for a comprehension or an internal
+    loop.  Pass the same `stmt` to `_loop_tail`."""
+    gen._goto(bb_cond)
+    gen._emit_label(bb_cond)
+    cond_t = gen._cmp(idx, '<', n)
+    gen._cond_goto(cond_t, bb_body, bb_after)
+    if stmt:
+        gen._loop_depth += 1
+        gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+        gen.loop_stack.append((bb_post, bb_after))
+    else:
+        gen._emit_label(bb_body)
+
+
+def _loop_tail(gen, idx: str, bb_cond: str, bb_post: str, bb_after: str,
+               stmt: bool) -> None:
+    """The tail of a counted loop opened by `_loop_head`: `idx += 1`, back
+    to the test, and the label after the loop."""
+    if stmt:
+        gen.loop_stack.pop()
+        gen._loop_depth -= 1
+    gen._goto(bb_post)
+    gen._emit_label(bb_post)
+    one = gen._new_val('int64_t', "(int64_t)1")
+    nxt = gen._binop('int64_t', idx, '+', one)
+    gen._copy(idx, nxt)
+    gen._goto(bb_cond)
+    gen._emit_label(bb_after)
+
+
 def _copy(gen, dst: str, src: str) -> None:
     """`dst = src;` -- THE way to assign one value to another.
 
@@ -4287,11 +4332,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-    gen._emit_label(bb_body)
+    gen._loop_head(idx64, len64, bb_cond, bb_body, bb_post, bb_after, False)
     if start_val is not None:
         disp_idx = gen._binop('int64_t', idx64, '+', f"{start_val}")
         gen._copy(f"{idx_c}", disp_idx)
@@ -4347,13 +4388,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
                 else:
                     gen._safe_coerce_emit('int64_t', _vt, _iv, _vc)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
-    gen._copy(idx64, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx64, bb_cond, bb_post, bb_after, False)
     # The comprehension is over: every name it bound is the enclosing
     # function's own binding again (see `ginf._restore_binding`).
     for _gn in gi:
@@ -4367,20 +4402,10 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-    gen._emit_label(bb_body)
+    gen._loop_head(idx64, len64, bb_cond, bb_body, bb_post, bb_after, False)
     gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str_cp', [f"mojo_str_data({_iv})", idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
-    gen._copy(idx64, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx64, bb_cond, bb_post, bb_after, False)
     ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
@@ -4410,11 +4435,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-    gen._emit_label(bb_body)
+    gen._loop_head(idx64, len64, bb_cond, bb_body, bb_post, bb_after, False)
     # `mojo_char_at_str`, for _gen_for_cstr's reason in full: gimple rejects a
     # `char` argument ("invalid argument to gimple call"), so the slice stood
     # in for `mojo_char_to_str` and allocated a two-byte buffer per character
@@ -4428,13 +4449,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     # `_gen_for_cstr` says the same).
     gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str', [_iv, idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
-    gen._copy(idx64, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx64, bb_cond, bb_post, bb_after, False)
     ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 

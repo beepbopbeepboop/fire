@@ -234,6 +234,15 @@ that is meant to be behaviour-preserving:
 - **Stage 5b. One value-info record.** The name-keyed tables become fields
   of one `ValueInfo` object per temp. `int64_t` splits into
   Int / Erased(T) / DynWord / Box in the value's info.
+- **Stage 6, counted loops (started 2026-11-14).** `gen._loop_head(idx, n,
+  bb_cond, bb_body, bb_post, bb_after, stmt)` and `gen._loop_tail(idx,
+  bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of
+  `while idx < n: ...; idx += 1`: the test, the branch, the body label, the
+  `loop_stack` / depth bookkeeping of a `for` statement, the increment and
+  the exit label. 14 of the hand-written copies use them. NOT converted yet:
+  the copies that spell the increment constant `1LL` (comprehension loops in
+  `emit_infra.py`), the cursor loops with no increment, and the nested
+  mini-loops in `emit_calls.py` / `emit_methods.py`.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.

@@ -1727,16 +1727,9 @@ def _gen_for_zip_longest(gen, node):
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', n_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen.loop_stack.append((bb_post, bb_after))
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, n_t, bb_cond, bb_body, bb_post, bb_after, True)
     gen._ziptmp = idx_t
     try:
         for si, vn in enumerate(tgt_names):
@@ -1770,16 +1763,7 @@ def _gen_for_zip_longest(gen, node):
         del gen._ziptmp
 
     gen._gen_loop_body(node.body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, f"{st}")
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _carry_nested_elem_type(gen, target, it_val, elem) -> None:
@@ -2010,29 +1994,13 @@ def _gen_for_zip(gen, node):
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', f"{n_t}")
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen.loop_stack.append((bb_post, bb_after))
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, f"{n_t}", bb_cond, bb_body, bb_post, bb_after, True)
     for _bi in range(len(tgt_names)):
         _zip_bind_slot(gen, tgt_names[_bi], seq_ptrs[_bi], seq_elems[_bi], idx_t)
     gen._gen_loop_body(node.body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    nxt = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, nxt)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None:
@@ -2071,16 +2039,9 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', len_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen.loop_stack.append((bb_post, bb_after))
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, len_t, bb_cond, bb_body, bb_post, bb_after, True)
     if start_val is not None:
         disp_idx = gen._binop('int64_t', idx_t, '+', f"{start_val}")
         gen._copy(f"{cidx_var}", disp_idx)
@@ -2102,15 +2063,7 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
         _emit_starred_slot_from_value(gen, starred_slot_name(star_src),
                                       'char *', cval_var, 'char *')
     gen._gen_loop_body(node.body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    nxt = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, nxt)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _gen_for_enumerate(gen, node):
@@ -2271,16 +2224,9 @@ def _gen_for_enumerate(gen, node):
     gen._copy(len_t, len64)
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', len_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen.loop_stack.append((bb_post, bb_after))
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, len_t, bb_cond, bb_body, bb_post, bb_after, True)
 
     if start_val is not None:
         disp_idx = gen._binop('int64_t', idx_t, '+', f"{start_val}")
@@ -2365,16 +2311,7 @@ def _gen_for_enumerate(gen, node):
             gen._copy(f"{cval_var}", elem64)
 
     gen._gen_loop_body(node.body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 
@@ -2562,15 +2499,9 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     gen._copy(len_t, len64)
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', len_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, len_t, bb_cond, bb_body, bb_post, bb_after, True)
     if is_tuple:
         elem64 = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{list_ptr}", idx_t])
         tuple_ptr = gen._coerce_to_type('int64_t', 'MojoList *', elem64)
@@ -2838,7 +2769,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         gen._dict_item_int_key_vars.add(var)
     else:
         gen._dict_item_int_key_vars.discard(var)
-    gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     if _is_pair_var:
         if _had_pair:
@@ -2860,15 +2790,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         gen._dict_item_int_key_vars.add(var)
     else:
         gen._dict_item_int_key_vars.discard(var)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
@@ -2881,27 +2803,12 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
     gen._copy(len_t, len64)
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', len_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, len_t, bb_cond, bb_body, bb_post, bb_after, True)
     gen._rt_into(gen._cname(var), 'mojo_char_at_str_cp', [f"mojo_str_data({it_val})", idx_t])
-    gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _gen_for_bytes(gen, var: str, it_val: str, body: list):
@@ -2912,28 +2819,13 @@ def _gen_for_bytes(gen, var: str, it_val: str, body: list):
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', len_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, len_t, bb_cond, bb_body, bb_post, bb_after, True)
     byte_t = gen._rt_call('int64_t', 'mojo_bytes_get', [it_val, idx_t])
     gen._copy(f"{gen._cname(var)}", byte_t)
-    gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
@@ -2944,28 +2836,13 @@ def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', len_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, len_t, bb_cond, bb_body, bb_post, bb_after, True)
     byte_t = gen._rt_call('int64_t', 'mojo_memoryview_get', [it_val, idx_t])
     gen._copy(f"{gen._cname(var)}", byte_t)
-    gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _gen_for_cstr(gen, var: str, it_val: str, body: list):
@@ -3013,27 +2890,12 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
-    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
-    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx_t, '<', len_t)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-
-    gen._loop_depth += 1
-    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._loop_head(idx_t, len_t, bb_cond, bb_body, bb_post, bb_after, True)
     gen._rt_into(gen._cname(var), 'mojo_char_at_str_cp', [it_val, idx_t])
-    gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
-    gen.loop_stack.pop()
-    gen._loop_depth -= 1
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx_t, '+', one)
-    gen._copy(idx_t, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx_t, bb_cond, bb_post, bb_after, True)
 
 
 def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,

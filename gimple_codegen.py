@@ -5913,6 +5913,12 @@ class GimpleGen:
         return grsl._cmp(self, a, op, b)
     def _binop_into(self, dst: str, a: str, op: str, b: str) -> None:
         grsl._binop_into(self, dst, a, op, b)
+    def _loop_head(self, idx: str, n: str, bb_cond: str, bb_body: str,
+                   bb_post: str, bb_after: str, stmt: bool) -> None:
+        grsl._loop_head(self, idx, n, bb_cond, bb_body, bb_post, bb_after, stmt)
+    def _loop_tail(self, idx: str, bb_cond: str, bb_post: str, bb_after: str,
+                   stmt: bool) -> None:
+        grsl._loop_tail(self, idx, bb_cond, bb_post, bb_after, stmt)
     def _goto(self, label: str) -> None:
         grsl._goto(self, label)
     def _cond_goto(self, cond: str, then_label: str, else_label: str) -> None:

@@ -6764,11 +6764,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-    gen._emit_label(bb_body)
+    gen._loop_head(idx64, len64, bb_cond, bb_body, bb_post, bb_after, False)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
     if _iv in getattr(gen, '_maybe_kinds_vals', ()) and gen._type_of(_as_str(gen0.target)) == 'int64_t':
         # a list that carries its own per-slot kinds: read each slot as the box
@@ -6807,13 +6803,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         else:
             gen._emit(f"  {_tgt} = (int64_t) {raw64};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
-    one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
-    gen._copy(idx64, st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(idx64, bb_cond, bb_post, bb_after, False)
     # The comprehension is over: the enclosing function's own binding for this
     # name is live again (see `_restore_binding`).
     _restore_binding(gen, _as_str(gen0.target), saved_target)
