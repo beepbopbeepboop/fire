@@ -7771,7 +7771,7 @@ class Parser:
             self._advance()
             if t.value == "lambda" and t.kind == "NAME" and (
                 self._peek().kind == "COLON"
-                or self._peek().kind == "NAME"
+                or self._peek().kind in ("NAME", "KW")
                 # LBRACKET/LPAREN/LBRACE are the Mojo lambda's own parameter
                 # block, capture list and parameter list; `lambda` is a real
                 # Python keyword and so is never an ordinary identifier, which
@@ -9878,22 +9878,31 @@ class Parser:
                     return self._parse_enum()
                 # else: fall through to expression statement
             if t.value == "trait":
-                # Same carve-out as the enum/comptime/param dispatches here: a
-                # trait DECLARATION must be followed by its name, so
-                # `trait = ...`, `trait.foo`, `trait(...)` and a bare `trait`
-                # are ordinary identifier uses and fall through to expression
-                # parsing. Without this the compiler's own Python sources
-                # cannot use `trait` as a variable name at all —
-                # mojo/middle/mojoc_conformance.py's
-                # `trait = (records or {}).get(...)` was refused with
-                # "Expected NAME got ASSIGN('=')", which aborted every
-                # whole-program compile of the self-host.
-                _nxt_tr = self._peek(1)
-                if _nxt_tr.kind == "NAME" or (
-                        _nxt_tr.kind == "STRING"
-                        and _nxt_tr.value.startswith("`")):
+                # `trait` is ambiguous the same way `fn`/`struct`/`enum` are:
+                # real Python has no `trait` keyword, so a local named `trait`
+                # is a legal identifier (`trait = ...`, `trait.foo(...)`,
+                # `trait(...)`). Only commit to the trait declaration parse when
+                # the shape that follows could actually BE one: `trait`
+                # immediately followed by a name-like token and then `[` (generic
+                # params), `(` (bases), or `:` (straight into the body). If it
+                # is clearly used as an ordinary identifier, fall through to
+                # expression/assignment parsing. Otherwise (e.g. a malformed or
+                # incomplete declaration like bare `trait` on its own line) keep
+                # routing to `_parse_trait` so parse errors/recovery behave as
+                # before.
+                nxt, nxt2 = self._peek(1), self._peek(2)
+                name_like = nxt.kind in ("NAME", "KW") or (
+                    nxt.kind == "STRING" and nxt.value.startswith("`"))
+                looks_like_traitdef = name_like and nxt2.kind in ("LBRACKET", "LPAREN", "COLON")
+                if looks_like_traitdef:
                     return self._parse_trait()
-                # else: fall through to expression/assignment parsing
+                if nxt.kind in ("ASSIGN", "DOT", "LPAREN", "LBRACKET"):
+                    # Ordinary identifier use at statement position.
+                    pass  # fall through to expression/assignment parsing
+                else:
+                    # Malformed/incomplete trait declaration: let _parse_trait
+                    # produce the diagnostic/recovery.
+                    return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
             if t.value == "comptime" or t.value == "param":
