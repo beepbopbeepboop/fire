@@ -76,6 +76,40 @@ def main():
         assert p.returncode == 0 and p.stdout.strip() == '5', (p.stdout, p.stderr)
 
 
+BIND_PACKAGE = 'def cf[a: Int, b: Int]() where a > 0:\n    pass\n'
+
+BIND_MAIN = '''import pk
+
+
+def lf[a: Int, b: Int]() where a > 0:
+    pass
+
+
+def main():
+    comptime x = pk.cf[0, 1]
+    comptime y = lf[0, 1]
+    comptime ok = lf[1, 1]
+'''
+
+BIND_WANT = "M:9:20: error: violated constraint\n    comptime x = pk.cf[0, 1]\n                   ^\nImported from M:1:\nP:1:32: note: constraint declared here evaluated to False, expected '(a > Int(0))'\ndef cf[a: Int, b: Int]() where a > 0:\n                               ^\nImported from M:1:\nP:1:5: note: function declared here\ndef cf[a: Int, b: Int]() where a > 0:\n    ^\nM:10:18: error: violated constraint\n    comptime y = lf[0, 1]\n                 ^\nM:4:32: note: constraint declared here evaluated to False, expected '(a > Int(0))'\ndef lf[a: Int, b: Int]() where a > 0:\n                               ^\nM:4:5: note: function declared here\ndef lf[a: Int, b: Int]() where a > 0:\n    ^\n"
+
+
+def test_violated_where_clause_in_a_comptime_binding():
+    # `comptime x = f[0, 1]` instantiates f without calling it: the message has
+    # no callee, and the caret sits on the callee (the `.` of a member callee)
+    # with no `~` run.
+    with tempfile.TemporaryDirectory() as d:
+        os.mkdir(os.path.join(d, 'pk'))
+        pk = os.path.join(d, 'pk', '__init__.mojo')
+        open(pk, 'w').write(BIND_PACKAGE)
+        m = os.path.join(d, 'g.mojo')
+        open(m, 'w').write(BIND_MAIN)
+        p = subprocess.run([sys.executable, FIRE, 'run', m],
+                           capture_output=True, text=True, timeout=300)
+        err = p.stderr.replace(pk, 'P').replace(m, 'M')
+        assert p.returncode == 1 and err == BIND_WANT, err
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_'):

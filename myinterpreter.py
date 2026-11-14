@@ -864,12 +864,15 @@ def _constraint_text(e):
     return None
 
 
-def where_violation_record(filename, node, loc, cond, site):
+def where_violation_record(filename, node, loc, cond, site, bare=False):
     """(message, record) for a call at `site` (a CallExpr) of function `node`
     (declared at `loc` = (file, line)) whose where-condition `cond` is False.
     The record is None when the call site or the constraint cannot be rendered
     the way the modular compiler does (the message alone is still an error)."""
     msg = f"invalid call to '{node.name}': violated constraint"
+    if bare:
+        # `comptime x = f[0, 1]`: no call, so the message carries no callee.
+        msg = 'violated constraint'
     text = _constraint_text(cond)
     if site is None or text is None or loc is None or not hasattr(site, 'func'):
         return msg, None
@@ -888,8 +891,9 @@ def where_violation_record(filename, node, loc, cond, site):
     after = 0
     if hasattr(callee, 'member') and getattr(callee, 'col', 0) > cc:
         caret = callee.col
-        tilde_from = cc
-        after = len(callee.member)
+        if not bare:
+            tilde_from = cc
+            after = len(callee.member)
     return msg, {
         'file': filename, 'line': site.line, 'caret': caret,
         'tilde_from': tilde_from, 'after': after, 'message': msg,
@@ -1171,13 +1175,24 @@ def _static_call_records(stmts, filename):
                     bound.add(str(p[0] if isinstance(p, tuple) else p).lstrip('*'))
             elif isinstance(n, N.VarDecl):
                 bound.add(n.name)
+            elif isinstance(n, N.ComptimeVarStmt):
+                bound.add(n.target)
             tgt = getattr(n, 'target', None)
             if isinstance(tgt, N.IdentExpr):
                 bound.add(tgt.name)
         for n in nodes:
-            if not isinstance(n, N.CallExpr):
+            bare = False
+            if isinstance(n, N.CallExpr):
+                callee = n.func
+            elif isinstance(n, N.ComptimeVarStmt) and isinstance(n.value, N.SubscriptExpr):
+                # `comptime x = f[0, 1]`: instantiates f, so its where clause
+                # is checked, but there is no call.
+                bare = True
+                callee = n.value
+                n = types.SimpleNamespace(func=callee, args=[], kwargs=[],
+                                          line=_callee_start(callee)[0], col=0)
+            else:
                 continue
-            callee = n.func
             sub = None
             if isinstance(callee, N.SubscriptExpr):
                 sub = callee
@@ -1207,7 +1222,7 @@ def _static_call_records(stmts, filename):
                     starred = True
             if starred:
                 continue
-            if sub is None and len(cands) >= 2:
+            if sub is None and len(cands) >= 2 and not bare:
                 specs = []
                 for c in cands:
                     specs.append((c,) + tuple(Interpreter._classify_params(c)))
@@ -1235,7 +1250,7 @@ def _static_call_records(stmts, filename):
                 for cond in (clause if isinstance(clause, list) else [clause]):
                     if _static_cond_false(cond, env):
                         msg, rec = where_violation_record(filename, c, (cfile, c.line),
-                                                          cond, n)
+                                                          cond, n, bare)
                         if rec is not None:
                             out.append(((n.line, rec['caret']), rec))
                         break

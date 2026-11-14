@@ -253,7 +253,12 @@ Running the real `diagnostics_in_missing_locs.mojo` (package source present)
 now prints, in the real compiler's order and with the same messages/notes:
 A (47), B (56), H (103), I (113), J (123), L (156, 167, 178). Missing from the
 real list: C (63, `no matching function in initialization`), E (78) and F (88)
-(`lacking evidence to prove correctness`), G (96, `violated constraint` for a
-`comptime _ = pkg.f[0, 1]` binding), D (65, deprecated implicit conversion, is
+(`lacking evidence to prove correctness`), D (65, deprecated implicit conversion, is
 not even in the real source-bearing output above) and K (137, candidate
 selection; the real compiler names the struct `'UnprovableWithValidCandidate[T]'`).
+
+Group G landed (`comptime x = pkg.f[0, 1]`, a binding that instantiates f
+without a call): `violated constraint` with no callee in the message, caret on the
+callee (the `.` of a member callee, no `~` run); byte-identical to `tools/mojo
+build`; covered by `test_static_call_diagnostics.py`. Known difference: the real
+compiler reports a second `comptime _ = ...` of the same name only once.
