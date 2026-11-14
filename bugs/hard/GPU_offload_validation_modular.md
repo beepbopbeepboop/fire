@@ -1,4 +1,4 @@
-SPLIT: bugs/GPU_offload_validation_modular-part2, bugs/GPU_offload_validation_modular-part3 (part1 triage landed and its doc deleted 2026-11-13: the per-case matrix is below; part4 dispositioned 2026-11-13: `test_regress_gpu_offload_validation_modular_part4.py`)
+SPLIT: part2 `bugs/mid/GPU_offload_validation_modular-part2.md`; part3 dispositioned 2026-11-13 (BLOCKED: enqueue-time device-passable closure arg type/layout validation requires MAX `DeviceContext`/`compile_function`+compiled-kernel metadata and `DevicePassable` device encoding/layout support not present in this tree) with pinning test `test_gpu_offload_validation_part3.py`, doc deleted; part1 triage landed and its doc deleted 2026-11-13 (per-case matrix below); part4 dispositioned 2026-11-13: `test_regress_gpu_offload_validation_modular_part4.py`
 # GPU: offload validation for modular test cases (category C)
 
 ## Symptom
