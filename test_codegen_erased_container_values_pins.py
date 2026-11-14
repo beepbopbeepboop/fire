@@ -5,9 +5,10 @@ Every `test_*` here is the Done-when test of a part that has LANDED: its bug
 doc is deleted and the assertion is now a standing pin. This is the registered
 `reg-codegen-erased-container-values` job, so it must stay green.
 
-The per-part Done-when probes of the still-open parts (p4_alias, p4_comptime,
-part5) live in test_codegen_erased_container_values.py and run by their bug
-docs' commands; a probe moves here, in the same commit that lands its part.
+The per-part Done-when probes of the still-open parts (p1_alias, p2_alias_ctor,
+p3_comptime) live in
+test_codegen_erased_container_values.py and run by their bug docs' commands; a
+probe moves here, in the same commit that lands its part.
 
 They assert on the C of one generated function body, not on the whole module:
 the module header already contains `double` and `float` (`extern double
@@ -29,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import build_stdlib_dylib as b
+import gimple_codegen as g
 
 
 def _compile(src, name):
@@ -96,6 +98,32 @@ SIMD_SIG_SRC = (
 SIMD_INT_SIG_SRC = (
     'def gi(x: SIMD[DType.int32, 2]) -> SIMD[DType.int32, 2]:\n'
     '    return x\n'
+)
+# part4: an Array/FixedSizeArray parameter keeps the element type its
+# annotation declares. The parameter is a tracked `MojoList *` and `a[0]`
+# reads the element's own kind, so a Float32 element reads `double` (the
+# constructor arm stores Float32 elements as double) and an Int element
+# still reads `int64_t`.
+P4_CONTAINER_PARAM_SRC = (
+    'def take(a: Array[Float32, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def span_take(a: Array[Float32, 4]):\n'
+    '    var s = Span(a)\n'
+    '    return s[0]\n'
+    '\n'
+    'def take_fixed(a: FixedSizeArray[Float32, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def take_int(a: Array[Int, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def take_fixed_int(a: FixedSizeArray[Int, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def f():\n'
+    '    var a = Array[Float32, 4](fill=0.0)\n'
+    '    return take(a)\n'
 )
 
 
@@ -179,6 +207,25 @@ def test_part4_float_simd_survives_call_and_return():
     assert 'int64_t r;' not in body, body
 
 
+def test_part4_container_param_keeps_element_type():
+    c = _compile(P4_CONTAINER_PARAM_SRC, 'p4_container_param')
+    for fn in ('p4_container_param_take', 'p4_container_param_take_fixed'):
+        body = _defn(c, fn)
+        assert '(MojoList * a)' in body, body
+        assert 'mojo_list_get_int' not in body, body
+        assert 'mojo_list_get_double' in body, body
+    sbody = _defn(c, 'p4_container_param_span_take')
+    assert '_mojo_at_char' not in sbody, sbody
+    assert '_mojo_at_double' in sbody, sbody
+    # An integer element keeps its own typed read.
+    for fn in ('p4_container_param_take_int',
+               'p4_container_param_take_fixed_int'):
+        body = _defn(c, fn)
+        assert '(MojoList * a)' in body, body
+        assert 'mojo_list_get_int' in body, body
+        assert 'mojo_list_get_double' not in body, body
+
+
 # part4-part1 (replan of part4, see bugs/mid/CODEGEN_simd_and_array_values_
 # erase_to_int64-part4-part1.md): a SIMD[<float dtype>, N] parameter and
 # return keep the scalar C type, and the call-result local inherits it.
@@ -201,6 +248,39 @@ def test_part4_part1_int_simd_unchanged():
     idbody = _defn(c, 'simd_sig_gi')
     idsig = idbody.splitlines()[1].strip()
     assert idsig.startswith('int64_t ') and idsig.endswith('(int64_t x)'), idbody
+
+
+# part5: Scalar[X] / SIMD[X, 1] resolve to the scalar C type of X. Its doc was
+# deleted with the fix; the Done-when probe moved here from the open-probe
+# harness.
+def test_part5_scalar_annotation_resolves_to_scalar_ctype():
+    gen = g.GimpleGen()
+    expect = {
+        'Float32': 'float',
+        'Float64': 'double',
+        'Scalar[Float32]': 'float',
+        'SIMD[Float32, 1]': 'float',
+        'Scalar[DType.float32]': 'float',
+        'Scalar[Float64]': 'double',
+        'Scalar[DType.float64]': 'double',
+    }
+    bad = {a: (gen._resolve_type(a), want) for a, want in expect.items()
+           if gen._resolve_type(a) != want}
+    assert not bad, 'annotation -> (got, want): %r' % (bad,)
+
+    # A comptime local `dt` bound to a float dtype must resolve through the
+    # comptime binding, not stay erased to int64_t.
+    gen._comptime_vals['dt32'] = 'DType.float32'
+    gen._comptime_vals['dt64'] = 'DType.float64'
+    expect_ct = {
+        'Scalar[dt32]': 'float',
+        'SIMD[dt32, 1]': 'float',
+        'Scalar[dt64]': 'double',
+        'SIMD[dt64, 1]': 'double',
+    }
+    bad = {a: (gen._resolve_type(a), want) for a, want in expect_ct.items()
+           if gen._resolve_type(a) != want}
+    assert not bad, 'comptime annotation -> (got, want): %r' % (bad,)
 
 
 if __name__ == '__main__':

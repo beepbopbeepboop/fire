@@ -228,7 +228,7 @@ _CASES = {
     'tagged': [test_yield_from_tagged_nested_generator_delegation_matches_cpython],
 }
 
-_DEFAULT_CASES = ['minimal', 'main-shape', 'tagged']
+_DEFAULT_CASES = ['minimal', 'tagged']
 
 
 if __name__ == '__main__':

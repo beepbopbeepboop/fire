@@ -906,9 +906,24 @@ class StructDef:
     # FunctionDef.where_clause: None when absent, one expression, or a list.
     # A `(cond, "message")` entry is a TupleExpr. See _parse_where_clauses.
     where_clause: object = None
+    # Parallel tables for comptime member declarations, keyed by member name:
+    # the declared type annotation ('' when the member has none) and the
+    # member's own `where` clause text ('' when none). Kept beside
+    # StructDef.comptime_aliases so that table's many value readers are
+    # unchanged. Two string-valued dicts rather than one dict of tuples: the
+    # self-hosted compiled path stores dict values as one machine word, and a
+    # tuple value has no such representation (a list of tuples is used for
+    # `base_constraints`, but `bases`-style parallel lists are the established
+    # spelling for a table the compiled path has to read back).
+    comptime_member_types: dict = field(default_factory=dict)
+    comptime_member_wheres: dict = field(default_factory=dict)
     # (name, type-annotation source) for each bracket parameter, in declaration
     # order. Read by _check_inferred_param_dependencies.
     bracket_types: list = field(default_factory=list)
+    # Full bracket-parameter records in declaration order, one per name in the
+    # bracket block: (name, type_annotation_source_or_"", default_source_text_or_None).
+    # Includes trait-bounded type parameters that bracket_types omits.
+    bracket_param_info: list = field(default_factory=list)
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -972,6 +987,8 @@ class TraitDef:
     # Parent trait names in declaration order, e.g. `trait Sub(Base):`.
     # Parsed from the parenthesised trait list; empty when none declared.
     bases: list = field(default_factory=list)
+    # Trait comptime member requirements: (name, type_ann, where_clause).
+    comptime_members: list = field(default_factory=list)
     line: int = 0
     col: int = 0
 
@@ -1083,6 +1100,8 @@ class ComptimeVarStmt:
     """Compile-time variable assignment: comptime NAME = expr"""
     target: str
     value: object
+    type_ann: str = None
+    where_clause: str = ""
     line: int = 0
     col: int = 0
 
@@ -4998,7 +5017,7 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
-def align_value_error(val: int):
+def align_value_error(val: int) -> str | None:
     """Shared @align value rule: None if valid, else a diagnostic suffix."""
     try:
         v = int(val)
@@ -5681,11 +5700,13 @@ class Parser:
         # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
         param_fields = []
         bracket_params = []
+        bracket_param_info = []
         if self._peek().kind == "LBRACKET":
             param_fields = self._parse_struct_params_as_fields()
             bracket_params = [f.name for f in param_fields
                               if isinstance(f, VarDecl)]
             type_param_names = list(getattr(self, '_struct_param_names', []) or [])
+            bracket_param_info = list(getattr(self, '_struct_bracket_param_info', []) or [])
         else:
             type_param_names = []
         # `struct Child(Base1, Base2):` / `class Child(Base):` — Python-style
@@ -5942,23 +5963,31 @@ class Parser:
         # _as_comptimevar_node). `_cs` is statically ComptimeVarStmt, so
         # `.target` compiles to a direct `char *` load on both backends.
         aliases = {}
+        comptime_member_types = {}
+        comptime_member_wheres = {}
         for _cs in body:
             if not isinstance(_cs, ComptimeVarStmt):
                 continue
             _cvnode = _as_comptimevar_node(_cs)
             aliases[_cvnode.target] = _cvnode.value
+            comptime_member_types[_cvnode.target] = _cvnode.type_ann or ""
+            comptime_member_wheres[_cvnode.target] = _cvnode.where_clause or ""
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         self._validate_align_decorators(decs)
         align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          align_expr=align_expr,
-                         comptime_aliases=aliases, bases=bases,
+                         comptime_aliases=aliases,
+                         comptime_member_types=comptime_member_types,
+                         comptime_member_wheres=comptime_member_wheres,
+                         bases=bases,
                          base_constraints=base_constraints,
                          keywords=class_keywords,
                          bracket_params=bracket_params,
                          type_param_names=type_param_names,
                          where_clause=struct_where,
+                         bracket_param_info=bracket_param_info,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
 
@@ -6130,9 +6159,19 @@ class Parser:
         body = self._parse_block()
         self._lazy_import_blockers.pop()
         methods = [s for s in body if isinstance(s, FunctionDef)]
+        # A trait's `comptime NAME: Type` is a REQUIREMENT; the same spelling
+        # with a value (`comptime NAME: Type = default`, e.g. EnumLike's
+        # `_enum_elt_type_for_case`) supplies a default and imposes nothing on
+        # conforming types. Only the value-less form is a requirement.
+        comptime_members = []
+        for s in body:
+            if isinstance(s, ComptimeVarStmt) and s.value is None:
+                comptime_members.append(
+                    (s.target, s.type_ann or "", s.where_clause or ""))
         decs = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        return TraitDef(name=name, methods=methods, decorators=decs, bases=bases)
+        return TraitDef(name=name, methods=methods, decorators=decs, bases=bases,
+                        comptime_members=comptime_members)
 
     def _parse_try(self):
         # The `try` keyword's own line, recorded because `TryStmt` is the one
@@ -6301,47 +6340,25 @@ class Parser:
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
         if t.kind == "NAME" or (t.kind == "STRING" and t.value.startswith("`")):
             name = self._advance().value
+            type_ann = None
+            where_clause = ""
             # Skip optional type parameters: comptime Alias[T, U]: Type = ...
             if self._peek().kind == "LBRACKET": self._skip_bracketed()
-            # Skip optional type annotation: comptime MIN: Bool = False
+            # Optional type annotation: comptime MIN: Bool = False
             if self._peek().kind == "COLON":
                 self._advance()  # skip colon
-                self._parse_type_ann()  # parse and discard type annotation
-                # Skip an optional `where <expr>` clause AFTER the annotation —
-                # the mid-statement form the funcdef/struct-head `where` skips
-                # (see _parse_funcdef's own and _parse_struct's) have no
-                # business with: `comptime F: Trait where conforms_to(T,
-                # Movable & Deinitable) = ...`. Every std/collections
-                # container (Array, List, Deque, LinkedList, Dict) spells its
-                # `IteratorOwnedType` alias exactly this way, MULTI-LINE:
-                #
-                #     comptime IteratorOwnedType: Iterator where conforms_to(
-                #         Self.T, Deinitable & Movable
-                #     ) = _ListIterOwned[Self.T]
-                #
-                # Without this the next token after the annotation is the NAME
-                # `where`, not `ASSIGN`, so the function returned
-                # ExprStmt(IdentExpr(name)) — the alias silently dropped — and
-                # the continuation `where conforms_to(...) = ...` parsed as an
-                # ORDINARY assignment statement, which _parse_struct then put
-                # into StructDef.fields, where every `.name` reader (elaborate
-                # .py's _struct_layout_anns is the measured crash) died with
-                # "AttributeError: 'AssignStmt' object has no attribute
-                # 'name'".
-                #
-                # The clause is an EXPRESSION (`conforms_to(...) and
-                # conforms_to(...)` — Dict's is two calls joined by `and` with
-                # no enclosing parens), followed by `= <RHS>`, so it is parsed
-                # as one expression and discarded — a skip-to-NEWLINE (the
-                # funcdef form) would swallow the `= <RHS>` for the single-line
-                # spelling, since NEWLINE is only emitted once brackets balance.
-                # The fallback token-skip (on a misparse of the clause itself)
-                # stops at the `=` so the RHS stays reachable.
+                type_ann = self._parse_type_ann()
+                # Optional `where <expr>` clause AFTER the annotation —
+                # `comptime F: Trait where conforms_to(T, Movable) = ...`.
+                # Parsed as an expression and retained (as text) for trait
+                # comptime member requirement checking, while preserving the
+                # tolerant fallback behavior.
                 if self._peek().kind == "NAME" and self._peek().value == "where":
                     self._advance()  # where
                     _where_saved = self._pos
+                    _wexpr = None
                     try:
-                        self._parse_expr(0)
+                        _wexpr = self._parse_expr(0)
                     except (SyntaxError, ValueError, TypeError, AttributeError,
                             IndexError, KeyError):
                         self._pos = _where_saved
@@ -6350,7 +6367,7 @@ class Parser:
                             self._parse_type_ann()
                             self._pos = _where_saved
                             try:
-                                self._parse_expr(0)
+                                _wexpr = self._parse_expr(0)
                             except Exception:
                                 self._pos = _where_saved
                                 while self._peek().kind not in (
@@ -6361,6 +6378,11 @@ class Parser:
                             while self._peek().kind not in (
                                     "ASSIGN", "NEWLINE", "DEDENT", "EOF"):
                                 self._advance()
+                    if _wexpr is not None:
+                        try:
+                            where_clause = _expr_constraint_text(_wexpr) or ""
+                        except Exception:
+                            where_clause = ""
             # A multi-target comptime binding: `comptime a, b = expr(...)`,
             # which unpacks ONE compile-time value into two names, and each
             # target may itself be a parenthesised (possibly nested) group —
@@ -6424,12 +6446,23 @@ class Parser:
                 # `test_gimple_runner.py`. The rename stays: it is free, and it
                 # keeps this function's own C output identical to what the
                 # self-host stages were compared byte-for-byte against.
-                return [ComptimeVarStmt(target=_name, value=rhs) for _name in targets]
+                return [ComptimeVarStmt(target=_name, value=rhs,
+                                        type_ann=type_ann,
+                                        where_clause=where_clause)
+                        for _name in targets]
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 # Parse/skip RHS expression, handling complex function types
                 rhs = self._skip_comptime_rhs()
-                return [ComptimeVarStmt(target=name, value=rhs)]
+                return [ComptimeVarStmt(target=name, value=rhs,
+                                        type_ann=type_ann,
+                                        where_clause=where_clause)]
+            # Declaration form without value, e.g. trait comptime requirement:
+            #   `comptime _enum_is_exhaustive: Bool`
+            if type_ann is not None or where_clause:
+                return [ComptimeVarStmt(target=name, value=None,
+                                        type_ann=type_ann,
+                                        where_clause=where_clause)]
             return ExprStmt(IdentExpr(name))
         raise SyntaxError(f"{self._loc(t)}Unexpected token after comptime: {t.value!r}")
 
@@ -8355,6 +8388,7 @@ class Parser:
         # not comptime VALUE parameters), but the StructDef's type_param_names
         # must still see them — see that field's comment.
         self._struct_param_names = []
+        self._struct_bracket_param_info = []
         while True:
             t = self._peek()
             if t.kind in ('RBRACKET', 'EOF'):
@@ -8379,34 +8413,41 @@ class Parser:
                 name = t.value
                 self._struct_param_names.append(name)
                 self._advance()
+                type_ann = ''
+                default_text = None
                 if self._peek().kind == 'COLON':
                     self._advance()  # consume ':'
                     type_ann = self._parse_type_ann()
-                    # Skip optional default value ('=' tokenizes as ASSIGN)
+                    # Optional default value ('=' tokenizes as ASSIGN)
                     if self._peek().kind in ('EQUAL', 'ASSIGN') or (
                             self._peek().kind == 'OP' and self._peek().value == '='):
                         self._advance()  # consume '='
-                        # Skip default value expression (balanced brackets)
+                        # Capture default value expression as source text.
                         depth = 0
+                        parts = []
                         while True:
                             pk = self._peek()
                             if pk.kind == 'EOF':
                                 break
                             if pk.kind in ('LPAREN', 'LBRACKET', 'LBRACE'):
                                 depth += 1
-                                self._advance()
+                                parts.append(self._advance().value)
                             elif pk.kind in ('RPAREN', 'RBRACE'):
                                 depth -= 1
-                                self._advance()
+                                parts.append(self._advance().value)
                             elif pk.kind == 'RBRACKET':
                                 if depth <= 0:
                                     break
                                 depth -= 1
-                                self._advance()
+                                parts.append(self._advance().value)
                             elif pk.kind == 'COMMA' and depth == 0:
                                 break
                             else:
-                                self._advance()
+                                parts.append(self._advance().value)
+                        text = " ".join(parts).strip()
+                        for ch in "[](),.":
+                            text = text.replace(" " + ch, ch).replace(ch + " ", ch)
+                        default_text = text if text else None
                     # `name: TraitName` is a generic TYPE parameter (T conforms
                     # to the trait), not a comptime VALUE parameter — it must
                     # NOT become a real field, or @fieldwise_init's synthesized
@@ -8418,6 +8459,7 @@ class Parser:
                 else:
                     # No colon — skip this token (could be a bare type name)
                     pass
+                self._struct_bracket_param_info.append((name, type_ann, default_text))
             else:
                 self._advance()  # skip unexpected token
         return fields

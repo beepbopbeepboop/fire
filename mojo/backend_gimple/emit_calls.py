@@ -106,16 +106,16 @@ def _pack_generator_star_args(gen, arg_pairs: list, star: int) -> list:
     disagree in kind, so one list never mixes accessors. Expects every fixed
     slot before `star` to be filled already."""
     _fixed = arg_pairs[:star]
-    _lst = gen._new_val('MojoList *', "mojo_list_new ()")
+    _lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
     for _at, _av in arg_pairs[star:]:
         _ct = _as_str(_at)
         if _ct == 'char *':
-            gen._emit(f"  mojo_list_append_str ({_lst}, {_av});")
+            gen._rt_void('mojo_list_append_str', [_lst, f"{_av}"])
         elif _ct == 'double':
-            gen._emit(f"  mojo_list_append_double ({_lst}, {_av});")
+            gen._rt_void('mojo_list_append_double', [_lst, f"{_av}"])
         else:
             _av = gen._coerce_to_type(_at, 'int64_t', _av)
-            gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+            gen._rt_void('mojo_list_append_int', [_lst, f"{_av}"])
     return _fixed + [('MojoList *', _lst)]
 
 
@@ -310,9 +310,12 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
     # (`__mgco_`) one has none, so noting its handle would be a no-op call.
     if _base and not _as_str(_base).startswith('__mgco_'):
         _start_sym = f"{_base}_start"
-        # -fgimple call operands cannot be casts, so the start symbol's
-        # address is materialised into its own temp first.
-        _start_ptr = gen._new_val('void *', f"(void *)&{_start_sym}")
+        # -fgimple cannot parse `(void *)&sym` (nor a cast applied to a bare
+        # function name): its grammar has no expression form for a function
+        # address. `&sym` alone IS accepted, and assigning it to the
+        # `void *` temp performs the same conversion the cast asked for, so
+        # materialise the address with no cast text.
+        _start_ptr = gen._new_val('void *', f"&{_start_sym}")
         # Keep the handle in MojoGenerator* form; mojo_gen_note returns the
         # same handle word and records it in the runtime handle table.
         _h = gen._new_temp('int64_t')
@@ -413,14 +416,14 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     resumed = gen._new_val('_Bool', f"{base}_resume ({av})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
-    gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._cond_goto(resumed, bb_ok, bb_exhausted)
     gen._emit_label(bb_exhausted)
     gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
     gen._emit_label(bb_stopiter)
-    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
     _stop_value_attach(gen, av, base)
-    gen._emit("  mojo_raise ();")
-    gen._emit(f"  goto {bb_merge};")
+    gen._rt_void('mojo_raise', [])
+    gen._goto(bb_merge)
     gen._emit_label(bb_ok)
     result = gen._new_val(vct, f"{base}_value ({av})")
     if api.get('boxed_container'):
@@ -428,7 +431,7 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     if api.get('mixed_slots') and vct == 'int64_t':
         gen._boxed_vals.add(result)       # a tagged word: rendered by kind
         gen._tagged_word_vals.add(result)
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -493,17 +496,17 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
         resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
-    gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._cond_goto(resumed, bb_ok, bb_exhausted)
     gen._emit_label(bb_exhausted)
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
-    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
     _stop_value_attach(gen, av, api['base'])
-    gen._emit("  mojo_raise ();")
-    gen._emit(f"  goto {bb_merge};")
+    gen._rt_void('mojo_raise', [])
+    gen._goto(bb_merge)
     gen._emit_label(bb_ok)
     result = gen._new_val(vct, f"{api['base']}_value ({av})")
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -548,7 +551,7 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
         f"__mojo_gen_throw ({handle}, {gen._exc_type_id(exc_name)}, {msg}, 0)")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
-    gen._emit(f"  if ({thrown}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._cond_goto(thrown, bb_ok, bb_exhausted)
     gen._emit_label(bb_exhausted)
     # The body propagated something (or ended): re-raise it HERE, on the
     # consumer's own frame, exactly as _lower_generator_next does. The
@@ -557,13 +560,13 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
     # flag, which is what makes the caller's `except` see it.
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
-    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
     _stop_value_attach(gen, av, api['base'])
-    gen._emit("  mojo_raise ();")
-    gen._emit(f"  goto {bb_merge};")
+    gen._rt_void('mojo_raise', [])
+    gen._goto(bb_merge)
     gen._emit_label(bb_ok)
     result = gen._new_val(vct, f"{api['base']}_value ({av})")
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -592,12 +595,12 @@ def _lower_generator_close(gen, node, av: str, api: dict):
     zero_word = gen._new_val('int64_t', '0')
     ignored = gen._new_val('_Bool', f"{closed_word} != {zero_word}")
     bb_ok = gen._new_bb(); bb_ignored = gen._new_bb()
-    gen._emit(f"  if ({ignored}) goto {bb_ignored}; else goto {bb_ok};")
+    gen._cond_goto(ignored, bb_ignored, bb_ok)
     gen._emit_label(bb_ignored)
     # Real Python: "RuntimeError: generator ignored GeneratorExit" when a
     # close()d generator yields again instead of unwinding.
-    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('RuntimeError')});")
-    gen._emit("  mojo_raise ();")
+    gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('RuntimeError')}"])
+    gen._rt_void('mojo_raise', [])
     gen._emit_label(bb_ok)
     return 'void', None
 
@@ -640,13 +643,13 @@ def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # Pointer-to-pointer reinterpret (e.g. wrapping another
         # UnsafePointer's raw value, or a `.unsafe_ptr()` result of a
         # different element type) — straight cast.
-        return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){av}")
+        return ptr_ctype, gen._cast(ptr_ctype, av)
     # Integer address -> pointer. GIMPLE rejects a direct int64_t->T* cast
     # in one statement ("invalid conversion"); go through void* in two
     # single-cast statements, the same pattern `_strided_data_ptr` uses.
-    av64 = av if at == 'int64_t' else gen._new_val('int64_t', f"(int64_t){av}")
-    vp = gen._new_val('void *', f"(void *){av64}")
-    return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){vp}")
+    av64 = av if at == 'int64_t' else gen._cast('int64_t', av)
+    vp = gen._cast('void *', f"{av64}")
+    return ptr_ctype, gen._cast(ptr_ctype, vp)
 
 
 def _lower_immpointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -745,7 +748,7 @@ def _lower_immpointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]
         at, av = gen.lower_expr(_to_expr.func.obj)
     else:
         at, av = gen.lower_expr(_to_expr)
-    av64 = av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}')
+    av64 = av if at == 'int64_t' else gen._cast('int64_t', av)
     # The static word-slot shape is only emitted where the enclosing C
     # function is GUARANTEED untagged: a top-level function (never
     # tagged) or a function whose body has ALREADY emitted a setjmp
@@ -782,10 +785,10 @@ def _lower_immpointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]
     # cast, no word indirection). Valid in strict GIMPLE: calls and casts
     # only, no address-of.
     tview = gen._new_temp('MojoList *')
-    gen._emit(f'  {tview} = mojo_list_new ();')
-    gen._emit(f'  mojo_list_append_int ({tview}, {av64});')
+    gen._rt_into(tview, 'mojo_list_new', [])
+    gen._rt_void('mojo_list_append_int', [tview, f"{av64}"])
     t = gen._new_temp('int64_t *')
-    gen._emit(f'  {t} = (int64_t *){tview};')
+    gen._cast_into(t, 'int64_t *', tview)
     return 'int64_t *', t
 
 
@@ -826,7 +829,7 @@ def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # for the degenerate no-arg spelling rather than emit invalid C.
     if node.args:
         nt, nv = gen.lower_expr(node.args[0])
-        n_val = nv if nt == 'int64_t' else gen._new_val('int64_t', f'(int64_t){nv}')
+        n_val = nv if nt == 'int64_t' else gen._cast('int64_t', nv)
     else:
         n_val = gen._new_val('int64_t', '(int64_t)1')
     for a in node.args[1:]:
@@ -1132,7 +1135,7 @@ def _lower_siter_collect_list(gen, it_v: str) -> tuple[str, str] | None:
     collector builds — measured)."""
     gen._func_used_setjmp = True
     l = gen._new_temp('MojoList *')
-    gen._emit(f"  {l} = mojo_list_new ();")
+    gen._rt_into(l, 'mojo_list_new', [])
     bb_loop = gen._new_bb()
     bb_exc = gen._new_bb()
     top1 = gen._new_temp('int')
@@ -1142,18 +1145,18 @@ def _lower_siter_collect_list(gen, it_v: str) -> tuple[str, str] | None:
     gen._emit(f"  {inc} = {top1} + 1;")
     gen._emit(f"  _mojo_exc_top = {inc};")
     gen._emit(f"  {top2} = _mojo_exc_top;")
-    gen._emit("  mojo_cleanup_checkpoint_save ();")
+    gen._rt_void('mojo_cleanup_checkpoint_save', [])
     sj = gen._new_temp('int')
     gen._emit(f"  {sj} = setjmp (_mojo_exc_stack[{top2}]);")
     ct = gen._new_temp('_Bool')
     gen._emit(f"  {ct} = {sj} != 0;")
-    gen._emit(f"  if ({ct}) goto {bb_exc}; else goto {bb_loop};")
+    gen._cond_goto(ct, bb_exc, bb_loop)
     gen._emit_label(bb_loop)
     e = gen._new_val('int64_t', f"_SIterBytes___next__ ({it_v})")
-    gen._emit(f"  mojo_list_append_int ({l}, {e});")
-    gen._emit(f"  goto {bb_loop};")
+    gen._rt_void('mojo_list_append_int', [l, e])
+    gen._goto(bb_loop)
     gen._emit_label(bb_exc)
-    gen._emit("  mojo_exc_pop ();")
+    gen._rt_void('mojo_exc_pop', [])
     return 'MojoList *', l
 
 
@@ -1408,7 +1411,7 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
         _box_t, _box_v = gen.lower_expr(_recv)
         if _box_t != 'int64_t':
             return None
-        cont_v = gen._new_val('MojoList *', f'(MojoList *){_box_v}')
+        cont_v = gen._cast('MojoList *', _box_v)
         cont_t = 'MojoList *'
         _cont_arg = _recv
     else:
@@ -1597,7 +1600,7 @@ def _lower_class_attr_builtin(gen, node, fn):
         return None   # static: the ordinary lowering owns it
     tag = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(struct)}LL')
     nt, nv = gen.lower_expr(name_node)
-    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
+    nm = nv if nt == 'char *' else gen._cast('char *', gen._to_int64(nt, nv))
     if fn == 'hasattr':
         if len(node.args) != 2:
             return None
@@ -1640,7 +1643,7 @@ def _lower_type_new(gen, node, args=None, meta=None):
     name_n, bases_n, ns_n = node.args if args is None else args
     # Python evaluates the arguments left to right; a call-result namespace can have effects.
     nt, nv = gen.lower_expr(name_n)
-    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
+    nm = nv if nt == 'char *' else gen._cast('char *', gen._to_int64(nt, nv))
     literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
     bases_list = None
     if not literal_bases:
@@ -1764,6 +1767,67 @@ _DTYPE_CAST_CTYPES = {
     'float32': 'float', 'float64': 'double', 'index': 'int64_t',
     'uindex': 'uint64_t',
 }
+
+
+def _float_dtype_arg_ctype(e):
+    """The C float type named by a dtype bracket argument, in any of its
+    spellings — `DType.float32`, the dot-relative `.float32`, or the scalar
+    name `Float32` an elaborated instantiation substitutes for a dtype
+    parameter — or None when it is not a float dtype."""
+    if isinstance(e, gimple_ctypes.DottedLiteral):
+        key = _as_str(e.path)
+    elif (isinstance(e, gimple_ctypes.MemberExpr)
+            and isinstance(e.obj, gimple_ctypes.IdentExpr)
+            and _as_str(e.obj.name) == 'DType'):
+        key = 'DType.' + _as_str(e.member)
+    elif isinstance(e, gimple_ctypes.IdentExpr):
+        key = _as_str(e.name)
+    else:
+        return None
+    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(key)
+
+
+def _lower_bitcast_call(gen, node):
+    """`bitcast[Float32, 1](bits)` and its float-to-integer converse: a bit
+    REINTERPRETATION, not a conversion. Returns (ctype, value), or None when
+    the call is not a float bitcast (the caller keeps its catch-all).
+
+    The integer side is the int64_t word the codegen uses for every integer,
+    so an int-to-float bitcast reads that word's low bits through the
+    runtime (`mojo_float_from_bits` / `mojo_double_from_bits`), and a
+    float-to-int bitcast takes the pattern (`mojo_float_to_bits` /
+    `mojo_double_to_bits`). Before this, `bitcast[...]` fell into the
+    catch-all and produced `0`, which is a silently wrong answer."""
+    if not (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(node.func.obj.name) == 'bitcast'
+            and len(node.args) == 1 and not node.kwargs):
+        return None
+    _ix = node.func.index
+    _idxs = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
+    if not _idxs:
+        return None
+    target = _float_dtype_arg_ctype(_idxs[0])
+    if target is None:
+        return None
+    at, av = gen.lower_expr(node.args[0])
+    if at in ('float', 'double'):
+        # float -> float: the same bits, already the right type.
+        if at == target:
+            return target, av
+        return None
+    return _emit_bits_to_float(gen, target, at, av)
+
+
+def _emit_bits_to_float(gen, target, at, av):
+    """Reinterpret the integer word `av` (C type `at`) as a `target` float or
+    double: the one lowering behind `bitcast[...]` and `SIMD[...](from_bits=)`.
+    Returns (target, temp)."""
+    word = gen._coerce_to_type(at, 'int64_t', av) if hasattr(gen, '_coerce_to_type') else av
+    fn = 'mojo_double_from_bits' if target == 'double' else 'mojo_float_from_bits'
+    t = gen._new_temp(target)
+    gen._emit(f'  {t} = ({target}){fn} ({word});')
+    return target, t
 
 
 def _dtype_cast_ctype(e):
@@ -2093,6 +2157,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and re.match(r'^__mojo_tuple_box_\d+$', _as_str(node.func.name))):
         return _lower_tuple_box_call(gen, node)
+    # Module-scope `globals()`: the compiled namespace is the module's own
+    # globals struct and its earlier bindings are statically known, so answer
+    # it here instead of letting it reach the unknown-builtin weak stub (which
+    # printed `globals: unavailable in compiled mode` and returned NULL — the
+    # Tools/cases_generator/lexer.py analyzer bug). See
+    # `emit_infra.lower_module_globals_read` for the precise bound.
+    if ginf.is_module_globals_call(gen, node):
+        return ginf.lower_module_globals_read(gen, node)
     _c = _try_lower_constrained(gen, node)
     if _c is not None:
         return _c
@@ -2460,7 +2532,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 'compiled to a real coroutine by this codegen (deliberate '
                 'stub -- see gimple_codegen.py\'s _lower_call comment on '
                 'create_task/create_raising_task) -- aborting\\n");')
-            gen._emit("  abort ();")
+            gen._rt_void('abort', [])
             handle = gen._new_val('MojoAsync *', '(MojoAsync *)0')
             # Marked 'stub' (no real base/value_ctype exists) so a
             # later `.wait()` on whatever variable this gets assigned
@@ -2475,6 +2547,128 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             f"`{_fname}(<call to a supported compiled async "
             "function>)` -- falling back to interpreting this module "
             "from source instead")
+    # rebind[T](x) / rebind[downcast[T, Trait]](x): identity in this backend.
+    # The downcast-witness form must diagnose when concrete T does not conform
+    # to Trait (missing witness table).
+    if isinstance(node.func, gimple_ctypes.SubscriptExpr):
+        _rb_obj = node.func.obj
+        _rb_name = None
+        if isinstance(_rb_obj, gimple_ctypes.IdentExpr):
+            _rb_name = _as_str(_rb_obj.name)
+        elif isinstance(_rb_obj, gimple_ctypes.MemberExpr):
+            _rb_name = _as_str(getattr(_rb_obj, 'member', None))
+        if _rb_name == 'rebind':
+            _rb_idx = node.func.index
+            _dc_call = None
+            if isinstance(_rb_idx, gimple_ctypes.SubscriptExpr):
+                _dc_obj = _rb_idx.obj
+                _dc_name = _as_str(getattr(_dc_obj, 'name', None)) if isinstance(_dc_obj, gimple_ctypes.IdentExpr) else None
+                if _dc_name == 'downcast':
+                    _dc_call = _rb_idx
+            if _dc_call is not None:
+                _dc_args = _dc_call.index
+                _dc_elems = _dc_args.elements if isinstance(_dc_args, gimple_ctypes.TupleExpr) else [_dc_args]
+                if len(_dc_elems) >= 2:
+                    def _rb_type_name(e):
+                        if isinstance(e, gimple_ctypes.IdentExpr):
+                            return _as_str(e.name)
+                        if isinstance(e, gimple_ctypes.MemberExpr):
+                            return _as_str(e.member)
+                        if isinstance(e, gimple_ctypes.StringLiteral):
+                            return _as_str(e.value)
+                        # best-effort text
+                        try:
+                            return _as_str(getattr(e, 'name', None)) or str(e)
+                        except Exception:
+                            return None
+                    _src_t = _rb_type_name(_dc_elems[0])
+                    _trait_t = _rb_type_name(_dc_elems[1])
+                    # Only diagnose when src type is concrete (not a generic param).
+                    _generic = False
+                    try:
+                        fn = getattr(gen, '_current_function_def', None) or getattr(gen, '_func_node', None)
+                        cparams = getattr(fn, 'comptime_params', None) or []
+                        # normalize names
+                        cpn = set()
+                        for p in cparams:
+                            if isinstance(p, str): cpn.add(p)
+                            elif isinstance(p, (list, tuple)) and p: cpn.add(p[0])
+                            elif hasattr(p, 'name'): cpn.add(getattr(p, 'name'))
+                        if _src_t in cpn:
+                            _generic = True
+                        # also if unresolved in comptime vals as concrete type name marker? keep simple
+                    except Exception:
+                        pass
+                    # treat unknown/placeholder names conservatively? if it's literally 'Self' or param-like
+                    if _src_t and not _generic:
+                        # try to decide if concrete struct we know about
+                        sb = getattr(gen, '_struct_bases', None) or {}
+                        tb = getattr(gen, '_trait_bases', None) or {}
+                        is_known_struct = _src_t in sb
+                        is_known_trait = _trait_t in tb or True  # trait may be local
+                        # If src_t equals a comptime param in _comptime_vals resolved to something else, prefer resolved
+                        try:
+                            cv = (getattr(gen, '_comptime_vals', None) or {}).get(_src_t)
+                            if isinstance(cv, str) and cv:
+                                _src_t_res = cv
+                            else:
+                                _src_t_res = _src_t
+                        except Exception:
+                            _src_t_res = _src_t
+                        # if resolved is still a param name, skip
+                        try:
+                            fn = getattr(gen, '_current_function_def', None) or getattr(gen, '_func_node', None)
+                            cparams = getattr(fn, 'comptime_params', None) or []
+                            cpn = set()
+                            for p in cparams:
+                                if isinstance(p, str): cpn.add(p)
+                                elif isinstance(p, (list, tuple)) and p: cpn.add(p[0])
+                                elif hasattr(p, 'name'): cpn.add(getattr(p, 'name'))
+                            if _src_t_res in cpn:
+                                _generic = True
+                        except Exception:
+                            pass
+                        if not _generic:
+                            # Only check when we can identify a concrete struct context.
+                            # Accept if undecidable/generic-like.
+                            if is_known_struct or (_src_t_res and _src_t_res[:1].isupper()):
+                                pred = _comptime_conforms_to_pred(gen)
+                                ok = None
+                                if pred is not None and _trait_t:
+                                    try:
+                                        ok = pred(_src_t_res, _trait_t)
+                                    except Exception:
+                                        ok = None
+                                else:
+                                    # try direct
+                                    try:
+                                        import mojo.middle.comptime as _ce
+                                        sb2 = getattr(gen, '_struct_bases', None) or {}
+                                        tb2 = getattr(gen, '_trait_bases', None) or {}
+                                        ex2 = getattr(gen, '_conformance_bases_extra', None) or {}
+                                        bases = dict(ex2); bases.update(sb2); bases.update(tb2)
+                                        ok = _ce.conforms_to(_src_t_res, _trait_t, bases)
+                                    except Exception:
+                                        ok = None
+                                # ok False => missing witness; ok True/None => accept (None = undecidable)
+                                if ok is False:
+                                    modname = getattr(gen, '_module_name', None) or ''
+                                    if not modname:
+                                        fnm = getattr(gen, '_current_filename', '') or 't.mojo'
+                                        modname = os.path.splitext(os.path.basename(fnm))[0]
+                                    struct_q = f"{modname}::{_src_t_res}" if modname else _src_t_res
+                                    trait_q = _trait_t or 'Trait'
+                                    line = getattr(node, 'line', None)
+                                    loc = f" (line {line})" if line else ''
+                                    raise RuntimeError(
+                                        f"function instantiation failed{loc}\n"
+                                        f"note: struct '{struct_q}' does not have witness table for trait '{trait_q}'"
+                                    )
+            # Lower as identity: return the (single) argument.
+            if node.args:
+                return gen.lower_expr(node.args[0])
+            return 'int64_t', '0'
+
     # __get_address_as_owned_value(addr)  →  *(int64_t *)addr
     # Mojo ownership intrinsic: load the value at a raw-pointer address.
     if isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name == '__get_address_as_owned_value' \
@@ -2710,7 +2904,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if _vt == 'double':
                     _vkind = '1'
                     _tmp = gen._new_val('int64_t', '0')
-                    gen._emit(f'  memcpy (&{_tmp}, &{_vv}, 8);')
+                    gen._rt_void('memcpy', [f"&{_tmp}", f"&{_vv}", '8'])
                     _vval = _tmp
                 elif _vt in ('char *', 'MojoStr *'):
                     _vkind = '2'
@@ -2720,9 +2914,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         and node.args[1].name == 'None'):
                     _vkind = '4'; _vval = '0'
                 elif _vt == '_Bool':
-                    _vkind = '3'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
+                    _vkind = '3'; _vval = gen._cast('int64_t', _vv)
                 else:
-                    _vkind = '0'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
+                    _vkind = '0'; _vval = gen._cast('int64_t', _vv)
             _rtfn = 'mojo_frozendict_fromkeys' if _mf.obj.name == 'frozendict' else 'mojo_dict_fromkeys'
             t = gen._new_val('MojoDict *', f'{_rtfn} ({_keys_v}, {_vval}, {_vkind}, {_vstr})')
             return 'MojoDict *', t
@@ -2765,7 +2959,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and isinstance(node.func.obj.obj, gimple_ctypes.IdentExpr)
             and node.func.obj.obj.name == 'collections'
             and node.func.obj.member in ('Counter', 'defaultdict', 'OrderedDict'))):
-        t = gen._new_val('MojoDict *', 'mojo_dict_new ()')
+        t = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
         for a in node.args: gen.lower_expr(a)
         return 'MojoDict *', t
     if (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.MemberExpr)
@@ -2824,7 +3018,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             elif _bc_target and not _bc_target.endswith(' *') and _bc_target != 'void':
                 _bc_target = f'{_bc_target} *'
             if _bc_target and _bc_target != _bc_ot:
-                return _bc_target, gen._new_val(_bc_target, f'({_bc_target}){_bc_ov}')
+                return _bc_target, gen._cast(_bc_target, _bc_ov)
             return _bc_ot, _bc_ov
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.MemberExpr):
         method_name = node.func.obj.member
@@ -3041,6 +3235,40 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # an honest null pointer rather than aliasing dead storage.
             ptr_ctype = f'{at} *'
             return ptr_ctype, gen._new_val(ptr_ctype, f'({ptr_ctype})0')
+    # A module-local `alias` naming a constructible type, used as the callee
+    # of a constructor call (`F2(1.0)`): expand to the aliased type's text
+    # and dispatch through the existing SIMD/Scalar and Array/FixedSizeArray
+    # constructor arms below. Scoped to the callee position; a local variable
+    # of the same name shadows the alias and must not be rewritten.
+    if isinstance(node.func, gimple_ctypes.IdentExpr):
+        _alias_name = _as_str(node.func.name)
+        _type_aliases = getattr(gen, '_type_aliases', None)
+        if (_alias_name and _type_aliases and _alias_name in _type_aliases
+                and _alias_name not in getattr(gen, 'var_types', {})):
+            _alias_target = _type_aliases.get(_alias_name)
+            if _alias_target:
+                try:
+                    _alias_stmts = N.Parser(N.py_tokenize(str(_alias_target))).parse_module()
+                    if (_alias_stmts and isinstance(_alias_stmts[0], gimple_ctypes.ExprStmt)):
+                        _alias_func = _alias_stmts[0].value
+                        if (isinstance(_alias_func, gimple_ctypes.SubscriptExpr)
+                                and isinstance(_alias_func.obj, gimple_ctypes.IdentExpr)
+                                and _as_str(_alias_func.obj.name) in (
+                                    'SIMD', 'Scalar', 'Array', 'FixedSizeArray')):
+                            try:
+                                import dataclasses as _dc
+                                node = _dc.replace(node, func=_alias_func)
+                            except Exception:
+                                _node2 = gimple_ctypes.CallExpr(
+                                    func=_alias_func,
+                                    args=getattr(node, 'args', None),
+                                    kwargs=getattr(node, 'kwargs', None),
+                                    line=getattr(node, 'line', 0),
+                                    col=getattr(node, 'col', 0),
+                                )
+                                node = _node2
+                except Exception:
+                    pass
     # Generic container constructors: List[T](...), Dict[K,V](...), Set[T](...), Optional[T](...)
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
         base = node.func.obj.name
@@ -3075,6 +3303,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _target = _dt_ctype
             else:
                 _target = 'int64_t'
+            # `SIMD[Float32, 1](from_bits=bits)`: the value whose IEEE pattern
+            # is `bits`. A float-typed scalar with no positional value, so a
+            # reinterpretation rather than a zero (see _lower_bitcast_call).
+            _from_bits = [_kv for _kv in (getattr(node, 'kwargs', None) or [])
+                          if _as_str(_kv[0]) == 'from_bits']
+            if _from_bits and _idxs and not node.args:
+                _fb_target = _float_dtype_arg_ctype(_idxs[0])
+                if _fb_target is not None:
+                    _fb_at, _fb_av = gen.lower_expr(_from_bits[0][1])
+                    return _emit_bits_to_float(gen, _fb_target, _fb_at, _fb_av)
             if node.args:
                 _at, _av = gen.lower_expr(node.args[0])
                 for _a in node.args[1:]:
@@ -3093,7 +3331,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 except Exception:
                     pass
             _zv = '0.0' if _target in ('float', 'double', '__fp16') else '0'
-            return _target, gen._new_val(_target, f'({_target}){_zv}')
+            return _target, gen._cast(_target, f"{_zv}")
         if base in ('Array', 'FixedSizeArray'):
             # Array/FixedSizeArray constructor: produce a tracked MojoList *
             # so element reads and Span views can inherit the element type
@@ -3123,7 +3361,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _elem_ct = _rt
             if _elem_ct == 'float':
                 _elem_ct = 'double'
-            t = gen._new_val('MojoList *', 'mojo_list_new ()')
+            t = gen._rt_call('MojoList *', 'mojo_list_new', [])
             if hasattr(gen, '_note_fresh_result'):
                 gen._note_fresh_result(t)
             if _elem_ct:
@@ -3180,11 +3418,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                              else '""' if _et == 'char *' else '0')
                     for _ in range(_ncount):
                         if _et == 'double':
-                            gen._emit(f'  mojo_list_append_double ({t}, {_zero});')
+                            gen._rt_void('mojo_list_append_double', [t, f"{_zero}"])
                         elif _et == 'char *':
-                            gen._emit(f'  mojo_list_append_str ({t}, {_zero});')
+                            gen._rt_void('mojo_list_append_str', [t, f"{_zero}"])
                         else:
-                            gen._emit(f'  mojo_list_append_int ({t}, {_zero});')
+                            gen._rt_void('mojo_list_append_int', [t, f"{_zero}"])
                 else:
                     _fat, _fav = gen.lower_expr(_fill_node)
                     # A non-numeric fill cannot become a `double` element:
@@ -3200,10 +3438,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         for _ in range(_ncount):
                             if _et == 'double' or _fat == 'double':
                                 _cv = gen._coerce_to_type(_fat, 'double', _fav) if hasattr(gen, '_coerce_to_type') else _fav
-                                gen._emit(f'  mojo_list_append_double ({t}, {_cv});')
+                                gen._rt_void('mojo_list_append_double', [t, f"{_cv}"])
                             elif _et == 'char *' or _fat == 'char *':
                                 _cv = gen._coerce_to_type(_fat, 'char *', _fav) if hasattr(gen, '_coerce_to_type') else _fav
-                                gen._emit(f'  mojo_list_append_str ({t}, {_cv});')
+                                gen._rt_void('mojo_list_append_str', [t, f"{_cv}"])
                             else:
                                 if hasattr(gen, '_coerce_to_type'):
                                     _cv = gen._coerce_to_type(_fat, 'int64_t', _fav)
@@ -3211,7 +3449,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     _cv = gen._to_int64(_fat, _fav)
                                 else:
                                     _cv = _fav
-                                gen._emit(f'  mojo_list_append_int ({t}, {_cv});')
+                                gen._rt_void('mojo_list_append_int', [t, f"{_cv}"])
             elif _fill_node is not None:
                 # Unknown count: evaluate fill for side effects but do not guess.
                 gen.lower_expr(_fill_node)
@@ -3220,15 +3458,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return 'MojoList *', t
         if base in ('List', 'InlineList', 'SmallVector', 'DynamicVector', 'InlineArray',
                     'Buffer', 'NDBuffer'):
-            t = gen._new_val('MojoList *', 'mojo_list_new ()')
+            t = gen._rt_call('MojoList *', 'mojo_list_new', [])
             for a in node.args: gen.lower_expr(a)
             return 'MojoList *', t
         if base in ('Dict', 'OrderedDict'):
-            t = gen._new_val('MojoDict *', 'mojo_dict_new ()')
+            t = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
             for a in node.args: gen.lower_expr(a)
             return 'MojoDict *', t
         if base in ('Set', 'FrozenSet'):
-            t = gen._new_val('MojoSet *', 'mojo_set_new ()')
+            t = gen._rt_call('MojoSet *', 'mojo_set_new', [])
             for a in node.args:
                 at, av = gen.lower_expr(a)
                 # Add the element to the set (measured 2026-10-21 (further):
@@ -3236,11 +3474,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # pre-fix loop evaluated the arguments and DROPPED them,
                 # silently constructing an empty set).
                 if at in ('int', 'int64_t', '_Bool'):
-                    gen._emit(f'  mojo_set_add_int ({t}, {av});')
+                    gen._rt_void('mojo_set_add_int', [t, f"{av}"])
                 elif at == 'char *':
-                    gen._emit(f'  mojo_set_add_str ({t}, {av});')
+                    gen._rt_void('mojo_set_add_str', [t, f"{av}"])
                 elif at == 'MojoBytes *':
-                    gen._emit(f'  mojo_set_add_bytes ({t}, {av});')
+                    gen._rt_void('mojo_set_add_bytes', [t, f"{av}"])
                 # Any other element type has no runtime add in this
                 # runtime: the argument stays evaluated but unadded (the
                 # pre-fix behavior), not a guess at a nonexistent call.
@@ -3270,7 +3508,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and len(node.kwargs or []) == 0):
         at, av = gen.lower_expr(node.args[0])
         if at == 'MojoSet *':
-            t = gen._new_val('MojoSet *', f'mojo_set_copy ({av})')
+            t = gen._rt_call('MojoSet *', 'mojo_set_copy', [f"{av}"])
             gen._note_fresh_result(t)
             return 'MojoSet *', t
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
@@ -3517,6 +3755,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"cannot materialize instantiation of generic {_g!r}: "
                     f"its bracket arguments advance without converging, "
                     f"which would cause infinite recursion")
+        _bc = _lower_bitcast_call(gen, node)
+        if _bc is not None:
+            return _bc
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -3539,7 +3780,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if _vt == 'double':
                     _vkind = '1'
                     _tmp = gen._new_val('int64_t', '0')
-                    gen._emit(f'  memcpy (&{_tmp}, &{_vv}, 8);')
+                    gen._rt_void('memcpy', [f"&{_tmp}", f"&{_vv}", '8'])
                     _vval = _tmp
                 elif _vt in ('char *', 'MojoStr *'):
                     _vkind = '2'
@@ -3548,9 +3789,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         isinstance(node.args[1], gimple_ctypes.IdentExpr) and node.args[1].name == 'None'):
                     _vkind = '4'; _vval = '0'
                 elif _vt == '_Bool':
-                    _vkind = '3'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
+                    _vkind = '3'; _vval = gen._cast('int64_t', _vv)
                 else:
-                    _vkind = '0'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
+                    _vkind = '0'; _vval = gen._cast('int64_t', _vv)
             _rtfn = 'mojo_frozendict_fromkeys' if _is_fd_fk else 'mojo_dict_fromkeys'
             t = gen._new_val('MojoDict *', f'{_rtfn} ({_keys_v}, {_vval}, {_vkind}, {_vstr})')
             return 'MojoDict *', t
@@ -3856,13 +4097,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 resumed = gen._new_val('_Bool', f"{base}_resume ({av})")
                 result = gen._new_temp(vct)
                 bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
-                gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+                gen._cond_goto(resumed, bb_ok, bb_exhausted)
                 gen._emit_label(bb_ok)
                 ok_val = gen._new_val(vct, f"{base}_value ({av})")
                 if api.get('boxed_container'):
                     gen._boxed_container_vals.add(ok_val)
                 gen._safe_coerce_emit(vct, vct, ok_val, result)
-                gen._emit(f"  goto {bb_merge};")
+                gen._goto(bb_merge)
                 gen._emit_label(bb_exhausted)
                 # `default` is only evaluated on the exhausted branch —
                 # real Python semantics (a non-trivial default expr must
@@ -3876,7 +4117,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 else:
                     dt, dv = gen.lower_expr(node.args[1])
                     gen._safe_coerce_emit(dt, vct, dv, result)
-                gen._emit(f"  goto {bb_merge};")
+                gen._goto(bb_merge)
                 gen._emit_label(bb_merge)
                 if api.get('boxed_container'):
                     gen._boxed_container_vals.add(result)
@@ -4010,7 +4251,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _n = gen._call_expr('int64_t', 'mojo_list_len', [('MojoList *', _dl)])
                     _zero = gen._new_val('int64_t', '0')
                     _nz = gen._new_val('_Bool', f'{_n} > {_zero}')
-                    _hasd = gen._new_val('int', f'(int){_nz}')
+                    _hasd = gen._cast('int', _nz)
                     _first = gen._call_expr('int64_t', 'mojo_list_get_int',
                                             [('MojoList *', _dl), ('int64_t', _zero)])
                     _dw = _first
@@ -4176,7 +4417,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == 'addr' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         if at.endswith(' *'):
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
+            return 'int64_t', gen._cast('int64_t', f"{av}")
     # ord()/chr() had NO real lowering at all — any call fell through to
     # a declared-but-never-defined variadic stub (`int64_t ord(...);`),
     # an undefined symbol at link time. Found via regex_compile.py's own
@@ -4185,13 +4426,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == 'ord' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         if at == 'char':
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
+            return 'int64_t', gen._cast('int64_t', f"{av}")
         if at not in ('char *', 'MojoStr *'):
-            av = gen._new_val('char *', f'(char *){gen._ensure_local(at, av)}')
+            av = gen._cast('char *', gen._ensure_local(at, av))
         return 'int64_t', gen._call_expr('int64_t', 'mojo_ord', [('char *', av)])
     if fname_raw == 'chr' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
-        av64 = av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}')
+        av64 = av if at == 'int64_t' else gen._cast('int64_t', f"{av}")
         return 'char *', gen._call_expr('char *', 'mojo_chr', [('int64_t', av64)])
     # `_floor` is defined generically over `SIMD`, so a call on a scalar
     # argument (a `Scalar`/float word, not a `SIMD *`) reaches the generic
@@ -4203,11 +4444,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _int_types = {'int8_t','uint8_t','int16_t','uint16_t','int32_t','uint32_t','int64_t','uint64_t','int','unsigned','long','size_t','_Bool'}
         if at in _int_types:
             return at, av
-        dv = av if at == 'double' else gen._new_val('double', f'(double){av}')
+        dv = av if at == 'double' else gen._cast('double', f"{av}")
         if at == 'float':
-            dv = gen._new_val('double', f'(double){av}')
+            dv = gen._cast('double', f"{av}")
         res = gen._new_val('double', f'floor({dv})')
-        return 'int64_t', gen._new_val('int64_t', f'(int64_t){res}')
+        return 'int64_t', gen._cast('int64_t', f"{res}")
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
     # `_locally_binds_name` gate: a module can define its OWN top-level
     # `any`/`all` (e.g. tokenize.py's `def any(*choices): return
@@ -4364,7 +4605,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'bytes' and not gen._locally_binds_name('bytes')
             and len(node.args) <= 3):
         if len(node.args) == 0:
-            return 'MojoBytes *', gen._new_val('MojoBytes *', 'mojo_bytes_empty ()')
+            return 'MojoBytes *', gen._rt_call('MojoBytes *', 'mojo_bytes_empty', [])
         at, av = gen.lower_expr(node.args[0])
         for _extra in node.args[1:]:
             gen.lower_expr(_extra)
@@ -4411,7 +4652,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'bytearray' and not gen._locally_binds_name('bytearray')
             and len(node.args) <= 3):
         if len(node.args) == 0:
-            return 'MojoBytes *', gen._new_val('MojoBytes *', 'mojo_bytearray_new ()')
+            return 'MojoBytes *', gen._rt_call('MojoBytes *', 'mojo_bytearray_new', [])
         at, av = gen.lower_expr(node.args[0])
         for _extra in node.args[1:]:
             gen.lower_expr(_extra)
@@ -4619,9 +4860,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             av = gen._materialize_as_list(at, av)
             at = 'MojoList *'
         if gen._elem_types.get(av) == 'double':
-            acast = av if at == 'void *' else gen._new_val('void *', f'(void *){av}')
+            acast = av if at == 'void *' else gen._cast('void *', f"{av}")
             return 'double', gen._call_expr('double', 'mojo_sum_double', [('void *', acast)])
-        acast = av if at == 'void *' else gen._new_val('void *', f'(void *){av}')
+        acast = av if at == 'void *' else gen._cast('void *', f"{av}")
         return 'int64_t', gen._call_expr('int64_t', 'mojo_sum', [('void *', acast)])
 
     # `hasattr(obj, attr)`: the `mojo_hasattr` runtime helper is a stub that
@@ -4681,7 +4922,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         ot, ov = gen.lower_expr(node.args[0])
         at, av = gen.lower_expr(node.args[1])
         vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
-        ap = av if at == 'char *' else gen._new_val('char *', f'(char *){av}')
+        ap = av if at == 'char *' else gen._cast('char *', f"{av}")
         gen._emit("  _mojo_getattr_missed = 0;")
         gen._emit("  _mojo_getattr_nothrow = 1;")
         gen._call_expr('int64_t', '_mojo_dispatch_getattr',
@@ -4743,7 +4984,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == 'vars' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         gen._asdict_dispatch_needed.add(1)
-        vp = av if at == 'void *' else gen._new_val('void *', f'(void *){av}')
+        vp = av if at == 'void *' else gen._cast('void *', f"{av}")
         return 'MojoDict *', gen._call_expr(
             'MojoDict *', '_mojo_dispatch_asdict', [('void *', vp)])
     if fname_raw == 'getattr' and len(node.args) >= 2:
@@ -4786,20 +5027,20 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _res = gen._new_temp('MojoDict *')
             _isdc = gen._call_expr('int', '_mojo_dispatch_is_dataclass', [('void *', vp)])
             _bb_y = gen._new_bb(); _bb_n = gen._new_bb(); _bb_e = gen._new_bb()
-            gen._emit(f'  if ({_isdc}) goto {_bb_y}; else goto {_bb_n};')
+            gen._cond_goto(_isdc, _bb_y, _bb_n)
             gen._emit_label(_bb_y)
             _d = gen._call_expr('MojoDict *', '_mojo_dispatch_asdict', [('void *', vp)])
-            gen._emit(f'  {_res} = {_d};')
-            gen._emit(f'  goto {_bb_e};')
+            gen._copy(f"{_res}", _d)
+            gen._goto(_bb_e)
             gen._emit_label(_bb_n)
             _dt, _dv = gen.lower_expr(node.args[2])
             if _dt == 'MojoDict *':
-                gen._emit(f'  {_res} = {_dv};')
+                gen._copy(f"{_res}", _dv)
             else:
                 _dvw = gen._to_int64(_dt, _dv)
-                _dvp = gen._new_val('void *', f'(void *){_dvw}')
-                gen._emit(f'  {_res} = (MojoDict *){_dvp};')
-            gen._emit(f'  goto {_bb_e};')
+                _dvp = gen._cast('void *', _dvw)
+                gen._cast_into(f"{_res}", 'MojoDict *', _dvp)
+            gen._goto(_bb_e)
             gen._emit_label(_bb_e)
             return 'MojoDict *', _res
         if (isinstance(node.args[1], gimple_ctypes.StringLiteral)
@@ -4883,8 +5124,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             if _boxed_ft is not None:
                 ot, ov = (_gattr_ot, _gattr_ov) if _gattr_ot else gen.lower_expr(node.args[0])
                 if ot in ('int', 'char'):
-                    ov = gen._new_val('int64_t', f'(int64_t){ov}')
-                vp = gen._new_val('void *', f'(void *){ov}')
+                    ov = gen._cast('int64_t', f"{ov}")
+                vp = gen._cast('void *', f"{ov}")
                 _nothrow3 = len(node.args) >= 3
                 if _nothrow3:
                     # `_mojo_dispatch_getattr` RAISES on a miss (its fallback
@@ -4899,7 +5140,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     gen._emit("  _mojo_getattr_nothrow = 0;")
                     dt, dv = gen.lower_expr(node.args[2])
                     if dt != 'int64_t':
-                        dv = gen._new_val('int64_t', f'(int64_t){dv}')
+                        dv = gen._cast('int64_t', f"{dv}")
                     _missed = gen._new_val('int', '_mojo_getattr_missed')
                     # GIMPLE: the ?: condition must be a _Bool temp (an
                     # inline `!=` in the selector is "bogus comparison
@@ -4907,10 +5148,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     cond = gen._new_val('_Bool', f'{_missed} != 0')
                     raw = gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')
                 if _boxed_ft.endswith(' *'):
-                    t = gen._new_val(_boxed_ft, f'({_boxed_ft}){raw}')
+                    t = gen._cast(_boxed_ft, raw)
                 else:
                     t = gen._new_temp(_boxed_ft)
-                    gen._emit(f"  {t} = ({_boxed_ft}){raw};")
+                    gen._cast_into(t, _boxed_ft, raw)
                 return _boxed_ft, t
         pairs = [gen.lower_expr(a) for a in node.args[:2]]
         if len(node.args) >= 3:
@@ -4937,7 +5178,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             if _res != 'int64_t':
                 raw_dt = dv
             else:
-                raw_dt = dv if dt == 'int64_t' else gen._new_val('int64_t', f'(int64_t){dv}')
+                raw_dt = dv if dt == 'int64_t' else gen._cast('int64_t', f"{dv}")
             gen._emit("  _mojo_getattr_missed = 0;")
             gen._emit("  _mojo_getattr_nothrow = 1;")
             raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
@@ -4953,7 +5194,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # `raw` is the dispatch's own int64_t word; in a `char *` result it
             # is either a borrowed string pointer (a hit) or 0 (the miss, which
             # the conditional never selects).
-            hit = gen._new_val(_res, f'({_res}){raw}')
+            hit = gen._cast(_res, raw)
             return _res, gen._new_val(_res, f'{cond} ? {raw_dt} : {hit}')
         _gw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
         gen._dyn_word_vals.add(_gw)   # see the identical note above
@@ -4993,11 +5234,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # member-expr handling above). int64_t return (mojo_read_type_tag_
         # safe's own type); the old 'int' boxed the 64-bit tag into a 32-bit
         # temp, a hard gcc "invalid conversion in gimple call" error.
-        av64 = gen._new_val('int64_t', f"(int64_t){av}")
+        av64 = gen._cast('int64_t', f"{av}")
         if gen._rt_classes_made:
             # a run-time class's metaclass / an instance's class, else the struct tag
             return 'int64_t', gen._call_expr('int64_t', 'mojo_type_of', [('int64_t', av64)])
-        return 'int64_t', gen._new_val('int64_t', f"mojo_read_type_tag_safe ({av64})")
+        return 'int64_t', gen._rt_call('int64_t', 'mojo_read_type_tag_safe', [f"{av64}"])
     if fname_raw == 'setattr' and len(node.args) >= 3:
         pairs = [gen.lower_expr(a) for a in node.args[:3]]
         return gen._void_call('_mojo_dispatch_setattr', pairs)
@@ -5066,6 +5307,24 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if outer_ci:
         return gen._lower_outer_closure_call(fname_raw, outer_ci, node)
 
+    _ctor_rt = gen.func_return_types.get(fname_raw, 'int64_t')
+    # Bare `List(...)` — the container constructor with its element type
+    # inferred from the argument, NOT an opaque uppercase type. Every other
+    # resolution above has had its chance, so a user struct/local/function
+    # named `List` still wins; what is left is the builtin spelling, which
+    # must be a `MojoList *` (see _lower_bare_list_ctor for the measured
+    # integer erasure this replaces).
+    if (fname_raw == 'List'
+            and _ctor_rt in ('int64_t', '')
+            and fname_raw not in gen.var_types
+            and fname_raw not in gen.func_param_types
+            and fname_raw not in gen.struct_field_types
+            and fname_raw not in gen._KNOWN_SIGS
+            and fname_raw not in gimple_ctypes._C_RESERVED_FUNCS
+            and fname_raw not in gen.BUILTIN_VALUE_MAP
+            and not gen._locally_binds_name('List')):
+        return _lower_bare_list_ctor(gen, node)
+
     # Opaque uppercase constructor (imported type not in any table).
     # `fname_raw in _STR_WRAPPER_CTORS` bypasses the `imported_symbols`
     # exclusion specifically: StringSlice/StaticString have no real struct
@@ -5080,7 +5339,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # ['StringRef'] == ''`) is non-null and `not` yields False, where the
     # python3 reference's `not ''` is True (string truthiness). Comparing
     # the value against both the default and the empty string avoids that.
-    _ctor_rt = gen.func_return_types.get(fname_raw, 'int64_t')
     if ((_ctor_rt == 'int64_t' or _ctor_rt == '')
             and fname_raw[0:1].isupper()
             # a LOCAL holding a class word (`Foo = type('Foo', (), {})`) is a value to call
@@ -5261,7 +5519,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(_wact, str) and _wact.endswith(' *') \
                 and _wact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
             _wct = _wact
-            av = gen._new_val(_wact, f'({_wact}){av}')
+            av = gen._cast(_wact, av)
     if _wct is not None and _struct_defines_method(gen, _wct[:-2], 'bounds'):
         _csn = _wct[:-2]
         _bsym = gen._struct_method_csym(_csn, 'bounds', '')
@@ -5282,8 +5540,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # hand-written (MojoList *) — same emitted cast, counted cast.
             _tupl = gen._coerce_to_type('int64_t', 'MojoList *', _tup64)
         _i1 = gen._new_val('int64_t', '(int64_t)1')
-        return 'int64_t', gen._new_val(
-            'int64_t', f'mojo_list_get_int ({_tupl}, {_i1})')
+        return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [_tupl, _i1])
     _LEN_FNS = {
         'MojoStr *':  f'mojo_str_codepoint_len ({av}->data)',
         'MojoBytes *': f'mojo_bytes_len ({av})',
@@ -5337,7 +5594,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _dsub_len = gen._dict_subclass_of(at)
     if _dsub_len and not gen._struct_defines_method(_dsub_len, '__len__'):
         dp = gen._new_val('MojoDict *', f"{av}->_data")
-        return 'int64_t', gen._new_val('int64_t', f'mojo_dict_len ({dp})')
+        return 'int64_t', gen._rt_call('int64_t', 'mojo_dict_len', [dp])
     _bsub_len = gen._bytes_subclass_of(at)
     if _bsub_len and not gen._struct_defines_method(_bsub_len, '__len__'):
         bp = gen._new_val('MojoBytes *', f"{av}->_data")
@@ -5385,14 +5642,14 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # really a string segfaulted deep in mojo_list_get_int.
         actual = gen._actual_types.get(av)
         if actual == 'char *':
-            cp = gen._new_val('char *', f'(char *){av}')
+            cp = gen._cast('char *', av)
             return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen', [('char *', cp)])
         if actual == 'MojoDict *':
             dp = gen._coerce_to_type('int64_t', 'MojoDict *', av)
-            return 'int64_t', gen._new_val('int64_t', f'mojo_dict_len ({dp})')
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_dict_len', [dp])
         if actual == 'MojoSet *':
             sp = gen._coerce_to_type('int64_t', 'MojoSet *', av)
-            return 'int64_t', gen._new_val('int64_t', f'mojo_set_len ({sp})')
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_set_len', [sp])
         if actual == 'MojoList *':
             # A statically RECORDED kind, so this is the fast path and not the
             # question `mojo_list_len` used to be answering by accident: no
@@ -5400,7 +5657,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # already knows, and the three arms above it are the same fast path
             # for the other two. Only the arm BELOW this one is the query.
             lp = gen._coerce_to_type('int64_t', 'MojoList *', av)
-            return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({lp})')
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_len', [lp])
         # NO recorded kind: the slot really is polymorphic, so ASK — and ask
         # the same way `repr` does. A parameter whose call sites are a list AND
         # a string, a conditional that assigns two kinds, a value forwarded from
@@ -5438,20 +5695,20 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     # type says nothing, so the question goes to the runtime, as for any
     # boxed handle.
     if obj_type == 'char *' and _as_str(obj_val) in gen._dyn_word_locals:
-        obj_val = gen._new_val('int64_t', f'(int64_t){obj_val}')
+        obj_val = gen._cast('int64_t', obj_val)
         obj_type = 'int64_t'
     if gen._rtobj_kinds.get(('l', type_name)) == 'class':
         # a class made at run time: the class table answers (instance's class or a base of it)
         cw = gen._new_val('int64_t', type_name)
         r = gen._call_expr('int', 'mojo_isinstance_rtclass',
                            [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
-        return gen._new_val('_Bool', f'(_Bool){r}')
+        return gen._cast('_Bool', r)
     if type_name == 'type':
         if gen._rt_classes_made:
             # a class made at run time is an instance of `type`
             r = gen._call_expr('int', 'mojo_isinstance_type',
                                [('int64_t', gen._to_int64(obj_type, obj_val))])
-            return gen._new_val('_Bool', f'(_Bool){r}')
+            return gen._cast('_Bool', r)
         return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
@@ -5462,10 +5719,10 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         # Without this every `isinstance(top, tuple)` on a boxed/popped
         # heterogeneous value fell through to `mojo_isinstance_p(_, 0)`,
         # which is unconditionally false — so the tuple branch was dead.
-        iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+        iv = gen._cast('int64_t', obj_val)
         res = gen._new_temp('int')
-        gen._emit(f'  {res} = mojo_isinstance_p ({iv}, 8);')
-        return gen._new_val('_Bool', f'(_Bool){res}')
+        gen._rt_into(res, 'mojo_isinstance_p', [iv, '8'])
+        return gen._cast('_Bool', res)
     if type_name in gen.struct_field_types:
         # A real user-defined struct/dataclass type: compare the
         # object's runtime type tag (see mojo_read_type_tag in
@@ -5498,14 +5755,14 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             return gen._new_val('_Bool', '0')
         if obj_type.endswith(' *'):
             ov_local = gen._ensure_local(obj_type, obj_val)
-            vp = gen._new_val('void *', f'(void *){ov_local}')
-            addr = gen._new_val('int64_t', f'(int64_t){vp}')
+            vp = gen._cast('void *', ov_local)
+            addr = gen._cast('int64_t', vp)
         elif obj_type == 'int64_t':
             addr = obj_val
         else:
-            addr = gen._new_val('int64_t', f'(int64_t){obj_val}')
+            addr = gen._cast('int64_t', obj_val)
         tag = gen._call_expr('int64_t', 'mojo_read_type_tag', [('int64_t', addr)])
-        target = gen._new_val('int64_t', f'(int64_t){target_id}')
+        target = gen._cast('int64_t', f"{target_id}")
         cmp_t = gen._new_temp('_Bool')
         gen._emit(f'  {cmp_t} = {tag} == {target};')
         if gen._rt_classes_made:
@@ -5515,7 +5772,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             # The cast goes in its own statement: a GIMPLE binary operand must
             # be a bare SSA name, so `a | (_Bool)b` is `expected expression
             # before '(' token` in every function that reaches this arm.
-            rt_b = gen._new_val('_Bool', f'(_Bool){rt}')
+            rt_b = gen._cast('_Bool', rt)
             both = gen._new_temp('_Bool')
             gen._emit(f'  {both} = {cmp_t} | {rt_b};')
             return both
@@ -5613,7 +5870,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                 # `mojo/middle/infra_infer.py`'s recursive `walk`, and
                 # the same lowering breaks 3 more `__GIMPLE` closure
                 # bodies later in the file.
-                iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+                iv = gen._cast('int64_t', obj_val)
                 isl = gen._call_expr('int', 'mojo_is_registered_list',
                                      [('int64_t', iv)])
                 tup = gen._call_expr('int', 'mojo_is_tuple',
@@ -5628,9 +5885,9 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             # frozen flag decides, so the static non-null shortcut is wrong.
             if obj_type == 'MojoDict *' and type_name in ('dict', 'frozendict'):
                 res = gen._new_temp('int')
-                iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
-                gen._emit(f'  {res} = mojo_isinstance_p ({iv}, {type_id});')
-                return gen._new_val('_Bool', f'(_Bool){res}')
+                iv = gen._cast('int64_t', obj_val)
+                gen._rt_into(res, 'mojo_isinstance_p', [iv, f"{type_id}"])
+                return gen._cast('_Bool', res)
             if obj_type.endswith(' *'):
                 # A NULL pointer here means None (e.g. the "default"
                 # branch of a dynamic getattr(obj, attr, None) on a
@@ -5647,7 +5904,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                 # large file, root-caused via _register_imported_structs
                 # __collect's `getattr(st, attr, None)` +
                 # `isinstance(sub, list)` walk).
-                iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+                iv = gen._cast('int64_t', obj_val)
                 zero = gen._new_val('int64_t', '(int64_t)0')
                 return gen._new_val('_Bool', f'{iv} != {zero}')
             return gen._new_val('_Bool', '(_Bool)1')
@@ -5668,30 +5925,30 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         # `mojo_isinstance_p`.
         if type_name in ('bytes', 'bytearray') and obj_type in ('char *', 'void *'):
             res = gen._new_temp('int')
-            iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
-            gen._emit(f'  {res} = mojo_isinstance_p ({iv}, {type_id});')
-            return gen._new_val('_Bool', f'(_Bool){res}')
+            iv = gen._cast('int64_t', obj_val)
+            gen._rt_into(res, 'mojo_isinstance_p', [iv, f"{type_id}"])
+            return gen._cast('_Bool', res)
         if obj_type not in ('int64_t', 'void *', ''):
             return gen._new_val('_Bool', '(_Bool)0')
     res = gen._new_temp('int')
     if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or obj_type.endswith(' *'):
-        iv  = gen._new_val('int64_t', f'(int64_t){obj_val}')
+        iv  = gen._cast('int64_t', obj_val)
         # `mojo_isinstance_p` (int64_t arg), NOT `mojo_isinstance((int)iv)`:
         # the old cast truncated the pointer to 32 bits so the runtime's
         # list/dict registry lookup always missed. The full-width entry
         # point makes `isinstance(node, list)` / `isinstance(node, dict)`
         # actually work for a boxed handle — the compiler's own generic
         # AST walkers depend on it when self-hosted.
-        gen._emit(f'  {res} = mojo_isinstance_p ({iv}, {type_id});')
+        gen._rt_into(res, 'mojo_isinstance_p', [iv, f"{type_id}"])
     else:
         # Widen through an explicit int64_t temp here too. The operand at
         # this point is typically an `int64_t`-typed BOXED handle (an
         # unannotated AST-node parameter, e.g. `_walk_ast_into(node, ...)`),
         # i.e. exactly the case that must not be truncated — see
         # mojo_isinstance's own definition for what the 32-bit form cost.
-        _iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
-        gen._emit(f'  {res} = mojo_isinstance_p ({_iv}, {type_id});')
-    return gen._new_val('_Bool', f'(_Bool){res}')
+        _iv = gen._cast('int64_t', obj_val)
+        gen._rt_into(res, 'mojo_isinstance_p', [_iv, f"{type_id}"])
+    return gen._cast('_Bool', res)
 
 
 
@@ -5704,7 +5961,7 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
     _single_tn = _isinstance_type_name(type_arg)
     if _single_tn is not None:
         cmp_t = gen._isinstance_one_type(obj_type, obj_val, _single_tn)
-        gen._emit(f'  {t} = (_Bool){cmp_t};')
+        gen._cast_into(t, '_Bool', f"{cmp_t}")
     elif isinstance(type_arg, gimple_ctypes.TupleExpr):
         # isinstance(x, (A, B, ...)) — OR together a per-alternative check
         # (see _isinstance_one_type). Previously stubbed to always-False,
@@ -5730,7 +5987,7 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
             acc = one if acc is None else gen._new_val('_Bool', _as_str(acc) + ' | ' + one)
         if acc is None:
             acc = gen._new_val('_Bool', '0')
-        gen._emit(f'  {t} = (_Bool){acc};')
+        gen._cast_into(t, '_Bool', f"{acc}")
     else:
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
@@ -5759,13 +6016,13 @@ def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
     n = gen._new_val('int64_t', rec['full'])
     bb_ok = gen._new_bb(); bb_miss = gen._new_bb(); bb_merge = gen._new_bb()
     cond = gen._new_val('_Bool', f"{cur} < {n}")
-    gen._emit(f"  if ({cond}) goto {bb_ok}; else goto {bb_miss};")
+    gen._cond_goto(cond, bb_ok, bb_miss)
     gen._emit_label(bb_ok)
     _rvct, ok = itc.read_at(gen, rec, cur)
     gen._safe_coerce_emit(_rvct, vct, ok, result)
     nxt = gen._inc_val(cur)
-    gen._emit(f"  {cur} = {nxt};")
-    gen._emit(f"  goto {bb_merge};")
+    gen._copy(f"{cur}", nxt)
+    gen._goto(bb_merge)
     gen._emit_label(bb_miss)
     if len(args) == 2:
         # `default` only evaluated on the exhausted branch (real Python
@@ -5773,9 +6030,9 @@ def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
         dt, dv = gen.lower_expr(args[1])
         gen._safe_coerce_emit(dt, vct, dv, result)
     else:
-        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-        gen._emit("  mojo_raise ();")
-    gen._emit(f"  goto {bb_merge};")
+        gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
+        gen._rt_void('mojo_raise', [])
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -5809,25 +6066,25 @@ def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     if lt != 'MojoList *':
         lv = gen._coerce_to_type(lt, 'MojoList *', lv)
     elem = gen._elem_of(lv) or 'int64_t'
-    n_t = gen._new_val('int64_t', f"mojo_list_len ({lv})")
+    n_t = gen._rt_call('int64_t', 'mojo_list_len', [lv])
     zero = gen._new_val('int64_t', "(int64_t)0")
     have = gen._new_val('_Bool', f"{n_t} > {zero}")
     result = gen._new_temp(elem)
     bb_have = gen._new_bb(); bb_empty = gen._new_bb(); bb_done = gen._new_bb()
-    gen._emit(f"  if ({have}) goto {bb_have}; else goto {bb_empty};")
+    gen._cond_goto(have, bb_have, bb_empty)
 
     gen._emit_label(bb_have)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
     if suf == 'str':
-        first = gen._new_val('char *', f"mojo_list_get_str ({lv}, {zero})")
+        first = gen._rt_call('char *', 'mojo_list_get_str', [lv, zero])
         gen._safe_coerce_emit('char *', elem, first, result)
     elif suf == 'double':
-        first = gen._new_val('double', f"mojo_list_get_double ({lv}, {zero})")
+        first = gen._rt_call('double', 'mojo_list_get_double', [lv, zero])
         gen._safe_coerce_emit('double', elem, first, result)
     else:
-        first = gen._new_val('int64_t', f"mojo_list_get_int ({lv}, {zero})")
+        first = gen._rt_call('int64_t', 'mojo_list_get_int', [lv, zero])
         gen._safe_coerce_emit('int64_t', elem, first, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
 
     gen._emit_label(bb_empty)
     if len(node.args) == 2:
@@ -5837,13 +6094,13 @@ def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[s
         dt, dv = gen.lower_expr(node.args[1])
         gen._safe_coerce_emit(dt, elem, dv, result)
     else:
-        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-        gen._emit("  mojo_raise ();")
+        gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
+        gen._rt_void('mojo_raise', [])
         # `mojo_raise()` does not return, but the merge block below still
         # needs `result` definitely-assigned on every incoming edge for
         # GIMPLE's own SSA construction.
         gen._safe_coerce_emit('int64_t', elem, zero, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
     gen._emit_label(bb_done)
     return elem, result
 
@@ -5900,39 +6157,39 @@ def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, 
         elem = gen._elem_of(av) or 'int64_t'
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
     if at == 'MojoSet *':
-        src = gen._new_val('MojoList *', f"mojo_set_to_list ({av})")
+        src = gen._rt_call('MojoList *', 'mojo_set_to_list', [av])
     else:
         src = av
     result = gen._new_temp(elem)
     if _dict_items_val is not None:
         gen._tuple_slot_types[result] = ['char *', _dict_items_val]
-    n_t = gen._new_val('int64_t', f"mojo_list_len ({src})")
+    n_t = gen._rt_call('int64_t', 'mojo_list_len', [f"{src}"])
     zero = gen._new_val('int64_t', "(int64_t)0")
     have = gen._new_val('_Bool', f"{n_t} > {zero}")
     bb_have = gen._new_bb(); bb_empty = gen._new_bb(); bb_done = gen._new_bb()
-    gen._emit(f"  if ({have}) goto {bb_have}; else goto {bb_empty};")
+    gen._cond_goto(have, bb_have, bb_empty)
     gen._emit_label(bb_have)
     if suf == 'str':
-        first = gen._new_val('char *', f"mojo_list_get_str ({src}, {zero})")
+        first = gen._rt_call('char *', 'mojo_list_get_str', [f"{src}", zero])
     elif suf == 'double':
-        first = gen._new_val('double', f"mojo_list_get_double ({src}, {zero})")
+        first = gen._rt_call('double', 'mojo_list_get_double', [f"{src}", zero])
     else:
-        first = gen._new_val('int64_t', f"mojo_list_get_int ({src}, {zero})")
+        first = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{src}", zero])
     gen._safe_coerce_emit(suf, elem, first, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
     gen._emit_label(bb_empty)
     if len(node.args) == 2:
         dt, dv = gen.lower_expr(node.args[1])
         gen._safe_coerce_emit(dt, elem, dv, result)
     else:
-        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-        gen._emit("  mojo_raise ();")
+        gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
+        gen._rt_void('mojo_raise', [])
         # mojo_raise() does not return, but the merge block still needs
         # `result` definitely-assigned on every incoming edge for GIMPLE's
         # own SSA construction -- same reason _lower_next_over_comprehension
         # keeps its dead store.
         gen._safe_coerce_emit('int64_t', elem, zero, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
     gen._emit_label(bb_done)
     return elem, result
 
@@ -6258,24 +6515,24 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
     elif elem and elem.endswith(' *'):
         _kelem_t = elem
     res = gen._new_temp('MojoList *')
-    gen._emit(f"  {res} = mojo_list_new ();")
-    klen = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
+    gen._rt_into(res, 'mojo_list_new', [])
+    klen = gen._rt_call('int64_t', 'mojo_list_len', [it_val])
     kidx = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
-    gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(kcond, bb_body, bb_after)
     gen._emit_label(bb_body)
-    _read64 = gen._new_val('int64_t', f'mojo_list_get_int ({it_val}, {kidx})')
+    _read64 = gen._rt_call('int64_t', 'mojo_list_get_int', [it_val, kidx])
     if _kelem_t == 'double':
-        _read = gen._new_val('double', f'mojo_list_get_double ({it_val}, {kidx})')
+        _read = gen._rt_call('double', 'mojo_list_get_double', [it_val, kidx])
     elif _kelem_t == 'int64_t':
         _read = _read64
     else:
         _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
     gen._declare_var(_kvar, _kelem_t)
-    gen._emit(f"  {gen._cname(_kvar)} = {_read};")
+    gen._copy(f"{gen._cname(_kvar)}", f"{_read}")
     _saved_param_types = _bind_callable_element_param(gen, fn_expr, _kelem_t)
     try:
         kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
@@ -6292,7 +6549,7 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
             _t = gen._new_val('_Bool', f'({kret_v}) == 0')
         else:
             _t = gen._new_val('_Bool', f'({kret_v}) != 0')
-        gen._emit(f"  if ({_t}) goto {bb_yes}; else goto {bb_no};")
+        gen._cond_goto(_t, bb_yes, bb_no)
         gen._emit_label(bb_yes)
         if _kelem_t == 'double':
             gen._void_call('mojo_list_append_double',
@@ -6313,8 +6570,8 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
         gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', _kret)])
     kone = gen._new_val('int64_t', '(int64_t)1')
     knew = gen._new_val('int64_t', f'{kidx} + {kone}')
-    gen._emit(f"  {kidx} = {knew};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._copy(kidx, knew)
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     return res
 
@@ -6435,24 +6692,24 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
     elif elem and elem.endswith(' *'):
         _kelem_t = elem
     keys = gen._new_temp('MojoList *')
-    gen._emit(f"  {keys} = mojo_list_new ();")
-    klen = gen._new_val('int64_t', f'mojo_list_len ({av})')
+    gen._rt_into(keys, 'mojo_list_new', [])
+    klen = gen._rt_call('int64_t', 'mojo_list_len', [av])
     kidx = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
-    gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(kcond, bb_body, bb_after)
     gen._emit_label(bb_body)
-    _read64 = gen._new_val('int64_t', f'mojo_list_get_int ({av}, {kidx})')
+    _read64 = gen._rt_call('int64_t', 'mojo_list_get_int', [av, kidx])
     if _kelem_t == 'double':
-        _read = gen._new_val('double', f'mojo_list_get_double ({av}, {kidx})')
+        _read = gen._rt_call('double', 'mojo_list_get_double', [av, kidx])
     elif _kelem_t == 'int64_t':
         _read = _read64
     else:
         _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
     gen._declare_var(_kvar, _kelem_t)
-    gen._emit(f"  {gen._cname(_kvar)} = {_read};")
+    gen._copy(f"{gen._cname(_kvar)}", f"{_read}")
     _saved_param_types = _bind_callable_element_param(gen, key_expr, _kelem_t)
     try:
         kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
@@ -6493,8 +6750,8 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
         gen._void_call('mojo_list_append_int', [('MojoList *', keys), ('int64_t', kret)])
     kone = gen._new_val('int64_t', '(int64_t)1')
     knew = gen._new_val('int64_t', f'{kidx} + {kone}')
-    gen._emit(f"  {kidx} = {knew};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._copy(kidx, knew)
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     return keys
 
@@ -6843,8 +7100,8 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     av = gen._materialize_as_list(at, av)
     elem = gen._elem_of(av)
     res = gen._new_temp('MojoList *')
-    gen._emit(f"  {res} = mojo_list_new ();")
-    len64 = gen._new_val('int64_t', f'mojo_list_len ({av})')
+    gen._rt_into(res, 'mojo_list_new', [])
+    len64 = gen._rt_call('int64_t', 'mojo_list_len', [av])
     # POSITION counter, kept separate from the index actually stored in each
     # pair: `enumerate(x, start)` starts counting at `start`, so the loop
     # bound has to be the position (0..len) or the first `start` iterations
@@ -6852,15 +7109,15 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     pos = gen._new_val('int64_t', '(int64_t)0')
     idx = gen._new_val('int64_t', start)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond = gen._new_val('_Bool', f'{pos} < {len64}')
-    gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond, bb_body, bb_after)
     gen._emit_label(bb_body)
     pair = gen._new_temp('MojoList *')
-    gen._emit(f"  {pair} = mojo_list_new ();")
+    gen._rt_into(pair, 'mojo_list_new', [])
     gen._void_call('mojo_list_append_int', [('MojoList *', pair), ('int64_t', idx)])
-    raw = gen._new_val('int64_t', f'mojo_list_get_int ({av}, {pos})')
+    raw = gen._rt_call('int64_t', 'mojo_list_get_int', [av, pos])
     # `mojo_list_get_int` already hands back the element's stored word
     # (a list boxes container pointers as int64), so the old double cast
     # was value-identical to a copy — but it is a NESTED cast, and gcc
@@ -6885,7 +7142,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     # nested — the argument-position twin of the nested-cast rejection
     # above, same measured mailbox 942/986/1432/1433 hit). A single cast
     # in a conversion statement parses, and appends the same word.
-    pword = gen._new_val('int64_t', f'(int64_t){pair}')
+    pword = gen._cast('int64_t', pair)
     gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', pword)])
     # The increment is computed INSIDE the loop body on purpose: hoisting it
     # (what `gen._new_val` does at the point of writing) evaluates
@@ -6894,13 +7151,13 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     # terminates.
     one = gen._new_val('int64_t', '(int64_t)1')
     npos = gen._new_val('int64_t', f'{pos} + {one}')
-    gen._emit(f"  {pos} = {npos};")
+    gen._copy(pos, npos)
     if start == '0':
-        gen._emit(f"  {idx} = {pos};")
+        gen._copy(idx, pos)
     else:
         nidx = gen._new_val('int64_t', f'{pos} + {start}')
-        gen._emit(f"  {idx} = {nidx};")
-    gen._emit(f"  goto {bb_cond};")
+        gen._copy(idx, nidx)
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     gen._nested_elem_types[res] = ['int64_t', elem or 'int64_t']
     # Also record the plain element type: the assignment sites propagate
@@ -6924,6 +7181,92 @@ _COMPREHENSION_ITER_TYPES = (
     'MojoList *', 'MojoStr *', 'char *', 'MojoDict *', 'MojoSet *',
     'MojoGenerator *', 'MojoBytes *',
 )
+
+
+def _lower_bare_list_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`List(...)` with NO bracket argument: an inferred-element container.
+
+    `List[T](...)` takes the generic-constructor arm; the bare spelling used
+    to reach `_lower_opaque_ctor`'s uppercase rule, which returns an
+    `int64_t`. So `var a = List([1, 2])` declared `a` as an integer and
+    `a * 3` became integer multiplication — the compiled program SEGFAULTS
+    where the interpreter answers 3 (bug:gate-stdlib-syntax class 2, and the
+    reason an elaborated `buckets = List([0]) * n` could not compile).
+
+    The element type is whatever the argument supplies, so a single
+    positional iterable is `list(...)`'s own lowering
+    (`_lower_ctor_from_iterable`), not a second iteration scheme;
+    `List(1, 2, 3)` is the variadic form, a list display. `List(length=, fill=)` has no iterable
+    argument; it is a synthetic `[fill for _ in range(length)]`, which
+    reuses the comprehension loop and therefore also handles a length that
+    is only known at run time (the fill is lowered ONCE, outside the loop,
+    because Mojo evaluates it once and copies it).
+    """
+    _length = None
+    _fill = None
+    for _kw in node.kwargs:
+        try:
+            _kn, _kv = _kw
+        except Exception:
+            continue
+        _kname = _as_str(_kn)
+        if _kname == 'length':
+            _length = _kv
+        elif _kname == 'fill':
+            _fill = _kv
+    if _length is not None and _fill is not None:
+        _ft, _fv = gen.lower_expr(_fill)
+        _ft = gen._get_actual_type(_ft, _fv) or _ft
+        if _ft == 'float':
+            _ft = 'double'
+        # A named temp, not `_ensure_local`: a literal fill has no name of
+        # its own, and the comprehension's element is an IdentExpr.
+        _fill_local = gen._new_val(_ft, _fv)
+        _range = gimple_ctypes.CallExpr(
+            func=gimple_ctypes.IdentExpr('range', node.line, node.col),
+            args=[_length], line=node.line, col=node.col)
+        gen.temp_counter += 1
+        _gen0 = gimple_ctypes.Generator(
+            target=f'_List_fill_elem{gen.temp_counter}', iterable=_range,
+            conditions=[], line=node.line, col=node.col)
+        _compr = gimple_ctypes.Comprehension(
+            kind='list',
+            element=gimple_ctypes.IdentExpr(_fill_local, node.line, node.col),
+            generators=[_gen0], line=node.line, col=node.col)
+        _rt, _rv = gen._lower_comprehension(_compr)
+        # Any other keyword (`capacity=`, a misspelt one) is still an
+        # expression the source evaluated: lower it for its side effects.
+        for _kw in node.kwargs:
+            try:
+                _kn, _kv = _kw
+            except Exception:
+                continue
+            if _as_str(_kn) not in ('length', 'fill'):
+                gen.lower_expr(_kv)
+        return 'MojoList *', _rv
+    if len(node.args) > 1:
+        # Mojo's variadic element form: `List(1, 2, 3)`. It is a list
+        # DISPLAY in all but spelling, so lower it as one rather than
+        # evaluating (and dropping) all but the first argument.
+        _lit = gimple_ctypes.ListExpr(elements=list(node.args))
+        _lt, _lv = gen._lower_list_literal(_lit)
+        return 'MojoList *', _lv
+    if not node.args:
+        # The length/fill pair is the only keyword pair that builds
+        # elements; everything else (`capacity=`, and a `length=` with no
+        # `fill=` this model cannot fill) is evaluated for its side effects
+        # and leaves this an empty list, which is still a `MojoList *`.
+        for _kw in node.kwargs:
+            try:
+                _kn, _kv = _kw
+            except Exception:
+                continue
+            gen.lower_expr(_kv)
+        _t = gen._rt_call('MojoList *', 'mojo_list_new', [])
+        if hasattr(gen, '_note_fresh_result'):
+            gen._note_fresh_result(_t)
+        return 'MojoList *', _t
+    return _lower_ctor_from_iterable(gen, 'list', node)
 
 
 def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -7169,7 +7512,7 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     # entry point refuses a marked list, so a mark placed before the fills
     # would make `tuple(x)` raise out of its own construction.
     if kind == 'tuple':
-        gen._emit(f'  mojo_mark_as_tuple ({res});')
+        gen._rt_void('mojo_mark_as_tuple', [f"{res}"])
     return res_type, res
 
 
@@ -7179,7 +7522,7 @@ def _lower_builtin_set(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if not node.args and len(node.kwargs or []) == 0:
-        return 'MojoDict *', gen._new_val('MojoDict *', 'mojo_dict_new ()')
+        return 'MojoDict *', gen._rt_call('MojoDict *', 'mojo_dict_new', [])
     # `dict(k=v, ...)` kwarg form — previously silently DROPPED (an
     # all-kwargs call hit the `not node.args` early return above and built
     # an EMPTY dict; kwargs-mixed-with-args never reached here either).
@@ -7190,7 +7533,7 @@ def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # through the SAME per-pair store helper the `{k: v}` literal uses, so
     # key coercion and per-type setter dispatch stay in one place.
     if len(node.kwargs or []) > 0 and not node.args:
-        t = gen._new_val('MojoDict *', "mojo_dict_new ()")
+        t = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
         for _kw_key, _kw_val in node.kwargs:
             # StringLiteral.value is the parser's already-quote-stripped
             # text, so the bare key name is the correct literal payload.
@@ -7224,9 +7567,9 @@ def _lower_builtin_frozendict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
     """Python 3.15 `frozendict(...)` builtin: immutable dict value."""
     import mojo.backend_gimple.emit_exprs as gex
     if not node.args and len(node.kwargs or []) == 0:
-        return 'MojoDict *', gen._new_val('MojoDict *', 'mojo_frozendict_new ()')
+        return 'MojoDict *', gen._rt_call('MojoDict *', 'mojo_frozendict_new', [])
     if len(node.kwargs or []) > 0 and not node.args:
-        t = gen._new_val('MojoDict *', "mojo_frozendict_new ()")
+        t = gen._rt_call('MojoDict *', 'mojo_frozendict_new', [])
         gen._emit_call('void', '', 'mojo_dict_set_frozen', [('MojoDict *', t), ('int', '0')])
         for _kw_key, _kw_val in node.kwargs:
             gex._emit_dict_pair_store(gen, t,
@@ -7272,7 +7615,7 @@ def _lower_builtin_frozendict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
             import mojo.backend_gimple.emit_infra as _gdi
             _gdi._copy_dict_metadata(gen, t, av)
         return 'MojoDict *', t
-    return 'MojoDict *', gen._new_val('MojoDict *', 'mojo_frozendict_new ()')
+    return 'MojoDict *', gen._rt_call('MojoDict *', 'mojo_frozendict_new', [])
 
 
 def _lower_builtin_list(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -7311,7 +7654,7 @@ def _lower_builtin_list(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             if isinstance(_lact, str) and _lact.endswith(' *') \
                     and _lact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
                 _wct = _lact
-                _lav = gen._new_val(_lact, f'({_lact}){_lav}')
+                _lav = gen._cast(_lact, _lav)
         if _wct is not None and _struct_defines_method(
                 gen, _wct[:-2], '__next__'):
             return 'MojoList *', gen._materialize_in_tu_wrapper(_wct[:-2], _lav)
@@ -7333,8 +7676,8 @@ def _lower_builtin_open(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     mode_type, mode_val = gen.lower_expr(node.args[1])
     fn_val   = gen._ensure_local('char *', gen._coerce_to_type(fn_type,   'char *', fn_val))
     mode_val = gen._ensure_local('char *', gen._coerce_to_type(mode_type, 'char *', mode_val))
-    tmp = gen._new_val('void *',   f'mojo_open ({fn_val}, {mode_val})')
-    return 'int64_t', gen._new_val('int64_t', f'(int64_t){tmp}')
+    tmp = gen._rt_call('void *', 'mojo_open', [fn_val, mode_val])
+    return 'int64_t', gen._cast('int64_t', tmp)
 
 
 def _lower_self_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -7364,7 +7707,7 @@ def _lower_self_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _ct, _cv = gen._lower_struct_constructor(
                     sname, list(node.args),
                     getattr(node, 'kwargs', None) or [])
-                return 'int64_t', gen._new_val('int64_t', f'(int64_t){_cv}')
+                return 'int64_t', gen._cast('int64_t', f"{_cv}")
             # No overload the real argument types select: the old path's
             # stub call stands (honest — the call site would fail the same
             # resolution), never a partial inline.
@@ -7381,9 +7724,9 @@ def _lower_imported_struct_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExp
     if arg_pairs:
         atype, aval = arg_pairs[0]
         if atype.endswith(' *'):
-            gen._emit(f'  {t} = (int64_t){aval};')
+            gen._cast_into(t, 'int64_t', f"{aval}")
         else:
-            gen._emit(f'  {t} = (int64_t){gen._ensure_local(atype, aval)};')
+            gen._cast_into(t, 'int64_t', gen._ensure_local(atype, aval))
     else:
         gen._emit(f'  {t} = (int64_t)0;')
     return 'int64_t', t
@@ -7459,9 +7802,9 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
             # in `gimple_gen_exprs.py` already relies on for exactly this),
             # so just take it — this is what callers actually want: the raw
             # bits of the object's address.
-            gen._emit(f'  {t} = ({ctype}){av};')
+            gen._cast_into(t, ctype, av)
         else:
-            gen._emit(f'  {t} = ({ctype}){gen._ensure_local(at, av)};')
+            gen._cast_into(t, ctype, gen._ensure_local(at, av))
     else:
         # `Float64(py=<box>)` / `Int8(py=<box>)` / ... (2026-10-21 part 4,
         # further, test_python_object): the PythonObject-conversion kwarg —
@@ -7486,12 +7829,11 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                     # cast may not be applied to a call expression in raw
                     # GIMPLE ("invalid operand in unary operation") — then
                     # take the target width.
-                    _bd = gen._new_val(
-                        'double', f'mojo_pyobject_box_as_double ({_b64v})')
+                    _bd = gen._rt_call('double', 'mojo_pyobject_box_as_double', [_b64v])
                     if ctype == 'double':
-                        gen._emit(f'  {t} = {_bd};')
+                        gen._copy(t, _bd)
                     else:
-                        gen._emit(f'  {t} = ({ctype}){_bd};')
+                        gen._cast_into(t, ctype, _bd)
                 else:
                     # Runtime class check: a container or a pointer-range
                     # word (a char * string box) is not a real number.
@@ -7509,20 +7851,16 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                     # precomputed. Measured 2026-10-21 part 4 integration:
                     # this arm broke the py-conversion paths under the
                     # sweep's -fgimple gate.
-                    _pc1 = gen._new_val(
-                        'int', f'mojo_pyobject_is_container ({_b64v})')
-                    gen._emit(
-                        f'  if ({_pc1}) goto {_bb_bad}; else goto {_bb_c2};')
+                    _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
+                    gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                     gen._emit_label(_bb_c2)
                     _z32 = gen._new_val('int64_t', '1LL << 32')
                     _pc2 = gen._new_val('_Bool', f'{_b64v} >= {_z32}')
-                    gen._emit(
-                        f'  if ({_pc2}) goto {_bb_c3}; else goto {_bb_good};')
+                    gen._cond_goto(_pc2, _bb_c3, _bb_good)
                     gen._emit_label(_bb_c3)
                     _z48 = gen._new_val('int64_t', '1LL << 48')
                     _pc3 = gen._new_val('_Bool', f'{_b64v} < {_z48}')
-                    gen._emit(
-                        f'  if ({_pc3}) goto {_bb_bad}; else goto {_bb_good};')
+                    gen._cond_goto(_pc3, _bb_bad, _bb_good)
                     gen._emit_label(_bb_bad)
                     gen._emit_call('void', '', 'mojo_raise_type_error',
                                    [('char *', gen._intern_string(
@@ -7531,13 +7869,13 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                     gen._emit(f'  {t} = ({ctype})0;')
                     gen._emit_label(_bb_good)
                     if ctype == 'double':
-                        gen._emit(f'  {t} = (double){_b64v};')
+                        gen._cast_into(t, 'double', _b64v)
                     else:
                         # int64 -> double -> float: the nested-cast RHS
                         # `(float)(double)x` is itself rejected in raw
                         # GIMPLE, so the double step gets its own temp.
-                        _dv = gen._new_val('double', f'(double){_b64v}')
-                        gen._emit(f'  {t} = ({ctype}){_dv};')
+                        _dv = gen._cast('double', _b64v)
+                        gen._cast_into(t, ctype, _dv)
             else:
                 _bb_bad = gen._new_bb(); _bb_good = gen._new_bb()
                 _bb_c2 = gen._new_bb()
@@ -7547,15 +7885,12 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                 # cast literals), and the constant must be precomputed.
                 # Measured 2026-10-21 part 4 integration: this arm broke
                 # the py-conversion paths under the sweep's -fgimple gate.
-                _pc1 = gen._new_val(
-                    'int', f'mojo_pyobject_is_container ({_b64v})')
-                gen._emit(
-                    f'  if ({_pc1}) goto {_bb_bad}; else goto {_bb_c2};')
+                _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
+                gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                 gen._emit_label(_bb_c2)
                 _z32 = gen._new_val('int64_t', '1LL << 32')
                 _pc2 = gen._new_val('_Bool', f'{_b64v} >= {_z32}')
-                gen._emit(
-                    f'  if ({_pc2}) goto {_bb_bad}; else goto {_bb_good};')
+                gen._cond_goto(_pc2, _bb_bad, _bb_good)
                 gen._emit_label(_bb_bad)
                 gen._emit_call('void', '', 'mojo_raise_type_error',
                                [('char *', gen._intern_string(
@@ -7564,7 +7899,7 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                                        "number, not 'str'")))])
                 gen._emit(f'  {t} = ({ctype})0;')
                 gen._emit_label(_bb_good)
-                gen._emit(f'  {t} = ({ctype}){_b64v};')
+                gen._cast_into(t, ctype, _b64v)
         else:
             gen._emit(f'  {t} = ({ctype})0;')
     return ctype, t
@@ -7601,9 +7936,9 @@ def _lower_opaque_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tup
     t = gen._new_temp('int64_t')
     if ctor_args:
         at, av = ctor_args[0]
-        if at.endswith(' *'):       gen._emit(f'  {t} = (int64_t){av};')
-        elif at == 'int64_t':       gen._emit(f'  {t} = {av};')
-        else:                       gen._emit(f'  {t} = (int64_t){gen._ensure_local(at, av)};')
+        if at.endswith(' *'):       gen._cast_into(t, 'int64_t', f"{av}")
+        elif at == 'int64_t':       gen._copy(t, f"{av}")
+        else:                       gen._cast_into(t, 'int64_t', gen._ensure_local(at, av))
     else:
         gen._emit(f'  {t} = (int64_t)0;')
         # PART 6 (2026-10-23, family S): the zero-argument STRING
@@ -8254,7 +8589,18 @@ def _lower_LambdaExpr(gen, node) -> tuple:
 
     outer_ctx = gen.current_func_name or 'root'
     gen._lambda_counter += 1
-    lifted_name = f'{outer_ctx}_lambda_{gen._lambda_counter}'
+    # Qualify with the module when there is one. `_lambda_counter` is PER GEN,
+    # and a flattened do_imports/link compile spins up one temp_gen per inlined
+    # module, each starting at 0 — so two modules that both lift a lambda from
+    # a same-named enclosing function (`_comptime_conforms_to_pred` in
+    # emit_calls.py and emit_stmts.py) produced the SAME
+    # `_comptime_conforms_to_pred_lambda_1` and gcc rejected the second as a
+    # redefinition. Same `_mod_id` rule as the `main` renaming just below
+    # (empty module name -> no prefix, so a standalone compile's
+    # `f_lambda_1` is unchanged).
+    _lmod = gen.module_name.replace('.', '_').replace('-', '_') if gen.module_name else ''
+    lifted_name = (f'{_lmod}_{outer_ctx}_lambda_{gen._lambda_counter}'
+                   if _lmod else f'{outer_ctx}_lambda_{gen._lambda_counter}')
 
     # Build a synthetic FunctionDef whose body is `return <lambda.body>`
     # The synthetic statements carry the lambda's own line: the lifted body is
@@ -8829,7 +9175,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
             # so failed to compile only when its lambda was referenced from a
             # `__GIMPLE`-tagged body.
             gen._emit(f'  {_sz} = {gen._c_sizeof_helper(_env_struct)} ();')
-            gen._emit(f'  {_vp} = malloc ({_sz});')
+            gen._rt_into(_vp, 'malloc', [_sz])
             _envp = gen._new_temp(f'{_env_struct} *')
             gen._emit(f'  {_envp} = ({_env_struct} *) {_vp};')
             _default_src = {pn: dv for pn, dv in node.params if dv is not None}
@@ -8841,7 +9187,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                 else:
                     _cv = _env_field_value(gen, _cn, _ct)
                 gen._emit(f'  {_envp}->{_cn} = {_cv};')
-            _env_void = gen._new_val('void *', f'(void *){_envp}')
+            _env_void = gen._cast('void *', _envp)
         _fnv = gen._new_temp('void *')
         gen._emit(f'  {_fnv} = {gen._c_fnaddr_helper(lifted_name)} ();')
         _nfv = gen._new_val('int64_t', str(_n_fixed))
@@ -8865,7 +9211,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                               ('int64_t', _hsv)])
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
-        _vft = gen._new_val('void *', f'(void *){_vf}')
+        _vft = gen._cast('void *', _vf)
         # The same return-type record the static and closing arms make just
         # below: the variadic value is a different carrier, not a different
         # callee, so a call through it must narrow its box back the same way
@@ -8907,7 +9253,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # the body calls. See GimpleGen._c_sizeof_helper / _c_fnaddr_helper.
     _sz = gen._new_temp('int64_t')
     gen._emit(f'  {_sz} = {gen._c_sizeof_helper(_env_struct)} ();')
-    gen._emit(f'  {_vp} = malloc ({_sz});')
+    gen._rt_into(_vp, 'malloc', [_sz])
     gen._emit(f'  {_envp} = ({_env_struct} *) {_vp};')
     # Which names come from a default argument (value = that expression at
     # this reference site) rather than from an enclosing local (value = the
@@ -8927,7 +9273,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen._emit(f'  {_fnv} = {gen._c_fnaddr_helper(lifted_name)} ();')
     _bm = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                         [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
-    _val = gen._new_val('void *', f'(void *){_bm}')
+    _val = gen._cast('void *', _bm)
     # Same reason as the non-capturing case just above: a call through this
     # value goes through the homogenized `int64_t` helper, so the return
     # type has to travel with the value or it is lost.
@@ -8980,14 +9326,14 @@ def _emit_asyncio_run_drive(gen, base: str, vct: str, arg_pairs: list) -> tuple[
     gen._emit(f"  mojo_async_schedule_ready ({handle});")
     gen._emit(f"  mojo_async_run_until_complete ();")
     gen._emit(f"  {base}_translate_pending_exc ({handle});")
-    pending_t = gen._new_val('int', "mojo_exc_pending_get ()")
+    pending_t = gen._rt_call('int', 'mojo_exc_pending_get', [])
     bb_pending = gen._new_bb()
     bb_ok = gen._new_bb()
-    gen._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
+    gen._cond_goto(pending_t, bb_pending, bb_ok)
     gen._emit_label(bb_pending)
-    gen._emit(f"  mojo_exc_pending_set (0);")
+    gen._rt_void('mojo_exc_pending_set', ['0'])
     gen._emit(f"  {base}_destroy ({handle});")
-    gen._emit("  mojo_raise ();")
+    gen._rt_void('mojo_raise', [])
     gen._emit_label(bb_ok)
     if vct == 'void':
         gen._emit(f"  {base}_destroy ({handle});")
@@ -9162,7 +9508,7 @@ def _pad_lambda_defaults(gen, node: gimple_ctypes.CallExpr,
             continue
         _dt, _dv = gen.lower_expr(_pdefault)
         if _dt != 'int64_t':
-            _dv = gen._new_val('int64_t', f'(int64_t){_dv}')
+            _dv = gen._cast('int64_t', _dv)
         arg_pairs.append(('int64_t', _dv))
 
 
@@ -9184,36 +9530,36 @@ def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes
     at run time, so it may sit before or after a `*` spread whose length is
     unknown here; `mojo_dict_set_double` for a keyword)."""
     if fp_type != 'void *':
-        fp_void = gen._new_val('void *', f'(void *){fp_raw}')
+        fp_void = gen._cast('void *', fp_raw)
     else:
         fp_void = fp_raw
-    _a = gen._new_val('MojoList *', 'mojo_list_new ()')
+    _a = gen._rt_call('MojoList *', 'mojo_list_new', [])
     _kw_spreads = []
     for _node_arg in node.args:
         _is_spread = isinstance(_node_arg, gimple_ctypes.UnaryOp) and _node_arg.op in ('*', '**')
         _t, _v = gen.lower_expr(_node_arg.operand if _is_spread else _node_arg)
         _t, _v = _as_str(_t), _as_str(_v)
         if _is_spread:
-            _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+            _w = _v if _t == 'int64_t' else gen._cast('int64_t', f"{_v}")
         else:
             _w = None
         if _is_spread and _node_arg.op == '*':
-            gen._emit(f"  mojo_args_extend_word ({_a}, {_w});")
+            gen._rt_void('mojo_args_extend_word', [_a, f"{_w}"])
         elif _is_spread:
             _kw_spreads.append(_w)
         elif _t == 'double':
             gen._emit(f"  mojo_list_append_double_kinded ({_a}, {_v}, 'i');")
         else:
-            _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
-            gen._emit(f"  mojo_list_append_int ({_a}, {_w});")
+            _w = _v if _t == 'int64_t' else gen._cast('int64_t', f"{_v}")
+            gen._rt_void('mojo_list_append_int', [_a, f"{_w}"])
     _kw_pairs = {kn: gen.lower_expr(kv) for kn, kv in (getattr(node, 'kwargs', None) or [])}
     _k = gen._pack_kwargs_dict(_kw_pairs)
     for _w in _kw_spreads:
-        gen._emit(f"  mojo_kwargs_merge_word ({_k}, {_w});")
+        gen._rt_void('mojo_kwargs_merge_word', [f"{_k}", f"{_w}"])
     if ret_type == 'int64_t':
         ret_type = gen._callable_ret_types.get(fp_raw, ret_type)
-    _fn = gen._new_val('int64_t', f'(int64_t){fp_void}')
-    raw_t = gen._new_val('int64_t', f'mojo_dyn_call ({_fn}, {_a}, {_k})')
+    _fn = gen._cast('int64_t', f"{fp_void}")
+    raw_t = gen._rt_call('int64_t', 'mojo_dyn_call', [_fn, _a, f"{_k}"])
     if ret_type == 'void':
         return 'int', gen._new_val('int', '0')
     if ret_type == 'int64_t':
@@ -9260,7 +9606,7 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     n = len(arg_pairs)
     # Cast to void * so the runtime helper receives a stable pointer type.
     if fp_type != 'void *':
-        fp_void = gen._new_val('void *', f'(void *){fp_raw}')
+        fp_void = gen._cast('void *', fp_raw)
     else:
         fp_void = fp_raw
     # Widen each arg to int64_t. Index the pair (`_ap[0]`/`_ap[1]`), don't
@@ -9276,7 +9622,7 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         if at == 'int64_t':
             widened.append(av)
         else:
-            widened.append(gen._new_val('int64_t', f'(int64_t){av}'))
+            widened.append(gen._cast('int64_t', f"{av}"))
     # The callee's real return type: what the caller knew, else what the
     # callable VALUE carries from where it was materialized. Both must be
     # settled BEFORE the helper is chosen — the helper's own return type is
@@ -9359,19 +9705,19 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     _cpt = (getattr(gen, '_callable_param_ret_types', None) or {}).get(fp_raw)
     if _cpt and ret_type == 'int64_t':
         if _cpt == 'double':
-            return 'double', gen._new_val('double', f'(double){raw_t}')
+            return 'double', gen._cast('double', raw_t)
         if _cpt != 'void':
-            return _cpt, gen._new_val(_cpt, f'({_cpt}){raw_t}')
+            return _cpt, gen._cast(_cpt, raw_t)
     _cap_api = (getattr(gen, '_callable_param_gen_api', None) or {}).get(fp_raw)
     if _cap_api is not None:
-        _gen_t = gen._new_val('MojoGenerator *', f'(MojoGenerator *){raw_t}')
+        _gen_t = gen._cast('MojoGenerator *', raw_t)
         gen._actual_types[_gen_t] = 'MojoGenerator *'
         gen._generator_var_api[_gen_t] = _cap_api
         return 'MojoGenerator *', _gen_t
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
     # Narrow back to declared return type.
-    t = gen._new_val(ret_type, f'({ret_type}){raw_t}')
+    t = gen._cast(ret_type, raw_t)
     return ret_type, t
 
 
@@ -9551,7 +9897,7 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
         _expanded.append(arg_pairs[_lp])
     for _pos in range(_lead, len(expected_params)):
         _ptype = _as_str(expected_params[_pos])
-        _idx64 = gen._new_val('int64_t', f"(int64_t){_pos - _lead}")
+        _idx64 = gen._cast('int64_t', f"{_pos - _lead}")
         _len64 = gen._call_expr('int64_t', 'mojo_list_len',
                                  [('MojoList *', _lst_v)])
         _inrange = gen._new_val('_Bool', f"{_idx64} < {_len64}")
@@ -9559,19 +9905,18 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
         # Result slot declared once, assigned in both branches (GIMPLE:
         # no phi nodes / no ternaries across divergent types).
         _slot = gen._new_temp(_ptype if _ptype != 'void *' else 'int64_t')
-        gen._emit(f"  if ({_inrange}) goto {_bb_in}; else goto {_bb_out};")
+        gen._cond_goto(_inrange, f"{_bb_in}", f"{_bb_out}")
         gen._emit_label(_bb_in)
         if _ptype == 'char *':
-            gen._emit(f"  {_slot} = mojo_list_get_str ({_lst_v}, {_idx64});")
+            gen._rt_into(_slot, 'mojo_list_get_str', [_lst_v, _idx64])
         elif _ptype == 'double':
-            gen._emit(f"  {_slot} = mojo_list_get_double ({_lst_v}, {_idx64});")
+            gen._rt_into(_slot, 'mojo_list_get_double', [_lst_v, _idx64])
         else:
-            _raw = gen._new_val('int64_t',
-                                 f"mojo_list_get_int ({_lst_v}, {_idx64})")
+            _raw = gen._rt_call('int64_t', 'mojo_list_get_int', [_lst_v, _idx64])
             gen._emit(f"  {_slot} = "
                        + (f"({_ptype}){_raw};" if _ptype != 'int64_t'
                           else f"{_raw};"))
-        gen._emit(f"  goto {_bb_merge};")
+        gen._goto(f"{_bb_merge}")
         gen._emit_label(_bb_out)
         _dv = None
         if _dflts and 0 <= _pos - _first_dflt < len(_dflts):
@@ -9582,14 +9927,14 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
                 # No string default: NULL (real Python would have raised
                 # TypeError for a genuinely-required arg left unfilled).
                 _dval = '(char *)0'
-            gen._emit(f"  {_slot} = {_dval};")
+            gen._copy(_slot, f"{_dval}")
         elif _ptype == 'double':
-            gen._emit(f"  {_slot} = (double){_dval};")
+            gen._cast_into(_slot, 'double', f"{_dval}")
         else:
             gen._emit(f"  {_slot} = "
                        + (f"({_ptype}){_dval};" if _ptype != 'int64_t'
                           else f"(int64_t){_dval};"))
-        gen._emit(f"  goto {_bb_merge};")
+        gen._goto(f"{_bb_merge}")
         gen._emit_label(_bb_merge)
         _expanded.append((_ptype, _slot))
     return _expanded
@@ -9665,10 +10010,10 @@ def _pack_vararg_trailing_params(gen, fname, fname_raw, arg_pairs, kwarg_dict,
                                 if _trailing_ptypes else [])
     _fixed2 = arg_pairs[:_n_fixed2]
     _vararg2 = arg_pairs[_n_fixed2:]
-    _lst2 = gen._new_val('MojoList *', "mojo_list_new ()")
+    _lst2 = gen._rt_call('MojoList *', 'mojo_list_new', [])
     for _at2, _av2 in _vararg2:
         _av2 = gen._coerce_to_type(_at2, 'int64_t', _av2)
-        gen._emit(f"  mojo_list_append_int ({_lst2}, {_av2});")
+        gen._rt_void('mojo_list_append_int', [_lst2, f"{_av2}"])
     _trailing_pairs = []
     for _i2, _tpt in enumerate(_trailing_ptypes):
         _tname = (_trailing_names_defaults[_i2][0]
@@ -9908,10 +10253,10 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
         _vararg_pairs = arg_pairs[_n_fixed:]
         _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
         if _has_vararg:
-            _lst = gen._new_val('MojoList *', "mojo_list_new ()")
+            _lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
             for _at, _av in _vararg_pairs:
                 _av = gen._coerce_to_type(_at, 'int64_t', _av)
-                gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+                gen._rt_void('mojo_list_append_int', [_lst, f"{_av}"])
             arg_pairs = _fixed_pairs + [('MojoList *', _lst), _packed_dict_pair]
         else:
             # No `*args` slot at all: any leftover positional args (a
@@ -10202,7 +10547,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
                 # std/python/bindings.mojo's PyType_FromSpec site). The
                 # temp form (`_tN = (int64_t)42;`) is valid raw GIMPLE
                 # in both tagged and untagged functions.
-                _av = gen._new_val('int64_t', f'(int64_t){_av}')
+                _av = gen._cast('int64_t', f"{_av}")
             elif _at in ('double', 'float'):
                 _av = f'mojo_double_to_bits(({_av}))'
             _wid.append((_at, _av))
@@ -10414,18 +10759,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # `round()` would give 3 and -3.
     if fname_raw == 'round' and len(node.args) == 1:
         (xt, xv), = arg_pairs
-        xd = xv if xt == 'double' else gen._new_val('double', f'(double){xv}')
+        xd = xv if xt == 'double' else gen._cast('double', f"{xv}")
         _r = gen._new_val('double', f'rint ({xd})')
-        return 'int64_t', gen._new_val('int64_t', f'(int64_t){_r}')
+        return 'int64_t', gen._cast('int64_t', _r)
 
     # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)
     if fname_raw == 'round' and len(node.args) == 2:
         (xt, xv), (nt, nv) = arg_pairs
-        xd = xv if xt == 'double' else gen._new_val('double', f'(double){xv}')
-        nd = nv if nt == 'double' else gen._new_val('double', f'(double){nv}')
-        p  = gen._new_val('double', f'pow (10.0, {nd})')
+        xd = xv if xt == 'double' else gen._cast('double', f"{xv}")
+        nd = nv if nt == 'double' else gen._cast('double', f"{nv}")
+        p  = gen._rt_call('double', 'pow', ['10.0', f"{nd}"])
         scaled = gen._new_val('double', f'{xd} * {p}')
-        r = gen._new_val('double', f'round ({scaled})')
+        r = gen._rt_call('double', 'round', [scaled])
         return 'double', gen._new_val('double', f'{r} / {p}')
 
     # A double bound for a parameter whose call sites also passed integers is
@@ -10457,9 +10802,9 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _ist, _isv = arg_pairs[0]
         _ibt, _ibv = arg_pairs[1]
         if _ist != 'char *':
-            _isv = gen._new_val('char *', f'(char *){gen._ensure_local(_ist, _isv)}')
+            _isv = gen._cast('char *', gen._ensure_local(_ist, _isv))
         if _ibt != 'int64_t':
-            _ibv = gen._new_val('int64_t', f'(int64_t){gen._ensure_local(_ibt, _ibv)}')
+            _ibv = gen._cast('int64_t', gen._ensure_local(_ibt, _ibv))
         return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int_base',
                                          [('char *', _isv), ('int64_t', _ibv)])
     if (len(expected_params) > 0 and len(arg_pairs) > len(expected_params)
@@ -10484,7 +10829,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         if _ex_t not in ('int', 'int64_t', '_Bool'):
             _msg = gen._stringify_value(_ex_t, _ex_v)
             gen._emit_call('void', '', 'mojo_print_stderr', [('char *', _msg)])
-            gen._emit("  exit (1);")
+            gen._rt_void('exit', ['1'])
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
 
     if fname_raw == 'int' and len(arg_pairs) > 1:
@@ -10523,7 +10868,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             return at, gen._new_val(at, f'{neg} ? {negv} : {v}')
         if at in _SCALAR_INT_TYPES or at == 'long long' or at.endswith(' *'):
             v = gen._ensure_local('int64_t', av if not at.endswith(' *')
-                                   else gen._new_val('int64_t', f'(int64_t){av}'))
+                                   else gen._cast('int64_t', f"{av}"))
             zero = gen._new_val('int64_t', '(int64_t)0')
             neg  = gen._new_val('_Bool', f'{v} < {zero}')
             negv = gen._new_val('int64_t', f'-{v}')
@@ -10600,7 +10945,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             # (a live heap pointer as a GIMPLE integer constant) — different
             # every run. Index, don't unpack, and re-tag the slot.
             _v = _as_str(v)
-            return _v if t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+            return _v if t == 'int64_t' else gen._cast('int64_t', _v)
         acc = _as_i64(_as_str(arg_pairs[0][0]), arg_pairs[0][1])
         for _ap in arg_pairs[1:]:
             bv = _as_i64(_as_str(_ap[0]), _ap[1])
@@ -10639,7 +10984,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         for _ap in arg_pairs[1:]:
             cv = _as_cstr(_as_str(_ap[0]), _ap[1])
             cmp_i = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', _as_str(acc)), ('char *', cv)])
-            cmp64 = gen._new_val('int64_t', f'(int64_t){cmp_i}')
+            cmp64 = gen._cast('int64_t', cmp_i)
             zero = gen._new_val('int64_t', '(int64_t)0')
             # cmp64 < 0 means acc sorts strictly before cv (acc is the
             # lexicographically smaller string); max wants the larger of
@@ -10686,10 +11031,10 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # handles. Real repro: Tools/scripts/summarize_stats.py's
         # load_raw_data: `stats[key.strip()] += int(value)`.
         if at in ('int', 'int64_t', '_Bool') and gen._actual_types.get(av) == 'char *':
-            cp = gen._new_val('char *', f'(char *){av}')
+            cp = gen._cast('char *', f"{av}")
             return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
         if at == 'double':
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
+            return 'int64_t', gen._cast('int64_t', f"{av}")
         # A tagged/boxed word (a double box holds the double's bits, not a
         # numeric int64_t) must be read by kind: `mojo_box_int` returns the
         # double box truncated toward zero (Python's `int(float)`), and the
@@ -10700,7 +11045,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         if at == 'int64_t':
             return 'int64_t', av
         if at in ('int', '_Bool'):
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
+            return 'int64_t', gen._cast('int64_t', f"{av}")
 
     # float(x) — direct cast for numeric types
     if fname_raw == 'float' and arg_pairs:
@@ -10708,7 +11053,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # Same boxed-string trap as int() above: `(double)<char*>` casts
         # pointer BITS, silently producing garbage; parse instead.
         if at in ('int64_t', 'int', '_Bool') and gen._actual_types.get(av) == 'char *':
-            cp = gen._new_val('char *', f'(char *){av}')
+            cp = gen._cast('char *', f"{av}")
             return 'double', gen._call_expr('double', 'mojo_make_float', [('char *', cp)])
         # A tagged/boxed word: `mojo_box_double` returns the double a 'd' box
         # holds, promotes an int/None/bool box's word to double, and is a
@@ -10716,7 +11061,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # read the box pointer's bits as a double.
         if at in ('int64_t', 'int', '_Bool') and av in getattr(gen, '_boxed_vals', ()):
             return 'double', gen._call_expr('double', 'mojo_box_double', [('int64_t', av)])
-        if at in ('int64_t', 'int', '_Bool'): return 'double', gen._new_val('double', f'(double){av}')
+        if at in ('int64_t', 'int', '_Bool'): return 'double', gen._cast('double', f"{av}")
         if at == 'double':                    return 'double', av
 
     # bool(x) — Python truthiness is container LENGTH, not pointer
@@ -10921,10 +11266,10 @@ def _lower_varargs_pack(gen, pack_args: list) -> tuple:
     lowered = [gen.lower_expr(a) for a in pack_args]
     if len(lowered) == 1 and lowered[0][0] == 'MojoList *':
         return lowered[0]
-    lst = gen._new_val('MojoList *', "mojo_list_new ()")
+    lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
     for atype, aval in lowered:
         aval = gen._coerce_to_type(atype, 'int64_t', aval)
-        gen._emit(f"  mojo_list_append_int ({lst}, {aval});")
+        gen._rt_void('mojo_list_append_int', [lst, f"{aval}"])
     return ('MojoList *', lst)
 
 
@@ -10973,7 +11318,7 @@ def _lower_struct_constructor(gen, struct_name: str,
         else:
             # No payload argument (`X()`): an empty bytes value, so
             # inherited ops never deref a NULL `_data`.
-            _mb = gen._new_val('MojoBytes *', 'mojo_bytes_empty ()')
+            _mb = gen._rt_call('MojoBytes *', 'mojo_bytes_empty', [])
             gen._emit(f"  {t}->_data = {_mb};")
 
     # Explicit length-based flags — a bare `if kwargs:` / `kwargs or args`
@@ -11201,11 +11546,11 @@ def _lower_struct_constructor(gen, struct_name: str,
             _lptr = _lelem + ' *'
             _lval = _lraw
             if _lptr != 'int64_t *':
-                _lval = gen._new_val(_lptr, f"({_lptr}){_lraw}")
+                _lval = gen._cast(_lptr, _lraw)
             _dct = gen.struct_field_types.get('Span', {}).get('_data') or 'char *'
-            _dbuf = _lval if _dct == _lptr else gen._new_val(_dct, f"({_dct}){_lval}")
+            _dbuf = _lval if _dct == _lptr else gen._cast(_dct, f"{_lval}")
             gen._emit(f"  {t}->_data = {_dbuf};")
-            _llen = gen._new_val('int64_t', f"mojo_list_len ({_span_list})")
+            _llen = gen._rt_call('int64_t', 'mojo_list_len', [f"{_span_list}"])
             gen._emit(f"  {t}->_len = {_llen};")
             elem_ct = _lelem
         elif 'ptr' in kw and isinstance(kw['ptr'], gimple_ctypes.IdentExpr):
@@ -11352,16 +11697,16 @@ def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: s
     if ftype and isinstance(ftype, str) and ftype.endswith(' *'):
         dp = gen._new_val(ftype, f"{obj_v}->{fname}")
         # GIMPLE: can't chain casts in one expr; split into two steps
-        vp = gen._new_val('void *', f"(void *){dp}")
-        i64p = gen._new_val('int64_t *', f"(int64_t *){vp}")
+        vp = gen._cast('void *', dp)
+        i64p = gen._cast('int64_t *', vp)
     elif ftype and isinstance(ftype, str) and ftype in ('int64_t', 'int'):
         dp = gen._new_val(ftype, f"{obj_v}->{fname}")
-        vp = gen._new_val('void *', f"(void *){dp}")
-        i64p = gen._new_val('int64_t *', f"(int64_t *){vp}")
+        vp = gen._cast('void *', dp)
+        i64p = gen._cast('int64_t *', vp)
     else:
         dp = gen._new_val(ftype, f"{obj_v}->{fname}")
-        vp = gen._new_val('void *', f"(void *){dp}")
-        i64p = gen._new_val('int64_t *', f"(int64_t *){vp}")
+        vp = gen._cast('void *', dp)
+        i64p = gen._cast('int64_t *', vp)
     idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
     gen._ptr_helpers_needed.add('int64_t')
     addr = gen._new_val('int64_t *', f"_mojo_at_int64_t ({i64p}, {idx64})")
@@ -11438,7 +11783,7 @@ def _list_slot_bytes(gen, list_val: str, idx64: str) -> tuple[str, str]:
     would otherwise spell the same coercion twice: the no-new-casts guard
     counts spellings, and a duplicate is a second site to keep in sync.
     """
-    _bt = gen._new_val('int64_t', f"mojo_list_get_int ({list_val}, {idx64})")
+    _bt = gen._rt_call('int64_t', 'mojo_list_get_int', [list_val, idx64])
     return 'MojoBytes *', gen._new_val(
         'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
 
@@ -11540,12 +11885,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             and not node.obj.args and not node.obj.kwargs):
         _recv_t, _recv_v = gen.lower_expr(node.obj.func.obj)
         if _recv_t == 'char *':
-            _b = gen._new_val(
-                'MojoBytes *', f'mojo_bytes_from_cstr ({_recv_v})')
+            _b = gen._rt_call('MojoBytes *', 'mojo_bytes_from_cstr', [_recv_v])
             _it, _iv = gen.lower_expr(node.index)
             _idx64 = gen._new_val('int64_t', f"(int64_t) {_iv}")
-            t = gen._new_val(
-                'int64_t', f"mojo_bytes_get_checked ({_b}, {_idx64})")
+            t = gen._rt_call('int64_t', 'mojo_bytes_get_checked', [_b, _idx64])
             return 'int64_t', t
 
     ot, ov = gen.lower_expr(node.obj)
@@ -11623,18 +11966,18 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             bb_hit = gen._new_bb()
             bb_miss = gen._new_bb()
             bb_done = gen._new_bb()
-            gen._emit(f"  if ({has} != 0) goto {bb_hit}; else goto {bb_miss};")
+            gen._cond_goto(f"{has} != 0", bb_hit, bb_miss)
             gen._emit_label(bb_hit)
             hv = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                                 [('MojoDict *', dp), (kt, kv)])
-            gen._emit(f"  {res} = {hv};")
+            gen._copy(res, hv)
             _mark_unknown_dict_value(gen, dp, res, kv, 'str')
-            gen._emit(f"  goto {bb_done};")
+            gen._goto(bb_done)
             gen._emit_label(bb_miss)
             miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
             mv = gen._call_expr('int64_t', miss_mangled, [(ot, ov), (kt, kv)])
-            gen._emit(f"  {res} = {mv};")
-            gen._emit(f"  goto {bb_done};")
+            gen._copy(res, mv)
+            gen._goto(bb_done)
             gen._emit_label(bb_done)
             return 'int64_t', res
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
@@ -11649,7 +11992,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if _bsub_r and not gen._struct_defines_method(_bsub_r, '__getitem__'):
         bp = gen._new_val('MojoBytes *', f"{ov}->_data")
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        return 'int64_t', gen._new_val('int64_t', f"mojo_bytes_get_checked ({bp}, {idx64})")
+        return 'int64_t', gen._rt_call('int64_t', 'mojo_bytes_get_checked', [bp, idx64])
 
     if ot == 'MojoList *':
         elem = gen._elem_of(ov)
@@ -11670,8 +12013,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 _skd = _sk[_si]
                 idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
                 if _skd == 'double':
-                    return 'double', gen._new_val(
-                        'double', f"mojo_list_get_double ({ov}, {idx64})")
+                    return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
                 if _skd == 'bytes':
                     return _list_slot_bytes(gen, ov, idx64)
                 if _skd == 'str':
@@ -11683,10 +12025,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     # always a heterogeneous list LITERAL, including one that
                     # came back through a `return`
                     # (`gen._return_value_slot_kinds`).
-                    return 'char *', gen._new_val(
-                        'char *', f"mojo_list_get_str ({ov}, {idx64})")
-                return 'int64_t', gen._new_val(
-                    'int64_t', f"mojo_list_get_int ({ov}, {idx64})")
+                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
+                return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
         # A tuple (or any list with per-slot C types recorded) subscripted at
         # a compile-time constant index: the slot's own C type is the answer.
         # This must run BEFORE the generic `_maybe_kinds_vals` boxed read,
@@ -11705,20 +12045,18 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 _sct = _as_str(_ts[_si])
                 idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
                 if _sct == 'double':
-                    return 'double', gen._new_val(
-                        'double', f"mojo_list_get_double ({ov}, {idx64})")
+                    return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
                 if _sct == 'char *':
-                    return 'char *', gen._new_val(
-                        'char *', f"mojo_list_get_str ({ov}, {idx64})")
+                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
                 if _sct == 'MojoBytes *':
                     return _list_slot_bytes(gen, ov, idx64)
                 if _sct == '_Bool':
                     return '_Bool', gen._new_val(
                         '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")
-                t = gen._new_val('int64_t', f"mojo_list_get_int ({ov}, {idx64})")
+                t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
                 if _sct and _sct.endswith(' *'):
                     gen._actual_types[t] = _sct
-                    cast_t = gen._new_val(_sct, f'({_sct}){t}')
+                    cast_t = gen._cast(_sct, t)
                     gen._actual_types[cast_t] = _sct
                     if _sct == 'MojoList *':
                         if ov in gen._tuple_slot_types:
@@ -11752,16 +12090,16 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # membership test at compile time, and the identical accessor
         # otherwise.
         if ov in getattr(gen, '_maybe_kinds_vals', ()):
-            t = gen._new_val('int64_t', f"mojo_list_get_boxed ({ov}, {idx64})")
+            t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{ov}", idx64])
             gen._boxed_vals.add(t)
             return 'int64_t', t
         if suf == 'double':
-            t = gen._new_val('double', f"mojo_list_get_double ({ov}, {idx64})")
+            t = gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
             return 'double', t
         if suf == 'str':
-            t = gen._new_val('char *', f"mojo_list_get_str ({ov}, {idx64})")
+            t = gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
             return 'char *', t
-        t = gen._new_val('int64_t', f"mojo_list_get_int ({ov}, {idx64})")
+        t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
         # Return the actual pointer type for pointer elements (MojoDict*,
         # MojoList*, MojoSet*) so downstream consumers (subscript, method
         # dispatch) see the real type instead of raw int64_t.  Without this,
@@ -11770,7 +12108,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # of MojoDict* — see BUG-2026-044.
         if elem and elem.endswith(' *'):
             gen._actual_types[t] = elem
-            cast_t = gen._new_val(elem, f'({elem}){t}')
+            cast_t = gen._cast(elem, t)
             gen._actual_types[cast_t] = elem
             # Propagate nested element types for MojoList* (list-of-lists)
             if elem == 'MojoList *':
@@ -11799,7 +12137,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     if ot == 'MojoStr *':
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        t = gen._new_val('char *', f"mojo_char_at_str_cp (mojo_str_data({ov}), {idx64})")
+        t = gen._rt_call('char *', 'mojo_char_at_str_cp', [f"mojo_str_data({ov})", idx64])
         return 'char *', t
 
     if ot == 'MojoBytes *':
@@ -11809,13 +12147,13 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # 0, which is not a neutral value here — 0 is a real byte, so
         # `if b[i] == 0:` on a short buffer silently took the true branch.
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        t = gen._new_val('int64_t', f"mojo_bytes_get_checked ({ov}, {idx64})")
+        t = gen._rt_call('int64_t', 'mojo_bytes_get_checked', [f"{ov}", idx64])
         return 'int64_t', t
 
     if ot == 'MojoMemoryView *':
         # mv[i] -> int (1-D byte view). Negative index handled in the helper.
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        t = gen._new_val('int64_t', f"mojo_memoryview_get ({ov}, {idx64})")
+        t = gen._rt_call('int64_t', 'mojo_memoryview_get', [f"{ov}", idx64])
         return 'int64_t', t
 
     if ot == 'MojoDict *' and gen._is_none_literal(node.index):
@@ -11862,7 +12200,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # Pointer value stored boxed as int64_t; recover the real type so a
             # later v[k2] / v.get(...) dispatches on the right container.
             raw = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
-            t = gen._new_val(val_ctype, f"({val_ctype}){raw}")
+            t = gen._cast(val_ctype, raw)
             # `d[k]` where `d: dict[K, dict[K2, V2]]` — carry V2 onto the inner
             # dict temp so `d[k][k2]` / `d[k].items()` type right (bug: every
             # `member in gen.struct_field_types[sn]` no-op'd on an int64_t).
@@ -11921,7 +12259,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # string's own bytes as a MojoList header and segfaults deep
             # in mojo_list_get_int. Found via fire_compiler.py's own
             # `rest[0]` in _strip_string_prefix_and_quotes.
-            cp = gen._new_val('char *', f'(char *){gen._ensure_local(ot, ov)}')
+            cp = gen._cast('char *', gen._ensure_local(ot, ov))
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             # `s[i]` on a str is a 1-char STRING, not a character code —
             # the same rule as _gen_for_cstr / _compr_cstr_loop (see those
@@ -11937,8 +12275,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # pass over a 96-character line, measured).
             # `_mojo_at_char` is not emitted here: it returns a pointer INTO
             # the string, which is not NUL-terminated and so is not a str.
-            return 'char *', gen._new_val(
-                'char *', f"mojo_char_at_str_cp ({cp}, {idx64})")
+            return 'char *', gen._rt_call('char *', 'mojo_char_at_str_cp', [cp, idx64])
         # A STRING index proves the container is a dict even when its own
         # type is opaque: no list is indexable by a string. `pat.fields`
         # in ast_rewriter.py is exactly this — the A5 boxed-member read
@@ -12003,16 +12340,16 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # accessor, as the direct list branch does: its tracked element type is
         # the promoted one, wrong for the int slots.
         if _as_str(lp) in gen._maybe_kinds_vals:
-            t = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
+            t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [lp, idx64])
             gen._boxed_vals.add(t)
             return 'int64_t', t
         if elem == 'char *':
-            t = gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+            t = gen._rt_call('char *', 'mojo_list_get_str', [lp, idx64])
             return 'char *', t
         if elem == 'double':
-            t = gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
+            t = gen._rt_call('double', 'mojo_list_get_double', [lp, idx64])
             return 'double', t
-        t = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+        t = gen._rt_call('int64_t', 'mojo_list_get_int', [lp, idx64])
         # Any OTHER pointer element type (struct pointers like Recipe*,
         # or MojoDict*/MojoList*/MojoSet*) was falling all the way
         # through to the plain int64_t return below, unlike the direct
@@ -12034,7 +12371,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # first_field_only_wrong_craft_results.md.
         if elem and elem.endswith(' *'):
             gen._actual_types[t] = elem
-            cast_t = gen._new_val(elem, f'({elem}){t}')
+            cast_t = gen._cast(elem, t)
             gen._actual_types[cast_t] = elem
             if elem == 'MojoList *':
                 if ov in gen._tuple_slot_types:
@@ -12090,7 +12427,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             if fname is not None:
                 raw = gen._new_val(ftype, f"{ov}->{fname}")
                 et_ptr = tracked + ' *'
-                dp = gen._new_val(et_ptr, f"({et_ptr}){raw}")
+                dp = gen._cast(et_ptr, raw)
                 cn = gimple_ctypes._c_id(tracked)
                 gen._ptr_helpers_needed.add(tracked)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
@@ -12162,8 +12499,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # costs (it is how the leak below survived a reading of the C).
     if et == 'char':
         # Codepoint-aware indexing
-        return 'char *', gen._new_val(
-            'char *', f"mojo_char_at_str_cp ({ov}, {idx64})")
+        return 'char *', gen._rt_call('char *', 'mojo_char_at_str_cp', [f"{ov}", idx64])
     gen._ptr_helpers_needed.add(et)
     addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
     # Can't dereference void* (no element type); return the pointer itself
@@ -12171,7 +12507,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         return ot, addr
     # Struct types: return int64_t (opaque handle) — can't cast struct→int64_t in GIMPLE
     if et in gen.struct_field_types:
-        t = gen._new_val('int64_t', f"(int64_t){addr}")
+        t = gen._cast('int64_t', addr)
         return 'int64_t', t
     t = gen._new_val(et, f"*{addr}")
     return et, t
@@ -12198,11 +12534,11 @@ def _emit_slice_step_zero_check(gen, step_v: str) -> str:
     _z0 = gen._new_val('int64_t', '0')
     _stepzero = gen._new_val('_Bool', f'{_stepv} == {_z0}')
     _lb = gen._new_bb(); _lo = gen._new_bb()
-    gen._emit(f'  if ({_stepzero}) goto {_lb}; else goto {_lo};')
+    gen._cond_goto(_stepzero, _lb, _lo)
     gen._emit_label(_lb)
     gen._emit_call('void', '', 'mojo_raise_value_error',
                    [('char *', gen._intern_string('slice step cannot be zero'))])
-    gen._emit(f'  goto {_lo};')
+    gen._goto(_lo)
     gen._emit_label(_lo)
     return _stepv
 
@@ -12304,8 +12640,8 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         _ov_local = gen._ensure_local('int64_t', ov)
         _ip_cast = gen._new_temp('int64_t')
         _np_cast = gen._new_temp(ot)
-        gen._emit(f"  {_ip_cast} = (int64_t){_ov_local};")
-        gen._emit(f"  {_np_cast} = ({ot}){_ip_cast};")
+        gen._cast_into(_ip_cast, 'int64_t', _ov_local)
+        gen._cast_into(_np_cast, ot, _ip_cast)
         # The re-typed value is the same list: it keeps the element kinds the
         # original carried (a module global's, see _note_global_slot_kinds).
         if _as_str(ov) in gen._maybe_kinds_vals:
@@ -12324,7 +12660,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         ot = 'MojoBytes *'
 
     if ot == 'MojoStr *':
-        t = gen._new_val('MojoStr *', f"mojo_str_slice ({ov}, {start_v}, {stop_v})")
+        t = gen._rt_call('MojoStr *', 'mojo_str_slice', [f"{ov}", f"{start_v}", f"{stop_v}"])
         return 'MojoStr *', t
 
     if ot == 'MojoBytes *':
@@ -12347,16 +12683,14 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         # Omitted start: pass the OMITTED sentinel (not 0) so mojo_bytes_slice
         # can pick the right endpoint for a negative step (`b[::-1]`).
         bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
-        t = gen._new_val('MojoBytes *',
-                         f"mojo_bytes_slice ({ov}, {bstart_v}, {stop_v}, {step_v})")
+        t = gen._rt_call('MojoBytes *', 'mojo_bytes_slice', [f"{ov}", f"{bstart_v}", f"{stop_v}", step_v])
         return 'MojoBytes *', t
 
     if ot == 'MojoMemoryView *':
         # mv[a:b] -> a sub-view into the SAME buffer (no copy). Step not
         # supported for a non-contiguous view; sentinel start like bytes.
         bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
-        t = gen._new_val('MojoMemoryView *',
-                         f"mojo_memoryview_slice ({ov}, {bstart_v}, {stop_v}, 1)")
+        t = gen._rt_call('MojoMemoryView *', 'mojo_memoryview_slice', [f"{ov}", f"{bstart_v}", f"{stop_v}", '1'])
         return 'MojoMemoryView *', t
 
     if ot == 'MojoList *':
@@ -12387,11 +12721,9 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
             _sv = gen._new_val('int64_t', start_v)
             _ev = (gen._new_val('int64_t', stop_v)
                    if node.stop is not None else '0')
-            t = gen._new_val('MojoList *',
-                             f"mojo_list_slice_step ({_ovv}, {_hs}, {_sv}, "
-                             f"{_he}, {_ev}, {_stepv})")
+            t = gen._rt_call('MojoList *', 'mojo_list_slice_step', [_ovv, f"{_hs}", _sv, f"{_he}", f"{_ev}", f"{_stepv}"])
         else:
-            t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
+            t = gen._rt_call('MojoList *', 'mojo_list_slice', [f"{ov}", f"{start_v}", f"{stop_v}"])
         if ov in getattr(gen, '_maybe_kinds_vals', ()):
             gen._maybe_kinds_vals.add(t)
             _slice_slot_kinds(gen, ov, node, t)
@@ -12412,10 +12744,10 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         t = gen._new_temp('Span *')
         gen._emit(f"  {t} = _alloc_Span ();")
         old_data = gen._new_val('char *', f"{ov}->_data")
-        old_data_i = gen._new_val('int64_t', f"(int64_t){old_data}")
-        start_i = gen._new_val('int64_t', f"(int64_t){start_v}")
+        old_data_i = gen._cast('int64_t', old_data)
+        start_i = gen._cast('int64_t', f"{start_v}")
         new_data_i = gen._new_val('int64_t', f"{old_data_i} + {start_i}")
-        new_data = gen._new_val('char *', f"(char *){new_data_i}")
+        new_data = gen._cast('char *', new_data_i)
         gen._emit(f"  {t}->_data = {new_data};")
         old_len = gen._new_val('int64_t', f"{ov}->_len")
         if node.stop is not None:
@@ -12425,7 +12757,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
             # here — mirroring start_i just above — or `stop_v - start_i`
             # mixes an untyped int literal with an int64_t and GIMPLE
             # rejects the binary expression outright.
-            stop_i = gen._new_val('int64_t', f"(int64_t){stop_v}")
+            stop_i = gen._cast('int64_t', f"{stop_v}")
             new_len = gen._new_val('int64_t', f"{stop_i} - {start_i}")
         else:
             new_len = gen._new_val('int64_t', f"{old_len} - {start_i}")
@@ -12434,7 +12766,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
 
     if ot == 'char *':
         # Codepoint-aware slicing for char* strings
-        t = gen._new_val('char *', f"mojo_cstr_slice_cp ({ov}, {start_v}, {stop_v})")
+        t = gen._rt_call('char *', 'mojo_cstr_slice_cp', [f"{ov}", f"{start_v}", f"{stop_v}"])
         return 'char *', t
 
     if ot == 'int64_t':
@@ -12444,7 +12776,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         # MOJO_SLICE_STOP_OMITTED macro, which GIMPLE will not take as a cast
         # operand in a separate statement.
         _wl = gen._ensure_local('int64_t', ov)
-        t = gen._new_val('int64_t', f"mojo_word_slice ({_wl}, {start_v}, {stop_v})")
+        t = gen._rt_call('int64_t', 'mojo_word_slice', [_wl, f"{start_v}", f"{stop_v}"])
         gen._dyn_word_vals.add(t)
         return 'int64_t', t
 
@@ -12452,14 +12784,14 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     # GIMPLE: no pointer+integer; cast pointer through int64_t; both operands
     # must be plain variables (no cast expressions in binary operands).
     t = gen._new_temp(ot)
-    cast_t = gen._new_val('int64_t', f"(int64_t){ov}")
+    cast_t = gen._cast('int64_t', f"{ov}")
     # Cast start to int64_t in a separate statement (GIMPLE binary operands
     # must be variables, not cast expressions)
     if start_v.lstrip('-').isdigit():
-        sv_cast = gen._new_val('int64_t', f"(int64_t){start_v}")
+        sv_cast = gen._cast('int64_t', f"{start_v}")
     else:
         # start_v is already a variable; ensure it's int64_t
-        sv_cast = gen._new_val('int64_t', f"(int64_t){start_v}")
+        sv_cast = gen._cast('int64_t', f"{start_v}")
     add_t = gen._new_val('int64_t', f"{cast_t} + {sv_cast}")
-    gen._emit(f"  {t} = ({ot}){add_t};")
+    gen._cast_into(t, ot, add_t)
     return ot, t

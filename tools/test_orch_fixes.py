@@ -7,7 +7,7 @@
 2. A doc whose last NO_PROGRESS_LIMIT attempts changed no code outside bugs/ and TASK.md is no longer fed.
 3. A gate job already red on master writes its gate doc but holds no branch.
 Pure logic only: no git, no registry, no suite run."""
-import contextlib, os, sys, tempfile
+import contextlib, os, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
@@ -65,6 +65,9 @@ def test_gate_doc_without_culprit_holds_nothing():
     real_main, real_reg = C.MAIN, C.registry
     tmp = tempfile.mkdtemp(prefix="orchfix_")
     os.makedirs(os.path.join(tmp, "bugs"))
+    # MAIN is a git repo on master: gate_doc commits the doc it writes, so the test tree must be one.
+    for a in (["init", "-q", "-b", "master"], ["add", "bugs"], ["commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *a], cwd=tmp, check=True)
     C.MAIN = tmp
 
     @contextlib.contextmanager
@@ -75,7 +78,7 @@ def test_gate_doc_without_culprit_holds_nothing():
     try:
         paths = I.gate_doc(None, None, ["formal-host-import-shapes"])
         check("a pre-existing red writes its gate doc", os.path.exists(paths[0]))
-        check("and the doc says it is red on master", "red on `master`" in open(paths[0]).read())
+        check("and the doc says it is red on `master`", "red on `master`" in open(paths[0]).read())
     finally:
         C.MAIN, C.registry = real_main, real_reg
 
