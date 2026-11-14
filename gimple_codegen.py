@@ -3401,6 +3401,8 @@ class GimpleGen:
         'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
         'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
         'mojo_isinstance_type': ('int', ['int64_t']),
+        'mojo_is_classword':   ('int', ['int64_t']),
+        'mojo_issubclass_rtclass': ('int', ['int64_t', 'int64_t']),
         'mojo_type_of':        ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
@@ -4591,6 +4593,9 @@ class GimpleGen:
 
     def _lower_builtin_isinstance(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_isinstance(self, node)
+
+    def _lower_builtin_issubclass(self, node: CallExpr) -> tuple[str, str]:
+        return ggc._lower_builtin_issubclass(self, node)
 
     def _lower_builtin_all_any(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_all_any(self, fname_raw, node)
