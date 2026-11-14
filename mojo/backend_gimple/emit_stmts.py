@@ -2440,7 +2440,13 @@ def _gen_stmt_AssignStmt(gen, node):
                 _nul = gen._new_temp('void *')
                 gen._cast_into(_nul, 'void *', ov)
                 _msg = "'NoneType' object has no attribute '" + node.target.member + "'"
-                gen._emit(f"  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(_msg)});")
+                _isnull = gen._bool_not('void *', f"{_nul}")
+                _bb_raise = gen._new_bb()
+                _bb_after = gen._new_bb()
+                gen._cond_goto(_isnull, _bb_raise, _bb_after)
+                gen._emit_label(_bb_raise)
+                gen._rt_void('mojo_raise_attribute_error', [gen._intern_string(_msg)])
+                gen._emit_label(_bb_after)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)
             # PART 6 (2026-10-22, family C): the tagged-Optional side-band
@@ -3015,7 +3021,8 @@ def _gen_stmt_AugAssignStmt(gen, node):
         if (base_op == '|'
                 and isinstance(node.target, gimple_ctypes.IdentExpr)
                 and gen._type_of(node.target.name) == 'MojoDict *'):
-            gen._emit(f'  mojo_frozendict_check_no_mut_method ({gen._cname(node.target.name)}, "__ior__");')
+            gen._rt_void('mojo_frozendict_check_no_mut_method',
+                         [f"{gen._cname(node.target.name)}", '"__ior__"'])
         fake  = gimple_ctypes.BinaryOp(op=base_op, left=node.target, right=node.value)
         vtype, v = gen.lower_expr(fake)
     else:
@@ -5383,7 +5390,13 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 _nul = gen._new_temp('void *')
                 gen._cast_into(_nul, 'void *', ov)
                 _msg2 = "'NoneType' object has no attribute '" + target.member + "'"
-                gen._emit(f"  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(_msg2)});")
+                _isnull2 = gen._bool_not('void *', f"{_nul}")
+                _bb_raise2 = gen._new_bb()
+                _bb_after2 = gen._new_bb()
+                gen._cond_goto(_isnull2, _bb_raise2, _bb_after2)
+                gen._emit_label(_bb_raise2)
+                gen._rt_void('mojo_raise_attribute_error', [gen._intern_string(_msg2)])
+                gen._emit_label(_bb_after2)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(sn), target.member, ov, op)
         elif isinstance(target, gimple_ctypes.SubscriptExpr):

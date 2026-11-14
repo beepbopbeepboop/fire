@@ -426,9 +426,11 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    gen._emit(f'  {ok_var} = mojo_regex_search ({prog_local}, {ranges_local}, {classinfo_local}, '
-               f'{info["root"]}, {ngroups}, {text_val}, {text_len}, {pos_var}, '
-               f'&{mstart_var}, &{mend_var}, {gstart_var}, {gend_var});')
+    gen._rt_into(ok_var, 'mojo_regex_search',
+                 [f"{prog_local}", f"{ranges_local}", f"{classinfo_local}",
+                  f'{info["root"]}', f"{ngroups}", f"{text_val}", f"{text_len}",
+                  f"{pos_var}", f'&{mstart_var}', f'&{mend_var}',
+                  f"{gstart_var}", f"{gend_var}"])
     gen._cond_goto(ok_var, bb_body, bb_after)
     gen._emit_label(bb_body, f'count(guessed_local({10 ** (gen._loop_depth + 1)}))')
 
@@ -527,9 +529,11 @@ def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    gen._emit(f'  {ok_var} = mojo_regex_search ({prog_local}, {ranges_local}, {classinfo_local}, '
-              f'{info["root"]}, {ngroups}, {text_val}, {text_len}, {pos_var}, '
-              f'&{mstart_var}, &{mend_var}, {gstart_var}, {gend_var});')
+    gen._rt_into(ok_var, 'mojo_regex_search',
+                 [f"{prog_local}", f"{ranges_local}", f"{classinfo_local}",
+                  f'{info["root"]}', f"{ngroups}", f"{text_val}", f"{text_len}",
+                  f"{pos_var}", f'&{mstart_var}', f'&{mend_var}',
+                  f"{gstart_var}", f"{gend_var}"])
     gen._cond_goto(ok_var, bb_body, bb_after)
     gen._emit_label(bb_body, f'count(guessed_local({10 ** (gen._loop_depth + 1)}))')
     gen.loop_stack.append((bb_post, bb_after))
