@@ -251,11 +251,6 @@ def type_of(cx: _Ctx, e: Ex) -> Type:
             return e.ty
         if not cast_is_legal(e.ty, st):
             cx.report('cast-illegal', st.name + ' cast to ' + e.ty.name)
-        elif (e.ty.kind == 'ptr' and st.kind in ('int', 'bool') and st.bits != 64
-                and not _is_literal(e.a)):
-            # GCC only warns here (-Wint-to-pointer-cast): the pointer is
-            # made from a 32-bit or 1-bit value, which is never an address.
-            cx.report('cast-narrow-int-to-ptr', st.name + ' cast to ' + e.ty.name)
         return e.ty
     if k == 'call':
         return _type_call(cx, e)

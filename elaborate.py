@@ -537,10 +537,47 @@ def parse_bounds(template_src: str):
     return bounds
 
 
+def _alpha_rename_method_params(fn: FunctionDef, text):
+    """Rename a method's OWN bracket parameters in `text` to `_m0`, `_m1`, ...
+
+    A method's bracket parameters are declared locally: `fn f[T](x: T) -> T`
+    and `fn f[U](x: U) -> U` declare the SAME method signature, so a trait
+    requirement and the implementation that satisfies it must compare equal
+    when they merely spell the parameter differently. They did not, and every
+    comparison in this module is textual (`_method_sig` tuples compared with
+    `==`), so `std/utils/variant.mojo`'s `_NicheStorage.as_uninit[T]` and its
+    `_DefaultNicheStorage.as_uninit[U]` were reported as a signature mismatch
+    ("does not implement all requirements"), failing `stdlib-syntax`.
+
+    Only a BARE occurrence of the name is renamed: `Self.T` names the struct's
+    parameter explicitly and is a different binding, so a preceding `.` is
+    part of the match's left context and is left alone. The placeholder is a
+    valid identifier (not a private Unicode marker) because `extract_trait`'s
+    records are rendered back into source by `mojoc_conformance.trait_source`
+    and re-parsed; `_m0` keeps that rendering parseable.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    names = list(getattr(fn, 'comptime_params', None) or [])
+    names += list(getattr(fn, 'variadic_bracket_params', None) or [])
+    for i, name in enumerate(names):
+        if not isinstance(name, str) or not name:
+            continue
+        text = re.sub(r'(?<![\w.])%s(?!\w)' % re.escape(name), '_m%d' % i, text)
+    return text
+
+
 def _method_sig(fn: FunctionDef):
-    """(name, [param_mojo_types excluding self], ret_mojo_type) of a method."""
-    ptypes = [t for n, t in fn.params if n != 'self']
-    return (fn.name, ptypes, fn.return_type)
+    """(name, [param_mojo_types excluding self], ret_mojo_type) of a method.
+
+    Signature texts are canonicalised over the method's own bracket parameters
+    (`_alpha_rename_method_params`), because conformance compares these tuples
+    textually and a requirement satisfied by a differently-named parameter is
+    still satisfied.
+    """
+    ptypes = [_alpha_rename_method_params(fn, t) for n, t in fn.params
+              if n != 'self']
+    return (fn.name, ptypes, _alpha_rename_method_params(fn, fn.return_type))
 
 
 def extract_trait(module_src: str, trait_name: str):
