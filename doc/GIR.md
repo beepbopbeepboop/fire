@@ -1,6 +1,6 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0, 1 and 2a landed 2026-11-13. This file is the plan and the rules. Read it
+Status: stages 0, 1, 2a and 3a landed 2026-11-13. This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
 
 ## 1. What is wrong today (measured 2026-11-13)
@@ -177,10 +177,21 @@ that is meant to be behaviour-preserving:
   Ratchet: the count of `gen._emit(f"` (about 900 after stage 2a) may only
   shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them) are the next
   mechanical batch: `gen._cast(T, x)`.
-- **Stage 3. Statements are `Instr`, not strings.** `gen.body_lines` becomes a
-  list of `Instr`; the four function-assembly sites print it. `_emit_raw`'s
-  text sniffing (`' = mojo_'`, `startswith('return ')`) and `EmitFrame`'s
-  return-slicing read `Instr` fields instead.
+- **Stage 3a (landed 2026-11-13). Exits are told, not recognised.**
+  `_emit_cf` (`emit_infra.py`) replaces `_emit_through`. `gen._goto`,
+  `gen._ret`, `gen._ret_void` hand it the KIND of statement and its label or
+  value; it runs the `try` / `with` teardown for the frames the exit leaves.
+  Nothing matches `startswith('return ')` or slices a value out of a line any
+  more, and `_emit_raw` no longer infers "terminal" from text. `gen._emit`
+  REFUSES a jump or return spelled as text (it would skip the teardown).
+- **Stage 3b. Ownership is told, not recognised.** `_emit_raw` still finds
+  ` = mojo_` in the line to decide a value is a fresh container
+  (`_fresh_vals`, `_owned_str_elem_vals`). Move that into `_rt_call` /
+  `_rt_into` / `_emit_call`, which know the callee. Blocked on the calls
+  whose text is built from a computed callee name or by concatenation; when
+  `TEXT_CALL_BASELINE` is 0 and those are converted, delete the sniff.
+- **Stage 3c. Statements are `Instr`, not strings.** `gen.body_lines` becomes
+  a list of `Instr`; the four function-assembly sites print it.
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet: counts of `.endswith(' *')` and `== 'int64_t'`.
