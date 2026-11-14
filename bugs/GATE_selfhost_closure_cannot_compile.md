@@ -131,5 +131,5 @@ half of that link failure and is now fixed: `_sanitize_qualifier('')` consulted
 prefix its importers' call sites did not. An empty module name now sanitizes to
 empty. The one remaining undefined symbol (`_conforms_to`, a module alias not
 visible inside a lifted lambda) is filed separately in
-bugs/mid/CODEGEN_selfhost_link_two_unqualified_calls.md. `test_gimple.py`:
+bugs/hard/CODEGEN_selfhost_link_two_unqualified_calls.md. `test_gimple.py`:
 454 passed, 0 failed.

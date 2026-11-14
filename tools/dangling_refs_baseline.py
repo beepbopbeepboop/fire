@@ -32,7 +32,6 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
-    'bugs/DIAGNOSTICS_binding_deferrals-part2-part2.md': 1,
     'bugs/GPU_offload_validation_modular-part2.md': 1,
     'bugs/GPU_offload_validation_modular-part3.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,

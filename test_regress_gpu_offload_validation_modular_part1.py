@@ -10,9 +10,9 @@ pins the two classifications that are checkable from the tree:
   closures, the end-to-end thunk) are blocked on module names this tree does
   not resolve: the interpreter auto-stubs `std.*` but a program importing
   `max.gpu.host` still fails with `No module named 'max'`;
-- `simd_bad_size_lowering` is only partly addressed: part 4's interpreter
-  guard rejects widths 0/-1/3, while the compiled path is still unguarded
-  (tracked by `bugs/CODEGEN_simd_width_guard_compiled_path.md`).
+- `simd_bad_size_lowering` is addressed: part 4's interpreter guard rejects
+  widths 0/-1/3, and the compiled path now rejects them too (shared rule in
+  `mojo/middle/simd_width.py`, pinned by `test_regress_gpu_offload_validation_modular_part4.py`).
 
 If the parent doc is deleted because parts 2/3 have landed, this test should be
 deleted with it: what it pins is the triage record, not a compiler behaviour

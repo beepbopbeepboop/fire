@@ -2200,65 +2200,84 @@ def pop_emit_frame(gen) -> None:
     gen._emit_frames.pop()
 
 
-def _emit_through(gen, line: str, level: int) -> None:
-    """Emit `line` as seen by frame `level` and every frame outside it (the
-    innermost frame is the last one); level -1 is the plain emitter."""
+def _emit_cf(gen, kind: str, line: str, val: str, level: int) -> None:
+    """Emit one jump or return as seen by frame `level` and every frame
+    outside it (the innermost frame is the last one; level -1 is the plain
+    emitter).
+
+    `kind` is 'goto' (`val` is the label), 'ret' (`val` is the returned
+    value) or 'retv' (a `return;`); `line` is the statement's text.
+
+    This is the ONLY code that makes an exit from a protected region run that
+    region's teardown, and its only callers are `gen._goto`, `gen._ret` and
+    `gen._ret_void` (emit_resolve.py).  It is told what the statement IS.  It
+    used to be `_emit_through`, which every emitted line passed through and
+    which recognised a return by `stripped.startswith('return ')` and sliced
+    the value out with `stripped[7:]`."""
     if level < 0:
         _emit_raw(gen, line)
+        gen._last_was_terminal = True
         return
     fr = gen._emit_frames[level]
-    stripped = line.strip()
-    if fr.frame_kind == 'try':
-        if stripped.startswith('return ') or stripped == 'return;':
-            if stripped.startswith('return ') and stripped != 'return;':
-                # ONE variable carries the value of every early return in
-                # this region to the deferred `return` after `finally`. The
-                # value text itself used to be kept, so with two returns in
-                # the body only the LAST one's temp was returned and the
-                # other path returned an unassigned temp: `return True, out`
-                # before a later `return False, out` came back as garbage
-                # (the self-hosted compiler's `_infer_return_maybe_kinds`).
-                _rv = stripped[7:].rstrip(';').strip()
-                if not fr.has_return_value:
-                    _rt = gen.func_ret_type if gen.func_ret_type else 'int64_t'
-                    fr.return_value = gen._new_temp(_rt)
-                    fr.has_return_value = True
-                _emit_through(gen, f"  {fr.return_value} = {_rv};", level - 1)
-            else:
-                fr.return_value = ''
-                fr.has_return_value = False
-            fr.saw_return = True
-            # An early return leaves the try block's protected region just as
-            # much as falling off the end of it does: it must pop the
-            # exception stack (_mojo_exc_top) like the normal-exit path, or a
-            # whole compiler run creeps `_mojo_exc_top` past the end of
-            # `_mojo_exc_stack[MOJO_EXC_STACK_MAX]`.
-            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
-            if fr.bb_finally != '':
-                _emit_through(gen, f"  goto {fr.bb_finally};", level - 1)
-            else:
-                _emit_through(gen, line, level - 1)
-            gen._last_was_terminal = True
-            return
-        _emit_through(gen, line, level - 1)
+    if fr.frame_kind == 'try' and (kind == 'ret' or kind == 'retv'):
+        if kind == 'ret':
+            # ONE variable carries the value of every early return in
+            # this region to the deferred `return` after `finally`. The
+            # value text itself used to be kept, so with two returns in
+            # the body only the LAST one's temp was returned and the
+            # other path returned an unassigned temp: `return True, out`
+            # before a later `return False, out` came back as garbage
+            # (the self-hosted compiler's `_infer_return_maybe_kinds`).
+            if not fr.has_return_value:
+                _rt = gen.func_ret_type if gen.func_ret_type else 'int64_t'
+                fr.return_value = gen._new_temp(_rt)
+                fr.has_return_value = True
+            _emit_raw(gen, f"  {fr.return_value} = {val};")
+        else:
+            fr.return_value = ''
+            fr.has_return_value = False
+        fr.saw_return = True
+        # An early return leaves the try block's protected region just as
+        # much as falling off the end of it does: it must pop the
+        # exception stack (_mojo_exc_top) like the normal-exit path, or a
+        # whole compiler run creeps `_mojo_exc_top` past the end of
+        # `_mojo_exc_stack[MOJO_EXC_STACK_MAX]`.
+        _emit_raw(gen, "  mojo_exc_pop ();")
+        if fr.bb_finally != '':
+            _emit_cf(gen, 'goto', f"  goto {fr.bb_finally};", fr.bb_finally, level - 1)
+        else:
+            _emit_cf(gen, kind, line, val, level - 1)
+        gen._last_was_terminal = True
         return
-    if fr.frame_kind == 'with':
-        if len(gen.loop_stack) > 0 and (
-                stripped == f"goto {gen._loop_continue_bb()};"
-                or stripped == f"goto {gen._loop_break_bb()};"):
-            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
-            gen._with_emit_exits(fr.ctx_ts, fr.ctx_vs, fr.ctx_sns,
-                                 fr.gctx_bases, fr.gctx_vs)
-            fr.teardown_done = True
-            _emit_through(gen, line, level - 1)
-            return
-    _emit_through(gen, line, level - 1)
+    if (fr.frame_kind == 'with' and kind == 'goto' and len(gen.loop_stack) > 0
+            and (val == gen._loop_continue_bb() or val == gen._loop_break_bb())):
+        # a `break` / `continue` out of the `with` body: pop the stack and
+        # run the items' teardown first
+        _emit_raw(gen, "  mojo_exc_pop ();")
+        gen._with_emit_exits(fr.ctx_ts, fr.ctx_vs, fr.ctx_sns,
+                             fr.gctx_bases, fr.gctx_vs)
+        fr.teardown_done = True
+    _emit_cf(gen, kind, line, val, level - 1)
+
+
+def _goto_raw(gen, label: str) -> None:
+    """A jump that leaves NO protected region, whatever frames are open (a
+    loop's own back edge inside its own exception frame).  Everything else
+    uses `gen._goto`."""
+    _emit_raw(gen, f"  goto {label};")
+    gen._last_was_terminal = True
 
 
 def _emit(gen, line: str):
-    if len(gen._emit_frames) > 0:
-        _emit_through(gen, line, len(gen._emit_frames) - 1)
-        return
+    """Emit one statement that is not a jump or a return.  Those go through
+    `gen._goto` / `gen._cond_goto` / `gen._ret` / `gen._ret_void`, which is how
+    an exit from a `try` or `with` region gets its teardown; a jump spelled as
+    text here would silently skip it, so it is refused."""
+    _s = line.lstrip()
+    if _s.startswith('return ') or _s.startswith('return;') or _s.startswith('goto '):
+        raise RuntimeError(
+            "internal: a jump or return was emitted as text (" + _s.strip()
+            + "); use gen._goto / gen._ret / gen._ret_void")
     _emit_raw(gen, line)
 
 
@@ -2288,12 +2307,10 @@ def _emit_raw(gen, line: str):
             gen._fresh_vals.add(line[:_fi].strip())
             if _rest[:_pi] in _OWNS_STR_ELEMS:
                 gen._owned_str_elem_vals.add(line[:_fi].strip())
-    # Track whether this is a terminal statement (can't have code after it)
-    stripped = line.strip()
-    if stripped.startswith('return ') or stripped.startswith('goto ') or stripped == 'return;':
-        gen._last_was_terminal = True
-    else:
-        gen._last_was_terminal = False
+    # Not a terminal statement, as far as this function knows: the three
+    # that are (`goto`, `return v`, `return`) are emitted by `_emit_cf` /
+    # `_goto_raw`, which set the flag after this returns.
+    gen._last_was_terminal = False
 
 
 

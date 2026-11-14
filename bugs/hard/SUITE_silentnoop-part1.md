@@ -1,3 +1,5 @@
+SPLIT: SUITE_silentnoop-part1-part1, SUITE_silentnoop-part1-part2
+
 # SUITE_silentnoop-part1: Investigate the make check failure (silent noop)
 
 **Parent BUG:** bugs/hard/SUITE_silentnoop.md  

@@ -4146,6 +4146,28 @@ UNREGISTERED = {
     # the document still say what the code says" was a test nobody ran, with
     # four of its rows drifted.
 
+    # The per-part Done-when probes of the still-open parts of
+    # CODEGEN_stdlib_dylib_lazy_undefined_refs. RED until each part lands, so
+    # not a registered job; each is run by its own bug doc's command
+    # (`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`), as
+    # the file's own docstring says. The landed pins are registered jobs.
+    'test_stdlib_dylib_lazy_undefined_refs_probes.py':
+        'The per-part Done-when probes of the still-open parts of '
+        'CODEGEN_stdlib_dylib_lazy_undefined_refs: red until each part lands, '
+        'so not a registered gate job. Run one by its own bug doc\'s command '
+        '(`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`).',
+
+    # A replan's Done-when checks, pytest-style (plain `test_*` functions with
+    # no runner of their own), so `python3 <file>` would run nothing. They pass
+    # only once that replan's deliverables exist, which is what their doc's
+    # command checks; a gate job here would be a red line about another lane's
+    # unfinished work.
+    'tests/test_suite_silentnoop_part1_replan.py':
+        'The pytest-style Done-when checks for the SUITE_silentnoop-part1 '
+        'replan, run by their own doc\'s command (`python3 -m pytest '
+        'tests/test_suite_silentnoop_part1_replan.py`). They assert that the '
+        'replan\'s evidence and findings files exist, so they are not a gate job.',
+
     # ── the formal backend's per-construct suites, run by hand ──
     #
     # Each of these BUILDS AND EXECUTES images on both architectures and
@@ -5234,27 +5256,35 @@ def test_the_trait_conformance_diagnostic_suites_are_gated():
 
 
 _SUITE_SELF_TEST_REGISTRATIONS = (
-    # (spec name, test file) — the five test files the estate row named after
-    # they landed on master with no spec (bug:SUITE_self_test_red). Each is a
-    # cheap in-process pin (measured: 0.03-0.07 GB peak, 0.1-12 s, no build),
-    # so they belong in `check`, which `gate` expands.
+    # (spec name, test file) — the test files the estate row named after they
+    # landed on master with no spec (bug:SUITE_self_test_red). The first five
+    # were there when this branch started; the next four arrived on master
+    # during the merge and put the job back to red. Each is a cheap in-process
+    # pin (measured: 0.0-0.1 GB peak, sub-second to ~12 s, no build), so they
+    # belong in `check`, which `gate` expands.
     ('binding-evidence', 'test_binding_evidence.py'),
     ('interp-list-ctor', 'test_interp_list_ctor.py'),
     ('module-globals-compiled', 'test_module_globals_compiled.py'),
     ('mojoc-precompile-signature', 'test_mojoc_precompile_signature.py'),
     ('stdlib-syntax-variant', 'test_stdlib_syntax_variant.py'),
+    ('function-body-alias-class-import',
+     'test_function_body_alias_class_import.py'),
+    ('gpu-offload-validation-part3', 'test_gpu_offload_validation_part3.py'),
+    ('mojoc-import-conformance', 'test_mojoc_import_conformance.py'),
+    ('mojoc-synthetic-signature-default',
+     'test_mojoc_synthetic_signature_default.py'),
 )
 
 
 def test_the_suite_self_test_registrations_are_gated():
     """Every test file the suite-self-test estate row named runs on every gate.
 
-    Five files landed on master named by no spec, so `suite-self-test`'s estate
+    These files landed on master named by no spec, so `suite-self-test`'s estate
     row was the only thing that mentioned them and no run executed their cases
     (`bug:SUITE_self_test_red`). They are registered now, and the estate check
     above is what keeps the next unregistered file from hiding — but it can
     only ask that SOME spec names the file, and a name in a bucket `gate` does
-    not expand to is the same hole one level over. All five are cheap
+    not expand to is the same hole one level over. All of them are cheap
     in-process pins, so they belong in the everyday loop, and this check pins
     that by name: dropping a registration, or moving one out of the gate, is a
     red row rather than a silent coverage loss.

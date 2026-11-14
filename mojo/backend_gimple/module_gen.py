@@ -5006,6 +5006,34 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _clc = getattr(fn, 'col', 0) or 0
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}error: violated constraint")
+            # Part 2: no where clause was provably false, so the declaration
+            # reached the type-argument stage. When one of the instantiated
+            # struct's type-parameter requirements is NEITHER provable NOR
+            # provably false (an unproven conditional conformance), the
+            # signature binding is unsatisfied and reports `lacking evidence`.
+            try:
+                _fnb = {}
+                for _p, _s in (_elaborate_mod._fn_known_bounds(fn, struct_module_src or module_src or '', None) or {}).items():
+                    if isinstance(_s, (set, frozenset, list, tuple)):
+                        _fnb[_p] = set(_s)
+                    elif _s:
+                        _fnb[_p] = {_s}
+                for _tp, _tbound in (_elaborate_mod.parse_bounds(tmpl) or {}).items():
+                    if not _tbound:
+                        continue
+                    _targ = (targs or {}).get(_tp)
+                    if _targ is None:
+                        continue
+                    if _elaborate_mod.type_arg_bound_evidence(struct_module_src or module_src or '', tmpl, _tp, str(_targ), _fnb) == 'unproven':
+                        _cfn = getattr(gen, '_current_filename', '') or ''
+                        _cln = getattr(fn, 'line', 0) or 0
+                        _clc = getattr(fn, 'col', 0) or 0
+                        _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                        raise RuntimeError(f"{_cat}error: invalid bindings in signature: lacking evidence")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
         except RuntimeError:
             raise
         except Exception as e:

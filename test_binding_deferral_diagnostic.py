@@ -189,8 +189,8 @@ def test_signature_unproven_binding_reports_lacking_evidence():
     assert 'violated constraint' not in text, text
     assert text.count('error:') == 1, f'more than one diagnostic: {text}'
 
-    # Positive control: the same struct instantiated with a provably Copyable
-    # type and a satisfied where clause still compiles.
+    # Positive controls: a provably Copyable concrete type compiles, and so
+    # does the same shape when the function's own bounds supply Copyable.
     src = _HEAD + (
         'def satisfied_binding(\n'
         '    x: NeedsCopyablePos[Int, 1]):\n'
@@ -198,6 +198,13 @@ def test_signature_unproven_binding_reports_lacking_evidence():
     )
     text = _driver_compile(src)
     assert text is None, f'a satisfied signature binding was refused: {text}'
+    src = _HEAD + (
+        'def g[U: Movable & Deinitable & Copyable](\n'
+        '    x: NeedsCopyablePos[CondCopyable[U], 1]):\n'
+        '    pass\n'
+    )
+    text = _driver_compile(src)
+    assert text is None, f'a copyable-bounded signature binding was refused: {text}'
 
 
 if __name__ == '__main__':
@@ -207,4 +214,5 @@ if __name__ == '__main__':
     test_satisfied_generic_binding_compiles()
     test_failed_binding_reports_only_the_failing_error_no_deferred_noise()
     test_signature_failed_binding_reports_violated_constraint()
+    test_signature_unproven_binding_reports_lacking_evidence()
     print('ok')

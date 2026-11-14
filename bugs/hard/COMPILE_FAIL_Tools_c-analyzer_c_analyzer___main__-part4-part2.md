@@ -1,7 +1,10 @@
 # COMPILE_FAIL: `yield from` a captured nested generator — the `c_analyzer/__main__.py` shape (`fmt_summary` / `section` / `build_section`)
 
 Part 2 of `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`
-(SPLIT). Depends on part 1 (minimal nested-generator `yield from` in a coroutine generator; fixed in this tree), which makes the minimal shape compile.
+(SPLIT). Depends on part 1 (the claimed nested-generator `yield from` lookup in
+`cpp_core._cpp_yield_from` plus the nested value type threaded through
+`_generator_yield_ctype`; minimal nested-generator `yield from` in a coroutine
+generator fixed in this tree), which makes the minimal shape compile.
 
 ## Goal
 

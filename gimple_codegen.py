@@ -3236,6 +3236,15 @@ class GimpleGen:
         self._extra_search_paths: list = []
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
+        # Struct/trait records read from a `.mojoc` artifact, name -> record
+        # (see mojo/middle/mojoc_artifact.py). A precompiled import has no
+        # source path to register in `_imported_generic_structs`; the stored
+        # signature itself is what an instantiation is checked against
+        # (`emit_resolve._ensure_generic_struct`), so the structural
+        # conformance failure of the modular `import_mojoc_conformance_error`
+        # case is reported instead of the instantiation silently falling
+        # through to the un-elaborated template.
+        self._mojoc_structs: dict = {}
         # Why an imported generic struct could NOT be elaborated for a
         # construction, one entry per occurrence. The codegen falls back to
         # the un-elaborated template (see

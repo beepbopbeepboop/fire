@@ -711,15 +711,23 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         'Optional', 'Variant', 'Tuple',
         'InlineArray', 'InlineList', 'StaticTuple',
     })
-    if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
+    # A class imported under a new bare name inside a function body
+    # (`from M import Class as A`): the alias's identity is the DEFINING
+    # name, recorded by the same shared writer (`_note_struct_import_alias`)
+    # the module-scope path uses. The bare no-signature import registration
+    # no longer emits for such an alias, so the only thing standing between
+    # `A` used as a value and the class-value lowering below is this map.
+    _class_as_value = (getattr(gen, '_struct_import_aliases', None)
+                       or {}).get(name, name)
+    if _class_as_value in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
         # `mojo_type_add_base`; CODEGEN_enum_runtime_class_creation stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
-        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
+        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(_class_as_value)}LL;  /* class {_class_as_value} as value */')
         return 'int64_t', t
-    if (name in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
+    if (_class_as_value in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
         # int64_t, not int: this placeholder commonly flows into a (void *)
         # cast (e.g. boxed for mojo_obj_getattr on `UInt64.MAX`-style class
         # refs) — a 4-byte int there is a real -Wint-to-pointer-cast size
@@ -6364,9 +6372,34 @@ def _definitive_binding_type(gen, name) -> str | None:
                     pann_s = _as_str(pann).strip()
                     if pann_s in tparams or pann_s == 'AnyType' or pann_s == '':
                         return None
-                    # Concrete scalar annotation (Int/Bool/Float64 etc.)
-                    # -> provably scalar.
-                    return 'Int'
+                    # Concrete annotation: answer from the C type the
+                    # annotation resolves to (not from "not a type param"),
+                    # so a container/boxed annotation like `frozenset | None`
+                    # that lowers to an int64_t word is not claimed as Int.
+                    try:
+                        resolved = gen._resolve_type(pann_s)
+                    except Exception:
+                        resolved = gimple_ctypes._mojo_type(pann_s)
+                    if resolved == '_Bool':
+                        return 'Bool'
+                    if resolved == 'double':
+                        return 'Float64'
+                    if resolved in ('int', 'int64_t'):
+                        # Scalar-int C type is a proof only for a scalar
+                        # integer annotation (Int/int/...), not for a boxed
+                        # container that happens to erase to int64_t.
+                        _base = pann_s
+                        if ' | ' in _base:
+                            parts = [p.strip() for p in _base.split(' | ')]
+                            non_none = [p for p in parts if p != 'None']
+                            if non_none:
+                                _base = non_none[0]
+                        _base = _base.split('[', 1)[0].strip()
+                        if _base == 'int' or (getattr(gimple_ctypes, '_TYPE_MAP', {}).get(_base) in ('int', 'int64_t')
+                                              and _base not in ('list', 'dict', 'set', 'tuple', 'str', 'bytes')):
+                            return 'Int'
+                    # Container/pointer/erased annotation -> runtime dispatch.
+                    return None
         # No function node context: a module-level binding cannot be a
         # container-proven Int either (it may be a boxed word).
         return None
