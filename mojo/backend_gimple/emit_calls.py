@@ -953,7 +953,7 @@ def _ggc_as_str(x) -> str:
     return x
 
 
-def _lower_device_launch(gen, node: gimple_ctypes.CallExpr) -> tuple:
+def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
     """A call whose target is an offloaded DEVICE function.
 
     A `@gpu` function has no C definition -- it is MSL, living in the
@@ -1561,7 +1561,7 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
     return _wt, wv
 
 
-def _class_struct_of_arg(gen, a) -> str:
+def _class_struct_of_arg(gen, a):
     """The struct a class-valued argument names: `Cls` (a known struct, not shadowed by a local)
     or `cls` inside a classmethod; None otherwise."""
     if not isinstance(a, gimple_ctypes.IdentExpr):
@@ -1963,7 +1963,7 @@ def _constrained_compile_error(gen, node, msg, cond_node=None):
     raise RuntimeError(f'{loc}constraint failed: {msg}')
 
 
-def _try_lower_constrained(gen, node: gimple_ctypes.CallExpr) -> tuple:
+def _try_lower_constrained(gen, node):
     """Compile-time diagnostic for `constrained[cond, msg]()` / `constrained(cond, msg)`.
 
     The Mojo builtin `constrained` is a compile-time check: a provably-false
@@ -4293,17 +4293,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         _dt_ctype = _DTYPE_CAST_CTYPES.get(str(_dt_name).replace('DType.', '').lstrip('.'))
                 except Exception:
                     _dt_ctype = None
-            # A `comptime dt = DType.float32` bound name: neither of the two
-            # lookups above knows a bare `dt`, but the folded VALUE is in
-            # `gen._comptime_vals`.  The shared resolver reads it (including
-            # the tuple-REPR string that map stores).
-            if _dt_ctype is None and _idxs:
-                _e0 = _idxs[0]
-                if isinstance(_e0, gimple_ctypes.IdentExpr):
-                    _cv = getattr(gen, '_comptime_vals', None)
-                    if _cv:
-                        _dt_ctype = gimple_ctypes._dtype_token_ctype(
-                            _cv.get(_as_str(_e0.name)))
             if _dt_ctype in ('float', 'double', '__fp16'):
                 _target = _dt_ctype
             else:
@@ -5042,19 +5031,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'int64_t', gen._cast('int64_t', f"{res}")
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
     if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
-    # `callable(x)` — does the word denote a function at run time? The runtime's
-    # `mojo_is_callable_word` answers from the function/bound-method/variadic-
-    # thunk registries and `dladdr` (a value whose address IS a symbol), which
-    # is the same helper the C++ generator body path uses. Without this arm the
-    # name fell through to a weak stub that PRINTED
-    # "callable: unavailable in compiled mode" to stdout and answered 0 — real:
-    # Tools/c-analyzer's `_normalize_fix_read` (`if callable(fix):`) put that
-    # line in a consumer's output between the program's real rows.
-    if (fname_raw == 'callable' and len(node.args) == 1
-            and not gen._locally_binds_name('callable')):
-        at, av = gen.lower_expr(node.args[0])
-        return 'int', gen._call_expr(
-            'int', 'mojo_is_callable_word', [('int64_t', gen._to_int64(at, av))])
     # `_locally_binds_name` gate: a module can define its OWN top-level
     # `any`/`all` (e.g. tokenize.py's `def any(*choices): return
     # group(*choices) + '*'`, called with exactly 1 arg at
@@ -6974,9 +6950,9 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
         # verdict is FALSE, so its yes-branch is the negated test.
         bb_yes = gen._new_bb(); bb_no = gen._new_bb()
         if keep == 'falsy':
-            _t = gen._new_val('_Bool', f'({kret_v}) == 0')
+            _t = gen._cmp(f'({kret_v})', '==', '0')
         else:
-            _t = gen._new_val('_Bool', f'({kret_v}) != 0')
+            _t = gen._cmp(f'({kret_v})', '!=', '0')
         gen._cond_goto(_t, bb_yes, bb_no)
         gen._emit_label(bb_yes)
         if _kelem_t == 'double':
@@ -8270,11 +8246,11 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                     _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
                     gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                     gen._emit_label(_bb_c2)
-                    _z32 = gen._new_val('int64_t', '1LL << 32')
+                    _z32 = gen._binop('int64_t', '1LL', '<<', '32')
                     _pc2 = gen._cmp(_b64v, '>=', _z32)
                     gen._cond_goto(_pc2, _bb_c3, _bb_good)
                     gen._emit_label(_bb_c3)
-                    _z48 = gen._new_val('int64_t', '1LL << 48')
+                    _z48 = gen._binop('int64_t', '1LL', '<<', '48')
                     _pc3 = gen._cmp(_b64v, '<', _z48)
                     gen._cond_goto(_pc3, _bb_bad, _bb_good)
                     gen._emit_label(_bb_bad)
@@ -8304,7 +8280,7 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                 _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
                 gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                 gen._emit_label(_bb_c2)
-                _z32 = gen._new_val('int64_t', '1LL << 32')
+                _z32 = gen._binop('int64_t', '1LL', '<<', '32')
                 _pc2 = gen._cmp(_b64v, '>=', _z32)
                 gen._cond_goto(_pc2, _bb_bad, _bb_good)
                 gen._emit_label(_bb_bad)
@@ -10189,33 +10165,6 @@ def _box_escaping_dict_slot_read(gen, enode, vtype: str, v: str) -> tuple[str, s
     return 'int64_t', v
 
 
-def _truthy_operand(e):
-    """`bool(A or B)` / `bool(A and B)` asks only for TRUTHINESS, never for the
-    selected operand, so it is `bool(A) or bool(B)` (`and` likewise) -- the same
-    answer and the same short-circuit, with every operand lowered on its own
-    terms. Lowering the `or` first made a value of the two operands' joined C
-    type, which cannot exist when they are different containers (a list on one
-    side, a dict on the other: `getattr(f, 'params', None) or getattr(f,
-    'annotations', None)`) -- the self-host's `cannot coerce MojoDict * to
-    MojoList *`. Recursive, so a chain is rewritten throughout; any other
-    expression is returned untouched."""
-    if (isinstance(e, gimple_ctypes.BinaryOp) and _as_str(e.op) in ('and', 'or')):
-        return gimple_ctypes.BinaryOp(
-            op=e.op, left=_truthy_call(e.left), right=_truthy_call(e.right),
-            line=getattr(e, 'line', 0), col=getattr(e, 'col', 0))
-    return e
-
-
-def _truthy_call(e):
-    inner = _truthy_operand(e)
-    if inner is not e:
-        return inner     # already a chain of `_Bool` operands
-    return gimple_ctypes.CallExpr(
-        func=gimple_ctypes.IdentExpr(name='bool', line=getattr(e, 'line', 0),
-                                     col=getattr(e, 'col', 0)),
-        args=[e], kwargs=[], line=getattr(e, 'line', 0), col=getattr(e, 'col', 0))
-
-
 def lower_call_args(gen, args: list) -> list:
     """Lower a call's positional arguments, expanding `*x` when `x` is a
     tuple of statically known ARITY into that many positional pairs.
@@ -10947,11 +10896,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and 'object' not in gen.func_return_types):
         return 'int64_t', gen._new_val('int64_t', '0')
 
-    _args = node.args
-    if (fname_raw == 'bool' and len(_args) == 1 and not node.kwargs
-            and not gen._locally_binds_name('bool')):
-        _args = [_truthy_operand(_args[0])]
-    arg_pairs = lower_call_args(gen, _args)
+    arg_pairs = lower_call_args(gen, node.args)
     if fname_raw in ('min', 'max', 'iter') and not gen._locally_binds_name(fname_raw):
         for _at, _ in arg_pairs:
             _refuse_namedtuple_tuple_use(gen, _at, f'calling {fname_raw} on')

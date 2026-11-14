@@ -64,37 +64,3 @@ under `python3 tools/memslot.py --gb 8 --label part4-part2 -- python3 test_neste
 * The minimal shape: part 1.
 * Keyword/rebound/`nonlocal` refusals and tagged-kind parity: part 3.
 * The imported-module floor: sibling docs named in the parent.
-
-## Status
-
-- **Measured 2026-11-14 — the refusal is NOT the anticipated one, and it is
-  already tracked.** `python3 test_nested_generator_yield_from_in_coroutine.py main`
-  fails with exactly one refusal, and it names neither `build_section` nor
-  `render`:
-
-  ```
-  Unsupported shape(s):
-    fmt_summary: a call to unresolved callee 'section(...)' is not supported in a
-      compiled generator/coroutine body (not a builtin this emitter supports, a
-      known module-level/imported function, a same-module struct constructor, or a
-      declared callable-value local);
-    section: is a nested generator that reads enclosing-scope variable(s) items;
-      the coroutine path has no capture model for a generator defined inside
-      another function (threading the enclosing variables into the generator frame
-      is the remaining work).
-  ```
-
-  So the first half of the doc's decision rule does not apply, and the second
-  half ("if it is a different refusal, file it as its own bug doc") would
-  duplicate work already filed: this is exactly
-  `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md` step 2,
-  "Thread the captures", whose plan is written out there (the nested generator's
-  `_start` signature, the claimed-capture detector, the slot-kind check). No new
-  doc is filed for it.
-
-- The part's Acceptance is therefore NOT met and cannot be met inside this part:
-  making the main shape compile is the capture-model feature, not a consumer fix.
-  What this part can still own is the OTHER half of the shape — once part 4's
-  step 2 lands, re-run this command and confirm the `render()` tuple-unpack and
-  the `yield from render()` delegation lower (that is the consumer half, and it
-  is untested until the capture model exists).

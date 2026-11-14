@@ -3557,20 +3557,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                                and gen._is_dyn_word(node.left, lval))))
         if _bool_word:
             _mixed_word = True
-        # TWO CONTAINER POINTERS OF DIFFERENT KINDS (`getattr(f, 'comptime_params',
-        # None) or getattr(f, 'comptime_param_annotations', None)`: a list on one
-        # side, a dict on the other). The join picks one pointer type and the
-        # other operand is then `coerce`d into it -- a cast between MojoList/
-        # MojoDict/MojoSet/MojoBytes reinterprets one struct as another, which
-        # `_sce_simple_emit` refuses (the self-host's `cannot coerce MojoDict *
-        # to MojoList *`). Python's value is whichever operand was selected, so
-        # it is a word of unknown kind, answered by the runtime, exactly like
-        # the string/word and bytes/str mixes above.
-        if (not _bool_merge and not _mixed_word
-                and ltype != _rq
-                and ltype in gimple_ctypes._CONTAINER_KIND_TYPES
-                and _rq in gimple_ctypes._CONTAINER_KIND_TYPES):
-            _mixed_word = True
         if _mixed_word:
             res_type = 'int64_t'
         # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
@@ -4991,18 +4977,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             # translation unit of a struct from another module.
             _negate = op == '!=' and '__ne__' not in gen._struct_method_names.get(_eq_struct, ())
             _dunder = '__eq__' if _negate or op == '==' else '__ne__'
-            # An overloaded dunder must be named by a CONCRETE overload: the
-            # suffix-less symbol is never defined, so a bare call here is an
-            # undefined reference at link (StringSpan's `__eq__(Int)` and
-            # `__eq__(StringSpan)` are the same arity).
-            _eq_oid = ''
-            _eq_cands = gmp._struct_method_candidates(gen, _eq_struct, _dunder)
-            if _eq_cands:
-                _eq_oid = (gmp._pick_overload_by_ctype(
-                    _eq_cands, [rt]) or {}).get('overload_id', '') or ''
-            _eq_val = gen._call_expr(
-                '_Bool', gen._struct_method_csym(_eq_struct, _dunder, _eq_oid),
-                [(lt, lv), (rt, rv)])
+            _eq_val = gen._call_expr('_Bool', gen._struct_method_csym(_eq_struct, _dunder, ''),
+                                     [(lt, lv), (rt, rv)])
             if _negate:
                 _eq_val = gen._bool_not('_Bool', _eq_val)
             return '_Bool', _eq_val
@@ -5017,27 +4993,13 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         _ord_struct = gimple_exprtypes._struct_name_of(lt)
         _ord_have = gen._struct_method_names.get(_ord_struct, ())
         _ord_dunder, _ord_refl = _USER_ORD_REFLECT[op]
-        _ord_oid = ''
-        _ord_cands = gmp._struct_method_candidates(gen, _ord_struct, _ord_dunder)
-        if _ord_cands:
-            # Non-reflected: self is the left operand, so the non-self
-            # argument is the RIGHT one.
-            _ord_oid = (gmp._pick_overload_by_ctype(
-                _ord_cands, [rt]) or {}).get('overload_id', '') or ''
         if _ord_dunder in _ord_have:
             return '_Bool', gen._call_expr(
-                '_Bool', gen._struct_method_csym(_ord_struct, _ord_dunder, _ord_oid),
+                '_Bool', gen._struct_method_csym(_ord_struct, _ord_dunder, ''),
                 [(lt, lv), (rt, rv)])
         if _ord_refl in _ord_have:
-            _ord_oid = ''
-            _ord_cands = gmp._struct_method_candidates(gen, _ord_struct, _ord_refl)
-            if _ord_cands:
-                # Reflected: the operands are swapped, so the non-self
-                # argument is the LEFT one.
-                _ord_oid = (gmp._pick_overload_by_ctype(
-                    _ord_cands, [lt]) or {}).get('overload_id', '') or ''
             return '_Bool', gen._call_expr(
-                '_Bool', gen._struct_method_csym(_ord_struct, _ord_refl, _ord_oid),
+                '_Bool', gen._struct_method_csym(_ord_struct, _ord_refl, ''),
                 [(rt, rv), (lt, lv)])
 
     if op in _CONTAINER_CMP_OPS:
@@ -5121,7 +5083,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             # guard, which is the shape this branch exists to fix.
             _p = gen._cast('int64_t', f"{_ptr_val}")
             _t = gen._new_temp('_Bool')
-            gen._emit(f'  {_t} = {_p} {op} 0;')
+            gen._binop_into(_t, _p, op, '0')
             return '_Bool', _t
         if _ptr_ty in ('int', 'int64_t', '_Bool', 'double', 'float'):
             # ...and the same comparison when the other side is NOT a
@@ -5304,7 +5266,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv, True)[1]
         cmp_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
         t = gen._new_temp('_Bool')
-        gen._emit(f'  {t} = {cmp_t} {op} 0;')
+        gen._binop_into(t, cmp_t, op, '0')
         return '_Bool', t
 
     # is / is not → pointer identity

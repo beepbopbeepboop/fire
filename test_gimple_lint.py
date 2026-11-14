@@ -331,7 +331,7 @@ def count_text_any_calls() -> tuple:
 # (`gen._new_val('int64_t', f"{a} + {b}")`).  `gen._binop(ctype, a, '+', b)`,
 # `gen._cmp(a, '<', b)` and `gen._binop_into(dst, a, '+', b)` convert an
 # operand of the wrong scalar type; text does not.  May only shrink.
-TEXT_BINOP_BASELINE = 16
+TEXT_BINOP_BASELINE = 0
 
 
 def count_text_binops() -> tuple:

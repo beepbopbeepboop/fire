@@ -1315,45 +1315,6 @@ _SIMD_FLOAT_DTYPE_CTYPE = {
 }
 
 
-def _dtype_token_ctype(tok):
-    """Scalar C type for a dtype TOKEN, or None when it is not a float dtype.
-
-    One resolver for every spelling a dtype can reach these lookups in: a
-    `('DType', 'float32')` TUPLE, the REPR of that tuple as a string
-    (`gen._comptime_vals` stores `comptime dt = DType.float32` as
-    `"('DType', 'float32')"`), a `DType.float32` / `dtype.float32` / leading-dot
-    spelling, or a bare `float32` / `Float32` / `f32` / `f64`.  Reads the one
-    table `_SIMD_FLOAT_DTYPE_CTYPE`, so the annotation resolver
-    (`infra_infer._resolve_type`) and the constructor lowerer
-    (`emit_calls`' `SIMD`/`Scalar` arm) cannot drift apart.
-    """
-    if tok is None:
-        return None
-    if isinstance(tok, (list, tuple)) and len(tok) == 2:
-        if tok[0] in ('.', 'DType', 'dtype'):
-            tok = tok[1]
-        else:
-            return None
-    s = str(tok).strip()
-    if not s:
-        return None
-    if s.startswith('DType.'):
-        s = s[len('DType.'):]
-    elif s.startswith('dtype.'):
-        s = s[len('dtype.'):]
-    if s.startswith('.'):
-        s = s[1:]
-    m = re.match(r"^\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)$", s)
-    if m and m.group(1) in ('.', 'DType', 'dtype'):
-        s = m.group(2)
-    sl = s.lower()
-    if sl == 'f32':
-        sl = 'float32'
-    elif sl == 'f64':
-        sl = 'float64'
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl)
-
-
 def _simd_float_dtype_ctype(inner: str) -> str | None:
     """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
     `<dtype>` when it is a float dtype spelling, else None (integer or
@@ -1816,7 +1777,7 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     nxt = gen._new_temp('uint64_t')
-    gen._emit(f"  {nxt} = {cur} | {1 << bit[1]}ULL;")
+    gen._binop_into(nxt, f"{cur}", '|', f"{1 << bit[1]}ULL")
     gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
 
 
@@ -1833,7 +1794,7 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     got = gen._new_temp('uint64_t')
-    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
+    gen._binop_into(got, f"{cur}", '&', f"{1 << bit[1]}ULL")
     msg = f"'{class_name}' object has no attribute '{member}'"
     # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
     # own basic block (the same goto shape `_lower_IfExpr` uses).

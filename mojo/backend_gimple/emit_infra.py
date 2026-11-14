@@ -42,7 +42,6 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
-import mojo.middle.coro as coro_mod
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
@@ -1399,8 +1398,6 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         obj, _hit = cas.get_or_build(key, '.o', _build_fn)
         return obj
     except Exception as e:
-        msg = f'[gimple_codegen] failed to compile link-mode inline-module cpp unit: {e}'
-        print(msg, flush=True)
         gimple_ctypes._debug_note('failed to compile link-mode inline-module cpp unit', e)
         return None
 
@@ -5740,7 +5737,7 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     gen._goto(bb_push)
     gen._emit_label(bb_push)
     fsave = gen._new_val('int64_t', '_mojo_exc_top')
-    fpush = gen._new_val('int64_t', f'{fsave} + (int64_t)1')
+    fpush = gen._binop('int64_t', f'{fsave}', '+', '(int64_t)1')
     gen._emit(f'  _mojo_exc_top = {fpush};')
     ftop = gen._new_val('int64_t', '_mojo_exc_top')
     gen._void_call('mojo_cleanup_checkpoint_save', [])
@@ -6686,7 +6683,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 continue
             _slot_i = i
             if star_idx >= 0 and i > star_idx:
-                _base = gen._new_val('int64_t', f"{_sub_len} - {n_after}LL")
+                _base = gen._binop('int64_t', f"{_sub_len}", '-', f"{n_after}LL")
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
                 _slot_i = gen._binop('int64_t', _base, '+', _off)
             _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
@@ -6854,12 +6851,13 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     else:
         var_names = None
         if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
-            # The message lives in mojo/middle/coro.py beside the pipeline
-            # pre-pass that raises the same refusal earlier (before the
-            # unknown-declaration pass can answer with a less-specific
-            # diagnostic for the same program): one builder, one wording.
-            raise coro_mod.multi_slot_comprehension_refusal(gen0.target,
-                                                             api.get('base'))
+            raise RuntimeError(
+                "cannot compile a multi-slot comprehension target over a "
+                f"generator whose yield arity is not a tuple (`{gen0.target} "
+                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
+                "yields one value per resume, and unpacking that value needs a "
+                "runtime iterator protocol this scalar generator model does "
+                "not have")
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -7080,7 +7078,7 @@ def _bind_local_decl(gen, name, ctype):
         gen._block_scope_frames[-1].append((name, saved))
 
 
-def _open_block_scope(gen) -> list:
+def _open_block_scope(gen):
     """Open a block body (an if/else/elif, loop, with, try/except/finally or
     match-case body). Returns the frame `_close_block_scope` needs."""
     frame = []
@@ -7088,7 +7086,7 @@ def _open_block_scope(gen) -> list:
     return frame
 
 
-def _close_block_scope(gen, frame: list) -> None:
+def _close_block_scope(gen, frame: list):
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""
@@ -8776,7 +8774,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 bb_none = gen._new_bb()
                 bb_done = gen._new_bb()
                 _cond = gen._new_temp('_Bool')
-                gen._emit(f'  {_cond} = ({aval}) != 0;')
+                gen._binop_into(_cond, f'({aval})', '!=', '0')
                 gen._cond_goto(_cond, bb_some, bb_none)
                 gen._emit_label(bb_some)
                 _some_lit = gen._intern_string('Optional(Some)')
