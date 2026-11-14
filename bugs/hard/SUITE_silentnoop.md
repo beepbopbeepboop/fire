@@ -32,9 +32,19 @@ def main():
 
 The loop body never runs, so `1 2 9` is missing. This is a regression guard on
 a lowering that already worked (the case's own comment says so). It is **not**
-from `e4a2cc2ed`: the case passes at `1a7b1f413` (where it was added, 2026-09-28)
-and at the 2026-11-11 tip `aca94072a`, and fails at `7f9788007~1`, so the
-regression is in the 2026-11-11..11-14 window. Re-run:
+from `e4a2cc2ed`. Bisected with `git worktree` at each step and a HEAD check
+(the case passes at `1a7b1f413`, where it was added, and at the 2026-11-11 tip
+`aca94072a`):
+
+```
+7c5d42be9  PASSES
+1507c34f1  FAILS   <- first bad
+```
+
+and there is exactly ONE commit in `7c5d42be9..1507c34f1`, so the regression
+is **`1507c34f1` — "gir stage 2a: runtime calls take values, not text (501
+sites)"** (2026-11-13 18:31). That is the refactor that made runtime calls take
+values, and `zip(...)` is a runtime call. Re-run:
 `python3 test_silent_noop_iter.py zip_nested_tuple_target`.
 
 The kept artifact
