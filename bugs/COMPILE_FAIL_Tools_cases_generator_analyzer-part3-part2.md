@@ -2,8 +2,8 @@
 
 Part 2 of 2 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md`
 (which is part 3 of the original `COMPILE_FAIL_Tools_cases_generator_analyzer.md`).
-Part 1 (the module-scope `globals()` support in the compiled path) makes the
-`globals()` use in `lexer.py` work; this part owns
+Part 1 (`COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part1.md`) makes the
+module-scope `globals()` in `lexer.py` work in the compiled path; this part owns
 the end-to-end run after it, and closing the original doc.
 
 ## Goal

@@ -1,7 +1,7 @@
 # DIAGNOSTICS mojoc imports, part 2 — part 3: conformance error against an imported struct with an implicit default
 
 Part 3 of 3 of `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`. Depends on
-the precompiled signature artifact/reader (part 1, landed) and
+`DIAGNOSTICS_mojoc_imports-part2-part1.md` (artifact and reader) and
 `DIAGNOSTICS_mojoc_imports-part2-part2.md` (synthetic signature printer).
 
 ## Class

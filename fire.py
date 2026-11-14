@@ -1391,21 +1391,6 @@ def main():
         sys.exit(2)
     formal_test_input = _pop_test_input(sys.argv)
 
-    # precompile: parse a package directory and write a .mojoc signature
-    # artifact (no codegen/compilation). Used by the mojoc import diagnostics
-    # path to carry signatures across a source-deleted boundary.
-    if sys.argv[1] == 'precompile':
-        sys.argv.pop(1)
-        pre_out = _pop_flag_value(sys.argv, '-o')
-        pre_inputs = [a for a in sys.argv[1:] if not a.startswith('-')]
-        if not pre_inputs or pre_out is None:
-            print(f"{_tool_name()} precompile: usage: precompile <pkg-dir> -o <out>.mojoc",
-                  file=sys.stderr)
-            sys.exit(2)
-        from mojo.middle import mojoc_artifact
-        mojoc_artifact.write_artifact(pre_inputs[0], pre_out)
-        return
-
     # Check for dylib command: compile one or more .mojo LIBRARY modules
     # (no main()/top-level entry point needed — same "library module" shape
     # every stdlib file already compiles as) into a single, standalone,

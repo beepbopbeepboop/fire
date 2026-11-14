@@ -4017,11 +4017,8 @@ def _lower_container_eq(gen, op: str, lkind: str | None, lnode, lt: str, lv: str
     _opv = _as_str(gen._new_val('int64_t', str(int(_ORD_CMP_OPS[op]))))
     _args.append(('int64_t', _opv))
     _c = _as_str(gen._call_expr('int', _fn, _args))
-    # Through `_call_expr`, not spelled as text: `mojo_cmp_fold (int, int)`
-    # takes the operator as a C `int` and `_opv` is an `int64_t` temp, and
-    # only the call chokepoint converts an argument (doc/GIR.md).
-    _fc = _as_str(gen._call_expr('int', 'mojo_cmp_fold',
-                                 [('int', _c), ('int64_t', _opv)]))
+    _fc = _as_str(gen._new_temp('int'))
+    gen._emit(f"  {_fc} = mojo_cmp_fold ({_c}, {_opv});")
     _t = gen._new_temp('_Bool')
     gen._emit(f"  {_t} = {_fc} != 0;")
     return '_Bool', _t
@@ -6147,12 +6144,7 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         return 'int64_t', t
     if lt in gimple_ctypes._FLOAT_TYPES or rt in gimple_ctypes._FLOAT_TYPES:
         td = gimple_ctypes.TypeLattice.join(lt, rt)
-        # Through `_call_expr`, not spelled as text: with one float operand
-        # and one integer operand (`2.0 ** n`) the integer has to be converted
-        # to `double` by its own statement. Spelled as `pow (2.0, n)` in a
-        # `__GIMPLE` function it was passed in an integer register and `pow`
-        # read its second argument from a float register nobody had set.
-        t = gen._call_expr(td, 'pow', [(lt, lv), (rt, rv)])
+        t = gen._new_val(td, f"pow ({lv}, {rv})")
         return td, t
     # Coerce struct pointers to int64_t before converting to double
     # (casting struct * to double directly is invalid in GIMPLE)

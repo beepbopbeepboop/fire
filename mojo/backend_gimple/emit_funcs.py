@@ -3969,8 +3969,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         lines.append(f"#if USE_PYTHON")
         lines.append(f"  Py_Finalize ();")
         lines.append(f"#endif")
-        # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
-        lines.append(f"  return (int)result;")
+        lines.append(f"  return result;")
         lines.append(f"}}")
 
     gen._pop_import_scope()
@@ -3996,15 +3995,10 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
-    gen._toplevel_bound_globals = []
     gen._frame_enter_module()
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
-            # AFTER the statement is lowered: a `globals()` inside this
-            # statement must see only the names bound by earlier ones (see
-            # `emit_infra.lower_module_globals_read`).
-            ginf.note_toplevel_bindings(gen, stmt)
     finally:
         gen._in_toplevel_gen = False
     gen._frame_leave()

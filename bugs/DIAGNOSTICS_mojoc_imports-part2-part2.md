@@ -1,7 +1,7 @@
 # DIAGNOSTICS mojoc imports, part 2 — part 2: synthetic signature rendering of implicit defaults
 
 Part 2 of 3 of `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`. Depends on
-the precompiled signature record (part 1, landed).
+`DIAGNOSTICS_mojoc_imports-part2-part1.md` (the precompiled signature record).
 Part 3 is `DIAGNOSTICS_mojoc_imports-part2-part3.md`.
 
 ## Class

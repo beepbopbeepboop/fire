@@ -1959,18 +1959,12 @@ def _validate_align_decorators_for_struct(module_src, template_src, struct_name,
             # false diagnostic for this instantiation.
             val = None
         if val is None:
-            # An unknown bare name used as `@align(...)` in this instantiation
-            # context. The `@align:` tag is part of the contract: the callers
-            # that decide whether an instantiation failure is a real user
-            # diagnostic rather than an elaboration-capability failure
-            # (`emit_resolve._ensure_generic_struct`/`_elaborate_generic_struct_call`
-            # and `elab_intu._materialize`) re-raise this class only when the
-            # message carries it. Without the tag the diagnostic was swallowed
-            # and a struct with `@align(missing)` compiled silently.
+            # Preserve legacy diagnostics for an unknown bare name used as
+            # @align(...) in this instantiation context.
             if isinstance(arg, IdentExpr) and arg.name not in bindings:
                 raise RuntimeError(
                     "function instantiation failed\n"
-                    f"@align: use of unknown declaration '{arg.name}'\n{arg.name}")
+                    f"use of unknown declaration '{arg.name}'\n{arg.name}")
             continue
         if val <= 0 or (val & (val - 1)) != 0 or val > (1 << 29):
             raise RuntimeError(

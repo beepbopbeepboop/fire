@@ -11716,12 +11716,7 @@ print("%r" % p)
                     paths.append(_r)
                     continue
                 for _dp, _dn, _ns in os.walk(_r):
-                    # `mojo/ir` is the typed IR (doc/GIR.md). Its `Ex`/`Instr`
-                    # classes have fields named `name`/`op`/`body` like AST
-                    # nodes do, but they are not AST nodes and `_walk_ast`
-                    # never sees one, so there is no memo to invalidate.
-                    _dn[:] = [d for d in _dn if d != "__pycache__"
-                              and not (_dp == "mojo" and d == "ir")]
+                    _dn[:] = [d for d in _dn if d != "__pycache__"]
                     for _n2 in sorted(_ns):
                         if _n2.endswith(".py"):
                             paths.append(os.path.join(_dp, _n2))
