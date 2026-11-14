@@ -3,7 +3,8 @@
 in-place `call.func.member` rewrite drops the walk-memo entry for the
 ENCLOSING `call` node, at the write site.
 
-Background (the deleted doc, bugs/CODEGEN_walk_ast_memo_cpp_yield_from.md):
+Background (the ADRP-from/`self.` walk-memo invalidation bug, fixed on
+2026-11-13 by 40985caba):
 `_cpp_yield_from` rewrites `call.func.member = _self_method_name` on both
 the classname path and the `self.<method>()` path. The site must invalidate
 the walk memo for the node it rewrote; the doc's next step was
