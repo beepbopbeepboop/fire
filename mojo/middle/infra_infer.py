@@ -1599,7 +1599,26 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                                 _all_present = False
                                 break
                         if _all_present:
-                            matches.append(_as_str(sname))
+                            # The compiler preloads ITS OWN AST-node layouts
+                            # (`TryStmt`, `WithStmt`, ...) into
+                            # struct_field_types for every compile, so a field
+                            # name as generic as `handlers` or `body` can
+                            # match one of them when the struct is really the
+                            # program's own (or an opaque stdlib object).
+                            # Real: c_common/logging.py's `logger.handlers`
+                            # typed `logger` as `TryStmt *`, and the emitted
+                            # `TryStmt_setLevel/addHandler` calls had no
+                            # definition in the build. Such a name is only
+                            # evidence when the module being compiled defines
+                            # that very struct (the self-host case, where the
+                            # AST nodes ARE the program).
+                            _sn_s = _as_str(sname)
+                            _sn_cls = getattr(gimple_ctypes, _sn_s, None)
+                            if (isinstance(_sn_cls, type)
+                                    and gimple_ctypes.dataclasses.is_dataclass(_sn_cls)
+                                    and _sn_s not in getattr(gen, '_local_struct_names', ())):
+                                continue
+                            matches.append(_sn_s)
                 if len(matches) == 1:
                     inferred[pname] = f"{matches[0]} *"
             # A dict-only method call with no better signal: the param is a

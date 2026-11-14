@@ -310,9 +310,12 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
     # (`__mgco_`) one has none, so noting its handle would be a no-op call.
     if _base and not _as_str(_base).startswith('__mgco_'):
         _start_sym = f"{_base}_start"
-        # -fgimple call operands cannot be casts, so the start symbol's
-        # address is materialised into its own temp first.
-        _start_ptr = gen._new_val('void *', f"(void *)&{_start_sym}")
+        # -fgimple cannot parse `(void *)&sym` (nor a cast applied to a bare
+        # function name): its grammar has no expression form for a function
+        # address. `&sym` alone IS accepted, and assigning it to the
+        # `void *` temp performs the same conversion the cast asked for, so
+        # materialise the address with no cast text.
+        _start_ptr = gen._new_val('void *', f"&{_start_sym}")
         # Keep the handle in MojoGenerator* form; mojo_gen_note returns the
         # same handle word and records it in the runtime handle table.
         _h = gen._new_temp('int64_t')

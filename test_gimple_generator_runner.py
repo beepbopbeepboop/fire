@@ -261,10 +261,8 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
 
 def _build_foreign_package_run_files(entry_src, files, cwd):
     """`_build_foreign_package_run` with the caller's OWN package content —
-    `files` is the package's SIBLING content (rel path -> source, e.g.
-    `__init__.py` and the helper module) instead of the shared
-    `_FOREIGN_PKG_FILES`; the entry source is written as `fpp/main.py`, the
-    same way `_build_foreign_package_run` writes its entry.
+    `files` is the full package (rel path -> source, including `__init__.py`
+    and the entry's `main.py`) instead of the shared `_FOREIGN_PKG_FILES`.
     For cross-module fixtures whose sibling modules differ from the shared
     package (the tables.py part-4/part-5 regressions below). Returns
     (compiled_stdout, cpython_stdout, cpython_completed)."""
@@ -291,6 +289,42 @@ def _build_foreign_package_run_files(entry_src, files, cwd):
     out = subprocess.run([exe], capture_output=True,
                          timeout=RUN_TIMEOUT_S).stdout.decode()
     return out, cpython_stdout, cp
+
+
+def _test_foreign_package_case(name, files, entry_src, want):
+    """`_test_foreign_a3_generator_handle` for a caller-defined package
+    (`files` is the FULL package content — `_build_foreign_package_run_files`
+    instead of the shared `_FOREIGN_PKG_FILES`). `want` is asserted against
+    CPython's own output first, so a fixture that drifted from its documented
+    expectation fails as a FIXTURE bug and not as a compiler regression."""
+    global _PASS, _FAIL
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_gen_fpp_')
+        got, cpy, cp = _build_foreign_package_run_files(entry_src, files, wd)
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _FAIL += 1
+        return
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return
+    if cp.returncode != 0:
+        print(f"FAIL  {name}: CPython reference exited {cp.returncode}: "
+              f"{cp.stderr[-500:]} — fixture is wrong, not the compiler")
+        _FAIL += 1
+        return
+    if cpy != want:
+        print(f"FAIL  {name}: CPython baseline is not {want!r} (got {cpy!r}) "
+              f"— fixture is wrong, not the compiler")
+        _FAIL += 1
+        return
+    if got == cpy:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiled stdout {got!r} != CPython {cpy!r}")
+        _FAIL += 1
 
 
 def _test_foreign_a3_generator_handle(name, entry_src, want):
@@ -419,6 +453,111 @@ def _foreign_a3_generator_handle_for_loop():
         "\n"
         "main()\n",
         "60\n")
+
+
+def _foreign_module_qualified_generator_tuple_for():
+    # `for a, b in <module>.<generator>(...):` inside a compiled generator
+    # body — the module-qualified (not `self.method`, not a bare imported
+    # name) delegation form, with a tuple-unpacked loop target. Real:
+    # c_common/tables.py's `parse_table` consuming
+    # `strutil.parse_entries(entries, ignoresep=sep)` (a cross-module
+    # generator, delegated with a keyword argument, tuple-unpacked).
+    global _PASS, _FAIL
+    name = "foreign_module_qualified_generator_tuple_for"
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_gen_fqm_', dir='.tmp')
+        os.makedirs(os.path.join(wd, 'fpq'), exist_ok=True)
+        with open(os.path.join(wd, 'fpq', '__init__.py'), 'w') as f:
+            f.write('')
+        # A tuple-yielding generator in another module. Scalar int pairs keep
+        # the value protocol simple and the cpp path eligible.
+        with open(os.path.join(wd, 'fpq', 'sub.py'), 'w') as f:
+            f.write("def pairs(n):\n"
+                    "    i = 0\n"
+                    "    while i < n:\n"
+                    "        yield i, i * 2\n"
+                    "        i = i + 1\n")
+        entry_src = ("from . import sub\n"
+                     "\n"
+                     "def consume(n, *, start=[]):\n"
+                     "    for a, b in sub.pairs(n):\n"
+                     "        yield a + b\n"
+                     "\n"
+                     "def main():\n"
+                     "    print(sum(consume(4)))\n"
+                     "\n"
+                     "main()\n")
+        entry = os.path.join(wd, 'fpq', 'main.py')
+        with open(entry, 'w') as f:
+            f.write(entry_src)
+        cp = subprocess.run([sys.executable, '-m', 'fpq.main'],
+                            cwd=wd, capture_output=True, text=True,
+                            timeout=RUN_TIMEOUT_S)
+        cpython_stdout = cp.stdout
+        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+            entry_src, do_imports=True, filename=entry)
+        if not cpp_code:
+            raise RuntimeError(
+                "expected a non-empty generated .cpp (consumer must take the "
+                "cpp C++20-coroutine path)")
+        exe = _build_generator_program_from_code(c_code, cpp_code)
+        out = subprocess.run([exe], capture_output=True,
+                             timeout=RUN_TIMEOUT_S).stdout.decode()
+        if cpython_stdout != "18\n":
+            print(f"FAIL  {name}: CPython baseline wrong (got {cpython_stdout!r})")
+            _FAIL += 1
+            return
+        if out == cpython_stdout:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled stdout {out!r} != CPython {cpython_stdout!r}")
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
+
+def _regression_tables_callable_param_generator_handle_arg():
+    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5: a call THROUGH a
+    # callable-valued parameter whose ARGUMENT is a compiled-generator HANDLE
+    # local — tables.py's read_table doing
+    # `lines = strutil._iter_significant_lines(infile)` then
+    # `for row in _get_reader(lines, delimiter=sep or '\t'):`. Before the fix
+    # `cpp_core._cpp_dyn_call_expr` refused the handle argument ("C type is not
+    # statically a word, string or container"); the lowering now materializes
+    # the handle into a fresh `MojoList *` and packs that.
+    #
+    # `mlines.iter_lines` is A3-lowered exactly like
+    # `strutil._iter_significant_lines`; `_get_reader=csv.reader` (a callable
+    # default) keeps `read_table` on the cpp path, and the csv.reader tabled
+    # runtime iterates the materialized list of lines.
+    _test_foreign_package_case(
+        "tables_callable_param_generator_handle_arg",
+        {'__init__.py': '',
+         'mlines.py': (
+             "def iter_lines(lines):\n"
+             "    for line in lines:\n"
+             "        yield line\n")},
+        (
+            "import csv\n"
+            "from . import mlines\n"
+            "\n"
+            "def read_table(entries, header, *, sep=',', _get_reader=csv.reader):\n"
+            "    lines = mlines.iter_lines(entries)\n"
+            "    for row in _get_reader(lines, delimiter=sep):\n"
+            "        yield row[0]\n"
+            "\n"
+            "def main():\n"
+            "    for v in read_table([\"a,b\", \"1,2\"], \"a,b\", sep=','):\n"
+            "        print(v)\n"
+            "\n"
+            "main()\n"),
+        "a\n1\n")
 
 
 def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
@@ -10359,6 +10498,8 @@ def main():
 
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
+    _foreign_module_qualified_generator_tuple_for()
+    _regression_tables_callable_param_generator_handle_arg()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
     _regression_read_table_callable_reader()
