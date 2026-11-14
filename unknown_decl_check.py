@@ -73,7 +73,13 @@ _KEYWORDS = frozenset({
 # mojo/backend_gimple/emit_calls.py (the `name == 'constrained'` sites).
 # `conforms_to` is NOT listed here: it is
 # in GimpleGen._KNOWN_SIGS, read by _compiler_runtime_names().
-_COMPILE_TIME_INTRINSICS = frozenset({'constrained'})
+# `__mlir_op` / `__mlir_attr` / `__mlir_type` are Mojo's own MLIR escape
+# hatches (`__mlir_op.`index.add`(a, b)`); the stdlib is written in them.
+# `create_future` is the event loop's future constructor, lowered by name in
+# mojo/backend_gimple/emit_calls.py and mojo/middle/coro.py.
+_COMPILE_TIME_INTRINSICS = frozenset({
+    'constrained', '__mlir_op', '__mlir_attr', '__mlir_type', 'create_future',
+})
 
 _RUNTIME_NAMES = frozenset({
     'self', 'Self', '__file__', '__name__', '__init__', '__class__',
@@ -116,13 +122,16 @@ def _stdlib_declared_names(stdlib_root: str) -> frozenset:
 def _compiler_runtime_names() -> frozenset:
     """Every function the compiler provides to a program at run time.
 
-    `GimpleGen._KNOWN_SIGS` is the one table of those (it includes the
-    compile-time builtins such as `conforms_to`, which the compiler lowers
-    specially and no source file declares). It is read lazily because
-    gimple_codegen imports this module at load time.
+    Two tables. `RT_SIGS` (mojo/middle/rt_sigs.py) is generated from the
+    runtime headers and names every C function the runtime exports; a program
+    may call any of them by name. `GimpleGen._KNOWN_SIGS` is hand-written and
+    covers fewer of those, but also holds the compile-time builtins such as
+    `conforms_to`, which the compiler lowers specially and no header declares.
+    Read lazily because gimple_codegen imports this module at load time.
     """
     import gimple_codegen
-    return frozenset(gimple_codegen.GimpleGen._KNOWN_SIGS)
+    from mojo.middle.rt_sigs import RT_SIGS
+    return frozenset(gimple_codegen.GimpleGen._KNOWN_SIGS) | frozenset(RT_SIGS)
 
 
 def _known_names() -> frozenset:

@@ -9877,23 +9877,7 @@ class Parser:
                 if looks_like_enumdef:
                     return self._parse_enum()
                 # else: fall through to expression statement
-            if t.value == "trait":
-                # Same carve-out as the enum/comptime/param dispatches here: a
-                # trait DECLARATION must be followed by its name, so
-                # `trait = ...`, `trait.foo`, `trait(...)` and a bare `trait`
-                # are ordinary identifier uses and fall through to expression
-                # parsing. Without this the compiler's own Python sources
-                # cannot use `trait` as a variable name at all —
-                # mojo/middle/mojoc_conformance.py's
-                # `trait = (records or {}).get(...)` was refused with
-                # "Expected NAME got ASSIGN('=')", which aborted every
-                # whole-program compile of the self-host.
-                _nxt_tr = self._peek(1)
-                if _nxt_tr.kind == "NAME" or (
-                        _nxt_tr.kind == "STRING"
-                        and _nxt_tr.value.startswith("`")):
-                    return self._parse_trait()
-                # else: fall through to expression/assignment parsing
+            if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
             if t.value == "comptime" or t.value == "param":
