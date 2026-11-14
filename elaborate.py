@@ -668,9 +668,11 @@ def _substitute_constraint_text(text: str, bindings: dict) -> str:
     return out
 
 
-def _constraint_implied_for_evidence(method_where: str, assumption: str, module_src: str, bindings: dict) -> bool:
+def _constraint_implied_for_evidence(method_where: str, assumption: str, module_src: str, bindings: dict, strict: bool = False) -> bool:
     """Conservative implication: does `assumption` imply `method_where`?
-    Unknown/unparseable => True (accept, do not report)."""
+    Unknown/unparseable => True (accept, do not report). When strict, an
+    atom-comparable assumption and clause return that verdict instead of the
+    undecided fall-through."""
     mw = _substitute_constraint_text(method_where or '', bindings).strip()
     if not mw:
         return True
@@ -679,6 +681,12 @@ def _constraint_implied_for_evidence(method_where: str, assumption: str, module_
     try:
         # Build conforms_to predicate and bases for evaluation
         cpred = _where_conforms_to_pred(module_src, bindings)
+        trait_bases, cache = _where_conformance_bases(module_src), {}
+        if strict:
+            mw_atoms = _constraint_atoms(_parse_constraint_expr(mw))
+            a_atoms_strict = _constraint_atoms(_parse_constraint_expr(asn)) if asn else None
+            if mw_atoms is not None and a_atoms_strict is not None:
+                return _atom_implies(a_atoms_strict, mw_atoms, trait_bases, cache)
         # If assumption is empty (unconditional conformance), only accept if method clause
         # is provably true with no extra conforms_to facts.
         if not asn:
@@ -686,7 +694,6 @@ def _constraint_implied_for_evidence(method_where: str, assumption: str, module_
             return st == CONST_TRUE
         # Try parsing and checking implication via text-level conservative rules.
         # If assumption implies method clause syntactically/structurally, accept.
-        trait_bases, cache = _where_conformance_bases(module_src), {}
         if _constraint_implies_text(asn, mw, trait_bases, cache):
             return True
         # Also try evaluating method clause assuming conformance facts implied by assumption atoms.
@@ -3136,3 +3143,157 @@ def check_method_call_evidence(module_src, fn, module_stmts=None):
                 continue
             raise RuntimeError("lacking evidence to prove correctness")
 
+
+
+def type_arg_bound_evidence(module_src, template_src, param, arg, fn_bounds):
+    """'proven' | 'unproven' | 'unknown' for ARG satisfying PARAM's bound."""
+    bounds = parse_bounds(template_src or '')
+    bound = bounds.get(param)
+    if bound is None:
+        return 'proven'
+    # A bound that is not a trait-like name (a value parameter such as n: Int)
+    # -> 'unknown'; the caller accepts it.
+    value_param_bounds = {
+        'Int', 'UInt', 'Bool', 'String',
+        'Float16', 'Float32', 'Float64', 'BFloat16',
+        'Int8', 'Int16', 'Int32', 'Int64',
+        'UInt8', 'UInt16', 'UInt32', 'UInt64',
+        'IntLiteral', 'FloatLiteral', 'StringLiteral',
+        'SIMD', 'Scalar',
+    }
+    # Split bound conjunctions on '&' (top-level for simple trait bounds).
+    conjuncts = [c.strip() for c in str(bound).split('&') if c.strip()]
+    if not conjuncts:
+        return 'proven'
+    for c in conjuncts:
+        if c in value_param_bounds:
+            return 'unknown'
+    arg = (arg or '').strip()
+
+    _uninspectable_subjects = {
+        'Int', 'UInt', 'Bool', 'String',
+        'Float16', 'Float32', 'Float64', 'BFloat16',
+        'Int8', 'Int16', 'Int32', 'Int64',
+        'UInt8', 'UInt16', 'UInt32', 'UInt64',
+        'IntLiteral', 'FloatLiteral', 'StringLiteral',
+        'SIMD', 'Scalar', 'NoneType', 'Object',
+    }
+
+    def _arg_params_in_fn_bounds(where_text, fb):
+        # subjects named in where_text that are neither a key in fb nor a struct
+        # declared in module_src: return True if any such subject appears as a
+        # conforms_to subject we cannot inspect (builtin/imported concrete type).
+        try:
+            expr = Parser(py_tokenize(where_text))._parse_expr(0)
+            atoms = _constraint_atoms(expr)
+        except Exception:
+            return False
+        subjects = set()
+        def _collect(a):
+            if a is None:
+                return
+            k = a[0]
+            if k == 'conforms':
+                subjects.add(a[1])
+            elif k in ('and', 'or'):
+                _collect(a[1]); _collect(a[2])
+            elif k == 'not':
+                _collect(a[1])
+        _collect(atoms)
+        for s in subjects:
+            if s in fb:
+                continue
+            if extract_struct_source(module_src, s) is not None:
+                continue
+            # A type parameter/generic placeholder not in fb is reasoned about as
+            # lacking evidence; concrete builtins/imported types are uninspectable.
+            if s in _uninspectable_subjects:
+                return True
+            if not re.match(r'^[A-Za-z_]\w*$', str(s)):
+                return True
+            # otherwise treat as a type variable with no stated bounds -> not unknown
+        return False
+
+    def _assumption_text(fb):
+        parts = []
+        for p in sorted(fb.keys()):
+            traits = fb[p]
+            for t in sorted(traits):
+                parts.append(f'conforms_to({p}, {t})')
+        return ' and '.join(parts)
+
+    def _check_one_trait(trait):
+        # rule 3: arg is exactly a key in fn_bounds
+        if arg in fn_bounds:
+            return 'proven' if trait in (fn_bounds.get(arg) or set()) else 'unproven'
+        base, targs = _split_base_type_args(arg)
+        tmpl = extract_struct_source(module_src, base)
+        if tmpl is None:
+            # rule 5: base not a struct declared in module_src
+            return 'unknown'
+        # parse struct def for base_constraints
+        try:
+            sd = None
+            for s in Parser(py_tokenize(textwrap.dedent(tmpl))).parse_module():
+                if isinstance(s, StructDef) and getattr(s, 'name', None) == base:
+                    sd = s
+                    break
+        except Exception:
+            sd = None
+        if sd is None:
+            return 'unknown'
+        params = type_param_names(tmpl) or []
+        bindings = {}
+        for i, p in enumerate(params):
+            if i < len(targs):
+                bindings[p] = targs[i]
+                bindings[f'Self.{p}'] = targs[i]
+        # rule 4: inspect base_constraints (not only bases)
+        base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+        if not base_constraints:
+            base_constraints = [(b, '') for b in (getattr(sd, 'bases', []) or [])]
+        # direct bases first
+        for bname, wtext in base_constraints:
+            bname_s = str(bname)
+            if bname_s != trait:
+                continue
+            wtext_s = (wtext or '').strip()
+            if not wtext_s:
+                return 'proven'
+            # conditional direct base
+            sub_where = _substitute_constraint_text(wtext_s, bindings).strip()
+            assumption = _assumption_text(fn_bounds)
+            # If where text names a subject neither in fn_bounds nor declared in module_src -> unknown
+            if _arg_params_in_fn_bounds(sub_where, fn_bounds):
+                return 'unknown'
+            implied = _constraint_implied_for_evidence(sub_where, assumption, module_src, bindings, strict=True)
+            return 'proven' if implied else 'unproven'
+        # not a direct base: try ancestors via _where_conformance_bases + _ancestors_with_paths
+        trait_bases = _where_conformance_bases(module_src)
+        found_path = False
+        for bname, wtext in base_constraints:
+            bname_s = str(bname)
+            for anc, aw, _path in _ancestors_with_paths(bname_s, wtext or '', trait_bases, {}):
+                if anc == trait:
+                    found_path = True
+                    wtext_s = (aw or '').strip()
+                    if not wtext_s:
+                        # unconditional in the current model
+                        return 'proven'
+                    sub_where = _substitute_constraint_text(wtext_s, bindings).strip()
+                    assumption = _assumption_text(fn_bounds)
+                    if _arg_params_in_fn_bounds(sub_where, fn_bounds):
+                        return 'unknown'
+                    implied = _constraint_implied_for_evidence(sub_where, assumption, module_src, bindings, strict=True)
+                    return 'proven' if implied else 'unproven'
+        if not found_path:
+            # no path exists -> unknown (Copyable/Movable derived from fields)
+            return 'unknown'
+        return 'unknown'
+
+    results = [_check_one_trait(c) for c in conjuncts]
+    if any(r == 'unproven' for r in results):
+        return 'unproven'
+    if all(r == 'proven' for r in results):
+        return 'proven'
+    return 'unknown'
