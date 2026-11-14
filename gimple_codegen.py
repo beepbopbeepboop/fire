@@ -5085,6 +5085,9 @@ class GimpleGen:
                                  depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
                                            depth=depth, want_abs=want_abs)
+    def _reexported_defining_qualifier(self, module: str, name: str,
+                                       kind: str = 'fn') -> str:
+        return gfn._reexported_defining_qualifier(self, module, name, kind)
     def _register_imported_symbol(self, name: str, info, original_name=None,
                                   write_param_types: bool = True):
         import mojo.middle.funcs_shared as _fn2

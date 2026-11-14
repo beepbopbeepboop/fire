@@ -7522,135 +7522,6 @@ class TestTheRefusalNamesTheSvcItRefuses(unittest.TestCase):
         self.assertIn("empty block runs certificate", msg)
 
 
-class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
-    """A dynamic write `svc` is admitted only by a NAMED assumption.
-
-    `_gen_run_cert` used to refuse a write `svc` whose x16 is not a `movz`
-    among the run's own preceding instructions: the step lemma's
-    `hx : ¬ arm64_reg 16 s = 1` had no reg-16 chain to discharge it from.
-    The write form is still sound when the caller supplies that hypothesis by
-    name -- it is ASSUMED at the certificate's own pre-svc state, never
-    invented or proved -- and the fall-through rewrites x0 before anything
-    reads the byte count the model does not model.
-
-    These are text tests over hand-built word dictionaries: no Lean, no
-    dylib, no compile.  They pin the admission, the binder, the `hx` it
-    becomes, and the three controls (static write, static exit, unrewritten
-    x0) that must keep today's behaviour.
-    """
-
-    BASE = 0x10000000
-    SVC = 0xd4000001
-    RET = 0xd65f03c0
-
-    @staticmethod
-    def _movz(rt, imm):
-        return 0xd2800000 | (imm << 5) | rt
-
-    def _cert(self, words, pcs, **kw):
-        import formal.arm64_proof_gen as G
-        return G._gen_run_cert("f", words, self.BASE, "b0", pcs, **kw)
-
-    def _dynamic_write(self):
-        """`svc` FIRST (x16 is not in the run), then `movz x0, #0; ret`."""
-        words = {self.BASE: self.SVC,
-                 self.BASE + 4: self._movz(0, 0),
-                 self.BASE + 8: self.RET}
-        return words, [self.BASE, self.BASE + 4, self.BASE + 8]
-
-    def test_a_dynamic_write_svc_with_no_assumption_is_still_refused(self):
-        words, pcs = self._dynamic_write()
-        self.assertIsNone(
-            self._cert(words, pcs),
-            "a dynamic write `svc` was admitted without the hypothesis its "
-            "step lemma needs -- the certificate would claim a state the "
-            "caller never justified")
-
-    def test_the_named_assumption_is_the_binder_and_its_hx(self):
-        words, pcs = self._dynamic_write()
-        part = self._cert(words, pcs, svc_assumed={self.BASE: "svc_write_assumed"})
-        self.assertIsNotNone(part, "a justified dynamic write `svc` was refused")
-        text = part[0]
-        self.assertIn(
-            "(svc_write_assumed : ¬ arm64_reg 16 (f_b0_qS0 st) = 1)", text,
-            "the runs certificate does not carry the assumption as a binder "
-            "at the run's own pre-svc state")
-        self.assertIn(
-            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := svc_write_assumed",
-            text,
-            "the dynamic svc's `hx` is not that hypothesis applied at its "
-            "pre-svc state")
-        self.assertIn(
-            "f_sr_0 (f_b0_qS0 st) (hpc0) (hx0)", text,
-            "the write-form step lemma is not applied under the assumption")
-        self.assertNotIn(
-            "h16_0", text,
-            "the certificate still invents a reg-16 chain for an x16 no "
-            "instruction in the run wrote")
-
-    def test_the_dynamic_step_is_the_write_form_not_the_exit(self):
-        words, pcs = self._dynamic_write()
-        part = self._cert(words, pcs, svc_assumed={self.BASE: "svc_write_assumed"})
-        self.assertIsNotNone(part)
-        text = part[0]
-        self.assertIn(
-            "def f_b0_qT0 (st : Arm64State) : Arm64State :=\n"
-            "  { (f_b0_qS0 st) with pc := (f_b0_qS0 st).pc + 4 }", text,
-            "the admitted svc is not composed as the write form (the "
-            "fall-through at pc + 4)")
-        self.assertNotIn(
-            "arm64_go_exit_step_jump_at", text,
-            "a dynamic write svc was closed as an exit step")
-
-    def test_the_assumption_name_is_the_callers(self):
-        words, pcs = self._dynamic_write()
-        part = self._cert(words, pcs, svc_assumed={self.BASE: "hwrite"})
-        self.assertIsNotNone(part)
-        self.assertIn("have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := hwrite",
-                      part[0])
-
-    def test_a_static_write_still_discharges_hx_from_its_own_chain(self):
-        # `movz x16, #4; svc; movz x0, #0; ret`
-        words = {self.BASE: self._movz(16, 4),
-                 self.BASE + 4: self.SVC,
-                 self.BASE + 8: self._movz(0, 0),
-                 self.BASE + 12: self.RET}
-        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
-        part = self._cert(words, pcs)
-        self.assertIsNotNone(part, "a static write svc is still refused")
-        text = part[0]
-        self.assertIn("h16_1 : arm64_reg 16 (f_b0_qS1 st) = (UInt64.ofNat 4)",
-                      text, "the static write lost its own reg-16 chain")
-        self.assertIn("have hx1 : ¬ arm64_reg 16 (f_b0_qS1 st) = 1 := by",
-                      text)
-        self.assertNotIn("svc_write_assumed", text,
-                         "a static write does not need the assumption")
-
-    def test_a_static_exit_is_still_refused(self):
-        # `movz x16, #1; svc; ...`: an exit has no fall-through to certify.
-        words = {self.BASE: self._movz(16, 1),
-                 self.BASE + 4: self.SVC,
-                 self.BASE + 8: self._movz(0, 0),
-                 self.BASE + 12: self.RET}
-        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
-        self.assertIsNone(self._cert(words, pcs))
-        self.assertIsNone(self._cert(words, pcs,
-                                     svc_assumed={self.BASE + 4: "h"}))
-
-    def test_a_dynamic_write_that_leaves_x0_unrewritten_is_refused(self):
-        # `svc; add x1, x0, #1; ret`: the fall-through READS the byte count
-        # the model does not model, so the assumption cannot make it sound.
-        add_x1_x0_1 = 0x91000000 | (0 << 5) | 1
-        words = {self.BASE: self.SVC,
-                 self.BASE + 4: add_x1_x0_1,
-                 self.BASE + 8: self.RET}
-        pcs = [self.BASE, self.BASE + 4, self.BASE + 8]
-        self.assertIsNone(
-            self._cert(words, pcs, svc_assumed={self.BASE: "svc_write_assumed"}),
-            "an assumption admitted a write svc whose result x0 is read "
-            "before it is rewritten")
-
-
 def _svc_census(words, base, code):
     """One record per `svc` in `words`: its static x16 and, for a non-exit
     `svc`, whether the fall-through rewrites x0 before anything reads it.
@@ -7807,6 +7678,142 @@ class TestSvcProvenanceCensus(unittest.TestCase):
             records[0]["x0_reassigned"],
             "a write svc followed by `movz x0, #0` was reported as "
             "unrewritten, so the failure above is not about the read")
+
+
+class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
+    """A dynamic write `svc` is admitted only by a NAMED assumption.
+
+    `_gen_run_cert` used to refuse a write `svc` whose x16 is not a `movz`
+    among the run's own preceding instructions: the step lemma's
+    `hx : ¬ arm64_reg 16 s = 1` had no reg-16 chain to discharge it from.
+    The write form is still sound when the caller supplies that hypothesis by
+    name -- it is ASSUMED at the certificate's own pre-svc state, never
+    invented or proved -- and the fall-through rewrites x0 before anything
+    reads the byte count the model does not model.
+
+    These are text tests over hand-built word dictionaries: no Lean, no
+    dylib, no compile.  They pin the admission, the binder, the `hx` it
+    becomes, and the three controls (static write, static exit, unrewritten
+    x0) that must keep today's behaviour.
+    """
+
+    BASE = 0x10000000
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+    # The hypothesis's one accepted spelling: over the STATES and the assumed
+    # pcs, so every certificate that uses a site instantiates the same binder
+    # (`_svc_write_assumed_type` in the generator).
+    HYP = ("svc_write_assumed",
+           "∀ s : Arm64State, s.pc ∈ [268435456] → ¬ arm64_reg 16 s = 1")
+
+    @staticmethod
+    def _movz(rt, imm):
+        return 0xd2800000 | (imm << 5) | rt
+
+    def _cert(self, words, pcs, **kw):
+        import formal.arm64_proof_gen as G
+        return G._gen_run_cert("f", words, self.BASE, "b0", pcs, **kw)
+
+    def _dynamic_write(self):
+        """`svc` FIRST (x16 is not in the run), then `movz x0, #0; ret`."""
+        words = {self.BASE: self.SVC,
+                 self.BASE + 4: self._movz(0, 0),
+                 self.BASE + 8: self.RET}
+        return words, [self.BASE, self.BASE + 4, self.BASE + 8]
+
+    def test_a_dynamic_write_svc_with_no_assumption_is_still_refused(self):
+        words, pcs = self._dynamic_write()
+        self.assertIsNone(
+            self._cert(words, pcs),
+            "a dynamic write `svc` was admitted without the hypothesis its "
+            "step lemma needs -- the certificate would claim a state the "
+            "caller never justified")
+
+    def test_the_named_assumption_is_the_binder_and_its_hx(self):
+        words, pcs = self._dynamic_write()
+        part = self._cert(words, pcs, svc_assumed={self.BASE: self.HYP})
+        self.assertIsNotNone(part, "a justified dynamic write `svc` was refused")
+        text = part[0]
+        self.assertIn(
+            f"(svc_write_assumed : {self.HYP[1]})", text,
+            "the runs certificate does not carry the assumption as a binder "
+            "of the walk's own shape")
+        self.assertIn(
+            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := "
+            "svc_write_assumed (f_b0_qS0 st) (by simp [hpc0])",
+            text,
+            "the dynamic svc's `hx` is not that hypothesis applied at its "
+            "pre-svc state")
+        self.assertIn(
+            "f_sr_0 (f_b0_qS0 st) (hpc0) (hx0)", text,
+            "the write-form step lemma is not applied under the assumption")
+        self.assertNotIn(
+            "h16_0", text,
+            "the certificate still invents a reg-16 chain for an x16 no "
+            "instruction in the run wrote")
+
+    def test_the_dynamic_step_is_the_write_form_not_the_exit(self):
+        words, pcs = self._dynamic_write()
+        part = self._cert(words, pcs, svc_assumed={self.BASE: self.HYP})
+        self.assertIsNotNone(part)
+        text = part[0]
+        self.assertIn(
+            "def f_b0_qT0 (st : Arm64State) : Arm64State :=\n"
+            "  { (f_b0_qS0 st) with pc := (f_b0_qS0 st).pc + 4 }", text,
+            "the admitted svc is not composed as the write form (the "
+            "fall-through at pc + 4)")
+        self.assertNotIn(
+            "arm64_go_exit_step_jump_at", text,
+            "a dynamic write svc was closed as an exit step")
+
+    def test_the_assumption_name_is_the_callers(self):
+        words, pcs = self._dynamic_write()
+        part = self._cert(words, pcs, svc_assumed={self.BASE: ("hwrite", self.HYP[1])})
+        self.assertIsNotNone(part)
+        self.assertIn(
+            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := "
+            "hwrite (f_b0_qS0 st) (by simp [hpc0])", part[0])
+
+    def test_a_static_write_still_discharges_hx_from_its_own_chain(self):
+        # `movz x16, #4; svc; movz x0, #0; ret`
+        words = {self.BASE: self._movz(16, 4),
+                 self.BASE + 4: self.SVC,
+                 self.BASE + 8: self._movz(0, 0),
+                 self.BASE + 12: self.RET}
+        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
+        part = self._cert(words, pcs)
+        self.assertIsNotNone(part, "a static write svc is still refused")
+        text = part[0]
+        self.assertIn("h16_1 : arm64_reg 16 (f_b0_qS1 st) = (UInt64.ofNat 4)",
+                      text, "the static write lost its own reg-16 chain")
+        self.assertIn("have hx1 : ¬ arm64_reg 16 (f_b0_qS1 st) = 1 := by",
+                      text)
+        self.assertNotIn("svc_write_assumed", text,
+                         "a static write does not need the assumption")
+
+    def test_a_static_exit_is_still_refused(self):
+        # `movz x16, #1; svc; ...`: an exit has no fall-through to certify.
+        words = {self.BASE: self._movz(16, 1),
+                 self.BASE + 4: self.SVC,
+                 self.BASE + 8: self._movz(0, 0),
+                 self.BASE + 12: self.RET}
+        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
+        self.assertIsNone(self._cert(words, pcs))
+        self.assertIsNone(self._cert(words, pcs,
+                                     svc_assumed={self.BASE + 4: ("h", self.HYP[1])}))
+
+    def test_a_dynamic_write_that_leaves_x0_unrewritten_is_refused(self):
+        # `svc; add x1, x0, #1; ret`: the fall-through READS the byte count
+        # the model does not model, so the assumption cannot make it sound.
+        add_x1_x0_1 = 0x91000000 | (0 << 5) | 1
+        words = {self.BASE: self.SVC,
+                 self.BASE + 4: add_x1_x0_1,
+                 self.BASE + 8: self.RET}
+        pcs = [self.BASE, self.BASE + 4, self.BASE + 8]
+        self.assertIsNone(
+            self._cert(words, pcs, svc_assumed={self.BASE: self.HYP}),
+            "an assumption admitted a write svc whose result x0 is read "
+            "before it is rewritten")
 
 
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
@@ -10876,6 +10883,10 @@ class TestSvcWriteAssumedHaltCertificate(unittest.TestCase):
 
     BASE = 0x1000
     EXIT_PC = 0x2000
+    # The one accepted hypothesis shape: over the states and the assumed pcs
+    # (`_svc_write_assumed_type`), so a site after a preceding run applies it
+    # at that segment's own pre-svc state.
+    HYP_TYPE = ("∀ s : Arm64State, s.pc ∈ [4096] → ¬ arm64_reg 16 s = 1")
 
     def _words(self):
         # <base>       svc                 # dynamic x16 (no preceding movz)
@@ -10902,7 +10913,7 @@ class TestSvcWriteAssumedHaltCertificate(unittest.TestCase):
         import formal.arm64_proof_gen as G
         r = G._gen_halt_cert("f", self._words(), self.BASE, "b0",
                              self._pcs(), self.EXIT_PC,
-                             svc_assumed={self.BASE: "svc_write_assumed"})
+                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
         self.assertIsNotNone(r, "expected halt cert when assumption supplied")
         defs, thm, n = r
         self.assertEqual(thm, "f_b0_halts")
@@ -10927,7 +10938,7 @@ class TestSvcWriteAssumedHaltCertificate(unittest.TestCase):
         }
         pcs = [self.BASE, self.BASE + 4]
         r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
-                             svc_assumed={self.BASE: "svc_write_assumed"})
+                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
         self.assertIsNotNone(r)
         defs, thm, n = r
         self.assertNotIn("svc_write_assumed", defs)
@@ -10939,7 +10950,7 @@ class TestSvcWriteAssumedHaltCertificate(unittest.TestCase):
         }
         pcs = [self.BASE]
         r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
-                             svc_assumed={self.BASE: "svc_write_assumed"})
+                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
         self.assertIsNone(r)
 
     def test_earlier_dynamic_write_reads_x0_before_rewrite_refused(self):
@@ -10953,8 +10964,215 @@ class TestSvcWriteAssumedHaltCertificate(unittest.TestCase):
         }
         pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
         r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
-                             svc_assumed={self.BASE: "svc_write_assumed"})
+                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
         self.assertIsNone(r)
+
+
+class TestSvcWriteAssumedUniversalWalk(unittest.TestCase):
+    """Part 4: the universal theorem carries `svc_write_assumed`.
+
+    The two certificate builders (parts 2 and 3) admit a dynamic write `svc`
+    under a named hypothesis, but nothing passed one in, so a synthetic image
+    whose only defect was a dynamic write still had NO universal theorem:
+    `_gen_universal_e2e_cfg` refused it.  The walk now collects the admissible
+    sites with ONE helper (`_svc_write_assumed_sites`, which is also what the
+    refusal classifier skips and what the dylib emitter reads), states a single
+    hypothesis over their states and pcs on the top-level theorem, and passes
+    it by name to every certificate that uses a site.
+
+    Text-only: hand-built words, no Lean, no dylib, no compile.
+    """
+
+    BASE = 0x10000000
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+
+    @staticmethod
+    def _movz(rt, imm):
+        return 0xd2800000 | (imm << 5) | rt
+
+    def _walk(self, ws, thm="f_halts"):
+        import formal.arm64_proof_gen as G
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        end = self.BASE + len(ws) * 4
+        return G._gen_universal_e2e_cfg(
+            "f", code, self.BASE, self.BASE, recursive=False, go_lemmas=[],
+            cond_branches=set(), code_name="dylib_code", sr_name="dylib",
+            exit_at=end, frame={"func_end": end}, thm=thm, prop="True",
+            no_change=True, halt_only=True, fuel=200000,
+            fuel_lean=f"200000 + {max(1, end // 4)} * n.toNat")
+
+    def _refusal(self, ws):
+        import formal.arm64_proof_gen as G
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        return G._cfg_decomposition_refusal("f", code, self.BASE, self.BASE)
+
+    def test_a_dynamic_write_svc_no_longer_kills_the_walk(self):
+        # <base> svc; base+4 movz x0, #0; base+8 ret
+        out = self._walk([self.SVC, self._movz(0, 0), self.RET])
+        self.assertIsNotNone(
+            out, "a dynamic write `svc` still makes the universal walk return "
+                 "None, so no caller ever sees a theorem to pass `n` and the "
+                 "assumption to")
+        self.assertIn(
+            "(svc_write_assumed : ∀ s : Arm64State, s.pc ∈ [268435456] → "
+            "¬ arm64_reg 16 s = 1)", out,
+            "the universal theorem does not state the dynamic write's "
+            "hypothesis under the fixed name")
+        self.assertIn("theorem f_halts (n : UInt64)", out,
+            "the assumption is not after the entry's `n`")
+
+    def test_the_block_certificate_uses_the_walk_s_hypothesis(self):
+        out = self._walk([self.SVC, self._movz(0, 0), self.RET])
+        self.assertIsNotNone(out)
+        self.assertIn(
+            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := "
+            "svc_write_assumed (f_b0_qS0 st) (by simp [hpc0])", out,
+            "the dynamic svc's `hx` is not the walk's hypothesis applied at "
+            "the certificate's own pre-svc state")
+        self.assertNotIn("h16_0", out,
+            "the certificate still invents a reg-16 chain for an x16 no "
+            "instruction wrote")
+        self.assertIn("f_b0_runs _ hpc_0 hjump_0 svc_write_assumed", out,
+            "the assumption does not reach the block certificate's call site")
+        self.assertIn("f_b0_mid 268435468", out)
+        self.assertIn("hpc_0 hexit_0 svc_write_assumed", out,
+            "the mid certificate's call site drops the assumption")
+
+    def test_an_unrewritten_x0_is_refused_and_the_refusal_names_it(self):
+        # <base> svc; base+4 add x1, x0, x2 (reads the byte count); base+8 ret
+        add_x1_x0_x2 = 0x8b020001
+        out = self._walk([self.SVC, add_x1_x0_x2, self.RET])
+        self.assertIsNone(
+            out, "a dynamic write whose x0 the fall-through READS was admitted "
+                 "under an assumption that cannot make it sound")
+        msg = self._refusal([self.SVC, add_x1_x0_x2, self.RET])
+        self.assertIn("0x10000000", msg)
+        self.assertIn("write svc", msg)
+        self.assertIn("x0", msg)
+        self.assertIn("dynamic-svc", msg,
+                      "the refusal lost the dynamic-svc reading while naming "
+                      "the x0 read")
+
+    def test_a_dynamic_final_svc_is_still_refused_with_its_pc(self):
+        # <base> svc; base+4 movz x0, #0; base+8 svc (no known x16, tail)
+        out = self._walk([self.SVC, self._movz(0, 0), self.SVC])
+        self.assertIsNone(out, "a dynamic FINAL svc was assumed to be a write; "
+                               "a halt cannot be assumed")
+        msg = self._refusal([self.SVC, self._movz(0, 0), self.SVC])
+        self.assertIn("0x10000008", msg)
+        self.assertIn("dynamic-svc", msg)
+
+    def test_a_control_image_has_no_binder(self):
+        out = self._walk([self._movz(0, 5), self.RET])
+        self.assertIsNotNone(out)
+        self.assertNotIn("svc_write_assumed", out,
+            "the common case gained a hypothesis it does not need")
+
+    def test_the_admissible_site_set_is_the_certificate_builders_rule(self):
+        import formal.arm64_proof_gen as G
+
+        def sites(ws):
+            code = b"".join(w.to_bytes(4, "little") for w in ws)
+            words = {self.BASE + 4 * i:
+                     int.from_bytes(code[4 * i:4 * i + 4], "little")
+                     for i in range(len(ws))}
+            blocks = G._cfg_blocks(words, self.BASE, self.BASE + len(ws) * 4)
+            leaders = frozenset(b["start"] for b in blocks)
+            return G._svc_write_assumed_sites(blocks, words, leaders)
+
+        self.assertEqual(sites([self.SVC, self._movz(0, 0), self.RET]),
+                         [self.BASE])
+        self.assertEqual(sites([self.SVC, 0x8b020001, self.RET]), [],
+                         "an svc whose x0 is read before it is rewritten is "
+                         "not an admissible site")
+        self.assertEqual(sites([self._movz(0, 0), self.SVC]), [],
+                         "a block's FINAL svc is not an admissible site: a "
+                         "halt cannot be assumed")
+
+
+class TestSvcWriteAssumedDylibTotal(unittest.TestCase):
+    """Part 5: the dylib termination theorem EXPOSES the assumption.
+
+    Part 4 makes the universal theorem conditional on `svc_write_assumed`, but
+    `_dylib_total_proof` still applied `{ident}_halts` directly to
+    `total_of_halts`.  With the binder present that application is a type
+    error at best and a silently dropped premise at worst: the public
+    termination claim would say "terminates" where the proof says "terminates
+    IF x16 at those pcs is never 1".  This class pins the exposed form, the
+    byte-for-byte control, and the obligation that names the dynamic `svc` pc
+    when the assumption cannot be stated at all.
+
+    Text-only: hand-built bytes and hand-built export tables, no Lean, no
+    dylib build, no proofs bucket.
+    """
+
+    BASE = 0x10000000
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+
+    @staticmethod
+    def _movz(rt, imm):
+        return 0xd2800000 | (imm << 5) | rt
+
+    def _total(self, ws):
+        import formal.arm64_proof_gen as G
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        # `exec_code_end` is the image's CODE SIZE (the last RET's end), not an
+        # address: `_export_extent` adds `base` to it.  Left at its default so
+        # the test reads the same number the image's `codeSize` will.
+        return G._dylib_total_proof(
+            "f", code, self.BASE, self.BASE, [{"name": "f", "entry": self.BASE}])
+
+    def test_the_assumption_reaches_total_of_halts(self):
+        out = self._total([self.SVC, self._movz(0, 0), self.RET])
+        self.assertIn(
+            "theorem f_semantics_total\n"
+            "    (svc_write_assumed : ∀ s : Arm64State, s.pc ∈ [268435456] → "
+            "¬ arm64_reg 16 s = 1) :\n"
+            "    DylibExport.Total dylib_image f :=", out,
+            "the export's public termination claim does not state the "
+            "hypothesis its proof needs")
+        self.assertIn(
+            "DylibExport.total_of_halts dylib_image f "
+            "(fun n => f_halts n svc_write_assumed)", out,
+            "`total_of_halts` is applied without the assumption, so the "
+            "export either fails to elaborate or silently loses the premise")
+        self.assertNotIn("theorem f_semantics_total :", out,
+                         "`semantics_total` was left unconditional")
+
+    def test_the_control_image_keeps_the_old_application(self):
+        out = self._total([self._movz(0, 5), self.RET])
+        self.assertIn(
+            "theorem f_semantics_total :\n"
+            "    DylibExport.Total dylib_image f :=\n"
+            "  DylibExport.total_of_halts dylib_image f f_halts", out,
+            "a control export with no dynamic svc changed shape")
+        self.assertNotIn("svc_write_assumed", out,
+                         "a control export gained a hypothesis it does not use")
+
+    def test_an_unassumable_dynamic_svc_names_its_pc_in_the_obligation(self):
+        # `svc; add x1, x0, x2; ret`: the write form's result is read before
+        # it is rewritten, so no assumption can make the run sound.
+        out = self._total([self.SVC, 0x8b020001, self.RET])
+        self.assertIn("OBLIGATION, not proved", out)
+        self.assertIn("0x10000000", out,
+                      "the obligation does not name the dynamic svc's pc")
+        self.assertIn("x0", out,
+                      "the obligation does not say why the write form could "
+                      "not be assumed")
+        self.assertIn("theorem f_semantics_total :\n"
+                      "    DylibExport.Total dylib_image f := by\n"
+                      "  sorry", out,
+                      "a refused export claims an unconditional Total")
+        self.assertNotIn("total_of_halts dylib_image f f_halts", out)
+
+    def test_a_dynamic_final_svc_names_its_pc_in_the_obligation(self):
+        out = self._total([self.SVC, self._movz(0, 0), self.SVC])
+        self.assertIn("OBLIGATION, not proved", out)
+        self.assertIn("0x10000008", out,
+                      "the obligation does not name the dynamic final svc")
+        self.assertIn("dynamic-svc", out)
 
 
 if __name__ == "__main__":

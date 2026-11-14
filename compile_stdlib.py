@@ -16,7 +16,8 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from module_loader import STDLIB_PATH
 from build_config import find_gcc
-from build_stdlib_dylib import compile_module_to_c_cached, stdlib_codegen_key, last_degradations
+from build_stdlib_dylib import (compile_module_to_c_cached, last_degradations,
+                                stdlib_codegen_key)
 
 import cas
 
@@ -106,6 +107,14 @@ def discover_roots(base: Path) -> list:
 # FLOOR-GREEN-but-ladder-partial classification (the test_set precedent).
 
 EXPECTED_FAILURES = {
+    # std/simd.mojo was listed here on 2026-11-14 while its
+    # `SIMD[exp.dtype, self.length]` elaboration was refused ("advance without
+    # converging") and the degraded module still parsed, so the sweep reported
+    # it FAILED with that reason. The refusal was a false positive and is
+    # fixed (2026-11-14; only simple stepping operands count as a progressing
+    # bracket argument), so the entry went with it: the module is clean and
+    # `transpile_file` sees no degradation.
+
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(
     # <call>)`, and the `var t = create_task(<call>); ...; await t` shape
@@ -791,13 +800,17 @@ def transpile_file(mojo_file):
     so the parent can aggregate cas.stats across processes (the same pattern as
     build_stdlib_dylib._compile_module_job).
 
-    `refusals` is the list of generic-struct elaboration failures the compile
-    ran through (`build_stdlib_dylib.last_degradations()`, read in this
-    worker's own frame right after its one compile): empty for a clean
-    module, and empty on a CAS hit, which ran no codegen at all. The
-    parent aggregates them into the one console count line; the module
-    name and reasons go to the run's refusal log (see `main` and
-    `--verbose`), not the console.
+    `success` is False for a module whose generic-struct elaboration failed even
+    when its C parses: the produced C is not the program its source describes,
+    so counting it as passed would report a green run over a wrong artifact
+    (see the model's own "NOT the program its source describes" message).
+    `refusals` is that same per-call list (`build_stdlib_dylib.
+    last_degradations()`, read in this worker's own frame right after its one
+    compile): empty for a clean module, and empty on a CAS hit, which ran no
+    codegen at all — an L1 hit answers with the stored list, so a replay of a
+    degraded module is still a FAILED verdict. The parent aggregates the list
+    into the one console count line; the module name and reasons go to the
+    run's refusal log (see `main` and `--verbose`), not the console.
 
     `auto_gpu` defaults OFF here, which is `--no-gpu`. This sweep is a
     syntax/coverage instrument, not a GPU target, and automatic offload costs
@@ -827,6 +840,23 @@ def transpile_file(mojo_file):
             refusals = last_degradations()
         except Exception as e:
             return False, f"codegen: {str(e)[:120]}", False, False, []
+
+        # A module built through a failed generic-struct elaboration is NOT
+        # the program its source describes: the struct was lowered against its
+        # un-elaborated template, so its type parameters are `int64_t` where
+        # the source says otherwise. It still parses, which is exactly why
+        # this verdict has to be taken HERE rather than left to gcc: without
+        # it the file counts as PASSED while the compiler itself says the C is
+        # wrong. `last_degradations()` is the machine-readable fact, for THIS
+        # module (a cache hit answers for itself, never for its predecessor).
+        # The same list is carried back to the parent so the sweep can log the
+        # refusal's module name and reason and print its one count line.
+        if refusals:
+            return (False,
+                    f"elaboration: {len(refusals)} generic struct "
+                    f"elaboration(s) failed, so the C is not the program its "
+                    f"source describes: {refusals[0]}",
+                    cg_was_hit, False, refusals)
 
         if not c_src.strip():
             return True, None, cg_was_hit, True, refusals  # empty file, no gcc step needed

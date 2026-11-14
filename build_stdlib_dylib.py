@@ -529,13 +529,15 @@ def compile_module_to_c(src: str, path: str, module_name: str,
     return box['c']
 
 
-# Why the LAST `compile_module_to_c` produced a different program from the one
-# its source says: one entry per generic struct that could not be elaborated,
-# as `Struct[Args] from <source>: <exception>`. Empty means the compile was
-# clean. Module-level because the codegen runs in a thread
-# (`compile_module_to_c`) and because the consumer
-# (`compile_module_to_c_cached`) is a different function from the producer;
-# it is written and read under one call, never accumulated.
+# Why the LAST module compiled produced a different program from the one its
+# source says: one entry per generic struct that could not be elaborated, as
+# `Struct[Args] from <source>: <exception>`. Empty means the compile was clean.
+# Module-level because the codegen runs in a thread (`compile_module_to_c`) and
+# because the consumer (`compile_module_to_c_cached`, and the stdlib sweep's
+# verdict through `last_degradations()`) is a different function from the
+# producer. It describes EXACTLY ONE module — the last one compiled or served
+# from the in-process L1 — never an accumulation, so a degraded module followed
+# by a clean cache hit does not label the clean one.
 _LAST_DEGRADED: list = []
 
 # Every generic-struct elaboration refusal this process has seen, as
@@ -553,7 +555,14 @@ _REFUSAL_LOG: list = []
 
 
 def last_degradations() -> list:
-    """The `_LAST_DEGRADED` list, as a copy. Read this, do not clear it."""
+    """The degradation list for the most recent `compile_module_to_c_cached` (or
+    `compile_module_to_c`) call in this process, as a copy.
+
+    A cache hit restores the entry's own list: a published artifact is only
+    ever a clean compile, but the in-process L1 also holds modules that were
+    NOT published (see `compile_module_to_c_cached`), so "the last thing I
+    read from a cache" is not the same claim as "never degraded". Read this,
+    do not clear it."""
     return list(_LAST_DEGRADED)
 
 
@@ -580,7 +589,11 @@ def _record_refusal(path: str, degraded: list) -> None:
             + ''.join(f'    {d}\n' for d in degraded))
 
 
-_stdlib_compile_cache: dict = {}  # in-process L1 for compile_module_to_c_cached
+# In-process L1 for compile_module_to_c_cached. Values are
+# `(c_text, degraded)` — the degradation list is stored WITH the artifact so a
+# hit can answer for itself rather than inheriting the previous module's state
+# (a degraded compile is not published to the CAS, but it is kept here).
+_stdlib_compile_cache: dict = {}
 
 
 def stdlib_codegen_key(src: str, path: str, module_name: str,
@@ -623,27 +636,41 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str,
     room for a build that must not be published. It is those six lines
     duplicated, not a second cache: the same key, the same L1, the same
     `cas.stats` accounting, in the same order.
+
+    **The degradation is part of the RESULT, not just a warning.** On return,
+    `last_degradations()` describes THIS module and nothing else — empty for a
+    CAS hit, the build's list for a miss, and the stored list for an L1 hit
+    (which may be a degraded compile, since those are not published but are
+    kept for the rest of the process). compile_stdlib.py's per-file verdict
+    reads it and reports the file FAILED: a module the compiler says is not
+    the program its source describes must not count as a pass.
     """
     # The `‘linkable’ half is part of the KEY, not of the cache: a `.ci`
     # published by a `linkable=False` call has had no link-line check made on
     # it, and handing it to `build()` would republish the very hole the refusal
     # exists to refuse. One extra character in the key, and the two artifacts
     # can never be confused for each other.
-    # `last_degradations()` must describe THIS call and only this call: the
-    # compile clears the list on entry, and a replayed artifact compiled
-    # nothing to clear it for, so both cache paths clear it here too —
-    # otherwise a caller would read the PREVIOUS module's refusals off a
-    # cache hit and count them against this one.
+    # `last_degradations()` must describe THIS call and only this call. The
+    # compile path clears/refreshes it, and each L1 entry carries its own
+    # degradation list, so a hit answers for the module it replays rather than
+    # inheriting whichever module this worker compiled last. (A CAS hit can
+    # only be clean: a degraded compile is never published.)
     key = stdlib_codegen_key(src, path, module_name, linkable)
     if key in _stdlib_compile_cache:
-        _LAST_DEGRADED[:] = []
-        return _stdlib_compile_cache[key]
+        text, degraded = _stdlib_compile_cache[key]
+        _LAST_DEGRADED[:] = degraded
+        return text
     cached = cas.lookup(key, '.ci')
     if cached is not None:
-        _LAST_DEGRADED[:] = []
         cas.stats['hits'] += 1
         with open(cached) as f:
             text = f.read()
+        # Only a CLEAN compile is ever published (the branch below), so a hit
+        # in the shared store cannot be degraded. Say so explicitly rather
+        # than leaving `_LAST_DEGRADED` holding whatever the previous module
+        # in this worker left there: compile_stdlib.py reads it as THIS
+        # module's verdict.
+        degraded = []
     else:
         cas.stats['misses'] += 1
         text = compile_module_to_c(src, path, module_name, linkable=linkable)
@@ -652,7 +679,8 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str,
             _record_refusal(path, degraded)
         else:
             cas.publish(key, '.ci', text.encode('utf-8'))
-    _stdlib_compile_cache[key] = text
+    _LAST_DEGRADED[:] = degraded
+    _stdlib_compile_cache[key] = (text, list(degraded))
     return text
 
 
