@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""CODEGEN_walk_ast_memo_cpp_yield_from: proof that `_cpp_yield_from`'s
+"""Yield-from walk-memo invalidation: proof that `_cpp_yield_from`'s
 in-place `call.func.member` rewrite drops the walk-memo entry for the
 ENCLOSING `call` node, at the write site.
 
-Background (deleted bug doc CODEGEN_walk_ast_memo_cpp_yield_from):
+Background (fixed by c158c0b38):
 `_cpp_yield_from` rewrites `call.func.member = _self_method_name` on both
 the classname path and the `self.<method>()` path. The site must invalidate
-the walk memo for the node it rewrote; the doc's next step was
-`_walk_ast_invalidate(call)` at each site, which branch
-work/bug-codegen-walk-ast-memo-cpp-yield-from landed. The census in
+the walk memo for the node it rewrote; the fix was
+`_walk_ast_invalidate(call)` at each site. The census in
 test_gimple.py::test_every_ast_mutation_site_invalidates_the_walk_memo only
 checks that the function calls `_walk_ast_invalidate` somewhere, so it
 cannot distinguish this site's argument; this pin does.
@@ -105,7 +104,7 @@ def main():
         fails.append("_cpp_yield_from did not return emitted C++ lines")
 
     # Scenario 2 — the classname path (`yield from S.plan(...)`): same write
-    # shape, second site the doc's next step names.
+    # shape, second site the fix names.
     call2 = gimple_ctypes.CallExpr(
         func=gimple_ctypes.MemberExpr(
             obj=gimple_ctypes.IdentExpr('S'), member='plan'))
