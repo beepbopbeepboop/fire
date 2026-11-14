@@ -59,6 +59,7 @@ sys.path.insert(0, HERE)
 import fire_compiler as F  # noqa: E402
 import formal.build as B  # noqa: E402
 import formal.model as M  # noqa: E402
+from exec_budget import RUN_TIMEOUT_S  # per-child budgets
 
 FIRE = os.path.join(HERE, "fire.py")
 
@@ -132,7 +133,7 @@ def build(source, name, tmpdir, backend="arm64"):
 
 def run(image):
     import subprocess
-    proc = subprocess.run([image], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([image], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     return proc.returncode, proc.stdout
 
 

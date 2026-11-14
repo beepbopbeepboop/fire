@@ -20,8 +20,9 @@ import math
 import collections
 import builtins
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
+from mojo.middle.simd_width import is_valid_width as _simd_width_is_valid
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -35,6 +36,850 @@ _COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'
 # (see Interpreter._generator_expression). Dunder-ish to stay clear of any
 # name a real program would use.
 _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
+
+
+# `@dataclass` / `@dataclasses.dataclass` is a COMPILE-TIME TRANSFORM, not a
+# runtime wrapper — the same argument `formal/dataclass_transform.py` records
+# for the compiled backends. CPython's `dataclasses.dataclass` rewrites a REAL
+# Python class: it reads the class's `__qualname__`, `__module__`, `__mro__`
+# and `__annotations__` and generates `__init__`/`__eq__`/`__repr__` methods.
+# This interpreter's classes are `MojoClass` objects, not Python classes, so
+# handing one to the real decorator raised on its first `__qualname__` read —
+# and executing `fire_compiler.py`, whose 65 AST dataclasses are decorated this
+# way, died at class-definition time (`interp-tokenizer-oracle` never reached
+# `py_tokenize` at all).
+#
+# Its ONE observable half on a struct — construct by filling the declared
+# fields in declaration order with their defaults — is what
+# `MojoClass.__call__` already does, so applying it would be a no-op even if it
+# succeeded. A class that really IS a Python class (execute_StructDef's
+# `types.new_class` path) still gets the decorator applied for real; see the
+# `isinstance(bound, MojoClass)` guard in `_apply_function_decorators`.
+_DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
+
+
+def _unwrap_dataclass_field(value):
+    """The default a declared field takes, given the value its initializer
+    evaluated to. `field(default=...)` and `field(default_factory=...)` are
+    calls that return a `dataclasses.Field`; the constructor binds the
+    wrapped default (or the factory's result), never the Field object.
+    Any other value passes through unchanged. A Field with neither a
+    `default` nor a `default_factory` is a required field with no default,
+    which binds None, as a bare `x: int` does."""
+    if not isinstance(value, Field):
+        return value
+    if value.default is not MISSING:
+        return value.default
+    if value.default_factory is not MISSING:
+        return value.default_factory()
+    return None
+
+
+def _decorator_dotted_name(node):
+    """The dotted SOURCE spelling of a decorator node (`dataclass`,
+    `dataclasses.dataclass`), or None for a shape this cannot spell.
+
+    A bare decorator is stored as a plain string; one with an argument list is
+    a `CallExpr` whose `func` is that dotted name's nested
+    `IdentExpr`/`MemberExpr` (fire_compiler's `_dotted_name_expr`), and a
+    `@spec(...)` is a `DecoratorArgs` that keeps the dotted name itself.
+    Needed because matching only the bare string misses every dotted or
+    parameterised spelling of a compile-time decorator."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, N.DecoratorArgs):
+        return node.name
+    if isinstance(node, N.CallExpr):
+        return _decorator_dotted_name(node.func)
+    if isinstance(node, N.IdentExpr):
+        return node.name
+    if isinstance(node, N.MemberExpr):
+        base = _decorator_dotted_name(node.obj)
+        if base is None:
+            return None
+        return base + '.' + node.member
+    return None
+
+
+# ---------------------------------------------------------------------------
+# CPython 3.15 "improved error messages" (What's New in 3.15): an UNCAUGHT
+# AttributeError is printed with a suggestion computed at PRINT time from two
+# fields the exception carries — `name` (the attribute that failed) and
+# `obj` (the object the lookup ran on) — exactly the fields CPython's
+# Lib/traceback.py reads (gh-146406, gh-136588). The machinery splits in two,
+# mirroring CPython's own split:
+#
+#   * `_tag_attribute_error` — the RAISE half. Every missing-attribute
+#     AttributeError in this file is built and tagged through it, so the
+#     exception carries the context no matter how it surfaces.
+#   * `attribute_error_suggestion` — the PRINT half. fire.py's top-level
+#     error printing calls it for an uncaught AttributeError and appends its
+#     result to the message. Because it runs at print time only, an
+#     AttributeError caught in user code stays plain — the same
+#     caught-plain/uncaught-suggested split CPython 3.15 measures.
+#
+# The fields are set with setattr() rather than member syntax because this
+# file self-hosts and the self-hosting compiler has no field table for
+# builtin exception attributes (the `e.code` note in fire.py).
+# ---------------------------------------------------------------------------
+
+def _tag_attribute_error(exc, obj, name, self_obj=None):
+    """Attach CPython 3.15's `name`/`obj` fields to a missing-attribute
+    AttributeError so the print-time suggestion pass can compute its hint
+    from the real object, not by re-parsing the message string. `self_obj`
+    is the `self` binding of the failing frame (None when there is none) —
+    CPython reads it off the traceback for its hide_underscored refinement;
+    this interpreter has no CPython frame for user code, so the raise site
+    captures it here (see `_frame_self`)."""
+    setattr(exc, 'name', name)
+    setattr(exc, 'obj', obj)
+    setattr(exc, 'self_obj', self_obj)
+    return exc
+
+
+def _frame_self(interp):
+    """The `self` binding of `interp`'s current (innermost) scope, or None.
+
+    This is the `frame.f_locals['self']` CPython 3.15's
+    `_compute_suggestion_error` reads off the failing traceback frame, which
+    this interpreter does not have: its user frames are Scope objects, and
+    the scope current at the failing member access IS that frame. Direct
+    `scope.vars` only, exactly like `_tag_name_error` — a `self` further up
+    the chain is a closure/global, which CPython does not put in the failing
+    frame's f_locals either."""
+    if interp is None:
+        return None
+    scope = interp.scope
+    if scope is not None and 'self' in scope.vars:
+        return scope.vars['self']
+    return None
+
+
+def _tag_name_error(exc, scope, name):
+    """Attach CPython 3.15's NameError-suggestion context to a `name` lookup
+    failure, at RAISE time: the print-time half computes the suggestion from
+    the failing frame's pool, but this interpreter's NameErrors carry no
+    CPython traceback frame (they are raised by this file's Scope, not by
+    CPython's name resolution), so the frame's contents are captured here,
+    while the exception still carries exactly the frame that failed:
+
+      * `name` — the lookup that failed (CPython's exc.name);
+      * `candidates` — CPython's `f_locals + f_globals + f_builtins` of the
+        failing frame. In this interpreter's scope model the current scope's
+        vars are the frame locals and the module (root) scope's vars are the
+        globals plus the builtins (setup_builtins binds them there); a
+        module-level failure duplicates the root scope once, exactly as
+        CPython duplicates the module dict (its f_locals IS its f_globals);
+      * `self_obj` — the frame's `self` (None when absent), for CPython's
+        `self.<name>` refinement (a bare name that is really an instance
+        attribute of the frame's `self`).
+
+    set with setattr() for the same self-host reason as
+    `_tag_attribute_error` (no field table for builtin exception attributes).
+    """
+    root = scope
+    while root.parent is not None:
+        root = root.parent
+    candidates = list(scope.vars)
+    candidates = candidates + list(root.vars)
+    self_obj = None
+    if 'self' in scope.vars:
+        self_obj = scope.vars['self']
+    setattr(exc, 'name', name)
+    setattr(exc, 'candidates', candidates)
+    setattr(exc, 'self_obj', self_obj)
+    return exc
+
+
+# Cross-language / wrong-type AttributeError hints, ported from CPython
+# 3.15.2's Lib/traceback.py `_CROSS_LANGUAGE_HINTS` (gh-146406). Each entry
+# maps the wrong name to a list of (type, hint, is_raw) triples checked in
+# order; the first isinstance() match wins. is_raw=False renders the hint as
+# "Did you mean '.<hint>'?", is_raw=True renders it verbatim.
+#
+# The `update` entry names `frozendict` (Python 3.15+), so the type is looked
+# up defensively — the tree's interpreter floor is 3.12 (CLAUDE.md) and a
+# bare name would be a NameError on older hosts.
+_FROZENDICT_TYPE = getattr(builtins, 'frozendict', None)
+_UPDATE_ENTRIES = ((frozenset, "Did you mean to use a 'set' object?", True),)
+if _FROZENDICT_TYPE is not None:
+    _UPDATE_ENTRIES = _UPDATE_ENTRIES + (
+        (_FROZENDICT_TYPE, "Did you mean to use a 'dict' object?", True),)
+_CROSS_LANGUAGE_ATTR_HINTS = {
+    # list -- JavaScript/Ruby equivalents
+    'push': ((list, 'append', False),),
+    'concat': ((list, 'extend', False),),
+    # list -- Java/C# equivalents
+    'addAll': ((list, 'extend', False),),
+    'contains': ((list, "Use 'x in list'.", True),),
+    # list -- wrong-type suggestion (user expected a set)
+    'add': ((list, "Did you mean to use a 'set' object?", True),
+            (frozenset, "Did you mean to use a 'set' object?", True)),
+    # str -- JavaScript equivalents
+    'toUpperCase': ((str, 'upper', False),),
+    'toLowerCase': ((str, 'lower', False),),
+    'trimStart': ((str, 'lstrip', False),),
+    'trimEnd': ((str, 'rstrip', False),),
+    # dict -- Java/JavaScript equivalents
+    'keySet': ((dict, 'keys', False),),
+    'entrySet': ((dict, 'items', False),),
+    'entries': ((dict, 'items', False),),
+    'putAll': ((dict, 'update', False),),
+    'put': ((dict, 'Use d[k] = v.', True),),
+    # tuple -- mutable method on immutable type (user expected a list)
+    'append': ((tuple, "Did you mean to use a 'list' object?", True),),
+    'extend': ((tuple, "Did you mean to use a 'list' object?", True),),
+    'insert': ((tuple, "Did you mean to use a 'list' object?", True),),
+    'remove': ((tuple, "Did you mean to use a 'list' object?", True),
+               (frozenset, "Did you mean to use a 'set' object?", True)),
+    # frozenset -- mutable method on immutable type (user expected a set)
+    'discard': ((frozenset, "Did you mean to use a 'set' object?", True),),
+    # frozenset/frozendict -- `update` on an immutable mapping/set
+    'update': _UPDATE_ENTRIES,
+    # float -- bitwise operators belong to int
+    '__or__': ((float, "Did you mean to use an 'int' object? "
+                       "Bitwise operators are not supported by 'float'.", True),),
+    '__and__': ((float, "Did you mean to use an 'int' object? "
+                        "Bitwise operators are not supported by 'float'.", True),),
+    '__xor__': ((float, "Did you mean to use an 'int' object? "
+                        "Bitwise operators are not supported by 'float'.", True),),
+    '__lshift__': ((float, "Did you mean to use an 'int' object? "
+                           "Bitwise operators are not supported by 'float'.", True),),
+    '__rshift__': ((float, "Did you mean to use an 'int' object? "
+                           "Bitwise operators are not supported by 'float'.", True),),
+}
+
+
+def _cross_language_attr_hint(obj, name):
+    """CPython 3.15's `_get_cross_language_hint`: the static-table half of
+    the suggestion, checked FIRST (it is more specific than distance).
+    Returns the hint text, or None."""
+    entries = _CROSS_LANGUAGE_ATTR_HINTS.get(name)
+    if entries is None:
+        return None
+    for check_type, hint, is_raw in entries:
+        if isinstance(obj, check_type):
+            if is_raw:
+                return hint
+            return f"Did you mean '.{hint}'?"
+    return None
+
+
+# CPython 3.15's Levenshtein costs (Lib/traceback.py / Python/suggestions.c):
+# a plain substitution or move costs 2, a case-only difference costs 1.
+_ATTR_MOVE_COST = 2
+_ATTR_CASE_COST = 1
+_ATTR_MAX_CANDIDATE_ITEMS = 750
+_ATTR_MAX_STRING_SIZE = 40
+
+# CPython 3.10+ exposes the set of stdlib module names (used by the
+# NameError "did you forget to import" refinement). Looked up defensively —
+# the self-hosted binary's `sys` is a stub (sys.argv/sys.path only, see
+# emit_exprs.py's module-attribute special cases), so a bare attribute read
+# would raise there; the empty default just withholds that one refinement
+# in the compiled path, like the other documented self-host gaps.
+_STDLIB_MODULE_NAMES = getattr(sys, 'stdlib_module_names', ())
+
+
+def _suggestion_normalize(name):
+    """CPython 3.15's `_compute_suggestion_error` NFKC preamble, shared by ALL
+    four branches (AttributeError, ModuleNotFoundError, ImportError,
+    NameError): a non-ASCII name that changes under NFKC normalization is
+    matched under its normalized form, and if that normalized form is present
+    in the candidate pool it is the answer outright (a "found" miss is never
+    suggested). Returns (normalized_name, was_changed)."""
+    if name.isascii():
+        return name, False
+    try:
+        import unicodedata
+        normalized = unicodedata.normalize('NFKC', name)
+    except ImportError:
+        normalized = name
+    if normalized == name:
+        return name, False
+    return normalized, True
+
+
+def _attr_substitution_cost(a, b):
+    """CPython 3.15.2's Python/suggestions.c substitution_cost, on bytes:
+    the low-five-bits test is its ASCII case-fold (no two ASCII letters
+    differ only in case can collide with a non-letter), then an explicit
+    A-Z check. CPython runs the whole match on the UTF-8 bytes of the
+    names, so a non-ASCII name gets exactly the C behavior."""
+    if (a & 31) != (b & 31):
+        # Not the same, not a case flip.
+        return _ATTR_MOVE_COST
+    if a == b:
+        return 0
+    if 65 <= a <= 90:
+        a += 32
+    if 65 <= b <= 90:
+        b += 32
+    if a == b:
+        return _ATTR_CASE_COST
+    return _ATTR_MOVE_COST
+
+
+def _attr_levenshtein_distance(a: str, b: str, max_cost: int) -> int:
+    """Port of CPython 3.15.2's Python/suggestions.c:levenshtein_distance —
+    the engine behind `_suggestions._generate_suggestions`, the fast path
+    Lib/traceback.py consults before its pure-Python fallback. (The
+    fallback differs in a way that matters: it seeds best_distance with
+    len(name) instead of infinity, silently dropping close matches on
+    short names — 'ge' -> 'get', 'po' -> 'pop'.) CPython operates on the
+    UTF-8 bytes of the names; we do the same. Single rolling row, common-
+    affix trimming, early bail-out when the running minimum exceeds
+    max_cost.
+
+    The trimming is tracked as OFFSETS into the byte sequences rather than
+    as slices: `a = a[pre:]` rebinds a local to a differently-typed value,
+    which the self-host lowering cannot express — it cast the `MojoBytes *`
+    to `char *` and ran the DP on a struct address, so this shape keeps
+    the encoded sequences in their own variables and indexes them with
+    `pre + i`."""
+    a_bytes = a.encode('utf-8')
+    b_bytes = b.encode('utf-8')
+    if a_bytes == b_bytes:
+        return 0
+
+    # Trim away common affixes.
+    pre = 0
+    alen = len(a_bytes)
+    blen = len(b_bytes)
+    while pre < alen and pre < blen and a_bytes[pre] == b_bytes[pre]:
+        pre += 1
+    post = 0
+    while post < alen - pre and post < blen - pre \
+            and a_bytes[alen - 1 - post] == b_bytes[blen - 1 - post]:
+        post += 1
+    alen -= pre + post
+    blen -= pre + post
+    if alen == 0 or blen == 0:
+        return _ATTR_MOVE_COST * (alen + blen)
+    if alen > _ATTR_MAX_STRING_SIZE or blen > _ATTR_MAX_STRING_SIZE:
+        return max_cost + 1
+
+    # Prefer shorter buffer — the trim offsets are common to both
+    # sequences, so each surviving range is [pre, pre + len).
+    if blen < alen:
+        a_bytes, b_bytes = b_bytes, a_bytes
+        alen, blen = blen, alen
+
+    # Quick fail when a match is impossible
+    if (blen - alen) * _ATTR_MOVE_COST > max_cost:
+        return max_cost + 1
+
+    # Instead of producing the whole traditional len(a)-by-len(b)
+    # matrix, we can update just one row in place.
+    row = list(range(_ATTR_MOVE_COST, _ATTR_MOVE_COST * (alen + 1), _ATTR_MOVE_COST))
+
+    result = 0
+    for bindex in range(blen):
+        bbyte = b_bytes[pre + bindex]
+        distance = result = bindex * _ATTR_MOVE_COST
+        minimum = sys.maxsize
+        for index in range(alen):
+            # 1) Previous distance in this row is cost(b[:bindex], a[:index])
+            substitute = distance + _attr_substitution_cost(bbyte, a_bytes[pre + index])
+            # 2) cost(b[:bindex], a[:index+1]) from previous row
+            distance = row[index]
+            # 3) existing result is cost(b[:bindex+1], a[:index])
+            insert_delete = min(result, distance) + _ATTR_MOVE_COST
+            result = min(insert_delete, substitute)
+
+            # cost(b[:bindex+1], a[:index+1])
+            row[index] = result
+            if result < minimum:
+                minimum = result
+        if minimum > max_cost:
+            # Everything in this row is too big, so bail early.
+            return max_cost + 1
+    return result
+
+
+def _attr_cp_levenshtein_distance(a: str, b: str, max_cost: int) -> int:
+    """Lib/traceback.py's pure-Python fallback (the pass CPython 3.15 runs
+    when the C module finds nothing): the same rolling-row algorithm, but on
+    CODE POINTS instead of UTF-8 bytes, and its substitution cost is
+    `str.lower()`-based, so a Unicode case flip ('É'->'é') costs 1 here
+    where the C byte pass (the low-five-bits trick) costs 2. On pure-ASCII
+    input the two passes agree on distance, and the fallback's best_distance
+    seed (len(name) rather than infinity) only ever TIGHTENS the window — so
+    the fallback can only ADD a match when non-ASCII is involved, which is
+    why `_attr_close_match` runs it only in that case."""
+    if a == b:
+        return 0
+
+    # Trim away common affixes.
+    pre = 0
+    while pre < len(a) and pre < len(b) and a[pre] == b[pre]:
+        pre += 1
+    a = a[pre:]
+    b = b[pre:]
+    post = 0
+    while post < len(a) and post < len(b) \
+            and a[len(a) - 1 - post] == b[len(b) - 1 - post]:
+        post += 1
+    if post:
+        a = a[:len(a) - post]
+        b = b[:len(b) - post]
+    if not a or not b:
+        return _ATTR_MOVE_COST * (len(a) + len(b))
+    if len(a) > _ATTR_MAX_STRING_SIZE or len(b) > _ATTR_MAX_STRING_SIZE:
+        return max_cost + 1
+
+    # Prefer shorter buffer
+    if len(b) < len(a):
+        a, b = b, a
+
+    # Quick fail when a match is impossible
+    if (len(b) - len(a)) * _ATTR_MOVE_COST > max_cost:
+        return max_cost + 1
+
+    # Instead of producing the whole traditional len(a)-by-len(b)
+    # matrix, we can update just one row in place.
+    row = list(range(_ATTR_MOVE_COST, _ATTR_MOVE_COST * (len(a) + 1), _ATTR_MOVE_COST))
+
+    result = 0
+    for bindex in range(len(b)):
+        bchar = b[bindex]
+        bchar_lower = bchar.lower()
+        distance = result = bindex * _ATTR_MOVE_COST
+        minimum = sys.maxsize
+        for index in range(len(a)):
+            # 1) Previous distance in this row is cost(b[:bindex], a[:index])
+            # CPython's fallback `_substitution_cost`: equal -> 0, a
+            # case-only flip -> _CASE_COST, else _MOVE_COST.
+            achar = a[index]
+            if bchar == achar:
+                cost = 0
+            elif bchar_lower == achar.lower():
+                cost = _ATTR_CASE_COST
+            else:
+                cost = _ATTR_MOVE_COST
+            substitute = distance + cost
+            # 2) cost(b[:bindex], a[:index+1]) from previous row
+            distance = row[index]
+            # 3) existing result is cost(b[:bindex+1], a[index])
+
+            insert_delete = min(result, distance) + _ATTR_MOVE_COST
+            result = min(insert_delete, substitute)
+
+            # cost(b[:bindex+1], a[:index+1])
+            row[index] = result
+            if result < minimum:
+                minimum = result
+        if minimum > max_cost:
+            # Everything in this row is too big, so bail early.
+            return max_cost + 1
+    return result
+
+
+def _suggestion_two_passes(d, name):
+    """CPython 3.15's distance-match tail, shared by ALL four
+    `_compute_suggestion_error` branches: the C module (`_suggestions`,
+    Python/suggestions.c) on UTF-8 BYTES with best_distance seeded at
+    infinity, then Lib/traceback.py's pure-Python fallback on CODE POINTS
+    with best_distance seeded at len(name) — and the two DISAGREE on
+    non-ASCII input (a Unicode case flip costs 2 in the byte pass, 1 in the
+    fallback; byte windows are wider but byte distances are bigger too), so
+    for example 'caf' -> 'café' is only found by the second pass. Returns the
+    closest candidate, or None.
+
+    `d` must already be branch-filtered (the underscore rule differs per
+    branch: the attr branch hides underscored candidates for a non-
+    underscored miss, the import branch only does so when `name_from` is
+    non-underscored, the NameError and ModuleNotFoundError branches filter
+    nothing) and `name` NFKC-normalized (the shared preamble). CPython's caps
+    apply verbatim: the C-module pass is skipped at 750+ candidates, the
+    fallback gives up at 751+ candidates and at a 40-code-point name. The
+    AttributeError branch must additionally skip its nested check after a
+    fallback cap — it decides that from the same caps, not from this
+    function's return value (a cap and a genuine no-match both return
+    None)."""
+    # Pass 1: the C module, on UTF-8 bytes, best_distance seeded at
+    # infinity, per-candidate max-distance window in BYTE lengths.
+    pass1_ran = len(d) < _ATTR_MAX_CANDIDATE_ITEMS
+    if pass1_ran:
+        wrong_name_bytes = len(name.encode('utf-8'))
+        best_distance = sys.maxsize
+        suggestion = None
+        for possible_name in d:
+            if possible_name == name:
+                # A missing attribute is "found". Don't suggest it (GH-88821).
+                continue
+            # No more than 1/3 of the involved characters should need changed.
+            item_bytes = len(possible_name.encode('utf-8'))
+            max_distance = (item_bytes + wrong_name_bytes + 3) * _ATTR_MOVE_COST // 6
+            # Don't take matches we've already beaten.
+            max_distance = min(max_distance, best_distance - 1)
+            current_distance = _attr_levenshtein_distance(name, possible_name, max_distance)
+            if current_distance > max_distance:
+                continue
+            if not suggestion or current_distance < best_distance:
+                suggestion = possible_name
+                best_distance = current_distance
+        if suggestion is not None:
+            return suggestion
+    # Pass 2: the pure-Python fallback, on code points, best_distance
+    # seeded at len(name). On pure-ASCII input it can only agree with or
+    # tighten pass 1, so when pass 1 RAN it is only worth running when
+    # non-ASCII is involved. That early return must NOT apply when pass 1
+    # was skipped by the 750 cap: at exactly 750 candidates CPython's C
+    # module gives up (its own cap) and the fallback is the only pass left,
+    # and it runs for ASCII too (test_name_error_caps_match_cpython pins
+    # the boundary).
+    if len(d) > _ATTR_MAX_CANDIDATE_ITEMS:
+        return None
+    if len(name) > _ATTR_MAX_STRING_SIZE:
+        return None
+    if pass1_ran:
+        _non_ascii = not name.isascii()
+        if not _non_ascii:
+            for n in d:
+                if not n.isascii():
+                    _non_ascii = True
+                    break
+        if not _non_ascii:
+            return None
+    wrong_name_len = len(name)
+    best_distance = wrong_name_len
+    suggestion = None
+    for possible_name in d:
+        if possible_name == name:
+            # A missing attribute is "found". Don't suggest it (GH-88821).
+            continue
+        # No more than 1/3 of the involved characters should need changed.
+        max_distance = (len(possible_name) + wrong_name_len + 3) * _ATTR_MOVE_COST // 6
+        # Don't take matches we've already beaten.
+        max_distance = min(max_distance, best_distance - 1)
+        current_distance = _attr_cp_levenshtein_distance(name, possible_name, max_distance)
+        if current_distance > max_distance:
+            continue
+        if not suggestion or current_distance < best_distance:
+            suggestion = possible_name
+            best_distance = current_distance
+    return suggestion
+
+
+def _suggestion_after_pool(d, name, not_normalized):
+    """The tail of CPython 3.15's `_compute_suggestion_error` every branch
+    shares AFTER its candidate pool is computed: the NFKC early return (a
+    name that normalization changed and which the pool contains is the
+    answer outright), then the distance match. Returns the suggestion or
+    None."""
+    if not_normalized and name in d:
+        return name
+    return _suggestion_two_passes(d, name)
+
+
+def _safe_dir(obj):
+    """CPython 3.15's `_get_safe___dir__` (its lazy-import filter has no
+    counterpart in this dialect): the names a successful `obj.<name>` lookup
+    could resolve to — the candidate pool CPython's traceback.py feeds its
+    matcher — obj.__dir__(), with CPython's `type(obj).__dir__(obj)` fallback
+    for the TypeError case (obj is a class), strings only, sorted. Shared by
+    the AttributeError branch (`_attr_candidates`) and the ImportError
+    branch (`import_error_suggestion`)."""
+    try:
+        names = obj.__dir__()
+    except TypeError:
+        names = type(obj).__dir__(obj)
+    return sorted(n for n in names if isinstance(n, str))
+
+
+def _attr_candidates(obj):
+    """The names a successful `obj.<name>` lookup could resolve to — the
+    candidate pool CPython's traceback.py feeds its matcher (its
+    `_get_safe___dir__`, i.e. the object's dir()). For a MojoInstance the
+    dir() machinery cannot see the Mojo method/alias tables (they live
+    outside the Python type), so those are added explicitly; for a
+    MojoClass, the methods/fields/aliases it presents. Host objects use
+    `_safe_dir`."""
+    if isinstance(obj, (MojoInstance, MojoClass)):
+        names = set()
+        if isinstance(obj, MojoInstance):
+            names.update(obj.__dict__)
+            names.update(obj._mojo_class.methods)
+            names.update(obj._mojo_class.comptime_aliases)
+        else:
+            names.update(obj.methods)
+            names.update(obj.comptime_aliases)
+            for f in obj.fields:
+                if hasattr(f, 'name'):
+                    names.add(f.name)
+        return sorted(n for n in names if isinstance(n, str))
+    return _safe_dir(obj)
+
+
+def _attr_close_match(obj, name, self_obj=None):
+    """CPython 3.15's Levenshtein half of `_compute_suggestion_error`:
+    the closest resolvable attribute name to a misspelled one, or None.
+
+    Candidate filtering follows CPython: no underscored names unless the
+    wrong name is underscored, OR the failing frame's `self` IS `obj`
+    (CPython's hide_underscored refinement: `self.value` inside a method may
+    suggest the private `self._value`, while the same misspell on the same
+    object from outside the method may not). The raising half captures that
+    frame `self` on the exception (`self_obj`); CPython reads it off the
+    traceback, which this interpreter does not carry. The distance match
+    itself is the engine every branch shares (`_suggestion_two_passes`); the
+    caps live there too, and a fallback cap aborts CPython's function
+    WITHOUT the nested check — so it is rechecked here (a cap and a genuine
+    no-match both return None from the engine, but only the former must skip
+    the nested check)."""
+    name, not_normalized = _suggestion_normalize(name)
+    d = _attr_candidates(obj)
+    hide_underscored = name[:1] != '_'
+    if hide_underscored and self_obj is not None and self_obj is obj:
+        hide_underscored = False
+    if hide_underscored:
+        d = [n for n in d if n[:1] != '_']
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None and len(d) <= _ATTR_MAX_CANDIDATE_ITEMS \
+            and len(name) <= _ATTR_MAX_STRING_SIZE:
+        # If no direct attribute match found, check for nested attributes
+        # (CPython's `_check_for_nested_attribute`: the What's New 3.15
+        # `container.area` -> `.inner.area` case).
+        suggestion = _attr_nested_match(obj, name, d)
+    return suggestion
+
+
+def _attr_nested_match(obj, name, candidates):
+    """CPython 3.15's `_check_for_nested_attribute`: when no attribute of
+    `obj` is a close match, look one level down — a member of obj that ITSELF
+    has `name`. Returns the dotted path (`inner.area`) or None. Mirrors
+    CPython's scan: ONLY non-underscored outer attributes — CPython re-
+    filters here, so even an underscored misspelling on `object()` gets no
+    nested suggestion (`__class__` does carry `__static_attributes__`, but
+    the underscored outer attribute is out of scope) — capped at 20 in
+    sorted order, errors while fetching a member are ignored (a failing
+    member cannot be the answer). CPython also skips descriptor outer
+    attributes and probes the member statically (`getattr_static`) so no
+    getter runs during error printing; the `hasattr` here agrees on plain
+    data and only diverges on a member whose `name` is a property that
+    raises — an under-suggestion on a cold path, not a false one."""
+    if isinstance(obj, MojoInstance):
+        # Instance fields only — the plain data members, no method-table
+        # values to fetch (CPython's equivalent skips descriptors for the
+        # same reason: fetching them runs code during error printing).
+        members = {n: obj.__dict__[n] for n in obj.__dict__
+                   if isinstance(n, str) and n[:1] != '_'}
+    else:
+        members = {}
+        checked = 0
+        for n in candidates:
+            if n[:1] == '_':
+                continue
+            if checked >= 20:
+                break
+            checked += 1
+            try:
+                members[n] = getattr(obj, n)
+            except Exception:
+                continue
+    for n in sorted(members)[:20]:
+        member = members[n]
+        try:
+            if hasattr(member, name):
+                return f"{n}.{name}"
+        except Exception:
+            continue
+    return None
+
+
+def attribute_error_suggestion(obj, name, self_obj=None):
+    """CPython 3.15's print-time AttributeError suggestion, as the suffix to
+    append to the message: '' when there is nothing to add. Priority is
+    CPython's: the static cross-language/wrong-type table first, then the
+    distance-based close match (with the nested-attribute fallback). The
+    renderings are CPython 3.15.2's verbatim (Lib/traceback.py).
+
+    `obj` is the object the failed lookup ran on — which may itself be None
+    (`None.append(1)`); CPython computes suggestions for that too (dunder
+    candidates for underscored names), so there is no None short-circuit.
+    The caller is responsible for only invoking this when the exception
+    actually carried an `obj` field (see fire.py's `name` guard).
+
+    `self_obj` is the failing frame's `self` captured at raise time (None
+    when the frame had none) — CPython's traceback-frame input to the
+    hide_underscored refinement, see `_attr_close_match`."""
+    if not isinstance(name, str):
+        return ''
+    hint = _cross_language_attr_hint(obj, name)
+    if hint:
+        return f". {hint}"
+    suggestion = _attr_close_match(obj, name, self_obj)
+    if suggestion is None:
+        return ''
+    if suggestion.isascii():
+        return f". Did you mean '.{suggestion}' instead of '.{name}'?"
+    return f". Did you mean '.{suggestion}' ({suggestion!a}) instead of '.{name}' ({name!a})?"
+
+
+def _module_not_found_candidates(name):
+    """CPython 3.15's ModuleNotFoundError candidate pool: every module spec
+    the import machinery can discover — for each finder in sys.meta_path
+    that carries a `discover` hook (in 3.15 only PathFinder does), the specs
+    it reports relative to the missing name's parent package. Mirrors
+    traceback.py's `_compute_suggestion_error` MNE branch verbatim: a dotted
+    miss probes `importlib.util.find_spec(parent)` (which yields None for a
+    missing parent — discover(None) then lists top-level names, CPython's
+    behavior), and ANY failure — e.g. a parent that is not a package
+    (frozen `os`: `import os.path2` raises ValueError inside discover) —
+    means no candidates at all, i.e. no suggestion."""
+    try:
+        import importlib.util
+        parent_name = name.rpartition('.')[0]
+        if parent_name:
+            parent = importlib.util.find_spec(parent_name)
+        else:
+            parent = None
+        d = []
+        for finder in sys.meta_path:
+            discover = getattr(finder, 'discover', None)
+            if discover is not None:
+                d += [spec.name for spec in discover(parent)]
+    except Exception:
+        return None
+    return d
+
+
+def module_not_found_suggestion(name):
+    """CPython 3.15's print-time ModuleNotFoundError suggestion, as the
+    suffix to append to the message: '' when there is nothing to add. The
+    real ModuleNotFoundError already carries `name` (the module that was not
+    found), so no raise-side tagging is needed. The rendering is 3.15.2's
+    verbatim (`. Did you mean: '<s>'?` — the MNE branch has no `!a`
+    rendering of its own; a module name is an identifier and CPython's MNE
+    branch prints it bare)."""
+    if not isinstance(name, str):
+        return ''
+    name, not_normalized = _suggestion_normalize(name)
+    d = _module_not_found_candidates(name)
+    if d is None:
+        return ''
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None:
+        return ''
+    return f". Did you mean: '{suggestion}'?"
+
+
+def import_error_suggestion(mod_name, name_from):
+    """CPython 3.15's print-time ImportError suggestion for a `from X import
+    Y` miss — an ImportError carrying `name` (module X) and `name_from`
+    (attribute Y) — as the suffix to append: '' when there is nothing to
+    add. Candidates are X's dir() (`_safe_dir`, CPython's `_get_safe___dir__`),
+    re-filtered to non-underscored names when Y is non-underscored
+    (CPython re-filters here, mirroring the attr branch), then the shared
+    distance match. The rendering is 3.15.2's verbatim (`. Did you mean:
+    '<s>'?`, with the `!a` parens for a non-ASCII suggestion).
+    `__import__` failing (module X gone by print time) means no candidates,
+    CPython's try/except-returns-None."""
+    if not isinstance(name_from, str) or not isinstance(mod_name, str):
+        return ''
+    name, not_normalized = _suggestion_normalize(name_from)
+    try:
+        mod = __import__(mod_name)
+        d = _safe_dir(mod)
+    except Exception:
+        return ''
+    if name[:1] != '_':
+        d = [x for x in d if x[:1] != '_']
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None:
+        return ''
+    if suggestion.isascii():
+        return f". Did you mean: '{suggestion}'?"
+    return f". Did you mean: '{suggestion}' ({suggestion!a})?"
+
+
+def name_error_suggestion(name, candidates, self_obj):
+    """CPython 3.15's print-time NameError suggestion, as the suffix to
+    append to the message: '' when there is nothing to add. CPython reads
+    the failing frame's pool (f_locals + f_globals + f_builtins) and `self`
+    off the traceback at print time; this interpreter's NameErrors carry
+    those captured at RAISE time instead (`_tag_name_error`), so `candidates`
+    and `self_obj` are the fields the exception carries — `candidates` None
+    for a NameError that never went through this interpreter's Scope (e.g.
+    one CPython raised itself), for which there is no frame to read and no
+    suggestion, exactly CPython's tb-is-None behavior.
+
+    CPython's order: the NFKC early return, then the `self.<name>`
+    refinement (a bare name that is really an instance attribute of the
+    frame's `self`), then the shared distance match. The renderings are
+    3.15.2's verbatim (`. Did you mean: '<s>'?` with `!a` parens for a
+    non-ASCII suggestion), plus CPython's forgot-to-import refinement: when
+    the misspelling IS a stdlib module name, append ` Or did you forget to
+    import '<name>'?` after a suggestion, or `. Did you forget to import
+    '<name>'?` when there is none."""
+    if not isinstance(name, str) or candidates is None:
+        return ''
+    d = [x for x in candidates if isinstance(x, str)]
+    name_n, not_normalized = _suggestion_normalize(name)
+    suggestion = None
+    if not_normalized and name_n in d:
+        suggestion = name_n
+    else:
+        if self_obj is not None:
+            try:
+                if hasattr(self_obj, name_n):
+                    suggestion = f"self.{name_n}"
+            except Exception:
+                pass
+        if suggestion is None:
+            suggestion = _suggestion_after_pool(d, name_n, not_normalized)
+    if suggestion is None:
+        if name in _STDLIB_MODULE_NAMES:
+            return f". Did you forget to import '{name}'?"
+        return ''
+    if suggestion.isascii():
+        suffix = f". Did you mean: '{suggestion}'?"
+    else:
+        suffix = f". Did you mean: '{suggestion}' ({suggestion!a})?"
+    if name in _STDLIB_MODULE_NAMES:
+        suffix += f" Or did you forget to import '{name}'?"
+    return suffix
+
+
+def error_suggestion_suffix(e):
+    """CPython 3.15's print-time suggestion suffix for ANY of the exception
+    types its improved error messages cover — AttributeError,
+    ModuleNotFoundError, ImportError (a `from X import Y` miss, the ones
+    carrying `name_from`), NameError — '' when CPython appends nothing.
+    fire.py appends it to an UNCAUGHT exception's message; an exception
+    caught in user code never goes through it, preserving CPython's
+    caught-plain/uncaught-suggested split.
+
+    The dispatch mirrors Lib/traceback.py's order: ModuleNotFoundError
+    before a bare ImportError (it is an ImportError subclass), and only
+    `from`-miss ImportErrors carry `name_from`, so the two are disjoint in
+    practice. Every guard is the one CPython applies (a str `name` field,
+    `name_from is not None`, ...)."""
+    if isinstance(e, AttributeError):
+        aname = getattr(e, 'name', None)
+        if isinstance(aname, str):
+            return attribute_error_suggestion(
+                getattr(e, 'obj', None), aname,
+                getattr(e, 'self_obj', None))
+        return ''
+    if isinstance(e, ModuleNotFoundError):
+        mname = getattr(e, 'name', None)
+        if isinstance(mname, str):
+            return module_not_found_suggestion(mname)
+        return ''
+    if isinstance(e, ImportError):
+        fname = getattr(e, 'name_from', None)
+        if isinstance(fname, str):
+            return import_error_suggestion(getattr(e, 'name', None), fname)
+        return ''
+    if isinstance(e, NameError):
+        nname = getattr(e, 'name', None)
+        if isinstance(nname, str):
+            return name_error_suggestion(
+                nname, getattr(e, 'candidates', None), getattr(e, 'self_obj', None))
+        return ''
+    return ''
 
 
 class ReturnValue(Exception):
@@ -62,7 +907,8 @@ class MojoError(Exception):
     self-hosting compiler doesn't know what to do with `super()` at all
     (tries to call it as a plain undefined function named `_super`)."""
     def __init__(self, *args):
-        Exception.__init__(self, ' '.join(str(a) for a in args))
+        self.args = args
+        Exception.__init__(self, *args)
 
 
 class MojoRaisedException(Exception):
@@ -78,6 +924,158 @@ class MojoRaisedException(Exception):
     ordinary, already-well-typed field on a well-known struct) — see
     execute_RaiseStmt/_matches_exc_type."""
     pass
+
+
+class _LazyImportState:
+    """Process-wide state for PEP 810 lazy imports (Python 3.15).
+
+    `mode` mirrors `sys.set_lazy_imports`: 'normal' honours the `lazy`
+    keyword and `__lazy_modules__` only, 'all' makes every import that can be
+    lazy potentially lazy. (CPython 3.15.2 rejects 'none' — the pre-final
+    PEP text listed it, the implementation does not — so this does too.)
+    `filter` is the optional `sys.set_lazy_imports_filter` callable and
+    `lazy_modules` is the `sys.lazy_modules` set of fully-qualified names
+    currently held by an unresolved proxy.
+    """
+    def __init__(self):
+        self.mode = 'normal'
+        env_mode = os.environ.get('PYTHON_LAZY_IMPORTS')
+        if env_mode == 'all':
+            self.mode = 'all'
+        self.filter = None
+        self.lazy_modules = set()
+
+    def set_mode(self, mode):
+        if not isinstance(mode, str):
+            raise TypeError("mode must be a string: 'normal' or 'all'")
+        if mode not in ('normal', 'all'):
+            raise ValueError("mode must be 'normal' or 'all'")
+        self.mode = mode
+
+
+_LAZY_IMPORT_STATE = _LazyImportState()
+
+
+class _LazyImportTarget:
+    """Resolution state shared by every name bound by ONE lazy import.
+
+    A `lazy from m import a, b` statement loads `m` at most once, and only
+    when the first of `a`/`b` is used; the other name stays unresolved.
+    """
+    def __init__(self, interp, module, alias=None, is_from=False, scope=None):
+        self.interp = interp
+        self.module = module
+        self.alias = alias
+        self.is_from = is_from
+        # The lexical scope the import statement executed in. Lazy
+        # resolution can happen much later, while `interp.scope` is some
+        # other frame (a function call that first touched the name), so a
+        # dotted sibling import's namespace chain must be built in THIS
+        # scope, not whatever happens to be current at resolve time.
+        self.scope = scope
+        self.loaded = False
+        self.value = None
+
+    def load(self):
+        if not self.loaded:
+            if self.is_from:
+                value = self.interp._resolve_from_import_module(self.module)
+            else:
+                value = self.interp._resolve_import_module(
+                    self.module, self.alias, self.scope)
+            self.value = value
+            self.loaded = True
+            _LAZY_IMPORT_STATE.lazy_modules.discard(self.module)
+        return self.value
+
+    def resolve_name(self, name):
+        module = self.load()
+        if module is None:
+            raise ModuleNotFoundError(
+                f"No module named {self.module!r}")
+        _LAZY_IMPORT_STATE.lazy_modules.discard(self.module + '.' + name)
+        return self.interp._resolve_from_import_name(module, self.module, name)
+
+
+class LazyImportType:
+    """The proxy bound by `lazy import` / `lazy from ... import` (PEP 810).
+
+    The name is bound immediately so the module's import-time side effects —
+    and any ImportError — are deferred until the first use of the name.
+    `Scope.get` reifies the proxy and replaces the binding, so after first
+    use the name is indistinguishable from an eager import; the dunder
+    forwarding below covers the other ways a proxy can be reached (stored in
+    a container, passed as an argument, printed directly).
+
+    `resolve()` is the explicit reification entry point CPython exposes on
+    `types.LazyImportType`.
+    """
+    __slots__ = ('_target', '_label', '_from_name', '_resolved', '_value')
+
+    def __init__(self, target, label, from_name=None):
+        self._target = target
+        self._label = label
+        self._from_name = from_name
+        self._resolved = False
+        self._value = None
+
+    def resolve(self):
+        if not self._resolved:
+            if self._from_name is None:
+                value = self._target.load()
+            else:
+                value = self._target.resolve_name(self._from_name)
+            self._value = value
+            self._resolved = True
+        return self._value
+
+    def __repr__(self):
+        return f"<lazy_import {self._label!r}>"
+
+    def __getattr__(self, name):
+        return getattr(self.resolve(), name)
+
+    def __call__(self, *args, **kwargs):
+        return self.resolve()(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self.resolve()[key]
+
+    def __setitem__(self, key, value):
+        self.resolve()[key] = value
+
+    def __delitem__(self, key):
+        del self.resolve()[key]
+
+    def __iter__(self):
+        return iter(self.resolve())
+
+    def __len__(self):
+        return len(self.resolve())
+
+    def __contains__(self, item):
+        return item in self.resolve()
+
+    def __bool__(self):
+        return bool(self.resolve())
+
+    def __str__(self):
+        return str(self.resolve())
+
+    def __eq__(self, other):
+        return self.resolve() == other
+
+    def __ne__(self, other):
+        return self.resolve() != other
+
+    def __hash__(self):
+        return hash(self.resolve())
+
+    def __enter__(self):
+        return self.resolve().__enter__()
+
+    def __exit__(self, *args):
+        return self.resolve().__exit__(*args)
 
 
 class Scope:
@@ -105,10 +1103,27 @@ class Scope:
 
     def get(self, name: str):
         if name in self.vars:
-            return self.vars[name]
-        if self.parent:
-            return self.parent.get(name)
-        raise NameError(f"name '{name}' is not defined")
+            value = self.vars[name]
+            if isinstance(value, LazyImportType):
+                value = value.resolve()
+                self.vars[name] = value
+            return value
+        # Walk the chain iteratively (the old recursion raised in the ROOT
+        # scope): the lookup either finds the nearest binding in the same
+        # order, or fails with the exception tagged at THIS scope — the
+        # frame that failed — which is what CPython 3.15's print-time
+        # NameError suggestion needs (see _tag_name_error).
+        scope = self.parent
+        while scope is not None:
+            if name in scope.vars:
+                value = scope.vars[name]
+                if isinstance(value, LazyImportType):
+                    value = value.resolve()
+                    scope.vars[name] = value
+                return value
+            scope = scope.parent
+        raise _tag_name_error(
+            NameError(f"name '{name}' is not defined"), self, name)
 
     def has(self, name: str) -> bool:
         if name in self.vars:
@@ -128,10 +1143,20 @@ class Scope:
     def delete(self, name: str):
         if name in self.vars:
             del self.vars[name]
-        elif self.parent:
-            self.parent.delete(name)
-        else:
-            raise NameError(f"name '{name}' is not defined")
+            return
+        # Walk the chain iteratively (the old recursion raised in the ROOT
+        # scope): the delete finds the nearest binding in the same order, or
+        # fails with the exception tagged at THIS scope — the frame that
+        # failed — for CPython 3.15's print-time NameError suggestion (see
+        # _tag_name_error).
+        scope = self.parent
+        while scope is not None:
+            if name in scope.vars:
+                del scope.vars[name]
+                return
+            scope = scope.parent
+        raise _tag_name_error(
+            NameError(f"name '{name}' is not defined"), self, name)
 
 
 def _split_invoker(owner_interp, args) -> tuple:
@@ -1291,7 +2316,7 @@ class _MojoWriter:
 
 class MojoInstance:
     """An instance of a Mojo-defined struct/class."""
-    def __init__(self, mojo_class):
+    def __init__(self, mojo_class: 'MojoClass'):
         self._mojo_class = mojo_class
 
     def __getattr__(self, name):
@@ -1312,7 +2337,9 @@ class MojoInstance:
             return BoundMethod(method, self, cls.interpreter)
         if name in cls.comptime_aliases:
             return cls.comptime_aliases[name]
-        raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
+        raise _tag_attribute_error(
+            AttributeError(f"'{cls.name}' object has no attribute '{name}'"),
+            self, name, _frame_self(cls.interpreter))
 
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
@@ -1326,13 +2353,31 @@ class MojoInstance:
         method(self._mojo_class.interpreter, self, writer)
         return writer.getvalue()
 
+    def _call_dunder_text(self, method_name):
+        """Call a user-defined Python-spelled `__str__`/`__repr__(self)` method
+        from the class's method table and return its text, or None if the
+        class does not define it. Mirrors the compiled path's
+        `user_dunder_repr_call` lookup, so `str(x)` / `print(x)` agree there."""
+        method = self._mojo_class.methods.get(method_name)
+        if method is None:
+            return None
+        return method(self._mojo_class.interpreter, self)
+
     def __str__(self):
+        # CPython's `str()` prefers `__str__`, then falls back to `__repr__`
+        # (via `repr(self)` below) before the default object repr.
+        result = self._call_dunder_text('__str__')
+        if result is not None:
+            return result
         result = self._write_via('write_to')
         if result is not None:
             return result
         return repr(self)
 
     def __repr__(self):
+        result = self._call_dunder_text('__repr__')
+        if result is not None:
+            return result
         result = self._write_via('write_repr_to')
         if result is not None:
             return result
@@ -1455,7 +2500,7 @@ class BoundClassMethod:
     `cls.<attr>` then raised "'int' object has no attribute ..."). That made
     the ORACLE disagree with the compiled path, which does pass a receiver,
     on a shape real code uses (see
-    bugs/COMPILE_FAIL_importlib_resources_readers.md's
+    bugs/mid/COMPILE_FAIL_importlib_resources_readers.md's
     `yield from cls.<sibling generator>(...)`).
 
     A separate class rather than a second receiver kind inside `BoundMethod`:
@@ -1491,6 +2536,55 @@ class BoundClassMethod:
         return self
 
 
+def _c3_linearize(cls):
+    """Return `cls.__mro__`: C3 linearization of the bases named in `cls`.
+
+    Matches CPython's `type.__mro__` exactly — including diamonds (e.g. a
+    `D(B, C)` over sibling `B(O)`/`C(O)` resolves to `D, B, C, O`) and its
+    error semantics: an entry that is neither a real Mojo class nor a real
+    Python type (typing specials like `TypedDict`, which are functions in 3.15+)
+    raises `TypeError`, and an inconsistent hierarchy raises a `TypeError`
+    naming every base, the same way `type()` does at class creation time. The
+    underlying Python-style hierarchy this interpreter synthesises only carries
+    `object` as an implicit root, so a plain class's MRO is just `(cls,)`; there
+    is no Mojo root type for it to inherit from."""
+    seqs = []
+    for b in cls.bases:
+        if isinstance(b, MojoClass):
+            seqs.append(_c3_linearize(b))
+        elif isinstance(b, type):
+            seqs.append(tuple(b.__mro__))
+        else:
+            raise TypeError(f"__mro__ entry is not a class: {b!r}")
+    seqs.append(tuple(cls.bases))
+    return (cls,) + tuple(_c3_merge(cls.bases, seqs))
+
+
+def _c3_merge(bases, seqs):
+    """Merge the sequence lists (`seqs`) one head at a time, removing every
+    head from every list's tail once taken — the standard C3 linearisation
+    step. A head that still appears in another list is rejected; if no head of
+    any list qualifies, the hierarchy is inconsistent, and the `TypeError`
+    names every base the way `type()` does at class creation."""
+    seqs = [list(s) for s in seqs if s]
+    out = []
+    while seqs:
+        for i, s in enumerate(seqs):
+            head = s[0]
+            # Only a tail appearance disqualifies a head; another list whose own
+            # head is this same element will consume it in this same step.
+            if any(head in other[1:] for j, other in enumerate(seqs) if j != i):
+                continue
+            out.append(head)
+            seqs = [o[1:] if o and o[0] is head else o for o in seqs]
+            seqs = [o for o in seqs if o]
+            break
+        else:
+            names = ', '.join(getattr(b, '__name__', type(b).__name__) or str(b) for b in bases)
+            raise TypeError(f"Cannot create a consistent method resolution order (MRO) for bases {names}")
+    return out
+
+
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
     _ARRAY_TYPE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\[([A-Za-z_][A-Za-z0-9_]*|\d+)\]$')
@@ -1499,9 +2593,9 @@ class MojoClass:
         'Float16': 0.0, 'Float32': 0.0, 'Float64': 0.0,
     }
 
-    def __init__(self, name, fields, methods, interpreter, bases=None,
+    def __init__(self, name, fields, methods: dict, interpreter, bases=None,
                  comptime_aliases=None, static_methods=None, class_methods=None,
-                 def_scope=None):
+                 def_scope=None, keywords=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
@@ -1513,6 +2607,11 @@ class MojoClass:
         # struct (mirrors how `__init__` bodies already resolve such names).
         self.def_scope = def_scope
         self.bases = bases or []  # base MojoClass objects, e.g. `struct Child(Base):`
+        # Keyword arguments from the class definition, e.g.
+        # `extra_items=bool`, `closed=True` (PEP 692/728) or `metaclass=M`.
+        # Stored for introspection and passed through where the interpreter
+        # creates a real Python class (Python-type bases with keywords).
+        self.keywords = keywords or {}
         # `comptime EOF_TOKEN: Int = 69` inside the struct body — evaluated
         # once at struct-definition time and exposed as a class-level
         # attribute (`TokenType.EOF_TOKEN`), same as a Python class constant.
@@ -1560,7 +2659,19 @@ class MojoClass:
             # ctypes/wintypes.py's `PFILETIME = POINTER(FILETIME)` raised
             # "'FILETIME' object has no attribute '__name__'".
             return self.name
-        raise AttributeError(f"'{self.name}' object has no attribute '{name}'")
+        if name == '__mro__':
+            # A real Python class built through the keywords path already owns a
+            # `__mro__`; only the plain interpreter-synthesised Mojo classes need
+            # this implemented here. Cached on the instance so repeated access is
+            # the one C3 work we do per class lifetime.
+            cached = self.__dict__.get('_mojo_mro')
+            if cached is None:
+                cached = _c3_linearize(self)
+                self.__dict__['_mojo_mro'] = cached
+            return cached
+        raise _tag_attribute_error(
+            AttributeError(f"'{self.name}' object has no attribute '{name}'"),
+            self, name, _frame_self(self.interpreter))
 
     def __call__(self, *args, **kwargs):
         instance = MojoInstance(self)
@@ -1597,6 +2708,7 @@ class MojoClass:
                         setattr(instance, f.name, container_default)
                         continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
+                value = _unwrap_dataclass_field(value)
                 value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
@@ -1605,10 +2717,13 @@ class MojoClass:
                 # raised "'AssignStmt' object has no attribute 'targets'"
                 # on any instantiation of a class with a bare `NAME = value`
                 # class-body attribute (e.g. `class Foo: count = 0`).
+                # `name: Type = field(default=...)` lands here (an AssignStmt
+                # carrying `type_ann`, not a VarDecl), so the dataclass Field
+                # unwrap applies to it too.
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 target = f.target
                 if self.interpreter._is_instance(target, 'IdentExpr'):
-                    setattr(instance, target.name, value)
+                    setattr(instance, target.name, _unwrap_dataclass_field(value))
         init = self.methods.get('__init__')
         if init is not None:
             interp = self.interpreter
@@ -1878,10 +2993,43 @@ class _MojoListType:
             return list(kwargs['copy'])
         if 'capacity' in kwargs or 'unsafe_uninit_length' in kwargs:
             return []
+        if 'length' in kwargs:
+            # `List(length=, fill=)` is a synthetic `[fill] * length` and
+            # `List(length=, fill_with=<callable>)` fills slot i with
+            # `fill_with(i)`: the same synthetic-comprehension reading the
+            # compiled path gives it (`_lower_bare_list_ctor` in
+            # emit_calls.py). A `fill` is evaluated ONCE by the caller and
+            # copied into every slot, never re-evaluated; a `fill_with` is a
+            # value call per slot, and a MojoFunction answers one like any
+            # other call (`MojoFunction.__call__` resolves its own
+            # interpreter). A `length=` with no filler (`capacity=` beside
+            # it, a misspelt one) builds nothing: an empty list, matching
+            # the compiled path's `mojo_list_new ()` fallback.
+            length = kwargs['length']
+            if 'fill' in kwargs:
+                fill = kwargs['fill']
+                return [fill] * length
+            if 'fill_with' in kwargs:
+                fill_with = kwargs['fill_with']
+                return [fill_with(i) for i in range(length)]
+            return []
+        if len(args) == 1 and isinstance(args[0], (list, tuple, set,
+                                                   frozenset, dict, range,
+                                                   str, bytes)):
+            # `List(<iterable>)` is a COPY in the container's iteration
+            # order, exactly as `list(<iterable>)` is — one walk, the same
+            # one the compiled path reuses in `_lower_bare_list_ctor`
+            # (emit_calls.py). Before this arm existed the sole iterable
+            # was wrapped as ONE element: `List([1, 2])` answered
+            # `[[1, 2]]` and the two engines disagreed on it
+            # (bug:INTERP_list_ctor_wraps_its_iterable).
+            return list(args[0])
         # `List(1, 2, 3, __list_literal__=NoneType())` - real Mojo's
         # list-literal-desugaring init; drop the marker kwarg, keep the
         # positional values as the initial contents. Plain `List[Int]()`
-        # (no positional args) falls through the same path to `[]`.
+        # (no positional args) falls through the same path to `[]`, and a
+        # lone NON-iterable (`List(5)`) is wrapped as one element, as it
+        # always was.
         return list(args)
 
     def alloc(self, count, *args, **kwargs):
@@ -2215,7 +3363,14 @@ class _MojoBoundArgCall:
     def __call__(self, *args, **kwargs):
         fn = self._fn
         wrapped_func = self._wrapped_func
-        return fn(wrapped_func, *args, **kwargs)
+        # `map`/`filter` take the callable as their FIRST positional and the
+        # iterable as their SECOND (or, for `map`, further ones). The first-arg
+        # rule in `_mojo_builtin_args` does not reach these calls because they
+        # arrive here as a `_MojoBoundArgCall`, not through `invoke` — so a
+        # Mojo iterable struct passed to `map[f](c)` fell through to
+        # `__getitem__` and died with `KeyError: 0`. Apply the same
+        # `_mojo_iterable` treatment to every argument after the callable.
+        return fn(wrapped_func, *(_mojo_iterable(a) for a in args), **kwargs)
 
 
 class _MojoParametricFn:
@@ -2234,7 +3389,12 @@ class _MojoParametricFn:
 
     def __call__(self, *args, **kwargs):
         fn = self._fn
-        return fn(*args, **kwargs)
+        if not args:
+            return fn(**kwargs)
+        # `map`/`filter` take the callable as FIRST positional and iterables
+        # after that. Convert Mojo iterable structs so Python's own builtin
+        # sees them as generators rather than falling through to `__getitem__`.
+        return fn(args[0], *(_mojo_iterable(a) for a in args[1:]), **kwargs)
 
 
 class _MojoScalarType:
@@ -2486,6 +3646,122 @@ def _mojo_min(*args, **kwargs):
     return _mojo_minmax(False, *args, **kwargs)
 
 
+def _mojo_iter(value):
+    """`iter(value)` for a struct that defines its own `__iter__`.
+
+    Python's `iter()` and `next()` look the protocol method up on the TYPE,
+    and `MojoInstance` only forwards attribute reads (`__getattr__`) to the
+    Mojo method table, so a Mojo struct with `__iter__`/`__next__` was not an
+    iterator here: `next(c)` raised "'MojoInstance' object is not an
+    iterator", and `for x in c` fell through to `__getitem__` and died with
+    `KeyError: 0`. The fix is to drive the Mojo protocol explicitly, the way
+    `__len__`/`__getitem__` already forward. A struct WITHOUT `__iter__`
+    keeps the old `iter()` behaviour (its `__getitem__` sequence fallback is
+    unchanged). Exhaustion is the Mojo `__next__` raising `StopIteration`,
+    which is a real Python exception, so it propagates unchanged."""
+    if isinstance(value, MojoInstance):
+        # Annotated: `value` is unannotated, so `value._mojo_class` is typed as a
+        # word unless the local says what it is; `cls.methods.get` then lowered
+        # to `mojo_dict_get_int(<int64>, ...)` (gcc: "makes pointer from integer").
+        cls: 'MojoClass' = value._mojo_class
+        method = cls.methods.get('__iter__')
+        if method is not None:
+            return _mojo_struct_iter_steps(cls, method(cls.interpreter, value))
+    return iter(value)
+
+
+def _mojo_struct_iter_steps(cls, iterator):
+    """Yield the values of a Mojo iterator object by calling its `__next__`
+    until that raises `StopIteration`. `iterator` is whatever the struct's
+    `__iter__` returned (usually `self`)."""
+    while True:
+        try:
+            yield _mojo_next(iterator)
+        except StopIteration:
+            return
+
+
+def _mojo_next(iterator, *default):
+    """`next(iterator[, default])` that also drives a Mojo struct's own
+    `__next__`. Anything that is not a `MojoInstance` goes to the builtin
+    unchanged. A struct without `__next__` is refused with CPython's own
+    message for a non-iterator."""
+    if not isinstance(iterator, MojoInstance):
+        return next(iterator, *default)
+    cls: 'MojoClass' = iterator._mojo_class
+    method = cls.methods.get('__next__')
+    if method is None:
+        raise TypeError(f"'{cls.name}' object is not an iterator")
+    if default:
+        try:
+            return method(cls.interpreter, iterator)
+        except StopIteration:
+            return default[0]
+    return method(cls.interpreter, iterator)
+
+def _mojo_reversed(value):
+    """CPython's `reversed()` only accepts objects with `__reversed__` or a
+    sequence protocol. A MojoInstance without either is refused with the
+    matching message instead of falling through to `__getitem__` and dying
+    with `KeyError: 0`."""
+    if isinstance(value, MojoInstance):
+        cls = value._mojo_class
+        if '__reversed__' in cls.methods:
+            # Call the reversed method and wrap result as an iterator
+            rev_method = cls.methods['__reversed__']
+            rev_result = rev_method(cls.interpreter, value)
+            return _mojo_iter(rev_result)
+        # Check for sequence protocol (has __len__ and __getitem__)
+        if '__len__' in cls.methods and '__getitem__' in cls.methods:
+            # CPython reversed works directly on sequences
+            return value
+        # Not reversible - raise proper TypeError matching CPython
+        raise TypeError(f"'{cls.name}' object is not reversible")
+    # For non-MojoInstance values, let CPython handle it
+    return reversed(value)
+
+
+def _mojo_iterable(value):
+    """A value handed to one of Python's own iterable-consuming builtins.
+
+    Those builtins call `iter()` on the argument, which looks `__iter__` up
+    on the TYPE, so a `MojoInstance` with a Mojo `__iter__` was not iterable
+    to them (`list(c)` fell through to `__getitem__` and died with
+    `KeyError: 0`). Such a struct is handed over as the `_mojo_iter` generator
+    instead. Anything else is returned untouched, so builtins keep their
+    exact argument semantics for every other value."""
+    if isinstance(value, MojoInstance) and '__iter__' in value._mojo_class.methods:
+        return _mojo_iter(value)
+    return value
+
+
+# Builtins that iterate their first positional argument, identified by
+# `id()` because builtins live for the whole process and an `id` test never
+# hashes the callee (a Mojo value may be unhashable). `zip` iterates every
+# positional argument; `min`/`max` iterate only when given ONE argument —
+# `max(a, b)` compares values and must not turn a struct into a generator.
+_MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
+                        id(sorted), id(enumerate), id(any), id(all), id(dict)}
+if hasattr(builtins, 'frozendict'):
+    _MOJO_ITER_FIRST_ARG.add(id(builtins.frozendict))
+_MOJO_ITER_ALL_ARGS = id(zip)
+_MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
+
+
+def _mojo_builtin_args(func, args):
+    """`args` with any Mojo iterable struct passed to `func` replaced by its
+    `_mojo_iterable` form. Only the calls `invoke` routes here are touched."""
+    key = id(func)
+    if key == _MOJO_ITER_ALL_ARGS:
+        return tuple(_mojo_iterable(a) for a in args)
+    if key in _MOJO_ITER_ONE_ARG:
+        if len(args) != 1:
+            return args
+    elif key not in _MOJO_ITER_FIRST_ARG or not args:
+        return args
+    return (_mojo_iterable(args[0]),) + tuple(args[1:])
+
+
 class _MojoSIMD:
     """Stand-in for real Mojo's `SIMD[dtype, width]` vector type. No real
     vectorization/hardware backend here — just a fixed-width list of scalars
@@ -2557,12 +3833,28 @@ class _MojoSIMDCtor:
         return _MojoSIMD(self.dtype, self.width, values)
 
 
+def _mojo_simd_width_is_valid(width):
+    """Return True if `width` is an acceptable SIMD lane count.
+
+    Mojo's SIMD vector length must be a power of two in [1, 2**15]. Non-int
+    widths (e.g. symbolic/comptime parameters not yet folded here) are not
+    rejected by this cheap interpreter-side guard. The rule itself lives in
+    `mojo.middle.simd_width`, shared with the compiled path's guard.
+    """
+    return _simd_width_is_valid(width)
+
+
 class _MojoSIMDType:
     """`SIMD[DType.float32, 4](0.0, 1.5, -42.5, -12.7)` — subscript with
     (dtype, width), call with `width` scalar values (or a single value,
     broadcast to fill every lane)."""
     def __getitem__(self, item):
         dtype, width = item
+        if not _mojo_simd_width_is_valid(width):
+            raise ValueError(
+                "SIMD vector length must be a power of two between 1 and "
+                f"2^15, found {width!r}"
+            )
         return _MojoSIMDCtor(dtype, width)
 
 
@@ -2951,7 +4243,9 @@ class _MojoSuper:
             return object.__getattribute__(self, name)
         if name in base_cls.comptime_aliases:
             return base_cls.comptime_aliases[name]
-        raise AttributeError(f"super object has no attribute '{name}'")
+        raise _tag_attribute_error(
+            AttributeError(f"super object has no attribute '{name}'"),
+            self, name)
 
 
 _AUTO_STUB_VALUE = 0
@@ -3051,8 +4345,10 @@ class _MojoModuleObject(types.SimpleNamespace):
         try:
             return self.__modvars__[name]
         except KeyError:
-            raise AttributeError(
-                f"module '{self.__modname__}' has no attribute '{name}'")
+            raise _tag_attribute_error(
+                AttributeError(
+                    f"module '{self.__modname__}' has no attribute '{name}'"),
+                self, name)
 
     def __setattr__(self, name, value):
         self.__modvars__[name] = value
@@ -3061,8 +4357,10 @@ class _MojoModuleObject(types.SimpleNamespace):
         try:
             del self.__modvars__[name]
         except KeyError:
-            raise AttributeError(
-                f"module '{self.__modname__}' has no attribute '{name}'")
+            raise _tag_attribute_error(
+                AttributeError(
+                    f"module '{self.__modname__}' has no attribute '{name}'"),
+                self, name)
 
     def __dir__(self):
         return sorted(set(self.__modvars__) | set(object.__dir__(self))
@@ -3092,12 +4390,239 @@ class _SysProxy:
     argv instead of its own — harmless for most scripts, but fatal for
     self-referential ones: `fire run fire.py help` would otherwise have the
     nested interpretation of fire.py re-read the unchanged host argv, take
-    the same branch, and re-interpret itself forever."""
+    the same branch, and re-interpret itself forever.
+
+    Encoding functions are overridden to guarantee PEP 686 semantics (UTF-8
+    is the default encoding), independent of the host Python's configuration.
+    """
     def __init__(self, argv):
         self.argv = argv
+        # `sys.lazy_modules` is the set of fully-qualified names currently
+        # bound to an unresolved PEP 810 lazy proxy. Deliberately OUR set,
+        # not the host interpreter's, since the interpreted program's lazy
+        # imports are resolved by this interpreter.
+        self.lazy_modules = _LAZY_IMPORT_STATE.lazy_modules
+
+    # PEP 810 lazy-import controls. These must be the interpreter's own
+    # state: the host `sys.set_lazy_imports` would govern the host's bytecode
+    # imports, not the imports this interpreter executes from source.
+    def set_lazy_imports(self, mode):
+        _LAZY_IMPORT_STATE.set_mode(mode)
+
+    def get_lazy_imports(self):
+        return _LAZY_IMPORT_STATE.mode
+
+    def set_lazy_imports_filter(self, func):
+        if func is not None and not callable(func):
+            raise ValueError("filter provided but is not callable")
+        _LAZY_IMPORT_STATE.filter = func
+
+    def get_lazy_imports_filter(self):
+        return _LAZY_IMPORT_STATE.filter
+
+    def getdefaultencoding(self):
+        return 'utf-8'
+
+    def getfilesystemencoding(self):
+        return 'utf-8'
+
+    def getfilesystemencodeerrors(self):
+        # POSIX default; matches CPython on the platforms this compiler
+        # targets (PEP 686 keeps surrogateescape for filesystem paths on
+        # Unix even with UTF-8 as the default encoding).
+        return 'surrogateescape'
 
     def __getattr__(self, name):
         return getattr(sys, name)
+
+
+class _TypesProxy:
+    """`import types` inside an interpreted program.
+
+    Forwards everything to the host `types` module except
+    `types.LazyImportType`, which is this interpreter's proxy class: lazy
+    imports of `.mojo` sibling modules resolve through this interpreter, so
+    the host's native lazy-import type would describe the wrong objects.
+    """
+    def __getattr__(self, name):
+        if name == 'LazyImportType':
+            return LazyImportType
+        return getattr(types, name)
+
+
+_TYPES_PROXY = _TypesProxy()
+
+
+def _sentinel_builtin():
+    """The `sentinel` builtin (Python 3.14+/3.15, PEP 661).
+
+    Returns the host's `builtins.sentinel` when available; otherwise a
+    compatible implementation: `sentinel(name, /, *, repr=None)` returns a
+    unique instance whose repr is `name` (or the custom `repr`), and
+    `isinstance(instance, sentinel)` is true.
+    """
+    host = getattr(builtins, 'sentinel', None)
+    if host is not None:
+        return host
+
+    class sentinel:
+        __slots__ = ('_name', '_repr')
+
+        def __new__(cls, name, /, *, repr=None):
+            self = object.__new__(cls)
+            self._name = name
+            self._repr = name if repr is None else repr
+            return self
+
+        def __repr__(self):
+            return self._repr
+
+        def __reduce__(self):
+            args = (self._name,)
+            if self._repr == self._name:
+                return (sentinel, args)
+            return (sentinel, args, {'repr': self._repr})
+
+    sentinel.__name__ = 'sentinel'
+    sentinel.__qualname__ = 'sentinel'
+    sentinel.__module__ = 'builtins'
+    sentinel.__doc__ = (
+        "Create a unique sentinel object.\n\n"
+        "*name* should be the name of the variable to which the return value shall be assigned.\n\n"
+        "*repr*, if supplied, will be used for the repr of the sentinel object. "
+        "If not provided, \"<name>\" will be used."
+    )
+    return sentinel
+
+
+def _frozendict_builtin():
+    """The `frozendict` builtin (Python 3.15+, PEP 814).
+
+    Returns the host's `builtins.frozendict` when available; otherwise a
+    compatible immutable mapping implementation.
+    """
+    host = getattr(builtins, 'frozendict', None)
+    if host is not None:
+        return host
+
+    class frozendict:
+        __slots__ = ('_data', '_hash')
+
+        def __new__(cls, *args, **kwargs):
+            self = object.__new__(cls)
+            self._data = dict(*args, **kwargs)
+            self._hash = None
+            return self
+
+        @classmethod
+        def fromkeys(cls, iterable, value=None):
+            return cls(dict.fromkeys(iterable, value))
+
+        def __repr__(self):
+            return f"frozendict({self._data!r})"
+
+        def __len__(self):
+            return len(self._data)
+
+        def __contains__(self, item):
+            return item in self._data
+
+        def __getitem__(self, key):
+            return self._data[key]
+
+        def __iter__(self):
+            return iter(self._data)
+
+        def __reversed__(self):
+            return reversed(self._data)
+
+        def __setitem__(self, key, value):
+            raise TypeError("'frozendict' object does not support item assignment")
+
+        def __delitem__(self, key):
+            raise TypeError("'frozendict' object does not support item deletion")
+
+        def keys(self):
+            return self._data.keys()
+
+        def values(self):
+            return self._data.values()
+
+        def items(self):
+            return self._data.items()
+
+        def get(self, key, default=None):
+            return self._data.get(key, default)
+
+        def copy(self):
+            return self
+
+        def __or__(self, other):
+            if isinstance(other, (dict, frozendict)):
+                data = dict(self._data)
+                if isinstance(other, frozendict):
+                    data.update(other._data)
+                else:
+                    data.update(other)
+                return frozendict(data)
+            return NotImplemented
+
+        def __ror__(self, other):
+            if isinstance(other, (dict, frozendict)):
+                if isinstance(other, frozendict):
+                    data = dict(other._data)
+                else:
+                    data = dict(other)
+                data.update(self._data)
+                return frozendict(data)
+            return NotImplemented
+
+        def __hash__(self):
+            if self._hash is None:
+                try:
+                    h = hash(frozenset(self._data.items()))
+                except TypeError:
+                    raise TypeError("unhashable type: 'frozendict'")
+                self._hash = h
+            return self._hash
+
+        def __eq__(self, other):
+            if isinstance(other, frozendict):
+                return self._data == other._data
+            if isinstance(other, dict):
+                return self._data == other
+            return NotImplemented
+
+    frozendict.__name__ = 'frozendict'
+    frozendict.__qualname__ = 'frozendict'
+    frozendict.__module__ = 'builtins'
+    return frozendict
+
+
+def _ascii_repr(value) -> str:
+    """CPython's `ascii(value)`: `repr(value)` with every non-ASCII code
+    point escaped as `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN`.
+
+    Spelled out here rather than calling the `ascii()` builtin for the same
+    reason `_eval_fstring_field` gives for repr/str: `ascii()` has no
+    compiled-path runtime backing, and this module is self-host-compiled.
+    The escape table is CPython's own (`repr` of a str and `ascii` differ
+    only in these escapes), and `mojo_ascii_escape` in fire_runtime.c is the
+    compiled engine's spelling of exactly this rule -- the two must agree
+    character for character."""
+    text = repr(value)
+    out = ''
+    for ch in text:
+        o = ord(ch)
+        if o < 0x80:
+            out += ch
+        elif o < 0x100:
+            out += '\\x%02x' % o
+        elif o < 0x10000:
+            out += '\\u%04x' % o
+        else:
+            out += '\\U%08x' % o
+    return out
 
 
 class Interpreter:
@@ -3116,6 +4641,18 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
+        # The one `_SysProxy` this interpreter binds `sys` to (see
+        # _setup_builtins). Kept here because imports must resolve the
+        # canonical sys module even when `lazy import sys` has temporarily
+        # rebound the name `sys` to a lazy proxy — looking it up through the
+        # scope there would re-enter the proxy's own resolve() forever.
+        self._sys_proxy = None
+        # PEP 810: mode 'all' leaves imports inside try/except blocks eager.
+        # Explicit `lazy` there is a parse error, so only mode 'all' consults
+        # this. execute_TryStmt keeps it incremented for every part of the
+        # statement (body, handlers, else, finally), matching CPython's
+        # symtable `ste_in_try_block`.
+        self._try_depth = 0
         # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
         # per-OS-thread storage for "the yield_fn of the generator whose body
         # is currently running on THIS thread" — see MojoGeneratorObject
@@ -3349,24 +4886,33 @@ class Interpreter:
             mod_interp.execute(stmt)
         return namespace
 
-    def _bind_dotted_import(self, module_name, mod):
+    def _bind_dotted_import(self, module_name, mod, scope=None):
         """`import std.sys` (no `as` alias) must bind the top-level name
         `std` and make `std.sys` resolve via chained attribute access — same
         as Python's own dotted-import binding rule. A flat bind of `std`
         straight to the `std.sys` shim namespace (the previous behavior)
-        broke `std.sys.whatever`, since there was no intermediate `.sys`."""
+        broke `std.sys.whatever`, since there was no intermediate `.sys`.
+        `scope` is supplied by a lazy import, whose statement's scope may
+        differ from the frame current at reification time."""
+        target_scope = scope if scope is not None else self.scope
         parts = module_name.split('.')
         top = parts[0]
         if len(parts) == 1:
-            self.scope.define(top, mod)
+            target_scope.define(top, mod)
             return
         try:
-            root = self.scope.get(top)
+            root = self._bind_dotted_import_lazy_safe_root(top, target_scope)
         except NameError:
+            root = None
+        if isinstance(root, LazyImportType):
+            # This dotted import's own lazy proxy is being reified right now
+            # (its resolver called us). Do not look it up through Scope.get —
+            # that would re-enter resolve() forever. It is about to be
+            # replaced by the namespace chain below.
             root = None
         if not isinstance(root, types.SimpleNamespace):
             root = types.SimpleNamespace()
-            self.scope.define(top, root)
+            target_scope.define(top, root)
         obj = root
         for p in parts[1:-1]:
             nxt = getattr(obj, p, None)
@@ -3418,9 +4964,15 @@ class Interpreter:
         self.scope.define('max', _mojo_max)
         self.scope.define('min', _mojo_min)
         self.scope.define('SIMD', _MojoSIMDType())
+        class _MojoFloatLiteralType:
+            infinity = float('inf')
+            negative_infinity = float('-inf')
+            negative_zero = float('-0.0')
+            nan = float('nan')
+        self.scope.define('FloatLiteral', _MojoFloatLiteralType)
         self.scope.define('sum', sum)
         self.scope.define('sorted', sorted)
-        self.scope.define('reversed', reversed)
+        self.scope.define('reversed', _mojo_reversed)
         self.scope.define('map', _MojoParametricFn(map, self))
         self.scope.define('filter', _MojoParametricFn(filter, self))
         self.scope.define('repr', repr)
@@ -3433,7 +4985,7 @@ class Interpreter:
         self.scope.define('chr', chr)
         self.scope.define('ord', ord)
         self.scope.define('divmod', divmod)
-        self.scope.define('next', next)
+        self.scope.define('next', _mojo_next)
         self.scope.define('index', _mojo_operator_index)
         self.scope.define('isnan', _mojo_isnan)
         self.scope.define('isinf', _mojo_isinf)
@@ -3509,11 +5061,13 @@ class Interpreter:
         # (bytes/bytearray deliberately omitted — the self-hosting codegen
         # doesn't recognize them as callable; see the String ctor note below.)
         self.scope.define('frozenset', frozenset)
+        self.scope.define('frozendict', _frozendict_builtin())
         self.scope.define('object', object)
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
+        self.scope.define('sentinel', _sentinel_builtin())
         self.scope.define('callable', callable)
-        self.scope.define('iter', iter)
+        self.scope.define('iter', _mojo_iter)
         self.scope.define('format', format)
         self.scope.define('hex', hex)
         self.scope.define('oct', oct)
@@ -3684,7 +5238,8 @@ class Interpreter:
         import tempfile
         import traceback
         self.scope.define('os', os)
-        self.scope.define('sys', _SysProxy(self.argv))
+        self._sys_proxy = _SysProxy(self.argv)
+        self.scope.define('sys', self._sys_proxy)
         self.scope.define('subprocess', subprocess)
         self.scope.define('shutil', shutil)
         self.scope.define('sysconfig', sysconfig)
@@ -3733,7 +5288,7 @@ class Interpreter:
 
         return method(node)
 
-    def execute_Module(self, node: N.Module):
+    def execute_Module(self, node):
         """Execute module (top-level statements)."""
         result = None
         for stmt in node.body:
@@ -3843,7 +5398,7 @@ class Interpreter:
         container[name] = func
         return func
 
-    def execute_FunctionDef(self, node: N.FunctionDef):
+    def execute_FunctionDef(self, node):
         """Execute function definition."""
         params = self._extract_param_names(node)
         comptime_params = getattr(node, 'comptime_params', None)
@@ -3879,6 +5434,9 @@ class Interpreter:
         'Copyable', 'Movable', 'ImplicitlyCopyable', 'ExplicitlyCopyable',
         'Writable', 'Sized', 'Boolable', 'Stringable', 'Hashable',
         'AnyType', '__allow_legacy_any_origin_fields',
+        '__allow_legacy_custom_self_type',
+        'stable', 'value', 'doc_private', 'doc_hidden', 'register_passable',
+        'trivial_register_passable', 'implicit',
     })
 
     def _apply_function_decorators(self, node, bound):
@@ -3895,7 +5453,7 @@ class Interpreter:
         undecorated body. Because the interpreter is the documented oracle
         for "the compiled path is wrong", that made the whole class of
         decorator bugs invisible — the two engines agreed on the wrong
-        answer. See bugs/COMPILE_FAIL_decorator_application_dropped.md.
+        answer. See bugs/hard/COMPILE_FAIL_decorator_application_dropped.md.
 
         Bottom-up because that is Python's order: `@a` above `@b` above
         `def f` means `f = a(b(f))`. A decorator whose application raises is
@@ -3904,6 +5462,12 @@ class Interpreter:
         """
         decs = getattr(node, 'decorators', None) or []
         for d in reversed(decs):
+            # A dataclass transform applied to one of THIS interpreter's
+            # classes (see _DATACLASS_DECORATORS): skip it rather than hand a
+            # MojoClass to CPython's dataclasses, which cannot process one.
+            if isinstance(bound, MojoClass) \
+                    and _decorator_dotted_name(d) in _DATACLASS_DECORATORS:
+                continue
             if isinstance(d, str):
                 if d in self._COMPILE_TIME_DECORATORS:
                     continue
@@ -3966,7 +5530,7 @@ class Interpreter:
                     f"applying decorator to {node.name!r} failed: {e}") from e
         return bound
 
-    def execute_StructDef(self, node: N.StructDef):
+    def execute_StructDef(self, node):
         """Execute struct/class definition.
 
         `struct Child(Base1, Base2):` — Python-style class inheritance:
@@ -3978,11 +5542,19 @@ class Interpreter:
         methods = {}
         base_names = getattr(node, 'bases', None) or []
         base_classes = []
+        python_bases = []
         merged_fields = []
         comptime_aliases = {}
         static_methods = set()
         class_methods = set()
         from_base = set()
+        class_keywords = getattr(node, 'keywords', None) or []
+        kw_dict = {}
+        for _k, _v in class_keywords:
+            try:
+                kw_dict[_k] = self.eval_expr(_v)
+            except Exception:
+                kw_dict[_k] = _v
         for base_name in base_names:
             try:
                 base_cls = self.scope.get(base_name)
@@ -3996,6 +5568,13 @@ class Interpreter:
                 static_methods.update(base_cls.static_methods)
                 class_methods.update(base_cls.class_methods)
                 from_base.update(base_cls.methods.keys())
+            elif base_cls is not None:
+                # Real Python bases (types, typing special forms such as
+                # typing.TypedDict which is a function in 3.15+, or anything
+                # else).  Preserved so a class with Python keywords (PEP 692
+                # closed= / PEP 728 extra_items=) can be created through
+                # Python's class-creation protocol below.
+                python_bases.append(base_cls)
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
@@ -4072,13 +5651,55 @@ class Interpreter:
                         except Exception:
                             pass
         fields = merged_fields + actual_fields
+        # PEP 692/728 / general Python interop: a class defined with keyword
+        # arguments (e.g. `class M(TypedDict, extra_items=bool, closed=True)`)
+        # over real Python type bases must be created through Python's class-
+        # creation protocol so the metaclass sees those keywords — the parser
+        # used to discard them (root cause of PYTHON3.15_typeddict_extra_items)
+        # and a MojoClass cannot carry a Python metaclass protocol.  Narrowly
+        # activate only for the pure-Python-base case with keywords; fall back
+        # to MojoClass on any difficulty so existing Mojo behavior is unchanged.
+        if kw_dict and python_bases and not base_classes:
+            try:
+                ns = {'__module__': getattr(self, 'module_name', None) or '__main__',
+                      '__qualname__': node.name}
+                anns = {}
+                for f in actual_fields:
+                    if self._is_instance(f, 'VarDecl') and getattr(f, 'type_ann', None) is not None:
+                        try:
+                            anns[f.name] = self.eval_expr(f.type_ann)
+                        except Exception:
+                            anns[f.name] = getattr(f, 'type_ann', None)
+                    elif self._is_instance(f, 'AssignStmt') and f.value is not None:
+                        t = f.target
+                        if self._is_instance(t, 'IdentExpr'):
+                            try:
+                                ns[t.name] = self.eval_expr(f.value)
+                            except Exception:
+                                pass
+                if anns:
+                    ns['__annotations__'] = anns
+                for k, v in comptime_aliases.items():
+                    ns.setdefault(k, v)
+
+                def _exec_body(_ns):
+                    _ns.update(ns)
+
+                cls = types.new_class(node.name, tuple(python_bases), kw_dict, _exec_body)
+                cls = self._apply_function_decorators(node, cls)
+                self.scope.define(node.name, cls)
+                return cls
+            except Exception:
+                pass
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
                          comptime_aliases=comptime_aliases, static_methods=static_methods,
-                         class_methods=class_methods, def_scope=self.scope)
+                         class_methods=class_methods, def_scope=self.scope,
+                         keywords=kw_dict)
+        cls = self._apply_function_decorators(node, cls)
         self.scope.define(node.name, cls)
         return cls
 
-    def execute_TraitDef(self, node: N.TraitDef):
+    def execute_TraitDef(self, node):
         """Traits are a compile-time/structural-typing construct (bound
         generics, elaborate.py's conformance checks) with no conformance
         enforcement here — this interpreter is dynamically typed and never
@@ -4136,14 +5757,14 @@ class Interpreter:
                 return True
             return False
 
-    def _bind_one_import(self, module: str, alias):
-        """Resolve and bind a single `import module [as alias]` target.
+    def _resolve_import_module(self, module, alias, scope=None):
+        """The value an eager `import module [as alias]` binds.
 
-        Shared by execute_ImportStmt for both the primary `module`/`alias`
-        and every extra `(module, alias)` pair from a comma-separated
-        `import a, b, c` so all targets get identical resolution logic
-        (sys special-case, sibling .mojo preference, real importlib
-        fallback) instead of only the first being handled.
+        Factored out of _bind_one_import so a lazy import can defer exactly
+        this resolution (including the sys/types proxies and the sibling
+        `.mojo` preference) to first use without a second implementation.
+        `scope` is the lexical scope a lazy statement ran in; it is only
+        needed to build a dotted sibling import's namespace chain there.
         """
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
@@ -4152,8 +5773,22 @@ class Interpreter:
         # nested interpretation of fire.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
-            self.scope.define(alias or 'sys', self.scope.get('sys'))
-            return
+            return self._sys_proxy
+        # A name with no dot in it resolves exactly as `from module import
+        # ...` does — the same sys/types proxies, the same sibling `.mojo`
+        # preference, the same real-importlib fallback, the same
+        # ModuleNotFoundError propagation (see `_resolve_from_import_module`
+        # for all three). Delegating rather than repeating that chain is not
+        # only DRY: it gives the two methods the SAME return type, which
+        # matters because `_LazyImportTarget.load` binds them to one slot.
+        # Returning `_TYPES_PROXY` (`_TypesProxy *`) beside `mod`
+        # (`_MojoModuleObject *`) made the join of this method's returns
+        # order-dependent — two distinct pointers join to the box, a pointer
+        # and the box join to the pointer — so the inferred type, and with it
+        # the C type every caller's temp is declared with, differed between
+        # inference passes while the emitted prototype kept the first one.
+        if alias or '.' not in module:
+            return self._resolve_from_import_module(module)
         # Prefer a sibling .mojo file/package over a same-named *real*
         # Python module — otherwise a coincidentally-named .py file
         # anywhere on sys.path (including this very project's own helper
@@ -4165,11 +5800,11 @@ class Interpreter:
         # name collision with an installed/local Python module.
         mod = self._load_mojo_sibling_module(module)
         if mod is not None:
-            if alias:
-                self.scope.define(alias, mod)
-            else:
-                self._bind_dotted_import(module, mod)
-            return
+            # `import a.b` binds the top-level name `a`; _bind_dotted_import
+            # builds the intermediate namespace chain (and replaces any lazy
+            # placeholder under that name rather than trying to reify it).
+            self._bind_dotted_import(module, mod, scope)
+            return (scope or self.scope).get(module.split('.')[0])
         # No sibling .mojo module and no real Python module: let
         # ModuleNotFoundError propagate as a real exception (it's a real
         # Python BaseException subclass — see execute_TryStmt /
@@ -4188,15 +5823,96 @@ class Interpreter:
         # _load_mojo_sibling_module yet. That's now handled explicitly
         # above, so by the time we reach the real importlib call, a
         # ModuleNotFoundError here always means a genuinely missing module.
-        mod = importlib.import_module(module)
-        if alias:
-            self.scope.define(alias, mod)
-        else:
-            # `import a.b` binds the top-level package name `a`.
-            top = module.split('.')[0]
-            self.scope.define(top, importlib.import_module(top))
+        imported = importlib.import_module(module)
+        # `import a.b` binds the top-level package name `a`.
+        return importlib.import_module(module.split('.')[0])
 
-    def execute_ImportStmt(self, node: N.ImportStmt):
+    def _bind_dotted_import_lazy_safe_root(self, top, scope=None):
+        """The current top-level binding for a dotted import, WITHOUT
+        reifying a lazy proxy that is resolving right now (that would
+        recurse forever: the proxy's resolver is the caller)."""
+        target_scope = scope if scope is not None else self.scope
+        if top in target_scope.vars:
+            return target_scope.vars[top]
+        return target_scope.get(top)
+
+    def _bind_one_import(self, module: str, alias):
+        """Resolve and bind a single `import module [as alias]` target.
+
+        Shared by execute_ImportStmt for both the primary `module`/`alias`
+        and every extra `(module, alias)` pair from a comma-separated
+        `import a, b, c` so all targets get identical resolution logic
+        (sys special-case, sibling .mojo preference, real importlib
+        fallback) instead of only the first being handled.
+        """
+        mod = self._resolve_import_module(module, alias)
+        self.scope.define(alias or module.split('.')[0], mod)
+
+    def _importing_module_name(self):
+        """`__name__` of the module whose source is executing — the first
+        argument CPython passes to a sys.set_lazy_imports_filter callable."""
+        try:
+            name = self.scope.get('__name__')
+        except NameError:
+            name = None
+        if isinstance(name, str) and name:
+            return name
+        return self.filename or '<input>'
+
+    def _declares_lazy_module(self, module):
+        """Whether this module's global `__lazy_modules__` names `module`.
+
+        PEP 810 checks it on imports at module scope only (measured against
+        CPython 3.15.2: a function-body import is eager even when the
+        module-level set names it), and consults `__contains__` on whatever
+        object is bound there.
+        """
+        if self.scope.parent is not None:
+            return False
+        if '__lazy_modules__' not in self.scope.vars:
+            return False
+        declared = self.scope.vars['__lazy_modules__']
+        try:
+            return module in declared
+        except TypeError:
+            return False
+
+    def _import_is_potentially_lazy(self, node, module, fromlist):
+        """Whether this import statement should bind lazy proxies.
+
+        `fromlist` is None for `import ...`, the tuple of imported names for
+        `from ... import ...`. A potentially lazy import (explicit `lazy`,
+        `__lazy_modules__`, or global mode 'all') still becomes eager under
+        the global filter callable, and mode 'all' leaves try-block imports
+        eager (CPython's symtable excludes them; explicit `lazy` there is a
+        SyntaxError, so the exclusion only ever applies to mode 'all').
+        """
+        mode = _LAZY_IMPORT_STATE.mode
+        potential = getattr(node, 'lazy', False)
+        if mode == 'all':
+            potential = True
+        if not potential and self._declares_lazy_module(module):
+            potential = True
+        if not potential:
+            return False
+        if mode == 'all' and self._try_depth > 0:
+            return False
+        if fromlist is not None and getattr(node, 'wildcard', False):
+            return False
+        flt = _LAZY_IMPORT_STATE.filter
+        if flt is not None:
+            if not flt(self._importing_module_name(), module, fromlist):
+                return False
+        return True
+
+    def _bind_lazy_import(self, module, alias):
+        target = _LazyImportTarget(self, module, alias, False, self.scope)
+        label = module
+        _LAZY_IMPORT_STATE.lazy_modules.add(module)
+        name = alias or module.split('.')[0]
+        self.scope.define(name, LazyImportType(target, label))
+
+    def execute_ImportStmt(self, node):
         """Execute `import mod` / `import mod as alias` / `import a, b, c`.
 
         The interpreter runs the AST as Python, so we resolve through Python's
@@ -4206,26 +5922,34 @@ class Interpreter:
 
         `node.extra` holds any additional comma-separated `(module, alias)`
         targets past the first (`import a, b, c`) — each gets the same
-        resolution as the primary target via _bind_one_import.
+        resolution as the primary target via _bind_one_import. A PEP 810 lazy
+        import binds a proxy for every target instead.
         """
-        self._bind_one_import(node.module, node.alias)
-        for extra_module, extra_alias in (node.extra or []):
-            self._bind_one_import(extra_module, extra_alias)
+        targets = [(node.module, node.alias)]
+        targets.extend(node.extra or [])
+        for module, alias in targets:
+            if self._import_is_potentially_lazy(node, module, None):
+                self._bind_lazy_import(module, alias)
+            else:
+                self._bind_one_import(module, alias)
         return None
 
-    def execute_FromImportStmt(self, node: N.FromImportStmt):
-        """Execute `from mod import a, b as c` / `from mod import *`."""
+    def _resolve_from_import_module(self, module):
+        """The module object `from module import ...` fetches names from."""
         # See execute_ImportStmt: keep the isolated-argv sys proxy, don't
         # pull attributes off the real sys module.
-        if node.module == 'sys':
-            mod = self.scope.get('sys')
-        elif node.module.startswith('.'):
+        if module == 'sys':
+            return self._sys_proxy
+        if module == 'types':
+            return _TYPES_PROXY
+        if module.startswith('.'):
             # Relative import (`from .compare_helpers import X`, inside a
             # package's __init__.mojo) — resolve relative to current module's directory.
-            rel_module = node.module.lstrip('.')
+            mod = None
+            rel_module = module.lstrip('.')
             if self.filename:
                 base_dir = os.path.dirname(os.path.abspath(self.filename))
-                level = len(node.module) - len(node.module.lstrip('.'))
+                level = len(module) - len(module.lstrip('.'))
                 base_dir = base_dir
                 for _ in range(level - 1):
                     base_dir = os.path.dirname(base_dir)
@@ -4238,38 +5962,86 @@ class Interpreter:
                         pkg_path = os.path.join(base_dir, rel_module.replace('.', os.sep), '__init__.mojo')
                         if os.path.isfile(pkg_path):
                             mod = self._load_mojo_module_from_path(pkg_path)
+            return mod
+        # Prefer a sibling .mojo file/package over a same-named *real*
+        # Python module — see execute_ImportStmt for why (a coincidental
+        # same-named .py file on sys.path, e.g. this project's own
+        # lexer.py, would otherwise silently shadow the .mojo file the
+        # source obviously meant).
+        mod = self._load_mojo_sibling_module(module)
+        if mod is None:
+            # See _bind_one_import: don't swallow ModuleNotFoundError —
+            # let it propagate as a real exception so an enclosing
+            # `except ImportError:` in the interpreted program (the
+            # extremely common `try: from _fast import * \n except
+            # ImportError: from _pure import *` idiom) actually fires,
+            # instead of the try silently continuing with nothing bound.
+            mod = importlib.import_module(module)
+        return mod
+
+    def _resolve_from_import_name(self, mod, module, name):
+        """Fetch one `from module import name` binding from `mod`."""
+        _missing = object()
+        value = getattr(mod, name, _missing)
+        if value is _missing:
+            # `from package import submodule`: a submodule of a package is
+            # not necessarily set as an attribute of the package until it
+            # has been imported (e.g. Python 3.15's `profiling` exposes
+            # `tracing`/`sampling` as submodules). Resolve it the way
+            # Python does, by importing the fully-qualified submodule, so
+            # `from profiling import tracing` binds the real module rather
+            # than an auto-stub. Only attempted for host/Python module
+            # objects with a resolvable name; fall through to the stub on
+            # any import failure.
+            base = getattr(mod, '__name__', None) or (module if not module.startswith('.') else None)
+            if base:
+                try:
+                    value = importlib.import_module(f"{base}.{name}")
+                except Exception:
+                    value = _AutoStubValue(_AUTO_STUB_VALUE)
+            else:
+                value = _AutoStubValue(_AUTO_STUB_VALUE)
+        elif value is None:
+            # Keep the historical fallback: `getattr(mod, name, None)`
+            # previously collapsed "missing" and "present but None" into a
+            # stub. Preserve that for present-but-None to avoid changing
+            # unrelated behavior; the missing case above now resolves
+            # package submodules before stubbing.
+            value = _AutoStubValue(_AUTO_STUB_VALUE)
+        return value
+
+    def execute_FromImportStmt(self, node):
+        """Execute `from mod import a, b as c` / `from mod import *`."""
+        if node.wildcard:
+            mod = self._resolve_from_import_module(node.module)
             if mod is None:
                 return None
-        else:
-            # Prefer a sibling .mojo file/package over a same-named *real*
-            # Python module — see execute_ImportStmt for why (a coincidental
-            # same-named .py file on sys.path, e.g. this project's own
-            # lexer.py, would otherwise silently shadow the .mojo file the
-            # source obviously meant).
-            mod = self._load_mojo_sibling_module(node.module)
-            if mod is None:
-                # See _bind_one_import: don't swallow ModuleNotFoundError —
-                # let it propagate as a real exception so an enclosing
-                # `except ImportError:` in the interpreted program (the
-                # extremely common `try: from _fast import * \n except
-                # ImportError: from _pure import *` idiom) actually fires,
-                # instead of the try silently continuing with nothing bound.
-                mod = importlib.import_module(node.module)
-        if node.wildcard:
             names = getattr(mod, '__all__', None)
             if names is None:
                 names = [n for n in dir(mod) if not n.startswith('_')]
             for name in names:
                 self.scope.define(name, getattr(mod, name))
             return None
+        fromlist = tuple(name for name, _alias in node.names)
+        if self._import_is_potentially_lazy(node, node.module, fromlist):
+            target = _LazyImportTarget(self, node.module, None, True, self.scope)
+            _LAZY_IMPORT_STATE.lazy_modules.add(node.module)
+            for name, alias in node.names:
+                _LAZY_IMPORT_STATE.lazy_modules.add(node.module + '.' + name)
+                label = node.module + '.' + name
+                self.scope.define(alias or name,
+                                  LazyImportType(target, label, from_name=name))
+            return None
+        mod = self._resolve_from_import_module(node.module)
+        if mod is None:
+            return None
         for name, alias in node.names:
-            value = getattr(mod, name, None)
-            if value is None:
-                value = _AutoStubValue(_AUTO_STUB_VALUE)
-            self.scope.define(alias or name, value)
+            self.scope.define(alias or name,
+                              self._resolve_from_import_name(mod, node.module, name))
         return None
 
-    def execute_AssignStmt(self, node: N.AssignStmt):
+
+    def execute_AssignStmt(self, node):
         """Execute assignment statement."""
         value = self.eval_expr(node.value)
         # Handle both 'targets' (list) and 'target' (single) for compatibility
@@ -4281,7 +6053,7 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
-    def execute_MultiAssignStmt(self, node: N.MultiAssignStmt):
+    def execute_MultiAssignStmt(self, node):
         """Chained assignment `a = b = c = expr`: evaluate the RHS once and
         bind every target to it (was "No handler for MultiAssignStmt" — hit by
         ctypes/wintypes.py, tkinter/constants.py)."""
@@ -4290,7 +6062,7 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
-    def execute_DelStmt(self, node: N.DelStmt):
+    def execute_DelStmt(self, node):
         """`del a`, `del a, b`, `del d["k"]`, `del obj.attr` (was "name
         'del' is not defined" — hit by compression/bz2.py, lzma.py,
         gzip.py, zlib.py, which all do `del <modname>` after a
@@ -4387,7 +6159,7 @@ class Interpreter:
             return bool(value)
         return value
 
-    def execute_VarDecl(self, node: N.VarDecl):
+    def execute_VarDecl(self, node):
         """Execute variable declaration."""
         if node.value is None and ',' not in node.name:
             # A `List`/`Dict`/`Set` local with no initializer is an empty
@@ -4557,28 +6329,169 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(target)}Cannot assign to {type(target).__name__}")
 
-    def execute_ReturnStmt(self, node: N.ReturnStmt):
+    def execute_ReturnStmt(self, node):
         """Execute return statement."""
         value = self.eval_expr(node.value) if hasattr(node, 'value') and node.value is not None else None
         raise ReturnValue(value)
 
-    def execute_IfStmt(self, node: N.IfStmt):
+    def execute_IfStmt(self, node):
         """Execute if statement."""
-        cond = self.eval_expr(node.condition)
-        if cond:
-            for stmt in node.then_body:
-                self.execute(stmt)
+        cond = node.condition
+        # Handle MatchCaseIf
+        if hasattr(cond, '__class__') and cond.__class__.__name__ == 'MatchCaseIf':
+            pattern = cond.pattern
+            value = self.eval_expr(cond.value)
+            matched = False
+            # Try to match pattern against value
+            matched = self._match_if_pattern(pattern, value)
+            if matched:
+                for stmt in node.then_body:
+                    self.execute(stmt)
+                return None
         else:
-            if node.elifs:
-                for elif_cond, elif_body in node.elifs:
-                    if self.eval_expr(elif_cond):
+            cond_val = self.eval_expr(cond)
+            if cond_val:
+                for stmt in node.then_body:
+                    self.execute(stmt)
+                return None
+        # elifs
+        if node.elifs:
+            for elif_cond, elif_body in node.elifs:
+                if hasattr(elif_cond, '__class__') and elif_cond.__class__.__name__ == 'MatchCaseIf':
+                    pattern = elif_cond.pattern
+                    value = self.eval_expr(elif_cond.value)
+                    if self._match_if_pattern(pattern, value):
                         for stmt in elif_body:
                             self.execute(stmt)
                         return None
-            if node.else_body:
-                for stmt in node.else_body:
-                    self.execute(stmt)
+                    continue
+                if self.eval_expr(elif_cond):
+                    for stmt in elif_body:
+                        self.execute(stmt)
+                    return None
+        if node.else_body:
+            for stmt in node.else_body:
+                self.execute(stmt)
         return None
+    
+    def _match_if_pattern(self, pattern, value):
+        # Try to match patterns like .Some(x), [a,b,c], etc.
+        try:
+            CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned', 'imm'}
+            # Check for CallExpr style pattern like .Some(x)
+            if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
+                return True
+            if self._is_instance(pattern, 'CallExpr'):
+                class_obj = None
+                try:
+                    class_obj = self.eval_expr(pattern.func)
+                except Exception:
+                    pass
+                args = getattr(pattern, 'args', []) or []
+                CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned', 'imm'}
+                try:
+                    if isinstance(class_obj, type) and isinstance(value, class_obj):
+                        match_args = getattr(class_obj, '__match_args__', ()) or ()
+                        if args:
+                            if match_args:
+                                for i, subpat in enumerate(args):
+                                    attr_name = match_args[i] if i < len(match_args) else None
+                                    if attr_name is None:
+                                        continue
+                                    attr_val = getattr(value, attr_name)
+                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name in CONV_KWS:
+                                        if i+1 < len(args):
+                                            binding = args[i+1]
+                                            if self._is_instance(binding, 'IdentExpr') and binding.name != '_':
+                                                try:
+                                                    self.scope.define(binding.name, attr_val)
+                                                except Exception:
+                                                    try:
+                                                        self.scope.set(binding.name, attr_val)
+                                                    except Exception:
+                                                        pass
+                                        continue
+                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and subpat.name not in CONV_KWS:
+                                        try:
+                                            self.scope.define(subpat.name, attr_val)
+                                        except Exception:
+                                            try:
+                                                self.scope.set(subpat.name, attr_val)
+                                            except Exception:
+                                                pass
+                                return True
+                            else:
+                                for i, subpat in enumerate(args):
+                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name in CONV_KWS:
+                                        if i+1 < len(args):
+                                            binding = args[i+1]
+                                            if self._is_instance(binding, 'IdentExpr') and binding.name != '_':
+                                                try:
+                                                    # Try to get first attr
+                                                    attrs = [a for a in dir(value) if not a.startswith('_')]
+                                                    if attrs:
+                                                        attr_val = getattr(value, attrs[0])
+                                                    else:
+                                                        attr_val = value
+                                                    self.scope.define(binding.name, attr_val)
+                                                except Exception:
+                                                    pass
+                                        continue
+                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and subpat.name not in CONV_KWS:
+                                        try:
+                                            attrs = [a for a in dir(value) if not a.startswith('_')]
+                                            if attrs:
+                                                attr_val = getattr(value, attrs[0])
+                                            else:
+                                                attr_val = value
+                                            self.scope.define(subpat.name, attr_val)
+                                        except Exception:
+                                            pass
+                                return True
+                        return True
+                except Exception:
+                    pass
+            # Try member access pattern like .Some
+            if self._is_instance(pattern, 'MemberExpr') and pattern.obj is None:
+                # Could be .Some variant
+                try:
+                    # Look up in value's type or compare
+                    pass
+                except Exception:
+                    pass
+            # List/array pattern
+            if self._is_instance(pattern, 'ListExpr') or self._is_instance(pattern, 'TupleExpr') or self._is_instance(pattern, 'TupleLiteral'):
+                try:
+                    elements = getattr(pattern, 'elements', []) or []
+                    if isinstance(value, (list, tuple)) and len(elements) == len(value):
+                        for pe, ve in zip(elements, value):
+                            if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
+                                continue
+                            elif self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
+                                self.scope.define(pe.name, ve)
+                                continue
+                            elif self._is_instance(pe, 'DottedLiteral'):
+                                try:
+                                    if self.eval_expr(pe) == ve:
+                                        continue
+                                    else:
+                                        return False
+                                except Exception:
+                                    pass
+                            elif self.eval_expr(pe) != ve:
+                                return False
+                        return True
+                except Exception:
+                    pass
+            # For other patterns, try equality
+            try:
+                pval = self.eval_expr(pattern)
+                return pval == value
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return False
 
     def execute_MatchStmt(self, node):
         """`match subject: case p1: ... case p2, p3: ... case _: ...`
@@ -4596,9 +6509,235 @@ class Interpreter:
         for match_case in node.cases:
             matched = False
             for pattern in match_case.patterns:
-                if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
-                    matched = True
+                # Handle case == patterns (stored as rhs of comparison)
+                try:
+                    if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
+                        matched = True
+                        break
+                    # Try structural tuple/list match
+                    if self._is_instance(pattern, 'TupleExpr') or self._is_instance(pattern, 'TupleLiteral') or self._is_instance(pattern, 'ListExpr'):
+                        elements = getattr(pattern, 'elements', []) or []
+                        # Get subject elements
+                        subj_elems = None
+                        if isinstance(subject, (tuple, list)):
+                            subj_elems = subject
+                        elif hasattr(subject, '__iter__') and not isinstance(subject, str):
+                            try:
+                                subj_elems = list(subject)
+                            except Exception:
+                                pass
+                        if subj_elems is not None:
+                            elements = list(elements)
+                            # check for star
+                            star_i = None
+                            for _si, _se in enumerate(elements):
+                                if self._is_instance(_se, 'UnaryOp') and getattr(_se, 'op', None) == '*':
+                                    star_i = _si
+                                    break
+                            if star_i is not None:
+                                before = elements[:star_i]
+                                after = elements[star_i+1:]
+                                if len(subj_elems) >= len(before) + len(after):
+                                    all_match = True
+                                    for pe, se in zip(before, subj_elems[:len(before)]):
+                                        if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
+                                            continue
+                                        if self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
+                                            self.scope.define(pe.name, se)
+                                            continue
+                                        if self._is_instance(pe, 'DottedLiteral'):
+                                            try:
+                                                pval = self.eval_expr(pe)
+                                                if pval != se and str(pval) != str(se):
+                                                    all_match = False
+                                                    break
+                                                continue
+                                            except Exception:
+                                                pass
+                                        try:
+                                            pval = self.eval_expr(pe)
+                                            if pval != se and str(pval) != str(se):
+                                                all_match = False
+                                                break
+                                            continue
+                                        except Exception:
+                                            pass
+                                        all_match = False
+                                        break
+                                    if all_match:
+                                        rest_start = len(before)
+                                        rest_end = len(subj_elems) - len(after)
+                                        rest = list(subj_elems[rest_start:rest_end])
+                                        star_t = elements[star_i].operand
+                                        if self._is_instance(star_t, 'IdentExpr') and star_t.name != '_':
+                                            if not self.scope.has(star_t.name):
+                                                self.scope.define(star_t.name, rest)
+                                            else:
+                                                try:
+                                                    self.scope.set(star_t.name, rest)
+                                                except Exception:
+                                                    self.scope.define(star_t.name, rest)
+                                        for pe, se in zip(after, subj_elems[rest_end:]):
+                                            if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
+                                                continue
+                                            if self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
+                                                self.scope.define(pe.name, se)
+                                                continue
+                                            if self._is_instance(pe, 'DottedLiteral'):
+                                                try:
+                                                    pval = self.eval_expr(pe)
+                                                    if pval != se and str(pval) != str(se):
+                                                        all_match = False
+                                                        break
+                                                    continue
+                                                except Exception:
+                                                    pass
+                                            try:
+                                                pval = self.eval_expr(pe)
+                                                if pval != se and str(pval) != str(se):
+                                                    all_match = False
+                                                    break
+                                                continue
+                                            except Exception:
+                                                pass
+                                            all_match = False
+                                            break
+                                else:
+                                    all_match = False
+                            elif len(elements) == len(subj_elems):
+                                all_match = True
+                                for pe, se in zip(elements, subj_elems):
+                                    if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
+                                        continue
+                                    if self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
+                                        self.scope.define(pe.name, se)
+                                        continue
+                                    if self._is_instance(pe, 'DottedLiteral'):
+                                        try:
+                                            pval = self.eval_expr(pe)
+                                            if pval != se and str(pval) != str(se):
+                                                all_match = False
+                                                break
+                                            continue
+                                        except Exception:
+                                            pass
+                                    try:
+                                        pval = self.eval_expr(pe)
+                                        if pval != se and str(pval) != str(se):
+                                            all_match = False
+                                            break
+                                        continue
+                                    except Exception:
+                                        pass
+                                    all_match = False
+                                    break
+                            else:
+                                all_match = False
+                            if all_match:
+                                matched = True
+                                break
+                    # Try equality match (handles case == style)
+                    try:
+                        pval = self.eval_expr(pattern)
+                        if pval == subject or str(pval) == str(subject):
+                            matched = True
+                            break
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                if matched:
                     break
+                if self._is_instance(pattern, 'DottedLiteral'):
+                    try:
+                        pval = self.eval_expr(pattern)
+                        if getattr(pval, '_is_some', False) or getattr(type(pval), '__name__', '') == 'Some':
+                            matched = True
+                            break
+                        if getattr(pval, '_is_none', False) or getattr(type(pval), '__name__', '') == 'NoneType' or value is None:
+                            if value is None or getattr(value, '_is_none', False):
+                                matched = True
+                                break
+                            try:
+                                if value is None or str(value) == 'None':
+                                    matched = True
+                                    break
+                            except Exception:
+                                pass
+                            continue
+                    except Exception:
+                        pass
+                if self._is_instance(pattern, 'CallExpr'):
+                    try:
+                        func = pattern.func
+                        if self._is_instance(func, 'DottedLiteral'):
+                            if func.path == 'Some':
+                                matched = True
+                                args = getattr(pattern, 'args', []) or []
+                                if args:
+                                    try:
+                                        if isinstance(value, object) and hasattr(value, '_value'):
+                                            payload = value._value
+                                        elif hasattr(value, 'value'):
+                                            payload = getattr(value, 'value')
+                                            if callable(payload):
+                                                try:
+                                                    payload = payload()
+                                                except Exception:
+                                                    pass
+                                        else:
+                                            payload = value
+                                        CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
+                                        bound = False
+                                        for i, subpat in enumerate(args):
+                                            if self._is_instance(subpat, 'IdentExpr') and subpat.name in CONV:
+                                                if i+1 < len(args):
+                                                    b = args[i+1]
+                                                    if self._is_instance(b, 'IdentExpr') and b.name != '_':
+                                                        try:
+                                                            self.scope.define(b.name, payload)
+                                                        except Exception:
+                                                            try:
+                                                                self.scope.set(b.name, payload)
+                                                            except Exception:
+                                                                pass
+                                                        bound = True
+                                                break
+                                            if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and subpat.name not in CONV:
+                                                try:
+                                                    self.scope.define(subpat.name, payload)
+                                                except Exception:
+                                                    try:
+                                                        self.scope.set(b.name, payload)
+                                                    except Exception:
+                                                        try:
+                                                            # force set
+                                                            self.scope._current[b.name] = payload
+                                                        except Exception:
+                                                            pass
+                                                bound = True
+                                                break
+                                        if not bound and args and self._is_instance(args[0], 'IdentExpr') and args[0].name != '_':
+                                            try:
+                                                self.scope.define(args[0].name, payload)
+                                            except Exception:
+                                                try:
+                                                    self.scope.set(args[0].name, payload)
+                                                except Exception:
+                                                    try:
+                                                        self.scope._current[args[0].name] = payload
+                                                    except Exception:
+                                                        pass
+                                    except Exception:
+                                        pass
+                                break
+                            if func.path == 'None':
+                                if value is None or getattr(value, '_is_none', False):
+                                    matched = True
+                                    break
+                                continue
+                    except Exception:
+                        pass
                 if self._is_instance(pattern, 'IdentExpr') and not self.scope.has(pattern.name):
                     # Bare name that isn't an already-defined constant: a
                     # PEP 634 capture pattern, not a switch-style equality
@@ -4676,20 +6815,35 @@ class Interpreter:
         """`comptime if cond: ... elif ...: ... else: ...` — the interpreter
         doesn't do compile-time branch elimination, so this just evaluates
         like a regular runtime if/elif/else."""
-        cond = self.eval_expr(node.condition)
-        if cond:
+        cond = node.condition
+        matched_main = False
+        if hasattr(cond, '__class__') and cond.__class__.__name__ == 'MatchCaseIf':
+            pattern = cond.pattern
+            value = self.eval_expr(cond.value)
+            matched_main = bool(self._match_if_pattern(pattern, value))
+        else:
+            matched_main = bool(self.eval_expr(cond))
+        if matched_main:
             for stmt in node.then_body:
                 self.execute(stmt)
-        else:
-            if node.elifs:
-                for elif_cond, elif_body in node.elifs:
-                    if self.eval_expr(elif_cond):
+            return None
+        if node.elifs:
+            for elif_cond, elif_body in node.elifs:
+                if hasattr(elif_cond, '__class__') and elif_cond.__class__.__name__ == 'MatchCaseIf':
+                    pattern = elif_cond.pattern
+                    value = self.eval_expr(elif_cond.value)
+                    if self._match_if_pattern(pattern, value):
                         for stmt in elif_body:
                             self.execute(stmt)
                         return None
-            if node.else_body:
-                for stmt in node.else_body:
-                    self.execute(stmt)
+                    continue
+                if self.eval_expr(elif_cond):
+                    for stmt in elif_body:
+                        self.execute(stmt)
+                    return None
+        if node.else_body:
+            for stmt in node.else_body:
+                self.execute(stmt)
         return None
 
     def execute_ComptimeVarStmt(self, node):
@@ -4700,7 +6854,7 @@ class Interpreter:
         self.scope.define(node.target, value)
         return value
 
-    def execute_WhileStmt(self, node: N.WhileStmt):
+    def execute_WhileStmt(self, node):
         """Execute while statement."""
         while self.eval_expr(node.condition):
             try:
@@ -4712,7 +6866,7 @@ class Interpreter:
                 continue
         return None
 
-    def execute_ForStmt(self, node: N.ForStmt):
+    def execute_ForStmt(self, node):
         """Execute for statement."""
         if getattr(node, 'is_async', False):
             # `async for` — ForStmt.is_async (see fire_compiler.py's
@@ -4738,7 +6892,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in iterable:
+        for value in _mojo_iter(iterable):
             # node.target is always a plain string from fire_compiler.py's
             # _parse_for (possibly comma-joined for tuple unpacking, e.g.
             # "op, i" or "(op, i)"), never an Expr node or list — was
@@ -4766,7 +6920,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in iterable:
+        for value in _mojo_iter(iterable):
             self._bind_comprehension_target(node.target, value)
             try:
                 for stmt in node.body:
@@ -4777,11 +6931,11 @@ class Interpreter:
                 continue
         return None
 
-    def execute_ExprStmt(self, node: N.ExprStmt):
+    def execute_ExprStmt(self, node):
         """Execute expression statement."""
         return self.eval_expr(node.value)
 
-    def execute_PassStmt(self, node: N.PassStmt):
+    def execute_PassStmt(self, node):
         """Execute pass statement."""
         return None
 
@@ -4790,7 +6944,11 @@ class Interpreter:
         cond = self.eval_expr(node.value)
         if not cond:
             msg = self.eval_expr(node.msg) if getattr(node, 'msg', None) is not None else None
-            raise AssertionError(f"{self._loc(node)}{msg if msg is not None else 'assert failed'}")
+            # Same `Assert Error: ` prefix the compiled path prints
+            # (mojo/backend_gimple/emit_stmts.py, the assert trap), so the
+            # modular `assert_failure_message.mojo` CHECK line holds on both.
+            text = msg if msg is not None else 'assert failed'
+            raise AssertionError(f"{self._loc(node)}Assert Error: {text}")
         return None
 
     def execute_NonlocalStmt(self, node):
@@ -4821,11 +6979,11 @@ class Interpreter:
             self.global_vars.update(node.names)
         return None
 
-    def execute_BreakStmt(self, node: N.BreakStmt):
+    def execute_BreakStmt(self, node):
         """Execute break statement."""
         raise BreakException()
 
-    def execute_ContinueStmt(self, node: N.ContinueStmt):
+    def execute_ContinueStmt(self, node):
         """Execute continue statement."""
         raise ContinueException()
 
@@ -4859,7 +7017,7 @@ class Interpreter:
             return method(obj._mojo_class.interpreter, obj, *args)
         return getattr(obj, name)(*args)
 
-    def execute_WithStmt(self, node: N.WithStmt):
+    def execute_WithStmt(self, node):
         """Execute with statement."""
         if getattr(node, 'is_async', False):
             # `async with` — WithStmt.is_async (see fire_compiler.py's
@@ -4936,7 +7094,12 @@ class Interpreter:
         if node.value is None:
             raise
         value = self.eval_expr(node.value)
-        if isinstance(value, BaseException):
+        # A real exception CLASS (`raise StopIteration`) is raised the way
+        # Python raises it — instantiated and propagated — not stashed as a
+        # Mojo value, which left `raise StopIteration` unable to end a
+        # user-defined `__next__` (the iterator protocol's exhaustion signal).
+        if isinstance(value, BaseException) or (
+                isinstance(value, type) and issubclass(value, BaseException)):
             raise value
         self._raised_mojo_value = value
         raise MojoRaisedException()
@@ -4979,8 +7142,21 @@ class Interpreter:
         except TypeError:
             return False
 
-    def execute_TryStmt(self, node: N.TryStmt):
-        """Execute try statement."""
+    def execute_TryStmt(self, node):
+        """Execute try statement.
+
+        The PEP 810 try-block context is held for the WHOLE statement (the
+        same region CPython's symtable marks `ste_in_try_block`), so a mode
+        'all' import in a handler/else/finally is eager too.
+        """
+        self._try_depth += 1
+        try:
+            return self._execute_try_stmt_inner(node)
+        finally:
+            self._try_depth -= 1
+
+    def _execute_try_stmt_inner(self, node):
+        """execute_TryStmt body — see that method's docstring."""
         try:
             for stmt in node.body:
                 self.execute(stmt)
@@ -5085,14 +7261,14 @@ class Interpreter:
 
         return method(expr)
 
-    def eval_FunctionType(self, expr: N.FunctionType):
+    def eval_FunctionType(self, expr):
         """A comptime function-type alias survives as a signature node.
         At runtime it cannot be evaluated, but that's okay for the regression
         test which only needs the alias to be something other than _comptime_expr.
         """
         return expr  # Return the node itself as a value
 
-    def eval_WalrusExpr(self, expr: N.WalrusExpr):
+    def eval_WalrusExpr(self, expr):
         """Walrus `(name := value)`: evaluate value, bind name in the current
         scope, and return the value (was "No handler for WalrusExpr" — hit by
         _pyrepl/trace.py)."""
@@ -5100,7 +7276,7 @@ class Interpreter:
         self.scope.define(expr.name, value)
         return value
 
-    def eval_LambdaExpr(self, expr: N.LambdaExpr):
+    def eval_LambdaExpr(self, expr):
         """`lambda <params>: <expr>` — an anonymous function. Returns a
         MojoFunction whose body is the single statement `return <expr>` and
         whose closure scope is the scope in effect where the lambda appears,
@@ -5141,7 +7317,7 @@ class Interpreter:
             raise SyntaxError(f"{self._loc(expr)}'yield'/'await' outside a generator/coroutine function")
         return fn
 
-    def eval_YieldExpr(self, expr: N.YieldExpr):
+    def eval_YieldExpr(self, expr):
         """`yield` / `yield expr`. Suspends the CURRENT thread (this Mojo
         generator's own dedicated worker thread — see MojoGeneratorObject)
         by calling that generator's `yield_fn`, which blocks until the
@@ -5151,7 +7327,7 @@ class Interpreter:
         value = self.eval_expr(expr.value) if expr.value is not None else None
         return self._current_yield_fn(expr)(value)
 
-    def eval_YieldFromExpr(self, expr: N.YieldFromExpr):
+    def eval_YieldFromExpr(self, expr):
         """`yield from <expr>` — delegating yield. If the delegated source
         is itself another Mojo generator, drive it via its own `.send()`/
         `.throw()`/`.close()` protocol so its `MojoGeneratorObject.
@@ -5188,7 +7364,7 @@ class Interpreter:
                     return source.return_value
                 sent = yield_fn(value)
 
-    def eval_AwaitExpr(self, expr: N.AwaitExpr):
+    def eval_AwaitExpr(self, expr):
         """`await <expr>` — Milestone 3b. Evaluates the awaited expression,
         then drives it via `_RealAwaitStep` regardless of what kind of
         awaitable it turned out to be: a `MojoCoroutine` (Mojo-await-Mojo),
@@ -5229,33 +7405,53 @@ class Interpreter:
         yield_fn = self._current_yield_fn(expr)
         return yield_fn(_RealAwaitStep(it))
 
-    def eval_EllipsisLiteral(self, expr: N.EllipsisLiteral):
+    def eval_EllipsisLiteral(self, expr):
         """The `...` literal — Python's Ellipsis singleton (was "No handler for
         EllipsisLiteral" — hit by tomllib/_types.py)."""
         return Ellipsis
 
-    def eval_DottedLiteral(self, expr: N.DottedLiteral):
-        """A dot-relative value reference (`.always`, `.uint64`).
-
-        The reference omits the type it belongs to, so it has no meaning on its
-        own — it resolves only against the type the surrounding position
-        supplies, which this interpreter does not infer. Refusing with the path
-        named is deliberate: the alternatives are worse. Looking the path up as
-        an ordinary identifier reports a `NameError` for a name the source
-        never wrote, and returning None would make the program run and print a
-        wrong answer.
-
-        The compiled backend takes the same view but has a use for the value —
-        it lowers the reference to the same zero placeholder the spelled-out
-        form (`DType.uint64`) already produces there — so a module using this
-        can still be transpiled; it just cannot be interpreted.
-        """
+    def eval_DottedLiteral(self, expr):
+        """A dot-relative value reference (`.always`, `.uint64`)."""
+        # Try to resolve as a variant/enum case
+        try:
+            # Look up in scope for common enum/variant constructors
+            name = expr.path
+            # Try to find as attribute of known types or just return a marker
+            # For Optional/Some/None patterns, try to construct
+            if name in ('Some', 'None'):
+                # Return a simple object representing the variant
+                class Variant:
+                    def __init__(self, name, *args):
+                        self._name = name
+                        self.args = args
+                    def __repr__(self):
+                        return f'.{name}{args}'
+                # But we need to know if it's Some with args - this is tricky
+                # For pattern matching, return a callable or special marker
+                if name == 'Some':
+                    def Some(*args):
+                        obj = object.__new__(type('Some', (), {}))
+                        obj._is_some = True
+                        obj._value = args[0] if args else None
+                        return obj
+                    return Some
+                elif name == 'None':
+                    obj = object.__new__(type('None', (), {}))
+                    obj._is_none = True
+                    return obj
+            # Try to look up as a global
+            try:
+                return self.scope.get(name)
+            except Exception:
+                pass
+        except Exception:
+            pass
         raise NotImplementedError(
             f"{self._loc(expr)}cannot resolve the dot-relative value "
             f"'.{expr.path}': it names a variant of a type this interpreter "
             f"does not infer, and the source omits which type that is")
 
-    def eval_IdentExpr(self, expr: N.IdentExpr):
+    def eval_IdentExpr(self, expr):
         """Evaluate identifier."""
         if expr.name == 'super':
             # `super` is only real Python-style base-class magic when
@@ -5278,7 +7474,13 @@ class Interpreter:
         try:
             return self.scope.get(expr.name)
         except NameError:
-            raise NameError(f"{self._loc(expr)}name '{expr.name}' is not defined")
+            # Re-raise with the source location, tagged like the original:
+            # scope.get raises through _tag_name_error (name/candidates/
+            # self_obj), and this new exception must carry the same fields
+            # for CPython 3.15's print-time NameError suggestion.
+            raise _tag_name_error(
+                NameError(f"{self._loc(expr)}name '{expr.name}' is not defined"),
+                self.scope, expr.name)
 
     def _resolve_Self(self, expr):
         """Resolve Self to the current struct type (when inside a struct method)."""
@@ -5290,7 +7492,7 @@ class Interpreter:
             pass
         return _MojoSelfType()
 
-    def _eval_super(self, expr: N.IdentExpr):
+    def _eval_super(self, expr):
         """Split out of eval_IdentExpr: returning a `_MojoSuper` instance
         from the same function as the plain `self.scope.get(expr.name)`
         path corrupted the self-hosted compiler's type inference for
@@ -5304,22 +7506,22 @@ class Interpreter:
                 return _MojoSuper(cls.bases[0], self_val, self)
         raise NameError(f"{self._loc(expr)}'super' used outside of struct method with a base class")
 
-    def eval_IntLiteral(self, expr: N.IntLiteral):
+    def eval_IntLiteral(self, expr):
         """Evaluate integer literal."""
         return expr.value
 
-    def eval_FloatLiteral(self, expr: N.FloatLiteral):
+    def eval_FloatLiteral(self, expr):
         """Evaluate float literal."""
         return expr.value
 
-    def eval_ImagLiteral(self, expr: N.ImagLiteral):
+    def eval_ImagLiteral(self, expr):
         """Evaluate a Python-style imaginary-number literal (`0j`, `1.5j`).
         `expr.value` is the magnitude before the implicit multiply-by-i
         (e.g. 2.5 for `2.5j`), so the literal itself is purely imaginary:
         `2.5j` -> MojoComplex(real=0.0, imag=2.5)."""
         return MojoComplex(0.0, expr.value)
 
-    def eval_StringLiteral(self, expr: N.StringLiteral):
+    def eval_StringLiteral(self, expr):
         """Evaluate string literal."""
         value = expr.value
         if getattr(expr, 'is_bytes', False):
@@ -5489,8 +7691,14 @@ class Interpreter:
         # and silently fail once compiled.
         expr_text, conv, spec = self._split_fstring_field(field)
         value = self._eval_fstring_expr(expr_text)
-        if conv == 'r' or conv == 'a':
+        if conv == 'r':
             text = repr(value)
+        elif conv == 'a':
+            # `!a` is ascii(), NOT repr(): repr leaves non-ASCII code points
+            # raw, so `f"{'héllo'!a}"` used to print the same unquoted text
+            # as `!s` here. The compiled engines have the same rule via
+            # mojo_ascii_escape (fire_runtime.c).
+            text = _ascii_repr(value)
         else:
             text = str(value)
         if spec:
@@ -5563,11 +7771,11 @@ class Interpreter:
         node = Parser(tokens)._parse_expr(0)
         return self.eval_expr(node)
 
-    def eval_BoolLiteral(self, expr: N.BoolLiteral):
+    def eval_BoolLiteral(self, expr):
         """Evaluate boolean literal."""
         return expr.value
 
-    def eval_NoneLiteral(self, expr: N.NoneLiteral):
+    def eval_NoneLiteral(self, expr):
         """Evaluate None literal."""
         return None
 
@@ -5586,7 +7794,7 @@ class Interpreter:
             return node.operand
         return None
 
-    def eval_ListLiteral(self, expr: N.ListLiteral):
+    def eval_ListLiteral(self, expr):
         """Evaluate list literal, expanding any `*expr` spread elements
         (PEP 448 iterable unpacking, e.g. `[*a, *b]`) in place."""
         result = []
@@ -5598,7 +7806,7 @@ class Interpreter:
                 result.append(self.eval_expr(e))
         return result
 
-    def eval_DictLiteral(self, expr: N.DictLiteral):
+    def eval_DictLiteral(self, expr):
         """Evaluate dict literal, expanding any `**expr` spread pairs (PEP
         448 mapping unpacking, e.g. `{**a, **b}`). A spread pair is
         represented as `(UnaryOp(op='**', operand=<mapping expr>), None)` by
@@ -5614,7 +7822,7 @@ class Interpreter:
                 result[self.eval_expr(key)] = self.eval_expr(value)
         return result
 
-    def eval_SetLiteral(self, expr: N.SetLiteral):
+    def eval_SetLiteral(self, expr):
         """Evaluate set literal, expanding any `*expr` spread elements
         (e.g. `{*a, *b}`) as a union into the resulting set."""
         result = set()
@@ -5626,7 +7834,7 @@ class Interpreter:
                 result.add(self.eval_expr(e))
         return result
 
-    def eval_TupleLiteral(self, expr: N.TupleLiteral):
+    def eval_TupleLiteral(self, expr):
         """Evaluate tuple literal, expanding any `*expr` spread elements
         (e.g. `(*a, *b)`) in place."""
         result = []
@@ -5658,7 +7866,7 @@ class Interpreter:
             left = set()
         return left, right
 
-    def eval_BinaryOp(self, expr: N.BinaryOp):
+    def eval_BinaryOp(self, expr):
         """Evaluate binary operation."""
         op = expr.op
         # 'and'/'or' must short-circuit — evaluating both operands
@@ -5723,7 +7931,14 @@ class Interpreter:
         elif op == '/':
             if isinstance(left, (str, MojoString)) and isinstance(right, (str, MojoString)):
                 return MojoString(os.path.join(str(left), str(right)))
-            return left / right
+            # `_wrap_int` like every other arithmetic op above: a bare
+            # `return left / right` emits `mojo_div_double` (double) into a
+            # return slot the str branch types as `MojoString *` — gcc:
+            # "makes pointer from ... double" (no double->pointer cast under
+            # -fgimple). `_wrap_int` is a @staticmethod identity for non-int
+            # (a `/` result is a float), so Python semantics are unchanged —
+            # it only gives codegen a call whose result it can type as a word.
+            return self._wrap_int(left / right)
         elif op == '//': return left // right
         elif op == '%': return left % right
         elif op == '**': return self._wrap_int(left ** right)
@@ -5757,7 +7972,7 @@ class Interpreter:
         else:
             raise NotImplementedError(f"Comparison operator {op!r} not implemented")
 
-    def eval_CompareChain(self, expr: N.CompareChain):
+    def eval_CompareChain(self, expr):
         """Python-style chained comparison `a < b < c`: each operand is
         evaluated exactly once, left-to-right; the whole expression
         short-circuits to False (without evaluating any remaining operands)
@@ -5772,7 +7987,7 @@ class Interpreter:
             left = right
         return True
 
-    def eval_UnaryOp(self, expr: N.UnaryOp):
+    def eval_UnaryOp(self, expr):
         """Evaluate unary operation."""
         operand = self.eval_expr(expr.operand)
         return self._apply_unary_op(expr, operand)
@@ -5790,8 +8005,52 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
-    def eval_CallExpr(self, expr: N.CallExpr):
+    def _eval_constrained_call(self, expr, cond_node, msg_node=None):
+        """Compile-time-style `constrained` check, evaluated at call time.
+
+        A provably-false condition raises `constraint failed: <msg>` (or
+        `constraint failed` with no message); a true condition is a no-op. The
+        message is only evaluated on failure, and an error in the condition
+        propagates rather than being read as false."""
+        if self.eval_expr(cond_node):
+            return None
+        msg = self.eval_expr(msg_node) if msg_node is not None else None
+        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
+        raise RuntimeError(f"{self._loc(expr)}{text}")
+
+    def _eval_constrained_bracket(self, expr):
+        """`constrained[cond, msg]()` — the bracket form of Mojo's builtin.
+
+        The compiled path diagnoses a provably-false condition at compile time
+        (mojo/backend_gimple/emit_calls.py, `constrained`). The interpreter has
+        no compile-time pass, so it checks the condition when the call runs:
+        false raises `constraint failed: <msg>` (or `constraint failed` with no
+        message), true is a no-op. A name the user has bound themselves is a
+        real callee and is not intercepted."""
+        idx = expr.func.index
+        if isinstance(idx, (N.TupleExpr, N.ListExpr)):
+            elems = list(getattr(idx, 'elements', None) or [])
+        else:
+            elems = [idx]
+        if not elems:
+            raise TypeError(f"{self._loc(expr)}constrained[] needs a condition")
+        msg_node = elems[1] if len(elems) > 1 else None
+        return self._eval_constrained_call(expr, elems[0], msg_node)
+
+    def eval_CallExpr(self, expr):
         """Evaluate function call."""
+        func_node = expr.func
+        if (isinstance(func_node, N.SubscriptExpr)
+                and isinstance(func_node.obj, N.IdentExpr)
+                and func_node.obj.name == 'constrained'
+                and not self.scope.has('constrained')):
+            return self._eval_constrained_bracket(expr)
+        if (isinstance(func_node, N.IdentExpr)
+                and func_node.name == 'constrained'
+                and len(getattr(expr, 'args', None) or []) >= 1
+                and not self.scope.has('constrained')):
+            msg_node = expr.args[1] if len(expr.args) > 1 else None
+            return self._eval_constrained_call(expr, expr.args[0], msg_node)
         func = self.eval_expr(expr.func)
         # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
         # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument
@@ -5845,14 +8104,15 @@ class Interpreter:
         (MojoCoroutine only) so plain generators are entirely unaffected."""
         if isinstance(func, (MojoFunction, MojoOverloadSet, _MojoBoundComptimeFunction)):
             return func(self, *args, **kwargs)
+        args = _mojo_builtin_args(func, args)
         tls = self._gen_tls
-        if getattr(tls, 'is_coroutine', False):
-            yield_fn = getattr(tls, 'yield_fn', None)
+        if hasattr(tls, 'is_coroutine') and tls.is_coroutine:
+            yield_fn = getattr(tls, 'yield_fn') if hasattr(tls, 'yield_fn') else None
             if yield_fn is not None:
                 return yield_fn(_RealThreadCall(func, args, kwargs))
         return func(*args, **kwargs)
 
-    def eval_MemberExpr(self, expr: N.MemberExpr):
+    def eval_MemberExpr(self, expr):
         """Evaluate member access."""
         obj = self.eval_expr(expr.obj)
         return self._eval_member_of(expr, obj)
@@ -5882,12 +8142,16 @@ class Interpreter:
                 return BoundMethod(method, obj, self)
             if expr.member in obj._mojo_class.comptime_aliases:
                 return obj._mojo_class.comptime_aliases[expr.member]
-            raise AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
+            raise _tag_attribute_error(
+                AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'"),
+                obj, expr.member, _frame_self(self))
         if not hasattr(obj, expr.member):
-            raise AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'")
+            raise _tag_attribute_error(
+                AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'"),
+                obj, expr.member, _frame_self(self))
         return getattr(obj, expr.member)
 
-    def eval_SubscriptExpr(self, expr: N.SubscriptExpr):
+    def eval_SubscriptExpr(self, expr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
         # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
@@ -5976,7 +8240,7 @@ class Interpreter:
             return _MojoBoundComptimeReceiver(obj, bindings)
         return _MojoBoundComptimeFunction(obj, bindings)
 
-    def eval_SliceExpr(self, expr: N.SliceExpr):
+    def eval_SliceExpr(self, expr):
         """Evaluate slice expression."""
         obj = self.eval_expr(expr.obj)
         start = self.eval_expr(expr.start) if expr.start else None
@@ -5984,7 +8248,7 @@ class Interpreter:
         step = self.eval_expr(expr.step) if expr.step else None
         return obj[start:stop:step]
 
-    def eval_TernaryExpr(self, expr: N.TernaryExpr):
+    def eval_TernaryExpr(self, expr):
         """Evaluate ternary conditional."""
         condition = self.eval_expr(expr.condition)
         if condition:
@@ -6398,19 +8662,33 @@ class Interpreter:
             result = self._generator_expression(expr)
         else:
             results = []
+            # Dict comprehensions may use `**` spread in the element
+            # (`{**d for d in ds}`) rather than `key: value`; detect it
+            # once so the inner loop can merge mappings.
+            _dict_spread = (expr.kind == 'dict' and expr.value is None
+                            and isinstance(expr.element, N.UnaryOp)
+                            and expr.element.op == '**')
 
             def run(generators):
                 if not generators:
                     if expr.kind == 'dict':
-                        k = self.eval_expr(expr.element)
-                        v = self.eval_expr(expr.value)
-                        results.append((k, v))
+                        if _dict_spread:
+                            results.append(('__spread__', self.eval_expr(expr.element.operand)))
+                        else:
+                            k = self.eval_expr(expr.element)
+                            v = self.eval_expr(expr.value)
+                            results.append((k, v))
                     else:
-                        results.append(self.eval_expr(expr.element))
+                        spread = self._spread_operand(expr.element, "*")
+                        if spread is not None:
+                            for _sv in self.eval_expr(spread):
+                                results.append(_sv)
+                        else:
+                            results.append(self.eval_expr(expr.element))
                     return
                 gen = generators[0]
                 rest = generators[1:]
-                for item in self.eval_expr(gen.iterable):
+                for item in _mojo_iter(self.eval_expr(gen.iterable)):
                     self._bind_comprehension_target(gen.target, item)
                     if all(self.eval_expr(cond) for cond in gen.conditions):
                         run(rest)
@@ -6424,7 +8702,12 @@ class Interpreter:
             if expr.kind == 'set':
                 result = set(results)
             elif expr.kind == 'dict':
-                result = dict(results)
+                if _dict_spread:
+                    result = {}
+                    for _pair in results:
+                        result.update(_pair[1])
+                else:
+                    result = dict(results)
             else:
                 result = results
         return result

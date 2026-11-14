@@ -63,7 +63,7 @@ import shutil
 # blocks a file on the formal path for exactly the reason an absent module
 # does, which is why `tools/formal_host_import_shapes.py` gives it a shape
 # (`DEAD`) rather than counting it as a use; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md (deleted)` §3.
 import sys
 import tempfile
 
@@ -250,10 +250,43 @@ def test_no_unrecorded_x86_64_failures(rows):
           "and the filing that owns it:\n    " + "\n    ".join(bad))
 
 
+def test_status_docs_cite_hoststatus(rows):
+    """Host status convention is discoverable and hoststatus.mojo is well-formed."""
+    import re
+
+    bad = []
+    for rel, full in hostmod_modules():
+        try:
+            with open(full) as f:
+                text = f.read()
+        except Exception:
+            continue
+        if rel == "hoststatus.mojo":
+            continue  # the convention module itself
+        if rel == os.path.join("os", "_syscalls.mojo") or rel == "os/_syscalls.mojo":
+            continue  # wrappers go through libc; not migrated
+        if re.search(r"0 on success|-1 on failure", text):
+            if "hoststatus" not in text:
+                bad.append(f"{rel}: has status wording without hoststatus citation")
+    check(not bad,
+          "files with '0 on success' or '-1 on failure' must cite hoststatus:\n    "
+          + "\n    ".join(bad))
+
+    # hoststatus.mojo must define exactly status_ok and status_err
+    hoststatus_path = os.path.join(HOSTMODS, "hoststatus.mojo")
+    if os.path.exists(hoststatus_path):
+        with open(hoststatus_path) as f:
+            htext = f.read()
+        defs = re.findall(r"^def (\w+)", htext, re.M)
+        check(defs == ["status_ok", "status_err"],
+              f"hoststatus.mojo must define exactly status_ok and status_err, got {defs}")
+
+
 TESTS = [
     ("every hostmod builds on arm64", test_every_hostmod_builds),
     ("x86-64 is a subset of arm64", test_x86_64_is_a_subset_of_arm64),
     ("no unrecorded x86-64 failure", test_no_unrecorded_x86_64_failures),
+    ("status docs cite hoststatus", test_status_docs_cite_hoststatus),
 ]
 
 

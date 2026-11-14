@@ -40,6 +40,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from exec_budget import COMPILE_TIMEOUT_S  # per-child budgets
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -430,6 +431,41 @@ def test_an_elf_module_dylib_is_a_loadable_object(tmpdir, shared):
           f"the padding is not what the PT_LOAD's p_align says it is")
 
 
+def test_the_elf_dylib_tail_is_zero_past_the_last_segment(tmpdir, shared):
+    """Every byte past the last PT_LOAD is page padding, and padding is zero.
+
+    The regression test for the non-zero bytes an ELF module dylib used to
+    leave past its last segment: the first PT_LOAD was sized
+    `body_size - globals_size`, which stops part-way through `.rela.dyn`
+    (the section that follows `.globals` in the body), so the tail of the
+    relocation table sat past the last segment — non-zero data where only
+    zero padding may be, and a `DT_RELA` that named bytes the loader could
+    not read. The first PT_LOAD now covers the whole body, so the tail is
+    the zero padding `_assemble` writes.
+    """
+    from formal import elf
+    from formal.build import compile_formal_dylib
+    src = os.path.join(tmpdir, "tailzero.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(x):\n  return x + 1\n\ndef twice(x):\n  return x * 2\n")
+    out = os.path.join(tmpdir, "tailzero.so")
+    compile_formal_dylib([src], output=out, arch="x86_64", fmt="elf",
+                         prove=False, check=False)
+    with open(out, "rb") as f:
+        data = f.read()
+    head = elf._read_header(data, out)
+    e_phoff, = struct.unpack_from("<Q", data, 32)
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    body_start = e_phoff + e_phnum * e_phentsize
+    covered = [(p[2], p[2] + p[4])
+               for p in elf._program_headers(data, head) if p[0] == 1]
+    body_end = max(e for _s, e in covered)
+    tail = data[body_end:]
+    check(not any(tail),
+          f"{sum(1 for b in tail if b)} non-zero byte(s) past the last "
+          f"segment's {len(tail)}-byte tail")
+
+
 def _st_name_at(strings, offset):
     """The name at a `.dynstr` offset, or "" past the end.
 
@@ -582,7 +618,7 @@ def test_a_hostmod_getsize_call_answers_under_rosetta(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check(build.returncode == 0,
           f"the getsize program did not build for x86-64: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")
@@ -683,7 +719,7 @@ def test_program_importing_an_extern_module_matches_cpython(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check(build.returncode == 0,
           f"an x86-64 program importing a module with an extern call did not "
           f"build: {(build.stderr or build.stdout).strip()[-400:]}")
@@ -736,7 +772,7 @@ def test_module_dylib_with_an_extern_call_loads_into_a_program(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, "--link-dylib", lib, prog],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check(build.returncode == 0,
           f"linking an x86-64 module dylib with an extern failed: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")
@@ -788,7 +824,7 @@ def test_an_imported_hostmod_dylib_answers_on_x86_64(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check(build.returncode == 0,
           f"an x86-64 program importing os.path.getsize did not build: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")
@@ -989,7 +1025,7 @@ def test_a_module_body_is_a_load_time_initializer(tmpdir, shared):
     built = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check(built.returncode == 0,
           f"an x86-64 program importing a module with a body failed to build: "
           f"{(built.stderr or built.stdout).strip()[-400:]}")
@@ -1117,7 +1153,7 @@ def test_a_program_importing_os_path_getsize_matches_cpython(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check(build.returncode == 0,
           f"an x86-64 program importing os.path.getsize did not build: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")
@@ -1140,6 +1176,8 @@ TESTS = [
      test_x86_64_dylib_passes_strict_validation),
     ("the dylib container is what the caller asked for",
      test_the_dylib_container_is_what_the_caller_asked_for),
+    ("the ELF dylib tail past the last segment is zero",
+     test_the_elf_dylib_tail_is_zero_past_the_last_segment),
     ("an ELF module dylib is a loadable object",
      test_an_elf_module_dylib_is_a_loadable_object),
     ("a module body is a load-time initializer in both containers",

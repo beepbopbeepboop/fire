@@ -260,6 +260,28 @@ BUILTIN_PROGRAMS = {
             var s = f"value={x}"
             print(s)
     """),
+    # `!a` is CPython's ascii(): repr() with every NON-ASCII code point
+    # escaped, and it is a conversion, so it applies to the value itself
+    # rather than to str(value). The compiled path parsed the conversion but
+    # had only the `!r` arm, so `!a` fell through to the str() arm and printed
+    # the plain value; the interpreter did the same by treating `!a` as repr,
+    # whose display spelling leaves non-ASCII raw. `!s` and the bare spelling
+    # are the control: both ARE str(), so they stay unquoted/unescaped.
+    # The λ/😀 row pins code-point escaping (`\u03bb`/`\U0001f600`) rather
+    # than a byte-wise `\xce\xbb`, and the list row pins that the escape pass
+    # also reaches the repr walker's nested strings.
+    "fstring_ascii_conversion": textwrap.dedent("""\
+        def main():
+            s = "héllo"
+            print(f"({s!a})")
+            print(f"({s!s})")
+            print(f"({s})")
+            print(f"({('λ😀')!a})")
+            print(f"({['é']!a})")
+            print(f"({42!a})")
+            print(f"({True!a})")
+            print(f"({1.5!a})")
+    """),
     # An ordinary string whose own TEXT begins with an f/t prefix and a quote.
     # Both engines printed the STRIPPED body (`n`, `x`) and exited 0, so the
     # diff between them was clean — which is why this program is also in
@@ -601,7 +623,7 @@ BUILTIN_PROGRAMS = {
             # type for the rest of the function: reusing `i` across an int and
             # a double sequence prints the wrong number (and killed the image
             # on the read side), which is
-            # bugs/CODEGEN_zip_loop_target_keeps_the_first_loops_type.md —
+            # CODEGEN_zip_loop_target_keeps_the_first_loops_type —
             # fixed for the generator consumers, still open for the
             # zip/enumerate/str/bytes/list/dict/set families, where the fix's
             # cost is measured and its blocker is named.
@@ -772,7 +794,8 @@ BUILTIN_PROGRAMS = {
     # evidence and `kind == 0` is `mojo_repr_int(val)`. The `kind == 1` arm is
     # added in the same place: a double's IEEE-754 bits went to `mojo_repr_str`
     # as a `char *`, and that pattern is pointer-shaped, so it printed garbage
-    # or faulted. See bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md.
+    # or faulted. See CODEGEN_dict_comprehension_repr_is_separately_broken (dict
+    # repr: 0-is-None sentinel, int-key stringification, tuple-key address).
     #
     # INTEGER KEYS are all this case uses, and they are all STRINGS on purpose:
     # `{1: "a"}` prints `{'1': 'a'}`, and that needs the slot to remember
@@ -799,6 +822,23 @@ BUILTIN_PROGRAMS = {
             d["k"] = 0
             d["j"] = 1
             print(d)
+    """),
+    # INTEGER key spelling in a repr, for the shapes that already match CPython
+    # (measured 2026-11-01 against CPython 3.14): an integer key prints
+    # unquoted, a canonical-decimal STRING key prints quoted, and a
+    # comprehension's int keys are integers. NOT pinned here, because they are
+    # still wrong and belong to bugs/CODEGEN_dict_comprehension_repr_is_
+    # separately_broken.md: `d[5]="int"; d["5"]="str"` is ONE entry here
+    # (CPython: two), `{True: 1}` prints `{1: 1}`, and `{1.5: "x"}` prints
+    # `{'1.5': 'x'}` -- those are the int/str domain merge, a bool lowered to
+    # the integer 1, and a float key with no domain of its own.
+    "dict_int_key_spelling_repr_matches_cpython": textwrap.dedent("""\
+        def main():
+            print({10: "a"})
+            print({"10": "a"})
+            print({i: 1 for i in range(3)})
+            print({i: i for i in range(2)})
+            print({"10": 1})
     """),
     # The SAME value kinds, read back through `.items()` instead of through
     # `print(d)`. The dict's own repr reads `_DictSlot.kind`; a `(key, value)`
@@ -835,7 +875,7 @@ BUILTIN_PROGRAMS = {
             # accessor (a container prints as a pointer decimal, a float as its
             # IEEE-754 bits). The kinds row fixes what a pair PRINTS with, not
             # what a subscript loop READS with, and that half is still open —
-            # `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
+            # `CODEGEN_dict_slot_read_loses_its_value_kind`.
             #
             # The keyed spec of the SAME value kinds, which was already right and
             # is the control that keeps this case from being satisfied by
@@ -1324,7 +1364,7 @@ BUILTIN_PROGRAMS = {
     # worst kind: the compiled path passes a receiver correctly, so a
     # compiled-path bug on this shape would have agreed with the wrong
     # answer instead of showing up as a diff. See
-    # bugs/COMPILE_FAIL_importlib_resources_readers.md's
+    # COMPILE_FAIL_importlib_resources_readers's
     # `yield from cls.<sibling generator>(...)`, which is the real code
     # that needs it.
     #
@@ -1638,6 +1678,8 @@ BUILTIN_PROGRAMS = {
 CPYTHON_COMPARABLE = {
     "minimal_main", "function_def", "method_call_result",
     "dict_get_none_guard",
+    # Int-key spelling in a repr: both engines and CPython agree on these shapes.
+    "dict_int_key_spelling_repr_matches_cpython",
     # Both engines answered these the SAME wrong way before the for-target
     # fix, so an engine-vs-engine diff was clean while both printed `1` where
     # CPython prints `(1,)`. The third opinion is the only thing that could
@@ -1676,6 +1718,10 @@ CPYTHON_COMPARABLE = {
     "dynamic_getattr_of_a_method",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
+    # `!a` has to agree with CPython, not merely with the interpreter: ascii()
+    # and repr() differ on non-ASCII, so engine-vs-engine alone could have
+    # been satisfied by making both engines wrong the same way.
+    "fstring_ascii_conversion",
     # The interpreter yielded characters where the compiled path yielded ints;
     # only CPython can say which is right, and it says ints.
     "bytes_iterates_as_ints",

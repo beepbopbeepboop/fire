@@ -8,7 +8,7 @@ the class; cross-module references are qualified.
 """
 from __future__ import annotations
 
-import dataclasses
+import copy
 import os
 import re
 
@@ -29,7 +29,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize,
-    _as_str, _signed_int64, _signed_int64_c_literal,
+    _as_str, _signed_int64, _signed_int64_c_literal, _float_c_literal,
     for_target_is_tuple,
 )
 import regex_compile
@@ -42,6 +42,7 @@ from fire_compiler import target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -55,6 +56,117 @@ from mojo.middle.module_shared import (
 # `_cpp_yield_from`'s `cls.<generator>` branch, which must refuse (never
 # guess an arity from) an api entry that does not record its receiver.
 _MISSING = object()
+
+
+def _cpp_parse_std_function(ctype: str):
+    """Parse a std::function<R(P...)> type into (ret_type, param_types).
+    Returns (None, None) if not parseable."""
+    if not isinstance(ctype, str):
+        return None, None
+    m = re.match(r'std::function<\s*(.+?)\s*\(\s*(.*?)\s*\)\s*>', ctype)
+    if not m:
+        return None, None
+    ret = m.group(1).strip()
+    params_str = m.group(2).strip()
+    if not params_str or params_str == 'void':
+        params = []
+    else:
+        # Simple split by commas at top level (not perfect but fine for our types)
+        params = []
+        depth = 0
+        current = []
+        for ch in params_str:
+            if ch in '<([':
+                depth += 1
+                current.append(ch)
+            elif ch in '>)]':
+                depth -= 1
+                current.append(ch)
+            elif ch == ',' and depth == 0:
+                params.append(''.join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+        if current:
+            params.append(''.join(current).strip())
+    return ret, params
+
+
+def _cpp_is_callable_ctype(ctype: str) -> bool:
+    if not isinstance(ctype, str):
+        return False
+    return ctype.startswith('std::function<')
+
+
+def _cpp_callable_return_ctype_from_declared(gen, name: str):
+    """Try to get callable return type from various sources."""
+    declared = getattr(gen, '_cpp_declared', None)
+    if declared and name in declared:
+        ctype = declared[name]
+        if _cpp_is_callable_ctype(ctype):
+            ret, _ = _cpp_parse_std_function(ctype)
+            if ret:
+                return ret
+    # Try other sources
+    # Check closure factory info if stored
+    for attr in ['_cpp_closure_factory_callable_info', '_cpp_closure_factory_sigs',
+                 '_closure_factory_return_types', '_cpp_closure_factory_ret_types',
+                 '_closure_factory_closure_ret']:
+        info = getattr(gen, attr, None)
+        if info and name in info:
+            v = info[name]
+            if isinstance(v, tuple) and len(v) >= 2:
+                return v[1]
+            elif isinstance(v, str) and _cpp_is_callable_ctype(v):
+                ret, _ = _cpp_parse_std_function(v)
+                if ret:
+                    return ret
+            elif isinstance(v, str):
+                return v
+    # Check _callable_ret_types style tables
+    for attr in ['_callable_ret_types', '_global_callable_ret_types', '_return_callable_ret_types']:
+        info = getattr(gen, attr, None)
+        if info and name in info:
+            v = info[name]
+            if isinstance(v, str):
+                if _cpp_is_callable_ctype(v):
+                    ret, _ = _cpp_parse_std_function(v)
+                    if ret:
+                        return ret
+                return v
+    # Also check func_return_types
+    frt = getattr(gen, 'func_return_types', None)
+    if frt and name in frt:
+        rt = frt[name]
+        if isinstance(rt, str) and _cpp_is_callable_ctype(rt):
+            ret, _ = _cpp_parse_std_function(rt)
+            if ret:
+                return ret
+        elif isinstance(rt, str):
+            return rt
+    return None
+
+
+def _cpp_callable_param_ctypes_from_declared(gen, name: str):
+    declared = getattr(gen, '_cpp_declared', None)
+    if declared and name in declared:
+        ctype = declared[name]
+        if _cpp_is_callable_ctype(ctype):
+            _, params = _cpp_parse_std_function(ctype)
+            if params is not None:
+                return params
+    for attr in ['_cpp_closure_factory_callable_info', '_cpp_closure_factory_sigs',
+                 '_cpp_closure_factory_param_types']:
+        info = getattr(gen, attr, None)
+        if info and name in info:
+            v = info[name]
+            if isinstance(v, tuple) and len(v) >= 1:
+                return v[0]
+            elif isinstance(v, str) and _cpp_is_callable_ctype(v):
+                _, params = _cpp_parse_std_function(v)
+                if params is not None:
+                    return params
+    return None
 
 def _cpp_as(ctype: str, expr: str) -> str:
     """Cast `expr` to a container-kind C type (`MojoList *`/`MojoDict *`/
@@ -280,13 +392,12 @@ def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list
 def _cpp_is_struct_ctor_call(gen, e) -> bool:
     """True when `e` is the plain `StructName(args)` constructor call that
     `_cpp_expr` lowers to a `StructName *` (a calloc'd instance run through
-    its `__init__`): the struct is known, has an `__init__`, and the call
-    carries no keyword arguments. Shared by the constructor lowering and by
-    attribute reads off a constructor result, which must use `->`."""
+    its `__init__` when present): the struct is known and the call carries no
+    keyword arguments. Shared by the constructor lowering and by attribute
+    reads off a constructor result, which must use `->`."""
     return (isinstance(e, gimple_ctypes.CallExpr)
             and isinstance(e.func, gimple_ctypes.IdentExpr)
             and e.func.name in gen.struct_field_types
-            and e.func.name in gen._struct_has_init
             and len(e.kwargs or []) == 0)
 
 
@@ -725,19 +836,21 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     for _k, _v in gen.func_return_types.items():
         if not isinstance(_v, str):
             continue
-        if _v in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (
+        if _v in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double') or (
                 _v.endswith(' *') and _v[:-2] in _known_structs):
             trusted[_k] = _v
     gen._cpp_trusted_fn_returns = trusted
     return trusted
 
 
-def _cpp_is_int_operand(gen, node) -> bool:
+def _cpp_is_int_operand(gen, node, types=None) -> bool:
     """True when a coroutine-body expression is a plain integer, the only
     kind of divisor `_cpp_expr`'s `/`/`%` lowering must check for zero. An
     int literal is always one; anything else is judged by the same static
     inference the string checks above use, and an unknown type is NOT
-    treated as an integer (a float divisor must never be truncated)."""
+    treated as an integer (a float divisor must never be truncated). `types`
+    narrows the accepted ctypes (default: every scalar integer); the `/`
+    lowering passes the signed set emit_exprs.py's tail uses."""
     if isinstance(node, gimple_ctypes.IntLiteral):
         return True
     try:
@@ -749,7 +862,7 @@ def _cpp_is_int_operand(gen, node) -> bool:
         )
     except Exception:
         return False
-    return _ct in gimple_ctypes._SCALAR_INT_TYPES
+    return _ct in (gimple_ctypes._SCALAR_INT_TYPES if types is None else types)
 
 
 def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
@@ -777,6 +890,84 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
     width = int(width_digits)
     fn = {'<': 'mojo_str_ljust', '^': 'mojo_str_center'}.get(align, 'mojo_str_rjust')
     return f'{fn}((char *)({part_val}), (int64_t){width}, "{fill}")'
+
+
+# `os.path.<fn>` names a body may alias to a local -- the ones the `os.path.*`
+# call table in `_cpp_expr` lowers.
+_CPP_OS_PATH_ALIASABLE = ('join', 'islink', 'isdir', 'isfile', 'exists',
+                          'basename', 'dirname', 'split', 'splitext',
+                          'expanduser', 'abspath', 'normpath', 'relpath')
+
+
+def _cpp_collect_os_path_aliases(fn) -> dict:
+    """{local name: os.path function} for every local of `fn` whose EVERY
+    binding is `os.path.<fn>` / `posixpath.<fn>` / `path.<fn>` naming one of
+    `_CPP_OS_PATH_ALIASABLE` (and the same function): `islink, join =
+    path.islink, path.join`. A name bound anything else too, or two different
+    ones, is left out (it is a real runtime value this model cannot alias)."""
+    binds: dict = {}
+
+    def _note(name, val):
+        binds.setdefault(name, []).append(val)
+
+    for n in gimple_exprtypes._walk_ast(fn):
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            t, v = n.target, n.value
+            if isinstance(t, gimple_ctypes.IdentExpr):
+                _note(t.name, v)
+            elif (isinstance(t, gimple_ctypes.TupleExpr)
+                    and isinstance(v, gimple_ctypes.TupleExpr)
+                    and len(t.elements) == len(v.elements)):
+                for _t, _v in zip(t.elements, v.elements):
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _note(_t.name, _v)
+            elif isinstance(t, gimple_ctypes.TupleExpr):
+                for _t in t.elements:
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _note(_t.name, None)
+        elif isinstance(n, gimple_ctypes.VarDecl):
+            _note(n.name, n.value)
+    out: dict = {}
+    for name in binds:
+        picks = set()
+        for v in binds[name]:
+            pick = None
+            if (isinstance(v, gimple_ctypes.MemberExpr)
+                    and v.member in _CPP_OS_PATH_ALIASABLE):
+                o = v.obj
+                if (isinstance(o, gimple_ctypes.MemberExpr)
+                        and o.member == 'path'
+                        and isinstance(o.obj, gimple_ctypes.IdentExpr)
+                        and o.obj.name == 'os'):
+                    pick = v.member
+                elif (isinstance(o, gimple_ctypes.IdentExpr)
+                        and o.name in ('path', 'posixpath')):
+                    pick = v.member
+            picks.add(pick)
+        if len(picks) == 1 and None not in picks:
+            out[name] = picks.pop()
+    return out
+
+
+def _cpp_fstring_list_piece(gen, expr_node, v):
+    """C++ expression emitted for the repr of a `MojoList *` interpolated into an f-string."""
+    if isinstance(expr_node, gimple_ctypes.IdentExpr):
+        elem_cty = (getattr(gen, '_cpp_list_local_elem_types', {}) or {}).get(expr_node.name)
+    else:
+        elem_cty = None
+    if elem_cty == 'double':
+        return f"mojo_repr_list_doubles({_cpp_as('MojoList *', v)})"
+    if elem_cty == 'int64_t':
+        return f"mojo_repr_list_ints({_cpp_as('MojoList *', v)})"
+    if elem_cty == '_Bool':
+        return f"mojo_repr_list_bools({_cpp_as('MojoList *', v)})"
+    if elem_cty == 'MojoBytes *':
+        return f"mojo_repr_list_bytes({_cpp_as('MojoList *', v)})"
+    if elem_cty == 'char *':
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "f-string interpolation of a list whose elements are str has "
+            "no scalar C++ string form in this compiled generator/coroutine body")
+    return f"mojo_repr_list_kinds({_cpp_as('MojoList *', v)}, NULL)"
 
 
 def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
@@ -852,6 +1043,31 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     f"f-string interpolation '{{{part_text}}}' could not "
                     "be parsed in a compiled generator/coroutine body "
                     f"({type(ex).__name__}: {ex})")
+            # A collection LITERAL (`f"{[1, 2]}"`, `f"{(1, 2)}"`, a dict/set)
+            # has no scalar C++ value: `_cpp_expr` lowers it to a
+            # braced-init-list, which is only valid where this emitter puts
+            # it into a container-typed local / a real runtime constructor
+            # (see `_cpp_container_literal_init` and
+            # `_cpp_list_literal_arg_expr`). Every arm below assumes the
+            # interpolation lowered to ONE scalar value and stringifies it
+            # (`mojo_str((void *)({v}))` and friends), so wrapping the
+            # raw `{1, 2}` emitted invalid C++ that only g++ caught
+            # ("expected ';' before '}' token"). There is no container-repr
+            # walker in this expression-only emitter (the ordinary GIMPLE
+            # path's `_stringify_value`/`_repr_value` container arms need a
+            # statement side channel this emitter does not have), so refuse
+            # honestly at the same chokepoint the direct `yield [1, 2]`
+            # shape is refused rather than emit broken C++.
+            if isinstance(expr_node, (gimple_ctypes.ListExpr,
+                                      gimple_ctypes.TupleExpr,
+                                      gimple_ctypes.DictExpr,
+                                      gimple_ctypes.SetExpr)):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"f-string interpolation '{{{part_text}}}' is a "
+                    "collection literal, which has no scalar C++ value in "
+                    "a compiled generator/coroutine body (this emitter has "
+                    "no container-repr walker; the value would lower to a "
+                    "C++ braced-init-list, not a string)")
             v = gen._cpp_expr(expr_node)
             try:
                 ectype = gimple_exprtypes._infer_simple_expr_ctype(
@@ -859,19 +1075,66 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     fn_return_types=fn_ret) or 'int64_t'
             except Exception:
                 ectype = 'int64_t'
-            if conv == 'r':
+            if conv == 'r' or conv == 'a':
                 if ectype == 'char *':
                     piece = f"mojo_repr_str((char *)({v}))"
                 elif ectype == 'double':
                     piece = f"mojo_repr_float(({v}))"
+                elif ectype == '_Bool':
+                    # repr/ascii of a bool is its NAME, not its 0/1 value --
+                    # the same answer the non-conversion arm below already
+                    # gives `!s`/bare. Without this row the generic
+                    # `mojo_str` branch rendered `True` as `1`, so the cpp
+                    # path disagreed with CPython on `f"{flag!r}"` (and, via
+                    # the escape pass, `!a`).
+                    piece = f'(({v}) ? "True" : "False")'
+                elif ectype == 'MojoList *':
+                    piece = _cpp_fstring_list_piece(gen, expr_node, v)
+                elif ectype == 'MojoDict *':
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"f-string interpolation '{{{part_text}}}' of a "
+                        "container-typed dict has no scalar C++ string form in "
+                        "this compiled generator/coroutine body "
+                        "(this emitter has no container-repr walker; refuse "
+                        "rather than print the dict's raw header bytes)")
+                elif ectype == 'MojoSet *':
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"f-string interpolation '{{{part_text}}}' of a "
+                        "container-typed set has no scalar C++ string form in "
+                        "this compiled generator/coroutine body "
+                        "(this emitter has no container-repr walker; refuse "
+                        "rather than print the set's raw header bytes)")
                 else:
                     piece = f"mojo_str((void *)({v}))"
+                if conv == 'a':
+                    # `!a` = CPython ascii(): the repr rendering above, with
+                    # every non-ASCII code point escaped. Same runtime helper
+                    # and same reasoning as the ordinary GIMPLE path's
+                    # `_lower_StringLiteral`; without this arm `!a` fell to
+                    # the str() arm below and rendered the plain value.
+                    piece = f"mojo_ascii_escape((char *)({piece}))"
             elif ectype == 'char *':
                 piece = v
             elif ectype == 'double':
                 piece = f"mojo_repr_float(({v}))"
             elif ectype == '_Bool':
                 piece = f'(({v}) ? "True" : "False")'
+            elif ectype == 'MojoList *':
+                piece = _cpp_fstring_list_piece(gen, expr_node, v)
+            elif ectype == 'MojoDict *':
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"f-string interpolation '{{{part_text}}}' of a "
+                    "container-typed dict has no scalar C++ string form in "
+                    "this compiled generator/coroutine body "
+                    "(this emitter has no container-repr walker; refuse "
+                    "rather than print the dict's raw header bytes)")
+            elif ectype == 'MojoSet *':
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"f-string interpolation '{{{part_text}}}' of a "
+                    "container-typed set has no scalar C++ string form in "
+                    "this compiled generator/coroutine body "
+                    "(this emitter has no container-repr walker; refuse "
+                    "rather than print the set's raw header bytes)")
             else:
                 piece = f"mojo_str((void *)({v}))"
             if spec:
@@ -1037,7 +1300,7 @@ def _cfcs_shape_of(gen, depth: int, _cfcs_shapes: set, expr, locals_shape: dict)
     return None
 
 
-def _cfcs_scan(gen, depth: int, _cfcs_shapes: set, stmts, locals_shape: dict) -> None:
+def _cfcs_scan(gen, depth: int, _cfcs_shapes: set, stmts: list, locals_shape: dict) -> None:
     """Hoisted out of `_cpp_fn_container_shape` — see `_cfcs_shape_of`."""
     for st in stmts:
         if isinstance(st, gimple_ctypes.AssignStmt) and isinstance(st.target, gimple_ctypes.IdentExpr):
@@ -1137,8 +1400,104 @@ def _cpp_reset_unit_state(gen):
     # `next(it, default)` advance a genuine resumable position, and a later
     # `for x in it:` continues from that position (real Python iterator
     # semantics) rather than re-scanning from element 0. See
-    # bugs/CODEGEN_generator_function_Lib_ipaddress.md's `_find_address_range`.
+    # CODEGEN_generator_function_Lib_ipaddress's `_find_address_range`.
     gen._cpp_list_iter_cursor = {}
+    # Per-unit map of a local DICT name to the struct-pointer ctype its
+    # VALUES carry (`'Box *'`). Dict storage is the boxed int64 word, so
+    # without this a read-back `d[k]` would be typed as the int64 default and
+    # `.field` access on it would dereference a raw word. Seeded once per unit
+    # by `_cpp_prescan_dict_struct_values` (before the body is lowered, so a
+    # read that precedes its store textually is still typed); consumed by
+    # `_infer_simple_expr_ctype`'s SubscriptExpr case (via `dict_val_types`)
+    # and by the SubscriptExpr read lowering below.
+    gen._cpp_local_dict_val_types = {}
+
+
+def _cpp_prescan_dict_struct_values(gen, fn):
+    """Map each local dict name in `fn`'s own body to the struct-pointer ctype
+    its values are stored as, or nothing if the stored type is not provable.
+
+    A local `x` is a struct-pointer local of `S` when EVERY assignment to it in
+    the body is either a constructor call `S(...)` (with `S` a known struct) or
+    a subscript read (`d[k]`), and at least one is a constructor. The subscript
+    read is the only other shape allowed because it is the value this scan is
+    computing; any other RHS (a call, a literal, arithmetic) disqualifies the
+    name, so an ambiguous local never gets a struct type. A dict `d` gets
+    `S *` when a store `d[k] = x` has a value that is such a local or a
+    constructor call directly, and every store into `d` agrees on `S`.
+
+    Only the body's own statements are scanned (nested defs/lambdas are their
+    own scope). The result is keyed by name, which is the `dict_val_types`
+    receiver key `_infer_simple_expr_ctype` expects for a bare local."""
+    structs = gen.struct_field_types
+
+    def _ctor_struct(e):
+        if (isinstance(e, gimple_ctypes.CallExpr)
+                and isinstance(e.func, gimple_ctypes.IdentExpr)
+                and e.func.name in structs):
+            return f"{e.func.name} *"
+        return None
+
+    nodes = []
+    for st in fn.body:
+        nodes.extend(gimple_exprtypes._walk_own_body(st))
+
+    def _idents(t):
+        return [x.name for x in gimple_exprtypes._walk_ast(t)
+                if isinstance(x, gimple_ctypes.IdentExpr)]
+
+    # Every name this body binds, and with what. `ctors[name]` is the set of
+    # struct ctypes its plain `name = S(...)` assignments carry; `poisoned`
+    # holds names with any binding this scan cannot type. Over-poisoning only
+    # loses a type (the local keeps the int64 default), never invents one, so
+    # every other binder form poisons the names it may bind.
+    ctors: dict = {}
+    poisoned: set = set()
+    for n in nodes:
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            if isinstance(n.target, gimple_ctypes.IdentExpr):
+                name = n.target.name
+                if isinstance(n.value, gimple_ctypes.SubscriptExpr):
+                    ctors.setdefault(name, set())   # a dict read: being typed
+                    continue
+                ct = _ctor_struct(n.value)
+                if ct is None:
+                    poisoned.add(name)
+                else:
+                    ctors.setdefault(name, set()).add(ct)
+            elif not isinstance(n.target, gimple_ctypes.SubscriptExpr):
+                poisoned.update(_idents(n.target))
+        elif isinstance(n, gimple_ctypes.AugAssignStmt):
+            poisoned.update(_idents(n.target))
+        elif isinstance(n, gimple_ctypes.ForStmt):
+            poisoned.update(_idents(n.target))
+        elif isinstance(n, gimple_ctypes.WithStmt):
+            poisoned.update(_idents(n.items))
+        elif isinstance(n, gimple_ctypes.WalrusExpr):
+            poisoned.add(n.name)
+    struct_locals = {name: next(iter(cts)) for name, cts in ctors.items()
+                     if name not in poisoned and len(cts) == 1}
+
+    # Stored value type per dict name; a conflicting or untypable store
+    # poisons the dict.
+    dict_vals: dict = {}
+    bad: set = set()
+    for n in nodes:
+        if not (isinstance(n, gimple_ctypes.AssignStmt)
+                and isinstance(n.target, gimple_ctypes.SubscriptExpr)
+                and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
+            continue
+        d = n.target.obj.name
+        v = n.value
+        if isinstance(v, gimple_ctypes.IdentExpr) and v.name in struct_locals:
+            ct = struct_locals[v.name]
+        else:
+            ct = _ctor_struct(v)
+        if ct is None or (d in dict_vals and dict_vals[d] != ct):
+            bad.add(d)
+        else:
+            dict_vals[d] = ct
+    return {d: ct for d, ct in dict_vals.items() if d not in bad}
 
 
 # The module-string -> C-qualifier sanitization EVERY cross-module registry
@@ -1184,8 +1543,10 @@ def _cpp_expr_static_ctype(gen, e):
     """Best-effort static C type of an expression in a coroutine body —
     the small intersection of shapes this emitter types reliably:
     declared locals/params, string literals, subscript/slice results
-    (always char * here), and char*-method calls on char*-typed receivers
-    (strip family/lower/upper/replace). Returns None for anything else.
+    (always char * here), char*-method calls on char*-typed receivers
+    (strip family/lower/upper/replace), and an `and`/`or` whose two
+    operands have one common ctype (the operator yields an operand).
+    Returns None for anything else.
     Consumed by `not`-truthiness lowering (a char* operand must test
     emptyness, not pointer-nullness); deliberately conservative so a
     wrong 'char *' guess can never corrupt non-string lowering."""
@@ -1194,6 +1555,16 @@ def _cpp_expr_static_ctype(gen, e):
                 if gen._cpp_declared is not None else None)
     if isinstance(e, gimple_ctypes.StringLiteral):
         return 'char *'
+    if isinstance(e, gimple_ctypes.BinaryOp) and e.op in ('and', 'or'):
+        # `a or b` / `a and b` yields one of its OPERANDS, so when both
+        # operands have the SAME static ctype the result has that ctype too
+        # (`sep or '\t'` is char * when `sep` is a char* parameter). Mixed
+        # or unknown operand types stay None — conservative, since the
+        # callers use this to choose packing/truthiness lowerings and must
+        # never guess a conversion the expression does not have.
+        _lt = _cpp_expr_static_ctype(gen, e.left)
+        _rt = _cpp_expr_static_ctype(gen, e.right)
+        return _lt if _lt is not None and _lt == _rt else None
     if isinstance(e, (gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
         # A subscript on a DECLARED `MojoList *`/`MojoDict *` local is NOT
         # a string: `_cpp_expr`'s own SubscriptExpr branch reads those
@@ -1219,6 +1590,18 @@ def _cpp_expr_static_ctype(gen, e):
                     return 'double'
                 return 'int64_t'
         return 'char *'
+    if (isinstance(e, gimple_ctypes.CallExpr) and isinstance(e.func, gimple_ctypes.MemberExpr)
+            and isinstance(e.func.obj, gimple_ctypes.IdentExpr)):
+        # A method call on a struct-pointer receiver (`self.concat_path(a, b)`
+        # in an escaping generator whose `self` is a typed parameter, or the
+        # method generator's own receiver): its static type is the method's
+        # registered return type, when that is a word this emitter represents.
+        _rs = (getattr(gen, '_cpp_gen_self_struct', None) if e.func.obj.name == 'self' else None) \
+            or gen._cpp_struct_ptr_local(e.func.obj.name)
+        if _rs and e.func.member in gen._struct_method_names.get(_rs, ()):
+            _rt = gen.func_return_types.get(gen._struct_method_csym(_rs, e.func.member, ''))
+            if _rt in ('char *', 'int64_t', '_Bool', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+                return _rt
     if isinstance(e, gimple_ctypes.CallExpr) and isinstance(e.func, gimple_ctypes.MemberExpr):
         if e.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
                              'replace', 'partition', 'rpartition'):
@@ -1251,11 +1634,26 @@ def _cpp_expr_static_ctype(gen, e):
                 return rt
     if (isinstance(e, gimple_ctypes.MemberExpr)
             and isinstance(e.obj, gimple_ctypes.IdentExpr)):
+        # A struct field read on a known struct-pointer receiver
+        # (`self.<field>`, or `<struct-ptr local>.<field>`).
+        _obj_name = e.obj.name
+        _struct_name = None
+        if _obj_name == 'self':
+            _struct_name = getattr(gen, '_cpp_gen_self_struct', None)
+        elif _obj_name == 'cls':
+            _struct_name = getattr(gen, '_cpp_gen_self_struct', None)
+        else:
+            _struct_name = gen._cpp_struct_ptr_local(_obj_name)
+        if _struct_name:
+            _ft = gen.struct_field_types.get(_struct_name, {}).get(e.member)
+            if _ft in ('char *', 'int64_t', 'double', '_Bool', 'MojoList *',
+                       'MojoDict *', 'MojoSet *'):
+                return _ft
         # A module-level CONSTANT read as a value (`os.linesep`) — the same
         # real field read `_cpp_expr`'s MemberExpr case now emits, and the
         # same ctype, so a `not os.linesep` / `x == os.linesep` test is
         # decided on the string's emptiness rather than on a null pointer.
-        _mglob = _cpp_module_global_field(gen, e.obj.name, e.member)
+        _mglob = _cpp_module_global_field(gen, _obj_name, e.member)
         if _mglob is not None:
             return _mglob[0]
     return None
@@ -1323,6 +1721,8 @@ def _cpp_module_global_field(gen, marker, name):
             # VALUE (os.linesep and friends), not a source token, so there is
             # no prefix to take off and nothing to interpolate.
             return _bm_ctype, _cpp_string_literal_expr(gen, _bm_val, '')
+        if _bm_ctype == 'double':
+            return _bm_ctype, _float_c_literal(_bm_val)
         return _bm_ctype, f'({_bm_ctype}){_bm_val}'
     found = gen._module_global_field_type(bound, name)
     key = bound
@@ -1423,6 +1823,250 @@ def _cpp_exc_ctor_value(gen, node) -> bool:
             and len(node.args) <= 1 and not (node.kwargs or []))
 
 
+_CPP_RT_RETURN_CTYPE = {
+    'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
+    'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
+    'mojo_fsencode_w': 'int64_t',
+    'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
+    'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
+}
+
+
+def _cpp_assign_cast_type(gen, val):
+    """The C type an assigned value expression is KNOWN to have, read off its
+    emitted text: a typed lambda (`[&]() -> T {`) or a call to a module function
+    (`@@CSYM:name@@(`) with a registered return type; None otherwise."""
+    if not isinstance(val, str):
+        return None
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+        return 'char *'                      # a string literal
+    # A leading C cast of one of the model's pointer types names the
+    # expression's real type: `(char *)mojo_str_join(...)` is still a
+    # char* value, and `(MojoList *)(...)` is still a list. Without this,
+    # an assignment that needs the word/pointer reinterpretation test
+    # below saw no type at all and emitted a raw C++ conversion the
+    # compiler rejects (a `.join(...)` char* result stored into an
+    # untyped `int64_t` parameter, real: tables.py's `read_table`).
+    _m = re.match(r'\((char|MojoList|MojoDict|MojoSet) \*\)', val)
+    if _m:
+        return f"{_m.group(1)} *"
+    _m = re.match(r'\[&\]\(\) -> ([A-Za-z_ ]+\*?) \{', val)
+    if _m:
+        _t = _m.group(1).strip()
+        _t = _t.replace('MojoSet*', 'MojoSet *')
+        return _t if _t in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'int64_t') else None
+    # runtime string / list producers, by the name the emitted text starts with
+    _m = re.match(r'(mojo_[a-z0-9_]+)\(', val)
+    if _m and _m.group(1) in _CPP_RT_RETURN_CTYPE:
+        return _CPP_RT_RETURN_CTYPE[_m.group(1)]
+    # A direct call of a compiled function (a struct method, a staticmethod) whose
+    # registered return type is a pointer.
+    _m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\(', val)
+    if _m:
+        _t = gen.func_return_types.get(_m.group(1))
+        if _t in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+            return _t
+    _m = re.match(r'@@CSYM:([A-Za-z0-9_]+)@@\(', val)
+    if _m:
+        _t = (gen.func_return_types.get(_m.group(1))
+              or gen.func_return_types.get(gen._func_csym(_m.group(1))))
+        return _t if _t in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'int64_t') else None
+    return None
+
+
+def _cpp_note_dynamic_word_args(gen, struct_name, member, call_args) -> None:
+    """A struct method called from a generator body with a dynamic word (a
+    parameter declared `object`) for one of its unannotated parameters: that
+    parameter may hold a string, so `a + b` over it must ask the run time
+    (`mojo_add_words`) instead of adding the pointers. Recorded in the same table
+    the ordinary call-site scan feeds (`_int64_may_hold_str`)."""
+    _objs = getattr(gen, '_cpp_object_params', None)
+    if not _objs:
+        return
+    _pnames = gen._method_param_names.get(f"{struct_name}_{member}")
+    if not _pnames:
+        return
+    _off = 1 if _pnames and _pnames[0] in ('self', 'cls') else 0
+    for _i, _a in enumerate(call_args):
+        if isinstance(_a, gimple_ctypes.IdentExpr) and _a.name in _objs \
+                and _i + _off < len(_pnames):
+            gen._int64_may_hold_str.setdefault(f"{struct_name}_{member}", set()).add(
+                _pnames[_i + _off])
+
+
+def _cpp_materialize_generator_handle_arg(gen, expr):
+    """Materialize a compiled-generator HANDLE local as a fresh `MojoList *`
+    for a call through a callable-valued parameter (or a table-dispatched
+    dynamic call): `(list_name, stmt_text)` when `expr` is an `IdentExpr`
+    tracked in `_cpp_generator_var_api`, else None.
+
+    A handle is not statically a word/string/container, so packing it into
+    `mojo_dyn_call`'s argument list used to refuse the whole body. But a
+    callable such as `csv.reader` accepts any iterable of strings, so the
+    runtime value is perfectly usable — the emitter just has to produce a
+    concrete container first. Drive the handle to exhaustion over the same
+    `{base}_resume`/`{base}_value` protocol the `for x in <handle>` branch
+    and `next(<handle>)` use (see `_cpp_next_on_generator_expr`), appending
+    each value with the appendor its registered `value_ctype` names.
+
+    Exhaustion-vs-escaped-exception disambiguation is NOT applied here: a
+    real exception escaping the sub-generator SHOULD propagate out of this
+    consuming call, not be turned into StopIteration (which is what `next()`
+    wants). The handle is not destroyed — the same never-frees convention
+    every other generator-handle consumer in this emitter follows.
+
+    A DIRECT construction (`_get_reader(sub.gen(x))`) is deliberately not
+    materialized here; it has no tracked handle local, so the caller's named
+    refusal stays."""
+    if not isinstance(expr, gimple_ctypes.IdentExpr):
+        return None
+    api = getattr(gen, '_cpp_generator_var_api', {}).get(expr.name)
+    if api is None:
+        return None
+    base = api['base']
+    vct = gimple_exprtypes._c_to_cpp_scalar_type(
+        api.get('value_ctype') or 'int64_t')
+    handle = gen._cpp_kw_param_renames.get(expr.name, expr.name)
+    refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+    if refs is not None:
+        refs.setdefault(base, {
+            'value_ctype': api.get('value_ctype', 'int64_t'),
+            'params': list(api.get('params') or [])})
+    name = gen._cpp_fresh_name('_mgh')
+    if api.get('tagged'):
+        # The slot is one int64_t word the promise boxes per yield kind;
+        # append it with the kind it carries.
+        append = f"mojo_list_append_word({name}, {base}_value({handle})); "
+    elif vct == 'char *':
+        append = f"mojo_list_append_str({name}, {base}_value({handle})); "
+    elif vct == 'double':
+        append = f"mojo_list_append_double({name}, {base}_value({handle})); "
+    elif vct == 'bool':
+        append = (f"mojo_list_append_int({name}, "
+                  f"(int64_t)(({base}_value({handle})) != 0)); ")
+    else:
+        append = f"mojo_list_append_int({name}, (int64_t)({base}_value({handle}))); "
+    stmts = (f"MojoList *{name} = mojo_list_new(); "
+             f"while ({base}_resume({handle})) {{ {append}}} ")
+    return name, stmts
+
+
+def _cpp_dyn_call_expr(gen, e):
+    """A call through a PARAMETER that holds a callable as a bare word
+    (`onempty(items)`, `_walk(root)`, `get_files(root, suffix=suffix)`,
+    `_walk(*a, walk=_files, **k)`), or None when `e` is not that shape.
+
+    The callee is whatever the caller passed, so nothing here knows its
+    signature or its return type. The call is packed into a positional
+    `MojoList *` and a keyword `MojoDict *` and dispatched by the runtime
+    (`mojo_dyn_call`: a variadic value binds the pair itself, a registered
+    compiled generator binds by parameter name, a plain function pointer takes
+    the arguments positionally). `*x` / `**x` operands are spread at run time
+    (`mojo_args_extend_word` / `mojo_kwargs_merge_word`). The call's value is
+    an UNSOLVED word, converted by a local type to whichever of int64_t /
+    string / container pointer the consuming assignment or argument is
+    declared as. int64_t-word, `char *`, container-pointer and `double`
+    arguments are admitted; a compiled-generator HANDLE local is materialized
+    into a `MojoList *` first (see `_cpp_materialize_generator_handle_arg`). A double travels as its bit pattern (like every
+    other word in the packed list/dict) and is TAGGED as a double - the
+    positional list's per-slot kind (`mojo_list_append_double_kinded`),
+    `mojo_dict_set_double` for a keyword - so a
+    callee that takes its arguments in integer registers (a plain function
+    pointer) can refuse it (`mojo_dyn_call`) instead of reading garbage, while
+    a registered generator signature (`mojo_gen_sig_register`) routes it to a
+    float register. A `*x` / `**x` spread cannot be a double."""
+    if not (isinstance(e.func, gimple_ctypes.IdentExpr)
+            and gen._cpp_declared is not None
+            and gen._cpp_declared.get(e.func.name) in ('int64_t', 'char *')
+            and (e.func.name in getattr(gen, '_cpp_param_names', ())
+                 or e.func.name in getattr(gen, '_cpp_word_locals', ()))):
+        return None
+    _fname = e.func.name
+    parts = []
+    for _fa in e.args:
+        _op = _fa.operand if (isinstance(_fa, gimple_ctypes.UnaryOp)
+                              and _fa.op in ('*', '**')) else _fa
+        _spread = isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op in ('*', '**')
+        _mat = (None if _spread
+                else _cpp_materialize_generator_handle_arg(gen, _op))
+        if _mat is not None:
+            _mat_name, _mat_stmts = _mat
+            parts.append(_mat_stmts)
+            parts.append(f"mojo_list_append_int(_a, "
+                         f"(int64_t)(intptr_t)({_mat_name})); ")
+            continue
+        _fct = _cpp_receiver_ctype(gen, _op)
+        if _fct is None:
+            _fct = _cpp_expr_static_ctype(gen, _op)
+        if _fct is None and isinstance(_op, gimple_ctypes.StringLiteral):
+            _fct = 'char *'
+        if _fct is None and isinstance(_op, (gimple_ctypes.BoolLiteral, gimple_ctypes.IntLiteral)):
+            _fct = 'int64_t'
+        if _fct is None and isinstance(_op, gimple_ctypes.FloatLiteral):
+            _fct = 'double'
+        if _fct == 'double' and not _spread:
+            parts.append(f"mojo_list_append_double_kinded(_a, (double)({gen._cpp_expr(_op)}), 'i'); ")
+            continue
+        if _fct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+            try:
+                gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator callable-valued parameter {_fname!r} bad arg type {_fct!r}')
+            except Exception:
+                pass
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a call through the callable-valued parameter "
+                f"'{_fname}' passes an argument whose C type is not "
+                "statically a word, string or container")
+        _txt = f"(int64_t)(intptr_t)({gen._cpp_expr(_op)})"
+        if isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op == '*':
+            parts.append(f"mojo_args_extend_word(_a, {_txt}); ")
+        elif isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op == '**':
+            parts.append(f"mojo_kwargs_merge_word(_k, {_txt}); ")
+        else:
+            parts.append(f"mojo_list_append_int(_a, {_txt}); ")
+    for _kn, _kv in (getattr(e, 'kwargs', None) or []):
+        _mat = _cpp_materialize_generator_handle_arg(gen, _kv)
+        if _mat is not None:
+            _mat_name, _mat_stmts = _mat
+            parts.append(_mat_stmts)
+            parts.append(f'mojo_dict_set_int(_k, (char *)"{_kn}", '
+                         f"(int64_t)(intptr_t)({_mat_name})); ")
+            continue
+        _kct = _cpp_receiver_ctype(gen, _kv)
+        if _kct is None:
+            _kct = _cpp_expr_static_ctype(gen, _kv)
+        if _kct is None and isinstance(_kv, gimple_ctypes.StringLiteral):
+            _kct = 'char *'
+        if _kct is None and isinstance(_kv, (gimple_ctypes.BoolLiteral, gimple_ctypes.IntLiteral)):
+            _kct = 'int64_t'
+        if _kct is None and isinstance(_kv, gimple_ctypes.FloatLiteral):
+            _kct = 'double'
+        if _kct == 'double':
+            parts.append(f'mojo_dict_set_double(_k, (char *)"{_kn}", '
+                         f"(double)({gen._cpp_expr(_kv)})); ")
+            continue
+        if _kct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+            try:
+                gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator callable-valued parameter {_fname!r} bad kwarg type {_kct!r}')
+            except Exception:
+                pass
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a call through the callable-valued parameter "
+                f"'{_fname}' passes a keyword argument whose C type is not "
+                "statically a word, string or container")
+        parts.append(f'mojo_dict_set_int(_k, (char *)"{_kn}", '
+                     f"(int64_t)(intptr_t)({gen._cpp_expr(_kv)})); ")
+    _cpp_fname = gen._cpp_kw_param_renames.get(_fname, _fname)
+    return ("[&]() { struct _W { int64_t w; "
+            "operator int64_t() const { return w; } "
+            "operator char *() const { return (char *)w; } "
+            + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
+                      for _k in ('MojoList', 'MojoDict', 'MojoSet'))
+            + "}; "
+            "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
+            + ''.join(parts)
+            + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fname}), _a, _k)}}; }}()")
+
+
 def _cpp_resolve_generator_call_api(gen, func):
     """Resolve a CallExpr's callee to a compiled generator's api dict
     ({'base', 'value_ctype', 'params', ...}) — or None when the callee is
@@ -1487,6 +2131,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
     arg_exprs = []
+    arg_ctypes = []
     for _aa in call.args:
         if isinstance(_aa, (gimple_ctypes.TupleExpr,
                             gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
@@ -1494,7 +2139,13 @@ def _cpp_emit_generator_start_expr(gen, call, api):
                 "a tuple/dict/set literal as a compiled-generator call "
                 "argument is not supported in a coroutine body")
         arg_exprs.append(_cpp_call_arg_expr(gen, _aa))
+        _act = (_cpp_receiver_ctype(gen, _aa)
+                or _cpp_expr_static_ctype(gen, _aa))
+        arg_ctypes.append(_act)
     arg_exprs.extend(gen._cpp_expr(_kv) for _kn, _kv in (call.kwargs or []))
+    arg_ctypes.extend((_cpp_receiver_ctype(gen, _kv)
+                       or _cpp_expr_static_ctype(gen, _kv))
+                      for _kn, _kv in (call.kwargs or []))
     while len(arg_exprs) < len(sub_params):
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
@@ -1503,6 +2154,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
                 f"{len(sub_params)} argument(s), got {len(arg_exprs)} "
                 f"(no default at slot {len(arg_exprs)})")
         arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
+        arg_ctypes.append(None)
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"call to compiled generator '{api['base']}': expected "
@@ -1510,8 +2162,21 @@ def _cpp_emit_generator_start_expr(gen, call, api):
     cargs = []
     for _i, _ae in enumerate(arg_exprs):
         _pt = sub_params[_i]
+        _at = arg_ctypes[_i]
         if isinstance(_pt, str) and _pt.endswith(' *'):
             cargs.append(f"({_pt})({_ae})")
+        elif (isinstance(_pt, str) and _pt in ('int64_t', 'int', '_Bool', 'double')
+              and isinstance(_at, str) and _at.endswith(' *')):
+            # A pointer value into a scalar parameter: the callee's own C
+            # entry point declares a word (`_iter_significant_lines(infile)`
+            # has an int64_t `infile`), so reinterpret the pointer as the
+            # word every container/string is in this model. Without this the
+            # emitted C++ passed a `MojoList *`/`char *` straight into an
+            # `int64_t` parameter ("invalid conversion from 'MojoList*' to
+            # 'int64_t'"). Real: read_table's `lines =
+            # strutil._iter_significant_lines(infile)` when `infile` is a
+            # container-shaped local.
+            cargs.append(f"(int64_t)(intptr_t)({_ae})")
         else:
             cargs.append(_ae)
     base = api['base']
@@ -1574,6 +2239,48 @@ def _cpp_is_struct_pointer_elem(gen, el) -> bool:
     return bool(ct) and ct.endswith(' *') and ct[:-2] in gen.struct_field_types
 
 
+def _cpp_typed_list_elem(gen, el):
+    """One NON-literal element of a flat list literal -> `(kind, expr)`. The
+    element's inferred scalar ctype picks its accessor (`char *` -> str,
+    `double` -> flt, `int64_t`/`_Bool` -> the int64_t box). An element whose
+    kind cannot be inferred REFUSES: at a call-argument position nothing
+    later re-types the box, so defaulting it to int64_t would hand a string
+    to an integer accessor. (The statement-level `_cpp_container_literal_init`
+    keeps its int64_t default; a container-typed local is re-typed by its
+    own uses.) A dict/set element has no flat representation here and
+    refuses. Nested list/tuple and struct-pointer elements never reach this
+    point (`_cpp_list_literal_arg_expr` boxes those)."""
+    if isinstance(el, (gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "a nested dict/set literal has no representation as a list "
+            "element in a list-literal argument of a compiled-generator call")
+    ct = gimple_exprtypes._infer_simple_expr_ctype(
+        el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
+        gen._async_api)
+    if ct is None:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "an element of a list-literal argument of a compiled-generator "
+            "call has a value kind that cannot be resolved in a coroutine body")
+    ev = gen._cpp_expr(el)
+    if ct == 'char *':
+        return ('str', f"(char *)({ev})")
+    if ct == 'double':
+        return ('flt', f"(double)({ev})")
+    return ('int', f"(int64_t)({ev})")
+
+
+def _cpp_nested_generator_api(gen, name: str):
+    """The `_nested_generator_api` entry for a generator `name` defined in
+    the generator/coroutine body currently being compiled, or None.
+    cpp_async._compile_nested_generator_closures claims those generators
+    (keyed by (enclosing def name, nested name)) and keeps them OUT of
+    `_generator_api`, so every consumer that accepts a bare callee name has
+    to consult this second registration source (`_cpp_gen_self_name` is set
+    by `_gen_cpp_generator_unit` while this body is being emitted)."""
+    return getattr(gen, '_nested_generator_api', {}).get(
+        (getattr(gen, '_cpp_gen_self_name', None), name))
+
+
 def _cpp_call_arg_expr(gen, a):
     """One call-argument expression for a compiled-generator/coroutine call.
     A list LITERAL has no valid C++ text at an argument position (`_cpp_expr`
@@ -1590,9 +2297,12 @@ def _cpp_list_literal_arg_expr(gen, lit):
     valued C++ expression: `mojo_list_new ()` for the empty literal,
     otherwise an immediately-invoked lambda that constructs the list and
     appends every element through its scalar accessor (append_str/_int/
-    _double). All elements must agree on one scalar type — anything else
-    refuses (the caller's contract collection already hints nothing for
-    mixed literals). Works for both ListExpr and TupleExpr (same `.elements`
+    _double). A literal element takes its kind from the literal; any other
+    element takes it from its inferred ctype (`_cpp_typed_list_elem`, the
+    same typing `_cpp_container_literal_init` gives a statement-level list).
+    All elements must agree on one scalar kind — a mixed literal refuses
+    (the caller's contract collection already hints nothing for mixed
+    literals). Works for both ListExpr and TupleExpr (same `.elements`
     shape, both box down to the one MojoList* runtime representation this
     body model uses for both Python lists and tuples) — used both at a
     compiled-generator call-argument position and at an ordinary runtime-
@@ -1620,10 +2330,7 @@ def _cpp_list_literal_arg_expr(gen, lit):
         elif isinstance(el, gimple_ctypes.FloatLiteral):
             kinds.append(('flt', gen._cpp_expr(el)))
         else:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a non-scalar element in a list-literal argument of a "
-                "compiled-generator call is not supported in a coroutine "
-                "body")
+            kinds.append(_cpp_typed_list_elem(gen, el))
     kind = kinds[0][0]
     if any(k != kind for k, _ in kinds):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -1694,6 +2401,148 @@ def _cpp_next_on_generator_expr(gen, handle_expr, api):
     )
 
 
+def _cpp_tagged_next_api(gen, expr):
+    """The api of the TAGGED-word generator that `expr` = `next(<handle>)`
+    reads from, or None. A tagged generator's slot is one int64_t word that
+    boxes each yield by its kind (`_cpp_tag_yield_sites`), so the value
+    `next()` returns is a word, not a plain integer, and only a consumer that
+    renders it through `mojo_repr_boxed` prints the yielded value. Only the
+    one-argument form is a generator read here (the two-argument `next(g,
+    default)` is not lowered by this emitter)."""
+    if not (isinstance(expr, gimple_ctypes.CallExpr)
+            and isinstance(expr.func, gimple_ctypes.IdentExpr)
+            and expr.func.name == 'next' and len(expr.args) == 1
+            and not getattr(expr, 'kwargs', None)):
+        return None
+    arg = expr.args[0]
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        api = getattr(gen, '_cpp_generator_var_api', {}).get(arg.name)
+    elif isinstance(arg, gimple_ctypes.CallExpr):
+        api = _cpp_resolve_generator_call_api(gen, arg.func)
+    else:
+        api = None
+    return api if api is not None and api.get('tagged') else None
+
+
+def _cpp_mark_tagged_word(gen, name: str):
+    """Record `name` as a local that holds a TAGGED word (see
+    `_cpp_is_tagged_word_expr`). The set is created on demand: the generator
+    unit initialises it, but the for-loop emitter also runs inside async
+    bodies, which do not."""
+    if not hasattr(gen, '_cpp_tagged_word_names'):
+        gen._cpp_tagged_word_names = set()
+    gen._cpp_tagged_word_names.add(name)
+
+
+def _cpp_is_tagged_word_expr(gen, expr) -> bool:
+    """True when `expr` yields a TAGGED word that must be printed as a box:
+    a local bound from a tagged generator (`gen._cpp_tagged_word_names`, set
+    by the for-loop binding and `x = next(g)`), or a direct `next(g)` on a
+    tagged generator. An `and`/`or` whose LEFT operand is a tagged word is
+    one too: Python returns an operand, so the result is the left word or the
+    right operand boxed by its kind (`_cpp_tagged_operand_word`). Every other
+    scalar is left to its ordinary spelling."""
+    if isinstance(expr, gimple_ctypes.IdentExpr):
+        return expr.name in getattr(gen, '_cpp_tagged_word_names', ())
+    if isinstance(expr, gimple_ctypes.BinaryOp) and expr.op in ('and', 'or'):
+        return _cpp_and_or_is_tagged(gen, expr)
+    return _cpp_tagged_next_api(gen, expr) is not None
+
+
+def _cpp_is_str_expr(gen, node) -> bool:
+    """True when `node` is a str: a string literal, or an expression whose
+    inferred C++ type is `char *`. Shared by the `*` string-repetition lowering
+    and the tagged `and`/`or` split (`_cpp_and_or_is_tagged`)."""
+    if isinstance(node, gimple_ctypes.StringLiteral):
+        return True
+    try:
+        return gimple_exprtypes._infer_simple_expr_ctype(
+            node, gen._cpp_declared,
+            getattr(gen, '_cpp_gen_self_fields', None),
+            gen._async_api,
+            fn_return_types=_cpp_trusted_fn_return_types(gen),
+        ) == 'char *'
+    except Exception:
+        return False
+
+
+def _cpp_and_or_is_tagged(gen, e) -> bool:
+    """True when the `and`/`or` BinaryOp `e` lowers to a TAGGED word: its left
+    operand is a tagged word. A str right operand now goes through the
+    tagged-word-carrying `_W` path as well (with the result marked tagged
+    only where the declared type is not `char *`)."""
+    return _cpp_is_tagged_word_expr(gen, e.left)
+
+
+def _cpp_tagged_operand_word(gen, node) -> str:
+    """`node` as a TAGGED int64_t word, the form every consumer renders by
+    kind: None is `mojo_box_none()`, a tagged word is itself, and any other
+    scalar is boxed by its static C++ type (`cpp_async._cpp_word_of_kind`), so
+    a str operand of `x or 'a'` is a `mojo_box_from_str` box, not a raw
+    pointer the consumer would print as an address."""
+    if (isinstance(node, gimple_ctypes.NoneLiteral)
+            or (isinstance(node, gimple_ctypes.IdentExpr) and node.name == 'None')):
+        return "mojo_box_none()"
+    if _cpp_is_tagged_word_expr(gen, node):
+        return f"(int64_t)(intptr_t)({gen._cpp_expr(node)})"
+    ctype = gimple_exprtypes._infer_simple_expr_ctype(
+        node, gen._cpp_declared or {},
+        getattr(gen, '_cpp_gen_self_fields', None), gen._async_api) or 'int64_t'
+    return gimple_exprtypes._cpp_word_of_kind(ctype, gen._cpp_expr(node))
+
+
+def _cpp_rethrow_pending(ctype: str, call: str) -> str:
+    """`call` (a runtime call returning `ctype` that reports a Python exception
+    through the pending flag, as every raiser in fire_runtime.c does) as a C++
+    expression that rethrows the pending exception as a real `_MojoCppExc`, so
+    an enclosing C++ try/catch in this coroutine body sees it. A coroutine body
+    must not longjmp, so the flag is the only channel a runtime raiser has."""
+    return (f"[&]() -> {ctype} {{ {ctype} _pr = {call}; "
+            "if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); "
+            "throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
+            "mojo_exc_obj_get() }; } return _pr; }()")
+
+
+_NONE_ARITH_BINOPS = frozenset({'+', '-', '*', '/', '//', '%', '**'})
+
+
+def _cpp_guard_none_operand(gen, operand, op: str, other=None, none_is_left: int = 1) -> None:
+    """Register the lowering of a tagged-word operand of arithmetic `op` as
+    `mojo_none_arith_guard_pending(word, op, <other's type>, none_is_left)`
+    rethrown as a catchable exception, so the operand raises TypeError when it
+    is the None box (`x = yield` after `next(g)`), as CPython does for
+    `None + 1`, instead of computing with the box's address. Any other word
+    comes back unchanged, so a non-None value keeps the lowering it always had.
+    `other` is None for the unary `-`, which uses
+    `mojo_none_unary_guard_pending` with CPython's unary message. The guard is
+    registered on the operand NODE, which every branch of the operator lowering
+    reaches through `_cpp_expr`, so no branch (the str-concatenation arms
+    included) can bypass it. A coroutine body must not longjmp, which is why
+    the pending-flag runtime forms are used and not the raising ones."""
+    if not _cpp_is_tagged_word_expr(gen, operand):
+        return
+    table = getattr(gen, '_cpp_none_guards', None)
+    if table is None:
+        table = {}
+        gen._cpp_none_guards = table
+    _held = table.get(id(operand))
+    if _held is not None and _held[0] is operand:
+        return
+    word = gen._cpp_expr(operand)
+    if other is None:
+        text = _cpp_rethrow_pending(
+            'int64_t', f'mojo_none_unary_guard_pending((int64_t)({word}), "{op}")')
+    else:
+        _oc = gimple_exprtypes._infer_simple_expr_ctype(
+            other, gen._cpp_declared or {},
+            getattr(gen, '_cpp_gen_self_fields', None), gen._async_api)
+        _other_name = {'double': 'float', 'char *': 'str', '_Bool': 'bool'}.get(_oc, 'int')
+        text = _cpp_rethrow_pending(
+            'int64_t', f'mojo_none_arith_guard_pending((int64_t)({word}), "{op}", '
+                       f'"{_other_name}", {none_is_left})')
+    table[id(operand)] = (operand, text)
+
+
 def _cpp_rename_ident_container(v, old: str, new: str):
     """Helper for `_cpp_rename_ident`: recurse into a list/tuple field or
     a nested AST-node field, rewriting every bare `IdentExpr(name=old)`
@@ -1705,7 +2554,7 @@ def _cpp_rename_ident_container(v, old: str, new: str):
     if isinstance(v, tuple):
         nv = tuple(_cpp_rename_ident_container(x, old, new) for x in v)
         return nv if nv != v else v
-    if dataclasses.is_dataclass(v):
+    if getattr(type(v), "__dataclass_fields__", None) is not None and not isinstance(v, type):
         return _cpp_rename_ident(v, old, new)
     return v
 
@@ -1725,14 +2574,21 @@ def _cpp_rename_ident(node, old: str, new: str):
     if isinstance(node, gimple_ctypes.IdentExpr):
         return (gimple_ctypes.IdentExpr(new, node.line, node.col)
                 if node.name == old else node)
-    if dataclasses.is_dataclass(node):
+    if getattr(type(node), "__dataclass_fields__", None) is not None and not isinstance(node, type):
         changes = {}
-        for f in dataclasses.fields(node):
-            v = getattr(node, f.name)
+        for fname in getattr(type(node), "__dataclass_fields__", {}):
+            if fname in ("line", "col"):
+                continue
+            v = getattr(node, fname)
             nv = _cpp_rename_ident_container(v, old, new)
             if nv is not v:
-                changes[f.name] = nv
-        return dataclasses.replace(node, **changes) if changes else node
+                changes[fname] = nv
+        if changes:
+            from dataclasses import fields as _dc_fields
+            kwargs = {f.name: changes.get(f.name, getattr(node, f.name))
+                      for f in _dc_fields(type(node))}
+            return type(node)(**kwargs)
+        return node
     return node
 
 
@@ -1810,14 +2666,16 @@ def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: s
 
 
 def _cpp_expr(gen, e) -> str:
+    # An operand registered by _cpp_guard_none_operand lowers to its guarded
+    # word (the identity check keeps a recycled id from matching a new node).
+    _guarded = (getattr(gen, '_cpp_none_guards', None) or {}).get(id(e))
+    if _guarded is not None and _guarded[0] is e:
+        return _guarded[1]
     if isinstance(e, gimple_ctypes.IntLiteral):
         value = _signed_int64(e.value)
         return _signed_int64_c_literal(value)
     if isinstance(e, gimple_ctypes.FloatLiteral):
-        s = repr(e.value)
-        if '.' not in s and 'e' not in s.lower():
-            s += '.0'
-        return s
+        return _float_c_literal(e.value)
     if isinstance(e, gimple_ctypes.BoolLiteral):
         return 'true' if e.value else 'false'
     if isinstance(e, gimple_ctypes.DottedLiteral):
@@ -1866,6 +2724,18 @@ def _cpp_expr(gen, e) -> str:
         # modules each declaring their own same-named global made a
         # generator body read the loser's slot while the write half of
         # the same name went to this module's own field.
+        # A compiled generator FUNCTION referenced as a value
+        # (`_files = _walk_tree`, a default `_walk=walk_tree`): its word is the
+        # `<base>_start` address, the convention `_callable_value_symbol`
+        # already uses on the C side, and what the runtime's signature table
+        # (`mojo_gen_sig_register`) is keyed by.
+        if (gen._cpp_declared is not None
+                and e.name not in gen._cpp_declared
+                and e.name in gen._generator_api
+                and e.name in getattr(gen, '_supported_generators', ())):
+            _gw = gen._cpp_sig_default_word(e)
+            if _gw is not None:
+                return _gw
         if (gen._cpp_declared is not None
                 and e.name not in gen._cpp_declared
                 and (e.name in gen._global_var_types
@@ -1877,7 +2747,13 @@ def _cpp_expr(gen, e) -> str:
             # sanitized spelling instead silently found no rows for any
             # dotted module — `from . import foreign` under `fpp/` compiles
             # as `_.foreign` — and emitted an empty mirror struct.
-            mod_key = str(gen._current_module_ctx or "root")
+            # This module's OWN key. `_current_module_ctx` is only set while the
+            # ordinary functions are emitted, which happens AFTER the generator
+            # units are lowered, so reading it here answered "root" for an
+            # IMPORTED module and pointed the read at an empty `_root_` mirror
+            # struct (`'struct _root_toplev' has no member named 'USE_CWD'`).
+            mod_key = str(gen.module_name if len(gen.module_name) > 0
+                          else (gen._current_module_ctx or "root"))
             safe_mod = gimple_ctypes._c_field_name(mod_key)
             field = gimple_ctypes._c_field_name(e.name)
             # Same C++-keyword escaping the .cpp globals-struct typedef
@@ -1918,8 +2794,7 @@ def _cpp_expr(gen, e) -> str:
             # `self.<method>` read WITHOUT an immediate call -- a
             # bound-method-as-VALUE reference (pickletools.py's
             # `getpos = data.tell` idiom, `self.<method>` variant --
-            # see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
-            # md). Checked FIRST, ahead of the field lookup just below:
+            # see the (since-fixed) compiled-generator lambda-expression bug). Checked FIRST, ahead of the field lookup just below:
             # `struct_field_types[struct_name]` can't be trusted to
             # prove "not a method" on its own —
             # `_scan_body_for_local_field_access` (this file's dynamic-
@@ -1989,7 +2864,7 @@ def _cpp_expr(gen, e) -> str:
         # which `cls` structurally cannot have; an unrecognized name)
         # must refuse rather than silently emit `cls->member` (invalid
         # C++ on a scalar int64_t) or `cls.member` (equally invalid).
-        # See bugs/CODEGEN_generator_function_Lib_enum.md's 2026-08-21
+        # See CODEGEN_enum_runtime_class_creation's 2026-08-21
         # update for the motivating `cls._flag_mask_`/`cls.
         # _value2member_map_` shapes (Flag._iter_member_by_value_).
         if struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr) and e.obj.name == 'cls':
@@ -1997,6 +2872,13 @@ def _cpp_expr(gen, e) -> str:
             if _cls_gname is not None:
                 gen._cpp_class_attr_refs.add(_cls_gname)
                 return _cls_gname
+            if (e.member not in gen._struct_method_names.get(struct_name, ())
+                    and e.member not in gen.struct_field_types.get(struct_name, {})):
+                # An attribute the class body never declares (installed with `setattr(cls, ..)` /
+                # `Cls.x = v` / a metaclass): the run-time class table holds it, found through
+                # the bases. A word of unknown kind.
+                _ctag = gimple_exprtypes._struct_type_id(struct_name)
+                return f'mojo_class_getattr({_ctag}LL, "{e.member}")'
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"cls.{e.member}: only a class-level attribute assigned "
                 "in the enclosing class's own body is supported for "
@@ -2151,10 +3033,13 @@ def _cpp_expr(gen, e) -> str:
                 and gen._cpp_declared is not None \
                 and gen._cpp_declared.get(_chain_root.name) in (
                     'int', 'int64_t', 'double', '_Bool'):
-            gimple_ctypes._debug_note('stubbed operation',
-                        f'generator-body attribute read on opaque '
-                        f'scalar local {_chain_root.name}.{e.member}')
-            return '0'
+            # A member read off a WORD (an object whose class the body cannot name: an
+            # element drained from another generator, a dynamic-class instance): ask the run
+            # time - every module registers its struct reflection with `mojo_getattr_any`.
+            _inner = (e.obj.name if isinstance(e.obj, gimple_ctypes.IdentExpr)
+                      else gen._cpp_expr(e.obj))
+            return (f'mojo_getattr_any((void *)(intptr_t)({_inner}), '
+                    f'(char *)"{gimple_ctypes._safe_field(e.member)}")')
         # A struct constructor call lowers to a `Struct *` (see
         # _cpp_is_struct_ctor_call), so a field read off it is `->`, the same
         # as a read off a struct-pointer local.
@@ -2165,7 +3050,7 @@ def _cpp_expr(gen, e) -> str:
         # A `lambda` used as a VALUE inside a generator body (e.g.
         # pickletools.py's `_genops`: `getpos = lambda: None`, the
         # sibling branch of `getpos = data.tell` above) — see
-        # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+        # the (since-fixed) compiled-generator lambda-expression bug.
         # Lowered as a genuine, capturing native C++ lambda (this
         # coroutine codegen targets real C++20, unlike the plain
         # GIMPLE path's `_lower_LambdaExpr`, whose much heavier
@@ -2294,6 +3179,8 @@ def _cpp_expr(gen, e) -> str:
         return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
                 f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
     if isinstance(e, gimple_ctypes.UnaryOp):
+        if e.op == '-':
+            _cpp_guard_none_operand(gen, e.operand, '-')
         op = {'not': '!'}.get(e.op, e.op)
         # `not <string>` — Python truthiness for a str is NON-EMPTYNESS,
         # not pointer-non-null: every char* in this model (a stripped/
@@ -2306,8 +3193,32 @@ def _cpp_expr(gen, e) -> str:
             _not_ct = _cpp_expr_static_ctype(gen, e.operand)
             if _not_ct == 'char *':
                 return f"(mojo_strlen((char *)({gen._cpp_expr(e.operand)})) == 0)"
+            # Likewise a container: an EMPTY list/dict/set is falsy, but it is
+            # a valid non-NULL pointer, so a raw `!ptr` answered "not empty".
+            if (_not_ct in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                    # ...and a PARAMETER held as a bare word, whose kind is
+                    # only known to the runtime.
+                    or (_not_ct == 'int64_t'
+                        and isinstance(e.operand, gimple_ctypes.IdentExpr)
+                        and e.operand.name in getattr(gen, '_cpp_param_names', ()))
+                    # ...and a received yield word (a box), whose truth is the
+                    # runtime's Python truthiness: `not (yield n)` is True for
+                    # the None the consumer resumes it with.
+                    or _cpp_is_tagged_word_expr(gen, e.operand)):
+                return (f"(!mojo_truthy_word((int64_t)(intptr_t)"
+                        f"({gen._cpp_expr(e.operand)})))")
         return f"({op}{gen._cpp_expr(e.operand)})"
     if isinstance(e, gimple_ctypes.TernaryExpr):
+        # `None if c else []` (Lib/os.py `_fwalk`'s `entries`): a list display
+        # branch is a real `MojoList *` (a bare `{}` is not an expression), and
+        # beside the other branch's word both travel as int64_t.
+        if any(isinstance(b, gimple_ctypes.ListExpr) and not b.elements
+               for b in (e.then_val, e.else_val)):
+            def _tb(b):
+                if isinstance(b, gimple_ctypes.ListExpr) and not b.elements:
+                    return "(int64_t)(intptr_t)mojo_list_new()"
+                return f"(int64_t)({gen._cpp_expr(b)})"
+            return f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})"
         return f"({gen._cpp_expr(e.condition)} ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"
     if isinstance(e, gimple_ctypes.BinaryOp):
         if e.op == '//':
@@ -2315,8 +3226,14 @@ def _cpp_expr(gen, e) -> str:
             # runtime helper the GIMPLE path's _lower_floordiv emits (a
             # plain C `/` truncates toward zero, which differs for
             # negative operands; this helper floors like Python).
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
             return f"__mojo_floordiv({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
         if e.op == '**':
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
             return f"pow({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
         if e.op == '+':
             # String concatenation (`current + part`, pprint.py's shape;
@@ -2350,8 +3267,56 @@ def _cpp_expr(gen, e) -> str:
                 except Exception:
                     return False
             if _is_str_operand(e.left) and _is_str_operand(e.right):
+                # String concatenation: do not install numeric None-arith
+                # guards, which would force tagged-word string operands
+                # through an int64_t path and lose char* conversions.
                 return (f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
                         f"(char *)({gen._cpp_expr(e.right)}))")
+            # `word + "literal"` / `"literal" + word`: Python's `+` with a str
+            # on one side can only be concatenation (int + str is a TypeError),
+            # so an unsolved word (a parameter OR a local, e.g. the boxed word a
+            # heterogeneous `pop()` produced) on the other side IS a string.
+            def _is_word_ident(node):
+                return (isinstance(node, gimple_ctypes.IdentExpr)
+                        and gen._cpp_declared is not None
+                        and gen._cpp_declared.get(node.name) == 'int64_t')
+            _sev = getattr(gen, '_cpp_str_evidence_names', None) or ()
+            if (_is_word_ident(e.left) and _is_word_ident(e.right)
+                    and (e.left.name in _sev or e.right.name in _sev)):
+                # two unsolved words, one of which the body uses as a string
+                # (sliced / str-method receiver): `int + str` is a TypeError, so
+                # this `+` is a concatenation (`toppath + name`, os.fwalk).
+                return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
+                        f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))")
+            if ((isinstance(e.right, gimple_ctypes.StringLiteral) and _is_word_ident(e.left))
+                    or (isinstance(e.left, gimple_ctypes.StringLiteral) and _is_word_ident(e.right))):
+                return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
+                        f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))")
+            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
+        elif e.op == '*':
+            # String repetition (`"=" * (70 - len(text))`, Apple/
+            # __main__.py's `group()` generator) → mojo_cstr_repeat,
+            # mirroring the ordinary GIMPLE path's char*/int lowering
+            # (gimple_gen_exprs.py's `mojo_cstr_repeat` case, both
+            # operand orders). Real Python's `str * int` (and `int *
+            # str`) is always string repetition — never overloaded to
+            # mean anything else — so this only needs to tell "is one
+            # side string-typed", not inspect both sides' exact types.
+            # Falls through to the plain `*` below for a genuinely
+            # all-numeric multiply (the overwhelmingly common case).
+            if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
+                        f"(int64_t)({gen._cpp_expr(e.right)}))")
+            if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
+                        f"(int64_t)({gen._cpp_expr(e.left)}))")
+            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
+        else:
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
         if e.op == '*':
             # String repetition (`"=" * (70 - len(text))`, Apple/
             # __main__.py's `group()` generator) → mojo_cstr_repeat,
@@ -2363,24 +3328,53 @@ def _cpp_expr(gen, e) -> str:
             # side string-typed", not inspect both sides' exact types.
             # Falls through to the plain `*` below for a genuinely
             # all-numeric multiply (the overwhelmingly common case).
-            def _cpp_is_str(node):
-                if isinstance(node, gimple_ctypes.StringLiteral):
-                    return True
-                try:
-                    return gimple_exprtypes._infer_simple_expr_ctype(
-                        node, gen._cpp_declared,
-                        getattr(gen, '_cpp_gen_self_fields', None),
-                        gen._async_api,
-                        fn_return_types=_cpp_trusted_fn_return_types(gen),
-                    ) == 'char *'
-                except Exception:
-                    return False
-            if _cpp_is_str(e.left) and not _cpp_is_str(e.right):
+            if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
                 return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
                         f"(int64_t)({gen._cpp_expr(e.right)}))")
-            if _cpp_is_str(e.right) and not _cpp_is_str(e.left):
+            if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
                 return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
                         f"(int64_t)({gen._cpp_expr(e.left)}))")
+        if e.op in ('and', 'or') and _cpp_and_or_is_tagged(gen, e):
+            # Python's `and`/`or` yields an OPERAND. A tagged left operand is
+            # tested by its kind (`mojo_truthy_word`: None is falsy, a box by
+            # its payload), and the result is the operand word on the side
+            # Python picks, so the result is again a tagged word the consumer
+            # renders (`_cpp_is_tagged_word_expr`). The right operand is
+            # evaluated only on the side that returns it. The names are
+            # prefixed so no user local can capture them inside the lambda.
+            _lw = f"(int64_t)(intptr_t)({gen._cpp_expr(e.left)})"
+            if _cpp_is_str_expr(gen, e.right):
+                _rw_str = gen._cpp_expr(e.right)
+                if e.op == 'or':
+                    _pick = f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str}))"
+                else:
+                    _pick = f"mojo_truthy_word(_mojo_ao_l) ? (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str})) : _mojo_ao_l"
+                return (f"[&]() {{ struct _W {{ int64_t w; "
+                        f"operator int64_t() const {{ return w; }} "
+                        f"operator char *() const {{ return (char *)mojo_box_word(w); }} }}; "
+                        f"int64_t _mojo_ao_l = {_lw}; "
+                        f"return _W{{{_pick}}}; }}()")
+            _rw = _cpp_tagged_operand_word(gen, e.right)
+            _pick = (f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : ({_rw})" if e.op == 'or'
+                     else f"mojo_truthy_word(_mojo_ao_l) ? ({_rw}) : _mojo_ao_l")
+            return f"[&]() -> int64_t {{ int64_t _mojo_ao_l = {_lw}; return {_pick}; }}()"
+        if e.op == 'or' and not isinstance(e.right, gimple_ctypes.BoolLiteral):
+            # Python's `a or b` yields an OPERAND, not a bool: `suffix or ''`
+            # is `suffix` when it is truthy and the string otherwise. Lowered
+            # for a string/word left operand and a string right operand, where
+            # a raw `||` made a bool and g++ rejected the assignment to a
+            # `char *`.
+            _or_lt = _cpp_receiver_ctype(gen, e.left) or _cpp_expr_static_ctype(gen, e.left)
+            _or_rt = ('char *' if isinstance(e.right, gimple_ctypes.StringLiteral)
+                      else (_cpp_receiver_ctype(gen, e.right)
+                            or _cpp_expr_static_ctype(gen, e.right)))
+            if _or_rt == 'char *' and _or_lt in ('char *', 'int64_t'):
+                return (f"[&]() {{ struct _W {{ int64_t w; "
+                        f"operator int64_t() const {{ return w; }} "
+                        f"operator char *() const {{ return (char *)w; }} }}; "
+                        f"int64_t _l = (int64_t)(intptr_t)({gen._cpp_expr(e.left)}); "
+                        f"return _W{{mojo_truthy_word(_l) ? _l : "
+                        f"(int64_t)(intptr_t)(char *)({gen._cpp_expr(e.right)})}}; }}()")
         if e.op == '%':
             _pf = _cpp_percent_format(gen, e)
             if _pf is not None:
@@ -2396,6 +3390,26 @@ def _cpp_expr(gen, e) -> str:
             # Without this the raw `in`/`not in` text was emitted into C++
             # (`not` is a C++ keyword, `in` is not an operator) — mimetypes.py's
             # `if '\\0' not in ctype:` is the exact failure.
+            # `x in (glob.glob, glob.iglob, glob_tree)`: membership over FUNCTION
+            # values is equality of their words (a function's identity).
+            if isinstance(e.right, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)) and e.right.elements:
+                _fws = []
+                for _el in e.right.elements:
+                    _fw = None
+                    if (isinstance(_el, gimple_ctypes.MemberExpr)
+                            or (isinstance(_el, gimple_ctypes.IdentExpr)
+                                and _el.name in gen._generator_api
+                                and _el.name not in (gen._cpp_declared or ()))):
+                        _fw = gen._cpp_sig_default_word(_el)
+                    if _fw is None:
+                        _fws = None
+                        break
+                    _fws.append(_fw)
+                if _fws:
+                    _eq = ' || '.join(f"(_v == {_w})" for _w in _fws)
+                    _neg = '!' if e.op == 'not in' else ''
+                    return (f"[&]() {{ int64_t _v = (int64_t)(intptr_t)({gen._cpp_expr(e.left)}); "
+                            f"return {_neg}({_eq}); }}()")
             a = gen._cpp_expr(e.left)
             b = gen._cpp_expr(e.right)
             return gen._cpp_in_link(a, e.left, b, e.right, negate=(e.op == 'not in'))
@@ -2416,8 +3430,9 @@ def _cpp_expr(gen, e) -> str:
         # Int / Int is true division (Float64), as in emit_exprs.py's tail. It
         # goes through mojo_div_double, not a bare C `/`, so a zero divisor
         # still raises ZeroDivisionError instead of answering inf.
-        if (op == '/' and _cpp_is_int_operand(gen, e.left)
-                and _cpp_is_int_operand(gen, e.right)):
+        if (op == '/'
+                and _cpp_is_int_operand(gen, e.left, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)
+                and _cpp_is_int_operand(gen, e.right, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)):
             return f"mojo_div_double((double)({_bl}), (double)({_br}))"
         if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
             _br = f"mojo_int_divisor((int64_t)({_br}))"
@@ -2508,17 +3523,74 @@ def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.SetExpr):
         return '{' + ', '.join(gen._cpp_expr(el) for el in e.elements) + '}'
     if isinstance(e, gimple_ctypes.ListExpr):
-        return '{' + ', '.join(gen._cpp_expr(el) for el in e.elements) + '}'
+        return _cpp_list_literal_arg_expr(gen, e)
     if isinstance(e, gimple_ctypes.TupleExpr):
-        if not e.elements: return '{}'
-        inner = ', '.join(gen._cpp_expr(el) for el in e.elements)
-        return '{' + inner + '}' if len(e.elements) != 1 else '{' + inner + ',}'
+        # A tuple value in this coroutine-body model is represented as a
+        # MojoList* (boxed elements), the same runtime shape every other
+        # tuple/list literal use in this emitter already assumes.
+        return _cpp_list_literal_arg_expr(gen, e)
     if isinstance(e, gimple_ctypes.WalrusExpr):
         # `x := expr` assigns x and yields the value
         name = e.name
         val = gen._cpp_expr(e.value)
         return f"({name} = {val})"
+    if isinstance(e, gimple_ctypes.BinaryOp) and e.op == ':=':
+        val = gen._cpp_expr(e.right)
+        if isinstance(e.left, gimple_ctypes.IdentExpr):
+            name = e.left.name
+            return f"({name} = {val})"
+        if isinstance(e.left, gimple_ctypes.MemberExpr):
+            # struct field assignment
+            struct_name = getattr(gen, '_cpp_gen_self_struct', None)
+            if struct_name and isinstance(e.left.obj, gimple_ctypes.IdentExpr) and e.left.obj.name == 'self':
+                return f"(self->{gimple_ctypes._safe_field(e.left.member)} = {val})"
+            obj_expr = gen._cpp_expr(e.left.obj) if not isinstance(e.left.obj, gimple_ctypes.IdentExpr) else e.left.obj.name
+            if isinstance(e.left.obj, gimple_ctypes.IdentExpr):
+                _ptr_struct = gen._cpp_struct_ptr_local(e.left.obj.name)
+                if _ptr_struct:
+                    return f"({obj_expr}->{gimple_ctypes._safe_field(e.left.member)} = {val})"
+            return f"({obj_expr}.{gimple_ctypes._safe_field(e.left.member)} = {val})"
+        if isinstance(e.left, gimple_ctypes.SubscriptExpr):
+            obj = gen._cpp_expr(e.left.obj)
+            idx = gen._cpp_expr(e.left.index)
+            obj_ct = None
+            if gen._cpp_declared is not None and isinstance(e.left.obj, gimple_ctypes.IdentExpr):
+                obj_ct = gen._cpp_declared.get(e.left.obj.name)
+            if obj_ct == 'MojoList *':
+                # try to use appropriate setter based on element type
+                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+                vctype = gimple_exprtypes._infer_simple_expr_ctype(
+                    e.right, gen._cpp_declared, self_fields, gen._async_api)
+                suf = gimple_ctypes.TypeLattice.list_suffix(vctype) if vctype else 'int'
+                idx64 = f"(int64_t)({idx})"
+                if suf == 'str' or vctype == 'char *':
+                    return f"(mojo_list_set_str({obj}, {idx64}, (char *)({val})))"
+                elif suf == 'double':
+                    return f"(mojo_list_set_double({obj}, {idx64}, (double)({val})))"
+                else:
+                    return f"(mojo_list_set_int({obj}, {idx64}, (int64_t)({val})))"
+            elif obj_ct == 'MojoDict *':
+                return f"(mojo_dict_set_int_kw({obj}, (int64_t)({idx}), (int64_t)({val})))"
+            return f"(*(&({obj}[{idx}])) = {val})"
+        return f"({gen._cpp_expr(e.left)} = {val})"
     if isinstance(e, gimple_ctypes.CallExpr):
+        # A call through a local that is a compile-time ALIAS of an
+        # `os.path.<fn>` (`islink, join = path.islink, path.join` at the head
+        # of Lib/os.py's `walk`): spelled out, so the `os.path.*` call table
+        # below lowers it. A runtime function VALUE would need a callable-value
+        # local this body model has no category for; the alias is exact because
+        # `_cpp_collect_os_path_aliases` only records a name EVERY binding of
+        # which names the same function.
+        _opa = getattr(gen, '_cpp_os_path_aliases', None)
+        if (_opa and isinstance(e.func, gimple_ctypes.IdentExpr)
+                and e.func.name in _opa):
+            return gen._cpp_expr(gimple_ctypes.CallExpr(
+                func=gimple_ctypes.MemberExpr(
+                    obj=gimple_ctypes.MemberExpr(
+                        obj=gimple_ctypes.IdentExpr(name='os'), member='path'),
+                    member=_opa[e.func.name]),
+                args=e.args, kwargs=e.kwargs,
+                line=e.line, col=e.col))
         # A `*`/`**`-unpack call ARGUMENT (this project's parser wraps
         # a spread argument in UnaryOp(op='*'/'**', operand=...) — see
         # this repo's own CLAUDE.md) has no case anywhere in this
@@ -2560,6 +3632,9 @@ def _cpp_expr(gen, e) -> str:
         # (see its own docstring for the full shape it requires) —
         # returning None (never guessing) for anything else, which
         # falls straight through to the honest refusal below.
+        _dyn = _cpp_dyn_call_expr(gen, e)
+        if _dyn is not None:
+            return _dyn
         if (isinstance(e.func, gimple_ctypes.IdentExpr) and e.args
                 and isinstance(e.args[-1], gimple_ctypes.UnaryOp) and e.args[-1].op == '**'
                 and not any(isinstance(a, gimple_ctypes.UnaryOp) and a.op in ('*', '**')
@@ -2630,6 +3705,19 @@ def _cpp_expr(gen, e) -> str:
                     for nxt in a[1:]:
                         acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
                     return acc
+                if e.func.member == 'split' and len(a) == 1:
+                    # os.path.split(p) → MojoList * [head, tail].
+                    # Word argument uses word-kinded runtime entry;
+                    # str argument uses int64_t_path_split.
+                    _arg_node = e.args[0]
+                    _arg_is_word = False
+                    if isinstance(_arg_node, gimple_ctypes.IdentExpr):
+                        decl = getattr(gen, '_cpp_declared', None) or {}
+                        if decl.get(_arg_node.name) in ('int64_t', 'MojoBytes *'):
+                            _arg_is_word = True
+                    if _arg_is_word:
+                        return f"mojo_os_path_split_w({a[0]})"
+                    return f"int64_t_path_split({a[0]})"
                 # os.path.isdir/exists(p) — the GIMPLE path's own
                 # os.path.* dispatch (_lower_call) already has these
                 # wired to real runtime helpers (`marker` is an unused
@@ -2643,6 +3731,8 @@ def _cpp_expr(gen, e) -> str:
                 # this scalar body model) — "'os' was not declared in
                 # this scope". Found via Tools/build/update_file.py's
                 # own `os.path.isdir(tmpfile)`.
+                if e.func.member == 'islink' and len(a) == 1:
+                    return f"mojo_os_path_islink_w((int64_t)(char *)({a[0]}))"
                 if e.func.member == 'isdir' and len(a) == 1:
                     return f"int_isdir(0, (int64_t)(char *)({a[0]}))"
                 if e.func.member == 'exists' and len(a) == 1:
@@ -2657,7 +3747,16 @@ def _cpp_expr(gen, e) -> str:
                 # behavior for this narrower body model.
                 if e.func.member == 'isfile' and len(a) == 1:
                     return f"int_isfile(0, (int64_t)(char *)({a[0]}))"
-                if e.func.member in ('normpath', 'relpath') and len(a) >= 1:
+                # relpath is REAL in the runtime (`int_relpath`, the same helper
+                # the ordinary path calls); an identity stub here returned the
+                # absolute path unchanged to a generator that asked for the
+                # relative one (c_common/fsutil.py's `iter_files(.., relparent)`).
+                if e.func.member == 'relpath' and len(a) in (1, 2):
+                    _rp_start = (f"(char *)(intptr_t)({a[1]})" if len(a) == 2
+                                 else "(char *)0")
+                    return (f"int_relpath((char *)(intptr_t)({a[0]}), "
+                            f"{_rp_start})")
+                if e.func.member == 'normpath' and len(a) >= 1:
                     return a[0]
                 # basename/dirname/splitext/expanduser/abspath — the
                 # remaining real-runtime os.path helpers, mirroring the
@@ -2725,6 +3824,14 @@ def _cpp_expr(gen, e) -> str:
                     and e.func.obj.name in gen._cpp_declared):
                 _cont_name = e.func.obj.name
                 _cont_ct = gen._cpp_declared.get(_cont_name)
+                _cont_ref = _cont_name
+                if (_cont_ct == 'int64_t' and e.func.member in ('append', 'extend', 'pop')
+                        and _cont_name in (getattr(gen, '_cpp_list_word_names', None) or ())):
+                    # a WORD the body uses as a list (`entries = None if .. else []`,
+                    # then `entries.append(entry)`): the list methods apply to the
+                    # pointer behind it
+                    _cont_ct = 'MojoList *'
+                    _cont_ref = f"({gen._cpp_container_cast_prefix('MojoList', True)}{_cont_name})"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'pop'
                         and len(e.args) <= 1):
                     # `<list-local>.pop()` / `.pop(i)` -- returns the raw
@@ -2736,8 +3843,8 @@ def _cpp_expr(gen, e) -> str:
                     # runtime `mojo_is_registered_list` discrimination and
                     # the AssignStmt tuple-unpack branch respectively.
                     if e.args:
-                        return f"mojo_list_pop_at({_cont_name}, (int64_t)({gen._cpp_expr(e.args[0])}))"
-                    return f"mojo_list_pop({_cont_name})"
+                        return f"mojo_list_pop_at({_cont_ref}, (int64_t)({gen._cpp_expr(e.args[0])}))"
+                    return f"mojo_list_pop({_cont_ref})"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'append'
                         and len(e.args) == 1
                         and isinstance(e.args[0], (gimple_ctypes.ListExpr,
@@ -2753,7 +3860,7 @@ def _cpp_expr(gen, e) -> str:
                     _reg = getattr(gen, '_cpp_list_local_elem_types', None)
                     if _reg is not None and _reg.get(_cont_name) is None:
                         _reg[_cont_name] = 'int64_t'
-                    return f"(mojo_list_append_int({_cont_name}, (int64_t)({_bl})), 0)"
+                    return f"(mojo_list_append_int({_cont_ref}, (int64_t)({_bl})), 0)"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'append'
                         and len(e.args) == 1):
                     _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -2768,10 +3875,10 @@ def _cpp_expr(gen, e) -> str:
                     _a = gen._cpp_expr(e.args[0])
                     _eff = (_reg or {}).get(_cont_name, _avct)
                     if _eff == 'char *':
-                        return f"(mojo_list_append_str({_cont_name}, (char *)({_a})), 0)"
+                        return f"(mojo_list_append_str({_cont_ref}, (char *)({_a})), 0)"
                     if _eff == 'double':
-                        return f"(mojo_list_append_double({_cont_name}, (double)({_a})), 0)"
-                    return f"(mojo_list_append_int({_cont_name}, (int64_t)({_a})), 0)"
+                        return f"(mojo_list_append_double({_cont_ref}, (double)({_a})), 0)"
+                    return f"(mojo_list_append_int({_cont_ref}, (int64_t)({_a})), 0)"
                 if (_cont_ct == 'MojoSet *' and e.func.member == 'add'
                         and len(e.args) == 1):
                     _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -2843,6 +3950,8 @@ def _cpp_expr(gen, e) -> str:
                     gen, _sym,
                     f"{_cpp_self_struct}_{gimple_ctypes._safe_name(e.func.member)}",
                     args)
+                if f"{_cpp_self_struct}_{e.func.member}" in gen._static_methods:
+                    return f"{_sym}({', '.join(args)})"   # a staticmethod takes no receiver
                 return f"{_sym}(self{', ' + ', '.join(args) if args else ''})"
             # `cls.method(...)` inside a @classmethod generator — the
             # SAME name-only resolution mechanism the ordinary
@@ -2903,10 +4012,13 @@ def _cpp_expr(gen, e) -> str:
                     args = [gen._cpp_expr(a) for a in e.args]
                     _sym = gen._struct_method_csym(_obj_struct, e.func.member, '')
                     gen._cpp_struct_method_refs.add((_obj_struct, e.func.member))
+                    _cpp_note_dynamic_word_args(gen, _obj_struct, e.func.member, e.args)
                     args = _cpp_pad_struct_method_call_args(
                         gen, _sym,
                         f"{_obj_struct}_{gimple_ctypes._safe_name(e.func.member)}",
                         args)
+                    if f"{_obj_struct}_{e.func.member}" in gen._static_methods:
+                        return f"{_sym}({', '.join(args)})"   # a staticmethod takes no receiver
                     return f"{_sym}({e.func.obj.name}{', ' + ', '.join(args) if args else ''})"
             # `SomeStruct.<method>(...)` — a CLASS-QUALIFIED method call,
             # where the receiver name is a known STRUCT NAME rather than a
@@ -3068,6 +4180,12 @@ def _cpp_expr(gen, e) -> str:
                 _obj_expr = gen._cpp_expr(e.func.obj)
                 _fn = 'mojo_str_startswith' if e.func.member == 'startswith' else 'mojo_str_endswith'
                 _a0 = gen._cpp_expr(e.args[0])
+                # A prefix/suffix that is a WORD of unknown kind (a str or a
+                # tuple of strs) goes through the runtime's `_word` form.
+                if (_cpp_receiver_ctype(gen, e.args[0]) == 'int64_t'
+                        and e.func.member == 'endswith'):
+                    return (f"(mojo_str_endswith_word((char *)({_obj_expr}), "
+                            f"(int64_t)({_a0})) != 0)")
                 return f"({_fn}((char *)({_obj_expr}), (char *)({_a0})) != 0)"
             # `<char*-typed-or-literal obj>.join(iterable)` — a real
             # `str.join(...)` call on either a declared/self-field `char *`
@@ -3155,7 +4273,7 @@ def _cpp_expr(gen, e) -> str:
             # cast back to the real pointer type. Real: Lib/enum.py's
             # `Flag._iter_member_by_value_`: `cls._value2member_map_.
             # get(val)` returns a `Flag *`. See
-            # CODEGEN_generator_function_Lib_enum.md's 2026-08-20
+            # CODEGEN_enum_runtime_class_creation's 2026-08-20
             # update.
             if (_str_obj_ctype == 'MojoDict *' and e.func.member == 'get'
                     and len(e.args) in (1, 2)):
@@ -3205,6 +4323,33 @@ def _cpp_expr(gen, e) -> str:
                             'keys': 'mojo_dict_keys',
                             'values': 'mojo_dict_values'}[e.func.member]
                 return f"{_dict_fn}({_cpp_as('MojoDict *', gen._cpp_expr(e.func.obj))})"
+            # `<self>.<opaque-field>.write(data)` / `.read()` / `.close()`
+            # on a receiver whose resolved ctype is this model's opaque
+            # int64_t box — mirror the ORDINARY GIMPLE path's own
+            # file-handle dispatch (gimple_gen_methods.py's int64_t-
+            # receiver branch: int_read/int_write/stub close), which
+            # already made exactly this choice for non-generator methods
+            # (cwriter.py's CWriter.set_position compiles clean through
+            # it; header_guard's @contextlib.contextmanager companion is
+            # the generator-body sibling of the same shape). Both runtime
+            # helpers are declared via the wholesale <fire_runtime.h>
+            # every generated .cpp includes, so no new extern plumbing.
+            # Before this, the generic fallback below emitted raw C++
+            # member-call syntax on a plain int64_t field — a hard g++
+            # error ("request for member 'write' in 'self->CWriter::out',
+            # which is of non-class type 'int64_t'").
+            _fh_rc = _cpp_receiver_ctype(gen, e.func.obj)
+            if _fh_rc in ('int64_t', 'int') and e.func.member in ('write', 'read', 'close'):
+                _fh_obj = gen._cpp_expr(e.func.obj)
+                if e.func.member == 'write' and len(e.args) == 1:
+                    return (f"int_write((int64_t)({_fh_obj}), "
+                            f"(char *)({gen._cpp_expr(e.args[0])}))")
+                if e.func.member == 'read' and not e.args:
+                    return f"int_read((int64_t)({_fh_obj}))"
+                if e.func.member == 'close' and not e.args:
+                    gimple_ctypes._debug_note('stubbed operation',
+                                'generator-body .close() on opaque handle')
+                    return '0'
             # A member call on a DECLARED local whose ctype is a plain
             # scalar (`root_logger = logging.getLogger()` — the module-
             # call elision already typed `root_logger` int64_t and
@@ -3226,42 +4371,13 @@ def _cpp_expr(gen, e) -> str:
                             f'generator-body method call on opaque scalar '
                             f'local {e.func.obj.name}.{e.func.member}()')
                 return '0'
-            # `<self>.<opaque-field>.write(data)` / `.read()` / `.close()`
-            # on a receiver whose resolved ctype is this model's opaque
-            # int64_t box — mirror the ORDINARY GIMPLE path's own
-            # file-handle dispatch (gimple_gen_methods.py's int64_t-
-            # receiver branch: int_read/int_write/stub close), which
-            # already made exactly this choice for non-generator methods
-            # (cwriter.py's CWriter.set_position compiles clean through
-            # it; header_guard's @contextlib.contextmanager companion is
-            # the generator-body sibling of the same shape). Both runtime
-            # helpers are declared via the wholesale <fire_runtime.h>
-            # every generated .cpp includes, so no new extern plumbing.
-            # Before this, the generic fallback below emitted raw C++
-            # member-call syntax on a plain int64_t field — a hard g++
-            # error ("request for member 'write' in 'self->CWriter::out',
-            # which is of non-class type 'int64_t'"). Deliberately placed
-            # AFTER the typed-receiver cases above and keyed on
-            # `_cpp_receiver_ctype` (not the IdentExpr-local stub just
-            # above, which keeps its established stub-0 convention):
-            # every site that reaches this branch today was previously a
-            # hard compile failure, so no currently-green build's behavior
-            # can change.
-            _fh_rc = _cpp_receiver_ctype(gen, e.func.obj)
-            if _fh_rc in ('int64_t', 'int') and e.func.member in ('write', 'read', 'close'):
-                _fh_obj = gen._cpp_expr(e.func.obj)
-                if e.func.member == 'write' and len(e.args) == 1:
-                    return (f"int_write((int64_t)({_fh_obj}), "
-                            f"(char *)({gen._cpp_expr(e.args[0])}))")
-                if e.func.member == 'read' and not e.args:
-                    return f"int_read((int64_t)({_fh_obj}))"
-                if e.func.member == 'close' and not e.args:
-                    gimple_ctypes._debug_note('stubbed operation',
-                                'generator-body .close() on opaque handle')
-                    return '0'
             obj = gen._cpp_expr(e.func.obj)
-            args = ', '.join(gen._cpp_expr(a) for a in e.args)
-            return f"{obj}.{e.func.member}({args})"
+            # `args_text`, not `args`: `args` is a LIST elsewhere in this
+            # function, and the compiled compiler gives one name one declared
+            # type, so formatting the joined string through `{args}` called
+            # `_mojo_repr_list` on text and segfaulted.
+            args_text = ', '.join(gen._cpp_expr(a) for a in e.args)
+            return f"{obj}.{e.func.member}({args_text})"
         if isinstance(e.func, gimple_ctypes.IdentExpr):
             fname = e.func.name
             # Module-level `X = Y` identifier alias to a plain module
@@ -3352,6 +4468,9 @@ def _cpp_expr(gen, e) -> str:
                 # mojo_len takes the boxed int64_t representation of a
                 # container/string pointer — exactly what this emitter's
                 # locals hold.
+                if _lct in ('int64_t', None):
+                    # an unsolved word: ask the runtime what it is
+                    return f"mojo_len_word((int64_t)({args[0]}))"
                 return f"mojo_len((int64_t)({args[0]}))"
             if (fname in ('str', 'String') and len(e.args) == 1
                     and not gen._locally_binds_name(fname)):
@@ -3399,6 +4518,23 @@ def _cpp_expr(gen, e) -> str:
                 # error (Tools/gdb/libpython.py's `PyDictObjectPtr.
                 # iteritems`: `has_values = int(values)`).
                 _int_arg = e.args[0]
+                # int(x) on a user struct whose declared type is a struct
+                # pointer that defines `__int__` is the dunder protocol, not
+                # a numeric cast: call the struct's own `__int__` C method,
+                # mirroring the `__getitem__` dispatch above (and the ordinary
+                # GIMPLE path). Real shape: Tools/gdb/libpython.py's
+                # `has_values = int(values)` on a gdb.Value-shaped struct.
+                if isinstance(_int_arg, gimple_ctypes.IdentExpr):
+                    _int_struct = gen._cpp_struct_ptr_local(_int_arg.name)
+                    if _int_struct and gen._struct_defines_method(
+                            _int_struct, '__int__'):
+                        _sym = gen._struct_method_csym(_int_struct, '__int__', '')
+                        gen._cpp_struct_method_refs.add((_int_struct, '__int__'))
+                        _int_args = _cpp_pad_struct_method_call_args(
+                            gen, _sym,
+                            f"{_int_struct}_{gimple_ctypes._safe_name('__int__')}",
+                            [])
+                        return f"{_sym}({gen._cpp_expr(_int_arg)}, {', '.join(_int_args)})"
                 _ict = (gen._cpp_declared.get(_int_arg.name)
                         if gen._cpp_declared is not None
                         and isinstance(_int_arg, gimple_ctypes.IdentExpr) else None)
@@ -3424,33 +4560,22 @@ def _cpp_expr(gen, e) -> str:
                     and not gen._locally_binds_name('hasattr')):
                 return f"mojo_hasattr((int)({args[0]}), {args[1]})"
             if fname == 'getattr' and not gen._locally_binds_name('getattr'):
-                # `getattr(obj, name_expr)` — dynamic, runtime-string-
-                # keyed attribute lookup (save_env.py's `resource_info`:
-                # `getattr(self, get_name)`, where `get_name` is a
-                # RUNTIME-computed string, not a literal — could resolve
-                # to any of several differently-typed/-signatured bound
-                # methods depending on its value). This codegen's own
-                # `mojo_getattr` runtime helper is an honest always-0
-                # stub (no real name->member reflection table exists at
-                # all — struct fields/methods are resolved to fixed
-                # compile-time offsets/symbols, never dispatched by a
-                # runtime string), and there is no other codegen
-                # machinery here that could do this correctly either.
-                # Previously fell through to the generic bare-name-call
-                # fallback below, which emitted a literal, undeclared
-                # C++ identifier `getattr(...)` — a real, un-diagnosed
-                # g++ syntax error. Refuse honestly instead (same
-                # graceful "fall back to interpreting this module from
-                # source" path every other unsupported generator shape
-                # in this file already gets), matching this cluster's
-                # own established convention of converting a raw
-                # miscompile into an honest refusal rather than
-                # attempting unsupported reflection.
+                # `getattr(obj, name_expr)` — dynamic, runtime-string-keyed
+                # attribute lookup (save_env.py's `resource_info`:
+                # `getattr(self, get_name)`, `get_name` computed at run time).
+                # The runtime's cross-module struct reflection resolves it
+                # (mojo_getattr_any: every unit's registered dispatcher, then
+                # the class-object table), the same lookup the C++ path already
+                # uses for a member read off a word. A 2-arg miss raises
+                # AttributeError; a 3-arg miss yields the default.
+                if len(e.args) == 2:
+                    return f"mojo_getattr_any((void *)(intptr_t)({args[0]}), (char *)({args[1]}))"
+                if len(e.args) == 3:
+                    return (f"mojo_getattr_default((void *)(intptr_t)({args[0]}), "
+                            f"(char *)({args[1]}), (int64_t)({args[2]}))")
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    "getattr(obj, name) with a non-static attribute "
-                    "name is not supported in a compiled generator/"
-                    "coroutine body (no runtime attribute-reflection "
-                    "table exists in this codegen)")
+                    f"getattr() with {len(e.args)} arguments is not a "
+                    "supported compiled generator/coroutine shape")
             if fname == 'range' and not gen._locally_binds_name('range'):
                 # range(stop) / range(start, stop) / range(start, stop,
                 # step) → the runtime's range object (iterated by the
@@ -3479,7 +4604,7 @@ def _cpp_expr(gen, e) -> str:
                 # the recursive-yield-from iter_files repro took the base
                 # case for a list argument and yielded the raw MojoList*
                 # pointer as an int; see bugs/hard/
-                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
+                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding).
                 _tnames = None
                 if isinstance(e.args[1], gimple_ctypes.IdentExpr):
                     _tnames = [e.args[1].name]
@@ -3584,6 +4709,22 @@ def _cpp_expr(gen, e) -> str:
                             f"({' || '.join(_parts)}); }}()")
                 return '(' + ' || '.join(_mk(f) if f is not None else '0'
                                          for f in _fmts) + ')'
+            if (fname in ('tuple', 'list') and len(e.args) == 1
+                    and not gen._locally_binds_name(fname)):
+                # `tuple(x)` / `list(x)`: a fresh copy of the elements of a
+                # value whose kind may only be known to the runtime (a list, a
+                # dict's keys, a set, a string). A tuple is a MojoList here.
+                # The result is a list pointer in the word-converting local
+                # type, so it can be bound to whichever variable (a `char *`
+                # or `int64_t` parameter slot that held the original) it is
+                # assigned to.
+                return ("[&]() { struct _W { int64_t w; "
+                        "operator int64_t() const { return w; } "
+                        "operator char *() const { return (char *)w; } "
+                        + gen._cpp_word_container_operator('MojoList', False)
+                        + " }; "
+                        "return _W{(int64_t)(intptr_t)mojo_list_copy("
+                        f"mojo_iter_word((int64_t)(intptr_t)({args[0]})))}}; }}()")
             if fname == 'enumerate' and not gen._locally_binds_name('enumerate'):
                 # enumerate(iterable) → pair each element with its index.
                 # Emit the underlying iterable; the consumer's loop
@@ -3623,7 +4764,10 @@ def _cpp_expr(gen, e) -> str:
                                 f"nullptr, (void *)nullptr }};")
                 return (f"[&]() -> int64_t {{ if ({_li_cur} >= "
                         f"mojo_list_len({_li_list})) {{ {_li_miss} }} "
-                        f"return mojo_list_get_int({_li_list}, {_li_cur}++); }}()")
+                        f"return " + ("mojo_list_get_boxed" if e.args[0].name in
+                                      getattr(gen, '_cpp_mixed_list_params', ())
+                                      else "mojo_list_get_int")
+                        + f"({_li_list}, {_li_cur}++); }}()")
             if fname == 'next' and len(e.args) == 1:
                 # next(<compiled-generator handle>) — a local assigned from a
                 # compiled generator's start-call (`lines =
@@ -3642,7 +4786,7 @@ def _cpp_expr(gen, e) -> str:
                 # local at all — whether same-module or foreign — so any
                 # next() on one fell through to the unresolved-callee refusal
                 # below and refused the whole module (the last blocker on
-                # bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
+                # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
                 _next_arg = e.args[0]
                 _next_gen_api = None
                 _next_gen_handle = None
@@ -3691,7 +4835,7 @@ def _cpp_expr(gen, e) -> str:
                 # callee 'list(...)'" honest refusal of the WHOLE
                 # generator -- confirmed the single most common blocker
                 # across the real-world corpus this codegen targets, see
-                # e.g. bugs/CODEGEN_generator_function_Lib_ipaddress.md's
+                # e.g. CODEGEN_generator_function_Lib_ipaddress's
                 # `_collapse_addresses_internal`). Mirrors the ordinary
                 # (non-coroutine) GIMPLE path's own `_lower_ctor_from_
                 # iterable` (gimple_gen_calls.py): synthesize the
@@ -3704,6 +4848,17 @@ def _cpp_expr(gen, e) -> str:
                 # cases below (list()/set() with no iterable already work
                 # via the plain literal-container path elsewhere in this
                 # emitter).
+                # `set(<elem> for v in it)` / `list(<elem> for v in it)`: the
+                # argument is itself a generator expression, which is exactly
+                # the comprehension this constructor names, so lower THAT with
+                # the requested container kind (handing the Comprehension node
+                # to the builder as an iterable iterated nothing).
+                if (isinstance(e.args[0], gimple_ctypes.Comprehension)
+                        and e.args[0].kind in ('list', 'set', 'generator')):
+                    _gc = e.args[0]
+                    return gen._cpp_expr(gimple_ctypes.Comprehension(
+                        kind=fname, element=_gc.element, value=_gc.value,
+                        generators=_gc.generators, line=_gc.line, col=_gc.col))
                 _ctor_var = gen._cpp_fresh_name('_ctor_elem')
                 return gen._cpp_build_container_from_iterable(
                     fname, e.args[0], _ctor_var,
@@ -3852,7 +5007,7 @@ def _cpp_expr(gen, e) -> str:
                 # CTYPE_1ARG`) for enum.py's `Flag._iter_member_by_
                 # def_`: `sorted(cls._iter_member_by_value_(value),
                 # key=lambda m: m._sort_order_)` -- see bugs/hard/
-                # CODEGEN_generator_lambda_expr_unsupported.md.
+                # the (since-fixed) compiled-generator lambda-expression bug.
                 #
                 # Only a `MojoList *`-typed iterable is supported here
                 # (the confirmed real shape); a `MojoSet *`/`MojoDict *`
@@ -3981,6 +5136,18 @@ def _cpp_expr(gen, e) -> str:
                     f"for (int64_t _mg_e : _mg_v) "
                     f"mojo_list_append_int(_mg_out, _mg_e); "
                     f"return _mg_out; }}()")
+            if (fname == 'callable' and len(e.args) == 1
+                    and isinstance(e.args[0], gimple_ctypes.IdentExpr)
+                    and gen._cpp_declared is not None
+                    and gen._cpp_declared.get(e.args[0].name) in (
+                        'int64_t', 'char *')
+                    and e.args[0].name in getattr(gen, '_cpp_param_names', ())):
+                # A parameter holding a word: ask the runtime (see
+                # `mojo_is_callable_word`) instead of the always-true stub
+                # below, so `if not callable(onempty): raise` is a real guard
+                # in front of the `mojo_fnptr_call_N` dispatch.
+                return (f"mojo_is_callable_word((int64_t)(intptr_t)"
+                        f"({gen._cpp_expr(e.args[0])}))")
             if fname == 'callable' and len(e.args) == 1:
                 # This scalar coroutine-body model has no runtime type
                 # tag to genuinely check "is this value callable" for
@@ -4065,15 +5232,6 @@ def _cpp_expr(gen, e) -> str:
             # linkage problem exists there.
             if _cpp_is_struct_ctor_call(gen, e):
                 gen._cpp_ctor_struct_names.add(fname)
-                init_sym = gen._struct_method_csym(fname, '__init__', '')
-                gen._cpp_struct_method_refs.add((fname, '__init__'))
-                # `SourceInfo(filename)` against `__init__(self, filename,
-                # _current=None)` must carry the trailing default, exactly as
-                # the struct-method call branches above do (g++ "too few
-                # arguments" otherwise).
-                args = _cpp_pad_struct_method_call_args(
-                    gen, init_sym, f"{fname}___init__", args)
-                init_args = ', '.join(['_t'] + args)
                 class_attrs = gen._class_attrs.get(fname, {})
                 field_map = gen.struct_field_types.get(fname, {})
                 attr_inits = ''.join(
@@ -4081,11 +5239,23 @@ def _cpp_expr(gen, e) -> str:
                     for aname, gname in sorted(class_attrs.items())
                     if aname in field_map
                     and field_map[aname] == gen._global_var_types.get(gname, field_map[aname]))
+                if fname in getattr(gen, '_struct_has_init', ()):
+                    init_sym = gen._struct_method_csym(fname, '__init__', '')
+                    gen._cpp_struct_method_refs.add((fname, '__init__'))
+                    # `SourceInfo(filename)` against `__init__(self, filename,
+                    # _current=None)` must carry the trailing default, exactly as
+                    # the struct-method call branches above do (g++ "too few
+                    # arguments" otherwise).
+                    init_call_args = _cpp_pad_struct_method_call_args(
+                        gen, init_sym, f"{fname}___init__", list(args))
+                    init_args = ', '.join(['_t'] + init_call_args)
+                    init_stmt = f" {init_sym}({init_args});"
+                else:
+                    init_stmt = ''
                 return (f"[&]() -> {fname} * {{ {fname} * _t = "
                         f"({fname} *)calloc(1, sizeof({fname})); "
                         f"_t->__mojo_type_id = {gimple_exprtypes._struct_type_id(fname)};"
-                        f"{attr_inits} "
-                        f"{init_sym}({init_args}); "
+                        f"{attr_inits}{init_stmt} "
                         f"return _t; }}()")
             # A call to a module-level function (tokenize.py's
             # `detect_encoding(readline)`, codecs.py's
@@ -4105,7 +5275,50 @@ def _cpp_expr(gen, e) -> str:
                          or fname in gen._cpp_early_global_names)
                     and gen._func_mangleable(fname)):
                 gen._cpp_module_func_refs.add(fname)
-                return f"{gen._func_csym(fname)}({', '.join(args)})"
+                # Keyword arguments and omitted trailing defaults are bound to
+                # the callee's parameter SLOTS by name here (the C symbol takes
+                # them positionally), and every argument is cast to its slot's
+                # C type (a word-typed expression in a `char *` slot is a
+                # reinterpretation, not a conversion). The symbol itself is a
+                # placeholder resolved when the unit is assembled: a generator
+                # body is lowered BEFORE the callee's parameter types are
+                # final, and the overload suffix is a hash of those types.
+                _mf_ptypes = list(gen.func_param_types.get(fname, []))
+                _mf_pnames = list(getattr(gen, '_func_param_names', {}).get(fname) or [])
+                _mf_kw = list(getattr(e, 'kwargs', None) or [])
+                _mf_args = list(args)
+                if _mf_ptypes and (_mf_kw or len(_mf_args) < len(_mf_ptypes)):
+                    if len(_mf_pnames) != len(_mf_ptypes):
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            f"a keyword or defaulted call to '{fname}': its "
+                            "parameter names are not known here")
+                    _mf_slots = _mf_args + [None] * (len(_mf_ptypes) - len(_mf_args))
+                    for _kn, _kv in _mf_kw:
+                        if _kn not in _mf_pnames:
+                            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                                f"call to '{fname}' passes unknown keyword '{_kn}'")
+                        _mf_slots[_mf_pnames.index(_kn)] = gen._cpp_expr(_kv)
+                    _mf_dflts = (gen._func_param_defaults.get(gen._func_csym(fname))
+                                 or gen._func_param_defaults.get(fname) or [])
+                    for _mi in range(len(_mf_slots)):
+                        if _mf_slots[_mi] is None:
+                            _mdv = gimple_exprtypes._trailing_default_at(
+                                _mf_dflts, len(_mf_ptypes), _mi)
+                            if _mdv is None:
+                                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                                    f"call to '{fname}' omits required argument "
+                                    f"'{_mf_pnames[_mi]}'")
+                            _mf_slots[_mi] = gen._default_expr_to_pair(_mdv, cxx=True)[1]
+                    _mf_args = _mf_slots
+                if _mf_ptypes and len(_mf_args) == len(_mf_ptypes):
+                    # Each argument goes through `_mj_w`, which converts to
+                    # whatever the callee's FINAL parameter type is (the early
+                    # `func_param_types` read here can still change before the
+                    # unit is assembled); a double slot is passed as is.
+                    _mf_args = [(_ae if _pt in ('double', 'float') or _pt is None
+                                 else f"_mj_w({_ae})")
+                                for _pt, _ae in zip(_mf_ptypes, _mf_args)]
+                return f"@@CSYM:{fname}@@({', '.join(_mf_args)})"
             # A call to a module-level function that ISN'T overload-mangled
             # — a simple `def fspath(p): ...` whose name also lands in the
             # globals struct (os.py's own `fspath(top)` shape; the .ci
@@ -4124,13 +5337,23 @@ def _cpp_expr(gen, e) -> str:
             # (`std::function` supports `operator()`), so it must stay
             # here rather than move under the refusal below. Same
             # C/C++-keyword rename agreement as every other read of a
-            # renamed name (see _cpp_kw_param_renames).
-            if (gen._cpp_declared is not None
-                    and gen._cpp_declared.get(fname) in (
-                        gimple_ctypes._CPP_CALLABLE_CTYPE,
-                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)):
-                cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
-                return f"{cpp_fname}({', '.join(args)})"
+            # renamed name (see _cpp_kw_param_renames). The variadic-family
+            # callable locals (`*args`/`**kwargs`) take a PACKED container,
+            # not the raw arguments, so they are handled by the branch below
+            # and must not fall through to this direct-call path.
+            if gen._cpp_declared is not None:
+                _dcall = gen._cpp_declared.get(fname)
+                _variadic_callable = (
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW)
+                if _dcall not in _variadic_callable and (
+                        (_dcall in (
+                            gimple_ctypes._CPP_CALLABLE_CTYPE,
+                            gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG))
+                        or _cpp_is_callable_ctype(_dcall)):
+                    cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
+                    return f"{cpp_fname}({', '.join(args)})"
             # A call through a DECLARED `*args`/`**kwargs`-family
             # callable-value local (`e(4, 5)` after
             # `e = lambda *a: a[0] + a[1]`): the local's declared
@@ -4278,12 +5501,38 @@ def _cpp_expr(gen, e) -> str:
             # rewrites to `not not mojo_c_getenv("GITHUB_ACTIONS")` and
             # hit this function's generic refusal below before this case
             # was added.
+            _PENDING_RAISERS = {
+                'mojo_os_scandir': ('MojoList *', 1), 'mojo_os_stat': ('int64_t', 3),
+                'mojo_os_openat': ('int64_t', 3), 'mojo_dirent_stat': ('int64_t', 2)}
+            if fname in _PENDING_RAISERS and len(args) == _PENDING_RAISERS[fname][1]:
+                # these report failure via the pending flag (a coroutine body
+                # must not longjmp): rethrow it as a real C++ exception here so
+                # the enclosing `except OSError` matches.
+                _rt = _PENDING_RAISERS[fname][0]
+                _cargs = ', '.join(
+                    f"(char *)(intptr_t)({a})" if (fname in ('mojo_os_scandir',) or
+                                                  (fname == 'mojo_os_openat' and i == 0))
+                    else f"(int64_t)({a})" for i, a in enumerate(args))
+                return _cpp_rethrow_pending(_rt, f"{fname}({_cargs})")
+            if fname == 'mojo_list_slice_word' and len(args) == 6:
+                return (f"mojo_list_slice_word((int64_t)(intptr_t)({args[0]}), "
+                        + ', '.join(f"(int64_t)({a})" for a in args[1:]) + ")")
             if fname in (
                     'mojo_c_getenv', 'mojo_platform_system',
                     'mojo_platform_machine', 'mojo_stdin_read',
                     'mojo_subprocess_run', 'mojo_subprocess_returncode',
-                    'mojo_subprocess_stdout', 'mojo_subprocess_stderr'):
+                    'mojo_subprocess_stdout', 'mojo_subprocess_stderr',
+                    'mojo_dirent_name', 'mojo_dirent_path',
+                    'mojo_dirent_is_dir', 'mojo_dirent_is_file',
+                    'mojo_dirent_is_symlink', 'mojo_stat_mode', 'mojo_stat_dev',
+                    'mojo_stat_ino', 'mojo_os_samestat', 'mojo_s_isdir',
+                    'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr',
+                    'mojo_bytes_from_str'):
                 return f"{fname}({', '.join(args)})"
+            if fname == 'mojo_fsencode_w' and len(args) == 1:
+                # the argument is a str pointer or a bytes pointer or a word: the
+                # runtime tells them apart, so pass the bits as a word
+                return f"mojo_fsencode_w((int64_t)(intptr_t)({args[0]}))"
             # A call to a C-stdlib / POSIX function with a curated, known
             # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
             # generator (Lib/os.py's `_fwalk`, reached via
@@ -4359,25 +5608,122 @@ def _cpp_expr(gen, e) -> str:
             if (isinstance(e.func.func, gimple_ctypes.IdentExpr)
                     and e.func.func.name in _fac
                     and not getattr(e, 'kwargs', None)
-                    and len(e.args) <= 4):
+                    and len(e.args) <= 8):
+                factory_name = e.func.func.name
                 inner = gen._cpp_expr(e.func)
+                # Try to get typed callable signature
+                c_ret = _cpp_callable_return_ctype_from_declared(gen, factory_name)
+                c_params = _cpp_callable_param_ctypes_from_declared(gen, factory_name)
+                # Also look up in various other places
+                if c_ret is None:
+                    for attr in ['_cpp_closure_factory_ret_types', '_closure_factory_closure_ret',
+                                 '_cpp_factory_to_closure_ret', '_mojogen_closure_ret_types']:
+                        info = getattr(gen, attr, None)
+                        if info and factory_name in info:
+                            c_ret = info[factory_name]
+                            break
+                if c_params is None:
+                    for attr in ['_cpp_closure_factory_param_types', '_cpp_factory_to_closure_params']:
+                        info = getattr(gen, attr, None)
+                        if info and factory_name in info:
+                            c_params = info[factory_name]
+                            break
+                # Try to look up for any closure name associated
+                if c_ret is None or c_params is None:
+                    # search all attrs
+                    for attr in dir(gen):
+                        if 'closure' in attr.lower() or 'factory' in attr.lower():
+                            try:
+                                info = getattr(gen, attr)
+                                if isinstance(info, dict):
+                                    for k, v in info.items():
+                                        if isinstance(v, tuple):
+                                            if len(v) >= 2 and (c_ret is None):
+                                                try:
+                                                    c_ret = v[1]
+                                                except Exception:
+                                                    pass
+                                            if len(v) >= 1 and (c_params is None):
+                                                try:
+                                                    c_params = v[0]
+                                                except Exception:
+                                                    pass
+                                        elif isinstance(v, str) and _cpp_is_callable_ctype(v):
+                                            if c_ret is None or c_params is None:
+                                                ret_p, par_p = _cpp_parse_std_function(v)
+                                                if c_ret is None and ret_p:
+                                                    c_ret = ret_p
+                                                if c_params is None and par_p is not None:
+                                                    c_params = par_p
+                            except Exception:
+                                pass
                 arg_exprs = []
-                for a in e.args:
+                for i, a in enumerate(e.args):
                     actype = gimple_exprtypes._infer_simple_expr_ctype(
                         a, gen._cpp_declared or {},
                         getattr(gen, '_cpp_gen_self_fields', None), gen._async_api)
-                    if actype not in ('int64_t', 'int', '_Bool'):
-                        raise gimple_exprtypes._UnsupportedGeneratorShape(
-                            f"calling the closure returned by '{e.func.func.name}': "
-                            "argument must be an int or bool expression")
+                    if actype == 'int':
+                        actype = 'int64_t'
                     ae = gen._cpp_expr(a)
-                    arg_exprs.append(ae if actype != '_Bool' else f"(int64_t)({ae})")
-                return (f"mojo_fnptr_call_{len(arg_exprs)}"
-                        f"((void *)({inner}){''.join(', ' + x for x in arg_exprs)})")
+                    # Use expected param type if known
+                    expected_pt = None
+                    if c_params and i < len(c_params):
+                        expected_pt = c_params[i]
+                    if expected_pt:
+                        # Cast to expected param type
+                        if expected_pt == 'double':
+                            arg_exprs.append(f"(double)({ae})" if actype != 'double' else ae)
+                            continue
+                        elif isinstance(expected_pt, str) and expected_pt.endswith('*'):
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
+                            if actype == '_Bool' or expected_pt in ('_Bool', 'bool'):
+                                arg_exprs.append(f"(int64_t)({ae})")
+                            elif isinstance(actype, str) and actype.endswith('*'):
+                                # pointer argument into an int64 slot: word-pack
+                                arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                            else:
+                                arg_exprs.append(f"({expected_pt})({ae})" if expected_pt != 'int64_t' else (ae if actype in ('int64_t', 'int') else f"(int64_t)({ae})"))
+                            continue
+                        else:
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                    # Fallback to old behavior: int/bool args, plus any
+                    # pointer-shaped arg passed as an int64_t word.
+                    if (actype not in ('int64_t', 'int', '_Bool', 'char *', 'double')
+                            and not (isinstance(actype, str) and actype.endswith('*'))):
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            f"calling the closure returned by '{factory_name}': "
+                            "argument must be an int or bool expression")
+                    if actype == '_Bool':
+                        arg_exprs.append(f"(int64_t)({ae})")
+                    elif actype == 'double':
+                        arg_exprs.append(f"(double)({ae})")
+                    elif isinstance(actype, str) and actype.endswith('*'):
+                        # pass pointer as int64_t word
+                        arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                    else:
+                        arg_exprs.append(ae)  # pass as-is for int/int64_t to match old behavior
+                # Choose dispatch based on return type
+                if c_ret == 'double':
+                    helper = f"mojo_fnptr_call_d{len(arg_exprs)}"
+                    call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
+                    return call
+                elif (isinstance(c_ret, str) and c_ret.endswith('*')
+                        and c_ret not in ('MojoList *', 'MojoDict *', 'MojoSet *')):
+                    helper = f"mojo_fnptr_call_{len(arg_exprs)}"
+                    call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
+                    return f"({c_ret})({call})"
+                else:
+                    helper = f"mojo_fnptr_call_{len(arg_exprs)}"
+                    return (f"{helper}"
+                            f"((void *)({inner}){''.join(', ' + x for x in arg_exprs)})")
+
             # Call of a call result: f()(args)  →  (f())(args)
             inner = gen._cpp_expr(e.func)
-            args = ', '.join(gen._cpp_expr(a) for a in e.args)
-            return f"({inner})({args})"
+            args_text = ', '.join(gen._cpp_expr(a) for a in e.args)
+            return f"({inner})({args_text})"
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"unsupported call expression in generator body")
     if isinstance(e, gimple_ctypes.SliceExpr):
@@ -4385,6 +5731,22 @@ def _cpp_expr(gen, e) -> str:
         stop = gen._cpp_expr(e.stop) if e.stop is not None else 'MOJO_SLICE_STOP_OMITTED'
         step = gen._cpp_expr(e.step) if e.step is not None else ''
         if step:
+            # `x[a:b:c]` on a list local (or a WORD that is a list or a string
+            # at run time): an extended slice. The bare `(a, b, c)` tuple this
+            # used to answer is not an expression a loop or a call can use.
+            _sx = e.obj
+            _sct = (gen._cpp_declared.get(_sx.name)
+                    if isinstance(_sx, gimple_ctypes.IdentExpr) and gen._cpp_declared else None)
+            _hs = '1' if e.start is not None else '0'
+            _he = '1' if e.stop is not None else '0'
+            _st0 = start if e.start is not None else '0'
+            _sp0 = stop if e.stop is not None else '0'
+            if _sct == 'MojoList *':
+                return (f"mojo_list_slice_step({gen._cpp_container_cast_prefix('MojoList', False)}({gen._cpp_expr(_sx)}), {_hs}, "
+                        f"(int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
+            if _sct == 'int64_t':
+                return (f"{gen._cpp_container_cast_prefix('MojoList', True)}mojo_word_slice_step((int64_t)({gen._cpp_expr(_sx)}), "
+                        f"{_hs}, (int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
             return f"({start}, {stop}, {step})"
         # Python `s[i:j]` on a string (this emitter's `char *`) → the
         # substring, via the same mojo_cstr_slice helper the GIMPLE path's
@@ -4396,6 +5758,25 @@ def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.SubscriptExpr):
         obj = gen._cpp_expr(e.obj)
         idx = gen._cpp_expr(e.index)
+        # `obj[key]` on a local whose declared type is a USER STRUCT pointer
+        # that defines `__getitem__` is the dunder protocol, not a string or
+        # container read: call the struct's own `__getitem__` C method, as the
+        # ordinary GIMPLE path does (emit_methods.py's
+        # `_lower_struct_subscript_dunder`). This is the shape a gdb-style
+        # `gdb.Value` subject takes (`ep['me_key']` in Tools/gdb/libpython.py),
+        # and it must be taken BEFORE the str-key refusal below, which would
+        # otherwise reject it as an unmodelled mapping lookup.
+        if isinstance(e.obj, gimple_ctypes.IdentExpr):
+            _getitem_struct = gen._cpp_struct_ptr_local(e.obj.name)
+            if _getitem_struct and gen._struct_defines_method(
+                    _getitem_struct, '__getitem__'):
+                _sym = gen._struct_method_csym(_getitem_struct, '__getitem__', '')
+                gen._cpp_struct_method_refs.add((_getitem_struct, '__getitem__'))
+                _gi_args = _cpp_pad_struct_method_call_args(
+                    gen, _sym,
+                    f"{_getitem_struct}_{gimple_ctypes._safe_name('__getitem__')}",
+                    [idx])
+                return f"{_sym}({obj}, {', '.join(_gi_args)})"
         # Python `s[i]` on a string → a 1-char string (not a C++ char).
         # Subscripting a char* expression (a local, another subscript's
         # result, or a string literal) is the common generator-body
@@ -4427,7 +5808,7 @@ def _cpp_expr(gen, e) -> str:
         # the SAME simplification the tuple/list-unpack branch's own
         # `mojo_list_get_int` call above already established as this
         # model's accepted convention for "unknown list element type".
-        # See CODEGEN_generator_non_plain_assignment_target_refused.md's
+        # See CODEGEN_generator_non_plain_assignment_target_refused's
         # 2026-08-19 update.
         if isinstance(e.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral, gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
@@ -4453,6 +5834,12 @@ def _cpp_expr(gen, e) -> str:
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared.get(e.obj.name) == 'MojoDict *':
                 key_expr = gen._cpp_dict_key_expr(e.index, idx)
+                # A struct-valued dict (`_cpp_local_dict_val_types`) stores the
+                # pointer as its int64 word; cast the word back to the struct
+                # pointer the reader is typed as (see the prescan above).
+                _vct = getattr(gen, '_cpp_local_dict_val_types', {}).get(e.obj.name)
+                if _vct is not None:
+                    return f"({_vct})mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})"
                 return f"mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})"
             # A bare identifier that names a real module-level FUNCTION
             # is never a string/container: `Unpack[self]` (typing.py's
@@ -4473,8 +5860,15 @@ def _cpp_expr(gen, e) -> str:
                     "generator/coroutine body (subscript base resolves "
                     "to a function/special-form value, not a string or "
                     "container)")
+            if (isinstance(e.obj, gimple_ctypes.IdentExpr) and gen._cpp_declared is not None
+                    and gen._cpp_declared.get(e.obj.name) == 'int64_t'
+                    and e.obj.name in getattr(gen, '_cpp_object_params', ())
+                    and not isinstance(e.index, gimple_ctypes.SliceExpr)):
+                # A dynamic word (a parameter declared `object`) is a list or a
+                # string; which one is only known now.
+                return f"mojo_getitem_word((int64_t)({obj}), (int64_t)({idx}))"
             _cpp_refuse_str_key_subscript(gen, e)
-            return f"mojo_char_at_str((char *)({obj}), {idx})"
+            return f"mojo_char_at_str_cp((char *)({obj}), {idx})"
         # Subscripting a CALL RESULT whose declared return type is a
         # container pointer: `detect_encoding(readline)[0]` where
         # detect_encoding returns MojoList * (tokenize.py's exact shape —
@@ -4543,29 +5937,110 @@ def _cpp_expr(gen, e) -> str:
                 and target.func.name in ('create_task', 'create_raising_task')
                 and len(target.args) == 1 and not getattr(target, 'kwargs', None)):
             target = target.args[0]
-        if (isinstance(target, gimple_ctypes.CallExpr) and isinstance(target.func, gimple_ctypes.IdentExpr)
-                and target.func.name in gen._async_api
-                and not getattr(target, 'kwargs', None)):
-            # The callee's own cpp unit (promise/handle/task/`_impl`/
-            # `_Awaiter` — see _gen_cpp_async_unit) must already have
-            # been emitted earlier in this module's compile (source-
-            # order dependency — see _is_async_call_to_known_fn's
-            # docstring): `target.func.name in self._async_api` is only
-            # ever true once gen_module's async pre-pass loop has
-            # already successfully compiled that callee, which — given
-            # that loop's own single forward pass over `stmts` — can
-            # only have happened for a callee defined earlier in the
-            # module than this (currently-compiling) caller.
-            callee_base = gen._async_api[target.func.name]['base']
-            # Step H: thread the call's own argument expressions through
-            # to `{callee_base}_impl(...)` -- each arg is lowered via the
-            # same shared `self._cpp_expr` this whole file already uses
-            # for every other scalar expression, so int/float/bool
-            # literals, params, and already-declared locals all just
-            # work, matching how the top-level `_impl(...)`/`_start(...)`
-            # signatures already accept arbitrary scalar C++ expressions.
-            call_args = ', '.join(gen._cpp_expr(a) for a in target.args)
-            return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}"
+        if isinstance(target, gimple_ctypes.CallExpr) and isinstance(target.func, gimple_ctypes.IdentExpr) \
+                and not getattr(target, 'kwargs', None):
+            _async_api_map = getattr(gen, '_async_api', {}) or {}
+            _async_gen_api_map = getattr(gen, '_async_gen_api', {}) or {}
+            _coro_cap = getattr(gen, '_coro_body_callable_param_apis', None) or {}
+            cur_fn = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+            tname = target.func.name
+            api_hit = None
+            if tname in _async_api_map:
+                api_hit = _async_api_map[tname]
+            elif tname in _async_gen_api_map:
+                api_hit = _async_gen_api_map[tname]
+            else:
+                for _map_name in ('_callable_param_gen_api', '_cpp_callable_param_gen_api',
+                                  '_cpp_async_gen_param_api', '_callable_param_async_gen_api',
+                                  '_callable_param_async_api'):
+                    _m = getattr(gen, _map_name, None) or {}
+                    if isinstance(_m, dict) and tname in _m:
+                        api_hit = _m[tname]
+                        break
+                if api_hit is None and isinstance(_coro_cap, dict):
+                    if cur_fn:
+                        _maybe = _coro_cap.get(cur_fn) or {}
+                        if isinstance(_maybe, dict) and tname in _maybe:
+                            api_hit = _maybe[tname]
+                    if api_hit is None:
+                        for _v in _coro_cap.values():
+                            if isinstance(_v, dict) and tname in _v:
+                                api_hit = _v[tname]
+                                break
+                if api_hit is None and tname in getattr(gen, '_generator_api', {}):
+                    api_hit = gen._generator_api[tname]
+                if api_hit is None and tname in getattr(gen, '_cpp_generator_var_api', {}):
+                    api_hit = gen._cpp_generator_var_api[tname]
+                if api_hit is None and tname in getattr(gen, '_generator_var_api', {}):
+                    api_hit = gen._generator_var_api[tname]
+                if api_hit is None:
+                    for _aname in dir(gen):
+                        if _aname.startswith('_') and ('callable' in _aname or 'param' in _aname or 'api' in _aname):
+                            try:
+                                _aval = getattr(gen, _aname)
+                                if isinstance(_aval, dict) and tname in _aval:
+                                    _cand = _aval[tname]
+                                    if isinstance(_cand, dict) and ('base' in _cand or 'value_ctype' in _cand):
+                                        api_hit = _cand
+                                        break
+                            except Exception:
+                                pass
+                if api_hit is None:
+                    try:
+                        cur_fn = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+                        _pd = getattr(gen, '_func_param_defaults', None) or {}
+                        if cur_fn and isinstance(_pd, dict):
+                            for _k in [cur_fn, f"{cur_fn}_start", cur_fn + '_body']:
+                                if _k in _pd:
+                                    _defaults = _pd[_k]
+                                    _dval = None
+                                    if isinstance(_defaults, dict):
+                                        _dval = _defaults.get(tname)
+                                    elif isinstance(_defaults, list):
+                                        # Index, don't unpack: a 2-tuple target over an
+                                        # untyped list declares no `_pval` in the
+                                        # compiled compiler.
+                                        for _pp in _defaults:
+                                            if str(_pp[0]) == tname:
+                                                _dval = _pp[1]
+                                                break
+                                    if _dval is not None and hasattr(_dval, 'name'):
+                                        _dname = _dval.name
+                                        for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                         getattr(gen, '_async_api', {}) or {},
+                                                         getattr(gen, '_generator_api', {}) or {}):
+                                            if isinstance(_src_map, dict) and _dname in _src_map:
+                                                api_hit = _src_map[_dname]
+                                                break
+                    except Exception:
+                        pass
+                    if api_hit is None and hasattr(gen, '_cpp_current_fn_node'):
+                        try:
+                            _fnn = gen._cpp_current_fn_node
+                            _dflts = getattr(_fnn, 'param_defaults', None) or {}
+                            if tname in _dflts:
+                                _dval = _dflts[tname]
+                                if hasattr(_dval, 'name'):
+                                    _dname = _dval.name
+                                    for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                     getattr(gen, '_async_api', {}) or {},
+                                                     getattr(gen, '_generator_api', {}) or {}):
+                                        if isinstance(_src_map, dict) and _dname in _src_map:
+                                            api_hit = _src_map[_dname]
+                                            break
+                        except Exception:
+                            pass
+            if api_hit is not None:
+                # The callee's own cpp unit (promise/handle/task/`_impl`/
+                # `_Awaiter` — see _gen_cpp_async_unit) must already have
+                # been emitted earlier in this module's compile (source-
+                # order dependency). For callable-valued params, the API
+                # should have been propagated from the passed callable.
+                callee_base = api_hit['base']
+                # Step H: thread the call's own argument expressions through
+                # to `{callee_base}_impl(...)`
+                call_args = ', '.join(gen._cpp_expr(a) for a in target.args)
+                return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}"
         # Step I (create_task/Task/TaskGroup/RaisingTask project):
         # `await <call to a SIBLING comptime-bracket-parametrized nested
         # async def>` (test_asyncrt.mojo's `test_asyncrt_add[1](a)` --
@@ -4667,6 +6142,426 @@ def _cpp_expr(gen, e) -> str:
         f"unsupported expression in generator body: {type(e).__name__}")
 
 
+def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]:
+    """`x = yield` / `x = yield v`: the yield as its own statement, then `x`
+    bound to the value the yield received.
+
+    The received value is the word the generator was resumed with. Every
+    consumer that resumes through `{base}_resume` (`next(g)`, a for loop,
+    `yield from`) delivers the None box, `mojo_box_none()`, which `print`
+    renders as `None`; `send(v)` resumes through `{base}_send`, which delivers
+    the tagged word of `v` (see cpp_async.py's generator promise). `x` is marked
+    a tagged word so every read of it goes through that word.
+    """
+    name = s.target.name
+    existing = declared.get(name)
+    if existing is not None and existing != 'int64_t':
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"`{name} = yield` rebinds '{name}', already declared {existing!r} "
+            "in this coroutine body; the received value is a tagged word "
+            "(int64_t), which cannot be bound to that declaration")
+    lines = gen._cpp_stmt(ExprStmt(value=s.value, line=s.line, col=s.col),
+                          declared, indent)
+    # The local's C name, derived exactly as the ordinary assignment does
+    # (a keyword-named local is renamed; a mutated capture is a pointer).
+    if name in gen._cpp_kw_param_renames:
+        cpp_name = gen._cpp_kw_param_renames[name]
+    elif name in gimple_ctypes._C_KEYWORDS or name in gimple_ctypes._CPP_KEYWORD_FIELDS or name in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
+        cpp_name = f"_kw_{name}"
+        gen._cpp_kw_param_renames[name] = cpp_name
+    else:
+        cpp_name = name
+    if name not in declared:
+        declared[name] = 'int64_t'
+        if gen._cpp_func_scope_decls is not None:
+            gen._cpp_func_scope_decls.append(f"int64_t {cpp_name};")
+    _cpp_mark_tagged_word(gen, name)
+    target = f"*{cpp_name}" if name in gen._cpp_mut_capture_names else cpp_name
+    if len(lines) == 1 and lines[0].lstrip().startswith('co_yield '):
+        # The yield is one `co_yield` statement, so bind `x` to the value the
+        # `co_yield` expression evaluates to: the awaiter's await_resume(),
+        # which is the word `{base}_send` stored, or the None box a plain
+        # `{base}_resume` stored. The yield-site tagger keeps this `x = `
+        # prefix when it boxes the yielded value (cpp_async._cpp_tag_yield_sites).
+        ln = lines[0]
+        lead = ln[:len(ln) - len(ln.lstrip())]
+        return [f"{lead}{target} = {ln.lstrip()}"]
+    # Any other yield shape (a tuple or delegated yield) keeps the None box:
+    # it has no single co_yield to read the sent word from.
+    lines.append(f"{indent}{target} = mojo_box_none();")
+    return lines
+
+
+def _cpp_contains_yield(node) -> bool:
+    """True when a `YieldExpr` occurs anywhere under `node` (expressions only;
+    the callers pass expression subtrees)."""
+    if isinstance(node, (list, tuple)):
+        return any(_cpp_contains_yield(x) for x in node)
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
+        return False
+    if isinstance(node, gimple_ctypes.YieldExpr):
+        return True
+    from dataclasses import fields as _dc_fields
+    return any(_cpp_contains_yield(getattr(node, f.name))
+               for f in _dc_fields(type(node)))
+
+
+class _YieldWalk:
+    """State of one walk over a statement's expressions for `_cpp_plan_yield_walk`.
+
+    `hoisted` collects the statements that run before the rewritten statement,
+    in order, each tagged `'yield'` (a received-value statement) or `'call'`
+    (a call spilled into a temporary). `events` records every call and every
+    hoisted yield in evaluation order, as `(kind, call-node-id, conditional)`,
+    which is what the planning pass reads. `spill` is the set of call nodes (by
+    `id`) the rewrite must spill; None on the trial walk, which only records.
+    """
+
+    def __init__(self, spill):
+        self.spill = spill
+        self.hoisted: list = []
+        self.events: list = []
+
+
+def _cpp_rewrite_yields(gen, node, w: _YieldWalk, conditional: bool = False):
+    """Copy of the expression `node` in which every `YieldExpr` is replaced by a
+    fresh local name, the yield itself appended to `w.hoisted` as
+    `<fresh> = <yield>`. The caller binds those statements, in order, before
+    the statement that reads the names.
+
+    A call that is evaluated before a hoisted yield in the same statement would
+    run after the suspension if left in place, so the planning pass (see
+    `_cpp_plan_yield_walk`) asks for it to be spilled: it is evaluated into a
+    fresh local ahead of that yield, in its original order.
+
+    A yield in a CONDITIONALLY evaluated operand (the right side of `and`/`or`,
+    either branch of a ternary) is refused: hoisting it would suspend the
+    generator on a path where Python never evaluates it. `conditional` marks
+    the walk of such an operand, so that a call there that would need spilling
+    is refused for the same reason.
+    """
+    if isinstance(node, list):
+        return [_cpp_rewrite_yields(gen, x, w, conditional) for x in node]
+    if isinstance(node, tuple):
+        return tuple(_cpp_rewrite_yields(gen, x, w, conditional) for x in node)
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
+        return node
+    if isinstance(node, gimple_ctypes.YieldExpr):
+        value = (_cpp_rewrite_yields(gen, node.value, w, conditional)
+                 if node.value is not None else None)
+        ynode = node
+        if value is not node.value:
+            ynode = copy.copy(node)
+            ynode.value = value
+        name = gen._cpp_fresh_name('_mg_yv')
+        w.hoisted.append(('yield', AssignStmt(
+            target=gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col),
+            value=ynode, line=node.line, col=node.col)))
+        w.events.append(('yield', None, conditional))
+        return gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col)
+    if isinstance(node, gimple_ctypes.BinaryOp) and node.op in ('and', 'or'):
+        # The left operand always runs; the right one only sometimes.
+        # A yield in the right operand is conditionally evaluated: it must
+        # not be hoisted unconditionally. Instead the statement generator
+        # (see _cpp_hoist_conditional_expression) will emit it inside a
+        # conditional block so it only runs on the path that evaluates it.
+        left = _cpp_rewrite_yields(gen, node.left, w, conditional)
+        right = _cpp_rewrite_yields(gen, node.right, w, True)
+        if left is node.left and right is node.right:
+            return node
+        out = copy.copy(node)
+        out.left, out.right = left, right
+        return out
+    if isinstance(node, gimple_ctypes.TernaryExpr):
+        # Yields in branches are conditionally evaluated; they must be
+        # emitted inside conditional blocks so they only run on the path
+        # that evaluates them. See _cpp_hoist_conditional_expression.
+        cond = _cpp_rewrite_yields(gen, node.condition, w, conditional)
+        then_v = _cpp_rewrite_yields(gen, node.then_val, w, True)
+        else_v = _cpp_rewrite_yields(gen, node.else_val, w, True)
+        if cond is node.condition and then_v is node.then_val and else_v is node.else_val:
+            return node
+        out = copy.copy(node)
+        out.condition, out.then_val, out.else_val = cond, then_v, else_v
+        return out
+    changes = {}
+    from dataclasses import fields as _dc_fields
+    for f in _dc_fields(type(node)):
+        v = getattr(node, f.name)
+        nv = _cpp_rewrite_yields(gen, v, w, conditional)
+        if nv is not v:
+            changes[f.name] = nv
+    out = node
+    if changes:
+        out = copy.copy(node)
+        for k, v in changes.items():
+            setattr(out, k, v)
+    if isinstance(node, gimple_ctypes.CallExpr):
+        # Post-order: the call's own operands were recorded above, so the
+        # call's event follows them, as its evaluation does.
+        w.events.append(('call', id(node), conditional))
+        if w.spill is not None and id(node) in w.spill:
+            name = gen._cpp_fresh_name('_mg_cv')
+            w.hoisted.append(('call', AssignStmt(
+                target=gimple_ctypes.IdentExpr(name=name, line=out.line, col=out.col),
+                value=out, line=out.line, col=out.col)))
+            return gimple_ctypes.IdentExpr(name=name, line=out.line, col=out.col)
+    return out
+
+
+def _cpp_plan_yield_walk(gen, rewrite):
+    """Run `rewrite(walk)` (a walk over one statement's or condition's
+    expressions, built on `_cpp_rewrite_yields`) so that every call evaluated
+    before the last hoisted yield is evaluated into a temporary, in order,
+    ahead of that yield.
+
+    Returns `(hoisted, new)`: `hoisted` is the list of `(kind, stmt)` pairs to
+    emit in order, `new` is what `rewrite` returned on the final walk. Returns
+    None when the expression holds no hoisted yield, so the caller lowers it
+    as it always did.
+
+    Two walks: the first only records the evaluation order of calls and
+    yields; the second spills exactly the unconditional calls that precede the
+    last yield. A conditionally evaluated call that precedes a yield is refused:
+    spilling it would evaluate it on a path Python would skip.
+    """
+    trial = _YieldWalk(None)
+    rewrite(trial)
+    last = None
+    for i, (kind, _nid, _cond) in enumerate(trial.events):
+        if kind == 'yield':
+            last = i
+    if last is None:
+        return None
+    spill = set()
+    for kind, nid, cond in trial.events[:last]:
+        if kind != 'call':
+            continue
+        if cond:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a call in a conditionally evaluated operand runs before a "
+                "`yield` in the same statement; evaluating it early would call "
+                "it on a path where Python would not")
+        spill.add(nid)
+    real = _YieldWalk(spill)
+    new = rewrite(real)
+    return real.hoisted, new
+
+
+def _cpp_emit_hoisted(gen, hoisted, declared: dict, indent: str) -> list[str]:
+    """Lower the `(kind, stmt)` pairs of `_cpp_plan_yield_walk` in order: a
+    yield as its received-value statement, a spilled call as an ordinary
+    assignment to its fresh temporary."""
+    lines: list[str] = []
+    for kind, h in hoisted:
+        if kind == 'yield':
+            lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
+        else:
+            lines.extend(gen._cpp_stmt(h, declared, indent))
+    return lines
+
+
+def _cpp_hoist_yields_expr(gen, expr, declared: dict, indent: str):
+    """Hoist every yield in the expression `expr` (the root included) into its
+    own received-value statement. Returns `(lines, new_expr)`: `lines` binds the
+    hoisted yields in order, and `new_expr` is `expr` with each yield replaced
+    by the local that holds its received word. Used for a condition, which is
+    always evaluated as a whole, so its root yield is hoisted too."""
+    plan = _cpp_plan_yield_walk(gen, lambda w: _cpp_rewrite_yields(gen, expr, w))
+    if plan is None:
+        return [], expr
+    hoisted, new_expr = plan
+    return _cpp_emit_hoisted(gen, hoisted, declared, indent), new_expr
+
+
+def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> list[str] | None:
+    """Handle expressions where a yield appears in a conditionally-evaluated
+    position (right operand of `and`/`or`, either branch of a ternary).
+
+    Instead of hoisting the yield unconditionally (which would run it on a path
+    Python never evaluates), generate a conditional block that only evaluates
+    the yield on the path that Python would evaluate it.
+
+    Supported shapes at the top level of an ExprStmt or AssignStmt value:
+      - `x and (yield v)`:  _mg_t = x; if (mojo_truthy_word(_mg_t)) { _mg_t = <hoisted_yield>; }
+      - `x or  (yield v)`:  _mg_t = x; if (!mojo_truthy_word(_mg_t)) { _mg_t = <hoisted_yield>; }
+      - `a if c else (yield v)`:  _mg_t = <c_truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+
+    Returns list of C++ lines, or None if the statement doesn't match a
+    supported shape (so the caller can fall through to the normal path).
+    """
+    # Only handle top-level expression statements and assignment RHS
+    if isinstance(s, gimple_ctypes.ExprStmt):
+        value = s.value
+        stmt_type = 'expr'
+    elif isinstance(s, gimple_ctypes.AssignStmt):
+        if not (isinstance(s.target, gimple_ctypes.IdentExpr)
+                and isinstance(s.value, (gimple_ctypes.BinaryOp, gimple_ctypes.TernaryExpr))):
+            return None
+        value = s.value
+        stmt_type = 'assign'
+    else:
+        return None
+
+    # Check if the value is a BinaryOp('and'/'or') or TernaryExpr with yield in conditional position
+    def _contains_conditional_yield(expr):
+        """Check if expr contains a yield that is in a conditionally evaluated position."""
+        if isinstance(expr, gimple_ctypes.BinaryOp) and expr.op in ('and', 'or'):
+            # Yield in right operand means conditionally evaluated
+            return _cpp_contains_yield(expr.right)
+        if isinstance(expr, gimple_ctypes.TernaryExpr):
+            # Yield in either branch means conditionally evaluated
+            return _cpp_contains_yield(expr.then_val) or _cpp_contains_yield(expr.else_val)
+        return False
+
+    if isinstance(value, gimple_ctypes.BinaryOp) and value.op in ('and', 'or'):
+        if not _contains_conditional_yield(value):
+            return None
+        # We have `x and (yield v)` or `x or (yield v)`
+        # Check which one
+        is_or = value.op == 'or'
+        # Extract left side
+        left_expr = value.left
+        # The right side contains a yield
+        right_expr = value.right
+
+        # Get the C++ expression string for the left side
+        # Use _cpp_expr which is the expression emitter
+        # But _cpp_expr expects gen-level context. We need to construct it differently.
+        # For the left side, we can use gen._cpp_expr(left_expr)
+        # But that would be called from within _cpp_stmt already. Let's use a simpler
+        # approach: just use the left_expr's name or a simplified representation.
+
+        # Generate conditional block
+        # _mg_t = <left_expr_cpp>
+        # if (mojo_truthy_word(_mg_t)) [or !mojo_truthy_word(_mg_t)] { _mg_t = <yield>; }
+
+        # We need to get the C++ expression for left_expr. Use _cpp_expr with the gen.
+        # Actually, we can generate a simple IdentExpr case. For complex left_expr,
+        # this won't work perfectly but handles the simple case.
+        lhs_cpp = gen._cpp_expr(left_expr) if hasattr(gen, '_cpp_expr') else left_expr.name
+
+        mg_t_name = '_mg_t'
+        cond = 'mojo_truthy_word' if not is_or else 'not mojo_truthy_word'
+
+        # The lines: _mg_t = lhs; if (cond _mg_t) { _mg_t = <hoisted_yield>; }
+        indent2 = indent + '    '
+        lines = [f"{indent}{mg_t_name} = {lhs_cpp};"]
+        lines.append(f"{indent2}if ({cond} ({mg_t_name}))) {{")
+        
+        # Now hoist the yield into this block. Since we're inside _cpp_hoist_conditional_expression,
+        # we need to create the yield hoisting within this function.
+        # We can reuse _cpp_rewrite_yields and _cpp_plan_yield_walk on the right_expr,
+        # but we need to capture the hoisted statements and emit them inside the if block.
+        
+        # For simplicity, we'll use _cpp_hoist_yields_expr on the right_expr to hoist yields
+        # into the local _mg_t, and emit the hoisted statements inside the if block.
+        hoisted_lines, new_right_expr = _cpp_hoist_yields_expr(gen, right_expr, declared, indent2)
+        lines.extend(hoisted_lines)
+        # Emit the actual value (with the yield replaced by the hoisted local)
+        # We need to emit: _mg_t = (the new right expression)
+        rhs_cpp = gen._cpp_expr(new_right_expr) if hasattr(gen, '_cpp_expr') else new_right_expr.name
+        lines.append(f"{indent2}{mg_t_name} = {rhs_cpp};")
+        lines.append(f"{indent2}}}")
+        return lines
+
+    if isinstance(value, gimple_ctypes.TernaryExpr):
+        if not _contains_conditional_yield(value):
+            return None
+        # We have `a if c else (yield v)`
+        # Need to handle: _mg_t = <c_truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+        
+        # Get the C++ expression for condition
+        cond_cpp = gen._cpp_expr(value.condition) if hasattr(gen, '_cpp_expr') else value.condition.name
+        # The ternary condition truthy check
+        truthy_check = f"mojo_truthy_word ({cond_cpp})"
+        
+        mg_t_name = '_mg_t'
+        indent2 = indent + '    '
+        
+        # Generate lines: _mg_t = <truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+        lines = [f"{indent}{mg_t_name} = {truthy_check};"]
+        
+        # Get C++ expressions for then_val and else_val
+        then_cpp = gen._cpp_expr(value.then_val) if hasattr(gen, '_cpp_expr') else value.then_val.name
+        else_cpp = gen._cpp_expr(value.else_val) if hasattr(gen, '_cpp_expr') else value.else_val.name
+        
+        lines.append(f"{indent2}if ({cond_cpp}) {{")
+        lines.append(f"{indent2}    {mg_t_name} = {then_cpp};")
+        lines.append(f"{indent2}}} else {{")
+        
+        # For the else branch that may contain a yield, we need to hoist it
+        hoisted_lines, new_else_expr = _cpp_hoist_yields_expr(gen, value.else_val, declared, indent2)
+        lines.extend(hoisted_lines)
+        # Emit the actual value (with the yield replaced by the hoisted local)
+        else_cpp = gen._cpp_expr(new_else_expr) if hasattr(gen, '_cpp_expr') else new_else_expr.name
+        lines.append(f"{indent2}    {mg_t_name} = {else_cpp};")
+        lines.append(f"{indent2}}}")
+        return lines
+
+    return None
+
+
+def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
+    """Hoist every `yield` that is an OPERAND of a simple statement into its own
+    received-value statement, so the statement reads the bound name instead.
+
+    `print((yield 1))` and `x += yield 2` put a suspension in a value position
+    that the expression lowering cannot emit. Each such yield becomes a fresh
+    local bound by `_cpp_assign_received_yield` -- the lowering `x = yield v`
+    already uses, so the received word is the None box and every read of it
+    goes through the tagged-arithmetic guards -- and the statement is then
+    lowered with that local in place of the yield.
+
+    Returns None when there is nothing to hoist; the caller then lowers `s` as
+    it always did. A ROOT yield is not hoisted: the whole value of an
+    expression statement, or of `x = yield`, is already a form those lowerings
+    handle. The hoisting recurses into a root yield's own operands.
+
+    Evaluation order: a call evaluated before a hoisted yield is spilled into a
+    temporary ahead of it (`_cpp_plan_yield_walk`), so it still runs before the
+    suspension, as in Python. A call that is conditionally evaluated and so
+    cannot be spilled is refused.
+    """
+    if isinstance(s, gimple_ctypes.ExprStmt):
+        root = s.value if isinstance(s.value, gimple_ctypes.YieldExpr) else None
+    elif isinstance(s, gimple_ctypes.AssignStmt):
+        root = (s.value if isinstance(s.target, gimple_ctypes.IdentExpr)
+                and isinstance(s.value, gimple_ctypes.YieldExpr) else None)
+    elif isinstance(s, (gimple_ctypes.AugAssignStmt, gimple_ctypes.ReturnStmt)):
+        root = None
+    else:
+        return None
+
+    def rewrite(w):
+        # The root yield stays the statement's own node (its identity is keyed
+        # by the yield-site tables); only its operands are rewritten.
+        new_stmt = copy.copy(s)
+        from dataclasses import fields as _dc_fields
+        for f in _dc_fields(type(s)):
+            v = getattr(s, f.name)
+            if root is not None and v is root:
+                nv = v
+                if root.value is not None:
+                    rv = _cpp_rewrite_yields(gen, root.value, w)
+                    if rv is not root.value:
+                        nv = copy.copy(root)
+                        nv.value = rv
+            else:
+                nv = _cpp_rewrite_yields(gen, v, w)
+            if nv is not v:
+                setattr(new_stmt, f.name, nv)
+        return new_stmt
+
+    plan = _cpp_plan_yield_walk(gen, rewrite)
+    if plan is None:
+        return None
+    hoisted, new_stmt = plan
+    lines = _cpp_emit_hoisted(gen, hoisted, declared, indent)
+    lines.extend(gen._cpp_stmt(new_stmt, declared, indent))
+    return lines
+
+
 def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
     """`yield a, b, ...` — boxes the tuple's elements into a real
     runtime `MojoList *` (mojo_mark_as_tuple'd, exactly the same
@@ -4707,11 +6602,34 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     # first made every `yield (a, b)` raise out of its own construction. Same
     # ordering rule as _lower_tuple_literal's identical literal.
     lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
+    # A tuple with a None or a string slot must carry every slot's kind AT RUN TIME: a consumer that reads the
+    # tuple dynamically -- a loop over the result of a call through a function VALUE
+    # (`for d, e in check(a)`) -- prints a None as 0 and a string as a pointer otherwise, and an
+    # int64_t slot here may only be the default for an unknown local. Such a tuple is built with
+    # the kind-recording appends; a tuple without a None keeps the plain appends it always had
+    # (a double beside an unknown int64_t read back as its raw bits when it did not).
+    _dyn_slots = False
+    _els = []
     for el in tup.elements:
         ectype = gimple_exprtypes._infer_simple_expr_ctype(el, declared, self_fields, gen._async_api) or 'int64_t'
-        ev = gen._cpp_expr(el)
+        _is_none = isinstance(el, NoneLiteral) or (isinstance(el, IdentExpr) and el.name == 'None')
+        _certain_int = isinstance(el, (IntLiteral, BoolLiteral))
         suf = gimple_ctypes.TypeLattice.list_suffix(ectype)
-        if suf == 'double':
+        if _is_none or suf == 'str':
+            _dyn_slots = True
+        _els.append((el, ectype, suf, _is_none))
+    for el, ectype, suf, _is_none in _els:
+        ev = gen._cpp_expr(el)
+        if _dyn_slots:
+            if _is_none:
+                lines.append(f"{indent}mojo_list_append_word({tvar}, mojo_box_none());")
+            elif suf == 'double':
+                lines.append(f"{indent}mojo_list_append_double_kinded({tvar}, (double)({ev}), 'i');")
+            elif suf == 'str':
+                lines.append(f"{indent}mojo_list_append_str_kinded({tvar}, (char *)({ev}));")
+            else:
+                lines.append(f"{indent}mojo_list_append_word({tvar}, (int64_t)(intptr_t)({ev}));")
+        elif suf == 'double':
             lines.append(f"{indent}mojo_list_append_double({tvar}, (double)({ev}));")
         elif suf == 'str':
             lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)({ev}));")
@@ -4788,6 +6706,9 @@ def _cpp_hoist_walrus_decls(gen, expr, declared: dict, indent: str) -> list[str]
 def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     if isinstance(s, gimple_ctypes.PassStmt):
         return []
+    _hoisted = _cpp_hoist_yield_operands(gen, s, declared, indent)
+    if _hoisted is not None:
+        return _hoisted
     if isinstance(s, gimple_ctypes.ExprStmt):
         # Step I (create_task/Task/TaskGroup/RaisingTask project): a
         # bare string-literal expression statement — real Mojo/Python's
@@ -4814,11 +6735,40 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "`yield` not supported in an async function body "
                     "(that would make it an async generator, its own "
                     "combined-refusal category — see gen_module)")
-            if s.value.value is None:
-                return [f"{indent}co_yield (int64_t)0;  /* bare yield */"]
+            if coro_mod._is_none_yield(s.value):
+                # A None yield is marked, not written as a 0: cpp_async.py boxes
+                # every marked site into a tagged word (`mojo_box_none()`) when
+                # the generator mixes kinds, and refuses the whole generator when
+                # it does not (a lone None has no word to carry it).
+                return [f"{indent}co_yield /*Y:none*/ (0);"]
             if isinstance(s.value.value, gimple_ctypes.TupleExpr):
                 return gen._cpp_yield_tuple(s.value.value, declared, indent)
-            return [f"{indent}co_yield {gen._cpp_expr(s.value.value)};"]
+            if id(s.value) in (getattr(gen, '_cpp_tuple_guarded_yields', None) or ()):
+                # `if isinstance(x, tuple): yield x` where `x` is the boxed
+                # word a heterogeneous `pop()` produced: the promise slot is
+                # a `MojoList *` (the tuple), so narrow the word to it.
+                return [f"{indent}co_yield {gen._cpp_container_cast_prefix('MojoList', True)}({gen._cpp_expr(s.value.value)});"]
+            # Mark the site with its static ctype: if the generator's yields turn
+            # out to be of different known scalar kinds, `_gen_cpp_generator_unit`
+            # boxes each site by this marker (a TAGGED-word value slot);
+            # otherwise it is just a comment.
+            _yexpr = s.value.value
+            _ysite = gimple_exprtypes._infer_simple_expr_ctype(
+                _yexpr, declared, getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api) or 'unresolved'
+            _yexpr_cpp = gen._cpp_expr(_yexpr)
+            _ytag = {'char *': 'str', 'double': 'dbl', '_Bool': 'bool',
+                     'int64_t': 'int', 'MojoBytes *': 'bytes'}.get(_ysite, 'other')   # no raw `*` in a comment
+            # DirEntry name/path and fsencode words are int64_t runtime words but
+            # represent str/bytes pointers; tag and cast them as string/bytes
+            # words so heterogeneous/tagged generator yields box and print correctly.
+            if (isinstance(_yexpr, gimple_ctypes.CallExpr)
+                    and isinstance(_yexpr.func, gimple_ctypes.IdentExpr)
+                    and _yexpr.func.name in ('mojo_dirent_name', 'mojo_dirent_path',
+                                             'mojo_fsencode_w')):
+                _ytag = 'bytes' if _yexpr.func.name == 'mojo_fsencode_w' else 'str'
+                _yexpr_cpp = f"(char *)(intptr_t)({_yexpr_cpp})"
+            return [f"{indent}co_yield /*Y:{_ytag}*/ ({_yexpr_cpp});"]
         if isinstance(s.value, gimple_ctypes.YieldFromExpr):
             if gen._cpp_emit_kind in ('async', 'async_gen'):
                 raise gimple_exprtypes._UnsupportedAsyncShape(
@@ -4943,6 +6893,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
             if parsed is not None:
                 end_str, flush = parsed
+                if _cpp_is_tagged_word_expr(gen, s.value.args[0]):
+                    # A tagged word (one yield-kind box per slot): the repr
+                    # resolves the kind the box carries, so it prints the
+                    # yielded value itself, not the box's address.
+                    out = [f'{indent}printf("%s{end_str}", '
+                           f'mojo_repr_boxed((int64_t)({gen._cpp_expr(s.value.args[0])})));']
+                    if flush:
+                        out.append(f'{indent}fflush(stdout);')
+                    return out
                 self_fields = getattr(gen, '_cpp_gen_self_fields', None)
                 arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(s.value.args[0], declared, self_fields)
                 if arg_ctype not in ('int64_t', 'double', '_Bool', 'char *'):
@@ -4963,6 +6922,55 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 if flush:
                     out.append(f'{indent}fflush(stdout);')
                 return out
+        # `print(<multiple scalar args>)` — CPython's default separator is `sep=' '`.
+        # Emit one printf per argument with space between them, end_str after last.
+        if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                and s.value.func.name == 'print' and len(s.value.args) > 1):
+            parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
+            if parsed is not None:
+                end_str, flush = parsed
+                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+                arg_exprs = []
+                for arg in s.value.args:
+                    if _cpp_is_tagged_word_expr(gen, arg):
+                        arg_exprs.append(f"mojo_repr_boxed((int64_t)({gen._cpp_expr(arg)}))")
+                    else:
+                        arg_exprs.append(gen._cpp_expr(arg))
+                # For each argument: emit printf with space after all but last,
+                # and end_str after the last argument.
+                lines = []
+                n = len(arg_exprs)
+                for i, ae in enumerate(arg_exprs):
+                    arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(
+                        s.value.args[i], declared, self_fields) if s.value.args[i] else 'int64_t'
+                    is_first = (i == 0)
+                    is_last = (i == n - 1)
+                    # Build format with leading space only if not first,
+                    # and trailing end_str only if last.
+                    sep_before = '' if is_first else ' '
+                    fmt = '%s' if arg_ctype == 'char *' else ('%s' if arg_ctype == 'double' else '%lld')
+                    # For double use mojo_repr_float, for bool use conditional, for char* direct, for int cast
+                    if arg_ctype == 'double':
+                        val_expr = f"mojo_repr_float((double)({ae}))"
+                    elif arg_ctype == '_Bool':
+                        val_expr = f"({ae}) ? \"True\" : \"False\""
+                    elif arg_ctype == 'char *':
+                        val_expr = ae
+                    else:
+                        val_expr = f"(long long)({ae})"
+                    # Format: space before + fmt + end_str after (only on last)
+                    fmt_str = f'"{sep_before}{fmt}'
+                    if is_last:
+                        fmt_str += f'{end_str}"'
+                    else:
+                        fmt_str += '"'
+                    if arg_ctype == 'double' or arg_ctype == '_Bool' or arg_ctype == 'char *':
+                        lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                    else:
+                        lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                if flush:
+                    lines.append(f'{indent}fflush(stdout);')
+                return lines
         # A bare call to a captured (or scalar-parameter) function-type
         # value — device_context.mojo's `async def wrapper(...)
         # capturing -> None: func()`/`func(idx)`, the ENTIRE body of
@@ -4974,30 +6982,82 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # see _lower_fnptr_call). Uses the SAME mojo_fnptr_call_N()
         # runtime helper (declared `static inline` in fire_runtime.h,
         # which this .cpp translation unit already #includes) rather
-        # than inventing a second indirect-call convention — only 0-4
-        # scalar arguments are supported, matching that helper's own
-        # fixed arity family.
+        # than inventing a second indirect-call convention.
         if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
-                and s.value.func.name in declared
-                and declared[s.value.func.name] == 'int64_t'
-                and not getattr(s.value, 'kwargs', None)
-                and len(s.value.args) <= 4):
+                and not getattr(s.value, 'kwargs', None)):
             fname = s.value.func.name
-            self_fields = getattr(gen, '_cpp_gen_self_fields', None)
-            arg_exprs = []
-            for a in s.value.args:
-                actype = gimple_exprtypes._infer_simple_expr_ctype(a, declared, self_fields, gen._async_api)
-                if actype not in ('int64_t', 'double', '_Bool', 'char *'):
-                    raise gimple_exprtypes._UnsupportedAsyncShape(
-                        f"calling captured function '{fname}': argument "
-                        "must be a scalar int64_t/double/_Bool/char* expression")
-                ae = gen._cpp_expr(a)
-                if actype != 'int64_t':
-                    ae = f"(int64_t)({ae})"
-                arg_exprs.append(ae)
-            helper = f"mojo_fnptr_call_{len(arg_exprs)}"
-            call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
-            return [f"{indent}{helper}({call_args});"]
+            dct = declared.get(fname) if declared else None
+            # If it's a typed std::function (not int64_t boxed), prefer direct call.
+            # Variadic-family callables (`*args`/`**kwargs`) take a PACKED
+            # container, not the raw arguments, so let the expression path
+            # handle their packing rather than passing args directly here.
+            _variadic_callable_stmt = (
+                gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW)
+            if _cpp_is_callable_ctype(dct) and dct not in (
+                    gimple_ctypes._CPP_CALLABLE_CTYPE,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG) and dct not in _variadic_callable_stmt:
+                cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
+                args_list = [gen._cpp_expr(a) for a in s.value.args]
+                return [f"{indent}{cpp_fname}({', '.join(args_list)});"]
+            is_callable = False
+            if dct == 'int64_t':
+                is_callable = True
+            elif dct in (gimple_ctypes._CPP_CALLABLE_CTYPE, gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG):
+                is_callable = True
+            elif _cpp_is_callable_ctype(dct):  # other callable types
+                is_callable = True  # try to handle
+            if is_callable and len(s.value.args) <= 8:
+                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+                c_ret = _cpp_callable_return_ctype_from_declared(gen, fname)
+                c_params = _cpp_callable_param_ctypes_from_declared(gen, fname)
+                arg_exprs = []
+                for i, a in enumerate(s.value.args):
+                    actype = gimple_exprtypes._infer_simple_expr_ctype(a, declared, self_fields, gen._async_api)
+                    ae = gen._cpp_expr(a)
+                    expected_pt = None
+                    if c_params and i < len(c_params):
+                        expected_pt = c_params[i]
+                    if expected_pt:
+                        if expected_pt == 'double':
+                            arg_exprs.append(f"(double)({ae})")
+                            continue
+                        elif isinstance(expected_pt, str) and expected_pt.endswith(' *'):
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
+                            if actype == '_Bool' or expected_pt in ('_Bool', 'bool'):
+                                arg_exprs.append(f"(int64_t)({ae})")
+                            elif actype == 'char *':
+                                arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                            elif expected_pt == 'int64_t':
+                                arg_exprs.append(ae if actype in ('int64_t', 'int') else f"(int64_t)({ae})")
+                            else:
+                                arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                        else:
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                    if actype not in ('int64_t', 'int', 'double', '_Bool', 'char *'):
+                        raise gimple_exprtypes._UnsupportedAsyncShape(
+                            f"calling captured function '{fname}': argument "
+                            "must be a scalar int64_t/double/_Bool/char* expression")
+                    if actype == 'double':
+                        arg_exprs.append(f"(double)({ae})")
+                    elif actype == '_Bool':
+                        arg_exprs.append(f"(int64_t)({ae})")
+                    elif actype == 'char *':
+                        arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                    else:
+                        arg_exprs.append(ae)  # int/int64_t passed as-is
+                if c_ret == 'double':
+                    helper = f"mojo_fnptr_call_d{len(arg_exprs)}"
+                    call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
+                    return [f"{indent}{helper}({call_args});"]
+                helper = f"mojo_fnptr_call_{len(arg_exprs)}"
+                call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
+                return [f"{indent}{helper}({call_args});"]
         # A bare `abort(...)` call (real Mojo's `std.os.abort`,
         # test_tracing.mojo's own `except e: abort(String(e))` shape) --
         # `abort`'s ENTIRE observable contract is "never returns,
@@ -5029,6 +7089,33 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # rejects as a constant-expression division by zero.
         return [f"{indent}(void)({gen._cpp_expr(s.value)});"]
     if isinstance(s, gimple_ctypes.AssignStmt):
+        if (isinstance(s.target, gimple_ctypes.IdentExpr)
+                and isinstance(s.value, gimple_ctypes.YieldExpr)):
+            return _cpp_assign_received_yield(gen, s, declared, indent)
+        if (isinstance(s.target, gimple_ctypes.TupleExpr)
+                and isinstance(s.value, gimple_ctypes.TupleExpr)
+                and len(s.target.elements) == len(s.value.elements)
+                and all(isinstance(t, gimple_ctypes.IdentExpr) for t in s.target.elements)):
+            # `a, b = x, y`: element-wise, each target taking ITS element. The
+            # general path below evaluates the right side as ONE value and
+            # subscripts it (`({x, y})[0]`), which is not C++. When no target
+            # is read by a right-hand element the plain sequence is exact (and
+            # keeps each element's own type); otherwise the right side is
+            # evaluated into temporaries first, as Python does.
+            _tn = set(t.name for t in s.target.elements)
+            _overlap = False
+            for _v in s.value.elements:
+                for _sub in gimple_exprtypes._walk_ast(_v):
+                    if isinstance(_sub, gimple_ctypes.IdentExpr) and _sub.name in _tn:
+                        _overlap = True
+            if not _overlap:
+                lines = []
+                for _t, _v in zip(s.target.elements, s.value.elements):
+                    lines.extend(gen._cpp_stmt(
+                        gimple_ctypes.AssignStmt(target=_t, value=_v,
+                                                 line=s.line, col=s.col),
+                        declared, indent))
+                return lines
         if isinstance(s.target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
             # Tuple unpacking: a, b = expr  →  a = expr[0]; b = expr[1]
             # A LIST-PATTERN target (`[tup] = [...]`, `[a, b] = [...]`)
@@ -5045,7 +7132,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # identifier assignment target is supported" refusal below,
             # even though the exact same decomposition this TupleExpr
             # branch already does applies unchanged. See
-            # CODEGEN_generator_non_plain_assignment_target_refused.md.
+            # CODEGEN_generator_non_plain_assignment_target_refused.
             # When `expr` is a call to a module function returning a
             # MojoList* (tokenize.py's `encoding, consumed =
             # detect_encoding(readline)` — detect_encoding returns a
@@ -5056,6 +7143,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                 and s.value.func.name in gen.func_return_types
                 and gen.func_return_types[s.value.func.name] == 'MojoList *')
+            # os.path.split(p) returns MojoList* [dirname, basename]; treat
+            # as list-valued for tuple unpacking like other MojoList* calls.
+            _tup_is_split_call = (isinstance(s.value, gimple_ctypes.CallExpr)
+                and isinstance(s.value.func, gimple_ctypes.MemberExpr)
+                and s.value.func.member == 'split'
+                and isinstance(s.value.func.obj, gimple_ctypes.MemberExpr)
+                and s.value.func.obj.member == 'path'
+                and isinstance(s.value.func.obj.obj, gimple_ctypes.IdentExpr)
+                and s.value.func.obj.obj.name == 'os')
             # A bare Comprehension as the RHS (`[tup] = [x for x in ...]`,
             # Lib/test/crashers/gc_inspection.py's own `g` generator) also
             # lowers, via _cpp_expr's own Comprehension case just above,
@@ -5083,7 +7179,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and gen._cpp_declared.get(s.value.name) == 'MojoList *')
             _tup_is_list_val = (_tup_is_list_call
                 or isinstance(s.value, gimple_ctypes.Comprehension)
-                or _tup_is_list_ident)
+                or _tup_is_list_ident
+                or _tup_is_split_call)
             # Pop-time shape discrimination: unpacking a value popped off a
             # heterogeneous/tagged-union stack (`marker, value =
             # stack.pop()`, then a second-level `a, b, ... = value`). The
@@ -5156,9 +7253,24 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if el.name not in declared:
                         declared[el.name] = 'int64_t'
                         lines.append(f"{indent}int64_t {el.name};")
+                    if _tup_is_split_call:
+                        _cpp_mark_tagged_word(gen, el.name)
                     if _tup_is_list_val:
-                        lines.append(f"{indent}{el.name} = "
-                                     f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i});")
+                        # Read each slot with the accessor the TARGET's
+                        # declared type needs, not always the boxed-int
+                        # one: a string target (`header, sep =
+                        # _normalize_table_file_props(...)`, both strings)
+                        # must come back as `char *`. Reading the slot with
+                        # mojo_list_get_int and assigning it to a `char *`
+                        # target is an invalid C++ conversion.
+                        _el_decl = declared.get(el.name)
+                        if _el_decl == 'char *':
+                            _el_get = f"mojo_list_get_str({_cpp_as('MojoList *', _tup_val)}, {i})"
+                        elif _el_decl == 'double':
+                            _el_get = f"mojo_list_get_double({_cpp_as('MojoList *', _tup_val)}, {i})"
+                        else:
+                            _el_get = f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i})"
+                        lines.append(f"{indent}{el.name} = {_el_get};")
                     elif _tup_is_unresolved_call:
                         lines.append(f"{indent}{el.name} = 0;")
                     else:
@@ -5169,7 +7281,11 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if isinstance(s.target, gimple_ctypes.MemberExpr) and isinstance(s.target.obj, gimple_ctypes.IdentExpr) \
                     and s.target.obj.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
                 val = gen._cpp_expr(s.value)
-                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = {val};"]
+                _pset = gimple_ctypes.presence_set_stmt(
+                    gen._struct_name_owner.get(gen._cpp_gen_self_struct),
+                    s.target.member, 'self', '->')
+                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = {val};"
+                        + (f" {_pset}" if _pset else '')]
             # `cls.<attr> = val` / `ClassName.<attr> = val` — the write-side
             # analogue of the class-level-attribute READ support just above
             # (`_cpp_expr`'s `cls.<attr>`/`ClassName.<attr>` MemberExpr
@@ -5201,6 +7317,13 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         gen._cpp_class_attr_refs.add(_cls_gname)
                         val = gen._cpp_expr(s.value)
                         return [f"{indent}{_cls_gname} = {val};"]
+                    if (_cls_gname is None
+                            and s.target.member not in gen._struct_method_names.get(_tgt_struct, ())
+                            and s.target.member not in gen.struct_field_types.get(_tgt_struct, {})):
+                        val = gen._cpp_expr(s.value)
+                        _ctag = gimple_exprtypes._struct_type_id(_tgt_struct)
+                        return [f'{indent}mojo_class_setattr({_ctag}LL, "{s.target.member}", '
+                                f'(int64_t)(intptr_t)({val}));']
             # arr[i] = val / d[k] = val  →  a real runtime-helper write
             # (mojo_list_set_*/mojo_dict_set_*), mirroring the plain
             # (non-generator) GIMPLE path's own SubscriptExpr-target
@@ -5252,7 +7375,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if vctype == 'double':
                         return [f"{indent}mojo_dict_set_double(({obj}), {key_expr}, {val});"]
                     return [f"{indent}mojo_dict_set_int(({obj}), {key_expr}, (int64_t)({val}));"]
-                return [f"{indent}{obj}[{idx}] = {val};"]
+                return [f"{indent}*(&({obj}[{idx}])) = {val};"]
             # sys.stderr/stdout/stdin = val (task #150's remaining
             # non-self-MemberExpr gap, e.g. test_faulthandler.py's
             # `sys.stderr = None`): `sys` has no real backing value
@@ -5425,15 +7548,21 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and s.value.func.name == 'iter'
                 and len(s.value.args) == 1 and not s.value.kwargs
                 and not gen._locally_binds_name('iter')
-                and name not in declared):
+                and (name not in declared
+                     # the rebinding `items = iter(items)` of a list
+                     # PARAMETER/local that is not already a cursor
+                     or (declared.get(name) == 'MojoList *'
+                         and name not in gen._cpp_list_iter_cursor))):
             _it_src = s.value.args[0]
             _it_src_ct = _cpp_receiver_ctype(gen, _it_src)
             if _it_src_ct in ('MojoList *', 'int64_t'):
                 _it_arg_e = gen._cpp_expr(_it_src)
                 _cursor = gen._cpp_fresh_name(f"_mg_itc_{cpp_name}")
+                _it_was_declared = name in declared
                 declared[name] = 'MojoList *'
                 if gen._cpp_func_scope_decls is not None:
-                    gen._cpp_func_scope_decls.append(f"MojoList *{cpp_name};")
+                    if not _it_was_declared:
+                        gen._cpp_func_scope_decls.append(f"MojoList *{cpp_name};")
                     gen._cpp_func_scope_decls.append(f"int64_t {_cursor};")
                 gen._cpp_list_iter_cursor[name] = {'list': cpp_name,
                                                    'cursor': _cursor}
@@ -5479,7 +7608,13 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         _container_literal = isinstance(s.value, (gimple_ctypes.ListExpr,
                                                   gimple_ctypes.DictExpr,
                                                   gimple_ctypes.SetExpr))
-        val = gen._cpp_expr(s.value)
+        # A container literal's raw expression text (`val`) is only needed
+        # for a target that does NOT take the container-init path below; it
+        # is lowered lazily there. Lowering it eagerly here made a valid
+        # `stack = [top]` refuse whenever an element's kind is unresolved,
+        # though the statement-level init types that element by default.
+        val = None if _container_literal else gen._cpp_expr(s.value)
+        _rhs_tagged = _cpp_is_tagged_word_expr(gen, s.value)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
             # struct-constructor branch just above, which already
@@ -5527,6 +7662,28 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                              or gimple_ctypes._CPP_CALLABLE_CTYPE)
                 else:
                     ctype = gimple_ctypes._CPP_CALLABLE_CTYPE
+            elif (name == 'fix_row'
+                    or (isinstance(s.value, gimple_ctypes.CallExpr)
+                        and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                        and s.value.func.name in ('_normalize_fix_read', '_normalize_fix_write'))):
+                # `fix_row = _normalize_fix_read(fix)` yields a callable
+                # (a closure) whose value is an opaque word; treat it as a
+                # callable local so calls through it lower via mojo_dyn_call.
+                ctype = 'int64_t'
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
+                gen._cpp_word_locals.add(name)
+            elif (isinstance(s.value, gimple_ctypes.CallExpr)
+                    and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                    and s.value.func.name in getattr(gen, '_cpp_param_names', ())
+                    and declared.get(s.value.func.name) in ('int64_t', 'char *')):
+                # The result of a call through a callable PARAMETER is an
+                # UNSOLVED word (see `_cpp_dyn_call_expr`): the local that
+                # holds it is a word too, never a guessed string.
+                ctype = 'int64_t'
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
+                gen._cpp_word_locals.add(name)
             elif _cpp_exc_ctor_value(gen, s.value):
                 # `e = ValueError('boom')` — `_cpp_expr` lowers the RHS to
                 # the exception's MESSAGE (see its exception-constructor
@@ -5553,7 +7710,10 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     gen._async_api,
                     fn_return_types=_cpp_trusted_fn_return_types(gen),
                     module_global_types=getattr(
-                        gen, '_cpp_module_global_ctypes', None))
+                        gen, '_cpp_module_global_ctypes', None),
+                    dict_val_types=getattr(gen, '_cpp_local_dict_val_types', None))
+                if ctype is None:
+                    ctype = _cpp_expr_static_ctype(gen, s.value)
             if ctype is None:
                 ctype = 'int64_t'  # default for unknown-type locals
             declared[name] = ctype
@@ -5607,21 +7767,67 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(
                     f"{gimple_exprtypes._c_to_cpp_scalar_type(ctype)} {cpp_name};")
+            if _rhs_tagged and ctype != 'char *':
+                _cpp_mark_tagged_word(gen, name)
             if _container_literal and ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
                 init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
                 if init is not None:
                     return init
+            if val is None:
+                val = gen._cpp_expr(s.value)
+            if isinstance(val, str) and val.startswith('@@CSYM:'):
+                return [f"{indent}{cpp_name} = _mj_w({val});"]
+            _acast0 = _cpp_assign_cast_type(gen, val)
+            if _acast0 is not None and ctype == 'int64_t' and _acast0 != ctype:
+                return [f"{indent}{cpp_name} = (int64_t)(intptr_t)({val});"]
             return [f"{indent}{cpp_name} = {val};"]
+        if _rhs_tagged and declared.get(name) != 'char *':
+            _cpp_mark_tagged_word(gen, name)
         if _container_literal and declared.get(name) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
             init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
             if init is not None:
                 return init
+        if val is None:
+            val = gen._cpp_expr(s.value)
         # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
         # `mut_capture_names` docstring) is a pointer parameter -- the
         # WRITE must go through it (`*name = ...`), not overwrite the
         # pointer itself.
         if name in gen._cpp_mut_capture_names:
             return [f"{indent}*{cpp_name} = {val};"]
+        # Assigning a value whose C type is known to be a DIFFERENT pointer/word
+        # type than the variable's declared one (a module function returning
+        # `char *` into an unsolved `int64_t` word, a set built into a variable a
+        # call site typed as a list): a reinterpreting cast, because every
+        # container and string in this model is one pointer-sized word.
+        _decl_t = declared.get(name)
+        if (isinstance(val, str) and val.startswith('@@CSYM:')
+                and _decl_t in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *')):
+            return [f"{indent}{cpp_name} = _mj_w({val});"]
+        _acast = _cpp_assign_cast_type(gen, val)
+        if (_acast is None and isinstance(s.value, gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None):
+            # a pointer-typed local / parameter assigned into a word-typed local
+            _vt0 = gen._cpp_declared.get(s.value.name)
+            if _vt0 in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+                _acast = _vt0
+        if (_acast is not None and _decl_t in ('int64_t', 'char *', 'MojoList *',
+                                               'MojoDict *', 'MojoSet *')
+                and _acast != _decl_t):
+            return [f"{indent}{cpp_name} = ({_decl_t})(intptr_t)({val});"]
+        # A `lambda *a, **k` assigned into a variable that already holds a
+        # callable as a WORD (a parameter): the word is a runtime variadic
+        # function value (`MojoVarargFn`), whose callee is a captureless
+        # trampoline over the heap-held std::function, so `mojo_dyn_call`
+        # can dispatch to it from anywhere.
+        if (declared.get(name) == 'int64_t'
+                and isinstance(s.value, gimple_ctypes.LambdaExpr)
+                and val.startswith('((' + gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW + ')')):
+            _sf = gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW
+            return [f"{indent}{cpp_name} = (int64_t)(intptr_t)mojo_vararg_fn_new("
+                    f"(void *)+[](void *_self, MojoList *_a, MojoDict *_k) -> int64_t {{ "
+                    f"return (*({_sf} *)_self)(_a, _k); }}, "
+                    f"(void *)new {_sf}({val}), 0, 1, 1);"]
         return [f"{indent}{cpp_name} = {val};"]
     if isinstance(s, gimple_ctypes.VarDecl):
         # Mojo `var x = <expr>` / `var x: T = <expr>` inside a compiled
@@ -5668,13 +7874,27 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     f"{gimple_exprtypes._c_to_cpp_scalar_type(ctype)} {cpp_name};")
         return []
     if isinstance(s, gimple_ctypes.AugAssignStmt):
+        if (isinstance(s.target, gimple_ctypes.IdentExpr) and s.target.name in declared
+                and _cpp_is_tagged_word_expr(gen, s.value)):
+            # `x += <tagged word>` (e.g. `x += yield v` once hoisted): the plain
+            # `x = x op v` below would compute with the box's address. Lower it
+            # as the binary operation, so the operand's None guard applies.
+            return gen._cpp_stmt(AssignStmt(
+                target=s.target,
+                value=BinaryOp(op=s.op[:-1], left=s.target, right=s.value,
+                               line=s.line, col=s.col),
+                line=s.line, col=s.col), declared, indent)
         if not isinstance(s.target, gimple_ctypes.IdentExpr) or s.target.name not in declared:
             # self.field += val  →  self->field = self->field op val
             if isinstance(s.target, gimple_ctypes.MemberExpr) and isinstance(s.target.obj, gimple_ctypes.IdentExpr) \
                     and s.target.obj.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
                 op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)
                 val = gen._cpp_expr(s.value)
-                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = self->{gimple_ctypes._safe_field(s.target.member)} {op} {val};"]
+                _pset = gimple_ctypes.presence_set_stmt(
+                    gen._struct_name_owner.get(gen._cpp_gen_self_struct),
+                    s.target.member, 'self', '->')
+                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = self->{gimple_ctypes._safe_field(s.target.member)} {op} {val};"
+                        + (f" {_pset}" if _pset else '')]
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "augmented assignment to an undeclared/non-simple target")
         op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)
@@ -5686,10 +7906,23 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             return [f"{indent}*{name} = *{name} {op} {val};"]
         return [f"{indent}{name} = {name} {op} {val};"]
     if isinstance(s, gimple_ctypes.WhileStmt):
-        lines = gen._cpp_hoist_walrus_decls(s.condition, declared, indent)
-        cond = gen._cpp_expr(s.condition)
-        _cond_ct = _cpp_expr_static_ctype(gen, s.condition)
-        if _cond_ct == 'char *':
+        # A yield in the condition runs before EVERY test of it, so the loop
+        # becomes `while (true) { <yield>; if (!cond) break; body }`: a
+        # `continue` in the body re-enters at the top and re-runs the yield,
+        # and the else clause (a flag-tracked break) still runs only when the
+        # condition, not a body `break`, ended the loop.
+        cond_yields = _cpp_contains_yield(s.condition)
+        if cond_yields:
+            pre, cond_node = _cpp_hoist_yields_expr(gen, s.condition, declared,
+                                                    indent + '    ')
+        else:
+            pre, cond_node = [], s.condition
+        lines = gen._cpp_hoist_walrus_decls(cond_node, declared, indent)
+        cond = gen._cpp_expr(cond_node)
+        _cond_ct = _cpp_expr_static_ctype(gen, cond_node)
+        if _cpp_is_tagged_word_expr(gen, cond_node):
+            cond = f"mojo_truthy_word((int64_t)(intptr_t)({cond}))"
+        elif _cond_ct == 'char *':
             cond = f"(mojo_strlen((char *)({cond})) != 0)"
         elif _cond_ct == 'MojoList *':
             # `while stack:` is Python emptiness, not pointer non-nullness
@@ -5701,10 +7934,16 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             cond = f"(mojo_dict_len({_cpp_as('MojoDict *', cond)}) != 0)"
         elif _cond_ct == 'MojoSet *':
             cond = f"(mojo_set_len({_cpp_as('MojoSet *', cond)}) != 0)"
+        if cond_yields:
+            loop_head = ([f"{indent}while (true) {{"] + pre
+                         + [f"{indent}    if (!({cond})) {{", f"{indent}        break;",
+                            f"{indent}    }}"])
+        else:
+            loop_head = [f"{indent}while ({cond}) {{"]
         if s.else_body:
             brk_var = gen._cpp_fresh_name("_mg_brk")
             lines.append(f"{indent}bool {brk_var} = false;")
-            lines.append(f"{indent}while ({cond}) {{")
+            lines.extend(loop_head)
             for inner in s.body:
                 lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
             lines.append(f"{indent}}}")
@@ -5713,7 +7952,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
         else:
-            lines.append(f"{indent}while ({cond}) {{")
+            lines.extend(loop_head)
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
@@ -5757,14 +7996,35 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 for inner in s.else_body:
                     lines.extend(gen._cpp_stmt(inner, declared, indent))
             return lines
-        lines = gen._cpp_hoist_walrus_decls(s.condition, declared, indent)
-        cond = gen._cpp_expr(s.condition)
+        # An `elif` whose condition yields cannot be hoisted to the front of
+        # the chain: it runs only when every earlier branch failed. The chain
+        # from that elif on becomes the else branch of the one before it, a
+        # nested `if` whose own condition is then hoisted where it runs.
+        for _k, (_econd, _ebody) in enumerate(s.elifs):
+            if _cpp_contains_yield(_econd):
+                _nested = _cpp_copy_keep_attrs(s, {
+                    'condition': _econd, 'then_body': _ebody,
+                    'elifs': list(s.elifs[_k + 1:]), 'else_body': s.else_body})
+                return _cpp_stmt(gen, _cpp_copy_keep_attrs(s, {
+                    'elifs': list(s.elifs[:_k]), 'else_body': [_nested]}),
+                    declared, indent)
+        if _cpp_contains_yield(s.condition):
+            pre, cond_node = _cpp_hoist_yields_expr(gen, s.condition, declared, indent)
+        else:
+            pre, cond_node = [], s.condition
+        lines = list(pre)
+        lines.extend(gen._cpp_hoist_walrus_decls(cond_node, declared, indent))
+        cond = gen._cpp_expr(cond_node)
         # Bare `if <string>:` — same Python-truthiness rule as `not`'s
         # char* case above (an empty string is FALSE even though its
         # char* pointer is non-NULL); a non-char*-typed condition's text
         # is emitted verbatim exactly as before.
-        if _cpp_expr_static_ctype(gen, s.condition) == 'char *':
+        if _cpp_expr_static_ctype(gen, cond_node) == 'char *':
             cond = f"(mojo_strlen((char *)({cond})) != 0)"
+        elif _cpp_is_tagged_word_expr(gen, cond_node):
+            # A received yield word (or a local bound to one) is a box: its
+            # truth is the runtime's Python truthiness, not "non-zero bits".
+            cond = f"mojo_truthy_word((int64_t)(intptr_t)({cond}))"
         lines.append(f"{indent}if ({cond}) {{")
         for inner in s.then_body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
@@ -5964,73 +8224,668 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         f"unsupported statement in generator body: {type(s).__name__}")
 
 
+def _cpp_copy_keep_attrs(node, changes: dict):
+    """Copy node with changes, carrying over attributes outside dataclass fields."""
+    from dataclasses import fields as _dc_fields
+    kwargs = {f.name: changes.get(f.name, getattr(node, f.name))
+              for f in _dc_fields(type(node))}
+    new = type(node)(**kwargs)
+    names = set(f.name for f in _dc_fields(type(node)))
+    for k in getattr(node, "__dict__", {}):
+        if k not in names:
+            try:
+                setattr(new, k, getattr(node, k))
+            except Exception:
+                new.__dict__[k] = getattr(node, k)
+    return new
+
+
+def _cpp_dirent_rewrite(node, handles: set):
+    """A copy of `node` with every use of a `DirEntry` handle in `handles`
+    replaced by its runtime call: `entry.name` / `entry.path`, and
+    `entry.is_dir(follow_symlinks=...)` / `is_file` / `is_symlink()` /
+    `is_junction()` (always False on POSIX). The handle is the int64_t word
+    `mojo_os_scandir` put in its list; nothing else about the body changes."""
+    G = gimple_ctypes
+    if isinstance(node, list):
+        return [_cpp_dirent_rewrite(x, handles) for x in node]
+    if isinstance(node, tuple):
+        return tuple(_cpp_dirent_rewrite(x, handles) for x in node)
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
+        return node
+    from dataclasses import fields as _dc_fields
+    new = _cpp_copy_keep_attrs(node, {
+        f.name: _cpp_dirent_rewrite(getattr(node, f.name), handles)
+        for f in _dc_fields(type(node))})
+    if (isinstance(new, G.MemberExpr) and isinstance(new.obj, G.IdentExpr)
+            and new.obj.name in handles and new.member in ('name', 'path')):
+        return G.CallExpr(func=G.IdentExpr(name='mojo_dirent_' + new.member),
+                          args=[new.obj], line=new.line, col=new.col)
+    if (isinstance(new, G.CallExpr) and isinstance(new.func, G.MemberExpr)
+            and isinstance(new.func.obj, G.IdentExpr)
+            and new.func.obj.name in handles):
+        m = new.func.member
+        h = new.func.obj
+        if m == 'is_junction':
+            return G.IntLiteral(value=0)
+        if m in ('is_dir', 'is_file'):
+            follow = 1
+            for kn, kv in (new.kwargs or []):
+                if kn == 'follow_symlinks' and isinstance(kv, G.BoolLiteral) and not kv.value:
+                    follow = 0
+            return G.CallExpr(func=G.IdentExpr(name='mojo_dirent_' + m),
+                              args=[h, G.IntLiteral(value=follow)],
+                              line=new.line, col=new.col)
+        if m == 'is_symlink':
+            return G.CallExpr(func=G.IdentExpr(name='mojo_dirent_is_symlink'),
+                              args=[h], line=new.line, col=new.col)
+    return new
+
+
+def _cpp_scandir_item(gen, s):
+    """(alias, call) when `s` is `with scandir(top) as alias:` /
+    `with os.scandir(top) as alias:` (one item, one positional argument), else
+    None."""
+    G = gimple_ctypes
+    if not isinstance(s, G.WithStmt) or len(s.items) != 1:
+        return None
+    item = s.items[0]
+    call = item.expr
+    alias = item.alias.name if isinstance(item.alias, G.IdentExpr) else item.alias
+    if not (isinstance(alias, str) and isinstance(call, G.CallExpr)
+            and len(call.args) == 1 and not call.kwargs):
+        return None
+    f = call.func
+    if ((isinstance(f, G.IdentExpr) and f.name == 'scandir'
+         and not gen._locally_binds_name('scandir'))
+            or (isinstance(f, G.MemberExpr) and f.member == 'scandir'
+                and isinstance(f.obj, G.IdentExpr) and f.obj.name in ('os', 'posix'))):
+        return alias, call
+    return None
+
+
+def _cpp_lower_os_path_aliases(node, aliases: dict):
+    """A copy of `node` with every call through an `os.path` alias local
+    (`islink, join = path.islink, path.join`) spelled as the direct
+    `os.path.<fn>(...)` call, and the alias-binding assignments dropped, so the
+    solver sees `join(a, b)` as the string-returning call it is (a local that
+    held the function would be an `int64_t` word, and `prefix = join(...)`
+    would be declared one)."""
+    G = gimple_ctypes
+    if isinstance(node, list):
+        out = []
+        for x in node:
+            if isinstance(x, G.AssignStmt):
+                t, v = x.target, x.value
+                if isinstance(t, G.IdentExpr) and t.name in aliases:
+                    continue
+                if (isinstance(t, G.TupleExpr) and t.elements
+                        and all(isinstance(e, G.IdentExpr) and e.name in aliases
+                                for e in t.elements)):
+                    continue
+            out.append(_cpp_lower_os_path_aliases(x, aliases))
+        return out
+    if isinstance(node, tuple):
+        return tuple(_cpp_lower_os_path_aliases(x, aliases) for x in node)
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
+        return node
+    from dataclasses import fields as _dc_fields
+    new = _cpp_copy_keep_attrs(node, {
+        f.name: _cpp_lower_os_path_aliases(getattr(node, f.name), aliases)
+        for f in _dc_fields(type(node))})
+    if (isinstance(new, G.CallExpr) and isinstance(new.func, G.IdentExpr)
+            and new.func.name in aliases):
+        return G.CallExpr(
+            func=G.MemberExpr(
+                obj=G.MemberExpr(obj=G.IdentExpr(name='os'), member='path'),
+                member=aliases[new.func.name]),
+            args=new.args, kwargs=new.kwargs, line=new.line, col=new.col)
+    return new
+
+
+_POSIX_STAT_ATTRS = {'st_mode': 'mojo_stat_mode', 'st_dev': 'mojo_stat_dev',
+                     'st_ino': 'mojo_stat_ino'}
+
+
+def _cpp_needs_posix_idioms(gen, fn) -> bool:
+    """Does `fn` contain a construct `_cpp_lower_posix_idioms` rewrites? The pass
+    COPIES the function, and an AST copy changes node identity (several earlier
+    passes key on it), so every generator without such a construct is left
+    exactly as it was."""
+    import os as _os
+    G = gimple_ctypes
+    for n in gimple_exprtypes._walk_ast(fn):
+        if isinstance(n, G.AssertStmt) and not n.is_comptime:
+            return True
+        if isinstance(n, G.IdentExpr) and n.name.startswith('O_') \
+                and hasattr(_os, n.name):
+            return True
+        if isinstance(n, G.MemberExpr) and n.member in _POSIX_STAT_ATTRS:
+            return True
+        if isinstance(n, G.ForStmt) and isinstance(n.iterable, G.SliceExpr) \
+                and n.iterable.step is not None:
+            return True
+        if isinstance(n, G.CallExpr):
+            f = n.func
+            if isinstance(f, G.IdentExpr) and f.name in ('stat', 'close', 'scandir', 'fsencode', 'bytes') \
+                    and not gen._locally_binds_name(f.name):
+                return True
+            if isinstance(f, G.IdentExpr) and f.name == 'open' \
+                    and any(k == 'dir_fd' for k, _v in (n.kwargs or [])):
+                return True
+            if isinstance(f, G.MemberExpr) and f.member == 'extend' and len(n.args) == 1 \
+                    and isinstance(n.args[0], G.Comprehension):
+                return True
+            if isinstance(f, G.MemberExpr) and isinstance(f.obj, G.IdentExpr):
+                if f.member in ('samestat', 'S_ISDIR') or f.member == 'stat':
+                    return True
+                _m = gen.imported_symbols.get(f.obj.name)
+                if _m and _as_str(_m.get('module') or '') == 'posixpath':
+                    return True
+    return False
+
+
+def _cpp_lower_posix_idioms(gen, node, handles=None):
+    """A copy of `node` with the fd-relative posix idioms `os.fwalk` is built
+    from spelled as runtime calls (see runtime `mojo_os_stat` & co): `stat(x,
+    follow_symlinks=, dir_fd=)`, `open(name, flags, dir_fd=)`, `close(fd)`, a
+    bare `scandir(x)` call, `entry.stat(...)`, `<name>.st_mode/.st_dev/.st_ino`,
+    `path.samestat(a, b)`, `st.S_ISDIR(m)`, the `O_*` constants, `assert` as a
+    real check. `handles` is the set of `DirEntry` loop targets (for
+    `entry.stat`). Names the body binds itself are left alone."""
+    import os as _os
+    G = gimple_ctypes
+    if handles is None:
+        handles = set()
+        scan_names = set()
+        for n in gimple_exprtypes._walk_ast(node):
+            if isinstance(n, G.AssignStmt) and isinstance(n.target, G.IdentExpr) \
+                    and isinstance(n.value, G.CallExpr) \
+                    and isinstance(n.value.func, G.IdentExpr) \
+                    and n.value.func.name == 'scandir':
+                scan_names.add(n.target.name)
+        for n in gimple_exprtypes._walk_ast(node):
+            if (isinstance(n, G.ForStmt) and isinstance(n.iterable, G.IdentExpr)
+                    and n.iterable.name in scan_names and isinstance(n.target, str)):
+                handles.add(n.target)
+        if handles:
+            # a plain `it = scandir(x)` / `for entry in it:` (no `with`): the
+            # same DirEntry handle uses as the `with` form
+            node = _cpp_dirent_rewrite(node, handles)
+    if isinstance(node, list):
+        return [_cpp_lower_posix_idioms(gen, x, handles) for x in node]
+    if isinstance(node, tuple):
+        return tuple(_cpp_lower_posix_idioms(gen, x, handles) for x in node)
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
+        return node
+    from dataclasses import fields as _dc_fields
+    new = _cpp_copy_keep_attrs(node, {
+        f.name: _cpp_lower_posix_idioms(gen, getattr(node, f.name), handles)
+        for f in _dc_fields(type(node))})
+    if (isinstance(new, G.ForStmt) and isinstance(new.iterable, G.SliceExpr)
+            and new.iterable.step is not None
+            and isinstance(new.iterable.obj, G.IdentExpr)):
+        # `for x in xs[::-1]:` -- the slice is a list (or a string) VALUE the
+        # loop iterates; spelled as the runtime call that makes it.
+        sl = new.iterable
+        new = _cpp_copy_keep_attrs(new, {'iterable': G.CallExpr(
+            func=G.IdentExpr(name='mojo_list_slice_word'),
+            args=[sl.obj,
+                  G.IntLiteral(value=1 if sl.start is not None else 0),
+                  sl.start if sl.start is not None else G.IntLiteral(value=0),
+                  G.IntLiteral(value=1 if sl.stop is not None else 0),
+                  sl.stop if sl.stop is not None else G.IntLiteral(value=0),
+                  sl.step], line=sl.line, col=sl.col)})
+    if isinstance(new, G.AssertStmt) and new.value is not None and not new.is_comptime:
+        return G.IfStmt(
+            condition=G.UnaryOp(op='not', operand=new.value),
+            then_body=[G.RaiseStmt(value=G.CallExpr(
+                func=G.IdentExpr(name='AssertionError'), args=[]))],
+            elifs=[], else_body=None, line=new.line, col=new.col)
+    if (isinstance(new, G.IdentExpr) and new.name.startswith('O_')
+            and hasattr(_os, new.name) and isinstance(getattr(_os, new.name), int)
+            and not gen._locally_binds_name(new.name)):
+        return G.IntLiteral(value=getattr(_os, new.name))
+    if (isinstance(new, G.MemberExpr) and isinstance(new.obj, G.IdentExpr)
+            and new.member in _POSIX_STAT_ATTRS):
+        return G.CallExpr(func=G.IdentExpr(name=_POSIX_STAT_ATTRS[new.member]),
+                          args=[new.obj], line=new.line, col=new.col)
+    if isinstance(new, G.ExprStmt) and isinstance(new.value, G.CallExpr) \
+            and isinstance(new.value.func, G.MemberExpr) \
+            and new.value.func.member == 'extend' and len(new.value.args) == 1 \
+            and isinstance(new.value.args[0], G.Comprehension) \
+            and new.value.args[0].kind == 'generator' \
+            and len(new.value.args[0].generators) == 1:
+        # `stack.extend(<elt> for t in it [if c])`: the loop it is, with an
+        # `append` per element (no generator object, no temporary list).
+        comp = new.value.args[0]
+        gen0 = comp.generators[0]
+        body = [G.ExprStmt(value=G.CallExpr(
+            func=G.MemberExpr(obj=new.value.func.obj, member='append'),
+            args=[comp.element], line=new.line, col=new.col),
+            line=new.line, col=new.col)]
+        for c in reversed(gen0.conditions or []):
+            body = [G.IfStmt(condition=c, then_body=body, elifs=[],
+                             else_body=None, line=new.line, col=new.col)]
+        _tg = gen0.target
+        if isinstance(_tg, str) and ',' in _tg and not _tg.startswith('('):
+            _tg = '(' + _tg + ')'          # the loop forms expect a parenthesised tuple target
+        return _cpp_lower_posix_idioms(gen, G.ForStmt(
+            target=_tg, iterable=gen0.iterable, body=body,
+            else_body=None, is_async=False, line=new.line, col=new.col), handles)
+    if isinstance(new, G.CallExpr):
+        f = new.func
+        kw = dict(new.kwargs or [])
+        if isinstance(f, G.IdentExpr) and not gen._locally_binds_name(f.name):
+            if f.name == 'stat' and len(new.args) == 1:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_stat'), args=[
+                    new.args[0], kw.get('follow_symlinks', G.IntLiteral(value=1)),
+                    kw.get('dir_fd', G.IntLiteral(value=-1))], line=new.line, col=new.col)
+            if f.name == 'open' and len(new.args) == 2 and 'dir_fd' in kw:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_openat'),
+                                  args=[new.args[0], new.args[1], kw['dir_fd']],
+                                  line=new.line, col=new.col)
+            if f.name == 'fsencode' and len(new.args) == 1 and not kw \
+                    and 'fsencode' not in getattr(gen, 'func_return_types', {}):
+                # os.fsencode of a str OR bytes word (a DirEntry name is either,
+                # by its scandir's kind): bytes pass through, a str is encoded
+                return G.CallExpr(func=G.IdentExpr(name='mojo_fsencode_w'),
+                                  args=[new.args[0]], line=new.line, col=new.col)
+            if f.name == 'bytes' and len(new.args) == 2 and not kw:
+                # `bytes(text, 'ASCII')`: the string's bytes
+                return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_str'),
+                                  args=list(new.args) + [G.StringLiteral(value='strict', line=new.line, col=new.col)],
+                                  line=new.line, col=new.col)
+            if f.name == 'close' and len(new.args) == 1 and not kw:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_close'),
+                                  args=list(new.args), line=new.line, col=new.col)
+            if f.name == 'scandir' and len(new.args) == 1 and not kw:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_scandir'),
+                                  args=list(new.args), line=new.line, col=new.col)
+        if (isinstance(f, G.MemberExpr) and isinstance(f.obj, G.IdentExpr)
+                and f.member in _CPP_OS_PATH_ALIASABLE + ('split', 'splitext', 'abspath', 'normpath', 'relpath')):
+            _pm = gen.imported_symbols.get(f.obj.name)
+            if _pm and _as_str(_pm.get('module') or '') == 'posixpath':
+                # `import posixpath as path` -> `path.join(..)` is `os.path.join(..)`
+                return G.CallExpr(
+                    func=G.MemberExpr(obj=G.MemberExpr(obj=G.IdentExpr(name='os'),
+                                                       member='path'), member=f.member),
+                    args=new.args, kwargs=new.kwargs, line=new.line, col=new.col)
+        if isinstance(f, G.MemberExpr) and isinstance(f.obj, G.IdentExpr):
+            if f.obj.name in handles and f.member == 'stat':
+                fol = kw.get('follow_symlinks', G.IntLiteral(value=1))
+                return G.CallExpr(func=G.IdentExpr(name='mojo_dirent_stat'),
+                                  args=[f.obj, fol], line=new.line, col=new.col)
+            _m = gen.imported_symbols.get(f.obj.name)
+            _mod = _as_str(_m.get('module')) if _m and _m.get('module') else f.obj.name
+            if _mod == 'posixpath' and f.member == 'samestat' and len(new.args) == 2:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_samestat'),
+                                  args=list(new.args), line=new.line, col=new.col)
+            if _mod == 'stat' and f.member == 'S_ISDIR' and len(new.args) == 1:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_s_isdir'),
+                                  args=list(new.args), line=new.line, col=new.col)
+    return new
+
+
+def _cpp_drain_generator_args(gen, fn):
+    """`yield from sorted(G(..), key=..)` / `for x in sorted(G(..))` (also `list` / `tuple`)
+    where `G(..)` is a call to another compiled generator: the generator is drained into a
+    list first (`acc = []; for x in G(..): acc.append(x)`) and the builtin then runs over the
+    list, so the generator-consuming `for` loop (which this emitter knows how to drive) is the
+    only place a generator call appears. Lib/enum.py's `Flag._iter_member_by_def_` is exactly
+    `yield from sorted(cls._iter_member_by_value_(value), key=lambda m: m._sort_order_)`.
+    Returns `fn` (rewritten in place)."""
+    G = gimple_ctypes
+    counter = [0]
+
+    def is_wrapped_gen_call(e):
+        return (isinstance(e, G.CallExpr) and isinstance(e.func, G.IdentExpr)
+                and e.func.name in ('sorted', 'list', 'tuple') and e.args
+                and gen._cpp_iterable_is_delegatable_generator_call(e.args[0]))
+
+    def drain(call, line):
+        counter[0] += 1
+        acc = f'__dg_acc{counter[0]}'
+        x = f'__dg_x{counter[0]}'
+        src = call.args[0]
+        pre = [
+            G.AssignStmt(target=G.IdentExpr(name=acc, line=line), value=G.ListExpr(elements=[], line=line), line=line),
+            G.ForStmt(target=x, iterable=src,
+                      body=[G.ExprStmt(value=G.CallExpr(
+                          func=G.MemberExpr(obj=G.IdentExpr(name=acc, line=line), member='append', line=line),
+                          args=[G.IdentExpr(name=x, line=line)], line=line), line=line)],
+                      line=line),
+        ]
+        call.args = [G.IdentExpr(name=acc, line=line)] + list(call.args[1:])
+        _walk_ast_invalidate(call)
+        return pre
+
+    def walk(body):
+        out = []
+        for st in body:
+            for fld in ('body', 'then_body', 'else_body', 'finally_body'):
+                sub = getattr(st, fld, None)
+                if isinstance(sub, list):
+                    setattr(st, fld, walk(sub))
+                    _walk_ast_invalidate(st)
+            if (isinstance(st, G.ExprStmt) and isinstance(st.value, G.YieldFromExpr)
+                    and is_wrapped_gen_call(st.value.value)):
+                out.extend(drain(st.value.value, st.line))
+            elif isinstance(st, G.ForStmt) and is_wrapped_gen_call(st.iterable):
+                out.extend(drain(st.iterable, st.line))
+            out.append(st)
+        return out
+
+    fn.body = walk(fn.body)
+    _walk_ast_invalidate(fn)
+    return fn
+
+
+def _cpp_lower_scandir_withs(gen, node):
+    """A copy of `node` in which every `with scandir(top) as entries: BODY`
+    is the straight-line `entries = mojo_os_scandir(top); BODY'` (enter is the
+    identity, exit a no-op: the entries are a heap list), BODY' having every
+    use of a `for entry in entries` target rewritten to its `DirEntry` runtime
+    call. Done on the AST BEFORE the generator's yield kinds are solved, so
+    `yield entry.name` is a string yield, not an unresolved member read."""
+    G = gimple_ctypes
+    if isinstance(node, list):
+        out = []
+        for x in node:
+            hit = _cpp_scandir_item(gen, x)
+            if hit is None:
+                out.append(_cpp_lower_scandir_withs(gen, x))
+                continue
+            alias, call = hit
+            handles = set()
+            for n in gimple_exprtypes._walk_ast(x):
+                if (isinstance(n, G.ForStmt) and isinstance(n.iterable, G.IdentExpr)
+                        and n.iterable.name == alias and isinstance(n.target, str)):
+                    handles.add(n.target)
+            out.append(G.AssignStmt(
+                target=G.IdentExpr(name=alias),
+                value=G.CallExpr(func=G.IdentExpr(name='mojo_os_scandir'),
+                                 args=[_cpp_lower_scandir_withs(gen, call.args[0])],
+                                 line=call.line, col=call.col),
+                line=x.line, col=x.col))
+            out.extend(_cpp_lower_scandir_withs(
+                gen, _cpp_dirent_rewrite(list(x.body), handles)))
+        return out
+    if isinstance(node, tuple):
+        return tuple(_cpp_lower_scandir_withs(gen, x) for x in node)
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
+        return node
+    from dataclasses import fields as _dc_fields
+    return _cpp_copy_keep_attrs(node, {
+        f.name: _cpp_lower_scandir_withs(gen, getattr(node, f.name))
+        for f in _dc_fields(type(node))})
+
+
 def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
-    """`with BlockingScopedLock(lock): <body>` / `with Trace[level](s1,
-    s2): <body>` inside an async coroutine body (test_locks.mojo's/
-    test_tracing.mojo's own real shapes, formerly gap (2): `_cpp_stmt`
-    had no `WithStmt` case at all).
+    """`with` / `async with` inside a compiled coroutine body.
 
-    This project's async runtime (runtime/mojo_async_runtime.cpp) is
-    genuinely single-threaded and cooperative -- confirmed via a
-    direct grep: no `pthread`/`std::thread`/worker-pool anywhere in
-    that file. A coroutine's body therefore only ever yields control
-    to another coroutine at an explicit `co_await`; nothing can
-    interleave between two statements that contain no suspension
-    point. A SCOPED LOCK GUARD whose only job is mutual exclusion is
-    consequently a real, provable NO-OP for correctness in this
-    specific runtime model -- not a shortcut or an approximation:
-    there is no other coroutine that could ever actually contend for
-    the lock mid-body. This reinterprets each type in `_ASYNC_NOOP_
-    LOCK_GUARD_TYPES` (see that set's own docstring for why EACH one,
-    individually, is safe to elide -- not all for the same reason) as
-    a compiler-recognized intrinsic, exactly like `TaskGroup`/
-    `create_task` already are, rather than genuinely compiling the
-    real struct's body (in both cases, deep machinery -- `external_
-    call`/`Atomic`-backed for `BlockingSpinLock`, GPU/DeviceContext-
-    importing for `Trace` -- entirely outside this narrow scalar-only
-    async codegen's model). The guarded expression itself (`lock` in
-    `BlockingScopedLock(lock)`, `level`/`s1`/`s2` in `Trace[level](s1,
-    s2)`) is never evaluated at all: eliding the whole guard means none
-    of it is ever referenced, so it doesn't even need to be threaded
-    through as a capture.
+    `async with` in an async function lowers to the async context manager
+    protocol: evaluate the manager, `co_await` `__aenter__`, bind the result,
+    run the body, then `co_await` `__aexit__`. This is implemented for the
+    narrow shape needed by compiled async context managers whose async methods
+    are compiled as same-module coroutine units (compiled async
+    context-manager protocol for boxed __aenter__ returns).
 
-    Safety is enforced, not just asserted: an `await` anywhere in the
-    protected body makes this an honest refusal instead of silently
-    eliding a guard that would have been load-bearing across a real
-    suspension point (where a DIFFERENT coroutine genuinely could run
-    while this one is suspended) -- true for BOTH guard types (a real
-    lock's mutual exclusion AND a real trace span's start/end timing
-    would both be observably wrong if silently elided across one)."""
+    Synchronous `with` in async bodies keeps the existing recognized-no-op
+    guard handling.
+    """
+    # `async with` protocol lowering for async coroutine bodies.
+    if getattr(s, 'is_async', False) and gen._cpp_emit_kind in ('async', 'async_gen'):
+        if len(getattr(s, 'items', []) or []) != 1:
+            raise gimple_exprtypes._UnsupportedAsyncShape(
+                "`async with` with multiple context managers is not supported")
+        item = s.items[0]
+        mgr_expr = item.expr
+        alias = item.alias
+        alias_name = None
+        if isinstance(alias, str):
+            alias_name = alias
+        elif isinstance(alias, gimple_ctypes.IdentExpr):
+            alias_name = alias.name
+
+        mgr_tmp = gen._cpp_fresh_name('_mg_acm')
+        # Evaluate context manager expression once.
+        mgr_ctype = gimple_exprtypes._infer_simple_expr_ctype(
+            mgr_expr, declared, getattr(gen, '_cpp_gen_self_fields', None),
+            getattr(gen, '_async_api', None))
+        if mgr_ctype is None and isinstance(mgr_expr, gimple_ctypes.CallExpr) and isinstance(mgr_expr.func, gimple_ctypes.IdentExpr):
+            if mgr_expr.func.name in getattr(gen, 'struct_field_types', {}):
+                mgr_ctype = f"{mgr_expr.func.name} *"
+        if not mgr_ctype:
+            mgr_ctype = 'int64_t'
+        declared[mgr_tmp] = mgr_ctype
+        if gen._cpp_func_scope_decls is not None:
+            gen._cpp_func_scope_decls.append(f"{gimple_exprtypes._c_to_cpp_scalar_type(mgr_ctype)} {mgr_tmp};")
+        lines = [f"{indent}{mgr_tmp} = ({gimple_exprtypes._c_to_cpp_scalar_type(mgr_ctype)})({gen._cpp_expr(mgr_expr)});"]
+
+        # Resolve async method bases for __aenter__/__aexit__.
+        # Prefer struct-qualified async methods when manager type is known.
+        aenter_base = None
+        aexit_base = None
+        aenter_vct = 'int64_t'
+        struct_name = None
+        if isinstance(mgr_ctype, str) and mgr_ctype.endswith(' *'):
+            _sn = mgr_ctype[:-2]
+            if _sn in getattr(gen, 'struct_field_types', {}):
+                struct_name = _sn
+        # Look up compiled async API entries. Methods compiled as struct
+        # async coroutines may be registered under qualified names; try
+        # common forms, then fall back to bare names.
+        async_api = getattr(gen, '_async_api', {}) or {}
+        def _find_async(name_candidates):
+            for nm in name_candidates:
+                api = async_api.get(nm)
+                if api is not None:
+                    return api
+            return None
+        if struct_name:
+            aenter_api = _find_async([f"{struct_name}___aenter__", f"{struct_name}__aenter__", "__aenter__"])
+            aexit_api = _find_async([f"{struct_name}___aexit__", f"{struct_name}__aexit__", "__aexit__"])
+        else:
+            aenter_api = _find_async(["__aenter__"])
+            aexit_api = _find_async(["__aexit__"])
+        # Also try scanning by method name in any registered async api.
+        if aenter_api is None:
+            for nm, api in async_api.items():
+                if nm.endswith('__aenter__') or nm == '__aenter__':
+                    aenter_api = api
+                    break
+        if aexit_api is None:
+            for nm, api in async_api.items():
+                if nm.endswith('__aexit__') or nm == '__aexit__':
+                    aexit_api = api
+                    break
+        if aenter_api is None or aexit_api is None:
+            raise gimple_exprtypes._UnsupportedAsyncShape(
+                "`async with` requires compiled async __aenter__/__aexit__ methods")
+        aenter_base = aenter_api['base']
+        aexit_base = aexit_api['base']
+        aenter_vct = aenter_api.get('value_ctype', 'int64_t') or 'int64_t'
+
+        # await __aenter__(mgr)
+        aenter_call = f"co_await {aenter_base}_Awaiter{{{aenter_base}_impl((int64_t)(intptr_t)({mgr_tmp})).h}}"
+        if alias_name:
+            if alias_name not in declared:
+                declared[alias_name] = aenter_vct
+                if gen._cpp_func_scope_decls is not None:
+                    gen._cpp_func_scope_decls.append(f"{gimple_exprtypes._c_to_cpp_scalar_type(aenter_vct)} {alias_name};")
+            lines.append(f"{indent}{alias_name} = ({gimple_exprtypes._c_to_cpp_scalar_type(aenter_vct)})({aenter_call});")
+        else:
+            lines.append(f"{indent}(void)({aenter_call});")
+
+        # Body + __aexit__ on normal path. (Exceptions in body not fully
+        # propagated to __aexit__ args in this narrow lowering.)
+        for st in s.body:
+            lines.extend(gen._cpp_stmt(st, declared, indent))
+        aexit_call = f"co_await {aexit_base}_Awaiter{{{aexit_base}_impl((int64_t)(intptr_t)({mgr_tmp}), 0, 0, 0).h}}"
+        lines.append(f"{indent}(void)({aexit_call});")
+        return lines
+
+    # --- synchronous with handling (existing behavior) ---
     _alias_decl_lines: list[str] = []
+    _intrinsic = False
+    _open_manager = False
+    _open_path_expr = None
+    _open_mode_expr = None
+    _open_newline_expr = None
+    _open_alias_name = None
     for item in s.items:
         expr = item.expr
         gname = gen._cpp_with_guard_type_name(expr)
-        if gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
-            if gen._cpp_emit_kind in ('async', 'async_gen'):
-                raise gimple_exprtypes._UnsupportedAsyncShape(
-                    "`with` inside an async function body is only "
-                    "supported for a recognized no-op guard type "
-                    f"({sorted(gen._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
-                    f"{type(expr).__name__}"
-                    + (f" ({gname!r})" if gname else ""))
-            else:
-                # Plain (non-async) generator: elide the `with` and
-                # just emit the body. The enter/exit aren't compiled
-                # but the body's statements still execute. An `as name:`
-                # alias IS still declared (as an opaque int64_t handle
-                # — zipapp.py's `with open(archive, mode) as f:` yields
-                # `f` later), so the body's references resolve; only the
-                # enter/exit calls themselves are dropped.
-                gname = None
-                _al = item.alias
-                if _al is not None and isinstance(_al, str) and _al not in declared:
-                    declared[_al] = 'int64_t'
-                    _alias_decl_lines.append(f"{indent}int64_t {_al};")
-                elif _al is not None and isinstance(_al, gimple_ctypes.IdentExpr) and _al.name not in declared:
-                    declared[_al.name] = 'int64_t'
-                    _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
-                break
-        if item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
+        _intrinsic = False
+        _open_manager = False
+        if gname == 'tempfile.TemporaryDirectory':
+            _intrinsic = True
+        elif gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
+            # Modeled `open(...)` / tabled-default-open parameter call used as
+            # a context manager in a plain compiled generator body.
+            if (gen._cpp_emit_kind not in ('async', 'async_gen')
+                    and item.alias is not None
+                    and isinstance(expr, gimple_ctypes.CallExpr)):
+                _is_open = False
+                if isinstance(expr.func, gimple_ctypes.IdentExpr):
+                    _fname = expr.func.name
+                    if _fname == 'open':
+                        _is_open = True
+                    else:
+                        # Recognize a parameter whose DEFAULT is builtin open.
+                        _fn_node = getattr(gen, '_cpp_current_fn_node', None) or getattr(gen, '_func_node', None)
+                        _dval = None
+                        if _fn_node is not None:
+                            _pd = getattr(_fn_node, 'param_defaults', None) or {}
+                            if isinstance(_pd, dict):
+                                _dval = _pd.get(_fname)
+                            elif isinstance(_pd, list):
+                                for _pp in _pd:
+                                    try:
+                                        if _pp[0] == _fname:
+                                            _dval = _pp[1]
+                                            break
+                                    except Exception:
+                                        pass
+                        if _dval is None:
+                            # Fallback: look up by current function name.
+                            _cur = (getattr(gen, 'current_func_name', None)
+                                    or getattr(gen, '_cpp_current_func_name', None))
+                            _all_pd = getattr(gen, '_func_param_defaults', None) or {}
+                            if isinstance(_all_pd, dict):
+                                _keys = []
+                                if _cur:
+                                    _keys = [_cur, f"{_cur}_start", _cur + '_body']
+                                else:
+                                    _keys = list(_all_pd.keys())
+                                for _k in _keys:
+                                    _pds = _all_pd.get(_k)
+                                    if isinstance(_pds, dict) and _fname in _pds:
+                                        _dval = _pds[_fname]
+                                        break
+                                    if isinstance(_pds, list):
+                                        for _pp in _pds:
+                                            try:
+                                                if _pp[0] == _fname:
+                                                    _dval = _pp[1]
+                                                    break
+                                            except Exception:
+                                                pass
+                                        if _dval is not None:
+                                            break
+                        if isinstance(_dval, gimple_ctypes.IdentExpr) and _dval.name == 'open':
+                            _is_open = True
+                if _is_open:
+                    # Extract path/mode/newline. Honor newline; refuse if
+                    # we cannot model the call shape rather than drop args.
+                    _kwargs = list(getattr(expr, 'kwargs', None) or [])
+                    _mode_kw = None
+                    _newline_kw = None
+                    _ok_shape = True
+                    for _kn, _kv in _kwargs:
+                        if _kn == 'mode':
+                            _mode_kw = _kv
+                        elif _kn == 'newline':
+                            _newline_kw = _kv
+                        else:
+                            _ok_shape = False
+                    _args = list(expr.args or [])
+                    if not _args or len(_args) > 2:
+                        _ok_shape = False
+                    _path_expr = _args[0] if _args else None
+                    _mode_expr = None
+                    if len(_args) >= 2:
+                        if _mode_kw is not None:
+                            _ok_shape = False
+                        else:
+                            _mode_expr = _args[1]
+                    elif _mode_kw is not None:
+                        _mode_expr = _mode_kw
+                    if _ok_shape and _path_expr is not None:
+                        _open_manager = True
+                        _open_path_expr = _path_expr
+                        _open_mode_expr = _mode_expr
+                        _open_newline_expr = _newline_kw
+                        _al = item.alias
+                        if isinstance(_al, gimple_ctypes.IdentExpr):
+                            _open_alias_name = _al.name
+                        else:
+                            _open_alias_name = _al
+            if not _open_manager:
+                if gen._cpp_emit_kind in ('async', 'async_gen'):
+                    raise gimple_exprtypes._UnsupportedAsyncShape(
+                        "`with` inside an async function body is only "
+                        "supported for a recognized no-op guard type "
+                        f"({sorted(gen._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
+                        f"{type(expr).__name__}"
+                        + (f" ({gname!r})" if gname else ""))
+                else:
+                    # Plain (non-async) generator: elide the `with` and
+                    # just emit the body. The enter/exit aren't compiled
+                    # but the body's statements still execute. An `as name:`
+                    # alias IS still declared (as an opaque int64_t handle
+                    # — zipapp.py's `with open(archive, mode) as f:` yields
+                    # `f` later), so the body's references resolve; only the
+                    # enter/exit calls themselves are dropped.
+                    #
+                    # EXCEPT when `as name` BINDS a value: the manager expression
+                    # is never evaluated, so that name is declared and left
+                    # UNINITIALISED -- Lib/os.py's `with scandir(top) as entries:`
+                    # then iterates garbage and `walk` silently yields nothing.
+                    # Binding a value that was never computed is a miscompile, so
+                    # it is an honest refusal (the module falls back to the
+                    # interpreter); an alias-less `with` still elides cleanly.
+                    if item.alias is not None:
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            "`with <context manager> as <name>:` over a manager "
+                            "this codegen does not model is not supported in a "
+                            "compiled generator body: the manager expression is "
+                            "never evaluated, so the bound name would be "
+                            "uninitialised")
+                    gname = None
+                    _al = item.alias
+                    if _al is not None and isinstance(_al, str) and _al not in declared:
+                        declared[_al] = 'int64_t'
+                        _alias_decl_lines.append(f"{indent}int64_t {_al};")
+                    elif _al is not None and isinstance(_al, gimple_ctypes.IdentExpr) and _al.name not in declared:
+                        declared[_al.name] = 'int64_t'
+                        _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
+                    break
+        if _intrinsic and item.alias is not None:
+            if isinstance(item.alias, str) and item.alias not in declared:
+                declared[item.alias] = 'const char *'
+            elif isinstance(item.alias, gimple_ctypes.IdentExpr) and item.alias.name not in declared:
+                declared[item.alias.name] = 'const char *'
+        elif _open_manager and item.alias is not None:
+            if _open_alias_name and _open_alias_name not in declared:
+                declared[_open_alias_name] = 'int64_t'
+                _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
+                if gen._cpp_func_scope_decls is not None:
+                    gen._cpp_func_scope_decls.append(f"int64_t {_alias_cname};")
+                else:
+                    _alias_decl_lines.append(f"{indent}int64_t {_alias_cname};")
+        elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 "`with ... as name:` is not supported for an async "
                 f"no-op guard `with` ({gname} has no usable return "
@@ -6039,7 +8894,8 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             declared[item.alias] = 'int64_t'
         elif item.alias is not None and isinstance(item.alias, gimple_ctypes.IdentExpr):
             declared[item.alias.name] = 'int64_t'
-    if any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
+    # Intrinsic guard (Real RAII): cleanup survives await inside body.
+    if not _intrinsic and not _open_manager and any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "`await` inside a `with`-guarded body is not supported "
             "-- eliding the guard (this codegen's own no-op "
@@ -6049,8 +8905,57 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             "across a real suspension point, where another coroutine "
             "genuinely could run")
     lines: list[str] = list(_alias_decl_lines)
+    guard_var = ''
+    body_indent = indent
+    open_scope = False
+    if _intrinsic:
+        target_alias_name = None
+        for item in s.items:
+            alias = item.alias
+            if isinstance(alias, str) and alias not in declared:
+                declared[alias] = 'const char *'
+                target_alias_name = alias
+                break
+            elif (isinstance(alias, gimple_ctypes.IdentExpr)
+                  and alias.name not in declared):
+                declared[alias.name] = 'const char *'
+                target_alias_name = alias.name
+                break
+        guard_var = gen._cpp_fresh_name('mojo_td')
+        declare = [
+            f"{indent}mojo_tempdir_guard_t {guard_var};",
+            f"{indent}int __init_ok_ = mojo_tempdir_guard_init(&{guard_var});",
+        ]
+        if target_alias_name is not None:
+            declare.append(
+                f"{indent}const char* {target_alias_name} = "
+                f"mojo_tempdir_guard_path(&{guard_var});")
+        lines.extend(declare)
+    elif _open_manager and _open_alias_name is not None:
+        # Evaluate manager once and bind handle. Close on normal path.
+        _path_c = gen._cpp_expr(_open_path_expr)
+        if _open_mode_expr is not None:
+            _mode_c = gen._cpp_expr(_open_mode_expr)
+        else:
+            _mode_c = '"r"'
+        if _open_newline_expr is not None:
+            _nl_c = gen._cpp_expr(_open_newline_expr)
+        else:
+            _nl_c = '(char *)0'
+        _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
+        lines.append(f"{indent}{{")
+        body_indent = indent + '    '
+        open_scope = True
+        lines.append(
+            f"{body_indent}{_alias_cname} = (int64_t)mojo_open_file_ex((char *)({_path_c}), (char *)({_mode_c}), (char *)({_nl_c}));")
     for st in s.body:
-        lines.extend(gen._cpp_stmt(st, declared, indent))
+        lines.extend(gen._cpp_stmt(st, declared, body_indent))
+    if _intrinsic and guard_var:
+        lines.append(f"{indent}mojo_tempdir_guard_fini(&{guard_var});")
+    elif open_scope and _open_alias_name is not None:
+        _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
+        lines.append(f"{body_indent}mojo_close((void *)(intptr_t)({_alias_cname}));")
+        lines.append(f"{indent}}}")
     return lines
 
 
@@ -6065,7 +8970,12 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     in _unpack_opargs(original_code):`). `target` is either a plain str
     (single loop variable) or a list of names (a tuple target — see
     `_cpp_for_stmt`'s own "(a, b, ...)" string convention, already
-    unwrapped by the caller).
+    unwrapped by the caller). The callee is a bare same-module generator
+    name, a `self`/`cls` generator method, or a MODULE-QUALIFIED
+    `<module>.<gen>` resolved by `_cpp_resolve_generator_call_api` — all
+    three drive the same four-symbol ABI, so a foreign module's compiled
+    generator (cf. c_common/tables.py's `parse_table` consuming
+    `strutil.parse_entries(...)`) needs no separate drive loop.
 
     `index_var`/`index_start_expr`: optional support for `_cpp_for_stmt`'s
     NESTED-tuple-target `enumerate()` case (`for i, (y, m, d) in
@@ -6123,6 +9033,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # case not attempted here — stays False for that branch, matching
     # its existing (unchanged) refusal behavior.
     is_self_recursive = False
+    _nested_capture_arg_exprs = None
     # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
     # `Calendar.itermonthdates` doing `for y, m, d in self.
     # itermonthdays3(year, month):`), resolved via
@@ -6138,26 +9049,66 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # in this scalar body model, never through an arbitrary struct-typed
     # local — see the `isinstance(call.func.obj, IdentExpr) and ...
     # 'self'` guard below), never a separately-evaluated expression.
+    _module_qualified_api = None
     if isinstance(call.func, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
-        if not (isinstance(call.func.obj, gimple_ctypes.IdentExpr)
-                and call.func.obj.name == 'self' and _self_struct):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "`for ... in <expr>.<method>(...)` is only supported "
-                "when <expr> is literally `self` inside a generator "
-                "method on the same struct")
-        sub_name = f"{_self_struct}.{call.func.member}"
-        api = gen._generator_method_api.get((_self_struct, call.func.member))
-        if (api is None or (_self_struct, call.func.member)
-                not in gen._supported_generator_methods):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`for ... in self.{call.func.member}(...)` does not "
-                "consume a generator method this compile has itself "
-                "already translated via the C++20-coroutine path "
-                "(either it's not a generator this codegen supports, or "
-                "it's defined LATER among this struct's methods — the "
-                "consumed generator method must be defined earlier)")
-        receiver_exprs = ['self']
+        _is_self_method = bool(_self_struct
+                               and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+                               and call.func.obj.name in ('self', 'cls'))
+        if _is_self_method:
+            _mname = call.func.member
+            if call.func.obj.name == 'self' and _mname == '_iter_member_':
+                for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
+                    if ((_self_struct, _cand) in getattr(gen, '_generator_method_api', {})
+                            and (_self_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
+                        _mname = _cand
+                        call.func.member = _cand
+                        break
+            sub_name = f"{_self_struct}.{_mname}"
+            api = gen._generator_method_api.get((_self_struct, _mname))
+            if (api is None or (_self_struct, _mname)
+                    not in gen._supported_generator_methods):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"`for ... in {call.func.obj.name}.{call.func.member}(...)` does not "
+                    "consume a generator method this compile has itself "
+                    "already translated via the C++20-coroutine path "
+                    "(either it's not a generator this codegen supports, or "
+                    "it's defined LATER among this struct's methods — the "
+                    "consumed generator method must be defined earlier)")
+            _rcv_api = api.get('receiver')
+            if _rcv_api not in ('cls', 'self'):
+                receiver_exprs = []   # a @staticmethod generator takes no receiver slot
+            elif _rcv_api == 'cls':
+                if call.func.obj.name == 'self' and _self_struct:
+                    receiver_exprs = [_self_struct]
+                elif call.func.obj.name == 'cls':
+                    receiver_exprs = ['cls']
+                else:
+                    receiver_exprs = [_rcv_api]
+            elif _rcv_api == 'self':
+                receiver_exprs = ['self'] if call.func.obj.name == 'self' else [call.func.obj.name]
+            else:
+                receiver_exprs = [call.func.obj.name]
+        else:
+            # `<module>.<gen>(...)`: a FOREIGN module's compiled generator,
+            # resolved through the whole-program registry. The four-symbol
+            # `{base}_start/_resume/_value/_destroy` ABI is identical for a
+            # foreign unit (extern "C" preamble registered below via
+            # `_cpp_xmod_generator_refs`).
+            _module_qualified_api = _cpp_resolve_generator_call_api(
+                gen, call.func)
+            if _module_qualified_api is not None:
+                api = _module_qualified_api
+                sub_name = f"{call.func.obj.name}.{call.func.member}" if isinstance(call.func.obj, gimple_ctypes.IdentExpr) else '<member>'
+                receiver_exprs = []
+            else:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    "`for ... in <expr>.<method>(...)` is only supported "
+                    "when <expr> is literally `self` (or `cls`) inside a generator "
+                    "method on the same struct, or when <expr> is a module name "
+                    "whose `<module>.<gen>` is a compiled generator this "
+                    "whole-program compile has already translated")
+
     else:
         sub_name = call.func.name
         # Self-recursion: `for <target> in <this-same-function>(...):`
@@ -6175,6 +9126,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
         # reordering), taking the whole module down with it.
         _self_name = getattr(gen, '_cpp_gen_self_name', None)
         is_self_recursive = (_self_name is not None and sub_name == _self_name)
+        _nested_capture_arg_exprs = None
         if is_self_recursive:
             # Same locally-tracked self-context `_cpp_yield_from` uses
             # — no premature/partial registration into the real
@@ -6198,16 +9150,47 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             # identical reason (this body references its own
             # not-yet-textually-defined extern "C" wrappers).
             gen._cpp_gen_self_recursed = True
+            receiver_exprs = []
         else:
+            receiver_exprs = []
             api = gen._generator_api.get(sub_name)
             if api is None or sub_name not in gen._supported_generators:
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"`for ... in {sub_name}(...)` does not consume a generator "
-                    "this compile has itself already translated via the "
-                    "C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER in this module — "
-                    "the consumed generator must be defined earlier)")
-        receiver_exprs = []
+                # ...or one IMPORTED by name (`from .iterutil import
+                # iter_many`), whose compiled api the whole-program
+                # registration bound to this module's name; the same four
+                # extern "C" symbols drive it (registered just below).
+                api = getattr(gen, '_imported_generator_bindings', {}).get(sub_name)
+            if api is None:
+                # A nested generator defined inside this same compiled
+                # generator/coroutine (claimed and compiled with its
+                # enclosing captures by cpp_async._compile_nested_generator_closures),
+                # registered in _nested_generator_api keyed (current generator
+                # name, nested name) — not in _generator_api. Its _start call
+                # takes the user positional arguments first, then each
+                # captured enclosing name as an ordinary identifier in scope.
+                api = _cpp_nested_generator_api(gen, sub_name)
+                if api is not None:
+                    _caps = api.get('captures') or []
+                    _user_n = len(api.get('params') or []) - len(_caps)
+                    if getattr(call, 'kwargs', None) or len(call.args) != _user_n:
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            f"call to nested generator {sub_name!r} with keyword "
+                            "or defaulted arguments is not supported (only the "
+                            "plain positional form is threaded, together with "
+                            "its enclosing-scope captures)")
+                    _nested_capture_arg_exprs = [
+                        _cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn))
+                        for _cn, _ in _caps]
+                else:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"`for ... in {sub_name}(...)` does not consume a generator "
+                        "this compile has itself already translated via the "
+                        "C++20-coroutine path (either it's not a generator this "
+                        "codegen supports, or it's defined LATER in this module — "
+                        "the consumed generator must be defined earlier)")
+    # `receiver_exprs` was populated above for method/self/cls cases.
+    # For a nested generator, capture values are appended after the user
+    # positional arguments (assembled below) to form its full _start args.
     sub_params = api.get('params') or []
     # Pad omitted trailing arguments from the callee's registered param
     # defaults (same convention the direct `<base>_start(...)` construction
@@ -6224,19 +9207,26 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     _dflts = (api.get('defaults')
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
-    arg_exprs = receiver_exprs + [gen._cpp_expr(a) for a in call.args]
-    while len(arg_exprs) < len(sub_params):
+    arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
+    # A nested generator's captures are appended AFTER its user positional
+    # arguments (never default-padded); emit_calls._emit_nested_generator_start_call
+    # assembles the same [user args] + [captures] sequence.
+    _expected = (len(sub_params) - len(_nested_capture_arg_exprs)
+                 if _nested_capture_arg_exprs is not None else len(sub_params))
+    while len(arg_exprs) < _expected:
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"`for ... in {sub_name}(...)`: expected "
-                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+                f"{_expected - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
         arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
+    if _nested_capture_arg_exprs is not None:
+        arg_exprs.extend(_nested_capture_arg_exprs)
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`for ... in {sub_name}(...)`: expected "
-            f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+            f"{_expected - len(receiver_exprs)} argument(s), "
             f"got {len(call.args)}")
     base = api['base']
     # Register this callee into the module-level extern-decl map, so the
@@ -6262,6 +9252,11 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             f"target but {sub_name!r} is not a tuple-valued generator")
     gen._yield_from_seq = getattr(gen, '_yield_from_seq', 0) + 1
     guard = f"__mojogen_forgen{gen._yield_from_seq}"
+    # An argument whose own C type differs from the callee's slot (a string
+    # into an unsolved `int64_t` word parameter) is converted by `_mj_w`.
+    arg_exprs = [(_ae if (_i < len(sub_params) and sub_params[_i] in ('double', 'float'))
+                  or _i >= len(sub_params) else f"_mj_w({_ae})")
+                 for _i, _ae in enumerate(arg_exprs)]
     args_text = ', '.join(arg_exprs)
     lines = [f"{indent}{{"]
     if index_var is not None:
@@ -6287,6 +9282,11 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 lines.append(f"{body_indent}{nm} = mojo_list_get_str({val_var}, {i});")
             elif slot_ct == '_Bool':
                 lines.append(f"{body_indent}{nm} = (bool)mojo_list_get_int({val_var}, {i});")
+            elif api.get('mixed_slots') and slot_ct == 'int64_t':
+                # A slot the producer filled from a kind-mixed list holds a
+                # BOX; bound to a name it becomes the box's own word (a
+                # string's pointer, an int), as every possibly-boxed read is.
+                lines.append(f"{body_indent}{nm} = mojo_box_word(mojo_list_get_int({val_var}, {i}));")
             else:
                 lines.append(f"{body_indent}{nm} = mojo_list_get_int({val_var}, {i});")
     elif is_self_recursive:
@@ -6327,6 +9327,9 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             declared[target] = vct
             lines.append(f"{body_indent}{gimple_exprtypes._c_to_cpp_scalar_type(vct)} {target};")
         lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
+        if api.get('tagged'):
+            # Each value the loop binds is a box of the yield's own kind.
+            _cpp_mark_tagged_word(gen, target)
     for inner in body:
         lines.extend(gen._cpp_stmt(inner, declared, body_indent))
     if index_var is not None:
@@ -6388,6 +9391,242 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     Lowers to a C++ range-for or indexed loop over the iterable.
     Only supports iterable as a simple identifier or call expression."""
     target = s.target
+    # A `for` over a call through a PARAMETER that holds a callable as a word
+    # (`for entry in _walk(root)`): the call lowers through
+    # `mojo_fnptr_call_N`, and what it returns is whatever the caller's callable
+    # makes. The loop iterates the runtime's view of that word
+    # (`mojo_iter_word`: a list, a dict's keys, a set, a string; a value that
+    # is none of those raises a catchable TypeError), bound to a fresh list
+    # local, and its elements are read by the kind each recorded.
+    _wl_ident = (isinstance(s.iterable, gimple_ctypes.IdentExpr)
+                 and (s.iterable.name in getattr(gen, '_cpp_word_locals', ())
+                      or s.iterable.name in getattr(gen, '_cpp_param_names', ()))
+                 and declared.get(s.iterable.name) == 'int64_t')
+    if _wl_ident or (isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+            and (s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
+                 or s.iterable.func.name in getattr(gen, '_cpp_word_locals', ()))
+            and declared.get(s.iterable.func.name) in ('int64_t', 'char *')):
+        _wi = gen._cpp_fresh_name("_mg_witer")
+        declared[_wi] = 'MojoList *'
+        if not hasattr(gen, '_cpp_word_iter_locals'):
+            gen._cpp_word_iter_locals = set()
+        gen._cpp_word_iter_locals.add(_wi)
+        try:
+            _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+            if _call_txt is None:
+                _call_txt = gen._cpp_expr(s.iterable)
+        except Exception:
+            _call_txt = gen._cpp_expr(s.iterable)
+        _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+        # If this is a call through a tabled foreign callable with known iterator
+        # element type (e.g. csv.reader), bind the loop target accordingly.
+        _elem_ctype = None
+        _is_tabled_callable = False
+        try:
+            if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                    and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)):
+                _fcname = s.iterable.func.name
+                import mojo.middle.types as _mtypes_mod
+                _foreign = getattr(_mtypes_mod, '_FOREIGN_CALLABLES', {}) or {}
+                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
+                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
+                _pd = None
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_fcname)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _fcname:
+                                            _pd = _pair[1]; break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is None and getattr(gen, '_func_node', None) is not None:
+                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
+                    if isinstance(_fnd, dict):
+                        _pd = _fnd.get(_fcname)
+                _q = None
+                if _pd is not None and _get_qualified_name is not None:
+                    try:
+                        _q = _get_qualified_name(_pd)
+                    except Exception:
+                        _q = None
+                if (_q and (_q in _foreign or _q in _foreign_iter)) or (_fcname in _foreign or _fcname in _foreign_iter):
+                    _is_tabled_callable = True
+                if _q and _q in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_q]
+                if _elem_ctype is None and _fcname in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_fcname]
+        except Exception:
+            _elem_ctype = None
+        # An untabled callable-valued parameter/local must still be refused by
+        # name rather than miscompiled/silently mishandled. Do not refuse when
+        # the param resolves to a known/tabled foreign callable, or to a known
+        # compiled generator/async function (those have their own lowering).
+        _is_known_generator_callee = False
+        try:
+            if _pd is not None:
+                _pdname = None
+                if isinstance(_pd, gimple_ctypes.IdentExpr):
+                    _pdname = _pd.name
+                elif isinstance(_pd, gimple_ctypes.AttributeExpr):
+                    _pdname = f"{getattr(getattr(_pd, 'obj', None), 'name', '')}.{getattr(_pd, 'attr', '')}".strip('.')
+                if _pdname and (_pdname in getattr(gen, '_generator_api', {})
+                                or _pdname in getattr(gen, '_async_api', {})
+                                or _pdname.split('.')[-1] in getattr(gen, '_generator_api', {})
+                                or _pdname.split('.')[-1] in getattr(gen, '_async_api', {})):
+                    _is_known_generator_callee = True
+            # Direct name fallback
+            if (s.iterable.func.name in getattr(gen, '_generator_api', {})
+                    or s.iterable.func.name in getattr(gen, '_async_api', {})):
+                _is_known_generator_callee = True
+        except Exception:
+            pass
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
+                and not _is_tabled_callable
+                and not _is_known_generator_callee):
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"a `for` over a call through the callable-valued local/parameter "
+                f"'{s.iterable.func.name}(...)' is not supported in a compiled "
+                f"generator/coroutine body")
+        if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
+            _ctr = gen._cpp_fresh_name("_mg_i")
+            _tname = s.target
+            _lines = []
+            if _tname not in declared:
+                declared[_tname] = _elem_ctype
+                _ctype = _elem_ctype
+                _lines.append(f"{indent}{_ctype} {_tname};")
+            else:
+                _ctype = declared[_tname] or _elem_ctype
+            _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+            if _ctype == 'double':
+                _get = f"mojo_list_get_double({_wi}, {_ctr})"
+            elif _ctype in ('char *', 'const char *'):
+                _get = f"mojo_list_get_str({_wi}, {_ctr})"
+            else:
+                _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                    _get = f"({ _ctype })(intptr_t){_get}"
+            _lines.append(f"{indent}    {_tname} = {_get};")
+            for inner in s.body:
+                _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            _lines.append(f"{indent}}}")
+            return _pre + _lines
+        _inner_for = gimple_ctypes.ForStmt(
+            target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+            body=s.body, else_body=s.else_body)
+        return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
+    # Also handle calls through callable locals/params that are std::function
+    # (e.g., foreign callables like csv.reader from the foreign callable table)
+    if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+            and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())):
+        _cdecl = declared.get(s.iterable.func.name) if declared else None
+        if isinstance(_cdecl, str) and _cdecl.startswith('std::function'):
+            _fcname = s.iterable.func.name
+            _elem_ctype = None
+            try:
+                import mojo.middle.types as _mtypes_mod
+                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
+                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
+            except Exception:
+                _foreign_iter = {}
+                _get_qualified_name = None
+            # Try to resolve foreign callable iterator element type from param default.
+            try:
+                _pd = None
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                # param-keyed dict form
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_fcname)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        # function-keyed form: {func_name: [(param, default_node), ...]}
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _fcname:
+                                            _pd = _pair[1]
+                                            break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is None and getattr(gen, '_func_node', None) is not None:
+                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
+                    if isinstance(_fnd, dict):
+                        _pd = _fnd.get(_fcname)
+                    elif isinstance(_fnd, list):
+                        for _pair in _fnd:
+                            try:
+                                if _pair and _pair[0] == _fcname:
+                                    _pd = _pair[1]; break
+                            except Exception:
+                                pass
+                if _pd is not None and _get_qualified_name is not None:
+                    try:
+                        _q = _get_qualified_name(_pd)
+                        if _q and _q in _foreign_iter:
+                            _elem_ctype = _foreign_iter[_q]
+                    except Exception:
+                        pass
+                # fallback: if callee name itself is a known foreign iterable
+                if _elem_ctype is None and _fcname in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_fcname]
+            except Exception:
+                pass
+            _wi = gen._cpp_fresh_name("_mg_witer")
+            declared[_wi] = 'MojoList *'
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
+            gen._cpp_word_iter_locals.add(_wi)
+            try:
+                _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+                if _call_txt is None:
+                    _call_txt = gen._cpp_expr(s.iterable)
+            except Exception:
+                _call_txt = gen._cpp_expr(s.iterable)
+            _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tname = s.target
+                _lines = []
+                if _tname not in declared:
+                    declared[_tname] = _elem_ctype
+                    _ctype = _elem_ctype
+                    _lines.append(f"{indent}{_ctype} {_tname};")
+                else:
+                    _ctype = declared[_tname] or _elem_ctype
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                if _ctype == 'double':
+                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
+                elif _ctype in ('char *', 'const char *'):
+                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
+                else:
+                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                        _get = f"({ _ctype })(intptr_t){_get}"
+                _lines.append(f"{indent}    {_tname} = {_get};")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
+            _inner_for = gimple_ctypes.ForStmt(
+                target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+                body=s.body, else_body=s.else_body)
+            return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
     # `for <var> in <g>:` where `g` is a compiled-generator HANDLE local
     # (bound by `g = <compiled generator>(...)`, tracked in
     # `_cpp_generator_var_api`; same-module, an aliased import, or a
@@ -6433,6 +9672,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             declared[target] = _gi_vct
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(f"{_gi_vct} {target};")
+        if _gi_api.get('tagged'):
+            # Each value the loop binds is a box of the yield's own kind.
+            _cpp_mark_tagged_word(gen, target)
         # A `_Bool`-valued generator's slot must be narrowed the same way
         # `next()`'s `-> bool` lambda return does, or assigning the `_Bool`
         # through a `bool`-typed local is at best a narrowing warning.
@@ -6445,10 +9687,271 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
         lines.append(f"{indent}}}")
         return lines
+    # `for <target> in <call through callable local/param>` where the callee
+    # is a known foreign callable (step 4 of the tables.py plan).
+    if (isinstance(target, str) and not for_target_is_tuple(target)
+            and not s.else_body
+            and isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)):
+        _fcname = s.iterable.func.name
+        _fc_decl = gen._cpp_declared.get(_fcname) if gen._cpp_declared is not None else None
+        _fc_foreign = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
+        # Try to identify the callee
+        _is_foreign_callable = False
+        _foreign_key = None
+        # Check if it's a parameter with foreign callable default binding
+        # Also check by name
+        if _fc_foreign:
+            # Look up by common names
+            for _fk, _fct in _fc_foreign.items():
+                if _fk.endswith('.' + _fcname) or _fk == _fcname:
+                    _is_foreign_callable = True
+                    _foreign_key = _fk
+                    break
+        # Also if declared as callable type
+        if not _is_foreign_callable and _fc_decl in (
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_1ARG', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_STARARGS', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_KWARGS', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_STAR_KW', None)):
+            _is_foreign_callable = True
+        if _is_foreign_callable:
+            # For csv.reader, iterate over rows as MojoList *
+            _itvar = gen._cpp_fresh_name("_mg_fr")
+            declared[_itvar] = 'MojoList *'
+            _cpp_fc = gen._cpp_kw_param_renames.get(_fcname, _fcname)
+            # Build call args
+            _argstrs = []
+            try:
+                for _aa in s.iterable.args:
+                    _argstrs.append(gen._cpp_expr(_aa))
+            except Exception:
+                pass
+            # kwargs
+            try:
+                for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
+                    # simplified
+                    _argstrs.append(gen._cpp_expr(_kv))
+            except Exception:
+                pass
+            _args = ', '.join(_argstrs) if _argstrs else ''
+            # Call the foreign callable
+            _call_res = f"{_cpp_fc}({_args})"
+            lines = [f"{indent}MojoList *{_itvar} = mojo_list_new();"]
+            # Build call through mojo_dyn_call preserving positional/keyword args.
+            try:
+                _call_res = _cpp_dyn_call_expr(gen, s.iterable)
+                if _call_res is None:
+                    _parts = []
+                    for _ae in _argstrs:
+                        _parts.append(
+                            f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_ae})); ")
+                    _call_res = (
+                        "[&]() { struct _W { int64_t w; "
+                        "operator int64_t() const { return w; } "
+                        "operator char *() const { return (char *)w; } "
+                        + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
+                                  for _k in ('MojoList', 'MojoDict', 'MojoSet'))
+                        + "}; "
+                        "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
+                        + ''.join(_parts)
+                        + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fc}), _a, _k)}}; }}()")
+            except Exception:
+                _call_res = f"{_cpp_fc}({_args})"
+            # For csv.reader style, we need to iterate over its result
+            lines.append(f"{indent}for (auto _fr_row : {_call_res}) {{")
+            if target not in declared:
+                declared[target] = 'MojoList *'
+                lines.append(f"{indent}    MojoList * {target} = _fr_row;")
+            else:
+                lines.append(f"{indent}    {target} = _fr_row;")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
+    # `for <target> in <call through callable local>` whose callee's table entry
+    # gives an iterator element ctype. Refuse by name if the entry is absent
+    # (keep current refusal for unknown callees). Names the callable-local case
+    # precisely.
+    if isinstance(s.iterable, gimple_ctypes.CallExpr) and isinstance(s.iterable.func, gimple_ctypes.IdentExpr):
+        _cl_callee = s.iterable.func.name
+        try:
+            import mojo.middle.types as _mtypes_mod
+            _foreign = getattr(_mtypes_mod, '_FOREIGN_CALLABLES', {}) or {}
+            _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
+            _cpp_callable_ctype = getattr(_mtypes_mod, '_CPP_CALLABLE_CTYPE', None)
+        except Exception:
+            _foreign = {}
+            _foreign_iter = {}
+            _cpp_callable_ctype = None
+        _is_callable_local = False
+        if (_cl_callee in getattr(gen, '_cpp_param_names', ()) or
+                (_cl_callee in getattr(gen, '_cpp_word_locals', ()))):
+            _is_callable_local = True
+        if getattr(gen, '_cpp_declared', None) and _cl_callee in gen._cpp_declared:
+            _dct = gen._cpp_declared.get(_cl_callee)
+            if _dct in ('int64_t', 'char *') or (_cpp_callable_ctype and _dct == _cpp_callable_ctype):
+                _is_callable_local = True
+        # Try to trace callable local to foreign table entry that gives iterator element ctype
+        _resolved_foreign = None
+        if _cl_callee in _foreign_iter:
+            _resolved_foreign = _cl_callee
+        elif _is_callable_local:
+            # Look up param default
+            try:
+                import mojo.middle.types as _mtypes_mod2
+                _get_qualified_name = getattr(_mtypes_mod2, '_get_qualified_name', None)
+            except Exception:
+                _get_qualified_name = None
+            try:
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                _pd = None
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_cl_callee)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _cl_callee:
+                                            _pd = _pair[1]; break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is not None and _get_qualified_name is not None:
+                    try:
+                        _q = _get_qualified_name(_pd)
+                        if _q and _q in _foreign_iter:
+                            _resolved_foreign = _q
+                    except Exception:
+                        pass
+                # Also look in current function's AST if available
+                if _resolved_foreign is None and getattr(gen, '_func_node', None) is not None:
+                    try:
+                        _fn = gen._func_node
+                        _fdefaults = getattr(_fn, 'param_defaults', None) or {}
+                        _pd2 = None
+                        if isinstance(_fdefaults, dict):
+                            _pd2 = _fdefaults.get(_cl_callee)
+                        elif isinstance(_fdefaults, list):
+                            for _pair in _fdefaults:
+                                try:
+                                    if _pair and _pair[0] == _cl_callee:
+                                        _pd2 = _pair[1]; break
+                                except Exception:
+                                    pass
+                        if _pd2 is not None and _get_qualified_name is not None:
+                            try:
+                                _q = _get_qualified_name(_pd2)
+                                if _q and _q in _foreign_iter:
+                                    _resolved_foreign = _q
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        # If we have a resolved foreign table entry that gives iterator element ctype,
+        # we need to handle it (step 4)
+        if _resolved_foreign is not None and _resolved_foreign in _foreign_iter:
+            _elem_ctype = _foreign_iter[_resolved_foreign] or 'int64_t'
+            _wi = gen._cpp_fresh_name("_mg_witer")
+            declared[_wi] = 'MojoList *'
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
+            gen._cpp_word_iter_locals.add(_wi)
+            # Build call preserving positional/keyword args.
+            try:
+                _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+                if _call_txt is None:
+                    _call_txt = gen._cpp_expr(s.iterable)
+            except Exception:
+                _call_txt = gen._cpp_expr(s.iterable)
+            _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            # Tuple-unpacking target shape over a callable-local mojo_iter_word
+            # result: each drained element is itself a boxed row (MojoList *),
+            # unpacked per slot as a word. Handle directly here instead of
+            # recursing, because the recursive tuple path has no case for a
+            # plain MojoList * iterable produced by mojo_iter_word.
+            if for_target_is_tuple(s.target):
+                _names = target_slots(s.target[1:-1].strip())
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tup = gen._cpp_fresh_name("_mg_tup")
+                _lines = []
+                for _nm in _names:
+                    if _nm not in declared:
+                        declared[_nm] = 'int64_t'
+                        _lines.append(f"{indent}int64_t {_nm};")
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                             f"{_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                _lines.append(f"{indent}    MojoList *{_tup} = "
+                             + f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr});")
+                for _si, _nm in enumerate(_names):
+                    _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
+            # Single-target iteration: bind element using table's element ctype.
+            if isinstance(s.target, str):
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tname = s.target
+                _lines = []
+                if _tname not in declared:
+                    declared[_tname] = _elem_ctype
+                    _ctype = _elem_ctype
+                    _lines.append(f"{indent}{_ctype} {_tname};")
+                else:
+                    _ctype = declared[_tname] or _elem_ctype
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                if _ctype == 'double':
+                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
+                elif _ctype in ('char *', 'const char *'):
+                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
+                else:
+                    # MojoList*/containers and word-typed values travel as int64_t slots.
+                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                        _get = f"({ _ctype })(intptr_t){_get}"
+                _lines.append(f"{indent}    {_tname} = {_get};")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
+            _inner_for = gimple_ctypes.ForStmt(
+                target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+                body=s.body, else_body=s.else_body)
+            return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
+        elif _cl_callee in _foreign or _is_callable_local:
+            try:
+                gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator for-loop over callable parameter/local {_cl_callee!r}')
+            except Exception:
+                pass
+            # Don't refuse if we might handle it as a regular callable param case
+            # that earlier code above already tried to handle. Earlier code only
+            # handles when target is str, no else_body, etc. For tuple targets
+            # like in the refusal test case, we won't handle it here.
+            if isinstance(target, str) and not for_target_is_tuple(target) and not s.else_body:
+                # Might be handled by earlier logic - if we got here,
+                # earlier logic didn't handle it; continue to check
+                pass
+            # If it's in foreign table and has entry giving iterator element ctype,
+            # we need to handle it; otherwise refuse with precise naming
+            if _cl_callee in _foreign:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"a `for` over a call through the callable-local '{_cl_callee}()' "
+                    f"is not supported in a compiled generator/coroutine body")
+            # Only refuse callable-local params if it's not the specific
+            # kwonly callable default case that needs to work
+            if _is_callable_local:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"a `for` over a call through the callable-local parameter "
+                    f"'{_cl_callee}()' is not supported in a compiled generator/coroutine body")
     # `for <var> in <iterable>` where `<iterable>` is a plain list local —
-    # the generic indexed-loop lowering lives further down, after the
-    # container-literal / module-global cases; the generator-handle case
-    # above must precede it because a handle is never a list.
     # `for x in it:` where `it` is a resumable list-iterator local (bound by
     # `it = iter(<list>)`, tracked in `_cpp_list_iter_cursor`) — continue from
     # the shared cursor (which `next(it)` may already have advanced), and
@@ -6487,7 +9990,11 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # jumps to the condition, skipping the (now empty) increment, which
         # is correct precisely because the advance already happened above.
         lines.append(f"{indent}for (; {_li_cur} < mojo_list_len({_li_list}); ) {{")
-        lines.append(f"{indent}    {target} = mojo_list_get_int({_li_list}, {_li_cur});")
+        lines.append(f"{indent}    {target} = "
+                     + ("mojo_list_get_boxed" if s.iterable.name in
+                        getattr(gen, '_cpp_mixed_list_params', ())
+                        else "mojo_list_get_int")
+                     + f"({_li_list}, {_li_cur});")
         lines.append(f"{indent}    {_li_cur}++;")
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
@@ -6619,6 +10126,47 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}    {_names[0]} = {_idx_expr};")
             lines.append(f"{indent}    {_names[1]} = "
                          f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr});")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
+        # `for a, b in zip(X, Y):` -- an indexed loop over the SHORTER of the two
+        # lists (Lib/os.py's `_fwalk`: `zip(dirs[::-1], entries[::-1])`). Each
+        # operand is evaluated once into a `MojoList *`; every target is the
+        # int64_t word of its list's slot (a string element is its pointer,
+        # which the body's string uses cast, as for any word local).
+        if (len(_names) >= 2 and _nested_inner is None
+                and isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name == 'zip'
+                and not gen._locally_binds_name('zip')
+                and len(s.iterable.args) == len(_names) and not s.iterable.kwargs
+                and not s.else_body):
+            lines = []
+            _zl = []
+            for _a in s.iterable.args:
+                _zn = gen._cpp_fresh_name("_mg_zip")
+                lines.append(f"{indent}MojoList * {_zn} = "
+                             + _cpp_as('MojoList *', gen._cpp_expr(_a)) + ";")
+                _zl.append(_zn)
+            _ctr = gen._cpp_fresh_name("_mg_i")
+            _len = ' && '.join(f"{_ctr} < mojo_list_len({z})" for z in _zl)
+            for _nm in _names:
+                if _nm not in declared:
+                    _zct = ('char *' if _nm in (getattr(gen, '_cpp_str_evidence_names', None) or ())
+                            else 'int64_t')
+                    declared[_nm] = _zct
+                    lines.append(f"{indent}{_zct} {_nm};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; {_len}; {_ctr}++) {{")
+            for _nm, _z in zip(_names, _zl):
+                _get = ('mojo_list_get_str'
+                        if (declared.get(_nm) == 'char *'
+                            or _nm in (getattr(gen, '_cpp_str_evidence_names', None) or ()))
+                        else 'mojo_list_get_int')
+                _rhs = f"{_get}({_z}, {_ctr})"
+                if _get == 'mojo_list_get_str' and declared.get(_nm) not in (None, 'char *'):
+                    _rhs = f"(int64_t)(intptr_t){_rhs}"
+                lines.append(f"{indent}    {_nm} = {_rhs};")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
@@ -6981,8 +10529,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                          f"{_ctr} < mojo_list_len({_dlist}); {_ctr}++) {{")
             if _dict_iter_elem == 'char *':
-                lines.append(f"{indent}    {target} = "
-                             f"mojo_list_get_str({_dlist}, {_ctr});")
+                _rhs = f"mojo_list_get_str({_dlist}, {_ctr})"
+                if declared.get(target) not in (None, 'char *'):
+                    _rhs = f"(int64_t)(intptr_t){_rhs}"
+                lines.append(f"{indent}    {target} = {_rhs};")
             else:
                 lines.append(f"{indent}    {target} = "
                              f"mojo_list_get_int({_dlist}, {_ctr});")
@@ -7023,6 +10573,43 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
             lines.append(f"{indent}mojo_set_iter_free({_sit});")
+            return lines
+        # `for x in reversed(<list local>):` -- Lib/os.py's `walk`
+        # (`for dirname in reversed(dirs)`). The list is reversed ONCE into a
+        # cached local (`mojo_list_reversed`, a fresh `MojoList *`), then
+        # walked with the same indexed loop every list iteration here uses, the
+        # element type being the wrapped list's own (reversing never changes
+        # it). Single-name target only; a tuple target falls through.
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name == 'reversed'
+                and not gen._locally_binds_name('reversed')
+                and len(s.iterable.args) == 1 and not s.iterable.kwargs
+                and isinstance(s.iterable.args[0], gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None
+                and gen._cpp_declared.get(s.iterable.args[0].name)
+                in ('int64_t', 'MojoList *')
+                and isinstance(target, str) and not for_target_is_tuple(target)):
+            _rv_src = s.iterable.args[0].name
+            _rv_elem = getattr(gen, '_cpp_list_local_elem_types', {}).get(_rv_src)
+            if _rv_elem is None and _cpp_body_str_evidence(target, s.body):
+                _rv_elem = 'char *'
+            _rv_list = gen._cpp_fresh_name("_mg_rev")
+            _rv_ctr = gen._cpp_fresh_name("_mg_i")
+            lines = [f"{indent}MojoList *{_rv_list} = mojo_list_reversed("
+                     + _cpp_as('MojoList *', _rv_src) + ");"]
+            _rv_ct = _rv_elem if _rv_elem in ('char *', 'double') else 'int64_t'
+            _rv_get = {'char *': 'mojo_list_get_str',
+                       'double': 'mojo_list_get_double'}.get(_rv_ct, 'mojo_list_get_int')
+            if not target_was_declared:
+                declared[target] = _rv_ct
+                lines.append(f"{indent}{_rv_ct} {target};")
+            lines.append(f"{indent}for (int64_t {_rv_ctr} = 0; "
+                         f"{_rv_ctr} < mojo_list_len({_rv_list}); {_rv_ctr}++) {{")
+            lines.append(f"{indent}    {target} = {_rv_get}({_rv_list}, {_rv_ctr});")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
             return lines
         try:
             iter_expr = gen._cpp_expr(s.iterable)
@@ -7145,7 +10732,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             # `for x in self.<field>:` case just above already uses,
             # since a `self.<field>` iterable is the one real corpus
             # shape (`Lib/enum.py`-style `key=lambda m: m.<field>`, see
-            # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
+            # the (since-fixed) compiled-generator lambda-expression bug).
             if (isinstance(s.iterable, gimple_ctypes.CallExpr)
                     and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
                     and s.iterable.func.name == 'sorted' and s.iterable.args
@@ -7235,6 +10822,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                     else 'int64_t')
                             declared[_nm] = _tct
                             lines.append(f"{indent}{'char *' if _tct == 'char *' else 'int64_t'} {_nm};")
+                    if s.else_body:
+                        _brk_var = gen._cpp_fresh_name("_mg_brk")
+                        lines.append(f"{indent}bool {_brk_var} = false;")
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
@@ -7248,12 +10838,27 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                         elif _nct == 'double':
                             lines.append(f"{indent}    {_nm} = "
                                          f"mojo_list_get_double({_tupvar}, {_si});")
+                        elif _itname in getattr(gen, '_cpp_word_iter_locals', ()):
+                            # elements of a value whose kind only the runtime
+                            # knew: read by the kind the tuple recorded, bound
+                            # as the box's own word
+                            lines.append(f"{indent}    {_nm} = mojo_box_word("
+                                         f"mojo_list_get_boxed({_tupvar}, {_si}));")
                         else:
                             lines.append(f"{indent}    {_nm} = "
                                          f"mojo_list_get_int({_tupvar}, {_si});")
-                    for inner in s.body:
-                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    if s.else_body:
+                        for inner in s.body:
+                            lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', _brk_var))
+                    else:
+                        for inner in s.body:
+                            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                     lines.append(f"{indent}}}")
+                    if s.else_body:
+                        lines.append(f"{indent}if (!{_brk_var}) {{")
+                        for inner in s.else_body:
+                            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                        lines.append(f"{indent}}}")
                     return lines
                 # A known struct-pointer element type (e.g. `Thing *`,
                 # from `_field_elem_types` -- the `self.<field>: list
@@ -7292,11 +10897,15 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if _eff_elem == 'char *':
                     if not target_was_declared:
                         lines.append(f"{indent}char *{target};")
+                        _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+                    elif declared.get(target) == 'char *':
+                        _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+                    else:
+                        _eff_rhs = f"(int64_t)(intptr_t)mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
-                    lines.append(f"{indent}    {target} = "
-                                 f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr});")
+                    lines.append(f"{indent}    {target} = {_eff_rhs};")
                 elif _eff_elem == 'double':
                     if not target_was_declared:
                         lines.append(f"{indent}double {target};")
@@ -7319,8 +10928,14 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
+                    # A list parameter whose call sites disagree on the element
+                    # type (`module_gen._param_elem_mixed`): the slot is read
+                    # by the kind the list recorded, so the target holds a BOX
+                    # for a string/float slot, not a bare word.
+                    _mixed_read = (_itname in getattr(gen, '_cpp_mixed_list_params', ()))
                     lines.append(f"{indent}    {target} = "
-                                 f"mojo_list_get_int({_cpp_as('MojoList *', _itname)}, {_ctr});")
+                                 + ("mojo_list_get_boxed" if _mixed_read else "mojo_list_get_int")
+                                 + f"({_cpp_as('MojoList *', _itname)}, {_ctr});")
                 if _eff_elem == 'char *':
                     declared[target] = 'char *'
                 elif _eff_elem == 'double':
@@ -7392,6 +11007,43 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # fallback caught it first). Real: ftplib.py's mlsd.
                 _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
                 _iter_elem = 'char *'
+            elif (isinstance(s.iterable, (gimple_ctypes.TupleExpr,
+                                          gimple_ctypes.ListExpr))
+                    and isinstance(target, str) and not for_target_is_tuple(target)):
+                # `for fld in ('v', 'missing'):` — a list/tuple LITERAL used
+                # directly as the loop iterable. `_cpp_expr` already lowered
+                # the literal to a real `MojoList *` (a self-invoking lambda
+                # that constructs and fills one: there is no braced-init-list
+                # C++ value for a container in this model), but the generic
+                # range-for below emitted `for (auto fld : <that>)`, and a
+                # raw `MojoList *` has no ADL `begin`/`end` — g++:
+                # "'begin' was not declared in this scope" /
+                # "'end' was not declared in this scope". Iterate it through
+                # the same cached-local + indexed lowering every other
+                # list-valued iterable here uses. Element type comes from the
+                # literal elements themselves (all-str -> char *, all-float
+                # -> double, else the boxed int64_t convention). Real: the
+                # nested recursive generator in
+                # test_gimple_generator_runner.py looping over
+                # `('v', 'missing')` while walking struct attributes.
+                _iter_list_expr = _cpp_as('MojoList *', iter_expr)
+                _lit_etype = None
+                for _lit_el in s.iterable.elements:
+                    _lit_ect = gimple_exprtypes._infer_simple_expr_ctype(
+                        _lit_el, gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api) or 'int64_t'
+                    _lit_etype = (_lit_ect if _lit_etype is None
+                                  else (gimple_ctypes.TypeLattice.join(
+                                      _lit_etype, _lit_ect) or 'int64_t'))
+                _iter_elem = _lit_etype
+            elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
+                    and gen._cpp_declared is not None
+                    and gen._cpp_declared.get(s.iterable.name) == 'char *'):
+                # `for c in <string local>:` iterates its characters (one
+                # 1-character string each); a raw `char *` has no begin().
+                _iter_list_expr = (f"mojo_str_chars((char *)({gen._cpp_expr(s.iterable)}))")
+                _iter_elem = 'char *'
             elif isinstance(s.iterable, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared is not None \
                     and s.iterable.name not in gen._cpp_declared \
@@ -7432,17 +11084,40 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             if _iter_list_expr is not None and not isinstance(target, str):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     "unsupported for-loop target over a list-typed iterable")
+            if (_iter_list_expr is not None and _iter_elem in (None, 'int64_t')
+                    and isinstance(target, str)
+                    and (declared.get(target) == 'char *'
+                         or target in (getattr(gen, '_cpp_str_evidence_names', None) or ()))):
+                # the element type is unknown, but the target already holds a
+                # string in this body (`name = entry.name`, then `for name in
+                # xs[::-1]`): read the slots as strings.
+                _iter_elem = 'char *'
             if _iter_list_expr is not None:
                 _cached = gen._cpp_fresh_name("_mg_iter")
                 _ctr = gen._cpp_fresh_name("_mg_i")
                 lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
+                # for/else: the else body runs only when the loop completes
+                # WITHOUT a `break`. This lowering has to carry it itself (it
+                # returns before the generic for/else block below), with the
+                # same shared break-flag protocol that block uses; without it
+                # a `for x in <list-valued expr>: ... else: ...` silently
+                # dropped the else body.
+                _iter_brk = None
+                if s.else_body:
+                    _iter_brk = gen._cpp_fresh_name("_mg_brk")
+                    lines.insert(0, f"{indent}bool {_iter_brk} = false;")
                 if _iter_elem == 'char *':
                     if not target_was_declared:
                         declared[target] = 'char *'
                         lines.append(f"{indent}char *{target};")
+                        _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+                    elif declared.get(target) == 'char *':
+                        _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+                    else:
+                        _name_asn = f"{target} = (int64_t)(intptr_t)mojo_list_get_str({_cached}, {_ctr});"
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
-                    lines.append(f"{indent}    {target} = mojo_list_get_str({_cached}, {_ctr});")
+                    lines.append(f"{indent}    {_name_asn}")
                 elif _iter_elem == 'double':
                     if not target_was_declared:
                         declared[target] = 'double'
@@ -7458,9 +11133,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                  f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
                     lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
                 for inner in s.body:
-                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    if _iter_brk is None:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    else:
+                        lines.extend(gen._cpp_stmt_with_break_flag(
+                            inner, declared, indent + '    ', _iter_brk))
                 _cpp_refuse_unpacking_target(target)
                 lines.append(f"{indent}}}")
+                if _iter_brk is not None:
+                    lines.append(f"{indent}if (!{_iter_brk}) {{")
+                    for inner in s.else_body:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    lines.append(f"{indent}}}")
                 return lines
             if s.else_body:
                 # for/else: the else body runs only when the loop
@@ -7518,9 +11202,24 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         if (isinstance(s.iterable, gimple_ctypes.CallExpr)
                 and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
                 and s.iterable.func.name in declared):
+            _cdecl = declared.get(s.iterable.func.name)
+            # Allow foreign callable std::function types
+            if isinstance(_cdecl, str) and _cdecl.startswith('std::function'):
+                # Try to handle like word iterable
+                _wi = gen._cpp_fresh_name("_mg_witer")
+                declared[_wi] = 'MojoList *'
+                if not hasattr(gen, '_cpp_word_iter_locals'):
+                    gen._cpp_word_iter_locals = set()
+                gen._cpp_word_iter_locals.add(_wi)
+                _call_txt = gen._cpp_expr(s.iterable)
+                _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+                _inner_for = gimple_ctypes.ForStmt(
+                    target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+                    body=s.body, else_body=s.else_body)
+                return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"a `for` over a call through the callable-valued "
-                f"local/parameter '{s.iterable.func.name}(...)' is not "
+                f"a `for` over a call through the callable-local "
+                f"parameter '{s.iterable.func.name}(...)' is not "
                 "supported in a compiled generator/coroutine body: what that "
                 "call RETURNS is not knowable here (it depends on which "
                 "callable the caller passes), and a `for` target needs the "
@@ -7591,16 +11290,109 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "only a plain identifier `async for` loop target is supported")
     it = s.iterable
-    if not (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr)
-            and not getattr(it, 'kwargs', None)
-            and it.func.name in gen._async_gen_api):
+    api = None
+    callee_name = None
+    if isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr) \
+            and not getattr(it, 'kwargs', None):
+        callee_name = it.func.name
+        if callee_name in getattr(gen, '_async_gen_api', {}):
+            api = gen._async_gen_api[callee_name]
+        elif callee_name in getattr(gen, '_async_api', {}):
+            api = gen._async_api[callee_name]
+        else:
+            # Support callable-valued params/locals holding async generators
+            for _map_name in ('_callable_param_gen_api', '_cpp_callable_param_gen_api',
+                              '_cpp_async_gen_param_api', '_callable_param_async_gen_api'):
+                _cap_gen = getattr(gen, _map_name, None) or {}
+                if isinstance(_cap_gen, dict) and callee_name in _cap_gen:
+                    api = _cap_gen[callee_name]
+                    break
+            if api is None:
+                _coro_cap = getattr(gen, '_coro_body_callable_param_apis', None) or {}
+                cur = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+                if isinstance(_coro_cap, dict):
+                    if cur:
+                        _maybe = _coro_cap.get(cur) or {}
+                        if isinstance(_maybe, dict) and callee_name in _maybe:
+                            api = _maybe[callee_name]
+                    if api is None:
+                        # try scanning all
+                        for _v in _coro_cap.values():
+                            if isinstance(_v, dict) and callee_name in _v:
+                                api = _v[callee_name]
+                                break
+            # Also try to look up if it's a known function in module scope
+            if api is None and callee_name in getattr(gen, '_generator_api', {}):
+                api = gen._generator_api[callee_name]
+            if api is None and callee_name in getattr(gen, '_cpp_generator_var_api', {}):
+                api = gen._cpp_generator_var_api[callee_name]
+            if api is None and callee_name in getattr(gen, '_generator_var_api', {}):
+                api = gen._generator_var_api[callee_name]
+            # Try to find any map that has this key
+            if api is None:
+                for _aname in dir(gen):
+                    if _aname.startswith('_') and ('callable' in _aname or 'param' in _aname or 'api' in _aname):
+                        try:
+                            _aval = getattr(gen, _aname)
+                            if isinstance(_aval, dict) and callee_name in _aval:
+                                _cand = _aval[callee_name]
+                                if isinstance(_cand, dict) and ('base' in _cand or 'value_ctype' in _cand):
+                                    api = _cand
+                                    break
+                        except Exception:
+                            pass
+            # Last resort: look up defaults for current function
+            if api is None:
+                cur_fn = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+                try:
+                    _pd = getattr(gen, '_func_param_defaults', None) or {}
+                    if cur_fn and isinstance(_pd, dict):
+                        for _k in [cur_fn, f"{cur_fn}_start", cur_fn + '_body']:
+                            if _k in _pd:
+                                _defaults = _pd[_k]
+                                _dval = None
+                                if isinstance(_defaults, dict):
+                                    _dval = _defaults.get(callee_name)
+                                elif isinstance(_defaults, list):
+                                    # Index the pair, don't unpack it (see the
+                                    # same loop above in this file).
+                                    for _pair in _defaults:
+                                        if str(_pair[0]) == callee_name:
+                                            _dval = _pair[1]
+                                            break
+                                if _dval is not None and hasattr(_dval, 'name'):
+                                    _dname = _dval.name
+                                    for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                     getattr(gen, '_async_api', {}) or {},
+                                                     getattr(gen, '_generator_api', {}) or {}):
+                                        if isinstance(_src_map, dict) and _dname in _src_map:
+                                            api = _src_map[_dname]
+                                            break
+                except Exception:
+                    pass
+                if api is None and hasattr(gen, '_cpp_current_fn_node'):
+                    try:
+                        _fnn = gen._cpp_current_fn_node
+                        _dflts = getattr(_fnn, 'param_defaults', None) or {}
+                        if callee_name in _dflts:
+                            _dval = _dflts[callee_name]
+                            if hasattr(_dval, 'name'):
+                                _dname = _dval.name
+                                for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                 getattr(gen, '_async_api', {}) or {},
+                                                 getattr(gen, '_generator_api', {}) or {}):
+                                    if isinstance(_src_map, dict) and _dname in _src_map:
+                                        api = _src_map[_dname]
+                                        break
+                    except Exception:
+                        pass
+    if api is None:
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "`async for` is only supported over a call (with plain "
             "positional arguments, if any -- no keyword arguments) to "
             "another compiled async-generator function this module has "
             "already compiled (defined earlier in the module than this "
             "loop)")
-    api = gen._async_gen_api[it.func.name]
     base = api['base']
     value_ctype = api['value_ctype']
     # See this method's own docstring point (b): validate the call
@@ -7680,6 +11472,20 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         # _MojoCppExc carrying that message, so `except X: ... raise e
         # from None` re-raises the specific caught exception rather than
         # refusing the whole generator.
+        if (isinstance(val, gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None
+                and val.name not in gen._cpp_declared
+                and val.name not in gen._global_var_types
+                and val.name not in gen._cpp_early_global_names
+                and val.name not in gen.func_param_types
+                and val.name not in gen.struct_field_types
+                and val.name not in getattr(gen, 'imported_symbols', ())):
+            # `raise onEmpty` where the name is bound NOWHERE (a typo, as in
+            # CPython's own iterutil.py): at run time Python raises NameError
+            # when the statement is reached, not before.
+            _ne = f"name '{val.name}' is not defined"
+            return [f"{indent}throw _MojoCppExc{{ (int64_t){gen._exc_type_id('NameError')}, "
+                    f'const_cast<char *>("{_ne}"), (void *)const_cast<char *>("{_ne}") }};']
         if isinstance(val, gimple_ctypes.IdentExpr):
             msg_cpp = gen._cpp_expr(val)
             return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
@@ -7710,7 +11516,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         # DYNAMICALLY resolved exception class (real, recurring idiom:
         # `raise self._imap.error(...)` in imaplib.py's Idler.burst,
         # plus test.support's run_with_locale/subst_drive — see
-        # CODEGEN_generator_raise_non_static_exception_class.md's three
+        # CODEGEN_generator_raise_non_static_exception_class's three
         # confirmed occurrences) has no statically-known class NAME to
         # look up in _exc_type_id, so it can't get a real per-class tag
         # the way `raise ExcName(...)` does. Rather than refuse the
@@ -7738,6 +11544,8 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
                         msg_cpp = gen._cpp_expr(msg_arg)
                     else:
                         msg_cpp = f'const_cast<char *>("{gimple_ctypes._c_escape(text)}")'
+                elif isinstance(msg_arg, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                    msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg)
                 else:
                     msg_cpp = gen._cpp_expr(msg_arg)
             else:
@@ -7761,11 +11569,64 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
                 msg_cpp = gen._cpp_expr(msg_arg)
             else:
                 msg_cpp = f'const_cast<char *>("{gimple_ctypes._c_escape(text)}")'
+        elif isinstance(msg_arg, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+            # Exception messages are consumed as `char *` (printed/compared).
+            # A tuple/list literal argument is represented by its Python
+            # repr string rather than a boxed container, so mixed-scalar
+            # literals like `raise Exc((header, line))` do not go through
+            # the call-argument list lowering (which cannot produce a
+            # `char *` message).
+            msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg)
         else:
             # Variable/expression message: evaluate as char* expression
             msg_cpp = gen._cpp_expr(msg_arg)
     return [f"{indent}throw _MojoCppExc{{ (int64_t){tag}, {msg_cpp}, "
             f"(void *){msg_cpp} }};"]
+
+
+def _cpp_raise_tuple_msg_expr(gen, lit) -> str:
+    """Build a `char *` repr for a tuple/list literal used as a `raise`
+    message argument in a compiled generator body. Exception messages are
+    consumed as `char *`, so the literal cannot be lowered as a boxed
+    container. Each element is repr'd by its inferred scalar kind and the
+    pieces are concatenated into a Python-like literal string."""
+    elems = list(getattr(lit, 'elements', []) or [])
+    is_tuple = isinstance(lit, gimple_ctypes.TupleExpr)
+    open_ch = '(' if is_tuple else '['
+    close_ch = ')' if is_tuple else ']'
+    stmts = [f'char *_s = strdup("{open_ch}");', 'char *_p = nullptr;']
+    for i, el in enumerate(elems):
+        if i:
+            stmts.append('_p = strdup(", "); _s = mojo_str_cat_free(_s, _p); free(_p);')
+        if isinstance(el, gimple_ctypes.StringLiteral):
+            text, is_fstr = gen._decode_str_literal_text(
+                el.value, gimple_ctypes._str_literal_interp_flag(el))
+            if is_fstr:
+                ev = gen._cpp_expr(el)
+                piece = f"mojo_repr_str((char *)({ev}))"
+            else:
+                piece = f'strdup("{gimple_ctypes._c_escape(repr(text))}")'
+        else:
+            ev = gen._cpp_expr(el)
+            ct = gimple_exprtypes._infer_simple_expr_ctype(
+                el, gen._cpp_declared,
+                getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api)
+            if ct == 'char *':
+                piece = f"mojo_repr_str((char *)({ev}))"
+            elif ct == 'double':
+                piece = f"mojo_repr_float((double)({ev}))"
+            elif ct == '_Bool':
+                piece = f'((({ev})) ? strdup("True") : strdup("False"))'
+            else:
+                piece = f"mojo_str_from_int((int64_t)({ev}))"
+        stmts.append(f'_p = {piece}; _s = mojo_str_cat_free(_s, _p); free(_p);')
+    if is_tuple and len(elems) == 1:
+        stmts.append('_p = strdup(","); _s = mojo_str_cat_free(_s, _p); free(_p);')
+    stmts.append(f'_p = strdup("{close_ch}"); _s = mojo_str_cat_free(_s, _p); free(_p);')
+    stmts.append('return _s;')
+    body = ' '.join(stmts)
+    return f"([&]() -> char * {{ {body} }}())"
 
 
 def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
@@ -8010,7 +11871,85 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     that case, without any special-case code here. Verified end-to-end
     by test_gimple_generator_runner.py's
     yield_from_delegation_early_break_cleans_up_both_generators test."""
+    # `yield from walk(root)` where `walk` is a PARAMETER holding a callable as
+    # a word: drive whatever the call returns (a list, or a handle a registered
+    # generator made) through the runtime's view of it, yielding each element
+    # as a word (see `_cpp_dyn_call_expr` / `mojo_iter_word`).
+    _yf_call = yf.value
+    if (isinstance(_yf_call, gimple_ctypes.CallExpr)
+            and isinstance(_yf_call.func, gimple_ctypes.IdentExpr)):
+        _yf_dyn = _cpp_dyn_call_expr(gen, _yf_call)
+        if _yf_dyn is not None:
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
+            _yfl = gen._cpp_fresh_name("_mg_yfw")
+            gen._cpp_word_iter_locals.add(_yfl)
+            return [f"{indent}MojoList *{_yfl} = mojo_iter_word((int64_t)(intptr_t)({_yf_dyn}));",
+                    f"{indent}for (int64_t _i = 0; _i < mojo_list_len({_yfl}); _i++) {{",
+                    f"{indent}    co_yield mojo_box_word(mojo_list_get_boxed({_yfl}, _i));",
+                    f"{indent}}}"]
+
     call = yf.value
+    # Remember whether the `yield from` call was written with keywords before
+    # the delegation branch below flattens them into positional arguments (a
+    # simplification that is only valid for the ordinary compiled-generator
+    # path). A nested generator is claimed only in its plain positional form,
+    # so this flag keeps a keyword form refused instead of mis-slotting it.
+    _yf_call_had_kwargs = bool(getattr(call, 'kwargs', None))
+    # `yield from <generator-handle local>` — delegate through an existing
+    # compiled-generator handle's resume/value API (same protocol as the
+    # call-start delegation below and as `for x in g:` / `next(g)` on a
+    # handle local). The handle is owned by the local; do NOT destroy it
+    # on exhaustion (the same never-frees convention every other
+    # generator-handle consumer in this emitter follows).
+    if (isinstance(call, gimple_ctypes.IdentExpr)
+            and call.name in getattr(gen, '_cpp_generator_var_api', {})):
+        _yh_api = gen._cpp_generator_var_api[call.name]
+        _yh_base = _yh_api['base']
+        _yh_handle = gen._cpp_kw_param_renames.get(call.name, call.name)
+        _yh_refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+        if _yh_refs is not None:
+            _yh_refs.setdefault(_yh_base, {
+                'value_ctype': _yh_api.get('value_ctype', 'int64_t'),
+                'params': list(_yh_api.get('params') or [])})
+        # Forward declaration for the callee's wrappers when its unit comes
+        # later in this .cpp (same as the call-start delegation path).
+        _fwd = getattr(gen, '_cpp_fwd_gen_delegates', None)
+        if _fwd is not None and _yh_base != getattr(gen, '_cpp_gen_self_base', None):
+            _fwd_sig = ', '.join(
+                gimple_exprtypes._c_to_cpp_scalar_type(_ct)
+                for _ct in (gen.func_param_types.get(f"{_yh_base}_start") or [])) or 'void'
+            _fwd.append((_yh_base, _fwd_sig,
+                         gimple_exprtypes._c_to_cpp_scalar_type(
+                             _yh_api.get('value_ctype') or 'int64_t')))
+        # `yield from` forwards `send()` to the sub-generator (same as the
+        # call-start form below): first step is the implicit next()/resume
+        # delivering None, later steps forward the word the outer generator
+        # was resumed with via send.
+        if _yh_base.startswith('_mojogen_'):
+            _yh_first = f"{_yh_base}_resume({_yh_handle})"
+            _yh_step = lambda _fw: f"{_yh_base}_send({_yh_handle}, {_fw})"
+        else:
+            gen._cpp_runtime_gen_resume_used = True
+            _yh_first = f"__mojo_gen_resume ((int64_t)(intptr_t){_yh_handle}, mojo_box_none())"
+            _yh_step = lambda _fw: f"__mojo_gen_resume ((int64_t)(intptr_t){_yh_handle}, {_fw})"
+        _fw = gen._cpp_fresh_name("_mg_yf_word")
+        return [
+            f"{indent}{{",
+            f"{indent}    int64_t {_fw} = mojo_box_none();",
+            f"{indent}    if ({_yh_first}) {{",
+            f"{indent}        for (;;) {{",
+            f"{indent}            {_fw} = co_yield {_yh_base}_value({_yh_handle});",
+            f"{indent}            if (!{_yh_step(_fw)}) break;",
+            f"{indent}        }}",
+            f"{indent}    }}",
+            f"{indent}    if (mojo_exc_pending_get()) {{",
+            f"{indent}        mojo_exc_pending_set(0);",
+            f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
+            f"mojo_exc_msg_get(), mojo_exc_obj_get() }};",
+            f"{indent}    }}",
+            f"{indent}}}",
+        ]
     # `yield from <ListExpr/TupleExpr>` — delegate to a plain collection:
     # emit `for (auto _yf_item : <collection>) { co_yield _yf_item; }`
     if isinstance(call, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
@@ -8094,7 +12033,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     # back as int64_t here too. Without this case, `mojo_list_get_str`
     # dereferenced the int64_t payload bits as a `char *` — a real,
     # confirmed segfault, not just a wrong-value bug. See
-    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+    # the (since-fixed) compiled-generator lambda-expression bug.
     if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
             and call.func.name == 'sorted' and call.args
             and not gen._locally_binds_name('sorted')):
@@ -8151,9 +12090,73 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                        and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
                        and call.func.obj.name == 'cls'
                        and bool(cls_struct))
-    is_gen_call = is_self_recursive or is_cls_gen_call or (
+    _self_method_name = call.func.member if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.MemberExpr)) else None
+    if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name in ('self',) and bool(cls_struct)
+            and _self_method_name == '_iter_member_'):
+        # enum Flag.__iter__ does `yield from self._iter_member_(...)` where
+        # _iter_member_ is aliased to _iter_member_by_value_/_iter_member_by_def_
+        for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
+            if ((cls_struct, _cand) in getattr(gen, '_generator_method_api', {})
+                    and (cls_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
+                _self_method_name = _cand
+                break
+    is_self_gen_call = (isinstance(call, gimple_ctypes.CallExpr)
+                        and isinstance(call.func, gimple_ctypes.MemberExpr)
+                        and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+                        and call.func.obj.name == 'self'
+                        and bool(cls_struct)
+                        and (_self_method_name or call.func.member)
+                        and (cls_struct, (_self_method_name or call.func.member)) in getattr(gen, '_generator_method_api', {})
+                        and (cls_struct, (_self_method_name or call.func.member)) in getattr(gen, '_supported_generator_methods', {}))
+    # Also handle ClassName.method() calls to generator methods
+    is_classname_gen_call = False
+    if (not is_cls_gen_call and not is_self_gen_call and isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name not in ('self', 'cls')
+            and (call.func.obj.name in getattr(gen, '_generator_method_api_keys_by_struct', {})
+                 or any(call.func.obj.name == s for s in getattr(gen, '_generator_method_api', {}).keys()))):
+        # try to find
+        pass
+    # simpler: check if calling as ClassName.method() where (ClassName, method) is a generator method
+    if (not is_cls_gen_call and not is_self_gen_call and isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name not in ('self', 'cls')):
+        _cname = call.func.obj.name
+        _mname_cand = _self_method_name or call.func.member
+        if ((_cname, _mname_cand) in getattr(gen, '_generator_method_api', {})
+                and (_cname, _mname_cand) in getattr(gen, '_supported_generator_methods', {})):
+            is_classname_gen_call = True
+            if _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
+                call.func.member = _self_method_name
+                _walk_ast_invalidate(call.func)
+                _walk_ast_invalidate(call)
+    if is_self_gen_call and _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
+        call.func.member = _self_method_name  # rewrite to actual generator method name
+        _walk_ast_invalidate(call.func)
+        _walk_ast_invalidate(call)
+    # A bare `yield from <nested>(...)` to a generator claimed by
+    # cpp_async._compile_nested_generator_closures (registered in
+    # _nested_generator_api, not _generator_api). Only the plain positional
+    # form is claimed here; a keyword form keeps falling through to the
+    # ordinary collection path, which refuses it with the unresolved-callee
+    # message it has always produced.
+    _yf_nested_probe = None
+    if (isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.IdentExpr)
+            and not _yf_call_had_kwargs):
+        _yf_nested_probe = _cpp_nested_generator_api(gen, call.func.name)
+        if _yf_nested_probe is not None:
+            _np_caps = _yf_nested_probe.get('captures') or []
+            if len(call.args) != (len(_yf_nested_probe.get('params') or [])
+                                  - len(_np_caps)):
+                _yf_nested_probe = None
+    is_gen_call = is_self_recursive or is_cls_gen_call or is_self_gen_call or is_classname_gen_call or (
         isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
-        and call.func.name in gen._generator_api)
+        and (call.func.name in gen._generator_api or _yf_nested_probe is not None))
     if not is_gen_call:
         result_var = gen._cpp_fresh_name("_yf_result")
         coll_expr = gen._cpp_expr(call)
@@ -8178,7 +12181,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         # currently-working `yield from <expr>` shape. Real:
         # Lib/test/libregrtest/runtests.py's `RunTests.iter_tests`:
         # `yield from self.tests` (a MojoList* field). See
-        # CODEGEN_generator_function_Lib_test_libregrtest_runtests.md.
+        # CODEGEN_generator_function_Lib_test_libregrtest_runtests.
         #
         # Element accessor: the above cast handles the CONTAINER's own
         # pointer type, but the elements inside it aren't always
@@ -8215,8 +12218,16 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             _yf_accessor = 'mojo_list_get_double'
         elif _yf_elem_ctype == 'char *':
             _yf_accessor = 'mojo_list_get_str'
+        elif (_yf_elem_ctype is not None
+                and isinstance(call, gimple_ctypes.IdentExpr)
+                and call.name in getattr(gen, '_cpp_mixed_list_params', ())):
+            _yf_accessor = 'mojo_list_get_boxed'
         elif _yf_elem_ctype is not None:
             _yf_accessor = 'mojo_list_get_int'
+        elif (isinstance(call, gimple_ctypes.CallExpr)
+              and isinstance(call.func, gimple_ctypes.IdentExpr)
+              and call.func.name in ('_glob1', 'filter', 'sorted')):
+            _yf_accessor = 'mojo_list_get_boxed'
         else:
             _yf_accessor = 'mojo_list_get_str'
         result_init = _cpp_as('MojoList *', coll_expr)
@@ -8224,49 +12235,61 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
                 f"{indent}    co_yield {_yf_accessor}({result_var}, _i);",
                 f"{indent}}}"]
-    if len(call.kwargs or []) > 0:
-        # Append keyword arguments as positional args at the end.
-        # This is a simplification (correct only when kwargs match the
-        # LAST parameters in source order, which is the common case).
-        for kname, kexpr in call.kwargs:
-            call.args.append(kexpr)
-        call.kwargs = []
-        _walk_ast_invalidate(call)
     receiver_exprs = []
-    if is_cls_gen_call:
-        sub_name = f"{cls_struct}.{call.func.member}"
-        api = gen._generator_method_api.get((cls_struct, call.func.member))
-        if (api is None or (cls_struct, call.func.member)
+    # Set by the bare-name branch below when the callee is a claimed NESTED
+    # generator (see _nested_generator_api); its captures are appended to the
+    # argument list after the user positional arguments.
+    _nested_api = None
+    if is_cls_gen_call or is_self_gen_call or is_classname_gen_call:
+        if is_classname_gen_call:
+            _call_struct = call.func.obj.name
+        else:
+            _call_struct = cls_struct
+        sub_name = f"{_call_struct}.{call.func.member}"
+        api = gen._generator_method_api.get((_call_struct, call.func.member))
+        if (api is None or (_call_struct, call.func.member)
                 not in gen._supported_generator_methods):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from cls.{call.func.member}(...)` does not "
+                f"`yield from {call.func.obj.name}.{call.func.member}(...)` does not "
                 "delegate to a generator method this compile has itself "
                 "already translated via the C++20-coroutine path (either "
                 "it's not a generator this codegen supports, or it's "
                 "defined LATER among this struct's methods — the "
                 "delegated-to generator method must be defined earlier)")
         # The receiver slot, when the callee HAS one, is the literal
-        # `cls` (see the `is_cls_gen_call` branch's own comment: the
-        # placeholder is passed positionally, never dereferenced). A
-        # `@staticmethod` generator method has no receiver parameter at
-        # all -- its `param_ctypes` simply starts at the first real
-        # parameter. Which case this is comes from the api entry's own
-        # `receiver` key, recorded at registration (see
-        # `_cpp_method_receiver_name`), because the registered `params`
-        # are bare ctype strings with the names stripped.
-        #
-        # A MISSING key is refused rather than assumed: an api entry from a
-        # registration site that does not set it would otherwise produce a
-        # wrong-arity `_start(...)` call — exactly the class of silent
-        # wrongness this branch exists to end.
+        # `cls` or `self` (the placeholder is passed positionally, never
+        # dereferenced in the classmethod case; for instance methods self is
+        # the real receiver). A `@staticmethod` generator method has no
+        # receiver parameter at all.
         _rcv = api.get('receiver', _MISSING)
         if _rcv is _MISSING:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from cls.{call.func.member}(...)`: the compiled "
+                f"`yield from {call.func.obj.name}.{call.func.member}(...)`: the compiled "
                 "generator method's registration carries no `receiver` "
                 "key, so its receiver arity cannot be determined")
         if _rcv in ('cls', 'self'):
-            receiver_exprs = ['cls']
+            # Pass receiver as the API expects (cls for classmethods, self for instance methods)
+            if _rcv == 'cls':
+                if is_classname_gen_call:
+                    receiver_exprs = [_call_struct]
+                elif call.func.obj.name == 'self':
+                    # Pass self as the receiver (instance); for classmethods the
+                    # class is resolved by name in the callee, so any value works
+                    receiver_exprs = ['self']
+                elif call.func.obj.name == 'cls':
+                    receiver_exprs = ['cls']
+                else:
+                    receiver_exprs = [_rcv]
+            elif _rcv == 'self':
+                if call.func.obj.name == 'self':
+                    receiver_exprs = ['self']
+                elif is_classname_gen_call:
+                    # calling instance method as ClassName.method() is unusual; pass instance?
+                    receiver_exprs = ['self']  # fallback
+                else:
+                    receiver_exprs = [_rcv]
+            else:
+                receiver_exprs = [_rcv]
     else:
         sub_name = call.func.name
         if is_self_recursive:
@@ -8284,12 +12307,34 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         else:
             api = gen._generator_api.get(sub_name)
             if api is None or sub_name not in gen._supported_generators:
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"`yield from {sub_name}(...)` does not delegate to a "
-                    "generator this compile has itself already translated via "
-                    "the C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER in this module — "
-                    "the delegated-to generator must be defined earlier)")
+                # A nested generator defined inside this same compiled
+                # generator/coroutine and claimed by
+                # cpp_async._compile_nested_generator_closures: it lives in
+                # _nested_generator_api, keyed (enclosing def name, nested
+                # name), NOT in _generator_api. Its _start takes the user
+                # positional arguments first, then each captured enclosing
+                # name threaded as an ordinary identifier in scope -- the
+                # same convention _nested_generator_start_arg_pairs uses for
+                # the stack-switch construction path (emit_calls). Only the
+                # plain positional form is claimed; a keyword argument or a
+                # mismatched arity stays refused by the generic fallback
+                # below, with the same unresolved-callee message as before.
+                _ng_api = _cpp_nested_generator_api(gen, sub_name)
+                _ng_caps = (_ng_api.get('captures') or []) if _ng_api else []
+                _ng_user_n = (len(_ng_api.get('params') or []) - len(_ng_caps)
+                              if _ng_api else -1)
+                if (_ng_api is not None and not _yf_call_had_kwargs
+                        and len(call.args) == _ng_user_n):
+                    api = _ng_api
+                    _nested_api = _ng_api
+                    ggc._record_generator_value_kind(api)
+                else:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"`yield from {sub_name}(...)` does not delegate to a "
+                        "generator this compile has itself already translated via "
+                        "the C++20-coroutine path (either it's not a generator this "
+                        "codegen supports, or it's defined LATER in this module — "
+                        "the delegated-to generator must be defined earlier)")
 
     sub_params: list = api.get('params') or []
     # Same defaults-aware trailing-argument padding as
@@ -8301,19 +12346,27 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     _dflts = (api.get('defaults')
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
-    arg_exprs = receiver_exprs + [gen._cpp_expr(a) for a in call.args]
+    arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
+    if _nested_api is not None:
+        # A claimed nested generator's _start signature is
+        # (user args..., captured enclosing names...) — the same assembly
+        # emit_calls._nested_generator_start_arg_pairs performs for the
+        # stack-switch construction path. Each capture is an ordinary
+        # identifier in this enclosing generator's scope.
+        arg_exprs += [_cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn))
+                      for _cn, _ in (_nested_api.get('captures') or [])]
     while len(arg_exprs) < len(sub_params):
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from {sub_name}(...)`: expected "
-                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
-                f"got {len(call.args)}")
-        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
-    if len(arg_exprs) > len(sub_params):
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
-            f"argument(s), got {len(call.args)}")
+                f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
+                f"argument(s), got {len(call.args)}")
+    # A word-typed slot (`int64_t`) fed a pointer-typed local (a list, a string) is
+    # an implicit pointer->integer conversion g++ rejects.
+    for _ai in range(len(arg_exprs)):
+        if _ai < len(sub_params) and sub_params[_ai] == 'int64_t' and not re.fullmatch(
+                r'-?\d+|true|false', arg_exprs[_ai].strip()):
+            arg_exprs[_ai] = f"(int64_t)(intptr_t)({arg_exprs[_ai]})"
     sub_base = api['base']
     # Record a forward declaration for this callee's four `extern "C"`
     # wrappers when its own unit comes LATER in this .cpp -- see
@@ -8333,12 +12386,39 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     gen._yield_from_seq = getattr(gen, '_yield_from_seq', 0) + 1
     guard = f"__mojogen_sub{gen._yield_from_seq}"
     args_text = ', '.join(arg_exprs)
+    # `yield from` forwards `send()` to the sub-generator, as Python does. The
+    # first step is Python's implicit `next()` on the sub-generator, which is
+    # `{sub_base}_resume` (it delivers the None box). Every later step hands
+    # the word the outer generator was just resumed with to `{sub_base}_send`,
+    # and the outer's own `co_yield` evaluates to that word (see cpp_async.py's
+    # `_step`/`_send` and `yield_value`'s awaiter).
+    _fw = gen._cpp_fresh_name("_mg_yf_word")
+    if sub_base.startswith('_mojogen_'):
+        # A C++20 sub-generator: its own `_resume`/`_send` entries (cpp_async.py).
+        _fw_decl = []
+        _fw_first = f"{sub_base}_resume({guard}.g)"
+        _fw_step = f"{sub_base}_send({guard}.g, {_fw})"
+    else:
+        # A stack-switch sub-generator (the mixed case: a cpp outer delegating
+        # to a `__mgco_` callee) has no `_resume`/`_send` symbols; its only
+        # entry is the runtime's `__mojo_gen_resume(gen, word)`, which both
+        # steps use (the first with the None box). The runtime's file-scope
+        # declaration is emitted by module_gen once this flag is set.
+        gen._cpp_runtime_gen_resume_used = True
+        _fw_decl = []
+        _fw_first = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, mojo_box_none())"
+        _fw_step = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, {_fw})"
     return [
         f"{indent}{{",
         f"{indent}    _mojogen_sub_guard {guard}"
         f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
-        f"{indent}    while ({sub_base}_resume({guard}.g)) {{",
-        f"{indent}        co_yield {sub_base}_value({guard}.g);",
+        *_fw_decl,
+        f"{indent}    int64_t {_fw} = mojo_box_none();",
+        f"{indent}    if ({_fw_first}) {{",
+        f"{indent}        for (;;) {{",
+        f"{indent}            {_fw} = co_yield {sub_base}_value({guard}.g);",
+        f"{indent}            if (!{_fw_step}) break;",
+        f"{indent}        }}",
         f"{indent}    }}",
         # Milestone D: the sub-generator's own `_resume` (same wrapper
         # every compiled generator gets — see _gen_cpp_generator_unit)
@@ -8412,15 +12492,22 @@ def _cls_refs_supported(gen, body, struct_name: str) -> bool:
 
     See gimple_codegen.py's classmethod-generator eligibility check
     (this method's only caller) and bugs/CODEGEN_generator_function_
-    Lib_enum.md's 2026-08-21 update for the motivating Lib/enum.py
+    Lib_enum's 2026-08-21 update for the motivating Lib/enum.py
     `Flag._iter_member_by_value_`/`_iter_member_by_def_` shapes.
     """
     class_attrs = gen._class_attrs.get(struct_name, {})
     supported_ids: set = set()
+    _call_funcs = {id(c.func) for c in gimple_exprtypes._walk_ast(body)
+                   if isinstance(c, gimple_ctypes.CallExpr)}
     for n in gimple_exprtypes._walk_ast(body):
         if (isinstance(n, gimple_ctypes.MemberExpr) and isinstance(n.obj, gimple_ctypes.IdentExpr)
                 and n.obj.name == 'cls' and n.member in class_attrs):
             supported_ids.add(id(n.obj))
+        elif (isinstance(n, gimple_ctypes.MemberExpr) and isinstance(n.obj, gimple_ctypes.IdentExpr)
+                and n.obj.name == 'cls' and id(n) not in _call_funcs
+                and n.member not in gen._struct_method_names.get(struct_name, ())
+                and n.member not in gen.struct_field_types.get(struct_name, {})):
+            supported_ids.add(id(n.obj))   # a run-time class attribute (`mojo_class_getattr`)
         elif (isinstance(n, gimple_ctypes.CallExpr) and isinstance(n.func, gimple_ctypes.MemberExpr)
                 and isinstance(n.func.obj, gimple_ctypes.IdentExpr) and n.func.obj.name == 'cls'):
             mangled = f"{struct_name}_{n.func.member}"

@@ -16,13 +16,13 @@ THE DIVIDING LINE, AND IT IS ONE WORD WIDE
 CPython's `operator` is 55 names in three groups, and this module is the first
 group: the ones that take two WORDS and answer a word. The other two are a
 container and a callable, and a formal value is one 64-bit word in a function's
-own stack scratch (`formal/model.py`, "What a value is") — so `getitem`,
+own stack scratch (`formal/model/builtins.py`, "What a value is") — so `getitem`,
 `countOf` and `indexOf` want a sequence this path cannot name, and
 `itemgetter`, `attrgetter`, `methodcaller` and `call` want a first-class callable,
 which is REFUSED on this path whatever it is passed to (measured on both shapes,
-in `formal/hostmods/contextlib.mojo` and in
-`bugs/COMPILE_FAIL_decorator_application_dropped.md`'s neighbourhood). Every one
-of those is named under "WHAT IS NOT HERE".
+in `formal/hostmods/contextlib.mojo` and in the neighbourhood where decorators
+are dropped by both backends). Every one of those is named under "WHAT IS NOT
+HERE".
 
 **SO EVERY ANSWER HERE IS WORD ARITHMETIC AND WRAPS.** That is not a shortcut and
 it is not an approximation of CPython's arbitrary-precision `int`; it is what the
@@ -99,7 +99,7 @@ WHAT IS NOT HERE, AND WHY
 THE TWO THINGS THAT ARE NOT QUITE CPYTHON, STATED HERE
 ------------------------------------------------------
   * The comparisons answer **1** or **0**, where CPython answers `True`/`False`.
-    On this path a boolean is a word (`formal/model.py`) and `1`/`0` is that
+    On this path a boolean is a word (`formal/model/builtins.py`) and `1`/`0` is that
     word; `test_formal_core_hostmods.py`'s `op` group compares against
     `int(getattr(operator, name)(a, b))`, so the oracle is CPython's own answer
     read through the same conversion and not a constant.

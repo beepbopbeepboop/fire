@@ -337,20 +337,57 @@ def iter_type_rhs(container_src: str, tname: str, kind: str) -> str | None:
     if kind == 'borrowed':
         m = re.search(r'comptime\s+IteratorType\s*\[', block)
         if not m:
-            return None
-        i = _matching_bracket(block, m.end() - 1)
-        if i is None:
-            return None
-        rest = block[i + 1:]
+            m = re.search(r'comptime\s+IteratorType\b(?!\s*\[)', block)
+            if not m:
+                return None
+            rest = block[m.end():]
+        else:
+            i = _matching_bracket(block, m.end() - 1)
+            if i is None:
+                return None
+            rest = block[i + 1:]
     else:
-        m = re.search(r'comptime\s+IteratorOwnedType\b', block)
-        if not m:
-            return None
-        rest = block[m.end():]
-    eq = re.search(r'(?<![:\w])=\s*', rest)
-    if not eq:
+        m = re.search(r'comptime\s+IteratorOwnedType\s*\[', block)
+        if m:
+            i = _matching_bracket(block, m.end() - 1)
+            if i is None:
+                return None
+            rest = block[i + 1:]
+        else:
+            m = re.search(r'comptime\s+IteratorOwnedType\b', block)
+            if not m:
+                return None
+            rest = block[m.end():]
+    # Find assignment = skipping over where clauses (handle multi-line)
+    eq = None
+    dp = db = dc = 0
+    t = 0
+    n = len(rest)
+    while t < n:
+        c = rest[t]
+        if c == '(':
+            dp += 1; t += 1; continue
+        if c == ')':
+            dp = max(0, dp - 1); t += 1; continue
+        if c == '[':
+            db += 1; t += 1; continue
+        if c == ']':
+            db = max(0, db - 1); t += 1; continue
+        if c == '{':
+            dc += 1; t += 1; continue
+        if c == '}':
+            dc = max(0, dc - 1); t += 1; continue
+        if c == '=' and dp == 0 and db == 0 and dc == 0:
+            if t > 0 and rest[t-1] in '!<>=':
+                t += 1; continue
+            if t + 1 < n and rest[t+1] == '=':
+                t += 2; continue
+            eq = t
+            break
+        t += 1
+    if eq is None:
         return None
-    line = rest[eq.end():].split('\n', 1)[0].strip()
+    line = rest[eq + 1:].split('\n', 1)[0].strip()
     return line or None
 
 

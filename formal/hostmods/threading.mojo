@@ -6,8 +6,7 @@ and nothing else gets no `pthread_create` to call.  So `Thread` cannot be built
 here, and neither can `Lock`, `RLock`, `Condition`, `Event`, `Semaphore`,
 `Barrier` or `Queue` -- each is a lock word plus a waiter list plus a predicate,
 and a waiter list is a run-time-length sequence, which is the same limit that
-took `os.listdir` out of reach
-(`bugs/FORMAL_listdir_no_run_time_sequence.md`).
+took `os.listdir` out of reach.
 
 WHAT IS DECIDED HERE
 --------------------
@@ -36,7 +35,7 @@ WHAT IS NOT HERE, AND WHY
   * `current_thread`, `main_thread`, `get_ident`, `active_count`,
     `enumerate`, `stack_size`, `TIMEOUT_MAX` as a settable.  `current_thread()`
     and `get_ident()` are the interpreter's own frame identity
-    (`bugs/FORMAL_a_frame_holder_rebound_from_a_word`), and `active_count()` is a
+    (a frame holder rebound from a word), and `active_count()` is a
     count of threads that exist, which is zero here and saying zero would be a
     claim about the host rather than about the model.
   * `local`, `Lock.acquire(blocking, timeout)`'s keyword form, `Thread` with its

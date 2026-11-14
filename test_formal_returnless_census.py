@@ -5,7 +5,7 @@ case per rule that decides a row, including the rules that REMOVE one.
     python3 test_formal_returnless_census.py [-v]
 
 `tools/formal_returnless_census.py` answers the question
-`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` (DELETED) — fixed by returning None from functions falling off the end
 §4 step 0 asks for: how many call sites in this repository and the stdlib
 CONSUME the value of a function that returns nothing. Its number is quoted in
 that doc and decides whether a `None` refusal is affordable, so the rules that
@@ -18,7 +18,7 @@ inventing direction:**
     result. The AST evaluator's `MojoStmt.exprstmt` arm does not evaluate the
     expression at all, which is why `fn main(): print(42)` proved with no
     holes, and a census that counted those rows would report the shape
-    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`'s
+    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` (DELETED) — fixed by returning None from functions falling off the end's
     own reproducer as a divergence when the answer is never observed;
   * a GENERATOR's "return value" is the generator object, and a STRUCT's is a
     frame. Counting either put 456 rows in `formal/hostmods/argparse.mojo` on
@@ -172,7 +172,7 @@ class TestWhatCounts(unittest.TestCase):
         DECLARES nothing — is not "a function that returns nothing", and filing
         its call sites as candidates is what put **456 rows in
         `formal/hostmods/argparse.mojo`** into the report §0a of
-        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` (DELETED) — fixed by returning None from functions falling off the end
         quotes: `_fld`, `_cp`, `_alpha_index` and `_name_ptr` are all of this
         shape and that file is a host module the gate compiles. The rule is a
         DISJUNCTION — a candidate is a site whose callee has neither a
@@ -374,6 +374,71 @@ class TestTheIndexIsNotNameKeyed(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestModuleHeader(unittest.TestCase):
+    """The tool's own header is in the order Python needs to run it.
+
+    Found 2026-11-12: a merge left the `sys.path` bootstrap and the
+    `module_loader` import ABOVE the shebang and docstring, so the module used
+    `os` before importing it and died with `NameError` at import, which
+    stopped this whole file from running. No gate runs this file, so nothing
+    else would have seen it. Checked on the source's AST, so the rule is the
+    one Python enforces, not a string match on a particular layout.
+    """
+
+    TOOL = os.path.join(HERE, "tools", "formal_returnless_census.py")
+
+    def setUp(self):
+        import ast
+        with open(self.TOOL, encoding="utf-8") as fh:
+            self.source = fh.read()
+        self.tree = ast.parse(self.source)
+
+    def test_shebang_is_the_first_line(self):
+        self.assertEqual(self.source.splitlines()[0], "#!/usr/bin/env python3")
+
+    def test_docstring_is_the_first_statement(self):
+        import ast
+        first = self.tree.body[0]
+        self.assertIsInstance(first, ast.Expr)
+        self.assertIsInstance(first.value, ast.Constant)
+        self.assertTrue(isinstance(first.value.value, str))
+        self.assertIsNotNone(ast.get_docstring(self.tree))
+        self.assertIn("Which call sites", C.__doc__)
+
+    def test_nothing_uses_os_or_sys_before_importing_them(self):
+        import ast
+        bound = {}
+        for index, stmt in enumerate(self.tree.body):
+            if isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    bound.setdefault(alias.asname or alias.name.split(".")[0],
+                                     index)
+            elif isinstance(stmt, ast.ImportFrom):
+                for alias in stmt.names:
+                    bound.setdefault(alias.asname or alias.name, index)
+        for name in ("os", "sys"):
+            self.assertIn(name, bound, f"{name} is never imported")
+            for index, stmt in enumerate(self.tree.body[:bound[name]]):
+                if isinstance(stmt, ast.Expr) and index == 0:
+                    continue  # the docstring
+                uses = {n.id for n in ast.walk(stmt) if isinstance(n, ast.Name)}
+                self.assertNotIn(name, uses,
+                                 f"top-level statement {index} uses {name} "
+                                 f"before line {self.tree.body[bound[name]].lineno} imports it")
+
+    def test_module_loader_import_follows_the_path_bootstrap(self):
+        import ast
+        loader = next(i for i, s in enumerate(self.tree.body)
+                      if isinstance(s, ast.ImportFrom)
+                      and s.module == "module_loader")
+        bootstrap = next(i for i, s in enumerate(self.tree.body)
+                         if isinstance(s, ast.Expr)
+                         and isinstance(s.value, ast.Call)
+                         and "sys.path.insert" in ast.unparse(s.value))
+        self.assertLess(bootstrap, loader,
+                        "module_loader is imported before ROOT is on sys.path")
 
 
 if __name__ == "__main__":

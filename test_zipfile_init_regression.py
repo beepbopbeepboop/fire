@@ -11,10 +11,11 @@ decrypter reads key2 by value.  The regression is "sibling reads a cell another
 closure rebinds", covered by test_nonlocal.py case 9.
 """
 import subprocess, sys, os
+from exec_budget import SWEEP_TIMEOUT_S
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Delegate to the existing nonlocal suite which already asserts the case.
 r = subprocess.run(
     [sys.executable, "-c", "import sys; import test_nonlocal; sys.exit(test_nonlocal.main())"],
-    capture_output=True, text=True, timeout=300, cwd=HERE)
+    capture_output=True, text=True, timeout=SWEEP_TIMEOUT_S, cwd=HERE)
 assert r.returncode == 0, f"pinning regression failed: {r.stdout}\n{r.stderr}"
 print("PINNED zipfile-init regression OK (nonlocal PASS=18 FAIL=0)")

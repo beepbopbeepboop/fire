@@ -34,6 +34,7 @@ import sys
 import subprocess
 import tempfile
 import shutil
+from exec_budget import RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -226,7 +227,7 @@ def test_compile_link_run(wd):
         return
     os.chmod(exe_file, 0o755)
 
-    run = subprocess.run([exe_file], capture_output=True, text=True, timeout=10)
+    run = subprocess.run([exe_file], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     check("scaffold executable runs and exits 0", run.returncode == 0,
           detail=f"returncode={run.returncode} stdout={run.stdout!r} stderr={run.stderr!r}")
 

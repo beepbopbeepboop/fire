@@ -286,6 +286,9 @@ theorem sumThrough_eq (n : Nat) : 2 * sumThrough n = (n + 1) * n := by
 /-- Its word reading. -/
 def sumTo64 (w : UInt64) : UInt64 := UInt64.ofNat (sumTo w.toNat)
 
+@[simp] theorem sumThrough_succ (n : Nat) : sumThrough (n + 1) = (n + 1) + sumThrough n := by
+  simp [sumThrough, sumTo_succ]
+
 /-- Its word reading — the one `sum.mojo` refines. -/
 def sumThrough64 (w : UInt64) : UInt64 := UInt64.ofNat (sumThrough w.toNat)
 
