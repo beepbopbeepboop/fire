@@ -37,10 +37,10 @@ def _compile_stdlib(rel):
                                  linkable=False)
 
 
-# part 1 (FIXED by `_reexported_defining_qualifier`): a free function
-# re-exported through a package `__init__.mojo` is referenced by the defining
-# unit's qualifier (`std_memory_memory_...`), never by the re-exporting
-# package's (`std_memory___init___...`).
+# part 1 (bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part1.md):
+# a free function re-exported through a package `__init__.mojo` is referenced
+# by the defining unit's qualifier (`std_memory_memory_...`), never by the
+# re-exporting package's (`std_memory___init__...`).
 def test_p1_reexport_home_module_is_the_defining_module():
     c = _compile_stdlib('std/memory/maybe_uninit.mojo')
     refs = [l for l in c.splitlines() if 'unsafe_memset_zero' in l]
@@ -48,94 +48,16 @@ def test_p1_reexport_home_module_is_the_defining_module():
     assert 'std_memory___init___unsafe_memset_zero' not in c, (
         'caller still qualifies the reference with the re-exporting '
         'package __init__:\n' + '\n'.join(refs))
-    # `<qualifier>_<bare-name>`, ONE separator: the defining file's own
-    # compile emits `std_memory_memory_unsafe_memset_37bd8e` for its
-    # sibling, and a double underscore appears only where the NAME itself
-    # starts with one (`..._memory__memcmp_impl_...`). The part-1 doc
-    # first spelled this with a second underscore; the compiler has never
-    # emitted that spelling, and `nm` on a production dylib agrees
-    # (`_std_memory_memory_unsafe_memset_37bd8e`, single).
     assert re.search(r'std_memory_memory_unsafe_memset_zero', c), (
         'caller does not reference the defining module '
         '(std/memory/memory.mojo):\n' + '\n'.join(refs))
 
 
-# The rest of the part-1 acceptance list, measured through the real
-# package-`__init__` re-export shape: one caller module per name from the
-# parent doc's qualifier group. Each reference must carry the DEFINING
-# module's qualifier, never the re-exporting package `__init__`'s.
-_P1_REEXPORT_GROUP = (
-    ('std/testing/assert_aborts.mojo', 'sleep',
-     'std/time/time.mojo', 'std_time'),
-    ('std/testing/prop/random.mojo', 'seed',
-     'std/random/random.mojo', 'std_random'),
-    ('std/itertools/itertools.mojo', 'forget_deinit',
-     'std/memory/memory.mojo', 'std_memory'),
-    ('std/pathlib/path.mojo', 'listdir',
-     'std/os/os.mojo', 'std_os'),
-    ('std/os/path/path.mojo', 'getpwnam',
-     'std/pwd/pwd.mojo', 'std_pwd'),
-    ('std/os/path/path.mojo', 'getpwuid',
-     'std/pwd/pwd.mojo', 'std_pwd'),
-)
-
-
-def test_p1_reexport_direct_import_and_unknown_name_unchanged():
-    # A DIRECT import already names the defining module: the re-export walk
-    # must leave its qualifier exactly as it was (`_home == module`).
-    direct = b.compile_module_to_c(
-        'from std.memory.memory import unsafe_memset_zero\n'
-        '\n'
-        'def f(p: Int) -> Int:\n'
-        '    unsafe_memset_zero(p, 1)\n'
-        '    return 0\n',
-        'p1_direct_import.mojo', 'p1_direct_import', linkable=False)
-    assert 'std_memory_memory_unsafe_memset_zero' in direct, (
-        'a direct import lost its defining-module qualifier:\n'
-        + '\n'.join(l for l in direct.splitlines()
-                    if 'unsafe_memset_zero' in l))
-
-    # A name NO reachable module defines: `_find_symbol_home_module`'s
-    # honest None keeps today's behaviour — the importing module's own
-    # qualifier (here it is not even mangleable) and NO invented home.
-    unknown = b.compile_module_to_c(
-        'from std.memory import not_a_real_symbol_zz9\n'
-        '\n'
-        'def f() -> Int:\n'
-        '    return not_a_real_symbol_zz9()\n',
-        'p1_unknown_symbol.mojo', 'p1_unknown_symbol', linkable=False)
-    assert 'std_memory_memory_not_a_real_symbol_zz9' not in unknown, (
-        'the re-export walk invented a defining home for a name nothing '
-        'defines:\n' + '\n'.join(
-            l for l in unknown.splitlines()
-            if 'not_a_real_symbol_zz9' in l))
-
-
-def test_p1_reexport_group_callers_name_the_defining_module():
-    for caller_rel, name, definer_rel, package in _P1_REEXPORT_GROUP:
-        c = _compile_stdlib(caller_rel)
-        refs = [l for l in c.splitlines() if name in l]
-        assert refs, '%s emits no %s reference; probe is stale' % (
-            caller_rel, name)
-        # The package `__init__`'s qualifier, whatever `module_name_for_path`
-        # derives for it: the package path is `<package>/__init__.mojo`, so
-        # its qualifier is `<package>___init__`.
-        bad = package + '___init___' + name
-        assert bad not in c, (
-            '%s still qualifies %s with the re-exporting package: %s'
-            % (caller_rel, name, bad))
-        definer = module_name_for_path(
-            os.path.join(STDLIB_PATH, *definer_rel.split('/')))
-        good = definer + '_' + name
-        assert re.search(re.escape(good), c), (
-            '%s does not reference the defining module %s (%s):\n%s'
-            % (caller_rel, definer_rel, good, '\n'.join(refs)))
-
-
-# part 2 (fixed): the overload suffix a reference to an IMPORTED free function
-# carries is the suffix of the DEFINING unit's signature. `std.collections.string.string`
-# calls `parsing_floats._atof`; before the fix the call emitted
-# `...__atof_55072c` (param `int64_t *`) while the defining unit emitted
+# part 2 (bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part2.md):
+# the overload suffix a reference to an IMPORTED free function carries is the
+# suffix of the DEFINING unit's signature. `std.collections.string.string`
+# calls `parsing_floats._atof`; measured today the call emits
+# `...__atof_55072c` (param `int64_t *`) while the defining unit emits
 # `...__atof_d719e0` (param `char *`) — an undefined reference at link time.
 _ATOF_FAMILY = (
     r'(?<![A-Za-z0-9_])'

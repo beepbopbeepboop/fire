@@ -11,7 +11,6 @@ generic → instantiate the template for those type args (CAS-cached), and repor
 the concrete symbol + object + signature so the codegen can lower the call and
 record the object on the link line.
 """
-import os
 import textwrap
 import re
 import subprocess
@@ -2093,33 +2092,6 @@ def _module_alias_bindings(module_src: str) -> dict:
     return bindings
 
 
-def is_downcast_witness_diagnostic(exc) -> bool:
-    """True for the user diagnostic `rebind[downcast[T, Trait]](x)` raises when
-    the concrete `T` has no witness table for `Trait` (emit_calls). It is a fact
-    about the program, so an instantiation site re-raises it rather than
-    treating the failed elaboration as a capability gap."""
-    if not isinstance(exc, RuntimeError):
-        return False
-    msg = str(exc)
-    return ('function instantiation failed' in msg
-            and 'does not have witness table for trait' in msg)
-
-
-def declaring_module_name(gen, module_src):
-    """The module name a caller can attest to for `module_src`, for naming
-    the declarations inside it in a diagnostic: the caller's own module when
-    `module_src` is the caller's own source text, else None (the caller cannot
-    name a template imported from elsewhere, so the diagnostic falls back to
-    the instantiation's file name)."""
-    if module_src is None or module_src != getattr(gen, '_source_text', None):
-        return None
-    name = getattr(gen, '_module_name', None) or ''
-    if not name:
-        fnm = getattr(gen, '_current_filename', '') or ''
-        name = os.path.splitext(os.path.basename(fnm))[0] if fnm else ''
-    return name or None
-
-
 def _where_conformance_bases(module_src: str) -> dict:
     """Declared struct/trait bases from module_src for conforms_to folding."""
     bases = {}
@@ -3096,7 +3068,7 @@ class Elaborator:
         self.gcc = gcc
 
     def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None,
-                               arg_ctypes=None, origin_module: str | None = None) -> dict:
+                               arg_ctypes=None) -> dict:
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
         via the CAS. Returns a dict {symbol, object, ret, params} or None.
 
@@ -3129,8 +3101,7 @@ class Elaborator:
         check_bounds(module_src, tmpl, targs)
 
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
-                                                     conformance_bases=_where_conformance_bases(module_src),
-                                                     origin_module=origin_module)
+                                                     conformance_bases=_where_conformance_bases(module_src))
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
         if ret is None:
@@ -3243,8 +3214,7 @@ class Elaborator:
                 'ret': _mojo_type(ret) if ret else 'void',
                 'params': [_mojo_type(p) for p in ptypes]}
 
-    def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes,
-                                        origin_module: str | None = None) -> dict:
+    def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
         tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
@@ -3257,8 +3227,7 @@ class Elaborator:
         try:
             return self.elaborate_generic_call(module_src, fn_name, type_args,
                                                arg_count=len(arg_ctypes),
-                                               arg_ctypes=arg_ctypes,
-                                               origin_module=origin_module)
+                                               arg_ctypes=arg_ctypes)
         except ConformanceError:
             # A conformance failure inferred from an ERASED argument type is
             # a fact about this codegen's C representation, not about the

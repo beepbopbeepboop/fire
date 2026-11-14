@@ -4591,7 +4591,6 @@ def _declare_posthoc_class_attrs(stmts: list) -> None:
 
 
 _LITERAL_KIND_CLONE_CTYPE = {
-    'none': 'int64_t',
     'str': 'char *',
     'list': 'MojoList *',
     'dict': 'MojoDict *',
@@ -4600,18 +4599,13 @@ _LITERAL_KIND_CLONE_CTYPE = {
 
 
 def _literal_arg_kind(a):
-    """The container-or-str-or-none kind a call argument PROVABLY is, or None.
+    """The container-or-str kind a call argument PROVABLY is, or None.
 
-    Only literals qualify: ``None`` is ``none``, a string literal is ``str``,
-    and a list/tuple, dict or set display is its container. Anything else (a
-    name, a call, a number) is None, and a call site whose argument is None
-    blocks the clone pass for its function, so the existing behaviour stands
-    for it.
+    Only literals qualify: a string literal is `str`, a list/tuple, dict or set
+    display is its container. Anything else (a name, a call, a number) is
+    None, and a call site whose argument is None blocks the clone pass for its
+    function, so the existing behaviour stands for it.
     """
-    if isinstance(a, gimple_ctypes.NoneLiteral):
-        return 'none'
-    if isinstance(a, gimple_ctypes.IdentExpr) and _as_str(a.name) == 'None':
-        return 'none'
     if isinstance(a, gimple_ctypes.StringLiteral):
         return 'str'
     if isinstance(a, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
@@ -4737,17 +4731,6 @@ def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
                 break
             if (isinstance(_bn, SubscriptExpr) and isinstance(_bn.obj, IdentExpr)
                     and _as_str(_bn.obj.name) == _pname):
-                _iterated = True
-                break
-            _bn_iter = None
-            if isinstance(_bn, gimple_ctypes.Comprehension):
-                _gens = getattr(_bn, 'generators', None) or []
-                if _gens:
-                    _bn_iter = getattr(_gens[0], 'iterable', None) or getattr(_gens[0], 'iter', None)
-            elif type(_bn).__name__ == 'Generator':
-                _bn_iter = getattr(_bn, 'iterable', None) or getattr(_bn, 'iter', None)
-            if (isinstance(_bn_iter, IdentExpr)
-                    and _as_str(_bn_iter.name) == _pname):
                 _iterated = True
                 break
         if not _iterated:
@@ -5074,35 +5057,6 @@ def _check_signature_binding_violations(gen, stmts):
 
 
 
-def _cpp_generator_param_names(fn, receiver: str = '') -> list:
-    """Source parameter names, one per slot `_gen_cpp_generator_unit` returns
-    in its ctype list — the `param_names` key every registered compiled
-    generator's api carries (module_gen's registrations, cpp_async's
-    self-recursion snapshot, coro.py's stack-switch meta).
-
-    A generator method's receiver is its own leading slot (`self`/`cls`) and
-    is NOT part of `fn.params[1:]`; a `*args`/`**kwargs` parameter occupies
-    the slot its C representation occupies, under its bare name (the same
-    names `_gen_cpp_generator_unit` registers). Having this list align 1:1
-    with the ctype slots is what lets a delegated call bind keyword arguments
-    by NAME rather than guessing that they are written in declaration order
-    in the trailing slots."""
-    names = []
-    _params = list(getattr(fn, 'params', None) or [])
-    if receiver:
-        names.append(_as_str(receiver))
-        _params = _params[1:]
-    for _pn, _pt in _params:
-        _pns = _as_str(_pn)
-        if _pns.startswith('**'):
-            names.append(_pns[2:])
-        elif _pns.startswith('*'):
-            names.append(_pns[1:])
-        else:
-            names.append(_pns)
-    return names
-
-
 def gen_module_impl(self, stmts: list):
     self._stmts = stmts
     self._current_module_stmts = stmts
@@ -5129,11 +5083,6 @@ def gen_module_impl(self, stmts: list):
                 for _em, _ea in _s.extra:
                     _imported_names.add(_ea if _ea else _em.split('.')[-1])
     self._gmi_imported_names = _imported_names
-    # Two `from M import X` of one name from different modules is an error at
-    # module scope too (modular's import_ambiguous). Raised before anything is
-    # lowered, with every conflict in the file gathered into the one message.
-    import mojo.middle.import_ambiguity as _import_ambiguity
-    _import_ambiguity.check_module_from_imports(self, stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
     # A function called with a list at one site and a str at another, and
     # iterated in its body, gets one clone per argument kind before any
@@ -9259,31 +9208,6 @@ def gen_module_impl(self, stmts: list):
                     exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
             else:
                 exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
-            # Mojoc-backed package/submodule: if source exports are absent,
-            # try the precompiled package artifact's records.
-            if not exports:
-                try:
-                    _mjr = getattr(self, '_mojoc_pkg_records', {}) or {}
-                    _mj_pkg = s.module.split('.', 1)[0].lstrip('.')
-                    _mj_alias = (getattr(self, '_mojoc_pkg_alias', {}) or {}).get(_mj_pkg)
-                    _mj_canon = _mj_alias if _mj_alias else _mj_pkg
-                    _mj_rec = _mjr.get(_mj_canon) or _mjr.get(_mj_pkg)
-                    if _mj_rec:
-                        exports = {}
-                        for _sn, _sr in (_mj_rec.get('structs') or {}).items():
-                            exports[_sn] = {'kind': 'struct', 'mojoc': _sr}
-                        for _fn, _fr in (_mj_rec.get('functions') or {}).items():
-                            _ret = (_fr or {}).get('ret')
-                            exports[_fn] = {
-                                'kind': 'function', 'mojoc': _fr,
-                                'return_type': _ret,
-                                'c_return_type': self._mojo_type(_ret) if _ret else 'int64_t',
-                                'parameters': [],
-                                'c_parameters': [],
-                                'signature': f"{self._mojo_type(_ret) if _ret else 'int64_t'} {_fn} (...)",
-                            }
-                except Exception:
-                    pass
             _sib_is_local_project = False
             if _sib_qualifier:
                 try:
@@ -14021,14 +13945,6 @@ def gen_module_impl(self, stmts: list):
         self._supported_generators[s.name] = s
         self._generator_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-            # The SOURCE parameter names, one per `params` slot, in order.
-            # Every consumer that binds a call's keyword arguments to slots
-            # by name reads this (`cpp_core._cpp_generator_call_slot_pairs`);
-            # without it a keyword argument was appended positionally, so
-            # `f(n - step, bump=bump, step=step)` bound `bump` to `step`.
-            # Foreign modules see it because the home-registry value IS this
-            # very api dict (`_generator_home_api` below).
-            'param_names': _cpp_generator_param_names(s),
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
             'mixed_slots': self._cpp_last_mixed_slots,
             # Value-carrying `return` support (asyncio/futures.py's
@@ -14437,11 +14353,6 @@ def gen_module_impl(self, stmts: list):
             self._supported_generator_methods[key] = m
             self._generator_method_api[key] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-                # Source parameter names, one per `params` slot (see
-                # `_register_free_generator`'s identical key): keyword
-                # arguments at a delegated call bind to their slot by name.
-                'param_names': _cpp_generator_param_names(
-                    m, _cpp_method_receiver_name(m)),
                 # Which SOURCE parameter, if any, is the receiver slot a
                 # caller must fill -- see mojo/middle/coro.py's identical
                 # key for why the registered `params` (bare ctype strings)
@@ -16584,20 +16495,11 @@ def gen_module_impl(self, stmts: list):
 
         except Exception as _me_err:
             try:
+                import sys
+                print("CAUGHT_IN_MAIN_LOOP:", str(_me_err)[:80], file=sys.stderr)
                 if not hasattr(self, '_lsp_recovery_errors'):
                     self._lsp_recovery_errors = []
                 self._lsp_recovery_errors.append(_me_err)
-                # The refusal itself is not lost: it is recorded here and
-                # re-raised by `gen_module` for LSP/front-end error recovery,
-                # so the caller already sees the compile as refused. The old
-                # unconditional `CAUGHT_IN_MAIN_LOOP` print to stderr only
-                # put the refusal on the console next to the run's PASSED
-                # line, where it read as a failure nobody could act on
-                # (bug:CODEGEN_stdlib_run_prints_elaboration_refusals).
-                # Like every other deliberately-swallowed error in this
-                # module, the detail is diagnosable under MOJO_DEBUG and
-                # otherwise off the console.
-                _debug_note('main-loop statement refused', _me_err)
             except Exception:
                 pass
             continue

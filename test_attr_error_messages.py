@@ -557,18 +557,20 @@ def test_name_error_caps_match_cpython():
 
 
 def test_end_to_end_name_error_suggestion():
-    # An uncaught unknown declaration in Mojo source prints the modular
-    # block (`mojo build`'s shape): the head carries the suggestion, the
-    # suggested name sits under the caret, and there is no Python traceback.
+    # The `Error:` line is what OUR printing computes (before the fix it was
+    # plain — a 3.15 host's own traceback module decorates its own final
+    # line, which is not our code); the final line must agree with it.
     out, err, rc = fire_run("a_val = 1\nb_val2")
     assert rc == 1, f"uncaught NameError must exit 1, got {rc}"
-    lines = err.splitlines()
-    assert lines[0].endswith(
-        ":3:5: error: use of unknown declaration 'b_val2'"
-        "; did you mean 'a_val'?"), f"head line: {lines[0]!r}"
-    assert lines[1] == "    b_val2" and lines[2] == "    ^~~~~~", lines
-    assert lines[-1] == "    a_val", f"candidate line: {lines[-1]!r}"
-    assert "Traceback" not in err, err
+    marker = "name 'b_val2' is not defined"
+    ours = line_suffix_after(err, marker)
+    assert ours == ". Did you mean: 'a_val'?", \
+        f"final NameError line must carry the 3.15 suggestion, got {ours!r}"
+    err_lines = [l for l in err.splitlines() if l.startswith("Error:")]
+    assert err_lines and marker in err_lines[0], \
+        f"the Error: line must carry the message, got {err_lines!r}"
+    assert err_lines[0].split(marker, 1)[1].strip() == ours, \
+        f"the Error: line must agree with the final line, got {err_lines!r}"
     # the self.<name> refinement end to end
     out, err, rc = fire_run(
         "class C:\n"
@@ -578,50 +580,8 @@ def test_end_to_end_name_error_suggestion():
         "        return area\n"
         "C().f()")
     assert rc == 1
-    assert "error: use of unknown declaration 'area'; did you mean 'self.area'?" \
-        in err.splitlines()[0], err
-    assert err.splitlines()[-1].strip() == "self.area", err
-
-
-def test_mojo_unknown_declaration_block_matches_modular():
-    # The modular reference for test/mojo-parser/diagnostic_format.mojo:
-    # `mojo build` prints exactly this block for the file (its launcher then
-    # adds a driver line, which is not part of the diagnostic). The path is
-    # the file's own, as given on the command line.
-    source = ("def main():\n"
-              "    _ = unknown_identifier\n")
-    fd, path = tempfile.mkstemp(suffix='.mojo', dir=HERE)
-    with os.fdopen(fd, 'w') as f:
-        f.write(source)
-    try:
-        r = subprocess.run([sys.executable, os.path.join(HERE, "fire.py"),
-                            "run", path],
-                           capture_output=True, text=True, cwd=HERE)
-    finally:
-        os.unlink(path)
-    assert r.returncode == 1, r.stderr
-    assert r.stderr == (
-        f"{path}:2:9: error: use of unknown declaration 'unknown_identifier'\n"
-        "    _ = unknown_identifier\n"
-        "        ^~~~~~~~~~~~~~~~~~\n"), repr(r.stderr)
-    # --diagnostic-format json: the same record, sorted keys, 0-based columns,
-    # then the driver's closing record (as the modular stream has it).
-    fd, path = tempfile.mkstemp(suffix='.mojo', dir=HERE)
-    with os.fdopen(fd, 'w') as f:
-        f.write(source)
-    try:
-        r = subprocess.run([sys.executable, os.path.join(HERE, "fire.py"),
-                            "run", "--diagnostic-format", "json", path],
-                           capture_output=True, text=True, cwd=HERE)
-    finally:
-        os.unlink(path)
-    assert r.returncode == 1, r.stderr
-    assert r.stderr == (
-        '{"diagnostic":{"file":"%s","fixIts":[],"location":{"column":8,"line":2},'
-        '"ranges":[{"end":26,"start":8}],"text":"    _ = unknown_identifier"},'
-        '"kind":"error","message":"use of unknown declaration \'unknown_identifier\'"}\n'
-        '{"kind":"error","message":"failed to parse the provided Mojo source module"}\n'
-        % path), repr(r.stderr)
+    assert line_suffix_after(err, "name 'area' is not defined") == \
+        ". Did you mean: 'self.area'?"
 
 
 # --------------------------------------------------- ModuleNotFoundError

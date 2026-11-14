@@ -59,7 +59,7 @@ from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
     _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
-    _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
+    _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
@@ -2735,6 +2735,31 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         home[bare_name] = gimple_codegen._AMBIGUOUS_FUNC_HOME
 
 
+def _find_decl_location(gen, module: str, name: str):
+    """Best-effort `(path, line, col)` of `name`'s top-level declaration in
+    `module`'s source, for an ambiguity note. None when the module or the
+    declaration cannot be located."""
+    import os as _os
+    try:
+        _p = gen._submodule_source_path(module)
+    except Exception:
+        _p = None
+    if not _p:
+        return None
+    try:
+        with open(_p, 'r') as _f:
+            _lines = _f.readlines()
+    except Exception:
+        return None
+    import re as _re
+    _pat = _re.compile(r'^\s*(?:def|fn|struct|trait|enum|alias|comptime|var|let)\s+'
+                       + _re.escape(name) + r'\b')
+    for _i, _ln in enumerate(_lines, 1):
+        if _pat.match(_ln):
+            return (_p, _i, 1)
+    return None
+
+
 def _push_import_scope(gen) -> dict:
     """Push a fresh lexical-scope import-binding map onto
     _import_scope_stack (see its docstring) and return it — used at the
@@ -2778,53 +2803,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
     to a different module, the unbound reference is ambiguous and is
     refused rather than silently resolved to either one."""
     for stmt in node_list:
-        if isinstance(stmt, gimple_ctypes.ImportStmt):
-            # A plain `import M as A` binds a MODULE NAMESPACE in this
-            # lexical scope, not a symbol: record it exactly as
-            # `_gen_stmt_ImportStmt` will when the body is emitted (module
-            # alias set + a `{module, return_type: 'unknown'}` entry), and
-            # record the name -> qualifier binding in the scope frame the
-            # same way the `FromImportStmt` branch below does. Without the
-            # frame entry, a lifted closure (`_gen_lifted_closure_body`
-            # seeds its scope from `_func_import_frames`, and the
-            # whole-module pre-scan fills that BEFORE any body is emitted)
-            # cannot see an alias its enclosing function binds, so
-            # `A.member(...)` inside the closure lowers on an unknown
-            # name: a placeholder receiver plus a bare/stubbed callee
-            # instead of the qualified symbol. Without the alias-set entry
-            # the module-marker branches (`_lower_MemberExpr`,
-            # `_lower_IdentExpr`, the module-qualified call paths) never
-            # recognize it as a namespace at all.
-            #
-            # `__impmod__` marks the binding as a plain-import alias so the
-            # `FromImportStmt` ambiguity check below does not treat a later
-            # `from Y import A` (a legal Python shadow, not an ambiguous
-            # same-name import) as an error.
-            for _im_mod_raw, _im_alias_raw in gimple_ctypes._import_targets(stmt):
-                _im_mod = gimple_ctypes._as_str(_im_mod_raw)
-                _im_alias = gimple_ctypes._as_str(_im_alias_raw)
-                # `import a.b` (no alias) binds the top-level package name
-                # `a` — same rule as `_gen_stmt_ImportStmt`.
-                if _im_alias:
-                    _im_local = _im_alias
-                elif '.' in _im_mod:
-                    _im_local = _im_mod[:_im_mod.index('.')]
-                else:
-                    _im_local = _im_mod
-                if not _im_local:
-                    continue
-                _im_q = gen._resolve_import_module_qualifier(_im_mod)
-                if not _im_q:
-                    continue
-                scope[_im_local] = _im_q
-                scope['__mod__' + _im_local] = _im_mod
-                scope['__impmod__' + _im_local] = _im_mod
-                gen._module_alias_names.add(_im_local)
-                gen.imported_symbols[_im_local] = {
-                    'module': _im_mod,
-                    'return_type': 'unknown',
-                }
-        elif isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
+        if isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
             for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
                 nm = gimple_ctypes._fi_name(_fip3)
                 alias = gimple_ctypes._fi_alias(_fip3)
@@ -2852,8 +2831,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     continue
                 _local_nm = alias if alias else nm
                 _prev_q = scope.get(_local_nm)
-                if (_prev_q is not None and _prev_q != q
-                        and ('__impmod__' + _local_nm) not in scope):
+                if _prev_q is not None and _prev_q != q:
                     # The same name imported from two different modules into
                     # one function scope is ambiguous (modular's
                     # import_fn_scope_ambiguous.mojo). A re-import from the
@@ -2861,13 +2839,30 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     # pre-scan, so the diagnostic points at the SECOND import
                     # (the body pass runs after this map is already filled and
                     # would otherwise flag the first one).
-                    # The message and its notes come from the one shared
-                    # formatter (mojo/middle/import_ambiguity.py), the same one
-                    # the module-scope check uses.
-                    from mojo.middle.import_ambiguity import ambiguous_import_error
-                    raise RuntimeError(ambiguous_import_error(
-                        gen, _local_nm, scope.get('__mod__' + _local_nm), stmt.module,
-                        getattr(stmt, 'line', 0) or 0))
+                    _iln = getattr(stmt, 'line', 0) or 0
+                    _ilc = getattr(stmt, 'col', 0) or 0
+                    _ifn = getattr(gen, '_current_filename', '') or ''
+                    _iat = f'{_ifn}:{_iln}:{_ilc}: ' if _ifn else f'{_iln}:{_ilc}: '
+                    # Notes naming where each module declares the name, as
+                    # modular does (`note: 'X' declared here` / `also declared
+                    # here`). Best-effort: resolve each module to a source
+                    # file and find the declaration line.
+                    _prev_mod = scope.get('__mod__' + _local_nm)
+                    _decls = []
+                    for _mod in (_prev_mod, stmt.module):
+                        if not _mod:
+                            continue
+                        _d = _find_decl_location(gen, _mod, _local_nm)
+                        if _d:
+                            _decls.append(_d)
+                    _note_txt = ''
+                    if len(_decls) == 2:
+                        _note_txt = (f"\n{_decls[0][0]}:{_decls[0][1]}:{_decls[0][2]}: "
+                                     f"note: '{_local_nm}' declared here")
+                        _note_txt += (f"\n{_decls[1][0]}:{_decls[1][1]}:{_decls[1][2]}: "
+                                      f"note: '{_local_nm}' also declared here")
+                    raise RuntimeError(
+                        f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
                 scope[_local_nm] = q
                 scope['__mod__' + _local_nm] = stmt.module
                 _lex = getattr(gen, '_lexical_func_import_homes', None)

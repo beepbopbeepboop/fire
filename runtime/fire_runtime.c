@@ -17977,32 +17977,6 @@ int mojo_isinstance_type(int64_t w)
 {
     return mojo_is_classobj(w);
 }
-/* 1 when `w` names a class: a run-time class handle, or a static class's type
- * tag (the word `_lower_IdentExpr` lowers a class name to). The query behind
- * `issubclass(<word>, object)`, which is True for exactly those words. */
-int mojo_is_classword(int64_t w)
-{
-    return mojo_is_classobj(w) || _class_find(w) != 0;
-}
-/* `issubclass(a, b)` over the run-time class table. Both operands are class
- * words: a class handle from `mojo_type_new`, or a static class's type tag.
- * A word that is neither (an integer, a string, a container) is not a class
- * and answers 0 -- which is what the compiler's own guard
- * `isinstance(value, type) and issubclass(value, BaseException)` needs, since
- * that guard has already established the word is a class. `object` is the top
- * of every hierarchy and is answered by the lowering, not here. The
- * derivation walk is `_class_derives`, the same one `isinstance` uses. */
-int mojo_issubclass_rtclass(int64_t a, int64_t b)
-{
-    int64_t atag, btag;
-    if (mojo_is_classobj(a)) atag = ((MojoClassObj *)(intptr_t)a)->tag;
-    else if (_class_find(a)) atag = a;
-    else return 0;
-    if (mojo_is_classobj(b)) btag = ((MojoClassObj *)(intptr_t)b)->tag;
-    else if (_class_find(b)) btag = b;
-    else return 0;
-    return _class_derives(atag, btag, 0);
-}
 /* `type(x)` for a word that may be a run-time class or an instance of one: a class is an
  * instance of its metaclass (plain `type` when it has none), an instance's type is its class;
  * anything else is the struct tag `type(x)` has always been. */

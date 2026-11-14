@@ -1015,56 +1015,6 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 return _raw
     return None
 
-def _reexported_defining_qualifier(gen, module: str, name: str,
-                                   kind: str = 'fn') -> str:
-    """The C module qualifier of the module that DEFINES `name`, for a
-    `from <module> import <name>` binding whose named module does not
-    define it itself (a package `__init__.mojo` that only re-exports it:
-    `from .memory import unsafe_memset_zero`). `''` means "the named
-    module IS the defining module, or nothing reachable defines it" — the
-    caller keeps its own spelling of the named module in that case,
-    because which spelling is right depends on the pipeline (a dylib's
-    export table is path-derived, an inline compile is keyed by the import
-    string; see `_find_symbol_home_module`'s docstring).
-
-    The whole point is that the qualifier half of a mangled symbol must
-    name the module the DEFINITION was compiled under. Deriving it from
-    the path of the re-exporting `__init__` emitted
-    `std_memory___init___unsafe_memset_zero` (extern, `#ifndef` guard and
-    call) against a definition emitted as
-    `std_memory_memory_unsafe_memset_zero`: an undefined reference a
-    client only trips over when it reaches the call. The re-export walk
-    itself is `_find_symbol_home_module` (memoized, cycle-guarded,
-    generic); this helper is the path half both import-registration
-    passes need, so one binding cannot be spelled two ways by them.
-
-    The defining module's PATH is what `module_name_for_path` is applied
-    to, and the walker's absolutized spelling is what is opened: its
-    as-written answer for a relative hop (`.memory`) is relative to the
-    REEXPORTING package, so opening it against this importing file would
-    read a different module. An unresolvable home keeps the walker's own
-    canonical dot-stripped spelling, the same fallback
-    `_collect_body_import_bindings` uses.
-    """
-    home = _find_symbol_home_module(gen, module, name, kind)
-    if not home or home == module:
-        return ''
-    ref = (_find_symbol_home_module(gen, module, name, kind, want_abs=True)
-           or home)
-    try:
-        path = gen._submodule_source_path(ref)
-    except Exception:
-        path = None
-    if path:
-        try:
-            import module_loader as _mlmod
-            qual = _mlmod.module_name_for_path(path)
-        except Exception:
-            qual = None
-        if qual:
-            return qual
-    return home.lstrip('.').replace('.', '_').replace('-', '_')
-
 def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | None:
     """Record `alias -> member` in `gen._struct_import_aliases` when
     `alias = <module>.<member>` binds a CLASS under a new bare name — the

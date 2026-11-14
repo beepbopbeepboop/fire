@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Yield-from walk-memo invalidation: proof that `_cpp_yield_from`'s
+"""CODEGEN_walk_ast_memo_cpp_yield_from: proof that `_cpp_yield_from`'s
 in-place `call.func.member` rewrite drops the walk-memo entry for the
 ENCLOSING `call` node, at the write site.
 
-Background (the ADRP-from/`self.` walk-memo invalidation bug, fixed on
-2026-11-13 by 40985caba):
+Background (the bug doc, deleted with its fix):
 `_cpp_yield_from` rewrites `call.func.member = _self_method_name` on both
 the classname path and the `self.<method>()` path. The site must invalidate
-the walk memo for the node it rewrote; the fix was
-`_walk_ast_invalidate(call)` at each site. The census in
+the walk memo for the node it rewrote; the doc's next step was
+`_walk_ast_invalidate(call)` at each site, which branch
+work/bug-codegen-walk-ast-memo-cpp-yield-from landed. The census in
 test_gimple.py::test_every_ast_mutation_site_invalidates_the_walk_memo only
 checks that the function calls `_walk_ast_invalidate` somewhere, so it
 cannot distinguish this site's argument; this pin does.
@@ -53,69 +53,6 @@ class _StubGen:
         return "%s_%d" % (prefix, self._n)
 
 
-def _method_api(base, receiver):
-    """A compiled generator METHOD's api entry, in the shape
-    `module_gen.gen_module_impl` actually registers: the receiver is the
-    callee's LEADING SLOT.
-
-    `_gen_cpp_generator_unit` prepends `('self', '<Struct> *')` (or
-    `('cls', 'int64_t')` for a `@classmethod`) to the method's own
-    `param_ctypes`, and `_cpp_generator_param_names` starts `param_names`
-    with that receiver — its docstring states the rule: "A generator
-    method's receiver is its own leading slot ... and is NOT part of
-    `fn.params[1:]`". `_cpp_yield_from` fills that slot from
-    `api['receiver']` before binding the call's own arguments, so a
-    registration that claims a receiver but carries no slot makes EVERY
-    `yield from self.<gen>()` an over-arity call:
-
-        `_UnsupportedGeneratorShape: too many arguments (the callee takes 0)`
-
-    That is how this pin went stale in `51934e78b`, which replaced the
-    per-site positional arithmetic with the shared
-    `_cpp_generator_call_slot_pairs` (the old code appended the receiver
-    without an arity check). Both scenarios build their registration here
-    so the stub cannot drift from the real shape again."""
-    if receiver not in ('self', 'cls'):
-        raise ValueError("a method receiver is 'self' or 'cls', not %r"
-                         % (receiver,))
-    return {'base': base,
-            'params': ['int64_t' if receiver == 'cls' else 'S *'],
-            'param_names': [receiver],
-            'receiver': receiver,
-            'value_ctype': 'int64_t'}
-
-
-def _registration_shape_problems():
-    """Cross-check the stub's registration against the shape production
-    DERIVES, not against a second hand-written copy of it.
-
-    `_cpp_generator_param_names` is what `module_gen.gen_module_impl` calls
-    for every generator method it registers, so comparing with it is what
-    catches the regression this pin suffered: a stub that claims a receiver
-    (`params`/`param_names` disagreeing, or the receiver absent from the
-    leading slot) no longer describes any registration the compiler can
-    produce, and `_cpp_yield_from` then refuses the delegation before a
-    single assertion here runs."""
-    from mojo.backend_gimple import module_gen
-
-    fn = gimple_ctypes.FunctionDef(
-        name='_iter_member_by_def_', params=[('self', 'S')],
-        return_type=None, body=[])
-    want_names = module_gen._cpp_generator_param_names(fn, 'self')
-    api = _method_api('_S_iter', 'self')
-    problems = []
-    if api['param_names'] != want_names:
-        problems.append("stub param_names %r != what module_gen derives %r"
-                        % (api['param_names'], want_names))
-    if len(api['params']) != len(api['param_names']):
-        problems.append("stub has %d ctype slot(s) for %d name(s)"
-                        % (len(api['params']), len(api['param_names'])))
-    if not api['param_names'] or api['param_names'][0] != api['receiver']:
-        problems.append("the receiver %r is not the leading name slot"
-                        % (api['receiver'],))
-    return problems
-
-
 def _drive(gen, call):
     """Run `_cpp_yield_from` over `yield from <call>`, recording every node
     handed to `_walk_ast_invalidate`."""
@@ -138,17 +75,6 @@ def _drive(gen, call):
 def main():
     fails = []
 
-    # The stub is the harness, not the subject: check it first, because a
-    # bad registration makes `_cpp_yield_from` refuse before any of the
-    # assertions below are reachable (a version of this pin whose stub
-    # claimed `receiver: 'self'` with `params: []` died in the binder, not
-    # in one of its own assertions).
-    shape = _registration_shape_problems()
-    if shape:
-        for p in shape:
-            print("FAIL  test_codegen_yield_from_walk_ast_memo: " + p)
-        sys.exit(1)
-
     # Scenario 1 — the `self._iter_member_(...)` alias rewrite: the stored
     # member changes value, so a stale memo entry would be a wrong answer.
     call = gimple_ctypes.CallExpr(
@@ -158,7 +84,8 @@ def main():
     ET._walk_ast(call)          # prime the memo for call AND call.func
     ET._walk_ast(call.func)
     gen = _StubGen({('S', '_iter_member_by_def_'):
-                    _method_api('_S_iter', 'self')})
+                    {'base': '_S_iter', 'params': [], 'receiver': 'self',
+                     'value_ctype': 'int64_t'}})
     out, recorded = _drive(gen, call)
     if call.func.member != '_iter_member_by_def_':
         fails.append("self._iter_member_ alias rewrite did not fire "
@@ -178,14 +105,15 @@ def main():
         fails.append("_cpp_yield_from did not return emitted C++ lines")
 
     # Scenario 2 — the classname path (`yield from S.plan(...)`): same write
-    # shape, second site the fix names.
+    # shape, second site the doc's next step names.
     call2 = gimple_ctypes.CallExpr(
         func=gimple_ctypes.MemberExpr(
             obj=gimple_ctypes.IdentExpr('S'), member='plan'))
     ET._walk_ast_reset()
     ET._walk_ast(call2)
     gen2 = _StubGen({('S', 'plan'):
-                     _method_api('_S_plan', 'self')})
+                     {'base': '_S_plan', 'params': [], 'receiver': 'self',
+                      'value_ctype': 'int64_t'}})
     out2, recorded2 = _drive(gen2, call2)
     if not any(n is call2 for n in recorded2):
         fails.append("classname path: enclosing CallExpr was never "

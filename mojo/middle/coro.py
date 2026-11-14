@@ -2193,20 +2193,8 @@ def _compute_pointer_evidence(stmts: list) -> None:
                             changed = True
     # Carried on the node as well: the table is per lower() call, and an imported
     # module's functions are inferred after the importing module's lower() has run.
-    # `_ptr_evidence` is the DURABLE copy of this pass's own answer: a nested
-    # module compile (the importing module's own `_compile_imported_module`
-    # recursion) calls `lower()` too, and its `_compute_pointer_evidence`
-    # clears/refills these bare-name tables -- so a reader that runs AFTER
-    # that recursion (the cpp C++20-coroutine path typing a generator
-    # parameter, `cpp_async._gen_cpp_generator_unit`) saw the LAST module's
-    # evidence, not this one's. Real: `c_common/tables.py` imported by a
-    # consumer, `read_table`'s `infile` was typed `char *` (from string call
-    # sites) instead of the word `isinstance(infile, str)` needs, and the
-    # imported module's generated .cpp failed to compile (the failure
-    # surfaced only as undefined `_mojogen_*` symbols at link).
     for nm, fd in fds.items():
         fd._ptr_forwarded = frozenset(_PTR_FORWARDED.get(nm, ()))
-        fd._ptr_evidence = frozenset(_PTR_EVIDENCE.get(nm, ()))
 
 
 def _index_generator_defs(stmts: list) -> None:
@@ -8640,17 +8628,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
             ct = 'double'          # unannotated param, kind from call sites
         _real_ct.append(ct)
     c_params = _lead + _real_ct
-    # Source parameter names, one per `c_params` slot in the same order (a
-    # kind-method receiver placeholder first, then the real parameters). Read
-    # by `cpp_core._cpp_generator_call_slot_pairs` to bind a delegated call's
-    # keyword arguments to their slots BY NAME — appending them positionally
-    # mis-slots `f(n - step, bump=bump, step=step)` as soon as the keywords
-    # are not written in declaration order.
-    _lead_pnames = []
-    if _lead:
-        _lead_pnames.append(_cm_as_str(fn.params[0][0]))
-    for _pmn, _pma in real_params:
-        _lead_pnames.append(_cm_as_str(_pmn))
     meta.append({
         'name': _cm_as_str(fn.name),
         'struct': struct_name,
@@ -8661,7 +8638,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'base': base,
         'body_name': body_name,
         'params': c_params,
-        'param_names': _lead_pnames,
         'star_slot': _star_slot(real_params, len(_lead)),
         'kwargs_slot': _kwargs_slot(real_params, len(_lead)),
         'nargs': len(real_params),
@@ -9089,11 +9065,6 @@ def register(gen, meta: list) -> None:
         api = {
             'base': m['base'],
             'value_ctype': m['value_ctype'],
-            # Source parameter names, one per `params` slot (see
-            # `_lower_one`'s meta key). Consumed by the cpp coroutine body
-            # emitter's shared argument-to-slot binder so a delegated call's
-            # keywords land in their own slots.
-            'param_names': m.get('param_names') or [],
             # a TAGGED-word generator: the consumer binds the value as a boxed
             # word (`gen._boxed_vals`, rendered by `mojo_repr_boxed`)
             'mixed_slots': m.get('value_kind') == 'w',

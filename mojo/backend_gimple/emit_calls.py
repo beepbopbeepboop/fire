@@ -1854,19 +1854,6 @@ def _dtype_cast_ctype(e):
 def _comptime_conforms_to_pred(gen):
     try:
         import mojo.middle.comptime as _comptime_eval
-        bases = _comptime_conformance_map(gen)
-        if bases is None:
-            return None
-        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
-    except Exception:
-        return None
-
-
-def _comptime_conformance_map(gen):
-    """The declared `{decl: [base, ...]}` map this generator knows, merged from
-    the struct bases, trait bases, the instantiation's extra bases and the
-    trait declarations read from the source text. None when it knows none."""
-    try:
         sb = getattr(gen, '_struct_bases', None) or {}
         tb = getattr(gen, '_trait_bases', None) or {}
         ex = getattr(gen, '_conformance_bases_extra', None) or {}
@@ -1909,7 +1896,7 @@ def _comptime_conformance_map(gen):
         for k, v in (tbt or {}).items():
             if v or k not in bases:
                 bases[k] = v
-        return bases
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
     except Exception:
         return None
 
@@ -2105,32 +2092,6 @@ _PROGRESSING_BRACKET_OPS = frozenset(
     ('+', '-', '*', '/', '//', '%', '**', '<<', '>>', '&', '|', '^'))
 
 
-def _is_simple_progression_operand(e) -> bool:
-    """Whether `e` is the kind of operand a stepping recursion index is built
-    from: a name/literal and arithmetic over them. A CallExpr, SubscriptExpr,
-    attribute/type-expression access, or any other non-stepping shape inside
-    an arithmetic bracket argument means the value is a fixed comptime
-    computation (e.g. `2 * Int(Self.length)`), not an index that advances
-    across recursive instantiations (`i + 1`)."""
-    if isinstance(e, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
-                      gimple_ctypes.BoolLiteral, gimple_ctypes.IdentExpr,
-                      gimple_ctypes.DottedLiteral)):
-        return True
-    if isinstance(e, gimple_ctypes.BinaryOp):
-        if _as_str(e.op) not in _PROGRESSING_BRACKET_OPS:
-            return False
-        return (_is_simple_progression_operand(e.left)
-                and _is_simple_progression_operand(e.right))
-    if isinstance(e, gimple_ctypes.UnaryOp):
-        if _as_str(e.op) not in ('-', '+', '~'):
-            return False
-        if isinstance(e.operand, (gimple_ctypes.IntLiteral,
-                                  gimple_ctypes.FloatLiteral)):
-            return True  # a negative literal
-        return _is_simple_progression_operand(e.operand)
-    return False
-
-
 def _progressing_bracket_arg(e) -> bool:
     """Whether one bracket argument at an elaborated call site is the
     progressing RECURSION shape the refusal below exists to catch (`i + 1`),
@@ -2152,18 +2113,14 @@ def _progressing_bracket_arg(e) -> bool:
     if isinstance(e, gimple_ctypes.BinaryOp):
         if _as_str(e.op) not in _PROGRESSING_BRACKET_OPS:
             return False
-        if _spells_a_string(e):
-            return False
-        return _is_simple_progression_operand(e)
+        return not _spells_a_string(e)
     if isinstance(e, gimple_ctypes.UnaryOp):
         if _as_str(e.op) not in ('-', '+', '~'):
             return False
         if isinstance(e.operand, (gimple_ctypes.IntLiteral,
                                   gimple_ctypes.FloatLiteral)):
             return False  # a negative literal, not arithmetic over a parameter
-        if _spells_a_string(e):
-            return False
-        return _is_simple_progression_operand(e)
+        return not _spells_a_string(e)
     return False
 
 
@@ -2683,30 +2640,36 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                             # Only check when we can identify a concrete struct context.
                             # Accept if undecidable/generic-like.
                             if is_known_struct or (_src_t_res and _src_t_res[:1].isupper()):
-                                # Closed-world decision over the declared bases
-                                # (module declarations, then stdlib trait
-                                # declarations). ok None = undecidable: accept.
-                                modname = (getattr(gen, '_diag_module_name', None)
-                                           or getattr(gen, '_module_name', None) or '')
-                                if not modname:
-                                    fnm = getattr(gen, '_current_filename', '') or 't.mojo'
-                                    modname = os.path.splitext(os.path.basename(fnm))[0]
-                                ok, trait_qual = None, None
-                                if _trait_t:
+                                pred = _comptime_conforms_to_pred(gen)
+                                ok = None
+                                if pred is not None and _trait_t:
+                                    try:
+                                        ok = pred(_src_t_res, _trait_t)
+                                    except Exception:
+                                        ok = None
+                                else:
+                                    # try direct
                                     try:
                                         import mojo.middle.comptime as _ce
-                                        ok, trait_qual = _ce.conforms_to_closed(
-                                            _src_t_res, _trait_t,
-                                            _comptime_conformance_map(gen) or {}, modname)
+                                        sb2 = getattr(gen, '_struct_bases', None) or {}
+                                        tb2 = getattr(gen, '_trait_bases', None) or {}
+                                        ex2 = getattr(gen, '_conformance_bases_extra', None) or {}
+                                        bases = dict(ex2); bases.update(sb2); bases.update(tb2)
+                                        ok = _ce.conforms_to(_src_t_res, _trait_t, bases)
                                     except Exception:
-                                        ok, trait_qual = None, None
+                                        ok = None
+                                # ok False => missing witness; ok True/None => accept (None = undecidable)
                                 if ok is False:
+                                    modname = getattr(gen, '_module_name', None) or ''
+                                    if not modname:
+                                        fnm = getattr(gen, '_current_filename', '') or 't.mojo'
+                                        modname = os.path.splitext(os.path.basename(fnm))[0]
                                     struct_q = f"{modname}::{_src_t_res}" if modname else _src_t_res
-                                    trait_q = trait_qual or _trait_t or 'Trait'
-                                    # No location: `node.line` is a line of the
-                                    # instantiated copy, not of the user's file.
+                                    trait_q = _trait_t or 'Trait'
+                                    line = getattr(node, 'line', None)
+                                    loc = f" (line {line})" if line else ''
                                     raise RuntimeError(
-                                        "error: function instantiation failed\n"
+                                        f"function instantiation failed{loc}\n"
                                         f"note: struct '{struct_q}' does not have witness table for trait '{trait_q}'"
                                     )
             # Lower as identity: return the (single) argument.
@@ -4512,7 +4475,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         res = gen._new_val('double', f'floor({dv})')
         return 'int64_t', gen._cast('int64_t', f"{res}")
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
-    if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
     # `_locally_binds_name` gate: a module can define its OWN top-level
     # `any`/`all` (e.g. tokenize.py's `def any(*choices): return
     # group(*choices) + '*'`, called with exactly 1 arg at
@@ -6054,204 +6016,6 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
     else:
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
-    return '_Bool', t
-
-
-def _issubclass_class_name(gen, node) -> str:
-    """The class NAME `node` syntactically names, or '' when it is a value.
-
-    * a class declared in the source this gen has collected (`Base`, an
-      import alias, a module-qualified `m.Derived`) -> its bare name;
-    * `object` -> 'object': the top of every hierarchy, which is not in
-      `_struct_bases` because it is never declared;
-    * a variable/parameter/literal/expression -> '' (a word whose class-ness,
-      if any, only the runtime can decide).
-
-    A name the module binds as a local/global shadows a class of the same
-    name, exactly as `_class_struct_of_arg` decides it for the other
-    class-valued builtins.
-    """
-    tn = _isinstance_type_name(node)
-    if tn is None:
-        return ''
-    if tn == 'object':
-        return 'object'
-    if isinstance(node, gimple_ctypes.IdentExpr):
-        if tn in gen.var_types or tn in getattr(gen, '_global_var_types', ()):
-            return ''
-        # `from M import Class as Alias`: the alias's identity is the class's
-        # defining name (the same map emit_exprs' class-as-value arm uses).
-        tn = (getattr(gen, '_struct_import_aliases', None) or {}).get(tn, tn)
-        if tn in (getattr(gen, '_struct_bases', None) or {}):
-            return tn
-        return ''
-    # Module-qualified (`m.Derived`): the trailing name IS the class's name.
-    # An imported module's structs are in `_struct_bases` by the time a
-    # function body is lowered (the import is inlined first); should one be
-    # collected later, the bare name is still what the class tag is hashed
-    # from, and the runtime class table answers the hierarchy question.
-    return tn
-
-
-def _static_class_derives(gen, child: str, base: str) -> bool:
-    """`child` is `base` or derives from it, by walking the PARSED hierarchy
-    (`gen._struct_bases`, direct bases and bases of bases).
-
-    `object` is not in that map: it is the top of every hierarchy, and the
-    caller answers it before asking this. Cycle-safe, like the runtime's
-    depth-limited `_class_derives` this mirrors.
-    """
-    if child == base:
-        return True
-    bases_map = getattr(gen, '_struct_bases', None) or {}
-    seen: set = set()
-    stack = [child]
-    while stack:
-        cur = stack.pop()
-        for b in bases_map.get(cur, ()):
-            bn = _as_str(b)
-            if bn == base:
-                return True
-            if bn not in seen:
-                seen.add(bn)
-                stack.append(bn)
-    return False
-
-
-# Values whose AST shape alone proves they are not a class: a literal of any
-# scalar kind, or a container literal. (A tuple is excluded here because a
-# tuple of classes is a legal second argument and is handled separately.)
-_ISSUBCLASS_NONCLASS_LITERALS = (
-    IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
-    EllipsisLiteral, NoneLiteral, ListExpr, DictExpr, SetExpr,
-)
-
-
-def _issubclass_operand_text(node) -> str:
-    """Human-readable spelling of an operand for the refusal message."""
-    if isinstance(node, (IntLiteral, FloatLiteral, BoolLiteral)):
-        return _as_str(node.value)
-    if isinstance(node, StringLiteral):
-        return repr(_as_str(node.value))
-    if isinstance(node, NoneLiteral):
-        return 'None'
-    if isinstance(node, EllipsisLiteral):
-        return '...'
-    if isinstance(node, IdentExpr):
-        return _as_str(node.name)
-    return type(node).__name__
-
-
-def _issubclass_refuse(gen, node, why: str) -> None:
-    """Honest compile-time refusal, the convention `asyncio.sleep(...)` uses:
-    an operand that cannot name a class is never a weak stub / silent False."""
-    raise RuntimeError(
-        "cannot compile in-process: issubclass() argument "
-        f"{_issubclass_operand_text(node)!r} is not a class ({why})")
-
-
-def _issubclass_refuse_known_nonclass(gen, node, ctype: str) -> None:
-    """Refuse an operand whose STATIC C type proves it is not a class word.
-
-    A class word is `int64_t` (a static class lowers to its type tag;
-    `_lower_IdentExpr`'s class-as-value arm) or a run-time class handle, which
-    also travels as `int64_t`. A container or a struct/class INSTANCE cannot
-    be one. Scalars are deliberately NOT refused here: an unannotated
-    parameter that a module only ever passes into `issubclass` can be typed
-    `char *` (or a narrow scalar) by call-site unanimity while really holding
-    a class word, and the class table already answers 0 for a word that is not
-    a class. Literals are refused by their AST shape before lowering.
-    """
-    if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-        _issubclass_refuse(gen, node, f"statically typed {ctype}")
-    if ctype.endswith(' *') and ctype[:-2] in getattr(gen, 'struct_field_types', {}):
-        _issubclass_refuse(gen, node, f"an instance of {ctype[:-2]}")
-
-
-def _issubclass_word(gen, node, name: str) -> str:
-    """The `int64_t` class WORD for one `issubclass` operand.
-
-    A class-named operand is its type tag (`_struct_type_id`, the number every
-    allocation site stamps and the runtime class table files it under);
-    anything else is lowered as an ordinary expression and its static type is
-    checked first (see `_issubclass_refuse_known_nonclass`).
-    """
-    if name != '':
-        return gen._new_val('int64_t',
-                            f'{gimple_exprtypes._struct_type_id(name)}LL')
-    at, av = gen.lower_expr(node)
-    _issubclass_refuse_known_nonclass(gen, node, at)
-    return gen._to_int64(at, av)
-
-
-def _issubclass_one(gen, a, b) -> str:
-    """Emit `issubclass(a, b)` for ONE class `b`, return a `_Bool` value name.
-
-    Three arms, one per way the operands can be known:
-
-    * both operands are classes in this gen's parsed hierarchy -> the answer
-      is a constant, from `_static_class_derives`;
-    * otherwise a class-named operand becomes its type tag and any other a
-      word, and the runtime class table answers (`mojo_issubclass_rtclass`,
-      which reuses `_class_derives`, the same hierarchy walk `isinstance`
-      uses). That covers a class made at run time (`Foo = type(...)`) and a
-      word whose kind only the runtime knows (the compiler's own
-      `issubclass(value, BaseException)`);
-    * `object` is the top of every hierarchy, so it is answered statically
-      (or, for a runtime word, by `mojo_is_classword`, which is True exactly
-      for the words that name a class).
-    """
-    bases = getattr(gen, '_struct_bases', None) or {}
-    an = _issubclass_class_name(gen, a)
-    bn = _issubclass_class_name(gen, b)
-    if an == '' and isinstance(a, _ISSUBCLASS_NONCLASS_LITERALS):
-        _issubclass_refuse(gen, a, "a literal, not a class")
-    if bn == '' and isinstance(b, _ISSUBCLASS_NONCLASS_LITERALS):
-        _issubclass_refuse(gen, b, "a literal, not a class")
-    if bn == 'object':
-        if an != '':
-            return gen._new_val('_Bool', '1')
-        aw = _issubclass_word(gen, a, '')
-        r = gen._call_expr('int', 'mojo_is_classword', [('int64_t', aw)])
-        return gen._cast('_Bool', r)
-    if an != '' and bn != '' and an in bases and bn in bases:
-        ok = _static_class_derives(gen, an, bn)
-        return gen._new_val('_Bool', '1' if ok else '0')
-    if an == 'object':
-        # `object` derives only from itself, and `bn == 'object'` was handled
-        # above, so the answer is known without a table query even when the
-        # other operand is not in this gen's map.
-        return gen._new_val('_Bool', '0')
-    aw = _issubclass_word(gen, a, an)
-    bw = _issubclass_word(gen, b, bn)
-    r = gen._call_expr('int', 'mojo_issubclass_rtclass',
-                       [('int64_t', aw), ('int64_t', bw)])
-    return gen._cast('_Bool', r)
-
-
-def _lower_builtin_issubclass(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`issubclass(a, b)` — see `_issubclass_one` for the arms.
-
-    A second operand that is a TUPLE of classes ORs one check per alternative
-    (`isinstance`'s own tuple arm is the model); an empty tuple is False, as in
-    CPython. `_Bool`, like isinstance/any/all, so a printed result says
-    True/False.
-    """
-    t = gen._new_temp('_Bool')
-    type_arg = node.args[1]
-    if isinstance(type_arg, gimple_ctypes.TupleExpr):
-        acc = None
-        for alt in type_arg.elements:
-            one = _as_str(_issubclass_one(gen, node.args[0], alt))
-            # `|` not `||`: GIMPLE rejects a raw `||` token in an assignment
-            # RHS; bitwise OR on two 0/1 _Bool values is equivalent.
-            acc = one if acc is None else gen._new_val('_Bool', _as_str(acc) + ' | ' + one)
-        if acc is None:
-            acc = gen._new_val('_Bool', '0')
-        gen._cast_into(t, '_Bool', _as_str(acc))
-    else:
-        cmp_t = _issubclass_one(gen, node.args[0], type_arg)
-        gen._cast_into(t, '_Bool', _as_str(cmp_t))
     return '_Bool', t
 
 

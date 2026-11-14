@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Regression: render a synthetic signature from a precompiled record.
 
-The imported-struct diagnostic prints a precompiled mojoc signature record as
-Mojo source text.  The tricky case is an implicit conversion default
-(`W: Wrapper = __init__(Int(4))`) whose `Wrapper.__init__` was never
-materialized into the artifact: the default must be printed as written and
-must not raise (MOCO-4270).
+DIAGNOSTICS_mojoc_imports-part2-part2: the imported-struct diagnostic prints
+the part-1 signature record as Mojo source text.  The tricky case is an
+implicit conversion default (`W: Wrapper = __init__(Int(4))`) whose
+`Wrapper.__init__` was never materialized into the artifact: the default must
+be printed as written and must not raise (MOCO-4270).
 
 Pure record-in/text-out; no compilation, no fixture package.
 """
@@ -36,7 +36,7 @@ def main():
     }
     got = render_signature(container)
     want = (
-        "struct Container[T: Marked, W: Wrapper = __init__(Int(4))]    "
+        "struct Container[T: Marked, W: Wrapper = __init__(Int(4))]  "
         "# note - synthetic signature"
     )
     assert got == want, f"rendered:\n{got!r}\nexpected:\n{want!r}"
@@ -49,7 +49,7 @@ def main():
         "runtime_params": [],
     }
     got = render_signature(literal)
-    want = "struct Bounded[N: Int = 4]    # note - synthetic signature"
+    want = "struct Bounded[N: Int = 4]  # note - synthetic signature"
     assert got == want, f"rendered:\n{got!r}\nexpected:\n{want!r}"
 
     # Bracket params precede runtime params, and a function record renders too.
@@ -63,7 +63,7 @@ def main():
         ],
     }
     got = render_signature(fn)
-    want = "def run[T: AnyType](x: Int = 4, y: Bool)    # note - synthetic signature"
+    want = "fn run[T: AnyType](x: Int = 4, y: Bool)  # note - synthetic signature"
     assert got == want, f"rendered:\n{got!r}\nexpected:\n{want!r}"
 
     # A record that came from source carries no synthetic marker.

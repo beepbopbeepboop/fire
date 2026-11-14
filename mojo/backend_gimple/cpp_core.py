@@ -2116,161 +2116,49 @@ def _cpp_resolve_generator_call_api(gen, func):
     return None
 
 
-def _cpp_generator_call_slot_pairs(gen, call, api, sub_params, defaults, *,
-                                   leading=(), tail=(), pad_upto=None,
-                                   label=''):
-    """Bind one compiled-generator call's arguments to the callee's parameter
-    SLOTS, returning `[(expression, source_ctype_or_None), ...]` in slot order.
-
-    This is the ONE argument-to-slot binder shared by every compiled-generator
-    delegation the coroutine body emitter emits (`<base>_start(...)` in
-    `_cpp_emit_generator_start_expr`, `yield from <gen>(...)` in
-    `_cpp_yield_from`, and `for ... in <gen>(...)` in
-    `_cpp_for_generator_delegate`). Before it existed each of those had its own
-    copy of the positional/defaults arithmetic and none of them bound a
-    keyword argument to its own slot:
-
-      - `yield from read_table(infile, header, sep=sep, fix=fix, _open=_open,
-        _get_reader=_get_reader)` counted only the two positional args and
-        refused on arity ("expected 6 argument(s), got 2"), taking the whole
-        c_common/tables.py module down with it;
-      - `yield from iter_many(items, onempty=None)` / `iter_files(root,
-        suffix, relparent, get_files=..., _glob=..., _walk=...)` refused the
-        same way, and when the missing slot HAPPENED to have a default the
-        keyword's value was silently replaced by that default (a wrong answer,
-        not a refusal);
-      - `_cpp_emit_generator_start_expr` and `_cpp_for_generator_delegate`
-        appended keywords positionally, which is only correct when every
-        keyword is written in declaration order AND occupies the trailing
-        slots — `f(n - step, bump=bump, step=step)` bound `bump` to `step`.
-
-    Hence: keyword arguments bind by parameter NAME, from the callee's own api
-    entry (`param_names`, recorded from the `(name, ctype)` pairs every
-    registration site already has). When the api does not know the names (a
-    `*args`-shaped signature whose ctype slots do not correspond 1:1 to
-    names) the historical positional-last convention is kept rather than
-    refusing a call that used to compile.
-
-    `leading`/`tail` are pre-bound `(expression, ctype)` pairs for slots that
-    are not source arguments: a method receiver (`self`/`cls`) takes its slot
-    first, and a nested generator's enclosing-scope captures fill the slots
-    after the user arguments. `pad_upto` is how many slots (`n` by default)
-    may be filled from `defaults`; the nested-generator case passes its user
-    argument count so captures are never default-padded. `label` is the
-    caller's own message prefix (`"`yield from f(...)`"`, ...)."""
-    n = len(sub_params)
-    if pad_upto is None:
-        pad_upto = n
-    names = []
-    for _pn in (api.get('param_names') or []):
-        names.append(_as_str(_pn))
-    if len(names) != n:
-        # No 1:1 name list (unknown callee, or a `*args`/`**kwargs` shape
-        # whose ctype slots do not map one-to-one): keywords fall back to the
-        # positional-last convention below.
-        names = []
-    slots: list = [None] * n
-    supplied = 0
-    pos = 0
-    for _pfx, _pct in leading:
-        if pos >= n:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{label}: too many arguments (the callee takes {n})")
-        slots[pos] = (_pfx, _pct)
-        supplied += 1
-        pos += 1
-    for _aa in call.args:
-        if pos >= n:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{label}: expected {n} argument(s), got more")
-        slots[pos] = (_cpp_call_arg_expr(gen, _aa),
-                      _cpp_receiver_ctype(gen, _aa)
-                      or _cpp_expr_static_ctype(gen, _aa))
-        supplied += 1
-        pos += 1
-    _kw_pairs = list(getattr(call, 'kwargs', None) or [])
-    for _kn, _kv in _kw_pairs:
-        _kname = _as_str(_kn)
-        _kidx = -1
-        for _ki in range(len(names)):
-            if names[_ki] == _kname:
-                _kidx = _ki
-                break
-        if names and _kidx < 0:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{label}: keyword argument '{_kname}' is not a parameter "
-                f"of the callee")
-        if _kidx < 0:
-            # No name list: the historical positional-last convention.
-            if pos >= n:
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"{label}: expected {n} argument(s), got more")
-            _kidx = pos
-        if slots[_kidx] is not None:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{label}: argument for parameter "
-                f"'{names[_kidx] if _kidx < len(names) else _kidx}' is "
-                "given more than once")
-        slots[_kidx] = (_cpp_call_arg_expr(gen, _kv),
-                        _cpp_receiver_ctype(gen, _kv)
-                        or _cpp_expr_static_ctype(gen, _kv))
-        supplied += 1
-        if _kidx == pos:
-            pos += 1
-    for _tfx, _tct in tail:
-        while pos < n and slots[pos] is not None:
-            pos += 1
-        if pos >= n:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{label}: expected {n} argument(s), got more")
-        slots[pos] = (_tfx, _tct)
-        supplied += 1
-        pos += 1
-    for _si in range(pad_upto):
-        if slots[_si] is not None:
-            continue
-        _dv = gimple_exprtypes._trailing_default_at(defaults, pad_upto, _si)
-        if _dv is None:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{label}: expected {n} argument(s), got {supplied} "
-                f"(no default at slot {_si})")
-        slots[_si] = (gen._default_expr_to_pair(_dv, cxx=True)[1], None)
-    for _si in range(n):
-        if slots[_si] is None:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{label}: expected {n} argument(s), got {supplied} "
-                f"(no default at slot {_si})")
-    return slots
-
-
 def _cpp_emit_generator_start_expr(gen, call, api):
     """Emit the `{base}_start(...)` construction expression for a call to a
     resolved compiled generator inside a coroutine body, registering the
     four-symbol extern "C" API for preamble declaration (_cpp_xmod_generator_refs).
-    Argument-to-slot binding (keywords BY NAME, defaults padded) is the shared
-    `_cpp_generator_call_slot_pairs`, so this path and `yield from`/`for ... in`
-    delegation cannot disagree; pointer-typed parameters additionally get an
-    explicit cast to their declared ctype, because the extern "C" signature
-    takes real pointers and a boxed-int64_t caller expression must not rely on
-    implicit conversion (invalid C++)."""
+    Argument handling mirrors _cpp_yield_from's delegation call EXACTLY (same
+    defaults-aware trailing padding via _trailing_default_at/_default_expr_to_pair,
+    same kwargs-appended-positionally simplification); pointer-typed parameters
+    additionally get an explicit cast to their declared ctype, because the
+    extern "C" signature takes real pointers and a boxed-int64_t caller
+    expression must not rely on implicit conversion (invalid C++)."""
     sub_params: list = api.get('params') or []
     _dflts = (api.get('defaults')
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
-    for _aa in list(call.args) + [_kv for _kn, _kv in (call.kwargs or [])]:
+    arg_exprs = []
+    arg_ctypes = []
+    for _aa in call.args:
         if isinstance(_aa, (gimple_ctypes.TupleExpr,
                             gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a tuple/dict/set literal as a compiled-generator call "
                 "argument is not supported in a coroutine body")
-    _slots = _cpp_generator_call_slot_pairs(
-        gen, call, api, sub_params, _dflts,
-        label=f"call to compiled generator '{api['base']}'")
-    arg_exprs = []
-    arg_ctypes = []
-    for _sx, _sct in _slots:
-        arg_exprs.append(_sx)
-        arg_ctypes.append(_sct)
+        arg_exprs.append(_cpp_call_arg_expr(gen, _aa))
+        _act = (_cpp_receiver_ctype(gen, _aa)
+                or _cpp_expr_static_ctype(gen, _aa))
+        arg_ctypes.append(_act)
+    arg_exprs.extend(gen._cpp_expr(_kv) for _kn, _kv in (call.kwargs or []))
+    arg_ctypes.extend((_cpp_receiver_ctype(gen, _kv)
+                       or _cpp_expr_static_ctype(gen, _kv))
+                      for _kn, _kv in (call.kwargs or []))
+    while len(arg_exprs) < len(sub_params):
+        _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
+        if _dv is None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"call to compiled generator '{api['base']}': expected "
+                f"{len(sub_params)} argument(s), got {len(arg_exprs)} "
+                f"(no default at slot {len(arg_exprs)})")
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
+        arg_ctypes.append(None)
+    if len(arg_exprs) > len(sub_params):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"call to compiled generator '{api['base']}': expected "
+            f"{len(sub_params)} argument(s), got {len(arg_exprs)}")
     cargs = []
     for _i, _ae in enumerate(arg_exprs):
         _pt = sub_params[_i]
@@ -9132,13 +9020,11 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     out-of-scope shape in this emitter, so an unsupported instance
     falls back to interpreting the whole module from source instead of
     miscompiling."""
-    # Keyword arguments are bound to their parameter SLOTS by name in the
-    # shared `_cpp_generator_call_slot_pairs` call far below, together with
-    # the positional arguments and the defaults-aware padding. They used to
-    # be flattened into `call.args` here — mutating the AST node in place
-    # (so a later retry pass re-emitted the same call with duplicated
-    # arguments) and correct only when every keyword happened to be written
-    # in declaration order in the trailing slots.
+    if len(call.kwargs or []) > 0:
+        for kname, kexpr in call.kwargs:
+            call.args.append(kexpr)
+        call.kwargs = []
+        _walk_ast_invalidate(call)
     # Set True only by the free-function self-recursion branch below —
     # read further down (the non-tuple value-consumption branch) to
     # decide between an explicit `vct` declaration and `auto` type
@@ -9177,7 +9063,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                             and (_self_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
                         _mname = _cand
                         call.func.member = _cand
-                        _walk_ast_invalidate(call.func)
                         break
             sub_name = f"{_self_struct}.{_mname}"
             api = gen._generator_method_api.get((_self_struct, _mname))
@@ -9257,8 +9142,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             # target here honestly, rather than guessing.
             api = {'base': gen._cpp_gen_self_base,
                    'params': gen._cpp_gen_self_params,
-                   'param_names': gen._cpp_gen_self_param_names,
-                   'defaults': gen._cpp_gen_self_defaults,
                    'value_ctype': None, 'tuple_slot_ctypes': None}
             # Tell _gen_cpp_generator_unit (after this body-emission
             # pass completes) that `{base}_start`/`_resume`/`_value`/
@@ -9309,35 +9192,42 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # For a nested generator, capture values are appended after the user
     # positional arguments (assembled below) to form its full _start args.
     sub_params = api.get('params') or []
-    # Argument-to-slot binding (keywords BY NAME, then defaults-aware padding)
-    # is the shared `_cpp_generator_call_slot_pairs` — the same binder the
-    # `<base>_start(...)` construction and `yield from <gen>(...)` paths use.
-    # Padded defaults go through `_default_expr_to_pair` (literals/True/False/
-    # None only; everything else is a typed zero by that helper's own
-    # documented convention) so no default expression can ever emit an
-    # undeclared identifier into the coroutine body.
+    # Pad omitted trailing arguments from the callee's registered param
+    # defaults (same convention the direct `<base>_start(...)` construction
+    # paths already apply — see gimple_gen_calls._emit_generator_start_call):
+    # `for x in prod(n):` against `def prod(n, step=10)` must consume
+    # step=10, not hard-refuse on arity. Padded defaults go through
+    # `_default_expr_to_pair` (literals/True/False/None only; everything
+    # else is a typed zero by that helper's own documented convention) so
+    # no default expression can ever emit an undeclared identifier into
+    # the coroutine body. Generator params are scalar-only (enforced at
+    # registration), so each padded text is trivially convertible to its
+    # slot's C++ type. A slot with NO default — or surplus arguments —
+    # still refuses honestly below, unchanged.
     _dflts = (api.get('defaults')
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
-    _leading = []
-    for _rex in receiver_exprs:
-        _leading.append((_rex, None))
-    # A nested generator's captures fill the slots AFTER its user positional
+    arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
+    # A nested generator's captures are appended AFTER its user positional
     # arguments (never default-padded); emit_calls._emit_nested_generator_start_call
     # assembles the same [user args] + [captures] sequence.
-    _tail = []
-    if _nested_capture_arg_exprs is not None:
-        for _cex in _nested_capture_arg_exprs:
-            _tail.append((_cex, None))
-    _expected = (len(sub_params) - len(_tail)
+    _expected = (len(sub_params) - len(_nested_capture_arg_exprs)
                  if _nested_capture_arg_exprs is not None else len(sub_params))
-    _slots = _cpp_generator_call_slot_pairs(
-        gen, call, api, sub_params, _dflts,
-        leading=_leading, tail=_tail, pad_upto=_expected,
-        label=f"`for ... in {sub_name}(...)`")
-    arg_exprs = []
-    for _sx, _sct in _slots:
-        arg_exprs.append(_sx)
+    while len(arg_exprs) < _expected:
+        _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
+        if _dv is None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"`for ... in {sub_name}(...)`: expected "
+                f"{_expected - len(receiver_exprs)} argument(s), "
+                f"got {len(call.args)}")
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
+    if _nested_capture_arg_exprs is not None:
+        arg_exprs.extend(_nested_capture_arg_exprs)
+    if len(arg_exprs) > len(sub_params):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"`for ... in {sub_name}(...)`: expected "
+            f"{_expected - len(receiver_exprs)} argument(s), "
+            f"got {len(call.args)}")
     base = api['base']
     # Register this callee into the module-level extern-decl map, so the
     # emitted `.ci` declares `extern "C" ... __mgco__<base>_start(...)`.
@@ -12408,9 +12298,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             # the locally-tracked self-context — no premature/partial
             # registration into the real (still-being-built) dict needed.
             api = {'base': gen._cpp_gen_self_base,
-                   'params': gen._cpp_gen_self_params,
-                   'param_names': gen._cpp_gen_self_param_names,
-                   'defaults': gen._cpp_gen_self_defaults}
+                   'params': gen._cpp_gen_self_params}
             # Tell _gen_cpp_generator_unit (after this body-emission pass
             # completes) that `{base}_start`/`{_resume}`/`{_value}`/`{_destroy}`
             # need forward declarations ahead of `{impl}`'s own definition
@@ -12449,41 +12337,31 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                         "the delegated-to generator must be defined earlier)")
 
     sub_params: list = api.get('params') or []
-    # Argument-to-slot binding (keywords BY NAME, defaults-aware trailing
-    # padding, surplus/duplicate arguments refused) is the shared
-    # `_cpp_generator_call_slot_pairs`; it is the same binder the
-    # `<base>_start(...)` construction and `for ... in <gen>(...)` paths use,
-    # so a bare `yield from prod(n)` against `def prod(n, step=10)` delegates
-    # with step=10, `yield from read_table(...)` passes its keyword-only args
-    # instead of refusing on a positional count, and no path can silently
-    # replace a passed keyword with the parameter's default. (This loop used
-    # to compute a default and then never append it, i.e. hang, and to drop
-    # `call.kwargs` entirely.)
+    # Same defaults-aware trailing-argument padding as
+    # _cpp_for_generator_delegate's consumption loop just above (shared
+    # helper + `_default_expr_to_pair` literal-text convention): a bare
+    # `yield from prod(n)` against `def prod(n, step=10)` must delegate
+    # with step=10, not refuse on arity. A slot with no default — or
+    # surplus arguments — still refuses honestly below, unchanged.
     _dflts = (api.get('defaults')
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
-    _leading = []
-    for _rex in receiver_exprs:
-        _leading.append((_rex, None))
-    _tail = []
-    _pad_upto = len(sub_params)
+    arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
     if _nested_api is not None:
         # A claimed nested generator's _start signature is
         # (user args..., captured enclosing names...) — the same assembly
         # emit_calls._nested_generator_start_arg_pairs performs for the
         # stack-switch construction path. Each capture is an ordinary
         # identifier in this enclosing generator's scope.
-        for _cn, _ in (_nested_api.get('captures') or []):
-            _tail.append((_cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn)),
-                          None))
-        _pad_upto = len(sub_params) - len(_tail)
-    _slots = _cpp_generator_call_slot_pairs(
-        gen, call, api, sub_params, _dflts,
-        leading=_leading, tail=_tail, pad_upto=_pad_upto,
-        label=f"`yield from {sub_name}(...)`")
-    arg_exprs = []
-    for _sx, _sct in _slots:
-        arg_exprs.append(_sx)    # A word-typed slot (`int64_t`) fed a pointer-typed local (a list, a string) is
+        arg_exprs += [_cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn))
+                      for _cn, _ in (_nested_api.get('captures') or [])]
+    while len(arg_exprs) < len(sub_params):
+        _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
+        if _dv is None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
+                f"argument(s), got {len(call.args)}")
+    # A word-typed slot (`int64_t`) fed a pointer-typed local (a list, a string) is
     # an implicit pointer->integer conversion g++ rejects.
     for _ai in range(len(arg_exprs)):
         if _ai < len(sub_params) and sub_params[_ai] == 'int64_t' and not re.fullmatch(

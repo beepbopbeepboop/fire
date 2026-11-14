@@ -1241,26 +1241,6 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             if _as_str(name) in getattr(gen, '_comptime_str_names', ()):
                 _w = gen._new_val('int64_t', str(_ct))
                 return 'char *', gen._cast('char *', _w)
-    # A MODULE NAMESPACE read as a value (`import M as A`; a bare `A`
-    # passed around, or — the case this exists for — the receiver of a
-    # lifted closure's `A.member(...)` before the callee path resolves it).
-    # A module is not a C value: `_gen_stmt_ImportStmt` materializes it as
-    # an `int64_t` marker local, and the module-marker branches of
-    # `_lower_MemberExpr`/the qualified-call paths read the NAME, not this
-    # placeholder word. A lifted closure has no such local (its enclosing
-    # function's scope frame carries the alias only as a name ->
-    # qualifier binding), so a read used to fall through to the generic
-    # "undeclared" placeholder below — the `(int64_t)0` with a
-    # `ct param or undeclared` comment that made `A.member(...)` a bare
-    # call. Answer the same marker instead, so the name reads as a
-    # namespace everywhere and nothing mistakes it for a value or a
-    # comptime parameter. Placed after every real binding above (captures,
-    # var_types, nested closures, comptime values) so an actual local of
-    # the same name still shadows the module alias, and it cannot suppress
-    # `_lower_MemberExpr`'s module-marker branches (they gate on
-    # `not in gen.var_types`, and this adds no var_types entry).
-    if name in gen._module_alias_names:
-        return 'int64_t', gen._new_val('int64_t', '0')
     # Unknown identifier (compile-time param, undeclared external, etc.).
     # Emit a placeholder so GCC doesn't see an undeclared reference.
     t = gen._new_temp('int64_t')

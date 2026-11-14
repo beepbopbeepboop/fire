@@ -288,7 +288,6 @@ _SELFHOST_EXTRA = [
     'cas.py',
     'determinism_trace.py',
     'jit/arm64.py',
-    'unknown_decl_check.py',  # compiler-provided builtins, reached from fire.py
     # The `formal` package's __init__, reached because
     # mojo/backend_gimple/emit_stmts.py does a function-local
     # `from formal import model as formal_model` (delayed inside the function

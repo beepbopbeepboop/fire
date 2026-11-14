@@ -47,10 +47,11 @@ python3 fire.py --dump-full mojo/middle/exprtypes.py 2>&1 | grep 'cannot coerce'
 Read each `dest=` binding: the emitter has decided the destination is a
 `MojoList *` while the value it is handed is a `MojoSet *` / `MojoDict *`.
 Either the destination's recorded kind is wrong (the same
-`_infer_param_types`-vs-USES mismatch as a parameter whose call sites disagree
-on container kind while its body rebinds it to one container kind) or the
-value's is. Start with `monomorphize.instantiate_build` (`_t22` -> `_t25`), the
-smallest of the three.
+`_infer_param_types`-vs-USES mismatch that
+`bugs/CODEGEN_param_container_kind_across_call_sites_refused.md` describes for
+a parameter) or the value's is. Start with
+`monomorphize.instantiate_build` (`_t22` -> `_t25`), the smallest of the
+three.
 
 ## Done when
 

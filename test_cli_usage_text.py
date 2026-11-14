@@ -226,8 +226,6 @@ _LEGACY_NAMES_OKAY = {
     'fire.py': 4,                                  # rename history, stage2/mojo, Real Mojo's own
     'test_cli_usage_text.py': 2,                   # this file's own "what it used to print"
     'test_selfhost_memory.py': 1,                  # the self-host binary's own dump flag
-    'myinterpreter.py': 1,                         # real-Mojo `build`'s diagnostic block, quoted as itself
-    'test_attr_error_messages.py': 2,              # real-Mojo `build`'s block pinned against the reference
     'mojo/backend_gimple/emit_resolve.py': 1,      # stage2/mojo
     'mojo/middle/infra_infer.py': 1,               # stage2/mojo
     'tools/suite.py': 1,                           # stage2/mojo

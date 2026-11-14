@@ -23,11 +23,11 @@ the compiled path has no representation for that yet
 ```
 
 Part 1's Escalation says a deep compiler defect gets its own doc rather than a
-shallow fix here, so the defect (a parameter passed mixed literal container/str/
-`None` kinds at different call sites and used as a container, refused at build
-time) was filed and has been fixed: the per-kind literal clone pass now
-recognizes `None` and container iteration in comprehensions/generators. Part 1
-is deleted with its acceptance met.
+shallow fix here, so the defect — evidence, fixture, CPython oracle, and the
+note that `_case`'s `expect_refusal_substring` is currently dead because
+`main()` never passes it — is filed as
+`bugs/CODEGEN_param_container_kind_across_call_sites_refused.md`. Part 1 is
+deleted with its acceptance met.
 
 ## Scope
 

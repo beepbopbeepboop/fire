@@ -6,7 +6,6 @@ SPLIT: SUITE_silentnoop-part1, SUITE_silentnoop-part2
 
 Not a timeout: the job runs 644 s against its registered `timeout=1500` and
 still fails. Part 1 (investigation) is closed — it found exactly two failing
-cases sharing one build-time refusal — the container-kind refusal for a
-parameter whose call sites disagree across literal kinds (fixed: the per-kind
-literal clone pass now recognizes `None` and container iteration in
-comprehensions). The fix is `bugs/SUITE_silentnoop-part2.md`.
+cases sharing one build-time refusal — and the defect is filed as
+`bugs/CODEGEN_param_container_kind_across_call_sites_refused.md`. The fix is
+`bugs/SUITE_silentnoop-part2.md`.
