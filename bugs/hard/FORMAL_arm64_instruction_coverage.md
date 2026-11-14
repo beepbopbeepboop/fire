@@ -93,5 +93,5 @@ against), and the generator's spelling is the model's spelling arm for arm.
 4. Re-run `TestRegister31` and `TestStepOkDerivesFromStepResult`; both
    classes green before the next formal sweep.
 
-Related: `bugs/mid/FORMAL_svc_exit_handling_incomplete.md` (the svc fix that
+Related: `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` (the svc fix that
 un-masked this; its remaining item is the dynamic `svc`, a different gap).
