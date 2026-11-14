@@ -4945,6 +4945,39 @@ def _step_rhs(w: int, idx: int):
         cond = (w >> 12) & 0xf
         return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                 f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
+    # 70-79: the scalar-double FP class.  `arm64_step` decodes all ten and
+    # `_WORK_STEP` already names a library lemma for each, so leaving them out
+    # here made `_step_result_plan` drop every one: the decoder claimed the
+    # entry, the proof side had no right-hand side, and the step-OK lemma had
+    # to re-reduce the whole `arm64_step` chain (when it was emitted at all).
+    #
+    # Each spelling below is the `work_step_*` conclusion instantiated at this
+    # word, because `_gen_step_result_lemmas` closes the lemma by `exact`-ing
+    # it: `arm64_reg_d` for a V/D read, `arm64_set_reg_d` for a V/D write, and
+    # the IEEE-754 bit helper named by the model's own arm.  The value helpers
+    # operate on `UInt64` BITS (`lib/IEEE754.lean`), not on `Float`, so they
+    # have the decidable equality the lemma's `rfl` closer needs.
+    if idx == 70:  # FCMP Dn, Dm: flags only, no register write
+        return (f"some {{ s with nzcv := fcmp_nzcv "
+                f"(arm64_reg_d {rn} s) (arm64_reg_d {rm} s) }}")
+    if idx in (71, 72, 73, 74):  # FADD/FSUB/FMUL/FDIV Dd, Dn, Dm
+        helper = {71: "faddBits", 72: "fsubBits",
+                  73: "fmulBits", 74: "fdivBits"}[idx]
+        return (f"some (arm64_set_reg_d {rd} s ({helper} "
+                f"(arm64_reg_d {rn} s) (arm64_reg_d {rm} s)))")
+    if idx == 75:  # FNEG Dd, Dn
+        return (f"some (arm64_set_reg_d {rd} s "
+                f"(fnegBits (arm64_reg_d {rn} s)))")
+    if idx == 76:  # FMOV Dd, Xn: GPR -> V/D
+        return f"some (arm64_set_reg_d {rd} s (arm64_reg {rn} s))"
+    if idx == 77:  # FMOV Xd, Dn: V/D -> GPR
+        return f"some (arm64_set_reg {rd} s (arm64_reg_d {rn} s))"
+    if idx == 78:  # SCVTF Dd, Xn: signed 64-bit int -> double
+        return (f"some (arm64_set_reg_d {rd} s "
+                f"(scvtfBits (arm64_reg {rn} s)))")
+    if idx == 79:  # FCVTZS Xd, Dn: double -> signed 64-bit int
+        return (f"some (arm64_set_reg {rd} s "
+                f"(fcvtzsBits (arm64_reg_d {rn} s)))")
     # CSINC/CSINV/CSNEG (handle by word to be robust to table layout)
     if (w & 0xffe00c00) == 0x9a800400 and not ((w & 0xffff0fe0) == 0x9a9f07e0):  # CSINC, not CSET
         cond = (w >> 12) & 0xf
@@ -4974,6 +5007,13 @@ def _step_rhs(w: int, idx: int):
         if (w & 0xffe00c00) == 0xda800000:
             return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                     f"{cond} s.nzcv then arm64_reg {rn_c} s else arm64_reg {rm_c} s ^^^ (0xffffffffffffffff : UInt64)))")
+    if idx == 86:  # CSNEG
+        cond = (w >> 12) & 0xf
+        rn_c = (w >> 5) & 0x1f
+        rm_c = (w >> 16) & 0x1f
+        if (w & 0xffe00c00) == 0xda800400:
+            return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
+                    f"{cond} s.nzcv then arm64_reg {rn_c} s else (0 : UInt64) - arm64_reg {rm_c} s))")
     if idx == 86:  # ADD Xd, Xn, Xm, UXTX #imm3 (extended register, SP class)
         rn = (w >> 5) & 0x1f
         rm = (w >> 16) & 0x1f
@@ -5320,6 +5360,29 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
                 f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
                 f"else arm64_reg {_RM} s))")
+    # 70-79: the scalar-double FP class, word-relative twin of `_step_rhs`'s
+    # arms.  None of these reads the pc, so the closer takes its `exact` path.
+    if idx == 70:  # FCMP
+        return (f"some {{ s with nzcv := fcmp_nzcv "
+                f"(arm64_reg_d {_RN} s) (arm64_reg_d {_RM} s) }}")
+    if idx in (71, 72, 73, 74):
+        helper = {71: "faddBits", 72: "fsubBits",
+                  73: "fmulBits", 74: "fdivBits"}[idx]
+        return (f"some (arm64_set_reg_d {_RD} s ({helper} "
+                f"(arm64_reg_d {_RN} s) (arm64_reg_d {_RM} s)))")
+    if idx == 75:
+        return (f"some (arm64_set_reg_d {_RD} s "
+                f"(fnegBits (arm64_reg_d {_RN} s)))")
+    if idx == 76:
+        return f"some (arm64_set_reg_d {_RD} s (arm64_reg {_RN} s))"
+    if idx == 77:
+        return f"some (arm64_set_reg {_RD} s (arm64_reg_d {_RN} s))"
+    if idx == 78:
+        return (f"some (arm64_set_reg_d {_RD} s "
+                f"(scvtfBits (arm64_reg {_RN} s)))")
+    if idx == 79:
+        return (f"some (arm64_set_reg {_RD} s "
+                f"(fcvtzsBits (arm64_reg_d {_RN} s)))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 85):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
