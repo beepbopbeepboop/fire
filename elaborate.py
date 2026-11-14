@@ -670,14 +670,9 @@ def _substitute_constraint_text(text: str, bindings: dict) -> str:
 
 def _constraint_implied_for_evidence(method_where: str, assumption: str, module_src: str, bindings: dict, strict: bool = False) -> bool:
     """Conservative implication: does `assumption` imply `method_where`?
-    Unknown/unparseable => True (accept, do not report).
-
-    `strict=True` (the declaration-time evidence decision, not the use-site
-    conformance check) runs the atom comparison FIRST: when BOTH sides parse
-    to `_constraint_atoms`, that verdict is the answer instead of falling
-    through to the conservative accept, so an assumption that does not imply
-    the clause is reported rather than swallowed. Either side unparseable
-    keeps falling through, so unknown stays accepted."""
+    Unknown/unparseable => True (accept, do not report). When strict, an
+    atom-comparable assumption and clause return that verdict instead of the
+    undecided fall-through."""
     mw = _substitute_constraint_text(method_where or '', bindings).strip()
     if not mw:
         return True
@@ -688,9 +683,6 @@ def _constraint_implied_for_evidence(method_where: str, assumption: str, module_
         cpred = _where_conforms_to_pred(module_src, bindings)
         trait_bases, cache = _where_conformance_bases(module_src), {}
         if strict:
-            # Atom-first: when BOTH sides parse as constraint atoms, the
-            # implication verdict is the answer; only an unparseable side
-            # keeps the conservative accept below.
             mw_atoms = _constraint_atoms(_parse_constraint_expr(mw))
             a_atoms_strict = _constraint_atoms(_parse_constraint_expr(asn)) if asn else None
             if mw_atoms is not None and a_atoms_strict is not None:
@@ -1448,288 +1440,6 @@ def check_conformance_declarations(struct_defs, trait_defs):
         raise RuntimeError(f"error: {msg}")
 
 
-# ── Candidate selection under conditional conformance (part 3) ──────────
-
-
-def _candidate_where_state(where_expr, assumption_text, module_src, bindings):
-    """Classify one method candidate's where clause as PROVABLE, DISPROVED, or
-    UNPROVABLE under the conformance `assumption_text`.
-
-    `where_expr` is the parsed where_clause (None for unconditional). An
-    unconditional candidate is PROVABLE. A clause disproved by the assumptions
-    is DISPROVED; one implied/proved by them is PROVABLE; anything this
-    checker cannot decide (including conditions it does not model) is
-    UNPROVABLE rather than guessed."""
-    if where_expr is None:
-        return 'PROVABLE'
-    try:
-        mw = _expr_constraint_text(where_expr) if not isinstance(where_expr, str) else where_expr
-    except Exception:
-        mw = ''
-    mw = _substitute_constraint_text(mw or '', bindings).strip()
-    if not mw:
-        return 'PROVABLE'
-    asn = _substitute_constraint_text(assumption_text or '', bindings).strip()
-
-    # DISPROVED: the negation of an assumption, directly or as an `and`
-    # conjunct with a disproved conjunct.
-    def _is_negation_of_assumption(expr_text, a_text):
-        if not expr_text or not a_text:
-            return False
-        et = expr_text.replace(' ', '')
-        at = a_text.replace(' ', '')
-        # direct negations
-        if et == f'not({at})' or et == f'(not({at}))':
-            return True
-        if et == f'notconforms_to' + at[len('conforms_to'):] if at.startswith('conforms_to') else False:
-            pass
-        # parse-based: not <atom-equal-to-assumption>
-        try:
-            e = _parse_constraint_expr(expr_text)
-            a = _parse_constraint_expr(a_text)
-            if e is not None and a is not None:
-                if isinstance(e, UnaryOp) and getattr(e, 'op', None) == 'not':
-                    if _expr_constraint_text(e.operand).replace(' ', '') == _expr_constraint_text(a).replace(' ', ''):
-                        return True
-                # and with a disproved conjunct
-                if isinstance(e, BinaryOp) and getattr(e, 'op', None) == 'and':
-                    ltxt = _expr_constraint_text(e.left)
-                    rtxt = _expr_constraint_text(e.right)
-                    if _is_negation_of_assumption(ltxt, a_text) or _is_negation_of_assumption(rtxt, a_text):
-                        return True
-        except Exception:
-            pass
-        return False
-
-    if asn and _is_negation_of_assumption(mw, asn):
-        return 'DISPROVED'
-    # also check against each assumption atom
-    if asn:
-        try:
-            a_atoms = _constraint_atoms(_parse_constraint_expr(asn))
-            if a_atoms is not None:
-                stack = [a_atoms]
-                flat = []
-                while stack:
-                    cur = stack.pop()
-                    if cur is None:
-                        continue
-                    if cur[0] == 'and':
-                        stack.append(cur[1]); stack.append(cur[2])
-                    else:
-                        flat.append(cur)
-                for aa in flat:
-                    # only simple conforms atoms as text assumptions matter most
-                    try:
-                        atxt = ''
-                        # reconstruct text roughly not needed; compare parsed forms
-                        e = _parse_constraint_expr(mw)
-                        # direct not of this atom
-                        if isinstance(e, UnaryOp) and getattr(e, 'op', None) == 'not':
-                            inner = _constraint_atoms(_parse_constraint_expr(_expr_constraint_text(e.operand)))
-                            if inner is not None and _atom_implies(inner, aa, _where_conformance_bases(module_src), {}) and _atom_implies(aa, inner, _where_conformance_bases(module_src), {}):
-                                return 'DISPROVED'
-                        if isinstance(e, BinaryOp) and getattr(e, 'op', None) == 'and':
-                            for side in (e.left, e.right):
-                                stxt = _expr_constraint_text(side)
-                                if _is_negation_of_assumption(stxt, asn):
-                                    return 'DISPROVED'
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    # PROVABLE: implied by assumption via part 1/2 implication rules.
-    try:
-        trait_bases, cache = _where_conformance_bases(module_src), {}
-        # strict-style atom implication first when possible
-        mw_atoms = _constraint_atoms(_parse_constraint_expr(mw))
-        a_atoms = _constraint_atoms(_parse_constraint_expr(asn)) if asn else None
-        if mw_atoms is not None and a_atoms is not None:
-            if _atom_implied_by_assumptions(mw_atoms, _flatten_and_assumptions(a_atoms), trait_bases, cache):
-                return 'PROVABLE'
-        elif mw_atoms is not None and not asn:
-            # no assumptions: only provable if tautologically true (rare)
-            pass
-        # fall back to text/evidence implication
-        if _constraint_implied_for_evidence(mw, asn, module_src, bindings, strict=False):
-            # But _constraint_implied_for_evidence is conservative (unknown->True).
-            # Distinguish provable from unknown by trying decidable checks.
-            # If it parses and evaluates to true under assumptions, provable.
-            cpred = _where_conforms_to_pred(module_src, bindings)
-            try:
-                st = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=cpred)
-                if st == CONST_TRUE:
-                    return 'PROVABLE'
-            except Exception:
-                pass
-            # atom implication path above would have caught many; check text implies
-            if asn and _constraint_implies_text(asn, mw, trait_bases, cache):
-                return 'PROVABLE'
-            if asn and mw.replace(' ', '') == asn.replace(' ', ''):
-                return 'PROVABLE'
-            # If assumption implies via conforms_to atoms explicitly
-            if asn and mw_atoms is not None and a_atoms is not None:
-                return 'PROVABLE' if _atom_implied_by_assumptions(mw_atoms, _flatten_and_assumptions(a_atoms), trait_bases, cache) else 'UNPROVABLE'
-            # no positive proof
-            return 'UNPROVABLE'
-        else:
-            # implied-for-evidence says False in strict cases? check for provable false
-            cpred = _where_conforms_to_pred(module_src, bindings)
-            try:
-                st = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=cpred)
-                if st == CONST_FALSE:
-                    return 'DISPROVED'
-            except Exception:
-                pass
-            return 'UNPROVABLE'
-    except Exception:
-        return 'UNPROVABLE'
-
-
-def _flatten_and_assumptions(a_atoms):
-    assumptions = []
-    stack = [a_atoms]
-    while stack:
-        cur = stack.pop()
-        if cur is None:
-            continue
-        if cur[0] == 'and':
-            stack.append(cur[1]); stack.append(cur[2])
-        else:
-            assumptions.append(cur)
-    return assumptions
-
-
-def check_conditional_conformance_candidates(struct_defs, trait_defs, module_src=''):
-    """Declaration-time candidate selection for conditional trait conformance
-    (part 3)."""
-    trait_by_name = {}
-    for td in (trait_defs or []):
-        if isinstance(td, TraitDef):
-            trait_by_name[_as_str(getattr(td, 'name', ''))] = td
-    if not trait_by_name:
-        return
-
-    for sd in (struct_defs or []):
-        if not isinstance(sd, StructDef):
-            continue
-        sline = getattr(sd, 'line', 0) or 0
-        bc_items = list(getattr(sd, 'base_constraints', None) or
-                        [(_as_str(b), '') for b in (getattr(sd, 'bases', None) or [])])
-        # bindings for struct params/self members in where texts
-        try:
-            bindings = _struct_targ_bindings('', sd, [])
-        except Exception:
-            bindings = {}
-        # also bind Self.T names as bare T for generic params
-        for k in list(getattr(sd, 'bracket_params', []) or []):
-            bindings.setdefault(f'Self.{k}', k)
-        for k in list(getattr(sd, 'type_param_names', []) or []):
-            bindings.setdefault(f'Self.{k}', k)
-
-        # index methods by (name, arity) and also collect full sigs
-        methods = list(getattr(sd, 'methods', None) or [])
-
-        for bname, wtext in bc_items:
-            bbase, _ = _split_base_type_args(_as_str(bname))
-            td = trait_by_name.get(bbase)
-            if td is None:
-                continue
-            assumption_base = _as_str(wtext) if wtext is not None else ''
-            # Part 3: candidate selection under conditional conformance. Only
-            # apply when the conformance itself carries a where clause; part 2
-            # handles unconditional conformance evidence at use sites.
-            if not assumption_base.strip():
-                continue
-            assumption = assumption_base
-            # Struct parameter bounds and struct-level where clauses constrain
-            # every valid instantiation, so they count as assumptions for
-            # declaration-time candidate selection.
-            extra_assumptions = []
-            try:
-                s_w = getattr(sd, 'where_clause', None)
-                if s_w is not None:
-                    s_wt = _expr_constraint_text(s_w) if not isinstance(s_w, str) else s_w
-                    if s_wt:
-                        extra_assumptions.append(s_wt)
-            except Exception:
-                pass
-            try:
-                if module_src:
-                    stmpl = extract_struct_source(module_src, _as_str(sd.name))
-                    if stmpl:
-                        sbounds = parse_bounds(stmpl)
-                        for pn, pb in (sbounds or {}).items():
-                            if pb:
-                                # treat trait bounds as conforms_to facts
-                                for bpart in [x.strip() for x in str(pb).replace('&', ',').split(',') if x.strip()]:
-                                    if re.match(r'^[A-Za-z_]\w*(\[.*\])?$', bpart):
-                                        extra_assumptions.append(f"conforms_to({pn}, {bpart})")
-            except Exception:
-                pass
-            if extra_assumptions:
-                all_assn = [assumption] if assumption else []
-                all_assn.extend(extra_assumptions)
-                assumption = ' and '.join(f'({a})' for a in all_assn if a)
-            required = [_method_sig(m) for m in (getattr(td, 'methods', None) or [])]
-            for tname, ptypes, ret in required:
-                # candidates: every struct method of that name with matching arity/signature
-                cands = []
-                for m in methods:
-                    if getattr(m, 'name', None) != tname:
-                        continue
-                    ms = _method_sig(m)
-                    # match by signature (name, param types, ret) like part 2
-                    if ms[1] != ptypes or ms[2] != ret:
-                        continue
-                    cands.append(m)
-                if not cands:
-                    # missing method handled elsewhere; no candidate selection error
-                    continue
-                states = []
-                for m in cands:
-                    st = _candidate_where_state(getattr(m, 'where_clause', None), assumption, '', bindings)
-                    states.append((st, m))
-                # Selection rule
-                provable = [(st, m) for st, m in states if st == 'PROVABLE']
-                unprovable = [(st, m) for st, m in states if st == 'UNPROVABLE']
-                disproved = [(st, m) for st, m in states if st == 'DISPROVED']
-                if unprovable:
-                    # blocks selection even if another is provable
-                    raise RuntimeError(
-                        f"error: '{_as_str(sd.name)}' does not implement all requirements for '{bbase}'")
-                if len(provable) > 1:
-                    msg = (f"error: '{_as_str(sd.name)}' does not implement all requirements for '{bbase}'")
-                    for _, m in provable:
-                        mline = getattr(m, 'line', 0) or 0
-                        note = f"\nnote: ambiguous use of '{tname}'"
-                        if mline:
-                            # keep note text exact as required; location may be appended if style allows
-                            pass
-                        msg += note
-                    raise RuntimeError(msg)
-                if len(provable) == 0:
-                    msg = (f"error: '{_as_str(sd.name)}' does not implement all requirements for '{bbase}'")
-                    # note lists the candidate with its clause (DisprovedWithWhereNot)
-                    for _, m in states:
-                        w = getattr(m, 'where_clause', None)
-                        if w is not None:
-                            try:
-                                wtxt = _expr_constraint_text(w) if not isinstance(w, str) else w
-                            except Exception:
-                                wtxt = ''
-                            if wtxt:
-                                msg += f"\nnote: candidate: {tname} where {wtxt}"
-                            else:
-                                msg += f"\nnote: candidate: {tname}"
-                        else:
-                            msg += f"\nnote: candidate: {tname}"
-                    raise RuntimeError(msg)
-                # exactly one provable, all others disproved => satisfied
-                continue
-
-
 # ── Copy/move synthesis under conditional conformance (part 4) ──────────
 
 def _sd_base_constraints_map(sd):
@@ -2235,153 +1945,6 @@ def check_bounds(module_src: str, template_src: str, targs: dict):
         raise
     except Exception:
         pass
-
-
-def _struct_conformance_conditions(struct_src, name):
-    """{trait: condition-or-None} from a struct's `(...)` base list.
-
-    `Copyable where conforms_to(T, Copyable), Movable` -> {'Copyable':
-    'conforms_to(T, Copyable)', 'Movable': None}. This is TEXT-level on
-    purpose: the parser's `StructDef.bases` is `['Copyable', 'Movable']` — it
-    keeps the trait and drops the condition, and the condition is exactly what
-    separates a provable bound from an unprovable one. Returns None when the
-    struct cannot be read at all."""
-    tmpl = extract_struct_source(struct_src, name)
-    if not tmpl:
-        return None
-    m = mm.head_match(tmpl)
-    if not m:
-        return None
-    i = tmpl.find('(', m.end() - 1)
-    if i < 0:
-        return {}
-    depth = 0
-    inner = ''
-    for j in range(i, len(tmpl)):
-        if tmpl[j] == '(':
-            depth += 1
-        elif tmpl[j] == ')':
-            depth -= 1
-            if depth == 0:
-                inner = tmpl[i + 1:j]
-                break
-    out = {}
-    for part in split_top_level_commas(inner):
-        part = part.strip()
-        if not part:
-            continue
-        if ' where ' in part:
-            # NOT `trait, cond = part.split(...)`: the selfhost compiles this
-            # very file with its own parser, which has no assignment
-            # tuple-unpacking (it reads `trait, cond =` as a declaration head
-            # and stops at the comma).
-            _pair = part.split(' where ', 1)
-            out[_pair[0].strip()] = _pair[1].strip()
-        else:
-            out[part] = None
-    return out
-
-
-def _bound_trait_evidence(struct_src, arg, trait, fn_bounds, seen):
-    """'proven' | 'false' | 'unproven' for the requirement `arg: trait`.
-
-    `fn_bounds` is the enclosing signature's own type-parameter bounds
-    (`{U: 'Movable & Deinitable'}`). Only two shapes can be shown UNPROVEN,
-    and both are ones we can name:
-
-      * the bound argument is a bare signature type parameter that does not
-        carry the trait;
-      * it is a generic instantiation whose conformance to the trait is
-        declared CONDITIONALLY (`Copyable where conforms_to(T, Copyable)`),
-        and reducing that condition through the supplied arguments lands on a
-        requirement the signature does not imply.
-
-    Everything unreadable answers 'proven', so this cannot invent a violation
-    — it can only refuse a declaration it can prove is unsupported.
-
-    Two readings that must NOT be confused with 'unproven':
-
-      * `AnyType` is the universal bound — every type conforms to it, so it is
-        always 'proven' (`OwnedPointer[T: AnyType]` instantiated with a `T` that
-        carries only `Movable` is fine).
-      * a bound we could not READ is not a bound that is ABSENT.
-        `_fn_type_param_bounds` reports `None` both for a parameter declared
-        with no bound and for one whose annotation the reader never captured
-        (a multi-line bracket head, as in
-        `def create_raising_task[\\n    type: Movable, origins: OriginSet\\n]`).
-        Only a bound list we actually READ and that lacks the trait is evidence
-        of unprovability."""
-    if not arg or arg in seen:
-        return 'proven'
-    if trait == 'AnyType':
-        return 'proven'
-    if re.fullmatch(r'[A-Za-z_]\w*', arg):
-        # Only a name that IS one of the signature's type parameters can be
-        # judged from `fn_bounds`; any other bare name is a concrete type
-        # (`Int`, `str`) whose conformance we cannot read here, so accept.
-        fb = fn_bounds or {}
-        if arg not in fb:
-            return 'proven'
-        b = fb[arg]
-        if b is None:
-            return 'proven'
-        traits = [t.strip() for t in b.split('&') if t.strip()]
-        return 'proven' if trait in traits else 'unproven'
-    m = re.fullmatch(r'([A-Za-z_]\w*)\s*\[(.*)\]', arg, re.S)
-    if not m:
-        return 'proven'
-    gname = m.group(1)
-    gargs = m.group(2)
-    g_tmpl = extract_struct_source(struct_src, gname)
-    if not g_tmpl:
-        return 'proven'
-    conds = _struct_conformance_conditions(struct_src, gname)
-    if conds is None or trait not in conds:
-        return 'proven'
-    cond = conds[trait]
-    if cond is None:
-        return 'proven'
-    gtargs = bind_type_args(g_tmpl, split_top_level_commas(gargs))
-    if not gtargs:
-        return 'proven'
-    for cm in re.finditer(
-            r'conforms_to\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)', cond):
-        xp = cm.group(1)
-        tr2 = cm.group(2)
-        sub = (gtargs.get(xp) or xp).strip()
-        v = _bound_trait_evidence(struct_src, sub, tr2, fn_bounds, seen + (arg,))
-        if v != 'proven':
-            return v
-    return 'proven'
-
-
-def check_signature_param_bound_evidence(struct_src, tmpl, targs, fn_bounds):
-    """Declaration-time evidence check for a signature parameter annotation.
-
-    `check_bounds` asks `check_conformance` whether each bound argument
-    conforms, and that oracle answers `(True, [])` for anything it cannot
-    resolve — so a requirement that is neither provable nor provably false is
-    silently accepted and the declaration compiles. This asks the sharper
-    question the diagnostic names: for each bracket parameter's trait bound, is
-    the bound argument PROVABLE, DISPROVABLE, or UNPROVEN? Returns a
-    diagnostic string, or None to accept.
-
-    Call this AFTER `check_where_clauses`: a provably-false requirement is the
-    stronger finding and must be the one reported."""
-    bounds = parse_bounds(tmpl)
-    if not bounds:
-        return None
-    for pname, bound in bounds.items():
-        if not bound or pname not in targs:
-            continue
-        arg = targs[pname].strip()
-        for trait in [b.strip() for b in bound.split('&') if b.strip()]:
-            verdict = _bound_trait_evidence(struct_src, arg, trait, fn_bounds, ())
-            if verdict == 'unproven':
-                return 'error: invalid bindings in signature: lacking evidence'
-            if verdict == 'false':
-                return 'error: invalid bindings in signature: violated constraint'
-    return None
 
 
 def extract_struct_source(module_src: str, name: str):
@@ -3582,166 +3145,155 @@ def check_method_call_evidence(module_src, fn, module_stmts=None):
 
 
 
-#: Subject type names the evidence checker cannot inspect: concrete builtin
-#: scalars and runtime types the module does not declare. A substituted
-#: where-clause subject naming one of these is a concrete type, so absence of
-#: evidence cannot be decided — the caller must keep the conservative accept.
-_INSPECTION_UNKNOWN_SUBJECTS = frozenset({
-    'Bool', 'Int', 'UInt', 'String',
-    'Float16', 'Float32', 'Float64', 'Float128', 'BFloat16',
-    'Int8', 'Int16', 'Int32', 'Int64', 'Int128',
-    'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128',
-    'IntLiteral', 'FloatLiteral', 'StringLiteral', 'BoolLiteral',
-    'SIMD', 'Scalar', 'NoneType', 'Object',
-})
-
-
-def _constraint_subject_is_inspectable(module_src: str, subject: str, fn_bounds: dict) -> bool:
-    """Is a where-clause subject decidable? A generic parameter name carried in
-    `fn_bounds`, a declared struct, or a bare identifier the checker can name is
-    inspectable; a builtin scalar the module does not declare is not."""
-    s = (subject or '').strip()
-    if not s:
-        return False
-    if s in fn_bounds:
-        return True
-    sd, _info = _find_struct_def(module_src, s)
-    if sd is not None:
-        return True
-    if s in _INSPECTION_UNKNOWN_SUBJECTS:
-        return False
-    # A qualified/parameterised spelling names a type the checker cannot look
-    # up here; a plain identifier is a type variable with no stated bounds.
-    return bool(re.match(r'^[A-Za-z_]\w*$', s))
-
-
-def _where_subjects_inspectable(where_text: str, module_src: str, fn_bounds: dict) -> bool:
-    """Can every `conforms_to` subject in `where_text` be inspected? An
-    unparseable clause answers True: the implication check below then takes its
-    own conservative accept."""
-    try:
-        atoms = _constraint_atoms(_parse_constraint_expr(where_text))
-    except Exception:
-        return True
-    if atoms is None:
-        return True
-    subjects = set()
-
-    def _collect(a):
-        if a is None:
-            return
-        k = a[0]
-        if k == 'conforms':
-            subjects.add(a[1])
-        elif k in ('and', 'or'):
-            _collect(a[1])
-            _collect(a[2])
-        elif k == 'not':
-            _collect(a[1])
-
-    _collect(atoms)
-    return all(_constraint_subject_is_inspectable(module_src, s, fn_bounds)
-               for s in subjects)
-
-
-def _is_trait_like_bound(module_src, name):
-    """Is `name` a trait-like bound (declared trait or used as a base) rather
-    than a value-parameter bound such as `Int` or the catch-all `AnyType`?"""
-    tb = _where_conformance_bases(module_src)
-    if name in tb:
-        return True
-    return any(name in v for v in tb.values())
-
-
-def _trait_bound_evidence(module_src, arg, trait, fn_bounds):
-    """'proven' | 'unproven' | 'unknown' for a single conjunct `trait`."""
-    trait = (trait or '').strip()
-    if not trait:
-        return 'proven'
-    if not _is_trait_like_bound(module_src, trait):
-        # A value parameter bound (`n: Int`) or a catch-all (`AnyType`) is not
-        # a conformance the checker can decide; accept it.
-        return 'unknown'
-    if arg in fn_bounds:
-        # The supplied type argument is itself a function type parameter: the
-        # bound is proven when the enclosing function carries it.
-        return 'proven' if trait in (fn_bounds.get(arg) or ()) else 'unproven'
-    base, aargs = _split_base_type_args(arg)
-    sd, _info = _find_struct_def(module_src, base)
-    if sd is None:
-        # builtin / imported / precompiled struct, or a plain identifier: the
-        # checker cannot inspect the base list and must keep accepting.
-        return 'unknown'
-    # The struct's own bracket parameters, substituted from `arg`'s arguments
-    # before asking whether the enclosing function's bounds imply a where text.
-    tmpl_src = extract_struct_source(module_src, sd.name) or ''
-    sparams = type_param_names(tmpl_src) or []
-    bindings = {}
-    for i, sp in enumerate(sparams):
-        if i < len(aargs):
-            bindings[sp] = aargs[i]
-            bindings[f'Self.{sp}'] = aargs[i]
-    assumption = ' and '.join(
-        f'conforms_to({p}, {t})'
-        for p in sorted(fn_bounds) for t in sorted(fn_bounds.get(p) or ()))
-
-    def _conditional(wtext):
-        sub_where = _substitute_constraint_text(wtext.strip(), bindings).strip()
-        # A subject the checker cannot inspect (e.g. CondCopyable[Int] ->
-        # conforms_to(Int, Copyable)) must not be reported.
-        if not _where_subjects_inspectable(sub_where, module_src, fn_bounds):
-            return 'unknown'
-        implied = _constraint_implied_for_evidence(
-            sub_where, assumption, module_src, bindings, strict=True)
-        return 'proven' if implied else 'unproven'
-
-    bc_items = list(getattr(sd, 'base_constraints', None) or [])
-    if not bc_items:
-        bc_items = [(_as_str(b), '') for b in (getattr(sd, 'bases', None) or [])]
-    # Direct bases first.
-    for bname, wtext in bc_items:
-        bb, _btargs = _split_base_type_args(_as_str(bname))
-        if bb != trait:
-            continue
-        wt = _as_str(wtext).strip()
-        # Unconditional direct base: trivially satisfied.
-        return 'proven' if not wt else _conditional(wt)
-    # Not a direct base: resolve it through the ancestor graph.
-    trait_bases = _where_conformance_bases(module_src)
-    for bname, wtext in bc_items:
-        for anc, aw, _path in _ancestors_with_paths(
-                _as_str(bname), wtext or '', trait_bases, {}):
-            if anc == trait:
-                wt = (aw or '').strip()
-                # Unconditional in the current model.
-                return 'proven' if not wt else _conditional(wt)
-    # No path exists (Copyable/Movable are derived from fields), so absence of
-    # evidence is not evidence of non-conformance.
-    return 'unknown'
-
-
 def type_arg_bound_evidence(module_src, template_src, param, arg, fn_bounds):
-    """'proven' | 'unproven' | 'unknown' for ARG satisfying PARAM's bound.
-
-    `fn_bounds` is the enclosing function's type-parameter facts,
-    `{param_name: {trait, ...}}` (the shape `_fn_known_bounds` returns).
-    Conservative by construction: only a requirement the checker can DECIDE is
-    reported ('unproven'); anything it cannot inspect answers 'unknown' and the
-    caller accepts it, so imported/builtin/stdlib types are never rejected on
-    the absence of evidence.
-    """
+    """'proven' | 'unproven' | 'unknown' for ARG satisfying PARAM's bound."""
     bounds = parse_bounds(template_src or '')
     bound = bounds.get(param)
-    if not bound:
-        # No bound for the parameter: nothing to satisfy.
+    if bound is None:
         return 'proven'
-    conjuncts = [c.strip() for c in str(bound).replace('&', ',').split(',') if c.strip()]
+    # A bound that is not a trait-like name (a value parameter such as n: Int)
+    # -> 'unknown'; the caller accepts it.
+    value_param_bounds = {
+        'Int', 'UInt', 'Bool', 'String',
+        'Float16', 'Float32', 'Float64', 'BFloat16',
+        'Int8', 'Int16', 'Int32', 'Int64',
+        'UInt8', 'UInt16', 'UInt32', 'UInt64',
+        'IntLiteral', 'FloatLiteral', 'StringLiteral',
+        'SIMD', 'Scalar',
+    }
+    # Split bound conjunctions on '&' (top-level for simple trait bounds).
+    conjuncts = [c.strip() for c in str(bound).split('&') if c.strip()]
     if not conjuncts:
+        return 'proven'
+    for c in conjuncts:
+        if c in value_param_bounds:
+            return 'unknown'
+    arg = (arg or '').strip()
+
+    _uninspectable_subjects = {
+        'Int', 'UInt', 'Bool', 'String',
+        'Float16', 'Float32', 'Float64', 'BFloat16',
+        'Int8', 'Int16', 'Int32', 'Int64',
+        'UInt8', 'UInt16', 'UInt32', 'UInt64',
+        'IntLiteral', 'FloatLiteral', 'StringLiteral',
+        'SIMD', 'Scalar', 'NoneType', 'Object',
+    }
+
+    def _arg_params_in_fn_bounds(where_text, fb):
+        # subjects named in where_text that are neither a key in fb nor a struct
+        # declared in module_src: return True if any such subject appears as a
+        # conforms_to subject we cannot inspect (builtin/imported concrete type).
+        try:
+            expr = Parser(py_tokenize(where_text))._parse_expr(0)
+            atoms = _constraint_atoms(expr)
+        except Exception:
+            return False
+        subjects = set()
+        def _collect(a):
+            if a is None:
+                return
+            k = a[0]
+            if k == 'conforms':
+                subjects.add(a[1])
+            elif k in ('and', 'or'):
+                _collect(a[1]); _collect(a[2])
+            elif k == 'not':
+                _collect(a[1])
+        _collect(atoms)
+        for s in subjects:
+            if s in fb:
+                continue
+            if extract_struct_source(module_src, s) is not None:
+                continue
+            # A type parameter/generic placeholder not in fb is reasoned about as
+            # lacking evidence; concrete builtins/imported types are uninspectable.
+            if s in _uninspectable_subjects:
+                return True
+            if not re.match(r'^[A-Za-z_]\w*$', str(s)):
+                return True
+            # otherwise treat as a type variable with no stated bounds -> not unknown
+        return False
+
+    def _assumption_text(fb):
+        parts = []
+        for p in sorted(fb.keys()):
+            traits = fb[p]
+            for t in sorted(traits):
+                parts.append(f'conforms_to({p}, {t})')
+        return ' and '.join(parts)
+
+    def _check_one_trait(trait):
+        # rule 3: arg is exactly a key in fn_bounds
+        if arg in fn_bounds:
+            return 'proven' if trait in (fn_bounds.get(arg) or set()) else 'unproven'
+        base, targs = _split_base_type_args(arg)
+        tmpl = extract_struct_source(module_src, base)
+        if tmpl is None:
+            # rule 5: base not a struct declared in module_src
+            return 'unknown'
+        # parse struct def for base_constraints
+        try:
+            sd = None
+            for s in Parser(py_tokenize(textwrap.dedent(tmpl))).parse_module():
+                if isinstance(s, StructDef) and getattr(s, 'name', None) == base:
+                    sd = s
+                    break
+        except Exception:
+            sd = None
+        if sd is None:
+            return 'unknown'
+        params = type_param_names(tmpl) or []
+        bindings = {}
+        for i, p in enumerate(params):
+            if i < len(targs):
+                bindings[p] = targs[i]
+                bindings[f'Self.{p}'] = targs[i]
+        # rule 4: inspect base_constraints (not only bases)
+        base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+        if not base_constraints:
+            base_constraints = [(b, '') for b in (getattr(sd, 'bases', []) or [])]
+        # direct bases first
+        for bname, wtext in base_constraints:
+            bname_s = str(bname)
+            if bname_s != trait:
+                continue
+            wtext_s = (wtext or '').strip()
+            if not wtext_s:
+                return 'proven'
+            # conditional direct base
+            sub_where = _substitute_constraint_text(wtext_s, bindings).strip()
+            assumption = _assumption_text(fn_bounds)
+            # If where text names a subject neither in fn_bounds nor declared in module_src -> unknown
+            if _arg_params_in_fn_bounds(sub_where, fn_bounds):
+                return 'unknown'
+            implied = _constraint_implied_for_evidence(sub_where, assumption, module_src, bindings, strict=True)
+            return 'proven' if implied else 'unproven'
+        # not a direct base: try ancestors via _where_conformance_bases + _ancestors_with_paths
+        trait_bases = _where_conformance_bases(module_src)
+        found_path = False
+        for bname, wtext in base_constraints:
+            bname_s = str(bname)
+            for anc, aw, _path in _ancestors_with_paths(bname_s, wtext or '', trait_bases, {}):
+                if anc == trait:
+                    found_path = True
+                    wtext_s = (aw or '').strip()
+                    if not wtext_s:
+                        # unconditional in the current model
+                        return 'proven'
+                    sub_where = _substitute_constraint_text(wtext_s, bindings).strip()
+                    assumption = _assumption_text(fn_bounds)
+                    if _arg_params_in_fn_bounds(sub_where, fn_bounds):
+                        return 'unknown'
+                    implied = _constraint_implied_for_evidence(sub_where, assumption, module_src, bindings, strict=True)
+                    return 'proven' if implied else 'unproven'
+        if not found_path:
+            # no path exists -> unknown (Copyable/Movable derived from fields)
+            return 'unknown'
         return 'unknown'
-    verdicts = [_trait_bound_evidence(module_src, (arg or '').strip(), c, fn_bounds)
-                for c in conjuncts]
-    if any(v == 'unproven' for v in verdicts):
+
+    results = [_check_one_trait(c) for c in conjuncts]
+    if any(r == 'unproven' for r in results):
         return 'unproven'
-    if all(v == 'proven' for v in verdicts):
+    if all(r == 'proven' for r in results):
         return 'proven'
     return 'unknown'

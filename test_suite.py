@@ -2159,10 +2159,14 @@ STALE_PER_CHILD_BUDGETS = {
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
     'test_imported_decorator_regression.py': 2,
+    'test_interp_list_ctor.py': 1,
     'test_metal_codegen.py': 9,
+    'test_module_globals_compiled.py': 3,
     'test_ptr_registry.py': 2,
     'test_python315_frozendict.py': 1,
     'test_python315_sentinel.py': 1,
+    'test_regress_gpu_offload_validation_modular_part1.py': 1,
+    'test_regress_gpu_offload_validation_modular_part4.py': 1,
     'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2189,21 +2193,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_disjoint_bases.py': 2,
     'test_python315_lazy_imports.py': 2,
     'test_unpacking_in_comprehensions.py': 1,
-    # +4 on 2026-11-13, the same day the three new test files below were
-    # registered (they had landed unregistered, so the estate check named them).
-    # Every one of these literals is a `subprocess` timeout on a COMPILE or a RUN
-    # the case itself performs — the RUN kind the census exists for, not a stale
-    # per-child budget: `test_interp_list_ctor.py` compiles then runs the
-    # interpreter and the compiled binary; `test_module_globals_compiled.py`
-    # builds with `fire.py build` (120 s), runs the produced executable (60 s)
-    # and allows 300 s for the whole build; the two
-    # `test_regress_gpu_offload_validation_modular_part*.py` rows are another
-    # workstream's, landing in the same commit only because the census is a
-    # ratchet and their literals arrived with them.
-    'test_interp_list_ctor.py': 1,
-    'test_module_globals_compiled.py': 3,
-    'test_regress_gpu_offload_validation_modular_part1.py': 1,
-    'test_regress_gpu_offload_validation_modular_part4.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -5200,8 +5189,6 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
     # sub-second.
     ('trait-requirement-evidence-diagnostic',
      'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
-    ('reg-conditional-conformance-candidate-diagnostic',
-     'test_conditional_conformance_candidate_diagnostic.py', 'part 3'),
     ('reg-conditional-conformance-synthesis-diagnostic',
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
     ('trait-comptime-member-conformance-diagnostic',

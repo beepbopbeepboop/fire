@@ -22,7 +22,6 @@ import builtins
 import threading
 from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
-from mojo.middle.simd_width import is_valid_width as _simd_width_is_valid
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -3838,10 +3837,11 @@ def _mojo_simd_width_is_valid(width):
 
     Mojo's SIMD vector length must be a power of two in [1, 2**15]. Non-int
     widths (e.g. symbolic/comptime parameters not yet folded here) are not
-    rejected by this cheap interpreter-side guard. The rule itself lives in
-    `mojo.middle.simd_width`, shared with the compiled path's guard.
+    rejected by this cheap interpreter-side guard.
     """
-    return _simd_width_is_valid(width)
+    if isinstance(width, bool) or not isinstance(width, int):
+        return True
+    return 1 <= width <= (1 << 15) and (width & (width - 1)) == 0
 
 
 class _MojoSIMDType:

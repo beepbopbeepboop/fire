@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Pin for the stdlib-syntax red fixed by commit 478a03b82: std/utils/variant.mojo must transpile."""
+"""Pin for the stdlib-syntax gate: std/utils/variant.mojo must transpile.
+
+The `gate-stdlib-syntax` bug doc was removed in 478a03b82 ("stdlib-syntax: pin
+variant.mojo and remove fixed gate doc") after the gate it described was
+folded into `compile_stdlib.py --ratchet`; this pin keeps the one case that
+gate was about — a stdlib file whose syntax the compiler must accept — from
+silently regressing when the gate is gone.
+"""
 
 import os
 import sys
