@@ -7084,6 +7084,7 @@ def gen_module_impl(self, stmts: list):
         'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
         'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
         'comptime_member_types': 'MojoDict *',
+        'comptime_member_wheres': 'MojoDict *',
         'bases': 'MojoList *',
         # Parallel to `bases`: (base_name, where_text) per positional base.
         'base_constraints': 'MojoList *',

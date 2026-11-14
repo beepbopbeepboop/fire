@@ -906,9 +906,17 @@ class StructDef:
     # FunctionDef.where_clause: None when absent, one expression, or a list.
     # A `(cond, "message")` entry is a TupleExpr. See _parse_where_clauses.
     where_clause: object = None
-    # Parallel table for comptime member declarations: name -> (type_ann, where_clause).
-    # Keeps StructDef.comptime_aliases unchanged for existing value readers.
+    # Parallel tables for comptime member declarations, keyed by member name:
+    # the declared type annotation ('' when the member has none) and the
+    # member's own `where` clause text ('' when none). Kept beside
+    # StructDef.comptime_aliases so that table's many value readers are
+    # unchanged. Two string-valued dicts rather than one dict of tuples: the
+    # self-hosted compiled path stores dict values as one machine word, and a
+    # tuple value has no such representation (a list of tuples is used for
+    # `base_constraints`, but `bases`-style parallel lists are the established
+    # spelling for a table the compiled path has to read back).
     comptime_member_types: dict = field(default_factory=dict)
+    comptime_member_wheres: dict = field(default_factory=dict)
     # (name, type-annotation source) for each bracket parameter, in declaration
     # order. Read by _check_inferred_param_dependencies.
     bracket_types: list = field(default_factory=list)
@@ -5950,13 +5958,14 @@ class Parser:
         # `.target` compiles to a direct `char *` load on both backends.
         aliases = {}
         comptime_member_types = {}
+        comptime_member_wheres = {}
         for _cs in body:
             if not isinstance(_cs, ComptimeVarStmt):
                 continue
             _cvnode = _as_comptimevar_node(_cs)
             aliases[_cvnode.target] = _cvnode.value
-            comptime_member_types[_cvnode.target] = (
-                _cvnode.type_ann, _cvnode.where_clause or "")
+            comptime_member_types[_cvnode.target] = _cvnode.type_ann or ""
+            comptime_member_wheres[_cvnode.target] = _cvnode.where_clause or ""
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         self._validate_align_decorators(decs)
@@ -5965,6 +5974,7 @@ class Parser:
                          align_expr=align_expr,
                          comptime_aliases=aliases,
                          comptime_member_types=comptime_member_types,
+                         comptime_member_wheres=comptime_member_wheres,
                          bases=bases,
                          base_constraints=base_constraints,
                          keywords=class_keywords,
@@ -6142,11 +6152,15 @@ class Parser:
         body = self._parse_block()
         self._lazy_import_blockers.pop()
         methods = [s for s in body if isinstance(s, FunctionDef)]
+        # A trait's `comptime NAME: Type` is a REQUIREMENT; the same spelling
+        # with a value (`comptime NAME: Type = default`, e.g. EnumLike's
+        # `_enum_elt_type_for_case`) supplies a default and imposes nothing on
+        # conforming types. Only the value-less form is a requirement.
         comptime_members = []
         for s in body:
-            if isinstance(s, ComptimeVarStmt):
+            if isinstance(s, ComptimeVarStmt) and s.value is None:
                 comptime_members.append(
-                    (s.target, s.type_ann, s.where_clause or ""))
+                    (s.target, s.type_ann or "", s.where_clause or ""))
         decs = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         return TraitDef(name=name, methods=methods, decorators=decs, bases=bases,
