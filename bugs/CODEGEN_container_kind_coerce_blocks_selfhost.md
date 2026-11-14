@@ -80,5 +80,6 @@ refusal, so the error message's `file:line` is line-less and the mangled
 so grep for them finds nothing. The enclosing top-level function is the
 source-visible handle. Second, all four are the SAME shape: a destination the
 inference said `MojoList *` and a value that is really a `MojoDict *`/`MojoSet *`,
-which is the `_infer_param_types`-vs-USES class
-`bugs/CODEGEN_param_container_kind_across_call_sites_refused.md` describes.
+which is the parameter container-kind inference class that the silentnoop
+`pick` refusal belonged to (fixed in e4a2cc2ed, "specialize literal-kind mixed
+params including None/comprehensions").

@@ -4314,6 +4314,33 @@ test('reg-conforms-to-condition-diagnostic', [PY, 'test_conforms_to_condition_di
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-constrained-paren-diagnostic', [PY, 'test_constrained_paren_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-issubclass-builtin', [PY, 'test_issubclass_builtin.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-mojoc-dual-mount-import', [PY, 'test_mojoc_dual_mount_import.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+# Nine more test files landed by other workstreams and registered nowhere,
+# which is the hole the estate check names. Each was measured green on this
+# tree before being registered. None is `cache=True`, matching the reg-*
+# convention: an uncached pin cannot serve a recorded PASS for a change it
+# does not name. `test_stdlib_dylib_lazy_undefined_refs_probes.py` is NOT here
+# — it is a per-part Done-when probe harness, red until parts 2 and 3 land,
+# and is in `test_suite.py`'s UNREGISTERED with that reason.
+test('reg-binding-evidence', [PY, 'test_binding_evidence.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-codegen-yield-from-walk-ast-memo', [PY, 'test_codegen_yield_from_walk_ast_memo.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-function-body-alias-class-import', [PY, 'test_function_body_alias_class_import.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-gpu-offload-validation-part3', [PY, 'test_gpu_offload_validation_part3.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-mojoc-implicit-default-conformance', [PY, 'test_mojoc_implicit_default_conformance.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-mojoc-import-conformance', [PY, 'test_mojoc_import_conformance.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-mojoc-synthetic-signature-default', [PY, 'test_mojoc_synthetic_signature_default.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
+test('reg-stdlib-syntax-variant', [PY, 'test_stdlib_syntax_variant.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-14)')
 # A Mojo keyword used as an ordinary Python identifier: the compiler compiles
 # its own sources, so `trait = ...` must parse (bugs/PARSER_keyword_identifier_
 # collision_refuses_module.md). Not cached, like the other reg-* pins.
@@ -4717,7 +4744,7 @@ BUCKETS = {
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-binding-evidence', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus

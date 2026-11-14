@@ -1,3 +1,4 @@
+SPLIT: DIAGNOSTICS_mojoc_imports-part1, DIAGNOSTICS_mojoc_imports-part2, DIAGNOSTICS_mojoc_imports-part3
 SPLIT: parts 1 and 2 landed (`test_mojoc_import_conformance.py` and
 `test_mojoc_implicit_default_conformance.py`); their docs are deleted.
 Dual-mount mojoc import (import_dual_mount_mojoc.mojo) is covered by
