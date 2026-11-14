@@ -75,6 +75,8 @@ sys.path.insert(0, HERE)
 from test_formal_dylib import (TestFailure, check, parse_macho,  # noqa: E402
                                run_fire)
 
+from exec_budget import RUN_TIMEOUT_S  # noqa: E402, per-child budgets
+
 # A CAS of this file's own. A module dylib is cached by content, so a stale
 # one from an earlier run could mask a regression, and this file must not
 # delete libraries out from under a parallel job in a shared bucket.
@@ -299,7 +301,7 @@ def build_and_run(root, name, source, expect_exit=0):
           f"build of {name}.mojo failed: "
           f"{(built.stderr or built.stdout).strip()[-500:]}")
     check(os.path.isfile(out), f"no executable written at {out}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     check(ran.returncode == expect_exit,
           f"{name}.mojo exited {ran.returncode}, expected {expect_exit}; "
           f"stderr: {(ran.stderr or '').strip()[-300:]}")
@@ -429,7 +431,7 @@ def test_the_dotted_spelling_runs_on_both_backends(tmp, _shared):
               f"{arch}: build failed: "
               f"{(built.stderr or built.stdout).strip()[-500:]}")
         check(os.path.isfile(out), f"{arch}: no executable written at {out}")
-        ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
+        ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         check(ran.returncode == 0,
               f"{arch}: the image exited {ran.returncode}; "
               f"stderr: {(ran.stderr or '').strip()[-300:]}")

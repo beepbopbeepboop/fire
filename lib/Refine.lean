@@ -81,6 +81,33 @@ theorem block_advance (code : Nat → UInt8) (b : Block) (exit g : Nat)
   go_exit_block code exit b.pcs.length g st (b.step st)
     (hcert.runs st hpc) hmid htc
 
+/-- Certificate for a GUARDED block: the body's normal path is one function of one
+    state ONLY on the states the guard `g` admits.  An export whose body carries an
+    overflow guard (`cbnz` to a trap, not taken on the normal path) is straight-line
+    exactly under `g`, the not-taken condition at that branch, computed from the
+    entry state.  The guard is a concrete `def` over the entry state (never
+    `opaque`), so a wrong spec is refutable on a `g`-state.  `g` is over the ENTRY
+    state, not each intermediate state: the emitter composes the prefix into the
+    guard. -/
+structure GuardedBlockCert (code : Nat → UInt8) (b : Block) (g : Arm64State → Prop) :
+    Prop where
+  runs : ∀ st, st.pc = b.entry_pc → g st →
+    arm64_runs code b.pcs.length st = some (b.step st)
+
+/-- The guarded advance: on a `g`-state, a `GuardedBlockCert` block advances the
+    same way `block_advance` does.  Same proof as `block_advance`, with the guard
+    passed through the certificate. -/
+theorem guarded_block_advance (code : Nat → UInt8) (b : Block) (g : Arm64State → Prop)
+    (exit gl : Nat) (st : Arm64State) (hpc : st.pc = b.entry_pc)
+    (hg : g st) (hcert : GuardedBlockCert code b g)
+    (hmid : ∀ u, u < b.pcs.length → ∀ su,
+      arm64_runs code u st = some su → su.pc ≠ exit)
+    (htc : (b.step st).pc ≠ exit) :
+    arm64_go_exit st code exit (b.pcs.length + gl) =
+      arm64_go_exit (b.step st) code exit gl :=
+  go_exit_block code exit b.pcs.length gl st (b.step st)
+    (hcert.runs st hpc hg) hmid htc
+
 /-! ## 3. Control-flow layer
 
 The generator emits the executed path as a list of edges.  Each edge is one of
@@ -709,7 +736,7 @@ theorem FrameOk_read_at (st st' : Arm64State)
 
 /-- Postcondition of a single (possibly recursive) call: there is a step bound
     `k` (`≤ fuel`) such that, after exactly `k` machine steps, the call is back
-    at its return address `st.x30` with `mojo arg` in `x0` and the caller's
+    at its return address `st.x30` with the model result in `x0` and the caller's
     frame (`FrameOk`) restored.
 
     Step-counted rather than exit-address-based: `arm64_runs` runs *exactly*
@@ -717,17 +744,17 @@ theorem FrameOk_read_at (st st' : Arm64State)
     time `pc = st.x30` (which, for self-recursion with a shared continuation, is
     the nested call's return to the same address).  This is what makes the
     recursion step case true. -/
-def Post (p : Prog) (fuel : Nat) (mojo : UInt64 → UInt64)
+def Post (p : Prog) (fuel : Nat) (mojo_res : UInt64)
     (st : Arm64State) (arg : UInt64) : Prop :=
   ∃ k st', k ≤ fuel ∧ arm64_runs p.code k st = some st' ∧
-    st'.x0 = mojo arg ∧ st'.pc = st.x30.toNat ∧ FrameOk st st' ∧
+    st'.x0 = mojo_res ∧ st'.pc = st.x30.toNat ∧ FrameOk st st' ∧
     (∀ u, u < k → ∀ s, arm64_runs p.code u st = some s → s.pc ≠ p.exit)
 
-theorem Post.exit_correct (p : Prog) (fuel total : Nat) (obs : UInt64 → UInt64)
-    (st : Arm64State) (arg : UInt64) (hpost : Post p fuel obs st arg)
+theorem Post.exit_correct (p : Prog) (fuel total : Nat) (obs_res : UInt64)
+    (st : Arm64State) (arg : UInt64) (hpost : Post p fuel obs_res st arg)
     (hret : st.x30.toNat = p.exit) (hfuel : fuel < total) :
     match arm64_go_exit st p.code p.exit total with
-    | some s => s.x0 = obs arg
+    | some s => s.x0 = obs_res
     | none => False := by
   obtain ⟨k, finish, hk, hrun, hx0, hpc, hframe, hmid⟩ := hpost
   have hglue := rec1_glue_gen p.code p.exit k (total - k) st finish hrun hmid
@@ -742,11 +769,11 @@ theorem Post.exit_correct (p : Prog) (fuel total : Nat) (obs : UInt64 → UInt64
     step case (`arg = k+1`, using the induction hypothesis for `arg-1` at any
     sufficient fuel) are supplied by the generator as per-level CFG walks; the
     induction itself is generic. -/
-theorem contract_sound (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat) (stride : Nat)
+theorem contract_sound (p : Prog) (mojo_res : UInt64 → UInt64) (BASE PATH : Nat) (stride : Nat)
     (hbase : ∀ (fuel : Nat) (st : Arm64State),
       BASE ≤ fuel → st.pc = p.entry → st.x0 = 0 →
       FrameBound stride st 0 →
-      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st 0)
+      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel (mojo_res 0) st 0)
     (hstep : ∀ (k : Nat) (arg : UInt64) (st : Arm64State) (fuel : Nat),
       arg.toNat = k + 1 → BASE + PATH * (k + 1) ≤ fuel →
       st.pc = p.entry → st.x0 = arg →
@@ -756,15 +783,15 @@ theorem contract_sound (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat) (
         BASE + PATH * k ≤ fuel' → sub.pc = p.entry → sub.x0 = arg - 1 →
         FrameBound stride sub (arg - 1) →
         (∀ pc, pc ∈ p.rets → pc ≠ sub.x30.toNat) →
-        Post p fuel' mojo sub (arg - 1)) →
-      Post p fuel mojo st arg) :
+        Post p fuel' (mojo_res (arg - 1)) sub (arg - 1)) →
+      Post p fuel (mojo_res arg) st arg) :
     ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
       BASE + PATH * arg.toNat ≤ fuel → st.pc = p.entry → st.x0 = arg →
       FrameBound stride st arg →
-      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
+      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel (mojo_res arg) st arg := by
   have key : ∀ k, ∀ arg st fuel, arg.toNat = k → BASE + PATH * k ≤ fuel →
       st.pc = p.entry → st.x0 = arg → FrameBound stride st arg →
-      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
+      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel (mojo_res arg) st arg := by
     intro k
     induction k with
     | zero =>
@@ -789,11 +816,11 @@ theorem contract_sound (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat) (
     `arg - 2` (`toNat = k`).  The fuel bound is **exponential** in `arg.toNat`
     (`BASE + PATH * 2^arg.toNat`, `PATH ≥ BASE + <machine path length>`), since
     a doubled recursion runs `Θ(2^n)` steps. -/
-theorem contract_sound_tree (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat) (stride : Nat)
+theorem contract_sound_tree (p : Prog) (mojo_res : UInt64 → UInt64) (BASE PATH : Nat) (stride : Nat)
     (hbase : ∀ (fuel : Nat) (st : Arm64State),
       BASE ≤ fuel → st.pc = p.entry → st.x0.toNat < 2 →
       FrameBound stride st st.x0 →
-      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st st.x0)
+      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel (mojo_res st.x0) st st.x0)
     (hstep : ∀ (k : Nat) (arg : UInt64) (st : Arm64State) (fuel : Nat),
       arg.toNat = k + 2 → BASE + PATH * 2 ^ (k + 2) ≤ fuel →
       st.pc = p.entry → st.x0 = arg →
@@ -803,22 +830,22 @@ theorem contract_sound_tree (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : N
         BASE + PATH * 2 ^ (k + 1) ≤ fuel' → sub.pc = p.entry → sub.x0 = arg - 1 →
         FrameBound stride sub (arg - 1) →
         (∀ pc, pc ∈ p.rets → pc ≠ sub.x30.toNat) →
-        Post p fuel' mojo sub (arg - 1)) →
+        Post p fuel' (mojo_res (arg - 1)) sub (arg - 1)) →
       (∀ (sub : Arm64State) (fuel' : Nat),
         BASE + PATH * 2 ^ k ≤ fuel' → sub.pc = p.entry → sub.x0 = arg - 2 →
         FrameBound stride sub (arg - 2) →
         (∀ pc, pc ∈ p.rets → pc ≠ sub.x30.toNat) →
-        Post p fuel' mojo sub (arg - 2)) →
-      Post p fuel mojo st arg) :
+        Post p fuel' (mojo_res (arg - 2)) sub (arg - 2)) →
+      Post p fuel (mojo_res arg) st arg) :
     ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
       BASE + PATH * 2 ^ arg.toNat ≤ fuel → st.pc = p.entry → st.x0 = arg →
       FrameBound stride st arg →
-      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
+      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel (mojo_res arg) st arg := by
   intro arg st fuel hfuel hpc hx0 hbnd hx30
   have key : ∀ m : Nat, ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
       arg.toNat = m → BASE + PATH * 2 ^ m ≤ fuel → st.pc = p.entry → st.x0 = arg →
       FrameBound stride st arg →
-      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
+      (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel (mojo_res arg) st arg := by
     intro m
     induction m using Nat.strongRecOn with
     | ind m ih =>
@@ -971,6 +998,39 @@ theorem dylib_export_contract_of_spec (image : DylibImage)
     (hspec : export_result_spec image export_ spec) (n : UInt64) :
     DylibExportContract (dylibExportProg image export_) spec n := by
   exact hspec n
+
+/-- **The guarded obligation.**  Like `export_result_spec`, but only for the
+    inputs that satisfy `pre`.  An export whose body has an overflow trap cannot
+    be stated over every `n`: on an overflowing input the trap's stop is not a
+    final state of the machine model, and the model's `svc` is a no-op, so the
+    unguarded claim would be false there.  `pre` is what the trap's guards say
+    the NORMAL path needs (no overflow), and the obligation is exactly as strong
+    as the normal path. -/
+def export_result_spec_under (pre : UInt64 → Prop) (image : DylibImage)
+    (export_ : DylibExport) (spec : UInt64 → UInt64) : Prop :=
+  ∀ (n : UInt64) (s : Arm64State), pre n →
+    runProg (dylibExportProg image export_) n = some s → s.x0 = spec n
+
+/-- The guarded contract a caller may use: on `pre`-inputs the export's result is
+    `obs`.  The guarded counterpart of `DylibExportContract`. -/
+def DylibExportContractUnder (p : Prog) (pre : UInt64 → Prop)
+    (obs : UInt64 → UInt64) (n : UInt64) : Prop :=
+  pre n → ∀ s, runProg p n = some s → s.x0 = obs n
+
+/-- The guarded obligation gives the guarded contract, with no new assumption. -/
+theorem dylib_export_contract_of_spec_under (image : DylibImage)
+    (export_ : DylibExport) (pre : UInt64 → Prop) (spec : UInt64 → UInt64)
+    (hspec : export_result_spec_under pre image export_ spec) (n : UInt64) :
+    DylibExportContractUnder (dylibExportProg image export_) pre spec n :=
+  fun hp s h => hspec n s hp h
+
+/-- The unguarded obligation is the guarded one with the trivial precondition.
+    Only exports with no trap may use it. -/
+theorem export_result_spec_of_true (image : DylibImage) (export_ : DylibExport)
+    (spec : UInt64 → UInt64)
+    (h : export_result_spec_under (fun _ => True) image export_ spec) :
+    export_result_spec image export_ spec :=
+  fun n s hr => h n s trivial hr
 
 /-- **The same, for a caller that has discharged the obligation.**  Stated over
     the machine's own run rather than `runProg`, so a proof that already has

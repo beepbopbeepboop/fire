@@ -56,3 +56,16 @@ int64_t mojo_list_get_int(void *lp, int64_t i)
     _TestList *l = lp;
     return (i >= 0 && i < l->n) ? l->d[i] : 0;
 }
+
+/* frame/cleanup slice hooks (fire_runtime.c has the real ones) */
+int   mojo_coro_frame_base(void)   { return 0; }
+int   mojo_coro_cleanup_base(void) { return 0; }
+void *mojo_coro_slice_save(int f, int c) { (void)f; (void)c; return 0; }
+void  mojo_coro_slice_restore(void *s) { (void)s; }
+int64_t (*_mojo_gen_state_hook)(int64_t) = 0;
+int64_t mojo_frame_for_gen(int64_t g, int64_t o, const char *n, const char *f, int64_t a, int64_t b)
+{ (void)g; (void)o; (void)n; (void)f; (void)a; (void)b; return 0; }
+int mojo_coro_slice_peek(void *s, const char **n, const char **f, int64_t *a, int64_t *b)
+{ (void)s; (void)n; (void)f; (void)a; (void)b; return 0; }
+void mojo_frame_set_resuming(int64_t g) { (void)g; }
+void mojo_exc_value_set(int64_t w) { (void)w; }

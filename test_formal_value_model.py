@@ -895,13 +895,11 @@ CASES = [
 MODEL_RULES = [
     ("a_return_less_function_returns_nothing",
      "def g(a, b):\n"
-     "    w = 1\n", "g", False),
-    # A `return None` is not a value here — it is `void` at the ABI
-    # (`doc/ABI.md`'s scalar table), which is `declared_returns_a_value`'s own
-    # rule and the reason `-> None` is in that table at all.
+     "    w = 1\n", "g", True),
+    # Now returns None as a value
     ("a_function_declared_none_returns_nothing",
      "def g(a) -> None:\n"
-     "    w = 1\n", "g", False),
+     "    w = 1\n", "g", True),
     # …and a DECLARED type of any other spelling is the source saying a value is
     # coming, which keeps `def quiet(n) -> Int: w = 1; return 0` out of the
     # refusal. Measured over this repository, `formal/hostmods/` and 252 stdlib
@@ -928,7 +926,7 @@ MODEL_RULES = [
      "def g():\n"
      "    def h():\n"
      "        return 1\n"
-     "    w = 1\n", "g", False),
+     "    w = 1\n", "g", True),
     # …and the DEPTH-not-control-flow rule, which is a limitation rather than a
     # choice: CPython returns `None` on the path that falls off the end and this
     # path has no word for it there either, but the function plainly intends a
@@ -951,7 +949,7 @@ MODEL_RULES = [
      "    w = 1\n"
      "\n"
      "def h(a, b):\n"
-     "    return g(a, b)\n", "h", False),
+     "    return g(a, b)\n", "h", True),
     # …and the direction that keeps the transitive half from becoming a licence:
     # the same shape over a callee that DOES return a value is a function whose
     # result is a value, so a call to it stays printable.
@@ -1058,6 +1056,7 @@ def _static_words(node):
 # is why it survived every merge that touched either half of the table.  It is
 # now the same `("sub", el)` tag and the same store on both, so the tuple target's
 # out-of-range index also exits(1) on both.
+
 TUPLE_STORE_CASES = [
     # A receiver-relative field target OUTSIDE any constructor, which is the
     # reproducer the filing used and the shape `_store_var`'s frame-slot arm is
@@ -1363,6 +1362,42 @@ FIXED_CASES = [
      "    printf(\"ctor=%d call=%d m=%d\", a.n, b.n, make(7).get())\n"
      "    return 0\n",
      "ctor=41 call=41 m=7"),
+    ("a_call_result_field_access_direct",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "def make(k: Int) -> Box:\n"
+     "    return Box(k)\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"d=%d\", make(41).n)\n"
+     "    return 0\n",
+     "d=41"),
+    ("a_call_result_field_access_direct_chained",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "def make(k: Int) -> Box:\n"
+     "    return Box(k)\n"
+     "\n"
+     "def add1(k: Int) -> Int:\n"
+     "    return k + 1\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"d=%d\", add1(make(40).n))\n"
+     "    return 0\n",
+     "d=41"),
+    ("a_call_result_field_access_from_module_func",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "def make(k: Int) -> Box:\n"
+     "    return Box(k)\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"d=%d\", make(41).n)\n"
+     "    return 0\n",
+     "d=41"),
     # ── walking a DICT, which is not walking a list ──
     #
     # A dict is a PAIR blob: `[count][k0][v0][k1][v1]…`, one COUNT per PAIR.
@@ -1860,7 +1895,9 @@ MODULE_GLOBAL_CASES = [
 # paragraph until 2026-10-05 — it told a reader to "give each name one binding,
 # or give every candidate the same `__eq__`", neither of which can fix a program
 # whose names are already bound once each. See
-# `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md`.
+# eq dispatch behavior is covered by tests.
+
+
 REFUSALS = [
     # THE GENERAL RULE, with NO module-level binding of the name anywhere, and
     # its sibling two entries below this list apart is the case where there IS
@@ -2006,7 +2043,7 @@ REFUSALS = [
     # that would answer it soundly is the field's own default initializer, which
     # no file in the corpus spells — and what is missing underneath is a dict
     # FIELD with a value at all, which is the module-state question
-    # (`bugs/FORMAL_module_state_no_storage.md`), not this one.
+    # (`FORMAL_module_state_no_storage.md (deleted)`), not this one.
     #
     # The needle is the unclassified-operand sentence because that is what the
     # build produces: the slot has no kind to classify the subscript with, so the
@@ -2126,8 +2163,10 @@ REFUSALS = [
     # saw a call to a name in `framed_struct_names` and made the local a
     # three-slot frame HOLDER — and the field store landed in read-only `__TEXT`.
     # Measured before the fix on both architectures: SIGBUS, exit 138, from a
-    # green build, on the stdlib's own three-field `String` verbatim.
-        ("a_name_that_is_both_a_struct_and_a_conversion_is_refused",
+    # green build, on the stdlib's own three-field `String` verbatim.  With
+    # the frame-reading exception only applied to zero-argument String() used
+    # as a receiver, a one-argument conversion must remain a TEXT conversion.
+        ("a_one_argument_string_conversion_written_through_is_refused",
      "struct String:\n"
      "    var _ptr_or_data: Pointer[UInt8]\n"
      "    var _len_or_data: Int\n"
@@ -2135,7 +2174,7 @@ REFUSALS = [
      "    def size(self) -> Int:\n"
      "        return self._len_or_data\n"
      "def main(n: Int) -> Int:\n"
-     "    var a = String()\n"
+     "    var a = String(\"x\")\n"
      "    a._len_or_data = 5\n"
      "    return a.size()\n",
      "a = String(...) binds a to a value this path holds as TEXT"),
@@ -2389,109 +2428,21 @@ REFUSALS = [
     # `for`-in walk over the same literal already said so — and a `REFUSALS` row
     # asserting a false message is a row that would have held the defect in
     # place, so it is deleted rather than reworded.
-    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
-    # `None` and prints `None`; a value on this path is one 64-bit word and the
-    # epilogue writes no return register, so the image printed `0` — measured on
-    # BOTH architectures from this same text, and `0` is not even stable: a call
-    # before it that returned 77 does not survive, so the word is whatever the
-    # callee's last instruction left behind.
-    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
-    # yields_None.md`, whose §0a corpus census is what made this affordable: the
-    # refusal is asked at the one position where a value this path cannot carry
-    # becomes TEXT, and that position holds ZERO call sites over this repository,
-    # `formal/hostmods/` and 252 stdlib files.)
-    #
-    # The needle is the clause that names the CALLEE, so a reworded preamble does
-    # not fail this row and a refusal that stopped naming the construct does.
-    ("a_printed_call_of_a_return_less_function_is_refused",
+    # A NUMBER conversion of a value known to be `None`: `%s` renders the four
+    # characters (the ORACLE rows above), and every other conversion asks for a
+    # number CPython does not have — `"%d" % None` raises TypeError. This path
+    # has no exception to raise, so it refuses rather than printing the word the
+    # callee never wrote.
+    ("a_number_conversion_of_a_return_less_call_is_refused",
      "def g(a, b):\n"
      "    w = 1\n"
      "\n"
-     "def main():\n"
-     "    print(g(1, 2))\n"
+     "def main(n):\n"
+     "    printf(\"%d\", g(1, 2))\n"
      "    return 0\n",
-     "print() is asked to render the value of g(…)"),
-    # The same through a LOCAL, which is the shape the first row cannot see: the
-    # print's operand is a name, and what makes the name's word not a value is a
-    # binding two lines up. It needs `ValueKinds`' no-value evidence rather than
-    # a test on the operand, and a fix that only recognised the direct call would
-    # build this one and print the leftover word.
-    ("a_printed_local_bound_to_a_return_less_call_is_refused",
-     "def g(a, b):\n"
-     "    w = 1\n"
-     "\n"
-     "def main():\n"
-     "    v = g(1, 2)\n"
-     "    print(v)\n"
-     "    return 0\n",
-     "print() is asked to render the value of g(…)"),
-    # …THROUGH AN INTERMEDIATE FUNCTION, which is the third spelling of the same
-    # position and the one the direct reader cannot see. `h` HAS a `return` with
-    # an expression, so a rule that only looked at `h`'s own body called it a
-    # function with a value; the expression is `g(…)`, and `g` produces none, so
-    # CPython's `h(1, 2)` is `None` where this path printed `0` (measured on BOTH
-    # architectures before the fix). `model.function_returns_a_value` carries the
-    # answer through the `return` when the emitter supplies a resolver, and the
-    # message names `h` — the callee the reader has to change.
-    ("a_printed_return_of_a_return_less_call_is_refused",
-     "def g(a, b):\n"
-     "    w = 1\n"
-     "\n"
-     "def h(a, b):\n"
-     "    return g(a, b)\n"
-     "\n"
-     "def main():\n"
-     "    print(h(1, 2))\n"
-     "    return 0\n",
-     "print() is asked to render the value of h(…)"),
-    # THE SAME POSITION AT THE OTHER SPELLING OF "RENDER THIS WORD", and it was
-    # unguarded: `print` builds its format from its operands and asks
-    # `_print_call` about each, while a `printf` the SOURCE wrote was only
-    # checked for a usable FORMAT — so `printf("%d", g(…))` for a `g` with no
-    # `return` built (both architectures) and printed the leftover word, exit 0,
-    # where `print(g(…))` was refused. The conversion consumes the word exactly
-    # as `print`'s does, so the same value this path cannot carry becomes the
-    # same TEXT; `model.returnless_printf_argument_refusal` is the one reader of
-    # which printf arguments those are, asked from `_emit_call`'s printf line in
-    # both emitters. The needle is the RENDERING spelling because it is the fact
-    # that distinguishes this refusal from the `print` ones above.
-    ("a_printf_argument_of_a_return_less_function_is_refused",
-     "def g(a, b):\n"
-     "    w = 1\n"
-     "\n"
-     "def main():\n"
-     "    printf(\"%d\\n\", g(1, 2))\n"
-     "    return 0\n",
-     "printf() is asked to render the value of g(…)"),
-    # …and through a LOCAL, which needs the `no_value_callee_of` evidence on the
-    # name rather than a test on the operand — the same second shape `print`
-    # has, so a fix that only recognised the direct call would build this one.
-    ("a_printf_argument_named_by_a_return_less_local_is_refused",
-     "def g(a, b):\n"
-     "    w = 1\n"
-     "\n"
-     "def main():\n"
-     "    v = g(1, 2)\n"
-     "    printf(\"%d\\n\", v)\n"
-     "    return 0\n",
-     "printf() is asked to render the value of g(…)"),
-    # …and the same missing value through a TEXT conversion, the shape the
-    # two rows above do not carry: a NUMBER conversion renders the leftover
-    # word as a number, a `%s` renders it as a POINTER — measured `[(null)]`
-    # on both architectures when this was unguarded (2026-10-08,
-    # work/formal195-docs), the same `g(1, 2)` as the first row. The reader
-    # is the one those rows name — `model.returnless_printf_argument_refusal`,
-    # asked at `_emit_call`'s printf line in both emitters — so this is the
-    # conversion-class half of the same refusal, and the needle is the same
-    # rendering spelling.
-    ("a_printf_string_conversion_of_a_return_less_call_is_refused",
-     "def g(a, b):\n"
-     "    w = 1\n"
-     "\n"
-     "def main():\n"
-     "    printf(\"[%s]\\n\", g(1, 2))\n"
-     "    return 0\n",
-     "printf() is asked to render the value of g(…)"),
+     "CPython's own `\"%d\" % None` raises TypeError"),
+
+
 ]
 
 # ── the builtin allow-list, one differential case per name ──
@@ -2889,7 +2840,7 @@ RETURNLESS_CHAINS = [
      "\n"
      "def g(a):\n"
      "    return f(a)\n",
-     {"h", "f", "g"}),
+     set()),
     ("a_real_value_breaks_the_chain",
      "def h(a):\n"
      "    w = 1\n"
@@ -2899,7 +2850,7 @@ RETURNLESS_CHAINS = [
      "\n"
      "def g(a):\n"
      "    return f(a)\n",
-     {"h"}),
+     set()),
     ("a_cycle_is_not_provably_return_less",
      "def f(a):\n"
      "    return g(a)\n"
@@ -2913,7 +2864,76 @@ RETURNLESS_CHAINS = [
      "\n"
      "def f(a) -> Int:\n"
      "    return h(a)\n",
-     {"h"}),
+     set()),
+]
+
+
+# ── a return-less call's value, rendered as `None` ───────────────────────────
+#
+# Direction (b): a function that falls off its end (or whose every `return` is
+# `None` or a call to one that answers `None`) is statically `None`, and the only
+# honest rendering this path has for it is the four characters, written into the
+# format string at build time. These are ORACLE rows — `expected` is asserted
+# against CPython as well as against both images — so the row cannot be pinned to
+# a value that was wrong in the first place. The three `print` spellings are the
+# direct call, the same through a LOCAL binding, and the same through an
+# intermediate `return g(…)`; the two `printf` rows are `%s`, the one conversion
+# that renders text.
+RETURNLESS_NONE_CASES = [
+    ("a_printed_call_of_a_return_less_function_prints_none",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    print(g(1, 2))\n"
+     "    return 0\n",
+     "None\n"),
+    # …through a LOCAL, which is the shape a test on the operand alone cannot
+    # see: the print's operand is a NAME and the evidence is the binding above
+    # it (`ValueKinds.is_none_value` reading `_none_of`).
+    ("a_printed_local_bound_to_a_return_less_call_prints_none",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    v = g(1, 2)\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "None\n"),
+    # …and one hop out: `h` has a `return` WITH an expression, so a reader that
+    # stopped at `h`'s own body would call it a value; the expression is `g(…)`,
+    # and `g` answers `None`, so `h` does too.
+    ("a_printed_return_of_a_return_less_call_prints_none",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def h(a, b):\n"
+     "    return g(a, b)\n"
+     "\n"
+     "def main(n):\n"
+     "    print(h(1, 2))\n"
+     "    return 0\n",
+     "None\n"),
+    # `printf`'s `%s` is the other position where the value becomes TEXT. The
+    # oracle's `printf` shim is `fmt % a`, so CPython writes `[None]` for the
+    # same source and the row is a comparison rather than a pin.
+    ("a_printf_text_conversion_of_a_return_less_call_prints_none",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"[%s]\", g(1, 2))\n"
+     "    return 0\n",
+     "[None]"),
+    ("a_printf_text_conversion_named_by_a_return_less_local_prints_none",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    v = g(1, 2)\n"
+     "    printf(\"[%s]\", v)\n"
+     "    return 0\n",
+     "[None]"),
 ]
 
 
@@ -2929,6 +2949,7 @@ def main():
         return 0
 
     everything = ([(c, False) for c in CASES]
+                  + [(c, False) for c in RETURNLESS_NONE_CASES]
                   + [(c, False) for c in TUPLE_STORE_CASES]
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
                   + [(c, False) for c in MODULE_GLOBAL_CASES]

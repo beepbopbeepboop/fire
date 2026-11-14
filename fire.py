@@ -116,7 +116,7 @@ Formal backend notes:
 
 Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
   -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
-  -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)
+  -g -g0 -g1 -g2 -g3               Debug info level (build default -g2; -g3 unsupported by the toolchain's debug linker)
 
 Backend selector (may appear anywhere; selects the codegen path):
   --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)
@@ -704,6 +704,26 @@ def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
     return False
 
 
+def _format_error_message(e):
+    """The top-level error text for an uncaught interpreter exception:
+    str(e), plus — for the exception types CPython 3.15's improved error
+    messages extend (AttributeError, ModuleNotFoundError, a `from X import
+    Y` ImportError, NameError) — the 3.15-style suggestion, computed at
+    PRINT time from the fields the exception carries (myinterpreter's
+    error_suggestion_suffix, mirroring CPython's Lib/traceback.py
+    `_compute_suggestion_error` for all four branches). This is how an
+    uncaught `x.push(4)` reads `... no attribute 'push'. Did you mean
+    '.append'?` exactly as CPython 3.15 prints it; an exception caught in
+    user code never goes through here and stays plain, the same
+    caught-plain/uncaught-suggested split CPython measures."""
+    msg = str(e)
+    from myinterpreter import error_suggestion_suffix
+    suffix = error_suggestion_suffix(e)
+    if suffix:
+        msg = msg + suffix
+    return msg
+
+
 def interpret_and_execute(src_code, filename=None, argv=None):
     """Runs the interpretation in a worker thread with a large native stack.
 
@@ -767,9 +787,28 @@ def interpret_and_execute(src_code, filename=None, argv=None):
             text = str(e)
             exit_code.append(int(text) if text.lstrip('-').isdigit() else 0)
         except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
+            base_msg = str(e)
+            msg = _format_error_message(e)
+            tb_lines = None
+            if msg != base_msg:
+                # A 3.15 suggestion was appended — CPython prints it on the
+                # exception's own final line, so the traceback's last line
+                # must carry the same text (on a 3.15 host CPython's own
+                # traceback module may have already appended one; replacing
+                # the whole line keeps the `Error:` line and this one
+                # agreeing whatever host is running us).
+                import traceback
+                tb_lines = traceback.format_exception(e)
+                if tb_lines:
+                    tb_lines.pop()
+                    tb_lines.append(f"{type(e).__name__}: {msg}\n")
+            print(f"Error: {msg}", file=sys.stderr)
             import traceback
-            traceback.print_exc(file=sys.stderr)
+            if tb_lines is None:
+                traceback.print_exc(file=sys.stderr)
+            else:
+                for line in tb_lines:
+                    print(line, end='', file=sys.stderr)
             # An uncaught interpreter exception is a failed run, not a
             # successful one — without this, the worker thread finishes
             # "normally" after swallowing the exception, exit_code stays
@@ -892,7 +931,7 @@ def run_repl():
                     if result is not None and not isinstance(result, str):
                         print(result)
             except Exception as e:
-                print("Error:", e)
+                print("Error:", _format_error_message(e))
 
         except KeyboardInterrupt:
             print("\nInterrupt")
@@ -999,7 +1038,7 @@ def build_executable(input_file: str, src: str, output: str = None,
     # `def main(): print(42)` under MOJO_NO_SHIM=1. Zero-init makes the read
     # well-defined (NULL), which the codegen's own `_ptr_slot_in_range`
     # guard already treats as "no known type" and falls back on safely.
-    cg_flags = [opt_flag or "-O0", debug_flag or "-g3", "-ftrivial-auto-var-init=zero"]
+    cg_flags = [opt_flag or "-O0", debug_flag or "-g2", "-ftrivial-auto-var-init=zero"]
     try:
         import gimple_codegen
 
@@ -1352,6 +1391,21 @@ def main():
         sys.exit(2)
     formal_test_input = _pop_test_input(sys.argv)
 
+    # precompile: parse a package directory and write a .mojoc signature
+    # artifact (no codegen/compilation). Used by the mojoc import diagnostics
+    # path to carry signatures across a source-deleted boundary.
+    if sys.argv[1] == 'precompile':
+        sys.argv.pop(1)
+        pre_out = _pop_flag_value(sys.argv, '-o')
+        pre_inputs = [a for a in sys.argv[1:] if not a.startswith('-')]
+        if not pre_inputs or pre_out is None:
+            print(f"{_tool_name()} precompile: usage: precompile <pkg-dir> -o <out>.mojoc",
+                  file=sys.stderr)
+            sys.exit(2)
+        from mojo.middle import mojoc_artifact
+        mojoc_artifact.write_artifact(pre_inputs[0], pre_out)
+        return
+
     # Check for dylib command: compile one or more .mojo LIBRARY modules
     # (no main()/top-level entry point needed — same "library module" shape
     # every stdlib file already compiles as) into a single, standalone,
@@ -1472,6 +1526,7 @@ def main():
 
     dump_full = '--dump-full' in sys.argv
     dump = '--dump' in sys.argv
+    dump_serial = '--serial' in sys.argv
     # Strip flags from sys.argv so input_file = sys.argv[1] works.
     # sys.argv.remove() is broken in the compiled binary (list method
     # dispatch fails), so rebuild the list instead -- via an explicit
@@ -1490,7 +1545,7 @@ def main():
     if dump_full or dump:
         _filtered_argv = []
         for a in sys.argv:
-            if a not in ('--dump-full', '--dump'):
+            if a not in ('--dump-full', '--dump', '--serial'):
                 _filtered_argv.append(a)
         sys.argv = _filtered_argv
 
@@ -1567,12 +1622,12 @@ def main():
             print("✓ Generated " + basename + ".ci (arm64 backend listing)", file=sys.stderr)
             return
         import gimple_codegen
-        c_code = gimple_codegen.compile_to_gimple(
+        c_code = gimple_codegen.compile_to_gimple_parallel_frozen(
             src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
         f_out = open(basename + ".ci", "w")
         f_out.write(c_code)
         f_out.close()
-        print("✓ Generated " + basename + ".ci (transitive closure)", file=sys.stderr)
+        print("✓ Generated " + basename + ".ci", file=sys.stderr)
         return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files

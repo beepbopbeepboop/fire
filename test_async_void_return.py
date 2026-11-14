@@ -80,7 +80,7 @@ def _build_and_run(mojo_src: str) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-    # The companion .cpp is the C++20-coroutine backend's output (MOJO_CORO=cpp,
+# The companion .cpp is the C++20-coroutine backend's output (MOJO_CORO=cpp,
     # the escape hatch). Pinned around this one compile, the way test_taskgroup.py
     # does it process-wide, because the stack-switch default never emits one.
     with coro.pinned('cpp'):
@@ -246,6 +246,36 @@ def main() raises:
           out == "idx 0\nidx 1\nidx 2\n", detail=repr(out))
 
 
+def test_cpp_harness_pins_its_own_backend():
+    """Regression pin for the gate job's three failures: importing this
+    file's stack-switch harness (test_coro_future_await) used to leave
+    MOJO_CORO=stackswitch set process-wide, so the cpp-path cases above were
+    lowered by the A3 backend — no generated .cpp at all for a void async
+    function, and stack-switch runtime symbols in a harness that links only
+    fire_runtime/fire_async_runtime. The harness must select the backend it
+    names regardless of the caller's environment."""
+    src = """\
+import asyncio
+
+async def noop() -> None:
+    print(7)
+
+def main() raises:
+    asyncio.run(noop())
+"""
+    prev = os.environ.get('MOJO_CORO')
+    os.environ['MOJO_CORO'] = 'stackswitch'
+    try:
+        out = _build_and_run(src)
+    finally:
+        if prev is None:
+            os.environ.pop('MOJO_CORO', None)
+        else:
+            os.environ['MOJO_CORO'] = prev
+    check("cpp-path harness compiles the cpp backend even under MOJO_CORO=stackswitch",
+          out == "7\n", detail=repr(out))
+
+
 def _async_refusal(src: str) -> str | None:
     # Compile-only: the refusal is raised by the async lowering itself, so
     # no gcc/link is needed to observe it. None means the module compiled.
@@ -368,6 +398,56 @@ def test_async_same_kind_returns_still_compile():
            '    print(0)\n')
     msg = _async_refusal(src)
     check('async same-kind returns still compile', msg is None, detail=repr(msg))
+
+
+def test_lift_refuses_nested_async_def_closing_over_comptime_callable_param():
+    """Regression pin for the async-lift enqueue_cpu unresolved-callee bug:
+    a nested `async def` that references the enclosing method's function-typed
+    comptime bracket parameter (`func: def() capturing -> None`) must NOT be
+    lifted to module level as `__lift_<Owner>_<method>_<name>` — the lifted
+    copy would leave `func` bound to nothing, and the coroutine body checker
+    refuses the module with "a call to unresolved callee 'func(...)'". It
+    must stay nested, where the nested-async-closure path captures the
+    callable as a declared callable-value local."""
+    from fire_compiler import Parser, py_tokenize_named
+    src = """\
+struct Ctx:
+    var _handle: Int
+    def __init__(out self):
+        self._handle = 0
+
+    def enqueue_cpu_function[
+        func: def() capturing -> None,
+    ](self) raises:
+        async def wrapper() capturing -> None:
+            func()
+"""
+    from fire_compiler import FunctionDef
+    stmts = Parser(py_tokenize_named(src, '<lift-pin>')).parse_module()
+    coro._lift_capture_free_nested_scopes(stmts)
+
+    def all_defs(ss):
+        for st in ss:
+            if isinstance(st, FunctionDef):
+                yield st
+                yield from all_defs(st.body)
+            elif hasattr(st, 'methods') and st.methods:
+                yield from all_defs(st.methods)
+            elif hasattr(st, 'body') and isinstance(st.body, list):
+                yield from all_defs(st.body)
+
+    names = [d.name for d in all_defs(stmts)]
+    lifted = [n for n in names if n.startswith('__lift_')]
+    if lifted or 'wrapper' not in names:
+        # raise (not just check()) so a failure is visible to BOTH runners:
+        # this file is registered as `python3 test_async_void_return.py`
+        # (run_all counts check() failures), but under pytest only an
+        # exception fails the test.
+        raise AssertionError(
+            f"nested async def closing over a comptime callable param was "
+            f"lifted out of its method (or dropped): {names}")
+    check("nested async def closing over a comptime callable param is NOT lifted to __lift_*",
+          True, detail=repr(names))
 
 
 def run_all():

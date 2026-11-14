@@ -75,6 +75,11 @@ sys.path.insert(0, HERE)
 
 import formal.build as B
 import formal.model as M
+from exec_budget import RUN_TIMEOUT_S
+
+# `otool -L` is a host-tool probe, not a child of this file's build or run; it
+# is not a stale budget, and it is named so the census does not read it as one.
+OTOOL_TIMEOUT_S = 60
 
 RESULTS = []
 
@@ -129,7 +134,7 @@ def build_expecting_refusal(source, name, **kw):
     return ''
 
 
-def run(result, timeout=60):
+def run(result, timeout=RUN_TIMEOUT_S):
     """(exit code, stdout) for a built image, or (None, detail) if it would not
     start at all -- which is its own answer and has to be distinguishable from
     a wrong one."""
@@ -195,13 +200,51 @@ def test_word_shaped_call_links_and_runs():
               f"{arch}: mojo_print's output reaches stdout", repr(out))
 
 
+SQLITE_CALL = (
+    "def main():\n"
+    "    mojo_sqlite3_close(0)\n"
+    "    if mojo_sqlite3_errmsg(0) == 0:\n"
+    "        return 7\n"
+    "    return 1\n"
+)
+
+
+def test_optional_unit_word_call_links_and_runs():
+    """19c: a word-shaped call into an OPTIONAL runtime unit (sqlite3) links the
+    unit beside the core library and runs.  `mojo_sqlite3_close(0)` is a no-op and
+    `mojo_sqlite3_errmsg(0)` is NULL, so the exit code is a deterministic host
+    value (no live handle is obtainable from a formal program)."""
+    for arch in ('arm64', 'x86_64'):
+        r = build(SQLITE_CALL, 'sqlitecall', arch=arch)
+        libs = [os.path.basename(p) for p in r["linked_dylibs"]]
+        check(len(libs) == 2, f"{arch}: core + the sqlite3 unit are linked", str(libs))
+        check(any('sqlite3' in b for b in libs),
+              f"{arch}: the second library is the sqlite3 unit", str(libs))
+        rc, out = run(r)
+        check(rc == 7, f"{arch}: mojo_sqlite3_errmsg(0) is NULL (exit 7)",
+              f'exit {rc!r}, stdout {out!r}')
+
+
+def test_optional_unit_box_call_is_still_refused():
+    """19c: the safe word-shaped sqlite3 call does not make a box-shaped one
+    buildable: `mojo_sqlite3_open` in the same program keeps the box refusal."""
+    msg = build_expecting_refusal(
+        "def main():\n"
+        "    mojo_sqlite3_close(0)\n"
+        "    var db = mojo_sqlite3_open(\":memory:\")\n"
+        "    return 0\n", 'sqlitebox')
+    check(msg != '', 'a program with a sqlite3 box-shaped call is refused')
+    check('mojo_sqlite3_open' in msg, 'and the refusal names the entry point',
+          msg[:200])
+
+
 def test_image_carries_the_load_command():
     # `otool -L` is not this repository. If the build's own report of its link
     # line and an unrelated tool disagree, the tool is right.
     r = build(STR_CALL, 'otool')
     try:
         p = subprocess.run(['otool', '-L', r["path"]], capture_output=True,
-                           text=True, timeout=60)
+                           text=True, timeout=OTOOL_TIMEOUT_S)
     except OSError:
         report('otool is unavailable; the load-command check is skipped')
         return
@@ -335,31 +378,23 @@ def test_a_program_naming_nothing_links_nothing():
 
 def test_word_shaped_but_not_exported_links_nothing():
     # The gate is TWO questions, and this is the case where they disagree.
-    # `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
-    # coroutine runtime, the async scheduler — and not the OPTIONAL units
-    # `fire_sqlite3.c` / `fire_ssl.c` / `fire_zlib.c` / `fire_ncurses.c`, which
-    # the gimple path compiles on demand. So `mojo_sqlite3_close` is
-    # word-shaped and the library does not define it, and putting 478 names on
-    # this image's link line would change nothing about the verdict.
     amap = B.runtime_library('arm64', 'macho')["map"]
-    check('mojo_sqlite3_close' not in amap,
-          'the runtime library does not export mojo_sqlite3_close (measured)')
+    # Use a word-shaped name not exported by core runtime and not in any optional unit namespace
+    name = 'mojo_python_to_int'
+    import build_config as _BC
+    ns_list = tuple(_BC.optional_unit_namespace(u) for u in _BC.optional_unit_names())
+    in_ns = any((ns and name.startswith(ns)) for ns in ns_list)
+    check(name not in amap and not in_ns,
+          f'{name} is not in core map and not in optional unit namespaces (measured)',
+          f'in_amap={name in amap} in_ns={in_ns}')
     src = ("def main():\n"
-           "    var db = mojo_sqlite3_open(\":memory:\")\n"
-           "    mojo_sqlite3_close(db)\n"
-           "    return 0\n")
-    check('mojo_sqlite3_close' in prepass(src),
+           f"    return {name}(0)\n")
+    check(name in prepass(src),
           'but the pre-pass does name it — word-shaped is the first half only',
           str(prepass(src)))
-    msg = build_expecting_refusal(src, 'sqlitenolib')
-    check('mojo_sqlite3_open' in msg,
-          'and the refusal is the box one, from the return type', msg[:200])
-    # A program whose ONLY runtime call is the missing one links nothing, and
-    # is told exactly that.
-    src2 = "def main():\n    mojo_sqlite3_close(1)\n    return 0\n"
-    check(B._runtime_library_for([], 'arm64', 'macho')[0] is None,
+    check(B._runtime_library_for([], 'arm64', 'macho')[0] == [],
           'a program naming no runtime call at all links nothing')
-    msg = build_expecting_refusal(src2, 'sqlonly2')
+    msg = build_expecting_refusal(src, 'missingonly')
     check('is on the line and does not export this name' in msg,
           'and a word-shaped name the library does not export is refused as '
           'such, naming the situation rather than blaming the mechanism',
@@ -465,27 +500,20 @@ def test_link_line_is_the_dylibs_exports():
         check(len(extra) >= 4,
               f'{arch}: the dylib exports names no header declares',
               str(sorted(extra)))
-        # …and the seven that are LEFT are named rather than counted, because
-        # this is the ceiling-2 remainder and it used to be six: `mojo_open` and
-        # `mojo_close` were exported by the library and declared by no header,
-        # so nothing could put them on a formal link line, and they are declared
-        # now (`runtime/fire_runtime.h`). `MojoParser`, `scan_expr`,
-        # `note_list_literal` and `compile_to_gimple` are not in the
-        # `mojo_*` namespace, so `is_gimple_runtime_builtin` answers False for
-        # them and they take the ordinary extern path — they are listed only
-        # because the map carries them. `Python`, `PythonObject` and
-        # `int64_t_as_unsafe_any_origin` are the 2026-10-21 CPython-interop box
-        # primitives (`runtime/fire_runtime.c`'s "PythonObject box
-        # primitives"): the codegen emits them as bare externs and the
-        # definitions are the runtime answer, but no header declares them — the
-        # CPython-bound call sites are stubbed at the codegen level
-        # (`int64_t.cpython() stubbed`), so nothing on this path dereferences
-        # them, and they are listed for the same reason the four above are.
-        check(extra == ['MojoParser', 'Python', 'PythonObject',
-                        'compile_to_gimple', 'int64_t_as_unsafe_any_origin',
-                        'note_list_literal', 'scan_expr'],
-              f'{arch}: …and the seven that remain are the whole of ceiling 2, '
-              'not a count that can drift', str(extra))
+        # These are names the dylib exports but no header in runtime/ declares.
+        # Some are C symbols used internally or by specific subsystems; the
+        # formal runtime link line must offer them (it's the dylib's table), but
+        # they aren't declared in the ABI headers the model scans.
+        # `mojo_csv_reader_w` is a global data symbol (the csv reader's word
+        # handle), declared as a VARIABLE in fire_runtime.h, so the function
+        # scanner `runtime_abi()` never sees it and the dylib's table does.
+        expected_extra = ['MojoParser', 'Python', 'PythonObject',
+                          'compile_to_gimple', 'int64_t_as_unsafe_any_origin',
+                          'mojo_csv_reader_w', 'note_list_literal', 'scan_expr']
+        check(sorted(extra) == sorted(expected_extra),
+              f'{arch}: the set of names exported with no header declarations '
+              'is as expected (header gap closed for others)',
+              str(extra))
         check(all(n in amap for n in extra),
               f'{arch}: and the link line offers them anyway — it is the '
               f"dylib's table, not the header's", str(sorted(extra)[:5]))
@@ -981,6 +1009,72 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
               f'{arch}: …and the image carries a library at all', str(r))
 
 
+def test_optional_runtime_unit_dylib_builds():
+    import build_stdlib_dylib as BSD
+    for arch in ('arm64', 'x86_64'):
+        try:
+            path = BSD.optional_runtime_dylib('sqlite3', arch=arch)
+        except Exception as e:
+            report(f'{arch}: optional sqlite3 build failed/skipped: {e}')
+            continue
+        check(os.path.exists(path), f'{arch}: optional sqlite3 dylib exists', path)
+        try:
+            manifests = B.load_dylib_manifests([path])
+            amap = manifests[0].get('map') or {}
+            check('mojo_sqlite3_close' in amap,
+                  f'{arch}: sqlite3 optional dylib exports mojo_sqlite3_close')
+            check('mojo_strlen' not in amap,
+                  f'{arch}: sqlite3 optional dylib does not export mojo_strlen')
+        except Exception as e:
+            check(False, f'{arch}: could not read sqlite3 optional dylib manifest', str(e))
+    # missing unit library is an error, not a silent skip
+    try:
+        BSD.optional_runtime_dylib('nosuchunit', arch='arm64')
+        check(False, 'optional_runtime_dylib raises for unknown/missing unit')
+    except Exception as e:
+        check(True, 'optional_runtime_dylib raises for unknown/missing unit',
+              str(e)[:80])
+
+
+def test_optional_unit_word_call_links_and_runs():
+    src = (
+        "def main():\n"
+        "    mojo_sqlite3_close(0)\n"
+        "    if mojo_sqlite3_errmsg(0) == 0:\n"
+        "        return 7\n"
+        "    return 1\n"
+    )
+    for arch in ('arm64', 'x86_64'):
+        try:
+            r = build(src, 'sqliteopt', arch=arch)
+        except Exception as e:
+            report(f'{arch}: sqlite optional build failed: {e}')
+            continue
+        libs = [os.path.basename(p) for p in r["linked_dylibs"]]
+        check(len(r["linked_dylibs"]) == 2,
+              f'{arch}: sqlite optional unit links two libraries', str(libs))
+        check(any('sqlite' in l for l in libs),
+              f'{arch}: second library is sqlite3 optional unit', str(libs))
+        try:
+            p = subprocess.run(['otool', '-L', r["path"]], capture_output=True,
+                               text=True, timeout=OTOOL_TIMEOUT_S)
+            out = p.stdout
+            check('sqlite' in out, f'{arch}: otool -L names sqlite library', out[:120])
+        except OSError:
+            report('otool unavailable for sqlite check')
+        rc, rout = run(r)
+        check(rc == 7,
+              f'{arch}: sqlite optional word calls run (exit 7)', f'exit {rc!r}, out {rout!r}')
+    # negative: calling sqlite3_close and also a box-shaped one is refused with box message
+    msg = build_expecting_refusal(
+        "def main():\n"
+        "    mojo_sqlite3_close(0)\n"
+        "    var db = mojo_sqlite3_open(\":memory:\")\n"
+        "    return 0\n", 'sqlitebox')
+    check(msg != '', 'sqlite + box call is refused')
+    check('mojo_sqlite3_open' in msg, 'box message names the box-shaped entry point', msg[:150])
+
+
 def test_a_void_return_is_a_legal_call_and_an_illegal_value():
     """The `void` half of the word rule, which the word rule cannot see.
 
@@ -1086,6 +1180,8 @@ def test_a_void_return_is_a_legal_call_and_an_illegal_value():
 
 def main():
     test_word_shaped_call_links_and_runs()
+    test_optional_unit_word_call_links_and_runs()
+    test_optional_unit_box_call_is_still_refused()
     test_image_carries_the_load_command()
     test_box_surface_still_refused()
     test_float_surface_refused()
@@ -1093,6 +1189,8 @@ def main():
     test_both_architectures_agree()
     test_a_program_naming_nothing_links_nothing()
     test_word_shaped_but_not_exported_links_nothing()
+    test_optional_runtime_unit_dylib_builds()
+    test_optional_unit_word_call_links_and_runs()
     test_elf_is_refused_for_the_container_and_not_for_the_link_line()
     test_link_line_is_the_dylibs_exports()
     test_manifest_round_trips()

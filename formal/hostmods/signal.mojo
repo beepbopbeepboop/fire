@@ -1,5 +1,7 @@
 """signal.mojo — the signal NUMBER VOCABULARY, for the formal backend.
 
+Status convention: hoststatus.mojo.
+
 `formal/imports.py` resolves an import in four passes and the FIRST is "a Mojo
 source `<name>.mojo` in a search root WINS OUTRIGHT, even over the host-module
 list". This file is that source for the name `signal`, so `import signal` is no
@@ -31,9 +33,8 @@ the first because it is the one a program READS.
     edited to use. `formal/hostmods/ast.mojo` says the opposite about its own
     literals — that they "are NOT importable from it" — and that is still true
     of a module that does not also declare a public function: a dylib with
-    nothing but constants cannot be linked at all
-    (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`), and
-    `strsignal` below is what makes this one linkable.
+    nothing but constants cannot be linked at all, and `strsignal` below is what
+    makes this one linkable.
   * `strsignal(sig)` is the C library's own `strsignal(3)`, called through the
     same extern-call path `formal/hostmods/sys.mojo` documents for `exit`. It is
     not a table of 31 strings, which is the shape that would have rotted: this
@@ -76,7 +77,7 @@ WHAT IS NOT HERE, AND WHY
   * `alarm`, `setitimer`, `getitimer` — an ITIMER the kernel arms against this
     process. `getitimer` is the sharpest omission: its answer is a
     `(delay, interval)` PAIR, and a pair is a frame-allocated blob that dies on
-    return (`bugs/FORMAL_time_struct_shaped_answers.md` says the same about
+    return (`(time struct shapes now implemented)` says the same about
     `time.get_clock_info`). `alarm(seconds)` alone would return a scalar and be
     the more useful of the two, and is left out for a reason of its own that is
     not capability: the name `alarm` is also the C library function that
@@ -107,7 +108,9 @@ THE TWO THINGS THAT ARE NOT QUITE CPYTHON, STATED HERE
     is `int.__str__`, so a plain `int` agrees with the host on every read an
     `int` can express. `.name` is the one it cannot, and it is above.
   * `strsignal` and `raise_signal` return 0 where CPython returns `None`.
-    `None` folds to the word 0 on this path (`formal/model.py`, `NONE_WORD`).
+    `None` folds to the word 0 on this path (`formal/model/frames.py`, `NONE_WORD`).
+
+Status convention: hoststatus.mojo.
 """
 
 # ── the signal numbers ──────────────────────────────────────────────────────

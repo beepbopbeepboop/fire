@@ -31,7 +31,12 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.abspath(__file__))
-CAST_RE = re.compile(r'\((?:MojoList|MojoDict|MojoSet|MojoBytes) \*\)')
+# A cast is always followed by its operand. `(MojoSet *);` is the parameter list
+# of a one-parameter PROTOTYPE (`static char * _mojo_repr_set (MojoSet *);`), not
+# a cast, so a `;` right after the paren is excluded -- which removes the
+# asymmetry the ledger below records (one-parameter prototypes counted, the
+# `(MojoList *, MojoDict *)` ones not).
+CAST_RE = re.compile(r'\((?:MojoList|MojoDict|MojoSet|MojoBytes) \*\)(?!\s*;)')
 
 
 def strip_prose(src: str) -> str:
@@ -383,7 +388,43 @@ def strip_prose(src: str) -> str:
 # measured registry dispatch -- the "kind proven by a measured dispatch"
 # class this ledger records, not a static guess, and the chokepoint cannot
 # serve a template string.
-BASELINE_COUNT = 27
+#
+# 27 -> 24 (2026-10-31): the 14 casts added since 37e8c2a2 were all C++ TEXT in
+# the coroutine backend (the `_W`/`_MjWord` word-conversion operators, three
+# `(MojoList *)(intptr_t)` slice/yield/contains casts) plus two `(MojoDict *)0`
+# NULLs. They are now composed in ONE place, `emit_resolve.cpp_container_cast_prefix`
+# / `container_null` / `cpp_word_container_operator` (reached through GimpleGen
+# delegates), which this test exempts, and the two duplicate operator lists in
+# cpp_core.py and module_gen.py share it. Generated C++ is byte-identical.
+# The one-parameter prototype `_mojo_repr_set (MojoSet *);` stopped counting (see
+# CAST_RE), which is the rest of the drop.
+#
+# 24 -> 22 (2026-11-08, work/bug-suite-no-new-casts): ROOT CAUSE of the
+# `no-new-casts` suite job failure (+14, 38 total) was a merge/regression that
+# re-inlined 13 C++ container casts in `cpp_core.py`'s coroutine `_W` word
+# structs and one tuple-unpack element read, bypassing the exempted
+# `emit_resolve.cpp_word_container_operator` / `cpp_container_cast_prefix`
+# helpers (the 2026-10-31 consolidation), plus 3 new ad-hoc `(MojoDict *)`
+# coercions in `emit_calls.py:_lower_type_new` (aac9e2d3e9, the permissive
+# EnumType/dict-subclass namespace fallback) that should route through the R2
+# GIMPLE chokepoint. Fixed by reusing the emit_resolve helpers for the C++
+# text casts and `gen._coerce_to_type(..., 'MojoDict *', ...)` for the
+# namespace coercions (an int64_t/boxed-handle source is not an R2
+# container-kind refusal). Net -2 below the prior baseline locks in the
+# improvement; the remaining 22 are the previously-justified sites (generated-C
+# template casts under measured registry dispatch, deliberate measured unboxes,
+# and typed NULLs) documented in the ledger above.
+#
+# 22 -> 22 (2026-11-11, the merge of origin/master 7caa433cf): NOT five new
+# ad-hoc coercions. `bf037426a` (the container-variable f-string fix) added
+# `_cpp_fstring_list_piece`, whose five arms each spelled
+# `mojo_repr_list_<kind>((MojoList *)({v}))` -- the C++ fallback path's own
+# ad-hoc cast, which the 2026-09-13 R1 consolidation had already centralized
+# into `_cpp_as` for exactly this reason. All five now go through
+# `_cpp_as('MojoList *', v)`, whose body spells `({ctype})({expr})` and so
+# carries no literal the scanner can match. The kind is proven by the caller:
+# both call sites dispatch on `ectype == 'MojoList *'` before calling in.
+BASELINE_COUNT = 22
 
 
 def count_casts() -> int:

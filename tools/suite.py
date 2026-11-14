@@ -59,6 +59,7 @@ Usage
     tools/suite.py                      # the `check` bucket, -j ncpu
     tools/suite.py bootstrap            # the ordered 3-stage self-host chain
     tools/suite.py gate                 # check + every heavy CLAUDE.md gate step
+    tools/suite.py orchestrator         # the swarm/registry/landing tests (no git in `check`)
     tools/suite.py check selfhost       # two buckets
     tools/suite.py gimple               # one test, by name
     tools/suite.py -j1 bootstrap        # strictly serial, output streamed live
@@ -562,7 +563,7 @@ MEASURED_PEAK_GB = {
     # (93 generated proofs, one after another) resembles. The `memwhy` on its
     # registration says the same thing and points at the doc that owns the
     # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
-    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+    # which `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`
     # is about and which a class change would not fix.
     'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
@@ -730,6 +731,8 @@ MEASURED_PEAK_GB = {
     'formal-ast':                             (0.1, 'measured'),
     'gimple':                                 (0.4, 'measured'),
     'gimplegenerators':                       (0.2, 'measured'),
+    'runtimere':                              (0.2, 'estimated'),
+    'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
     'linkmode':                               (0.1, 'measured'),
@@ -791,6 +794,7 @@ MEASURED_PEAK_GB = {
     'preflight':                              (0.06, 'measured'),  # 0.6 s, 3 procs
     'no-new-casts':                           (0.10, 'measured'),  # 0.7 s
     'rthdrscan':                              (0.11, 'measured'),  # 0.7 s
+    'gimple-lint':                            (0.50, 'measured'),  # 10 s; four --dump children, the largest (myinterpreter.py) 0.5 GB
     'doc-refs':                               (0.15, 'measured'),  # 1.4 s
     'returned-frame-layout':                  (0.09, 'measured'),  # 0.8 s
     'formal-typed-flag':                      (0.08, 'measured'),  # 0.8 s
@@ -831,7 +835,7 @@ MEASURED_PEAK_GB = {
     # inputs, 2163 s each. `trusted_peaks` keeps the worst for exactly this
     # reason, and a class sized to the smaller of them would be a coin flip.
     # The spread is the finding; see
-    # bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md.
+    # PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.
     'stdlib-tests':                           (52.2, 'measured'),  # 321 items, of 34.9/52.2
     # RED and recorded anyway, for the reason `formal`'s row gives: it ran all
     # 102 s to completion and peaks at 2.2 GB, so that is what it needs and not
@@ -1771,7 +1775,7 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
+# `formal/build.py`, `FORMAL.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
 # because the scanner does: `test_runtime_header_scan.py`'s census check
 # compares the figures those three quote in prose with `runtime_abi()`, and an
@@ -1785,7 +1789,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model.py', 'bugs/FORMAL_known_limits.md',
+            'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -1835,7 +1839,7 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
 # is then wrong in the same direction and every engine-vs-engine diff in the
 # tree stays clean. That is how `@classmethod`'s `cls` binding the first real
 # ARGUMENT, and `@deco` being parsed and then never applied at all, stayed
-# invisible (`bugs/UNTESTED.md` 3.2 -- and what `interporacle` was written for).
+# invisible (`bug:UNTESTED` 3.2 -- and what `interporacle` was written for).
 #
 # It ran by NOTHING until 2026-10-02: it loaded `mojo/ast_nodes.mojo`,
 # `mojo/tokenizer.mojo` and `mojo/parser.mojo`, none of which exists, and
@@ -1852,7 +1856,8 @@ test('interp-tokenizer-oracle', [PY, 'test_myinterpreter_validation.py'],
      mem='tiny', cache=True,
      extra=['test_myinterpreter_validation.py', 'fire_compiler.py',
             'myinterpreter.py', 'formal/examples'],
-     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts')
+     desc='the interpreter\'s tokenizer vs the imported one, over the corpus '
+          'of snippets and whole files')
 test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
@@ -1873,6 +1878,21 @@ test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
 test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
      mem='tiny', extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
      desc='grow-only allowlist on ad-hoc container casts (text scan)')
+# The typed-IR checker over real emitted code (doc/GIR.md). GCC verifies only
+# `__GIMPLE`-tagged functions and never a call's arguments, and a mismatched
+# argument is passed unconverted (an `int` for an `int64_t` parameter arrives
+# with garbage upper bits; measured with gcc-mp-15 on arm64). So this is the
+# only job that type-checks every statement the backend emits. Its BASELINE
+# counts may only shrink.
+test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
+     extra=GIMPLE_SOURCES + sorted(
+         os.path.relpath(p, REPO)
+         for p in glob.glob(os.path.join(REPO, 'mojo', 'ir', '*.py'))) + [
+         'test_gimple_lint.py', 'tools/gimple_lint.py', 'runtime/fire_runtime.h',
+         'fire_compiler.py', 'myinterpreter.py', 'module_loader.py', 'cas.py',
+         'ast_rewriter.py', 'fire.py', 'hello.mojo', 'class_jit.mojo',
+         'test_struct.mojo', 'array_ops_jit.mojo'],
+     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)')
 # The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
 # hard-coded one. Registered by the integrator: the test landed with help-rename
 # but in no bucket, which turned `suite-self-test`'s estate check red.
@@ -1902,8 +1922,17 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # the corpus cannot land while it is that size — it would be red on arrival and
 # in every branch that did not cause it — so this is the one shape that can:
 # `--ratchet` fails only when a file GAINS a citation, against per-file ceilings
-# in `tools/dangling_refs_baseline.py`. It is green today, and the campaign is
-# 480 one-line prose edits that each of them now makes easier to bank.
+# in `tools/dangling_refs_baseline.py`. The corpus drifted red while nothing
+# was watching it (2026-11-09: 28 files over their baselines, the same set at
+# master's tip and at this branch's base), which the `expect=` below declares:
+# a whole-job condition with no count, because the ratchet prints no summary
+# line the runner can check one against. Its doc
+# (the doc SUITE_doc_refs_ratchet_red, now retired) was the switch — the campaign landed,
+# the doc goes, and a still-marked `doc-refs` that now PASSES reports loudly
+# until the marker drops. An `expect=` in `check` runs against this bucket's
+# stated convention on purpose: the alternative is a permanently UNDECLARED red
+# in the everyday tally, and the anti-rot above is what makes the marker
+# temporary rather than permanent.
 #
 # The key covers `**/*.md` and `**/*.py` because the walk's subject is every
 # `.md` and `.py` in the tree — `fire_compiler.py` alone is 24 of the citations,
@@ -1925,7 +1954,7 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
 # `lib/` because two of its groups read them.
 test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=True,
      extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
-            'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
+            'doc/ABI.md', 'runtime', 'lib', 'formal/model',
             'formal/lean.py', 'formal/build.py',
             'formal/arm64_proof_gen.py',
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
@@ -1967,13 +1996,21 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # not `'mem'`: they invoke gcc directly on a snippet-sized translation unit,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
-# `gimplerunner` carried `expect='3 failing: ...'` while the merge of ten branches
-# left compile-and-execute rows red (a bound method stored in a module global, the
-# `zip_longest` absent fill, a module's own global shadowing a from-imported
-# homonym, a list of structs built in an imported module). All of them are fixed
-# and the marker is gone: an `expect=` on this job would now be reported as a
-# FAILURE ("marked expect= ... but it PASSES"), which is the anti-rot working.
+# `gimplerunner` is red on the tree (2026-11-11): 20 cases fail, a mix of wrong output,
+# RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 20 are listed
+# in bugs/hard/SUITE_gimplerunner_21_failing.md; the 21st, `gimple_nested_class_var_attr_from_str_param`,
+# was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
+# (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
+# so a case that starts or stops failing makes this marker disagree and the gate says so.
+#
+# 2026-11-13: re-measured at 626 passed / 1 failed (627 cases). Every case the
+# doc's inventory names now passes; the one failure is
+# `c_accessor_helpers_emitted_once_across_modules` (two modules each emit their
+# own sizeof/fnaddr accessor for a same-shaped lambda environment, where the
+# test wants one shared across the closure). Marker updated to 1.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
+     expect='1 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md '
+            '(c_accessor_helpers_emitted_once_across_modules: duplicate sizeof/fnaddr accessors)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
@@ -1984,6 +2021,17 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, me
                              'build_config.py', RUNTIME_SRC, RUNTIME_HDR]
          + CORO_RUNTIME,
      desc='compile-and-execute: every generator/coroutine shape, both backends')
+
+test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
+     extra=GIMPLE_SOURCES + ['test_runtime_re.py', 'build_config.py', 'exec_budget.py',
+                             RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc',
+                             'runtime/test_fire_re_engine.c'],
+     desc='run-time re: the engine against CPython, and a compiled program using it')
+
+test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
+     extra=GIMPLE_SOURCES + ['test_glob_compiled.py', 'build_config.py', 'exec_budget.py',
+                             RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc'],
+     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython")
 
 # [1]'s round was "the silent no-op class", and this is the test that pins it.
 # It is in `check` and not in a heavyweight bucket because it needs no Lean and
@@ -2059,12 +2107,12 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True, mem='tiny',
      # so the 46th example is covered the day it is added and a rename moves
      # the key. Measured by [5]: this key read 48 repo files and 0 under
      # formal/examples/, so a SyntaxError in any of the 45 could not invalidate
-     # it and a recorded PASS replayed. See bugs/UNTESTED.md 3.1.
+     # it and a recorded PASS replayed. See bug:UNTESTED 3.1.
      extra=['test_examples_parse.py', 'formal/examples'],
      desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
 
 
-# ── the test estate, inventoried by [5] in bugs/UNTESTED.md ────────────────
+# ── the test estate, inventoried by [5] in bug:UNTESTED ────────────────
 #
 # 50 test files were named by no registered spec, and 21 of those exited
 # non-zero. Measured per file here rather than read out of a bug doc, because
@@ -2186,7 +2234,8 @@ test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
           'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-     desc='an async function with no return value')
+desc='void-returning async functions and the device_context-shaped '
+          'repro, on both coroutine backends')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -2313,7 +2362,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `native-dumpfull` was marked with this same reason until its bootstrap chain
 # went green (2026-10-25); its registration below says why it is not marked
 # any more. This constant is
-# also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
+# also the whole of §4's subject matter: CODEGEN_ab_native_fails tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
@@ -2340,19 +2389,11 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
             'a fact — see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
-# ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
-# blowup it used to describe; the blowup is closed (bugs/CODEGEN_ab_native_fails.md,
-# 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
-# divergence. `2f75609d` turned the job back from disabled= to expect=
-# referencing the constant `58192261` had removed, so every import of this
-# module (i.e. every `make gate`) died with a NameError before any test ran.
-# The "1 failing" is load-bearing, not decoration: _expect_count_drift
-# re-counts the run's "Results: N passed, M failed" line against it, so a
-# second divergence cannot be absorbed silently by the marker.
-SELFHOST_TOKENIZE_BLOWUP = (
-    'bugs/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
-    '(29/30 byte-identical; the blowup this constant was named for is '
-    'closed, the run is now 0.1 GB / ~10s)')
+# The A/B native campaign is past: its bug doc (`CODEGEN_ab_native_fails`) was
+# deleted with the work, and the `expect=` marker that watched `match_stmt`'s
+# divergence went with it (2026-11-13). The job keeps its registration, class
+# and memwhy for the day the corpus is run again; a marker with no live subject
+# is a red line in every gate, and this one had none left.
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
 # and the measurement is why: registered at `small` (8 GB) it was killed by its
 # own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
@@ -2380,7 +2421,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
 # the 0.
 #
-# The bug doc IS the switch: bugs/CODEGEN_ab_native_fails.md is what the test
+# The bug doc IS the switch: CODEGEN_ab_native_fails is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
 # `disabled_problems` refuses to load this registry the moment that doc is
 # gone — naming the job and saying to turn the test back on. So the test cannot
@@ -2390,20 +2431,19 @@ SELFHOST_TOKENIZE_BLOWUP = (
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
             'pre-pass this corpus legitimately triggers (see '
-            'bugs/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
+            'CODEGEN_ab_native_fails), and 1.5x is 30.75 GB, so '
             '`module` (24) was 85% of what it uses. Recorded, not charged: the '
             'job is disabled, so this class is what it will cost the day it is '
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
             'because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
-     expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 # NOT switched, deliberately, and the reason is per job rather than per
 # principle: `bootstrap-stage2-dumps` carries the same blowup in its `expect=`
 # reason and is the owner's call, because it is also the job whose run produces
 # the measurements the blowup work is steered by — a marker that cannot be
 # observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/CODEGEN_ab_native_fails.md tables it with its peak, class and
+# §4 of CODEGEN_ab_native_fails tables it with its peak, class and
 # reservation and a recommendation, so the choice is a line rather than an
 # investigation.
 # `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
@@ -2455,7 +2495,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
             'any budget under 96 GB; that is a worse failure than a thin margin '
             'and it is why this is a CLASS_ABOVE_PEAK entry. Over the 4 GB '
             'line and therefore a debt, not a fact; the spread is '
-            'bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md. See ' +
+            'PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run. See ' +
             MEM_DEBT_DOC,
      desc='every stdlib test/benchmark through interpreter and JIT')
 # Fresh by design: reusing the built dylib would make "did this module fall
@@ -2722,7 +2762,7 @@ test('prooflib', [PY, '-c',
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
 #      normalisation cannot be configured out of, and three budgets were
 #      measured failing to fire (`FORMAL.md` §12,
-#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+#      `FORMAL_dylib_export_loops_and_frame_bounds` §1).
 #      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
@@ -2831,12 +2871,23 @@ test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
      deps=['preflight', 'prooflib'], timeout=1200, mem='tiny',
      extra=['test_formal_call_proof_gen.py', 'fire_compiler.py',
             'formal/arm64_proof_gen.py', 'formal/x86_64_proof_gen.py',
-            'formal/arm64_codegen.py', 'formal/build.py', 'formal/lean.py',
+            'formal/arm64_codegen.py', 'formal/x86_64_codegen.py',
+            'formal/build.py', 'formal/lean.py',
             'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
             'lib/X86.lean', 'lib/work.lean'],
      desc='proof generation on programs that CALL: a call must not raise, the '
           'model must be the model of the call, and no declaration may be '
           'vacuous')
+test('formal-try-model', [PY, 'test_formal_try_model.py'],
+     deps=['preflight'], mem='tiny',
+     extra=['test_formal_try_model.py', 'formal/arm64_proof_gen.py',
+            'formal/x86_64_proof_gen.py', 'fire_compiler.py'],
+     desc='try/except/finally flattening in the proof model')
+test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
+     deps=['preflight'], mem='tiny',
+     extra=['test_formal_eh_tables.py', 'formal/model/eh.py',
+            'formal/model/__init__.py', 'formal/model/types.py'],
+     desc='landing-pad/personality tables in the value model')
 # `mem='tiny'` (4 GB) from a MEASURED peak, not from the shape of the workload.
 # `test_formal_dylib.py` peaked at 1.7 GB across the process tree on
 # 2026-10-03 (`python3 tools/memslot.py --gb 8 -- python3
@@ -2847,6 +2898,8 @@ test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
+     expect='3 failing: the hole-count checks on the overflow-trapping exports, whose termination '
+            'obligations an exit svc keeps named (bugs/hard/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -2865,7 +2918,7 @@ test('formal-imports', [PY, 'test_formal_imports.py'],
 test('formal-interop', [PY, 'test_formal_interop.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny', timeout=1800,
-     extra=['test_formal_interop.py', 'formal/model.py', 'formal/build.py',
+     extra=['test_formal_interop.py', 'formal/model', 'formal/build.py',
             'formal/macho_linker.py', 'reflect.py', 'exec_budget.py',
             'doc/ABI.md'],
      desc='the formal dylib boundary, bound and called on both architectures')
@@ -2931,6 +2984,23 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
      desc='every bound symbol is accounted for, on every container format')
+# Scaffold holes are ledgered in formal/proof_gaps.py and counted by
+# library_census; every sorry must live only in lib/Scaffold.lean.
+test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
+     deps=['preflight', 'prooflib'], mem='module',
+     memwhy='the proof-gap ledger runs library_census over the whole Lean '
+            'library (module class); over the 4 GB line because the workload '
+            'is — see ' + MEM_DEBT_DOC,
+     desc='proof-gap ledger matches library_census (Scaffold only)')
+test('formal-once-bound-strings', [PY, 'test_formal_once_bound_strings.py'],
+     deps=['preflight'], mem='tiny',
+     desc='only once-bound string literals may be folded through a name')
+test('formal-str-trim-runtime', [PY, 'test_formal_str_trim_runtime.py'],
+     deps=['preflight'], mem='tiny',
+     desc='strip()/rstrip() on an unfoldable receiver, arm64 and x86-64 vs CPython')
+test('lean-hne-chain', [PY, 'test_lean_hne_chain.py'],
+     deps=['preflight'], mem='tiny',
+     desc='arm64_step hne negation chain generator')
 # `formal/hostmods/re.mojo` against CPython's own `re`: 112 patterns, eight
 # sections each, every integer compared.  In `proofs` rather than `check` for
 # the reason it is slow and not the reason it is fast: it builds and EXECUTES
@@ -2969,7 +3039,7 @@ test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
 # `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
 # and the only report of it was a bug doc. Fixed 2026-10-05
 # (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
-# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+# `lean::memory_exception`, which `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`
 # owns and which is a resource ceiling rather than a wrong proof. That doc's own
 # 2026-10-05 Status entry carries this branch's measurement.
 #
@@ -2994,14 +3064,14 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
             '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
             'chain, which is the subject of '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
+            '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)` '
             'and not something a class change would fix.',
      expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
             'than a wrong proof — `lean` aborts with '
             '`lean::memory_exception: excessive memory consumption detected at '
             '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
             'read over a 113-equation chain. See '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
+            '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`. '
             'The other 64 are 58 proved with no sorry and 6 proved with a '
             'counted hole; the 28 that build no path tree are reported by the '
             'harness itself (19 loop, 9 uncovered form) and are not cases.',
@@ -3224,7 +3294,7 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_dataclasses_formal.py', 'formal/dataclass_transform.py',
             'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
-            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/arm64_codegen.py', 'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='@dataclass as a compile-time transform, against CPython')
 # `typing.NamedTuple` on both architectures, each execution case run under
 # CPython and both images and required to agree; refusals pinned by message.
@@ -3233,7 +3303,7 @@ test('formal-namedtuple', [PY, 'test_namedtuple_formal.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_namedtuple_formal.py', 'formal/dataclass_transform.py',
             'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
-            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/arm64_codegen.py', 'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='typing.NamedTuple on the formal backend, against CPython')
 # `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
 # constant, each built for both architectures and run — plus the three shapes
@@ -3250,7 +3320,7 @@ test('formal-namedtuple', [PY, 'test_namedtuple_formal.py'],
 # sentence that is true of it.
 test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_module_attr.py', 'formal/model.py',
+     extra=['test_formal_module_attr.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='mod.NAME: calls, re-exports, chains, constants and attribute '
           'reads, on both backends')
@@ -3268,7 +3338,7 @@ test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
 test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
-            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      # 72 of 72, and the `expect=` this carried is gone with its bug doc. The
      # 2026-10-07 six reds (three cases x two backends) are all closed on
      # master: the 32-bit pointer-subscript class (`pointer_subscript_i32`,
@@ -3334,7 +3404,7 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 test('formal-external-call', [PY, 'test_formal_external_call.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_external_call.py', 'formal/build.py',
-            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='external_call[sym, RetType]: both the answers and the refusals')
 # The ELEVENTH of the section above, and the first one to arrive with a merge
 # rather than with a batch: `work/formal8-4` added `test_formal_typed_flag.py`
@@ -3354,7 +3424,7 @@ test('formal-external-call', [PY, 'test_formal_external_call.py'],
 # cheap enough that either is defensible and it is not worth the second argument.
 test('formal-typed-flag', [PY, 'test_formal_typed_flag.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_typed_flag.py', 'formal/model.py', 'formal/types.py',
+     extra=['test_formal_typed_flag.py', 'formal/model', 'formal/types.py',
             'formal/build.py'],
      desc="the `typed` model flag: one definition, and not vacuous")
 # `json`: RFC 8259 on the formal backend, every case computed twice — once
@@ -3366,7 +3436,7 @@ test('formal-typed-flag', [PY, 'test_formal_typed_flag.py'],
 test('formal-json', [PY, 'test_formal_json.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_json.py', 'formal/hostmods/json.mojo',
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='json: RFC 8259 built, run, and diffed against CPython\'s json')
 # `pathlib`, and the `PurePosixPath` half of it: a module whose every answer is
@@ -3377,7 +3447,7 @@ test('formal-pathlib', [PY, 'test_formal_pathlib.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_pathlib.py', 'formal/hostmods/pathlib.mojo',
             'test_formal_json.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='pathlib: the pure half of PurePosixPath, against CPython\'s pathlib')
 # A method parameter's field, established by its DECLARED type and nothing else.
 # A method's other parameters were never seeded as frame holders, so
@@ -3387,7 +3457,7 @@ test('formal-pathlib', [PY, 'test_formal_pathlib.py'], mem='tiny',
 test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_method_param_field.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='a method parameter\'s field, from its declared type')
 # A frame address at an ARGUMENT position of a comptime-specialized call —
 # `f[T](r)` — which is not a method call at all, so none of the receiver-handoff
@@ -3455,7 +3525,7 @@ test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
 test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_receiver_position.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='a frame address at a specialization\'s argument position, refused')
 # `io` and `typing`: four numeric constants and one function, which is the
 # measurement behind why `typing` is one function — the formal backends ERASE
@@ -3465,7 +3535,7 @@ test('formal-small-hosts', [PY, 'test_formal_small_hosts.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_small_hosts.py', 'test_formal_json.py',
             'formal/hostmods/io.mojo', 'formal/hostmods/typing.mojo',
-            'formal/build.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/build.py', 'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='io and typing, and the 38 names that must stay absent')
 # A comptime SPECIALIZATION, `f[a, b](...)`, on both formal paths. The bracket
 # is spelled like a subscript and both backends resolve it by flattening the
@@ -3484,7 +3554,7 @@ test('formal-specialization', [PY, 'test_formal_specialization.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_specialization.py', 'formal/arm64_codegen.py',
             'formal/x86_64_codegen.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='f[a, b](...): a specialization, and what must stay refused')
 # `#kgen.param.expr<…>`: the family whose meaning is not an MLIR object at all
 # but a QUESTION the build can answer. `std/sys/info.mojo` is built out of them
@@ -3492,7 +3562,7 @@ test('formal-specialization', [PY, 'test_formal_specialization.py'],
 test('formal-target-queries', [PY, 'test_formal_target_queries.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_target_queries.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='#kgen.param.expr<…>: a build-time question, answered and executed')
 # The value model's shapes, measured against CPython rather than pinned. Its
 # `global`-write case is the one worth naming here: it was a REFUSAL until the
@@ -3502,7 +3572,7 @@ test('formal-target-queries', [PY, 'test_formal_target_queries.py'],
 test('formal-value-model', [PY, 'test_formal_value_model.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_value_model.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='the value model\'s shapes, against CPython on both backends')
 # `enum` and `contextlib`, the two host modules whose whole content is one or two
 # names whose answers are CPython's to give. Registered because
@@ -3519,7 +3589,7 @@ test('formal-core-hostmods', [PY, 'test_formal_core_hostmods.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_core_hostmods.py', 'formal/hostmods/enum.mojo',
             'formal/hostmods/contextlib.mojo', 'formal/build.py',
-            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='enum and contextlib: S.NAME.value/.name and nullcontext, against CPython')
 # An x86-64 MODULE dylib that calls out: it must build, sign, load and RUN.
 # Module dylibs are how every cross-module call reaches its definition on this
@@ -3528,7 +3598,7 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_x86_64_dylib.py', 'formal/macho_linker.py',
             'formal/elf.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='an x86-64 module dylib that calls out, built, signed and run')
 
 # ── the two the estate check caught on master, 2026-10-02 ──────────────────
@@ -3552,7 +3622,7 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
 # that a build-and-run row would each cost a compiler invocation to reach.
 test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_read_before_store.py', 'formal/model.py'],
+     extra=['test_formal_read_before_store.py', 'formal/model'],
      desc='read-before-store dominance, against CPython in both directions')
 # `iter_statement_nodes` against the full `iter_nodes`, over the three node
 # shapes that hid a store from a walk without `_STATEMENT_CONSTRUCTS`: a class
@@ -3584,7 +3654,7 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # another field's word.
 #
 # It was also the one file in the estate that no gate ran at all while
-# `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
+# the 2026-10-03 build-cost measurement (§3.1, doc in git history) rested on it, because
 # `test_suite.py`'s `test_formal_*` FAMILY rule excused it on the cost rule
 # ("minutes of real compilation") — a rule made about the file rather than about
 # its expensive part, since only two of the 26 rows build. The `module table`
@@ -3595,7 +3665,7 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 test('formal-bracketed-method-field-set',
      [PY, 'test_formal_bracketed_method_field_set.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_bracketed_method_field_set.py', 'formal/model.py',
+     extra=['test_formal_bracketed_method_field_set.py', 'formal/model',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a struct\'s field set, and the one store census it is derived from')
 # Every case is DIFFERENTIAL and each `this` case has a `self` twin that has
@@ -3605,7 +3675,7 @@ test('formal-bracketed-method-field-set',
 # and runs on both backends, so `FORMAL_BUILD_INPUTS` is in its key.
 test('formal-receiver-spelling', [PY, 'test_formal_receiver_spelling.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_receiver_spelling.py', 'formal/model.py',
+     extra=['test_formal_receiver_spelling.py', 'formal/model',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a receiver spelled `this`, diffed against a `self` twin and CPython')
 # `formal/imports.py`'s `HOST_OWNED_BLOBS` is the one place this tree says what
@@ -3655,15 +3725,14 @@ test('formal-textwrap', [PY, 'test_formal_textwrap.py'], mem='tiny',
      extra=['test_formal_textwrap.py', 'formal/hostmods/textwrap.mojo',
             'formal/hostmods/os/_syscalls.mojo'] + FORMAL_BUILD_INPUTS,
      desc="textwrap's dedent and indent, diffed against CPython on both backends")
-# The instrument behind `bugs/FORMAL_proof_coverage_census_2026-10-03.md`, and
-# only the instrument: `tools/formal_proof_breadth.py` takes 60 functions from
-# this repository's own `*.py` through `compile_formal(prove=True, …)` on both
-# architectures and reads Lean's verdict, and its numbers are quoted in a bug doc
-# that says they will be re-quoted. So what is registered here is the check that
-# those numbers stay COMPARABLE across runs — the 60 identifiers are a function
-# of the tree rather than of the clock, every emitted program is a closed module
-# that reads nothing it does not define, and three programs with known verdicts
-# classify into the classes the census table depends on.
+# The proof-breadth census instrument: `tools/formal_proof_breadth.py` takes
+# 60 functions from this repository's own `*.py` through
+# `compile_formal(prove=True, …)` on both architectures and reads Lean's verdict.
+# So what is registered here is the check that those numbers stay COMPARABLE
+# across runs — the 60 identifiers are a function of the tree rather than of the
+# clock, every emitted program is a closed module that reads nothing it does not
+# define, and three programs with known verdicts classify into the classes the
+# census table depends on.
 #
 # That is 7 tests and NO Lean run, which is the point: the census's own
 # Lean-dependent numbers are its ledger's business and the instrument is cheap
@@ -3695,8 +3764,7 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # `formal` (test_formal.py) prints today's pass/fail against a hand-maintained
 # `EXPECTED_FAILURES` dict and throws the rest away, so a proof that got five
 # times slower, or started admitting holes, or started needing 3 GB, leaves the
-# suite green. `§0.8` of `bugs/FORMAL_proof_coverage_census_2026-10-03.md` is
-# the census's own summary and the finding it produced on its first run.
+# suite green; measurements are recorded in committed ledgers.
 #
 # Why it is a separate job from `formal` and not folded into it: `formal` runs
 # `fire.py` as a subprocess and learns a boolean per example, this one keeps the
@@ -3763,7 +3831,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      extra=['tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json',
             'test_formal_proof_census.py', 'formal/lean.py', 'formal/build.py',
-            'formal/admitted.py', 'formal/model.py', 'formal/imports.py',
+            'formal/admitted.py', 'formal/model', 'formal/imports.py',
             'formal/arm64.py', 'formal/arm64_proof_gen.py',
             'formal/macho_linker.py', 'formal/macho.py', 'formal/elf.py',
             'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
@@ -3793,7 +3861,7 @@ test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
 test('formal-monomorph', [PY, 'test_formal_monomorph.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_monomorph.py', 'formal/monomorph.py',
-            'formal/imports.py', 'formal/build.py', 'formal/model.py',
+            'formal/imports.py', 'formal/build.py', 'formal/model',
             'monomorphize.py', 'elaborate.py', 'reflect.py'] + FORMAL_BUILD_INPUTS,
      desc="a generic's instantiations are its boundary symbols, differentially")
 
@@ -3813,7 +3881,7 @@ test('formal-monomorph', [PY, 'test_formal_monomorph.py'],
 # Measured 2026-10-04 under `tools/memslot.py --gb 8`: 11.4-13.0 s, 0.1 GB peak.
 test('formal-optional', [PY, 'test_formal_optional.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_optional.py', 'formal/model.py', 'formal/build.py',
+     extra=['test_formal_optional.py', 'formal/model', 'formal/build.py',
             'formal/arm64_codegen.py', 'formal/x86_64_codegen.py',
             'lib/ProofLib.lean'] + FORMAL_BUILD_INPUTS,
      desc="Optional[T]'s niche: truthiness, unwrap and the calls that refuse")
@@ -3873,7 +3941,7 @@ test('formal-admitted', [PY, 'test_formal_admitted.py'], mem='tiny',
 # and it is in `proofs` too, so the bucket is the whole formal picture.
 test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_field_walk.py', 'formal/model.py',
+     extra=['test_formal_field_walk.py', 'formal/model',
             'formal/imports.py', 'formal/build.py',
             'tools/formal_field_walk_differential.py'] + FORMAL_BUILD_INPUTS,
      desc='iter_statement_nodes against the full walk, 61 statement shapes')
@@ -3926,7 +3994,7 @@ test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
 test('formal-per-struct-asks', [PY, 'test_formal_per_struct_asks.py'],
      mem='tiny', cache=True,
      deps=['preflight'],
-     extra=['test_formal_per_struct_asks.py', 'formal/model.py',
+     extra=['test_formal_per_struct_asks.py', 'formal/model',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a per-struct predicate is asked once per struct, not once per function')
 # `glob`, differential against CPython's own. Registered rather than excused
@@ -3942,13 +4010,13 @@ test('formal-fcntl', [PY, 'test_formal_fcntl.py'], mem='tiny',
      extra=['test_formal_fcntl.py', 'test_formal_dylib.py',
             'formal/hostmods/fcntl.mojo',
             'formal/hostmods/os/_syscalls.mojo',   # `fs_open_ro`, `fs_close`
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='fcntl: flock(2) and CPython\'s whole constant surface, both backends')
 test('formal-math', [PY, 'test_formal_math.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_math.py', 'test_formal_dylib.py',
-            'formal/hostmods/math.mojo', 'formal/build.py', 'formal/model.py',
+            'formal/hostmods/math.mojo', 'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='math: the integer-valued surface, against CPython on both backends')
 test('formal-shutil', [PY, 'test_formal_shutil.py'], mem='tiny',
@@ -3956,13 +4024,13 @@ test('formal-shutil', [PY, 'test_formal_shutil.py'], mem='tiny',
      extra=['test_formal_shutil.py', 'test_formal_dylib.py',
             'formal/hostmods/shutil.mojo',
             'formal/hostmods/os/_syscalls.mojo',   # the 8 fs_* it calls
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='shutil: copy, move, rmtree, copytree and which, over the real filesystem')
 test('formal-stat', [PY, 'test_formal_stat.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_stat.py', 'formal/hostmods/stat.mojo',
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='stat: the mode vocabulary, all 65547 modes against CPython')
 # `glob`, differential against CPython's own, over a fixture tree this file
@@ -3981,7 +4049,7 @@ test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_glob.py', 'formal/hostmods/glob.mojo',
             'test_formal_dylib.py', 'formal/hostmods/os/__init__.mojo',
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='glob: has_magic, hidden files, symlinks and escapes, against CPython')
 
@@ -4003,7 +4071,7 @@ test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
 test('formal-shlex', [PY, 'test_formal_shlex.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_shlex.py', 'test_formal_dylib.py',
-            'formal/hostmods/shlex.mojo', 'formal/build.py', 'formal/model.py',
+            'formal/hostmods/shlex.mojo', 'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='shlex.quote against CPython, both backends, 5 groups')
 
@@ -4073,12 +4141,331 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 # test scheduled exactly once per run — so `make gate`, which contains both
 # `selfhost` and `bootstrap`, runs `mojoc` and `native-dumpfull` once, not
 # twice, and there is no second copy of any test's name to keep in sync.
+# Test files the estate check found unregistered (2026-11-10): each one runs in `check`.
+test('ambiguous-import-diagnostic', [PY, 'test_ambiguous_import_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('attr-error-messages', [PY, 'test_attr_error_messages.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('backtick-import-literals', [PY, 'test_backtick_import_literals.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('bootstrap-hotspots', [PY, 'test_bootstrap_hotspots.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('compile-linked-result', [PY, 'test_compile_linked_result.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('comptime-assert-diagnostic', [PY, 'test_comptime_assert_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('comptime-dtype-diagnostic', [PY, 'test_comptime_dtype_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('constrained-diagnostic', [PY, 'test_constrained_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('dict-none-key', [PY, 'test_dict_none_key.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('floatliteral-special', [PY, 'test_floatliteral_special.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('foreign-callable-lambda-default', [PY, 'test_foreign_callable_lambda_default.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('implicit-string-concat', [PY, 'test_implicit_string_concat.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('import-missing-module-diagnostic', [PY, 'test_import_missing_module_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('lexer-double-slash-operator', [PY, 'test_lexer_double_slash_operator.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-link-symbols', [PY, 'test_linked_list_link_symbols.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-struct-element-step4', [PY, 'test_linked_list_struct_element_step4.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-struct-element-step4b', [PY, 'test_linked_list_struct_element_step4b.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-struct-element-step4c', [PY, 'test_linked_list_struct_element_step4c.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('module-loader-stdlib', [PY, 'test_module_loader_stdlib.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('mro', [PY, 'test_mro.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('out-param-return-type-diagnostic', [PY, 'test_out_param_return_type_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('parser-param-for', [PY, 'test_parser_param_for.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('python315-free-threaded-abi', [PY, 'test_python315_free_threaded_abi.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('python315-frozendict', [PY, 'test_python315_frozendict.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('trait-comptime-member-conformance-diagnostic',
+     [PY, 'test_trait_comptime_member_conformance_diagnostic.py'], mem='tiny',
+     desc='trait comptime member type/where requirements at declaration '
+          '(trait conformance part 5)')
+test('tuple-enumerate-var-refinement', [PY, 'test_tuple_enumerate_var_refinement.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('where-clause-call-site-diagnostic', [PY, 'test_where_clause_call_site_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+# Landed with 06ea5b0ef ("compiler: enforce trait method requirement
+# evidence (part 2)") and registered nowhere until
+# bug:SUITE_trait_requirement_evidence_unregistered. Cheap (tiny, 0.1 GB
+# measured, sub-second, drives `compile_to_gimple` in-process only) and it
+# pins a compiler diagnostic, so it runs in the everyday loop rather than in
+# `regressions`; `test_suite.py`'s
+# test_the_trait_conformance_diagnostic_suites_are_gated pins that.
+test('trait-requirement-evidence-diagnostic', [PY, 'test_trait_requirement_evidence_diagnostic.py'], mem='tiny',
+     desc='trait method requirement evidence at use sites (part 2): '
+          'conditional methods, mismatched constraints, conditional defaults '
+          'and the MOCO-4214/4400 shapes are refused with the modular '
+          'diagnostic, and the positive controls still compile')
+# Landed with ec12b76e1 ("Diagnose missing witness table for rebind downcast
+# (trait conformance part 7)") and registered nowhere: the same hole the
+# part-2 file was in, one part later, and the same shape the part-4 file was
+# in when cd4f93687 registered it. The estate check named all three; this
+# file is the one no fix had reached. Cheap (tiny, 0.0 GB measured,
+# sub-second, `compile_to_gimple` in-process only), so it runs with its
+# siblings in the everyday loop rather than in `regressions`;
+# `test_suite.py`'s test_the_trait_conformance_diagnostic_suites_are_gated
+# pins that.
+test('downcast-witness-diagnostic', [PY, 'test_downcast_witness_diagnostic.py'], mem='tiny',
+     desc='rebind[downcast[T, Trait]] is refused when the concrete T has no '
+          'witness table for Trait (part 7), with the generic-T and '
+          'conforming-struct positive controls still compiling')
+test('dead-worker-state', [PY, 'tools/test_dead_worker_state.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('refill-claim-blocked', [PY, 'tools/test_refill_claim_blocked.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('swarm-reclass-busy-set', [PY, 'tools/test_swarm_reclass_busy_set.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('swarm-replan', [PY, 'tools/test_swarm_replan.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('swarm-why', [PY, 'tools/test_swarm_why.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('sync-restart-guards', [PY, 'tools/test_sync_restart_guards.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+
+# ── pins the 2026-11-13 estate audit found unregistered ───────────────
+# These test files landed while `suite-self-test` was OFF (the recover-land
+# backlog) and no spec named them. Registered so the estate's "every test
+# file is run by something" is true again; the buckets below keep them out
+# of `check`/`gate` (the everyday loop stays curated).
+test('reg-align-decorator-literal-diagnostic', [PY, 'test_align_decorator_literal_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-align-decorator-parametric-diagnostic', [PY, 'test_align_decorator_parametric_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-align-decorator-part1-storage', [PY, 'test_align_decorator_part1_storage.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-analyzer-build', [PY, 'test_analyzer_build.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-binding-deferral-diagnostic', [PY, 'test_binding_deferral_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-class-rebind-late-binding', [PY, 'test_class_rebind_late_binding.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-drop-unreferenced-unimpl-stubs', [PY, 'test_codegen_drop_unreferenced_unimpl_stubs.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-enumerate-unpack-shadow-store-cast', [PY, 'test_codegen_enumerate_unpack_shadow_store_cast.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-erased-container-values', [PY, 'test_codegen_erased_container_values_pins.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-import-extern-annotated-ptr-return', [PY, 'test_codegen_import_extern_annotated_ptr_return.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-import-extern-unannotated-param-dropped-arity', [PY, 'test_codegen_import_extern_unannotated_param_dropped_arity.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-local-bindings-cache', [PY, 'test_codegen_local_bindings_cache.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-local-generic-float-literal', [PY, 'test_codegen_local_generic_float_literal.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-tuple-slot-scalar-beside-list', [PY, 'test_codegen_tuple_slot_scalar_beside_list.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condition_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "fix stdlib-dylib: two regressions from today's diagnostics
+# commits" (b3b2233b0) and registered nowhere until this audit, which is the
+# same hole the suite's estate check names. 0.15 s, 0.0 GB measured: it only
+# drives `compile_to_gimple`, no build.
+test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditional_conformance_declaration_diagnostic.py'], mem='tiny',
+     desc='conditional conformance declarations are diagnosed: the diamond, '
+          'the derived/ancestor constraint, conditional RegisterPassable, and '
+          'the `ref` origin rule; positive controls still compile')
+test('reg-conditional-conformance-candidate-diagnostic', [PY, 'test_conditional_conformance_candidate_diagnostic.py'], mem='tiny',
+     desc='conditional conformance candidate selection under a where clause '
+          '(trait conformance part 3): ambiguity, unprovable-vs-provable, and '
+          'disproved candidates are refused; the positive controls still compile')
+test('reg-conditional-conformance-synthesis-diagnostic', [PY, 'test_conditional_conformance_synthesis_diagnostic.py'], mem='tiny',
+     desc='conditional conformance copy/move synthesis is diagnosed when the '
+          'field type is unsynthesizable (part 4); positive controls still compile')
+test('reg-conforms-to-condition-diagnostic', [PY, 'test_conforms_to_condition_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-constrained-paren-diagnostic', [PY, 'test_constrained_paren_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "Reject membership on provably scalar containers without
+# `__contains__`" (03d4302ba) and registered nowhere until this audit. 0.0 GB
+# measured, 0.65 s.
+test('reg-contains-method-diagnostic', [PY, 'test_contains_method_diagnostic.py'], mem='tiny',
+     desc="membership on a provably scalar type is refused with the "
+          "'__contains__' diagnostic")
+test('reg-dict-mixed-join', [PY, 'test_dict_mixed_join.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-dict-slot-read-bug', [PY, 'test_dict_slot_read_bug.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-dict-slot-read-bug-demo', [PY, 'test_dict_slot_read_bug_demo.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-dict-slot-read-selfhost-modules', [PY, 'test_dict_slot_read_selfhost_modules.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-docstring-mojo-blocks', [PY, 'test_docstring_mojo_blocks.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-docstring-self-import', [PY, 'test_docstring_self_import.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "Refuse mutually recursive and unbounded generic instantiation"
+# (b3e501b60) and registered nowhere until this audit. 0.6 GB measured (it
+# builds and runs seven programs through `fire.py`).
+test('reg-elaboration-recursion-diagnostic', [PY, 'test_elaboration_recursion_diagnostic.py'], mem='tiny',
+     desc='mutually recursive and unbounded generic instantiation is refused in '
+          'bounded work while finite chains still run')
+test('reg-float-return-beside-tuple-return', [PY, 'test_float_return_beside_tuple_return.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-gate-rthdrscan', [PY, 'test_gate_rthdrscan.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-gimple-function-scoped-alias-extern', [PY, 'test_gimple_function_scoped_alias_extern.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-inferred-param-dependency-diagnostic', [PY, 'test_inferred_param_dependency_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-inferred-where-clause-diagnostic', [PY, 'test_inferred_where_clause_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-interpreter-assert-message', [PY, 'test_interpreter_assert_message.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-interpreter-constrained-diagnostic', [PY, 'test_interpreter_constrained_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-line-directives-per-generated-line', [PY, 'test_line_directives_per_generated_line.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-linked-list-hash-equality', [PY, 'test_linked_list_hash_equality.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-lsp-error-recovery-part2', [PY, 'test_lsp_error_recovery_part2.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-lsp-error-recovery-part3', [PY, 'test_lsp_error_recovery.py'], mem='tiny',
+     desc='an unknown declaration is diagnosed and the following struct is '
+          'still emitted by the recovered front end')
+test('reg-lsp-error-recovery-parser', [PY, 'test_lsp_error_recovery_parser.py'], mem='tiny',
+     desc='the PARSER layer of the same bug: a malformed declaration is recorded '
+          'and the following struct is still parsed (from the fire clone)')
+test('reg-match-class-pattern-match-args', [PY, 'test_match_class_pattern_match_args.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-mixed-kind-name-representation', [PY, 'test_mixed_kind_name_representation.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-mlir-annotation-diagnostic', [PY, 'test_mlir_annotation_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Three more test files landed by other workstreams and registered nowhere,
+# which is the hole the estate check names as "not run by any registered spec,
+# not in UNREGISTERED, and in no declared family". Each was measured green on
+# this tree before being registered, so registering adds no known-red job:
+#   test_interp_list_ctor.py          Results: 21 passed, 0 failed
+#   test_module_globals_compiled.py   PASS module-scope globals() matches CPython
+#   test_mojoc_precompile_signature.py  ok (parses/reads only, no compilation)
+# None is `cache=True`, matching the reg-* convention above: a pin that is not
+# cached cannot serve a recorded PASS for a change it does not name.
+test('reg-interp-list-ctor', [PY, 'test_interp_list_ctor.py'], mem='tiny',
+     desc='the List(...) constructor parity cases: interp vs compiled vs CPython')
+test('reg-module-globals-compiled', [PY, 'test_module_globals_compiled.py'], mem='tiny',
+     desc='module-scope globals() in the compiled path matches CPython')
+test('reg-mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'], mem='tiny',
+     desc='precompile a package to a .mojoc signature artifact and read it back '
+          'with the sources deleted (parses/reads only)')
+test('reg-nested-generator-for-in-coroutine', [PY, 'test_nested_generator_for_in_coroutine.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-nested-generator-yield-from-in-coroutine', [PY, 'test_nested_generator_yield_from_in_coroutine.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-os-path-split-word-truthy', [PY, 'test_os_path_split_word_truthy.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-paren-ternary-gimple-operand', [PY, 'test_paren_ternary_gimple_operand.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-parser-error-recovery-part1', [PY, 'test_parser_error_recovery_part1.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-peek-result-print-link', [PY, 'test_peek_result_print_link.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-peekable-iterator-link', [PY, 'test_peekable_iterator_link.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-python315-disjoint-bases', [PY, 'test_python315_disjoint_bases.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-python315-lazy-imports', [PY, 'test_python315_lazy_imports.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-sibling-ast-name-collision', [PY, 'test_sibling_ast_name_collision.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-tagged-container-corpus', [PY, 'test_tagged_container_corpus.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-tagged-mixed-readsites', [PY, 'test_tagged_mixed_readsites.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "elaborate: reject where clauses that name module alias
+# constants" (491ae6d5b) and registered nowhere until this audit. 0.1 GB
+# measured, 2.3 s.
+test('reg-where-alias-diagnostic', [PY, 'test_where_alias_diagnostic.py'], mem='tiny',
+     desc='a provably false where clause naming a module alias constant is '
+          'refused; an undecided one and a plain assignment stay accepted')
+test('reg-where-message-diagnostic', [PY, 'test_where_message_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('orch-chain-cap', [PY, 'tools/test_chain_cap.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-claim-release', [PY, 'tools/test_claim_release.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-control-branch-retire', [PY, 'tools/test_control_branch_retire.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-control-cleanup', [PY, 'tools/test_control_cleanup.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+# Landed with "control: norm_claim treats a `bugs/<class>/` path as its
+# document's claim" (6e35ff35e) and registered nowhere until this audit. Pure
+# Python, 0.0 GB: every spelling of one bug document is one `bug:<stem>` claim,
+# whatever class directory it sits in, and an unrecognised path is refused.
+test('orch-control-norm-claim', [PY, 'tools/test_control_norm_claim.py'], mem='tiny',
+     desc="control.norm_claim: bare, .md, bugs/, bugs/hard/ and bugs/mid/ "
+          "spellings are one claim; an unplaceable path is refused")
+test('orch-control-prune-unmerged', [PY, 'tools/test_control_prune_unmerged.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-control-retire-landed', [PY, 'tools/test_control_retire_landed.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-finishing-first', [PY, 'tools/test_finishing_first.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-gate-doc', [PY, 'tools/test_gate_doc.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-gate-ledger', [PY, 'tools/test_gate_ledger.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-integrate-dryrun', [PY, 'tools/test_integrate_dryrun.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-land-master-moved', [PY, 'tools/test_land_master_moved.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-orch-fixes', [PY, 'tools/test_orch_fixes.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-orch-review', [PY, 'tools/test_orch_review.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-orchestration-formal-unlanded-task-state', [PY, 'tools/test_orchestration_formal_unlanded_task_state.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-proof-review', [PY, 'tools/test_proof_review.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-stash-ff', [PY, 'tools/test_stash_ff.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-swarm-log-quiet', [PY, 'tools/test_swarm_log_quiet.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-verify-lock', [PY, 'tools/test_verify_lock.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+
+              'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
-              'gimplegenerators', 'interporacle', 'examples-parse',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'nonlocal', 'gimplerunner',
+              'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
               # hostmod claim for `ast`; each was added to this bucket on its
@@ -4087,7 +4474,7 @@ BUCKETS = {
               # test from the everyday loop.
               'rthdrscan', 'ptrreg', 'ptrreg-boxed-str', 'runtimedylib',
               'sqliteruntime', 'formal-sweep-truth', 'formal-link-accounting',
-              'formal-ast', 'silentnoop',
+              'formal-proof-gaps', 'lean-hne-chain', 'formal-ast', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
               # The host-import WALL's readers. 17 cases, 0.36 s, no build and
               # no Lean, so the `formal-field-walk` rule puts it in the everyday
@@ -4201,6 +4588,11 @@ BUCKETS = {
               # that is a word rather than an absence — both are programs that
               # build, run and answer wrongly.
               'formal-shlex', 'formal-optional',
+              # …and the four the bucket census named (TEST_formal_tests_registered_in_no_bucket, 2026-11-12):
+              # registered by 0bf96e814, c7f641b19 and 4f0755020 and in no bucket, so no run executed them. Each
+              # measured alone at about 1 s, 0.0x GB, `preflight` only: NONE runs Lean, so they belong here.
+              'formal-try-model', 'formal-eh-tables',
+              'formal-once-bound-strings', 'formal-str-trim-runtime',
               # …and the third file the estate check named (2026-10-04, on the
               # merge of the formal20 batch), measured at 0.08 s and 0.03 GB —
               # the cheapest thing registered in this bucket by an order of
@@ -4246,6 +4638,22 @@ BUCKETS = {
               # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
               # seconds.
               'formal-reproducible'],
+
+    # The orchestrator's own tests (the swarm, the registry, reclass, landing).
+    # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
+    # the heavy steps): they exercise tools/swarm.py's git-facing passes and
+    # the fleet registry, and `make check` must not be in the business of
+    # spawning git or touching checkout/fleet state — the default loop needs no
+    # git binary at all. The tests stub `_git` and the registry, but that is a
+    # property of the tests, not something a category boundary should rely on.
+    # Run them explicitly: `make check-orchestrator`.
+    'orchestrator': ['dead-worker-state', 'done-ratchet-landing', 'refill-claim-blocked',
+                     'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why',
+                     'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
+
+    # Per-bug regression pins from the same audit; explicit, not in `check`.
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -4516,8 +4924,8 @@ BUCKETS = {
     # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
     # cases pass (re-measured 41 s / 0.1 GB, below).
     #
-    # The three `expect=`-marked ones stay in `coroutine` rather than `check` for
-    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
+    # The remaining `expect=`-marked job stays in `coroutine` rather than
+    # `check` for the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
     # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
@@ -4528,7 +4936,8 @@ BUCKETS = {
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
     #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
-    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
+    #   async-void-return    3.3 s  0.1 GB  11 passed   (green 2026-10-29;
+    #                                       import-time MOJO_CORO leak fixed)
     #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
@@ -4548,6 +4957,13 @@ BUCKETS = {
     'smoke': ['preflight', 'suite-self-test', 'memslot'],
     'ab': ['ab-clean', 'ab-aside', 'ab-bside', 'ab-compare'],
 }
+
+# The trait-conformance part 5 regression runs with the other cheap
+# declaration-time diagnostics on every gate. It is added here rather than
+# inside the `check` literal because that literal is a single ~4 KB line every
+# parallel branch rewrites, so an edit there is a guaranteed merge conflict
+# for the one entry it adds.
+BUCKETS['check'].append('trait-comptime-member-conformance-diagnostic')
 
 # A name that is both a bucket and a test would make `suite.py <name>` mean
 # whichever one won the lookup, silently. There is no good reason to want one,
@@ -5302,6 +5718,16 @@ def execute(jobs, per_test, opts, log: Log):
         state[name] = max([s for s in (prev, status) if s],
                           key=lambda s: _RANK.get(s, 0))
 
+    def pending(name):
+        """True while a dependency has no verdict yet. `state` gets an entry
+        when the FIRST job of a fanout settles, so `name in state` alone would
+        release a dependent after one of 46 items; a passing dep is only done
+        when every one of its jobs has settled (`resolved` counts them). A
+        failing one is final already: the dependent is skipped at once."""
+        if name not in state:
+            return True
+        return state[name] in DEP_SATISFIED and resolved[name] < per_test[name]
+
     with ThreadPoolExecutor(max_workers=opts.jobs,
                             thread_name_prefix='suite') as pool:
         running: dict[object, Job] = {}
@@ -5323,7 +5749,7 @@ def execute(jobs, per_test, opts, log: Log):
             ready, blocked = [], []
             for key in sorted(waiting, key=lambda k: order[k]):
                 job = waiting[key]
-                if any(d not in state for d in job.spec.deps):
+                if any(pending(d) for d in job.spec.deps):
                     continue                     # a dep is still running
                 if all(state[d] in DEP_SATISFIED for d in job.spec.deps):
                     ready.append(job)
@@ -5352,7 +5778,7 @@ def execute(jobs, per_test, opts, log: Log):
                 # plan can ever satisfy (a test whose dep was not selected).
                 # Say so instead of spinning.
                 job = sorted(waiting.values(), key=lambda j: order[j.key])[0]
-                missing = [d for d in job.spec.deps if d not in state]
+                missing = [d for d in job.spec.deps if pending(d)]
                 res = Result(ERROR, detail='dependency not selected: '
                              + ', '.join(missing))
                 del waiting[job.key]
@@ -5756,6 +6182,62 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
+def known_bugs(name):
+    """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
+    seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
+    job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
+    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
+    import re as _re
+    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
+    hits = []
+    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
+        for f in files:
+            if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
+                continue
+            path = os.path.normpath(os.path.join(root, f))
+            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
+            if all(w in tokens for w in words):
+                hits.append(path)
+                continue
+            try:
+                title = open(path, encoding='utf-8', errors='replace').readline()
+            except OSError:
+                continue
+            if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
+                hits.append(path)
+    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    return sorted(os.path.relpath(h, rel) for h in hits)
+
+
+def _hms(secs):
+    """Seconds as H:MM:SS (or M:SS under an hour), for the time line a reader compares run to run."""
+    secs = int(round(secs))
+    h, rem = divmod(secs, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
+
+
+def _record_timing(wall, work, results, opts):
+    """Append this run's timing to build/suite-timings.jsonl: one line per run, with the revision and every job's
+    own time, so a slowdown can be traced to the job and the commit that caused it."""
+    import json as _json, subprocess as _sp, time as _time
+    try:
+        head = _sp.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=HERE).stdout.strip()
+    except OSError:
+        head = ''
+    rec = {'when': _time.strftime('%Y-%m-%dT%H:%M:%S'), 'head': head,
+           'wall_s': round(wall, 1), 'work_s': round(work, 1),
+           'jobs': {k: round(r.secs, 1) for k, r in sorted(results.items())},
+           'cached': sum(1 for r in results.values() if r.cached)}
+    path = os.path.join(HERE, '..', 'build', 'suite-timings.jsonl')
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a') as f:
+            f.write(_json.dumps(rec) + '\n')
+    except OSError as e:
+        print(f'  (could not record timing: {e})')
+
+
 def report(names, state, results, wall, peak, opts, log: Log):
     # Group the run's tests into the tally's counters, one lookup per test, so
     # a test cannot end up in a bucket nobody reads.
@@ -5917,6 +6399,23 @@ def report(names, state, results, wall, peak, opts, log: Log):
                       + (f'  [{_TAG.get(status, "?")}]'
                          if status != row.statuses[0] else '')
                       + (f'  — {why}' if why else ''))
+                if row.count == 'failed':
+                    # Is this a regression someone has already filed? A gate reads this line to tell a repeat
+                    # from a new break: the bug doc that tracks the job, or NEW when no doc does.
+                    docs = known_bugs(name)
+                    print('      ' + (('previously seen: ' + ', '.join(docs)) if docs
+                                      else 'NEW: no bug doc tracks this job'))
+    # How long the gate took, and where the time went. The wall clock is what a person waits for; the sum of the jobs'
+    # own times is the work done (it exceeds the wall when jobs ran in parallel, and the gap is the parallelism). The
+    # slowest jobs are the first place to look when a gate gets slower. Each run is also appended to
+    # build/suite-timings.jsonl, so "how long does the gate take" has an answer over time, not just for this run.
+    work = sum(r.secs for r in results.values())
+    slow = sorted(((r.secs, k) for k, r in results.items() if not r.cached), reverse=True)[:8]
+    print(f'time: wall {_hms(wall)} | work {_hms(work)} across {len(results)} job(s) '
+          f'({sum(1 for r in results.values() if r.cached)} replayed from cache)')
+    for secs, key in slow:
+        print(f'  slowest  {_hms(secs):>9}  {key}')
+    _record_timing(wall, work, results, opts)
     print(tally + (f'   log: {log.path}' if log.path else ''))
     # Non-zero for any member of a counter that `fails`, and for a summary that
     # could not account for every test: a run that cannot count itself has not

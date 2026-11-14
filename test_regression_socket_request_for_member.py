@@ -5,6 +5,8 @@ structure or union) is fixed in the merge. This quick test verifies the
 shape no longer triggers a compile refusal.
 """
 
+from exec_budget import RUN_TIMEOUT_S
+
 def test_socket_request_for_member_fixed():
     # Accessing pseudo-dunder attrs on a non-structure must compile and
     # return the expected string, not a GCC member-request error.
@@ -21,7 +23,7 @@ print(__name__)
     here = os.path.dirname(__file__)
     result = subprocess.run(
         [sys.executable, os.path.join(here, 'fire.py'), 'run', '/dev/stdin'],
-        input=snippet, capture_output=True, text=True, timeout=30
+        input=snippet, capture_output=True, text=True, timeout=RUN_TIMEOUT_S
     )
     # If the bug regressed we'd see a GCC-level refusal or crash.
     assert result.returncode == 0, f"regression: {result.stderr}\nstdout: {result.stdout}"

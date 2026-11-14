@@ -25,6 +25,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           BOOL_TYPE_NAMES)
 
 import collections
+import os
 
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
@@ -672,6 +673,14 @@ def _emit_sub_imm(asm, xd: int, xn: int, imm: int) -> None:
                           encode_add_xd_xn_imm_sh)
 
 
+#: `if A and B:` over two integer comparisons as `cmp ; ccmp ; b.cond` (step 06c/06d).
+#: ON by default: the machine code answers CPython's (`test_arm64_emission.py`),
+#: and the proof generator proves it (`both.mojo` 0 sorries; the full arm64 corpus
+#: went 50 -> 55 PASS with it on, no example regressed because of it).
+#: `FIRE_CCMP_LOWERING=0` turns it off for A/B comparison.
+CCMP_LOWERING = os.environ.get("FIRE_CCMP_LOWERING", "1") != "0"
+
+
 class ARM64Codegen:
     """ARM64 code generator over the fire_compiler AST."""
 
@@ -705,6 +714,11 @@ dylib_exports: list = None, globals_base: int = None,
         # names whose calls produce no value, transitively over `return <call>`
         # chains (`model.returnless_function_names`). None means "not computed".
         self._returnless = None
+        # Lazily filled by `_callee_returns_none` from `self._functions`: the
+        # name -> "every path answers None" resolver
+        # (`model.function_returns_none_resolver`). None means "not computed";
+        # the same one-table-per-compile shape as `_returnless`.
+        self._returns_none = None
         # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
         # parameters each function measures as TEXT, transitively through calls
         # that forward a bare parameter (`model.text_measured_parameters`).
@@ -733,6 +747,21 @@ dylib_exports: list = None, globals_base: int = None,
         # instead.  See `_emit_exit` for why the subtraction is the difference
         # between a proof and a `lean-rejected` row.
         self._compiler_trap_addrs: set = set()
+        # The ADDRESSES of the extern calls the float-repr helper made — its
+        # `snprintf` and `strtod`, in the helper's general path.  The helper is
+        # this emitter's own, emitted once per image after every function body
+        # when a float is printed, so its sites are in `extern_calls` at or
+        # above `func_offset` and are NOT calls the program makes:
+        # `formal/arm64_proof_gen.py::_program_extern_calls` subtracts them
+        # for the same reason the traps are subtracted, and not doing so turns
+        # every image on this backend into an opaque-call image.  Published in
+        # `compile()`'s `info` as `float_repr_calls`.
+        self._float_repr_call_addrs: list = []
+        # Set by `_emit_float_print_operand`, the only thing that branches to
+        # the helper. The helper is emitted only when this is set, so an image
+        # whose program formats no float carries no helper, no helper calls and
+        # no `snprintf`/`strtod` in `extern_calls`.
+        self._float_repr_used: bool = False
         self._if_counter = 0
         self._while_counter = 0
         self._assert_counter = 0
@@ -918,6 +947,7 @@ dylib_exports: list = None, globals_base: int = None,
         # container-tracking sets above: a `comptime` in one function does
         # not bind in the next.
         self._comptime_vals: dict = {}
+        self._str_lit_vals: dict = {}   # once-bound string literals (model.once_bound_string_literals)
         # {bare callee name -> exported symbol} for the formal libraries this
         # program links against. A call to one of these names is emitted
         # against the library's exported spelling, so the image can record the
@@ -1139,17 +1169,31 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_ldp_sp_post(29, 30))
             self.asm.emit(encode_ret())
 
+        # A LIBRARY's stack-floor initializer, when one is needed. It is emitted
+        # BEFORE the bodies, where the startup stub sits in an executable: it is
+        # a function of its own that nothing branches to, so no path tree walks
+        # it, and it is registered as the first load-time entry below. It has to
+        # be a separate function at all because the floor it fills is what every
+        # guarded body reads; see `_emit_library_floor_init`.
+        self._floor_init_label = None
+        if not emit_startup and self._guarded_names:
+            self._floor_init_label = M.LIBRARY_FLOOR_INIT_LABEL
+            self._internal_labels.add(M.LIBRARY_FLOOR_INIT_LABEL)
+            self._emit_library_floor_init()
+
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
-        # The float-repr helper, once per image, after every body: a `print`
-        # of a float branches to it from any of them, so it has to be out
+        # The float-repr helper, once per image, after every body, and only
+        # when a float is printed (`_float_repr_used`): a `print` of a float
+        # branches to it from any of them, so it has to be out
         # before `resolve()` patches those `bl`s, and its label joins
         # `_internal_labels` the same way the per-definition labels do, so a
         # reader of `info["labels"]` sees one address per program name only.
-        self._emit_float_repr_helper()
-        self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
-        self._internal_labels.update(_FLOAT_REPR_HELPER_LABELS)
+        if self._float_repr_used:
+            self._emit_float_repr_helper()
+            self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
+            self._internal_labels.update(_FLOAT_REPR_HELPER_LABELS)
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # One binding per name, at one place, after every definition — which is
@@ -1195,6 +1239,13 @@ dylib_exports: list = None, globals_base: int = None,
             # `formal/arm64_proof_gen.py::_program_extern_calls`, which is the
             # arm64 twin of x86-64's `_program_externs`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
+            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
+            # by address — the helper is emitted once per image after every
+            # function body when a float is printed, so the sites are at or
+            # above `func_offset` and `_program_extern_calls` subtracts them
+            # there, the same subtraction `compiler_traps` is for the guard's
+            # `fflush`.
+            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1212,15 +1263,20 @@ dylib_exports: list = None, globals_base: int = None,
             # program on this path, since a program enters its body through
             # the startup stub instead — so the key is inert unless a dylib
             # reads it.
-            "mod_init_addrs": [
-                self.asm.labels[f.name]
-                for f in M.module_body_functions(functions)
-                if f.name in self.asm.labels],
+            # The library floor initializer, when there is one, is FIRST: the
+            # guarded prologues in the bodies read the floor it fills, and the
+            # loader runs these in order before any export can be called.
+            "mod_init_addrs": (
+                ([self.asm.labels[self._floor_init_label]]
+                 if self._floor_init_label else [])
+                + [self.asm.labels[f.name]
+                   for f in M.module_body_functions(functions)
+                   if f.name in self.asm.labels]),
             # The EXCEPTION KIND TABLE, published rather than recomputed and put
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
+            # yet — see the (deleted) doc on the unemitted ARM try-handler arm
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1410,7 +1466,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # `bugs/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
+        # the wide-receiver-by-reference contract (formerly documented in a deleted FORMAL doc) lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -1573,6 +1629,7 @@ dylib_exports: list = None, globals_base: int = None,
         self._fd_vars = set()
         self._comptime_vals = {}
         self._comptime_list_asts = {}
+        self._str_lit_vals = M.once_bound_string_literals(f)
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Both are properties of the whole
         # function, so they are computed once here rather than guessed at each
@@ -1782,32 +1839,16 @@ dylib_exports: list = None, globals_base: int = None,
         # `ulimit -s 2048` where the usable stack is exactly 14 frames: `n=13`
         # exits 0 and `n=14` dies of SIGSEGV with no output.
         #
-        # AFTER the argument moves, and the reason is a LIBRARY's guard rather
-        # than a program's. A program image's guard is four instructions that
-        # touch only X16/X17 (the startup stub already read `getrlimit` — see
-        # `_emit_stack_floor_init`), but a LIBRARY has no stub, so its first
-        # guarded prologue still emits the `getrlimit` call, and AAPCS gives a
-        # call every caller-saved register: X0..X17, which is where every
-        # incoming argument still is at the top of this prologue. That guard
-        # parks argument 0 in X14 and puts it back, because it is the one
-        # register whose value it needed for itself, and arguments 1..7 would be
-        # simply destroyed. Measured, and the shape of the failure is a contract
-        # check reading a parameter that is no longer the caller's: on arm64,
-        # `formal/examples/bounds_index.mojo`'s `at_offset(2, 5)` and
-        # `at_offset(4, 5)` exited 1 through `debug_assert` where CPython answers
-        # 2 and 4 — two parameters, and the guard ran before the second was
-        # saved. One-argument functions were unaffected, which is why this sat
-        # behind every single-argument case in the corpus. Keeping the homes
-        # first for BOTH shapes is one ordering to reason about, and a program's
-        # guard is unharmed by registers it never writes.
-        #
-        # It cannot be fixed by pushing the arguments around the call instead:
-        # a `sub sp, #16` across `getrlimit` was measured as a hang or a SIGSEGV
-        # on EVERY program (`def helper(x): return x + 1` with a `main` that
-        # calls it), because the C library reads SP-relative state across the
-        # boundary and the offsets the rest of this prologue computes from SP
-        # are then wrong by that much. The callee-saved homes are the only place
-        # an argument can live across this call.
+        # AFTER the argument moves. The guard is call-free now (it LOADS the
+        # floor word, and the floor is filled once at load time by the startup
+        # stub for a program or by `_emit_library_floor_init` for a library), so
+        # it clobbers only X16/X17 and nothing it touches holds an argument. The
+        # homes are still written first, so the order is one thing to reason
+        # about for every guarded prologue: the argument homes, then the guard,
+        # then the frame. The historical reason for this order was a `getrlimit`
+        # call inside the guard, which clobbered every caller-saved argument
+        # register; that call moved out of the prologue, and the placement
+        # constraint that remains is the one below.
         #
         # **…which is why the homes are written BEFORE the guard and the pushes
         # that preserve them come AFTER it.** The registers are the homes, so
@@ -2012,9 +2053,10 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_stack_floor_init(self) -> None:
         """Read `RLIMIT_STACK` once and park the FLOOR in `__DATA`.
 
-        Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
-        before the entry function is called and outside every function body —
-        and that placement is the whole reason this is its own method. The read
+        Called from the STARTUP STUB (`compile`'s `emit_startup` branch, before
+        the entry function is called) and from the LIBRARY's load-time
+        initializer (`_emit_library_floor_init`), both outside every function
+        body, and that placement is the whole reason this is its own method. The read
         is a `getrlimit` CALL, and a call inside a guarded prologue is a `BL` on
         a path `formal/arm64_proof_gen.py` WALKS: the walker cannot follow a call
         out of the image, so with the read in the prologue it refused proof
@@ -2093,6 +2135,41 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
         self.asm.label(done_label)
 
+    def _emit_library_floor_init(self) -> None:
+        """The LIBRARY's load-time stack-floor initializer, as a function.
+
+        A program's floor is filled by its startup stub, which runs once before
+        `main`. A LIBRARY has no stub (`emit_startup=False`), so before this its
+        floor word was never written: every guarded prologue loaded zero, `SP >=
+        0` always held, and a recursive export that exhausted the stack died with
+        SIGSEGV rather than the trap the guard exists to give. Measured on a
+        dylib built from `def deep(n): ... return 1 + deep(n - 1)`, which
+        answered signal 11 at depth 240 (`test_formal_dylib.py`'s
+        `test_a_dylib_export_traps_at_its_stack_floor`).
+
+        Filling the floor LAZILY from the first guarded prologue, the other
+        obvious answer, anchors it to whichever caller ran first and is wrong
+        either way: a first call near the top stores a floor too high, and one
+        near the bottom stores a floor below the real stack. So the floor is
+        anchored at LOAD time, the moment the program's is anchored at process
+        entry, and the loader runs this function before any export can be called
+        (it is the first entry of `info["mod_init_addrs"]`, which `formal/elf.py`
+        and `formal/macho_linker.py` write into the load-time array).
+
+        The body is the stub's own sequence, `_emit_stack_floor_init`, wrapped in
+        a frame that saves X29/X30: the `getrlimit` inside it is a `BL`, which
+        clobbers the link register, and the loader's `ret` must return to the
+        loader. Nothing branches to this function, so no path tree walks it and
+        the proof layer's walked range never reaches it. It is emitted before the
+        bodies, where the stub is, so it is the same code the stub would be
+        for the same arguments.
+        """
+        self.asm.label(M.LIBRARY_FLOOR_INIT_LABEL)
+        self.asm.emit(encode_stp_sp_pre(29, 30))
+        self._emit_stack_floor_init()
+        self.asm.emit(encode_ldp_sp_post(29, 30))
+        self.asm.emit(encode_ret())
+
     def _emit_stack_floor_guard(self) -> None:
         """Refuse instead of dying when the frame just taken crosses the floor.
 
@@ -2104,8 +2181,11 @@ dylib_exports: list = None, globals_base: int = None,
         one outcome this backend already has an idiom for and the one a caller
         can read.
 
-        The FLOOR is a `__DATA` word the STARTUP STUB filled once
-        (`_emit_stack_floor_init`), so the guard only LOADS it and compares:
+        The FLOOR is a `__DATA` word filled ONCE, at load time, before any
+        guarded code can run: by the STARTUP STUB for a program, and by the
+        library's load-time initializer (`_emit_library_floor_init`, which is
+        `_emit_stack_floor_init` as a function) for a dylib. So the guard only
+        LOADS it and compares:
 
             ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
             ADD X17, SP, #0 ; CMP X17, X16
@@ -2113,18 +2193,14 @@ dylib_exports: list = None, globals_base: int = None,
             <message> ; movz x0, 2 ; movz x16, 1 ; svc #0x80   SP < floor
 
         There is **no call in this sequence**, and that is deliberate as well as
-        necessary: the `getrlimit` that fills `&limit` lives in the startup stub
-        (`_emit_stack_floor_init`), where no path tree walks it.
+        necessary: the `getrlimit` that fills `&limit` lives in the load-time
+        initializer (the startup stub, or `_emit_library_floor_init`), where no
+        path tree walks it.
 
-                ADRP+ADD X16, &floor ; LDR X16, [X16]
-                ADD X17, SP, #0 ; CMP X17, X16
-                B.HS ok                                    SP >= floor: carry set
-                movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
-            ok:
-
-          * **A library** (no stub) has no floor in `__DATA` yet, so the first
-            guarded prologue reads the limit itself and stores the floor — the
-            original shape, below.
+        A guarded prologue in a library is the same sequence. The one thing a
+        library does differently is WHEN the floor is filled, and that is why it
+        has an initializer and not a lazy store in the prologue: see
+        `_emit_library_floor_init`.
 
         The move is the arm64 twin of x86-64's `_emit_stack_floor_init` and it is
         the WALKER, not taste, that decided it: a `BL getrlimit` in every
@@ -2226,7 +2302,11 @@ dylib_exports: list = None, globals_base: int = None,
         _emit_sub_imm(self.asm, 31, 31, 16)
         self.asm.emit_adrp_add(1, label)
         self.asm.emit(encode_movz_xd_imm(0, 2))              # fd = stderr
-        self.asm.emit(encode_movz_xd_imm(2, len(text)))      # length
+        # The BYTE length, `M.diagnostic_length`, not `len(text)`: the interned
+        # blob is `text.encode()`, and the message is not ASCII (an em dash is
+        # three bytes). `len(text)` made the write stop two bytes short — measured
+        # as 837 written of 839 on the first arm64 trap run.
+        self.asm.emit(encode_movz_xd_imm(2, M.diagnostic_length(text)))  # length
         self.asm.emit(encode_movz_xd_imm(16, DARWIN_SYS_WRITE))
         self.asm.emit(encode_svc(0x80))
         _emit_add_imm(self.asm, 31, 31, 16)
@@ -2626,6 +2706,9 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_receiver_writeback()
                 self.asm.emit(encode_movz_wd_imm(0, 0))
             else:
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before the
                 # value is emitted, because the answer is about the FUNCTION's
                 # declaration rather than about the return instruction, and
@@ -4412,8 +4495,15 @@ dylib_exports: list = None, globals_base: int = None,
 
         if isinstance(expr, F.SetExpr):
             # Formal has no set runtime — lower as a list blob (membership
-            # / iteration are the only uses seen on this path).
-            self._emit_list(expr)
+            # / iteration are the only uses seen on this path). A set's
+            # elements are DISTINCT in CPython, and the elements whose word is
+            # known at compile time are deduplicated here so the count word and
+            # the walk agree with it; see `model.set_literal_distinct_elements`.
+            kept, dropped = M.set_literal_distinct_elements(expr.elements)
+            if kept is not None:
+                self._emit_deduped_set(expr, kept, dropped)
+                return
+            self._emit_set_literal(expr)
             return
 
         if isinstance(expr, F.CallExpr):
@@ -4695,6 +4785,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returns_none=self._callee_returns_none,
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -5162,6 +5253,31 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._functions.values())
         return name not in self._returnless
 
+    def _callee_returns_none(self, name):
+        """Whether EVERY path out of the local function `name` answers `None`.
+
+        **Direction (b)'s question**, and the one `ValueKinds.is_none_value`
+        asks a call before `print` (or a `printf`'s `%s`) renders it: a
+        function that falls off its end, or whose every `return` is `None` or a
+        call to one that answers `None`, is statically `None`, and the four
+        characters are the only honest rendering this path has for it (a value
+        here is one 64-bit word, and `None` is the absence of one).
+
+        **The answer is the TRANSITIVE one, and the recursion lives in
+        `model.function_returns_none_resolver`** — the same shape as
+        `_callee_returns_value` above and for the same reason: `def h(a): return
+        g(a)` with a return-less `g` is `None` one hop out, so a reader that
+        stopped at the first function would print the word `g` never wrote.
+        The resolver is built once over `self._functions` (the emitter's table)
+        and its cycle/not-of-this-unit answers are the shared reader's, so
+        arm64 and x86-64 cannot disagree about what a call to one function
+        produces.
+        """
+        if self._returns_none is None:
+            self._returns_none = M.function_returns_none_resolver(
+                self._functions)
+        return self._returns_none(name)
+
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
 
@@ -5302,7 +5418,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
             getattr(fn, "body", None) or [], self._stmt_loop_trips)}
         for node, recv, method, _args in _walk_value_methods(fn):
-            if method != "append" or not isinstance(recv, F.IdentExpr):
+            if method not in ("append", "add") \
+                    or not isinstance(recv, F.IdentExpr):
                 continue
             # `or 1`, not a refusal: a site inside a loop with no compile-time
             # iteration count keeps the one-per-site bound it always had, and
@@ -5424,6 +5541,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._dict_vars.discard(name)
             self._blob_vars.discard(name)
             self._blob_var_est.pop(name, None)
+            # NOT recorded in `_comptime_vals`: that table holds `comptime`
+            # constants, and `_check_comptime_target` refuses any later store to
+            # a name in it. A `var s = "lit"` is an ordinary mutable local, so
+            # recording it there made every reassignment of a string variable a
+            # build error (it broke 42 of 92 hostmods through `out = ...` in
+            # os/_syscalls.mojo). A printf fold of a string VARIABLE would need
+            # a once-assigned analysis; it does not exist yet.
         elif isinstance(value, F.IdentExpr):
             if value.name in self._dict_vars:
                 self._dict_vars.add(name)
@@ -5600,7 +5724,41 @@ ctor_field_value=self._ctor_field_value_for(name),
             sl = e.index
             self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
             return
-        self._emit_subscript_addr(e)
+        # Try fold for string subscript first
+        try:
+            if self._is_string_subscript(e.obj):
+                def _text_of(a):
+                    t = self._printf_arg_text(a)
+                    if t is not None:
+                        return t
+                    try:
+                        if isinstance(a, F.IdentExpr):
+                            nm = a.name
+                            if nm in self._text_vals():
+                                cv = self._text_vals()[nm]
+                                if isinstance(cv, str): return cv
+                                t2 = M.string_literal_text(cv)
+                                if t2 is not None: return t2
+                                t2 = self._printf_arg_text(cv)
+                                if t2 is not None: return t2
+                    except Exception:
+                        pass
+                    return None
+                ch_f = M.string_element_fold(e.obj, e.index, _text_of)
+                if ch_f is not None:
+                    self._emit_expr(F.StringLiteral(ch_f))
+                    return
+                try:
+                    pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # A READ: the element's kind is the pointee's, which `ValueKinds` answers
+        # (`pointee_kind_of`), so a float element is loaded here and answered as
+        # a double by every consumer. The flag is what admits it; the store and
+        # the augmented/del/tuple forms do not pass it.
+        self._emit_subscript_addr(e, element_kind_ok=True)
         self._emit_subscript_load(0, 0)
 
     def _emit_subscript_load(self, reg: int, base: int) -> None:
@@ -6199,7 +6357,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(why)
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
-                             for_store: bool = False) -> None:
+                             for_store: bool = False,
+                             element_kind_ok: bool = False) -> None:
         """X0 = &obj[index]. Blob path bounds-checks, loudly (exit 1 on OOB).
 
         The single choke point for a subscript: a read, a store
@@ -6300,6 +6459,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             # declarations are passed because the refusal is about a `str` and
             # this function's own local is not one — see
             # `model.string_element_refusal`'s section on `bytes`.
+            try:
+                ch_fold = M.string_element_fold(e.obj, e.index, getattr(self, "_printf_arg_text", None))
+                if ch_fold is not None:
+                    self._emit_expr(F.StringLiteral(ch_fold))
+                    return
+            except Exception:
+                pass
             why = M.string_element_refusal(e.obj, e.index, self._cur_fn,
                                            self._structs, self._functions)
             if why is not None:
@@ -6324,7 +6490,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # answered 4 where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
         shape, width, signed, sub_why = M.subscript_base_lowering(
-            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs,
+            element_kind_ok=element_kind_ok)
         if shape is None:
             raise CodegenError(sub_why)
         if shape == "load":
@@ -6437,12 +6604,28 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(end_label)
 
     def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:
-        """`obj[index] = value` — evaluate addr once, then store."""
+        """`obj[index] = value` — evaluate addr once, then store.
+
+        A STORE through a FLOAT pointee's element is answered only when the
+        value's kind agrees with the pointee (`pointer_store_lowering`, the same
+        check `p.value() = v` makes): a double's bits are the element's word,
+        and an integer's are a denormal the element would read back as."""
+        if M.subscript_float_element(self._cur_fn, target.obj, self._structs,
+                                     self._functions):
+            how, why = M.pointer_store_lowering(
+                self._cur_fn, target, self._structs, self._functions,
+                self._structs, value=value,
+                class_of=self._printf_arg_conversion_class)
+            if how is None:
+                raise CodegenError(why)
+            self._emit_expr(value)              # X0 = value
+            self._emit_subscript_store_reg(target, 0, element_kind_ok=True)
+            return
         self._emit_expr(value)                  # X0 = value
         self._emit_subscript_store_reg(target, 0)
 
     def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
-                                  reg: int) -> None:
+                                  reg: int, element_kind_ok: bool = False) -> None:
         """Store the value already in X{reg} into `target[index]`.
 
         Split from `_emit_subscript_store` so a caller that already HAS the
@@ -6482,7 +6665,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_ldp_sp_post(reg, 31))   # pop the value
             self.asm.emit(encode_mov_zr_xn(reg, 0))      # the assignment's None
             return
-        self._emit_subscript_addr(target)           # X0 = address
+        self._emit_subscript_addr(target, for_store=True,
+                                  element_kind_ok=element_kind_ok)  # X0 = address
         self.asm.emit(encode_stp_sp_pre(0, 2))      # save addr
         self.asm.emit(encode_mov_zr_xn(9, 0))       # X9 = addr
         # X5 is outside the set the address computation above uses, and
@@ -6494,10 +6678,56 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, 0))  # value back in X{reg}
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop value
 
+    def _emit_float_subscript_aug(self, stmt, op: str) -> None:
+        """`p[i] <op>= v` on a FLOAT pointee: the element's own double operation.
+
+        The element is read as its bits, combined with the value through the FP
+        unit (`_emit_float_op_on_vregs`), and stored back at the same address.
+        The integer ALU is never used: it would add the PATTERNS, so `p[0] +=
+        1.0` on a double 2.0 would store a number nobody wrote. The address is
+        computed once, so an index with a call in it is evaluated once.
+
+        Both operands must be doubles. `float_binary_refusal` is the one table
+        that says which mixed pairs and which operators are refused, by name,
+        for every binary form, so the augmented form reads it rather than
+        keeping its own list.
+        """
+        target = stmt.target
+        spelled_expr = (f"{M.spelled(target)} {stmt.op} "
+                        f"{M.spelled(stmt.value)}")
+        reason = M.float_binary_refusal(
+            op, M.FLOAT_KIND, self._expr_str_kind(stmt.value), spelled_expr,
+            left=target, right=stmt.value)
+        if reason is not None:
+            raise CodegenError(reason)
+        # The element's own width, captured before the RHS can overwrite it (a
+        # subscript on the right has its own `_sub_width`), and restored for
+        # the store — the same discipline the integer form keeps.
+        self._emit_subscript_addr(target, element_kind_ok=True)  # X0 = address
+        width = self._sub_width
+        self.asm.emit(encode_stp_sp_pre(0, 31))           # push addr
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))     # X9 = addr
+        self._emit_subscript_load(0, 9)                   # X0 = old bits
+        self.asm.emit(encode_stp_sp_pre(0, 31))           # push old
+        self._emit_expr_to(stmt.value, "X1")              # X1 = value bits
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))     # X0 = old (re-load)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))         # D0 = old
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))         # D1 = value
+        self._emit_float_op_on_vregs(op)                  # X0 = old op value
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))    # X9 = addr
+        self._sub_width = width
+        self._emit_subscript_store_at(9, 0)
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+
     def _emit_subscript_aug(self, stmt) -> None:
         """`obj[index] <op>= value` — addr and old value evaluated once."""
         op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
             else stmt.op
+        if M.subscript_float_element(self._cur_fn, stmt.target.obj,
+                                     self._structs, self._functions):
+            self._emit_float_subscript_aug(stmt, op)
+            return
         ops = {"+": encode_add_xd_xn_xm,
                "-": encode_sub_xd_xn_xm,
                "*": encode_mul_xd_xn_xm,
@@ -6650,26 +6880,27 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
 
     def _emit_text_builtin(self, e: F.CallExpr, name: str) -> None:
-        """`ord(x)` / `chr(n)` / `hash(s)` — one folds, two are refused by name.
+        """`ord(x)` / `chr(n)` / `hash(s)` — ord folds, chr folds for small ASCII literals, hash refused.
 
-        Delegation and nothing else: `model.ord_fold` decides the one answer
-        that exists and `model.text_builtin_refusal` words the other three, so
-        x86-64's copy of this cannot come to disagree with arm64's about any of
-        them.  A second copy of the refusal text would be a second thing to fall
-        out of step, and the whole point of intercepting these at all is that
-        the refusal replaces a LINK-TIME message four stages late.
-
-        The three reasons are unrelated and that is why there are three: `ord`'s
-        is what the build can SEE (a literal's one character is known, so it is
-        folded; a name's is not), `chr`'s is where the answer would LIVE (a new
-        one-character object, and a string value is a `char *` into read+execute
-        text), and `hash`'s is that CPython randomises a `str` hash per process,
-        so there is no value of the text to be right about.
+        Delegation and nothing else: `model.ord_fold`/`model.chr_fold` decide
+        answers that exist and `model.text_builtin_refusal` words the others.
         """
         args = list(e.args or [])
         if getattr(e, "kwargs", None):
             raise CodegenError(M.text_builtin_refusal(
                 name, list(e.args or [])))
+        if name == "ord":
+            fold = M.ord_fold(args)
+            if fold is not None:
+                self._emit_mov_imm("X0", fold)
+                return
+            raise CodegenError(M.text_builtin_refusal(name, args))
+        if name == "chr":
+            s = M.chr_fold(args)
+            if s is not None:
+                self._emit_expr(F.StringLiteral(s))
+                return
+            raise CodegenError(M.text_builtin_refusal(name, args))
         fold = M.ord_fold(args) if name == "ord" else None
         if fold is not None:
             self._emit_mov_imm("X0", fold)
@@ -6711,6 +6942,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         returned 3 elements where CPython returns 2: the comprehension's `x`
         was in no kind map at all, so `if x:` fell to `TRUTHY_NONZERO` and
         tested the ADDRESS of the empty string for zeroness."""
+        try:
+            if isinstance(expr, F.SubscriptExpr):
+                try:
+                    if M.string_element_fold(expr.obj, expr.index, getattr(self, "_printf_arg_text", None)) is not None:
+                        return M.STR_KIND
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
@@ -6854,17 +7094,32 @@ ctor_field_value=self._ctor_field_value_for(name),
             container_of=lambda e: self._vkinds.kind_of(e))
 
     def _printf_arg_text(self, arg):
-        """The DECODED TEXT of a `printf` vararg, or None when unseen.
-
-        The second hook of the two `model.printf_format_refusal` takes, and it
-        is a different question from `_printf_arg_is_text`: that one asks
-        whether the argument is text at all, this one asks WHICH text, because
-        a `%<width>s` pads to a byte width and only a non-ASCII operand makes
-        that differ from what CPython means. None for anything whose text this
-        build cannot see, which is the permissive direction — the model decides
-        the rest from the image's own literals.
-        """
-        return M.string_literal_text(arg)
+        """The DECODED TEXT of a `printf` vararg, or None when unseen."""
+        t = M.string_literal_text(arg)
+        if t is not None:
+            return t
+        try:
+            import fire_compiler as F
+            if isinstance(arg, F.IdentExpr):
+                name = arg.name
+                try:
+                    if name in self._text_vals():
+                        cv = self._text_vals()[name]
+                        if isinstance(cv, str):
+                            return cv
+                        t2 = M.string_literal_text(cv)
+                        if t2 is not None:
+                            return t2
+                        try:
+                            if hasattr(cv, 'value') and isinstance(getattr(cv, 'value'), str):
+                                return cv.value
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None
 
     def _printf_arg_conversion_class(self, arg):
         """`"float"` / `"int"` / `"container"` / None — see
@@ -7036,7 +7291,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
         largest `codegen-refused` family in this repository's own source, per
-        `bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
+        the 2026-10-03 proof-coverage census, §0.2), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
@@ -7096,7 +7351,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # computes CPython's spelling lives at `M.FLOAT_REPR_SYMBOL` — and this
     # method pair is the ARM half of the branch and the buffer, the machine
     # part only this backend can spell. The algorithm is the validated one
-    # (`bugs/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
+    # (shortest-round-trip decimal spelling): the
     # specials from the bits, then `%.*g` at the smallest precision n that
     # parses back to the same 64 bits (a `snprintf`/`strtod` round trip),
     # laid out in CPython's own notation — scientific iff E >= 16 or
@@ -7215,10 +7470,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         a.emit(encode_ldr_xt_xn_imm(11, 31, 136))    # a_bits, frame is +64
         a.emit(encode_str_xt_xn_imm(11, 31, 8))      # [area+8] = a
         a.emit_extern_bl("snprintf")
+        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_add_xd_xn_imm(31, 31, 64))
         a.emit(encode_add_xd_xn_imm(0, 31, 16))      # x0 = buf
         a.emit(encode_add_xd_xn_imm(1, 31, 64))      # x1 = &endptr
         a.emit_extern_bl("strtod")
+        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_fmov_v_to_gpr(14, 0))          # x14 = parsed bits
         a.emit(encode_ldr_xt_xn_imm(11, 31, 72))
         a.emit(encode_cmp_xn_xm(14, 11))
@@ -7612,6 +7869,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_expr(fp.expr)
         self.asm.emit(encode_add_xd_xn_imm(
             1, 31, 16 * (1 + fp.position) + 64 * fp.index))
+        self._float_repr_used = True
         self.asm.emit(encode_bl(0))
         self.asm.emit_label_rel(M.FLOAT_REPR_SYMBOL, here_offset=-4)
 
@@ -7789,7 +8047,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # are this backend's, and the plan needs them only for the five methods
         # whose arguments are read as `char *`.
         accept = None
-        if M.is_string_method(method):
+        recv_kind = self._method_recv_kind(e)
+        if M.is_string_method(method) and M.string_operand_is_string(recv_kind):
             args = list(e.args)
             plan, payload = M.string_method_call_plan(
                 method, _dotted(e.func), obj, args,
@@ -7804,7 +8063,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             accept = payload
         reason = M.value_method_refusal(
-            method, self._method_recv_kind(e), _dotted(e.func),
+            method, recv_kind, _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
             receiver_shape=M.receiver_shape(obj))
         if reason is not None:
@@ -7818,6 +8077,11 @@ ctor_field_value=self._ctor_field_value_for(name),
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
+        elif how == "set_add":
+            if not self._expr_is_set_like(obj):
+                raise CodegenError(M.set_add_receiver_refusal(
+                    _dotted(e.func), M.receiver_shape(obj)))
+            self._emit_list_append(e, distinct=True)
         elif how == "list_clear":
             self._emit_list_clear(e)
         elif how == "file_write":
@@ -7826,6 +8090,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_file_close(e)
         elif how == "str_lstrip":
             self._emit_str_lstrip(e, accept=accept)
+        elif how == "str_strip":
+            self._emit_str_trim(e, leading=True)
+        elif how == "str_rstrip":
+            self._emit_str_trim(e, leading=False)
         elif how in ("str_startswith", "str_endswith"):
             self._emit_str_affix(e, at_end=how == "str_endswith")
         elif how == "str_find":
@@ -7844,6 +8112,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # own was answered by calling `str.count` on its receiver.  See the
             # comment on the `else`.
             self._emit_str_count(e)
+        elif how in ("str_upper", "str_lower"):
+            self._emit_str_case(e, "toupper" if how == "str_upper" else "tolower")
         else:
             # `_emit_str_count` WAS this arm, and the fall-through was invisible
             # in two directions at once.  `how` is
@@ -7886,8 +8156,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # established from a declared type, or has refused.  There is no width this
     # emitter is allowed to choose, and that is the entire point: the pre-change
     # tree could only have emitted an 8-byte load, which over-reads a `UInt8`
-    # pointee by seven bytes and faults at a page edge (see the measurement in
-    # `bugs/FORMAL_pointer_value_model.md`).
+    # pointee by seven bytes and faults at a page edge.
     #
     # The two answers and the two instructions:
     #
@@ -8369,6 +8638,95 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 32))
         _emit_add_imm(self.asm, 31, 31, 48)
 
+    def _emit_str_case(self, e: F.CallExpr, libc_fn: str) -> None:
+        """`s.upper()` / `s.lower()` via strdup + toupper/tolower."""
+        self._while_counter += 1
+        n = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_case{n}_loop"
+        done = f"{fn}_case{n}_done"
+        _emit_sub_imm(self.asm, 31, 31, 32)
+        self._emit_expr(e.func.obj)
+        self._emit_extern_call("strdup")
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+        self.asm.label(loop)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
+        self.asm.emit(encode_ldrb_wd_wn(0, 1, 0))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self._emit_extern_call(libc_fn)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
+        self.asm.emit(encode_strb_wd_wn(0, 1, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 31, 8))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        _emit_add_imm(self.asm, 31, 31, 32)
+
+    def _emit_str_trim(self, e: F.CallExpr, *, leading: bool) -> None:
+        """`s.strip()` / `s.rstrip()` via strdup + trim on the copy."""
+        self._while_counter += 1
+        n = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_trim{n}_loop"
+        done = f"{fn}_trim{n}_done"
+        set_lit = F.StringLiteral(M.STRIP_CHARS)
+        _emit_sub_imm(self.asm, 31, 31, 32)
+        self._emit_expr(e.func.obj)
+        if leading:
+            self.asm.emit(encode_str_xt_xn_imm(0, 31, 16))  # save recv
+            self._emit_expr(set_lit)
+            self.asm.emit(encode_mov_zr_xn(1, 0))  # X1 = set
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 16))  # X0 = recv
+            self._emit_extern_call("strspn")
+            self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 16))
+            self.asm.emit(encode_add_xd_xn_xm(0, 1, 0))
+        else:
+            self.asm.emit(encode_str_xt_xn_imm(0, 31, 16))  # save recv if needed
+        self._emit_extern_call("strdup")
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))  # [sp+0] = p
+        self.asm.emit(encode_mov_zr_xn(0, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self._emit_extern_call("strlen")
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))  # [sp+8] = n
+        self.asm.label(loop)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
+        self.asm.emit(encode_sub_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_add_xd_xn_xm(1, 0, 1))  # p + n - 1
+        self.asm.emit(encode_ldrb_wd_wn(1, 1, 0))  # W1 = the byte (zero-extended)
+        # Parked in the FRAME, not left in a scratch register: building the set
+        # literal below is free to use any caller-saved register, and a byte
+        # held in X9 across it was trimmed against whatever that left behind.
+        self.asm.emit(encode_str_xt_xn_imm(1, 31, 24))
+        self._emit_expr(set_lit)  # X0 = set
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 24))  # X1 = byte
+        self._emit_extern_call("strchr")
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)  # if not found
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+        self.asm.emit(encode_sub_xd_xn_imm(0, 0, 1))
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
+        self.asm.emit(encode_add_xd_xn_xm(1, 0, 1))
+        # A real ZERO. `encode_mov_zr_xn(2, 0)` is `mov x2, x0` (the second
+        # argument is a REGISTER NUMBER, not the zero register), so this used to
+        # terminate the string with the low byte of its own address: `pad0 `,
+        # `padP`, `pad\``, `padp`, a different byte per run.
+        self.asm.emit(encode_movz_wd_imm(2, 0))
+        self.asm.emit(encode_strb_wd_wn(2, 1, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        _emit_add_imm(self.asm, 31, 31, 32)
+
     def _emit_list_clear(self, e: F.CallExpr) -> None:
         """`xs.clear()` — one store of zero at offset 0 of the blob.
 
@@ -8404,8 +8762,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_movz_wd_imm(0, 0))         # count = 0
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
 
-    def _emit_list_append(self, e: F.CallExpr) -> None:
+    def _emit_list_append(self, e: F.CallExpr, *, distinct: bool = False) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
+
+        `distinct=True` is `set.add(v)`: the same store and the same capacity
+        guard, preceded by the word scan (`_emit_set_contains`) and skipped
+        when the word is already there. The scan comes BEFORE the guard, so
+        adding a member to a full set is the no-op CPython makes of it.
 
         The blob is `[count:i64][elem0]…` in the frame, so there is no room to
         grow one: the capacity is a compile-time number (`_scan_list_caps`)
@@ -8451,12 +8814,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 0))       # X4 = base
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))       # X0 = value
         self.asm.emit(encode_ldr_xt_xn_imm(1, 4, 0))        # X1 = count
-        self._emit_mov_imm("X2", cap)
-        self.asm.emit(encode_cmp_xn_xm(1, 2))
-        self.asm.emit(encode_cset_xd_cond(3, "cs"))        # X3 = count >= cap
         self._while_counter += 1
         oob = f"{self.func_name}_appoob{self._while_counter}"
         ok = f"{self.func_name}_appok{self._while_counter}"
+        dup = f"{self.func_name}_appdup{self._while_counter}"
+        if distinct:
+            self._require_set_word_element(args[0])
+            self._emit_set_contains(4, 1, 0, 3)             # X3 = already there
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(dup, here_offset=-4)
+        self._emit_mov_imm("X2", cap)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "cs"))        # X3 = count >= cap
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(oob, here_offset=-4)
         # value slot = base + header + count * stride, at the RECEIVER's own
@@ -8479,6 +8848,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_str_xt_xn_imm(1, 4, 0))       # count = n + 1
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
+        if distinct:
+            self.asm.label(dup)
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self._emit_b_to(ok)
         self.asm.label(oob)
         self._emit_stop_diagnostic(
             M.list_append_overflow_message(
@@ -8739,7 +9112,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
         foldable case is refused here, precisely, and the rest is
-        `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        the known limit that integer overflow at run time is still untrapped (deleted FORMAL doc).
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9327,20 +9700,44 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
             self.asm.emit(encode_ldp_sp_post(0, 2))
             result_t = common_type(self._ttype(e.left), self._ttype(e.right))
-            # The build-time half of `model.int_overflow_traps`: a `+`, `-` or
-            # `*` whose operands the build can FOLD is decided here, and a
-            # refusal carrying the exact CPython value is a better answer than
-            # a wrapped number or a status code. The run-time half — the same
-            # predicate over a value the build cannot know — is emitted by
-            # `_emit_int_alu_checked`, which is wired up but not yet reachable;
-            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
-            # says why and what it needs.
+            # `model.int_overflow_traps`'s two halves, asked in the order the
+            # value exists: the build-time half — a `+`, `-` or `*` whose
+            # operands the build can FOLD is decided here, and a refusal
+            # carrying the exact CPython value is a better answer than a
+            # wrapped number or a status code — and the run-time half, the
+            # same predicate over a value the build CANNOT know, which a
+            # plain `ADD`/`SUB`/`MUL` used to answer with the hardware's
+            # modulo-2^64 wrap (exit 0, empty stderr, the deleted FORMAL
+            # integer-overflow-untrapped doc's `VARIABLE_ROWS` table is the
+            # measurement that pinned it). That
+            # half is `_emit_int_alu_checked`: the flag-setting instruction
+            # and the branch into the trap block, with the trap the one
+            # answer this path has for a value the target cannot hold.
+            #
+            # The build-decidable case that FITS stays on the plain
+            # instruction: `fold_overflow` has just said the run-time answer
+            # is the exact one, so the checked sequence would be a branch
+            # the run can never take, and an image whose every constant
+            # `5 + 7` carries a trap block is a bigger proof for the same
+            # theorem. "The build knows" is the SAME test `fold_overflow`
+            # applies to its own tuple — both operands fold to a NON-BOOL
+            # int — because a folded `True` is unknown to IT, and a
+            # `True + n` that the build does not refuse must be the one the
+            # run checks.
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
                                          pointer_arith=bool(scale))
                 if reason:
                     raise CodegenError(reason)
-            self.asm.emit(alu[op](0, 0, 1))
+                decided = all(isinstance(v, int) and not isinstance(v, bool)
+                              for v in (M.fold_literal_expr(e.left),
+                                        M.fold_literal_expr(e.right)))
+                if not decided:
+                    self._emit_int_alu_checked(op)
+                else:
+                    self.asm.emit(alu[op](0, 0, 1))
+            else:
+                self.asm.emit(alu[op](0, 0, 1))
             if op in ("+", "-", "*"):
                 self._emit_trunc(result_t)
             return
@@ -9419,10 +9816,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_int_overflow_trap(op, "vs")
             return
         if op == "*":
+            # The product fits in 64 bits exactly when the HIGH word (smulh) is
+            # the sign extension of the LOW word (mul), i.e. hi == lo asr 63 in
+            # every bit. The earlier sequence tested only bit 63 of hi XOR lo
+            # (`lsr #63`), which misses an overflow whose high word is nonzero
+            # but whose low word's top bit equals it: `triple(2**63 - 1)` wrapped
+            # to 9223372036854775805 and exited 0. The fix is the full test:
+            # sign(lo) into a scratch, XOR into hi, a zero result means it fits.
+            # x1 is the second operand, dead once `mul` has read it.
             self.asm.emit(encode_smulh_xd_xn_xm(2, 0, 1))
             self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
-            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 0))
-            self.asm.emit(encode_lsr_xd_xn_imm(2, 2, 63))
+            self.asm.emit(encode_asr_xd_xn_imm(1, 0, 63))
+            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 1))
             self._emit_int_overflow_trap(op, None, reg=2)
             return
         raise CodegenError(
@@ -9466,11 +9871,83 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_cbnz_xn(0, reg))
         self.asm.emit_label_rel(trap, here_offset=-4)
         self._emit_b_to(ok)
+        self._emit_int_overflow_trap_block(op, trap, ok)
+        return ok
+
+    def _emit_int_overflow_trap_block(self, op: str, trap: str, ok: str) -> None:
+        """The overflow trap block every entry shape on this backend branches
+        into: the label, the one-sentence diagnostic on fd 2, and the stop at
+        `INT_OVERFLOW_TRAP_STATUS`.
+
+        The shared half of `_emit_int_overflow_trap` (the flag/register branch
+        after a `+`/`-`/`*`) and `_emit_div_overflow_precheck` (the sentinel
+        before a `//`), which need the block without either of their branches.
+        One emission of the scaffolding rather than one per caller, for the
+        reason `_emit_int_overflow_trap` states: the diagnostic and the status
+        are `model.py`'s and the two should not be able to drift."""
         self.asm.label(trap)
         self._emit_stop_diagnostic(M.int_overflow_trap_message(op))
         self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
         self.asm.label(ok)
-        return ok
+
+    def _emit_div_overflow_precheck(self, op: str) -> None:
+        """The `//` overflow PRE-check: trap on `INT64_MIN // -1`, the one
+        division whose answer does not fit.
+
+        Measured on this machine before the shape was written: `SDIV` of the
+        overflowing pair answers the dividend and leaves the flags `N = 1,
+        Z = 0, C = 1, V = 0` — the SAME pattern `SDIV` of `INT64_MIN, 1`
+        leaves, which is why no flag a POST-check could read names the case
+        (the round had assumed the ARM set V; the CPU disagrees), and the
+        x86-64 twin's `IDIV` raises `#DE` on the pair and dies on SIGFPE
+        before any flag exists at all. So the check is a sentinel over the two
+        operands — the one exact characterization — and it runs BEFORE the
+        divide on BOTH backends. On this backend each constant goes into X2
+        in MOVZ/MOVK instructions before a REGISTER compare, not into an
+        immediate:
+        the 12-bit immediate of the 64-bit data-processing compare is
+        sign-extended into bits [63:12], so the smallest value it reaches is
+        -4096 and -1 (0xffff_ffff_ffff_ffff) is not in the class — measured,
+        `CMP X1, #0xfff` with X1 = -1 leaves BNE taken, and the x86 twin's
+        sign-extended 8-bit immediate is the one form that does reach it:
+
+            MOV X2, #0xffffffffffffffff   ; the overflow DIVISOR
+            CMP X1, X2
+            B.ne  ok
+            MOV X2, #0x8000000000000000   ; INT64_MIN, the overflow DIVIDEND
+            CMP X0, X2
+            B.ne  ok
+            <the trap block>
+        ok:
+            SDIV X2, X0, X1              ; the divide the check protects
+
+        The caller is the division arm with X0 = dividend and X1 = divisor.
+        X2 is the quotient destination the `SDIV` after `ok` writes, and each
+        constant is MOVed before the CMP that reads it, so the reuse is safe,
+        and the trap block ends in an exit, so nothing here preserves a
+        register.
+
+        The branches are not recorded as source conditions: no `if` the
+        program wrote is behind them, the reading arm64's own guards apply
+        (a recorded branch would claim a source-level conditional that is not
+        there), and the walk follows them down both edges and closes the trap
+        branch at its `BL` to the exit stub, which is the `+`/`-`/`*` trap's
+        close.
+        """
+        self._if_counter += 1
+        tid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_ovf{tid}_t"
+        ok = f"{fn}_ovf{tid}_k"
+        self._emit_mov_imm("X2", -1)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_b_cond("ne", 0))
+        self.asm.emit_label_rel(ok, here_offset=-4)
+        self._emit_mov_imm("X2", M.INT64_MIN)
+        self.asm.emit(encode_cmp_xn_xm(0, 2))
+        self.asm.emit(encode_b_cond("ne", 0))
+        self.asm.emit_label_rel(ok, here_offset=-4)
+        self._emit_int_overflow_trap_block(op, trap, ok)
 
     def _emit_float_to_int_range_trap(self) -> None:
         """Trap if the double in V0 does not fit in an `Int64` after truncation.
@@ -9677,13 +10154,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         # column 0; x86-64 reads column 1.  One table decides what each operator
         # MEANS and each backend owns how it spells it, which is why adding an
         # operator is one row and not two.
+        self._emit_cmp_operands(l, r)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        self._emit_float_op_on_vregs(op)
+
+    def _emit_float_op_on_vregs(self, op: str) -> None:
+        """The FP operation of `op` on D0 and D1, leaving the result in X0.
+
+        The shared tail of `_emit_float_binary` and the augmented subscript
+        store: the caller has put the left operand in D0 and the right in D1
+        (and so X1 still holds the right operand's bits, which is what the
+        divide-by-zero guard reads). One place for the operator's meaning
+        (`FLOAT_BINARY_MNEMONICS`) and its guard, so the two forms cannot
+        answer differently about the same operator.
+        """
         emit = {
             "fadd": encode_fadd_dd_dn_dm, "fsub": encode_fsub_dd_dn_dm,
             "fmul": encode_fmul_dd_dn_dm, "fdiv": encode_fdiv_dd_dn_dm,
         }[M.FLOAT_BINARY_MNEMONICS[op][0]]
-        self._emit_cmp_operands(l, r)
-        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
-        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
         if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
             self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 0, 1))
@@ -10200,6 +10689,71 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(false_label, here_offset=-4)
         return True
 
+    def _emit_branch_unless_and_cmp(self, cond, false_label: str) -> bool:
+        """Lower `A and B` where A and B are integer comparisons to cmp + ccmp + b.cond.
+
+        Shape: `A and B` with both operands BinaryOp in _cmp_conds() (no is/is not),
+        both integer (no float reading, string_binary_refusal None, no frame-order
+        refusal), and B's operands flag-neutral (load or literal 0..31). Or is
+        declined. B's operand evaluation must not write flags between cmp A and
+        ccmp. Uses encode_ccmp_xn_xm or encode_ccmp_xn_imm5.
+        """
+        if not CCMP_LOWERING:
+            return False
+        # Only handle `and`
+        if not (isinstance(cond, F.BinaryOp) and cond.op == "and"):
+            return False
+        A = cond.left
+        B = cond.right
+        if not (isinstance(A, F.BinaryOp) and A.op in self._cmp_conds()):
+            return False
+        if not (isinstance(B, F.BinaryOp) and B.op in self._cmp_conds()):
+            return False
+        if A.op in ("is", "is not") or B.op in ("is", "is not"):
+            return False
+        # Check string/binary refusals for both
+        for c in (A, B):
+            reason = M.string_binary_refusal(
+                c.op, self._expr_str_kind(c.left),
+                self._expr_str_kind(c.right), left=c.left, right=c.right,
+                fn=self._cur_fn, untyped_callee=self._untyped_callee)
+            if reason is not None:
+                raise CodegenError(reason)
+            self._refuse_frame_order_operand(c.op, c.left)
+            self._refuse_frame_order_operand(c.op, c.right)
+        # Integer only - check cmp specs
+        left_a, right_a, u_a, s_a, reading_a = self._cmp_spec(A.op, A.left, A.right)
+        left_b, right_b, u_b, s_b, reading_b = self._cmp_spec(B.op, B.left, B.right)
+        if reading_a is not None or reading_b is not None:
+            return False
+        # B operands must be flag-neutral loads or literals 0..31
+        if not self._is_flag_preserving_load(B.left) or not self._is_flag_preserving_load(B.right):
+            return False
+        # Each comparison keeps its OWN signedness
+        signed_a = cmp_signed(common_type(self._ttype(A.left), self._ttype(A.right)))
+        signed_b = cmp_signed(common_type(self._ttype(B.left), self._ttype(B.right)))
+        condA_chosen = s_a if signed_a else u_a
+        condB_chosen = s_b if signed_b else u_b
+        # Emit cmp for A using same operand loading as single-comparison path
+        self._emit_cmp_operands(A.left, A.right)
+        self.asm.emit(encode_cmp_xn_xm(0, 1))
+        # Load B operands into X2, X3 (or use immediate)
+        # Evaluate B.left into X2 (must be flag-neutral)
+        self._emit_expr_to(B.left, "X2")
+        # Check if B.right is a literal 0..31
+        b_right_imm = self._static_int(B.right)
+        from formal.arm64 import _ccmp_false_nzcv
+        nzcv_false = _ccmp_false_nzcv(condB_chosen)
+        if b_right_imm is not None and 0 <= b_right_imm <= 31:
+            self.asm.emit(encode_ccmp_xn_imm5(2, b_right_imm, nzcv_false, condA_chosen))
+        else:
+            self._emit_expr_to(B.right, "X3")
+            self.asm.emit(encode_ccmp_xn_xm(2, 3, nzcv_false, condA_chosen))
+        self._record_cond_branch()
+        self.asm.emit(encode_b_cond(invert_cond(condB_chosen), 0))
+        self.asm.emit_label_rel(false_label, here_offset=-4)
+        return True
+
     def _emit_branch_unless(self, cond, false_label: str) -> bool:
         """Branch to `false_label` unless `cond` holds. True if it emitted.
 
@@ -10216,6 +10770,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if self._emit_branch_unless_bit_test(cond, false_label):
             return True
         if self._emit_branch_unless_and_test(cond, false_label):
+            return True
+        if self._emit_branch_unless_and_cmp(cond, false_label):
             return True
         if not (isinstance(cond, F.BinaryOp) and cond.op in self._cmp_conds()):
             return False
@@ -11617,8 +12173,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
-            # is the doc for what is left when neither has an answer.
+            # the deleted FORMAL doc on function-value calls not proved to be calls
+            # is what covers what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
             if holds is not None:
@@ -11650,6 +12206,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
+        # `str(<integer literal>)` / `repr(<integer literal>)` is a build-time
+        # constant: the literal's decimal text, interned like any string
+        # literal. No buffer, no pointer arithmetic, same on both architectures.
+        # (`str(n)` of a RUN-TIME integer stays refused: formatting needs a
+        # buffer that outlives the call, which this path does not have.)
+        if not is_extern_call and name in ("str", "repr") \
+                and len(e.args) == 1 and not e.kwargs:
+            _lit = M.integer_literal_text(e.args[0])
+            if _lit is not None:
+                self._emit_expr(F.StringLiteral(_lit))
+                return
         if not is_extern_call and M.emitter_lowers(name):
             if name == "len":
                 self._emit_len(e)
@@ -11697,17 +12264,69 @@ ctor_field_value=self._ctor_field_value_for(name),
         # gates on the resolved CALLEE rather than on `is_extern_call`, so
         # `external_call["printf", Int32](fmt, n)` — which reaches this same
         # line with `name == "printf"` — is asked the same question.
+        # Try to fold width/precision on known non-ASCII text first.
+        try:
+            idx_f = M.printf_format_arg_index(name)
+            if idx_f is not None and idx_f < len(e.args):
+                fmt_node = e.args[idx_f]
+                if isinstance(fmt_node, F.StringLiteral):
+                    fmt_text_f = F.decoded_literal(fmt_node)
+                    vargs = list(e.args[idx_f + 1:])
+                    def _text_of_arg(a):
+                        t = self._printf_arg_text(a)
+                        if t is not None:
+                            return t
+                        try:
+                            if isinstance(a, F.IdentExpr):
+                                nm = a.name
+                                if nm in self._text_vals():
+                                    cv = self._text_vals()[nm]
+                                    if isinstance(cv, str):
+                                        return cv
+                                    t2 = M.string_literal_text(cv)
+                                    if t2 is not None:
+                                        return t2
+                                    t2 = self._printf_arg_text(cv)
+                                    if t2 is not None:
+                                        return t2
+                        except Exception:
+                            pass
+                        return None
+                    folded = M.printf_fold_text_widths(name, fmt_text_f, vargs, _text_of_arg)
+                    if folded is None:
+                        # Step 13d: text the build cannot see, in an image that holds non-ASCII
+                        # text, becomes the star form with widths computed in characters.
+                        folded = M.printf_runtime_rewrites(
+                            name, fmt_text_f, vargs, _text_of_arg,
+                            lambda a: self._is_string_subscript(a.obj))
+                    if folded is not None:
+                        new_fmt, new_vargs = folded
+                        new_args = list(e.args)
+                        new_args[idx_f] = F.StringLiteral(new_fmt)
+                        new_args[idx_f + 1:idx_f + 1 + len(vargs)] = new_vargs
+                        e = F.CallExpr(func=e.func, args=new_args, kwargs=getattr(e, "kwargs", None), line=getattr(e, "line", None), col=getattr(e, "col", None))
+        except Exception:
+            pass
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, each of which the format's conversions
-        # turn into TEXT.  A return-less call here is the same value this path
-        # cannot carry that `_print_call` refuses for `print`, at the other
-        # spelling of "render this word" — see
-        # `model.returnless_printf_argument_refusal` for why it is one reader and
-        # not a second copy of `_print_call`'s loop.
-        reason = M.returnless_printf_argument_refusal(
-            name, list(e.args or []), self._vkinds.no_value_callee_of)
-        if reason is not None:
-            raise CodegenError(reason)
+        # …and the same call's VARARGS, a value this build knows is `None`
+        # among them.  Direction (b) makes a call to a function that always
+        # answers `None` a value whose TEXT is decided at build time, so `%s`
+        # gets the four characters (`printf_none_argument_rewrite`) rather than
+        # the word the callee never wrote.  A NUMBER conversion of the same
+        # operand is refused, because CPython raises TypeError for
+        # `"%d" % None` and this path has no exception to raise.  The rewrite
+        # is the model's, asked at the same line in both emitters, so the two
+        # architectures cannot render one call differently.
+        rewritten = M.printf_none_argument_rewrite(
+            name, list(e.args or []), self._vkinds.is_none_value)
+        if rewritten is not None:
+            new_args, reason = rewritten
+            if reason is not None:
+                raise CodegenError(reason)
+            e = F.CallExpr(func=e.func, args=new_args,
+                           kwargs=getattr(e, "kwargs", None),
+                           line=getattr(e, "line", None),
+                           col=getattr(e, "col", None))
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above and for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —
@@ -11806,6 +12425,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         # files here declare and an identity conversion, and preferring the
         # declaration would change a program's MEANING rather than its
         # verdict.
+        if M.call_is_string_frame_reading(e):
+            self._emit_struct_constructor(e, name, self._structs[name])
+            return
         if not is_extern_call and name not in self._functions:
             nargs = len(e.args) + len(e.kwargs or [])
             if not M.type_constructor_prefers_local_struct(
@@ -12714,7 +13336,10 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # emitters that this element is that shape, and the decision
                 # is `model.comprehension_element_is_relocatable`'s so both
                 # backends relocate the same elements.
-                reloc = (cap > 1
+                is_set = expr.kind == "set"
+                if is_set:
+                    self._require_set_comprehension_element(expr.element)
+                reloc = (cap > 1 and not is_set
                          and M.comprehension_element_is_relocatable(
                              expr.element))
                 if reloc:
@@ -12726,7 +13351,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                         self._compr_reloc.pop()
                 self._materialize_compr_element(
                     expr.element, res_offset, cap, _before)
-                self._compr_append_elem(res_offset, cap)
+                self._compr_append_elem(res_offset, cap, distinct=is_set)
             return
 
         gen = gens[gi]
@@ -12852,17 +13477,40 @@ ctor_field_value=self._ctor_field_value_for(name),
 
 
 
-    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
-        """Append X0 to list result at res_offset; exit(1) past cap."""
+    def _require_set_comprehension_element(self, el) -> None:
+        """A set comprehension's element must be a word whose `==` is a word
+        compare. Containers are refused (unhashable); the rest is the literal
+        rule, except that a COMPUTED integer expression (`x % 2`, which the
+        string-kind query cannot classify) is accepted: arithmetic yields an
+        integer word, and the string-kind check still refuses a string."""
+        if M.set_element_is_container(el):
+            raise CodegenError(M.set_comprehension_element_refusal(M.spelled(el)))
+        if isinstance(el, F.FloatLiteral):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
+        if self._expr_str_kind(el) == "str" and not isinstance(el, F.StringLiteral):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "str"))
+
+    def _compr_append_elem(self, res_offset: int, cap: int, *,
+                           distinct: bool = False) -> None:
+        """Append X0 to list result at res_offset; exit(1) past cap.
+
+        `distinct=True` (a set comprehension) first scans the result so far
+        (`_emit_set_contains`) and appends nothing when the word is there; the
+        capacity is an upper bound on appends, so skipping is always safe."""
         self.asm.emit(encode_stp_sp_pre(0, 2))
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
-        self._emit_mov_imm("X2", cap)
-        self.asm.emit(encode_cmp_xn_xm(1, 2))
-        self.asm.emit(encode_cset_xd_cond(3, "cs"))
         self._while_counter += 1
         oob = f"{self.func_name}_cgoob{self._while_counter}"
         ok = f"{self.func_name}_cgok{self._while_counter}"
+        dup = f"{self.func_name}_cgdup{self._while_counter}"
+        if distinct:
+            self._emit_set_contains(9, 1, 0, 3)
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(dup, here_offset=-4)
+        self._emit_mov_imm("X2", cap)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "cs"))
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(oob, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
@@ -12873,6 +13521,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
+        if distinct:
+            self.asm.label(dup)          # already a member: unwind, store nothing
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self._emit_b_to(ok)
         self.asm.label(oob)
         self._emit_exit(1)
         self.asm.label(ok)
@@ -13053,6 +13705,28 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `model.division_needs_zero_guard` is the shared decision, asked by
             # both backends for the reason `division_floors` gives above.
             needs_guard = M.division_needs_zero_guard(folded_right)
+            # `model.int_overflow_traps`'s run-time half for `//`, the shape
+            # the `+`/`-`/`*` ALU arm landed for (2026-11-02): the build-time
+            # half is `division_overflow_refusal` above, and when THAT has just
+            # decided the pair the plain `SDIV` below stays the byte-identical
+            # emission — a folded case never carries the check. The run-time
+            # half fires when the build cannot decide, and it is a PRE-check
+            # rather than the flag the `+`/`-` arm reads, measured on this
+            # machine rather than assumed: `SDIV` leaves V CLEAR on the
+            # overflowing pair (the architecture defines the result as the
+            # dividend, and the flags left are the SAME ones `INT64_MIN, 1`
+            # leaves, so no flag a post-check could read names the case) and
+            # x86-64's `IDIV` raises `#DE` before any flag exists at all, so
+            # the one check BOTH backends emit is the sentinel over the two
+            # operands, in the trap rather than in a wider word. `model.
+            # division_needs_overflow_precheck` adds the sentinel's deadness —
+            # the taken arm is the trap's own `bl fflush`, the same cost the
+            # zero guard above refuses to pay for a divisor that cannot be
+            # zero, and a `// 4` image carrying a dead sentinel re-puts the
+            # universal theorem behind the two-calls rule.
+            checked = (M.int_overflow_traps(op, result_t)
+                       and M.division_needs_overflow_precheck(
+                           folded_left, folded_right))
             self._if_counter += 1
             cid = self._if_counter
             fn = self.func_name
@@ -13067,6 +13741,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_cbz_xn(0, 1))
                 self.asm.emit_label_rel(div0_label, here_offset=-4)
             if signed:
+                if checked:
+                    self._emit_div_overflow_precheck(op)
                 self.asm.emit(encode_sdiv_xd_xn_xm(2, 0, 1))
             else:
                 self.asm.emit(encode_udiv_xd_xn_xm(2, 0, 1))
@@ -13113,7 +13789,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            # is the known limit that integer overflow at run time is still untrapped (deleted FORMAL doc).
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])
@@ -14115,6 +14791,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
 
 
+    def _text_vals(self) -> dict:
+        """The text the build knows for a NAME: `comptime` constants, plus the
+        locals bound once to a string literal and never stored to again
+        (`model.once_bound_string_literals`). Separate from `_comptime_vals` on
+        purpose: that table is what `_check_comptime_target` refuses stores to."""
+        return {**self._str_lit_vals, **self._comptime_vals}
+
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.
 
@@ -14185,6 +14868,30 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_stmt(F.AssignStmt(target=F.IdentExpr(name=target),
                                      value=value, line=0, col=0))
 
+    def _same_pure_expr(self, a, b) -> bool:
+        """Structural equality ignoring source positions."""
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, F.IdentExpr):
+            return getattr(a, "name") == getattr(b, "name")
+        if isinstance(a, F.IntLiteral):
+            return getattr(a, "value") == getattr(b, "value")
+        if isinstance(a, F.StringLiteral):
+            return getattr(a, "value") == getattr(b, "value")
+        if isinstance(a, F.BoolLiteral):
+            return getattr(a, "value") == getattr(b, "value")
+        if isinstance(a, F.UnaryOp):
+            return getattr(a, "op") == getattr(b, "op") and self._same_pure_expr(getattr(a, "operand"), getattr(b, "operand"))
+        if isinstance(a, F.BinaryOp):
+            return (getattr(a, "op") == getattr(b, "op")
+                    and self._same_pure_expr(getattr(a, "left"), getattr(b, "left"))
+                    and self._same_pure_expr(getattr(a, "right"), getattr(b, "right")))
+        # Fall back to structural equality for anything else
+        try:
+            return a == b
+        except Exception:
+            return False
+
     def _is_flag_preserving_load(self, e) -> bool:
         """True when `e` lowers to one load or move, neither of which writes
         the flags.
@@ -14201,6 +14908,51 @@ ctor_field_value=self._ctor_field_value_for(name),
         that is silent."""
         return isinstance(e, (F.IdentExpr, F.IntLiteral, F.StringLiteral,
                               F.BoolLiteral))
+
+    def _csel_family_shape(self, expr):
+        """Detect ternary shapes that lower to CSINC/CSINV/CSNEG.
+
+        Measured counts in this tree: csinc 3,255, csinv 483, csneg 362.
+        csinc/csneg are gated on ``int_overflow_traps`` for the result type
+        because lowering ``a + 1`` / ``0 - a`` on signed 64-bit would wrap
+        silently where the current lowering traps on overflow; ``~a`` never
+        overflows so csinv is always allowed when shapes match.
+        """
+        T = expr.then_val
+        E = expr.else_val
+        if not self._is_flag_preserving_load(T):
+            return None
+        # Shape 1: T if c else ~T
+        if isinstance(E, F.UnaryOp) and getattr(E, "op") == "~":
+            if self._same_pure_expr(getattr(E, "operand"), T):
+                return ("csinv", T)
+        # Shape 2: T if c else T + 1
+        if isinstance(E, F.BinaryOp) and getattr(E, "op") == "+":
+            if self._same_pure_expr(E.left, T) and isinstance(E.right, F.IntLiteral) and getattr(E.right, "value") == 1:
+                rt = self._ttype(expr)
+                if not M.int_overflow_traps("+", rt):
+                    return ("csinc", T)
+                return None
+            if self._same_pure_expr(E.right, T) and isinstance(E.left, F.IntLiteral) and getattr(E.left, "value") == 1:
+                rt = self._ttype(expr)
+                if not M.int_overflow_traps("+", rt):
+                    return ("csinc", T)
+                return None
+        # Shape 3: T if c else 0 - T or -T
+        if isinstance(E, F.BinaryOp) and getattr(E, "op") == "-":
+            if isinstance(E.left, F.IntLiteral) and getattr(E.left, "value") == 0 and self._same_pure_expr(E.right, T):
+                rt = self._ttype(expr)
+                if not M.int_overflow_traps("-", rt):
+                    return ("csneg", T)
+                return None
+        if isinstance(E, F.UnaryOp) and getattr(E, "op") == "-":
+            if self._same_pure_expr(getattr(E, "operand"), T):
+                rt = self._ttype(expr)
+                if not M.int_overflow_traps("-", rt):
+                    return ("csneg", T)
+                return None
+        return None
+
 
     def _emit_csel_ternary(self, expr) -> None:
         """`a if c else b` branchlessly: evaluate both arms, CSEL between them.
@@ -14223,6 +14975,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         takes the `then` arm.
         """
         self._emit_truthy_word(expr.condition)
+        shape = self._csel_family_shape(expr)
+        if shape is not None:
+            name, T = shape
+            self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self._emit_expr(T)
+            if name == "csinv":
+                self.asm.emit(encode_csinv_xd_xm_cond(0, 0, 0, "ne"))
+            elif name == "csinc":
+                self.asm.emit(encode_csinc_xd_xm_cond(0, 0, 0, "ne"))
+            elif name == "csneg":
+                self.asm.emit(encode_csneg_xd_xm_cond(0, 0, 0, "ne"))
+            else:
+                raise AssertionError(name)
+            return
         if (self._is_flag_preserving_load(expr.then_val)
                 and self._is_flag_preserving_load(expr.else_val)):
             # Nothing to spill: the arms are loads, and a load does not write
@@ -15715,6 +16481,93 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(clamped, here_offset=-4)
         self.asm.emit(encode_movz_wd_imm(reg, 0))
         self.asm.label(clamped)
+
+    def _require_set_word_element(self, el) -> None:
+        """Refuse a set element whose equality is not a word comparison.
+
+        Eligible: an integer/bool, a string LITERAL (interned by content), and
+        an unclassified word that is a plain name (the corpus's unannotated
+        integer parameter). Refused: a float, a string that is not a literal
+        (possibly computed, hence not interned), anything else unclassified."""
+        if isinstance(el, F.FloatLiteral):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
+        if isinstance(el, F.StringLiteral):
+            return
+        kind = self._expr_str_kind(el)
+        if kind == "str" or (kind is None and not isinstance(
+                el, (F.IntLiteral, F.BoolLiteral, F.IdentExpr))):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
+
+    def _emit_deduped_set(self, expr, kept, dropped) -> None:
+        """A set literal whose element words are known at compile time: the
+        list blob of its distinct elements. The capacity the append scan found
+        is keyed by the SET node, so it is carried to the replacement list."""
+        if not dropped:
+            self._emit_list(expr)
+            return
+        lst = F.ListExpr(elements=kept, line=expr.line, col=expr.col)
+        cap = self._list_caps.get(id(expr))
+        if cap is not None:
+            self._list_caps[id(lst)] = cap
+        try:
+            self._emit_list(lst)
+        finally:
+            self._list_caps.pop(id(lst), None)
+
+    def _emit_set_literal(self, expr: F.SetExpr) -> None:
+        """Set literal with runtime deduplication for non-canonical elements."""
+        if self._compr_reloc:
+            raise CodegenError(M.set_runtime_element_refusal_in_comprehension(
+                M.spelled(expr)))
+        has_star = any(isinstance(el, F.UnaryOp) and el.op == "*"
+                       for el in expr.elements)
+        if has_star:
+            raise CodegenError("star unpack in set literal not supported")
+        n = len(expr.elements)
+        cap = max(n, self._list_caps.get(id(expr), n))
+        size = 8 * (1 + cap)
+        if self._list_cursor + size > self._blob_cap:
+            raise CodegenError(M.frame_blob_refusal(
+                "a set literal", self._list_cursor + size, self._blob_cap))
+        offset = self._list_cursor
+        self._list_cursor += size
+        self._materialised[id(expr)] = (offset, size)
+
+        base_reg = 9
+        count_reg = 2
+        elem_reg = 0
+        found_reg = 3
+        self._emit_list_base(offset)
+        self._emit_mov_imm(f"X{count_reg}", 0)
+        self.asm.emit(encode_str_xt_xn_imm(count_reg, base_reg, 0))
+        for i, el in enumerate(expr.elements):
+            self._require_set_word_element(el)
+            # Evaluate element
+            self._emit_expr(el)  # result in elem_reg (X0)
+            # Reload base and count
+            self._emit_list_base(offset)
+            self.asm.emit(encode_ldr_xt_xn_imm(count_reg, base_reg, 0))
+            # Check if contains
+            self._emit_set_contains(base_reg, count_reg, elem_reg, found_reg)
+            self._while_counter += 1
+            skip = f"{self.func_name}_sls{self._while_counter}_{i}"
+            # if found, skip insertion
+            self.asm.emit(encode_cbnz_xn(0, found_reg))
+            self.asm.emit_label_rel(skip, here_offset=-4)
+            # Not found - insert (use X10 which is clobbered by set_contains but we don't need old value)
+            self._emit_list_base(offset)
+            self.asm.emit(encode_ldr_xt_xn_imm(count_reg, base_reg, 0))
+            # store at base+8 + 8*count
+            self.asm.emit(encode_add_xd_xn_imm(10, base_reg, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(10, 10, count_reg))
+            self.asm.emit(encode_str_xt_xn_imm(elem_reg, 10, 0))
+            # increment count
+            self.asm.emit(encode_add_xd_xn_imm(count_reg, count_reg, 1))
+            self._emit_list_base(offset)
+            self.asm.emit(encode_str_xt_xn_imm(count_reg, base_reg, 0))
+            self.asm.label(skip)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, base_reg))
 
 
 def _always_returns(stmts: list) -> bool:

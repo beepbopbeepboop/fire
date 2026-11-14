@@ -75,10 +75,8 @@ def enqueue_fixer(name, why):
             "(`git diff master...HEAD`, bisect its commits), and fix it properly without losing what the branch delivers; the "
             "branch's own tests must still pass. Light worker: no gate. Never use git stash. Commit; finish with the REPORT block "
             "and a CONTROL-STATUS line. Excerpt of the failure:\n%s" % (t["branch"], t["summary"][:150], why.splitlines()[0] if why else "?", why))
-    fname = "fix-screen-" + name
-    if fname in C.load():
-        fname += "-%d" % int(time.time() % 100000)
-    C.cmd_enqueue(_ap.Namespace(name=fname[:60], claim=t["claims"] or ["task:" + fname], task=task, task_file=None, file=[],
+    fname = C.free_task_name("fix-screen-" + name)
+    C.cmd_enqueue(_ap.Namespace(name=fname, claim=t["claims"] or ["task:" + fname], task=task, task_file=None, file=[],
                                 base=t["branch"], needs=[], model=None))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
@@ -194,8 +192,7 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
         family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
         for n in family:
             if C.state_of(tasks[n]) == "running":
-                try: os.killpg(tasks[n]["pid"], 15)
-                except OSError: pass
+                C.fleet_ledger.kill_group(C.ctl_dir(), n, "fixer exited with a running worker")
             snapshot_tree(tasks[n], "the fixer exited with uncommitted work")
         done = [n for n in family if C.ahead(tasks[n]) > 0 and tasks[n].get("state") != "abandoned"]
         qtext = " ".join(q for n in family for q in C.questions(tasks[n]))
@@ -318,8 +315,7 @@ def merge_conflicts(M, X, timeout_min=180):
     family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
     for n in family:
         if C.state_of(tasks[n]) == "running":
-            try: os.killpg(tasks[n]["pid"], 15)
-            except OSError: pass
+            C.fleet_ledger.kill_group(C.ctl_dir(), n, "merger exited with a running worker")
         snapshot_tree(tasks[n], "the merger exited with uncommitted work")
     done = [n for n in family if C.ahead(tasks[n]) > 0]
     if not done:

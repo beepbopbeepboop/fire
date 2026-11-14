@@ -1,0 +1,733 @@
+#!/usr/bin/env python3
+"""Regression test for comptime assert compile-time diagnostics.
+
+The compiler previously accepted (missing comptime validation diagnostics)
+`comptime assert` statements whose conditions are provably false at compile
+time.  A `comptime assert` is a compile-time check; a provably-false
+condition must fail compilation with a diagnostic, not be silently accepted
+(or lowered to a runtime trap).
+"""
+
+from gimple_codegen import compile_to_gimple
+
+
+def _compile(src, filename='t.mojo'):
+    return compile_to_gimple(src, do_imports=False, filename=filename)
+
+
+def test_comptime_assert_false_fails():
+    try:
+        _compile('fn f():\n    comptime assert False, "nope"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed' in str(e), e
+        assert 'nope' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_comptime_assert_false_no_msg():
+    try:
+        _compile('fn f():\n    comptime assert False\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_comptime_assert_true_passes():
+    _compile('fn f():\n    comptime assert True, "ok"\n    pass\n')
+
+
+def test_comptime_assert_comparison_fails():
+    try:
+        _compile('fn f():\n    comptime assert 1 == 2, "math"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed' in str(e), e
+        assert 'math' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_comptime_assert_message_string_concat_and_string_int():
+    # Comptime diagnostic messages must be evaluated: String(int) and +
+    # concatenation fold so the message is human-readable, not a temp name.
+    try:
+        _compile('fn f():\n    comptime x = 42\n    comptime assert False, "got " + String(x)\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'got 42' in s, s
+        assert '_t' not in s.split('comptime assertion failed:')[-1], s
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_comptime_assert_message_tstring():
+    # t-string (template string) messages must be evaluated in comptime
+    # diagnostics (t"..." reflection-driven messages in comptime diagnostics;
+    # reflection-driven messages).
+    try:
+        _compile('fn f():\n    comptime x = 5\n    comptime assert False, t"value is {x}"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'value is 5' in s, s
+        assert '{x}' not in s, s
+        return
+    raise AssertionError('provably-false comptime assert with t-string compiled')
+
+
+def test_comptime_assert_message_tstring_expr():
+    try:
+        _compile('fn f():\n    comptime assert 1 == 2, t"math {1 + 1}"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'math 2' in s, s
+        return
+    raise AssertionError('provably-false comptime assert with t-string expr compiled')
+
+
+def test_comptime_assert_message_fstring():
+    try:
+        _compile('fn f():\n    comptime x = 9\n    comptime assert False, f"n={x}"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'n=9' in s, s
+        return
+    raise AssertionError('provably-false comptime assert with f-string compiled')
+
+
+def test_in_process_refuses_a_bracketed_call_to_a_generic_function():
+    # The single-unit path does not instantiate a generic; the stub it used to
+    # emit printed 0 where the build prints 2. It refuses, and names link mode.
+    try:
+        _compile('def f[x: Int]() -> Int:\n    return x + 1\n\ndef main():\n    print(f[1]())\n')
+    except RuntimeError as e:
+        assert 'needs the generic instantiated' in str(e), str(e)
+        assert 'link mode' in str(e), str(e)
+        return
+    raise AssertionError('a bracketed generic call compiled in-process (it would print 0)')
+
+
+def test_comptime_assert_short_circuit_and_false():
+    # Short-circuit: `False and <unknown>` is provably false even when the
+    # right operand cannot be folded (generic/comptime-param dependent).
+    # missing diagnostic when
+    # comptime bool folding required both operands to be known.
+    # A generic body is checked only when it is instantiated, which the real
+    # build does (see diagnostic_build.py); the in-process path does not.
+    from diagnostic_build import build_refusal
+    rc, s = build_refusal('def f[x: Int]():\n    comptime assert False and x > 0, "nope"\n\ndef main():\n    f[1]()\n')
+    assert rc != 0, 'provably-false short-circuit in a called generic built without error'
+    assert 'comptime assertion failed' in s, s
+    assert 'nope' in s, s
+
+
+def test_comptime_assert_short_circuit_or_unknown_not_false():
+    # `True or <unknown>` is provably true: must NOT fail compilation.
+    _compile('fn f[x: Int]():\n    comptime assert True or x < 0, "ok"\n')
+
+
+def test_comptime_assert_short_circuit_and_true_needs_rhs():
+    # `True and <unknown>` depends on rhs; must not produce a false diagnostic.
+    _compile('fn f[x: Int]():\n    comptime assert True and x > 0, "ok"\n')
+
+
+def _compile_full(src):
+    import os
+    import tempfile
+    tmpdir = os.environ.get('TMPDIR', '.tmp')
+    os.makedirs(tmpdir, exist_ok=True)
+    with tempfile.NamedTemporaryFile(suffix='.mojo', dir=tmpdir,
+                                     delete=False, mode='w') as f:
+        f.write(src)
+        fn = f.name
+    try:
+        return compile_to_gimple(src, do_imports=True, filename=fn)
+    finally:
+        try:
+            os.unlink(fn)
+        except OSError:
+            pass
+
+
+def test_comptime_assert_in_comptime_for_range():
+    # comptime for unrolls at compile time; the induction variable must be
+    # visible to comptime assertion evaluation so a provably-false condition in
+    # any iteration is diagnosed (comptime validation).
+    try:
+        _compile('fn f():\n    comptime for i in range(3):\n        comptime assert i < 2, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for (false iteration) compiled')
+
+
+def test_comptime_assert_in_comptime_for_range_true():
+    _compile('fn f():\n    comptime for i in range(3):\n        comptime assert i < 3, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_product():
+    # product() unrolling must also bind loop targets for comptime evaluation.
+    src = (
+        'from itertools import product\n'
+        'fn f():\n'
+        '    comptime for i, j in product(range(2), range(2)):\n'
+        '        comptime assert i + j < 2, "sum"\n'
+    )
+    try:
+        _compile(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'sum' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for product compiled')
+
+
+def test_comptime_assert_message_tstring_generic_param():
+    # Modular shape: t-string message referencing an instantiated generic param.
+    src = '''
+def use_positive_int[x: Int]():
+    comptime assert x > 0, t"expected positive number, got {x}"
+
+def main():
+    use_positive_int[-3]()
+'''
+    try:
+        _compile_full(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'expected positive number, got -3' in s, s
+        return
+    raise AssertionError('instantiated generic comptime assert t-string compiled')
+
+
+def test_comptime_assert_in_comptime_for_list_literal():
+    # comptime for over a constant list literal must unroll and bind the loop
+    # variable so comptime assertions see the per-iteration value
+    # (comptime-for shapes
+    # beyond the gimple unroller's bound forms").
+    try:
+        _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        comptime assert i < 2, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for over list literal compiled')
+
+
+def test_comptime_assert_in_comptime_for_tuple_literal():
+    try:
+        _compile('fn f():\n    comptime for i in (0, 1, 2):\n        comptime assert i != 2, "hit"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'hit' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for over tuple literal compiled')
+
+
+def test_comptime_assert_in_comptime_for_list_literal_true():
+    _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        comptime assert i < 3, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_tuple_unpack():
+    # tuple-unpacking targets over constant collections must bind each target
+    # so comptime diagnostics see per-iteration values
+    # (comptime validation diagnostics).
+    try:
+        _compile('fn f():\n    comptime for i, j in [(0, 1), (2, 0)]:\n        comptime assert i + j < 2, "sum"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'sum' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for tuple unpack compiled')
+
+
+def test_comptime_assert_in_comptime_for_tuple_unpack_true():
+    _compile('fn f():\n    comptime for i, j in [(0, 1), (1, 2)]:\n        comptime assert i < j, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_comptime_alias():
+    # Iterating over a comptime (non-literal) iterable alias must unroll with
+    # the loop variable bound so comptime diagnostics fire
+    # ("iteration over
+    # non-literal comptime values").
+    src = 'fn f():\n    comptime vals = [0, 1, 2]\n    comptime for i in vals:\n        comptime assert i < 2, "bad"\n'
+    try:
+        _compile(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for over comptime alias compiled')
+
+
+def test_comptime_assert_in_comptime_for_comptime_alias_true():
+    _compile('fn f():\n    comptime vals = [0, 1, 2]\n    comptime for i in vals:\n        comptime assert i < 3, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_comptime_alias_tuple_unpack():
+    src = (
+        'fn f():\n'
+        '    comptime pairs = [(0, 1), (2, 0)]\n'
+        '    comptime for i, j in pairs:\n'
+        '        comptime assert i + j < 2, "sum"\n'
+    )
+    try:
+        _compile(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'sum' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for over comptime alias unpack compiled')
+
+
+def test_comptime_assert_in_comptime_for_range_comptime_bound():
+    # Range bounds from comptime-bound identifiers must unroll so comptime
+    # validation sees the loop variable (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime n = 3\n'
+            '    comptime for i in range(n):\n'
+            '        comptime assert i < 2, "nope"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for range(comptime var) compiled')
+
+
+def test_comptime_assert_in_comptime_for_range_comptime_bound_true():
+    _compile(
+        'fn f():\n'
+        '    comptime n = 3\n'
+        '    comptime for i in range(n):\n'
+        '        comptime assert i < 3, "ok"\n')
+
+
+def test_comptime_assert_len_comptime_list_fails():
+    # `len()` folds on comptime-known collections (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [1, 2, 3]\n'
+            '    comptime assert len(a) == 2, "bad len"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad len' in s, s
+        return
+    raise AssertionError('comptime assert len(comptime list) == wrong compiled')
+
+
+def test_comptime_assert_len_comptime_list_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [1, 2, 3]\n'
+        '    comptime assert len(a) == 3, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_range_len_fails():
+    # `range(len(a))` bounds must fold when `a` is comptime-known so the
+    # comptime-for unroller can validate the body.
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [1, 2, 3]\n'
+            '    comptime for i in range(len(a)):\n'
+            '        comptime assert i < 2, "nope"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for range(len(a)) compiled')
+
+
+def test_comptime_assert_in_comptime_for_range_len_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [1, 2, 3]\n'
+        '    comptime for i in range(len(a)):\n'
+        '        comptime assert i < 3, "ok"\n')
+
+
+def test_comptime_assert_subscript_list_fails():
+    # Subscript on a comptime-known list must fold so provably-false
+    # conditions are diagnosed (DIAGNOSTICS_missing_validation_modular:
+    # collection ops beyond len()).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [10, 20, 30]\n'
+            '    comptime assert a[1] == 99, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with list subscript false compiled')
+
+
+def test_comptime_assert_subscript_list_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [10, 20, 30]\n'
+        '    comptime assert a[1] == 20, "ok"\n')
+
+
+def test_comptime_assert_subscript_tuple_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = (1, 2, 3)\n'
+            '    comptime assert a[0] == 5, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with tuple subscript false compiled')
+
+
+def test_comptime_assert_subscript_str_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime s = "abc"\n'
+            '    comptime assert s[1] == "z", "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with str subscript false compiled')
+
+
+def test_comptime_assert_subscript_in_range_bound_fails():
+    # Subscript-folded range bound must let the comptime-for unroller diagnose.
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [2, 5]\n'
+            '    comptime for i in range(a[1]):\n'
+            '        comptime assert i < 3, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime for with subscript range bound compiled')
+
+
+def test_comptime_assert_in_comptime_for_str_alias_fails():
+    # Comptile-for over a comptime-known string must unroll with the loop
+    # variable bound (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime s = "ab"\n'
+            '    comptime for c in s:\n'
+            '        comptime assert c == "a", "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime for over comptime str alias compiled')
+
+
+def test_comptime_assert_in_comptime_for_str_alias_true():
+    _compile(
+        'fn f():\n'
+        '    comptime s = "ab"\n'
+        '    comptime for c in s:\n'
+        '        comptime assert c == "a" or c == "b", "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_str_literal_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime for c in "ab":\n'
+            '        comptime assert c == "a", "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime for over string literal compiled')
+
+
+def test_comptime_assert_dict_subscript_fails():
+    # Dict literal folding/subscript in comptime validation
+    # (DIAGNOSTICS_missing_validation_modular: comptime-known dict literal
+    # folding/subscript).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime d = {"a": 1, "b": 2}\n'
+            '    comptime assert d["a"] == 9, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with dict subscript false compiled')
+
+
+def test_comptime_assert_dict_subscript_true():
+    _compile(
+        'fn f():\n'
+        '    comptime d = {"a": 1, "b": 2}\n'
+        '    comptime assert d["b"] == 2, "ok"\n')
+
+
+def test_comptime_assert_dict_len_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime d = {"a": 1, "b": 2}\n'
+            '    comptime assert len(d) == 3, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert len(comptime dict) == wrong compiled')
+
+
+def test_comptime_assert_dict_len_true():
+    _compile(
+        'fn f():\n'
+        '    comptime d = {"a": 1, "b": 2}\n'
+        '    comptime assert len(d) == 2, "ok"\n')
+
+
+def test_comptime_assert_local_alias_binding_fails():
+    # Local alias bindings must be visible to comptime folding
+    # (DIAGNOSTICS missing comptime validation (deleted doc): "local `alias`
+    # bindings not always visible to comptime folding").
+    try:
+        _compile('fn f():\n    alias x = 5\n    comptime assert x == 0, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with local alias binding compiled without error')
+
+
+def test_comptime_assert_local_alias_binding_true():
+    _compile('fn f():\n    alias x = 5\n    comptime assert x == 5, "ok"\n')
+
+
+def test_comptime_assert_adjacent_literal_message():
+    # A bare continuation line of string literals is one message, not three
+    # statements (modular's comptime_assert.mojo long-message shape).
+    src = ('def use_positive_int[x: Int]():\n'
+           '    comptime assert x > 0, "custom error message"\n'
+           '                          " with long message "\n'
+           '                          "and more"\n'
+           'def main():\n'
+           '    use_positive_int[0]()\n')
+    try:
+        _compile_full(src)
+    except RuntimeError as e:
+        assert 'custom error message with long message and more' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_comptime_assert_adjacent_literal_message_integration_shape():
+    # Modular's integration form: the same message, with the real value -2.
+    src = ('def use_positive_int[x: Int]():\n'
+           '    comptime assert x > 0, "custom error message"\n'
+           '                          " with long message "\n'
+           '                          "and more"\n'
+           'def main():\n'
+           '    use_positive_int[-2]()\n')
+    try:
+        _compile_full(src)
+    except RuntimeError as e:
+        assert 'custom error message with long message and more' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_blank_line_between_string_literals_is_not_merged():
+    # A blank line ends the implicit concatenation: the second literal is its
+    # own statement, so the message is only the first literal.
+    from fire_compiler import Parser, py_tokenize, AssignStmt, ExprStmt
+    src = ('def f():\n'
+           '    x = "a"\n'
+           '\n'
+           '    "b"\n')
+    body = Parser(py_tokenize(src)).parse_module()[0].body
+    assert [type(s).__name__ for s in body] == ['AssignStmt', 'ExprStmt'], body
+
+
+def test_comptime_assert_in_comptime_for_list_comprehension():
+    try:
+        _compile('fn f():\n'
+                 '    comptime vals = [i * 2 for i in range(3)]\n'
+                 '    comptime for v in vals:\n'
+                 '        comptime assert v != 4, "bad"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: bad' in str(e), e
+        return
+    raise AssertionError('comprehension element 4 did not fail the comptime assert')
+
+
+def test_comptime_assert_in_comptime_for_list_comprehension_true():
+    _compile('fn f():\n'
+             '    comptime vals = [i * 2 for i in range(3)]\n'
+             '    comptime for v in vals:\n'
+             '        comptime assert v != 5, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_comprehension_filter():
+    try:
+        _compile('fn f():\n'
+                 '    comptime vals = [i for i in range(5) if i > 2]\n'
+                 '    comptime for v in vals:\n'
+                 '        comptime assert v != 4, "bad"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: bad' in str(e), e
+        return
+    raise AssertionError('filtered comprehension element 4 did not fail')
+
+
+def test_comptime_assert_in_comptime_for_direct_comprehension():
+    try:
+        _compile('fn f():\n'
+                 '    comptime for v in [i * 2 for i in range(3)]:\n'
+                 '        comptime assert v != 4, "bad"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: bad' in str(e), e
+        return
+    raise AssertionError('direct comprehension element 4 did not fail')
+
+
+def test_comptime_assert_comprehension_over_unknown_stays_unfolded():
+    # A comprehension over a runtime value must not fold: it compiles as before.
+    _compile('fn g(values: List[Int]):\n'
+             '    comptime for v in [x * 2 for x in values]:\n'
+             '        comptime assert v != 4, "bad"\n')
+
+
+def test_comptime_assert_message_get_kgen_string():
+    src = ('def _get_kgen_string[s: String]() -> String:\n'
+           '    return s\n'
+           'fn f():\n'
+           '    comptime assert False, StaticString(_get_kgen_string["hello"]())\n')
+    try:
+        # _compile_full: do_imports=True + a real temp file, the path that
+        # elaborates the generic `_get_kgen_string[s]` call.
+        _compile_full(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed: hello' in s, s
+        assert '_t' not in s.split('comptime assertion failed:')[-1], s
+        return
+    raise AssertionError('provably-false comptime assert compiled')
+
+
+def test_comptime_assert_message_get_kgen_string_comptime_alias():
+    try:
+        _compile('''def _get_kgen_string[s: String]() -> String:
+    return s
+fn f():
+    comptime name = "hi"
+    comptime assert False, StaticString(_get_kgen_string[name]())
+''')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: hi' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled')
+
+
+def test_comptime_assert_message_get_kgen_string_unknown_index_unfolded():
+    # An index that is not a comptime string stays unfolded: the assert still
+    # reports, it just cannot name the text, and nothing crashes.
+    try:
+        _compile('''def _get_kgen_string[s: String]() -> String:
+    return s
+fn f(x: String):
+    comptime assert False, StaticString(_get_kgen_string[x]())
+''')
+    except RuntimeError as e:
+        assert 'comptime assertion failed' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled')
+
+
+if __name__ == '__main__':
+    test_comptime_assert_false_fails()
+    test_comptime_assert_message_get_kgen_string()
+    test_comptime_assert_message_get_kgen_string_comptime_alias()
+    test_comptime_assert_message_get_kgen_string_unknown_index_unfolded()
+    test_comptime_assert_in_comptime_for_list_comprehension()
+    test_comptime_assert_in_comptime_for_list_comprehension_true()
+    test_comptime_assert_in_comptime_for_comprehension_filter()
+    test_comptime_assert_in_comptime_for_direct_comprehension()
+    test_comptime_assert_comprehension_over_unknown_stays_unfolded()
+    test_comptime_assert_adjacent_literal_message()
+    test_comptime_assert_adjacent_literal_message_integration_shape()
+    test_blank_line_between_string_literals_is_not_merged()
+    test_comptime_assert_false_no_msg()
+    test_comptime_assert_true_passes()
+    test_comptime_assert_comparison_fails()
+    test_comptime_assert_message_string_concat_and_string_int()
+    test_comptime_assert_message_tstring()
+    test_comptime_assert_message_tstring_expr()
+    test_comptime_assert_message_fstring()
+    test_comptime_assert_short_circuit_and_false()
+    test_comptime_assert_short_circuit_or_unknown_not_false()
+    test_comptime_assert_short_circuit_and_true_needs_rhs()
+    test_comptime_assert_in_comptime_for_range()
+    test_comptime_assert_in_comptime_for_range_true()
+    test_comptime_assert_in_comptime_for_product()
+    test_comptime_assert_message_tstring_generic_param()
+    test_comptime_assert_in_comptime_for_list_literal()
+    test_comptime_assert_in_comptime_for_tuple_literal()
+    test_comptime_assert_in_comptime_for_list_literal_true()
+    test_comptime_assert_in_comptime_for_tuple_unpack()
+    test_comptime_assert_in_comptime_for_tuple_unpack_true()
+    test_comptime_assert_in_comptime_for_comptime_alias()
+    test_comptime_assert_in_comptime_for_comptime_alias_true()
+    test_comptime_assert_in_comptime_for_comptime_alias_tuple_unpack()
+    test_comptime_assert_in_comptime_for_range_comptime_bound()
+    test_comptime_assert_in_comptime_for_range_comptime_bound_true()
+    test_comptime_assert_len_comptime_list_fails()
+    test_comptime_assert_len_comptime_list_true()
+    test_comptime_assert_in_comptime_for_range_len_fails()
+    test_comptime_assert_in_comptime_for_range_len_true()
+    test_comptime_assert_subscript_list_fails()
+    test_comptime_assert_subscript_list_true()
+    test_comptime_assert_subscript_tuple_fails()
+    test_comptime_assert_subscript_str_fails()
+    test_comptime_assert_subscript_in_range_bound_fails()
+    test_comptime_assert_in_comptime_for_str_alias_fails()
+    test_comptime_assert_in_comptime_for_str_alias_true()
+    test_comptime_assert_in_comptime_for_str_literal_fails()
+    test_comptime_assert_dict_subscript_fails()
+    test_comptime_assert_dict_subscript_true()
+    test_comptime_assert_dict_len_fails()
+    test_comptime_assert_dict_len_true()
+    test_comptime_assert_local_alias_binding_fails()
+    test_comptime_assert_local_alias_binding_true()
+    print('ok')

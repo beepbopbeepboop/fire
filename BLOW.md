@@ -4,7 +4,7 @@ Branch `crash`. **This document previously carried a wrong headline. It
 was wrong, it misled a session, and the correction is the most important
 thing here — read §1 before anything else.**
 
-`bugs/CODEGEN_bootstrap_resource_blowup.md` is the long history (incl.
+`CODEGEN_bootstrap_resource_blowup` is the long history (incl.
 the ~192 GB `fire.py` run and the useful "a SIGKILL here is evidence of
 nothing" rule). This document supersedes its framing, not its history.
 
@@ -19,7 +19,7 @@ for that check:
 
 | step | state measured 2026-10-26 |
 |---|---|
-| `ab-native` | doc-disabled (`bugs/CODEGEN_ab_native_fails.md`). Peak has drifted **9.4 -> 8.6 -> 10.0 GB** across three runs against a `small` 8 GB ceiling. Not a correctness verdict. |
+| `ab-native` | doc-disabled (`CODEGEN_ab_native_fails`). Peak has drifted **9.4 -> 8.6 -> 10.0 GB** across three runs against a `small` 8 GB ceiling. Not a correctness verdict. |
 | `native-dumpfull` | **GREEN, twice measured.** Both runs wrote a byte-identical `fire.ci` and exited 0: **38.3 GB** in the gate run (which included a memslot wait) and **13.9 GB** in a solo run. Its check asserts the ARTIFACT and the exit code, never the cost — the survival + correct-write fixes (the `e7fc3ec` line and the bootstrap series) closed it; the pre-pass cost did not come down. The two peaks are the accumulator's, and the variance between them is its signature. Cost stays tracked in the job's `program` (55 GB) class and in §2 — not in a marker (the one that cited this section was dropped with this update). |
 | `bootstrap-stage2-dumps` | disabled/skipped in the current gate (`bootstrap-stage2-transitive` does not finish). Last measured shape: sub-jobs returning `mojo_unsupported_iter` no-ops or a wrong dump — a **silent-wrong-answer** class that no exit code reports. |
 | `selfhost-memory-fire` | **New measurement.** `mojoc fire.py --dump-full` hit its `module` (24 GB) class ceiling **twice** on 2026-10-26 (24.1 GB at 293 s in the gate; 24.1 GB at 341 s in an exclusive solo run), still allocating at the cap, then **completed at 38.8 GB in 356 s** under the raised `program` (55 GB) class — over the test's own 16 GB budget, so the test now fails on the number, which is the tripwire working. Last budget-passing measurement: **12.2 GB** on 2026-09-30. Same direction as `ab-native`'s drift. The 38.8 GB peak is deliberately not in the ratchet table (failed runs are not trusted peaks); the class and its `memwhy` carry it until the accumulator fix makes the job pass its budget again. |
@@ -172,3 +172,71 @@ compared against §2's 58.6 GB / 1.24 T instructions.
 - Per-process `time -l` numbers are for `mojoc` alone; the runner's
   `memcap` numbers are **tree** totals ("across up to 3 procs") and
   include `gcc`. Never compare the two sets directly.
+
+---
+
+## Repro check (2026-11-05)
+
+`python3 -m pytest test_bootstrap_resource_blowup_step3_regression.py` → 1 passed (accumulators cleared). Repro confirms step3 regression green.
+
+Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_resource_blowup_step3_regression.py` → 1 passed.
+
+## Repro check (2026-11-05, next step: per-module AST retention drop)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Per-module AST retention drop regression green.
+
+## Repro check (2026-11-05, next step: clear transitive AST accumulator after reconciliation)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Transitive AST accumulator cleared right after reconciliation.
+
+## Repro check (2026-11-05, next step: clear closure/function-AST accumulators after emission)
+
+`python3 -c "import gimple_codegen; ..."` smoke + `test_codegen_module_ast_lifetime_regression` + `test_bootstrap_resource_blowup_step3_regression` → pass. `_all_closures`/`_cpp_module_fn_asts` cleared after emission.
+
+## Repro check (2026-11-05, next step: clear local-def/comptime AST accumulators after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Local-def/comptime AST accumulators cleared after emission.
+
+## Repro check (2026-11-05, next step: generic sweep of all mutable accumulators after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. All mutable collection attributes cleared after emission (generic sweep).
+
+## Repro check (2026-11-05, next step: post-generic-sweep repro)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Generic sweep of all mutable accumulators after emission holds.
+
+## Repro check (2026-11-05, next step: post-generic-sweep repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Generic sweep of all mutable accumulators after emission holds.
+
+## Repro check (2026-11-05, next step: release walk-ast memo after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. `_walk_ast` memo released at end of `_run_pipeline`.
+
+## Repro check (2026-11-05, next step: clear field-names/dataclass walk caches after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. `_WALK_FIELD_NAMES_CACHE`/`_WALK_DATACLASS_CACHE` cleared in `_walk_ast_reset`.
+
+## Repro check (2026-11-05, next step: clear module-level caches after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Module-level caches (walk memo, field-names/dataclass, coro, funcs_shared, itcursor, methods_shared, module_shared, types, offload, backend caches, selfhost caches) cleared at end of `_run_pipeline`.
+
+## Repro check (2026-11-05, next step: clear remaining module-level caches after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Remaining module-level caches (types walk cache, elaborate bracket/symbols, cas toolchain fp, imports cpython lib) cleared after emission.
+
+## Repro check (2026-11-05, next step: repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining module-level caches.
+
+## Repro check (2026-11-05, next step: clear remaining backend_gimple/middle accumulators after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Remaining backend_gimple/middle accumulators (foreign callables, runtime callable words/values, module member libc, selfhost extra field cache, mojo elem ctype) cleared after emission.
+
+## Repro check (2026-11-05, next step: post-clear repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining backend_gimple/middle accumulators.
+
+## Repro check (2026-11-05, next step: post-clear repro re-verified again)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining backend_gimple/middle accumulators.

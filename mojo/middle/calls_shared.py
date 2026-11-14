@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, conv_is_read_only
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, conv_is_read_only, _float_c_literal
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -70,7 +70,7 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     f=leaf): return f(x)` invoked as `apply_it("q")` compiled, linked,
     and died with SIGSEGV on `mojo_fnptr_call_1(NULL, ...)` — exit 139,
     no diagnostic, and the doc that recorded the *generator* instance of
-    this shape (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`)
+    this shape (`the (since-fixed) c_common/fsutil.py compile failure`)
     never saw it, because it is reachable from an ordinary `def` too.
 
     Two spellings, matching the two the corpus actually uses:
@@ -111,6 +111,17 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     REDIRECTED symbol, because `_funcptr_`'s statics live in the .c
     translation unit and are not visible from the separately-compiled .cpp.
     """
+    # A callable the RUNTIME implements (`os.walk`, `glob.glob`, ...) used as a
+    # value: its address, through the same `_funcptr_` static every other
+    # "function as a value" site uses.
+    if (isinstance(node, gimple_ctypes.MemberExpr)
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)):
+        _rtf = _RUNTIME_CALLABLE_VALUES.get(f'{node.obj.name}.{node.member}')
+        if _rtf is not None and node.obj.name not in getattr(gen, 'var_types', ()):
+            if cxx:
+                return ('void *', f'(void *){_rtf}')
+            gen._funcptr_builtins_needed.add(_rtf)
+            return ('void *', f'_funcptr_{_rtf}')
     _fname = None
     if isinstance(node, gimple_ctypes.IdentExpr):
         _fname = _as_str(node.name)
@@ -155,13 +166,13 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     _vshapes = getattr(gen, '_variadic_func_shape', None) or {}
     _vshape = _vshapes.get(_target) or _vshapes.get(_c_name) or _vshapes.get(_fname)
     if _vshape is not None:
-        _fnv = gen._new_val('void *', f'(void *){_target}')
+        _fnv = gen._cast('void *', f"{_target}")
         _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
                              [('void *', _fnv), ('void *', '0'),
                               ('int64_t', f'({_vshape[0]})'),
                               ('int64_t', f'({_vshape[1]})'),
                               ('int64_t', '(0)')])
-        return 'void *', gen._new_val('void *', f'(void *){_vf}')
+        return 'void *', gen._cast('void *', _vf)
     if cxx:
         return ('void *', f'(void *){_target}')
     gen._funcptr_builtins_needed.add(_c_name)
@@ -193,7 +204,14 @@ def _callable_default_generator(gen, default_node):
         return None
     _fname = _as_str(default_node.name)
     _api = (getattr(gen, '_generator_api', None) or {}).get(_fname)
-    return _api
+    if _api is not None:
+        return _api
+    # Also check async generator APIs (and async function APIs)
+    for _aname in ('_async_gen_api', '_async_api', '_generator_var_api', '_cpp_generator_var_api'):
+        _api = (getattr(gen, _aname, None) or {}).get(_fname)
+        if _api is not None:
+            return _api
+    return None
 
 
 def _callable_param_ret_types(gen, fn_node) -> dict:
@@ -359,12 +377,11 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     if isinstance(_dflt, gimple_ctypes.FloatLiteral):
         # A float default is a `double` value — returning it typed `int`
         # made the call-site coercion emit `(double)(int)0.5`, invalid in a
-        # `__GIMPLE` body ("expected expression before '(' token"). Mirror
-        # `_lower_FloatLiteral`.
-        _s = repr(_dflt.value)
-        if '.' not in _s and 'e' not in _s.lower():
-            _s += '.0'
-        return ('double', _s)
+        # `__GIMPLE` body ("expected expression before '(' token"). The
+        # spelling is `_lower_FloatLiteral`'s own (`_float_c_literal`), so a
+        # non-finite default cannot be valid in one path and `inf`
+        # undeclared C in the other.
+        return ('double', _float_c_literal(_dflt.value))
     if isinstance(_dflt, gimple_ctypes.IntLiteral):
         return ('int', str(_dflt.value))
     if isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
@@ -413,11 +430,27 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     if (isinstance(_dflt, gimple_ctypes.MemberExpr)
             and isinstance(_dflt.obj, gimple_ctypes.IdentExpr)):
         _nm = f'{_dflt.obj.name}.{_dflt.member}'
+        # A callable the RUNTIME implements (`os.walk`, `glob.glob`,
+        # `glob.iglob`) is a real function value: its address, in the
+        # int64_t-in/int64_t-out ABI `mojo_fnptr_call_N` dispatches through.
+        _rt_fn = _RUNTIME_CALLABLE_VALUES.get(_nm)
+        if _rt_fn is not None:
+            return ('void *', gen._cast('void *', f"{_rt_fn}"))
         _slit = gen._new_val('char *',
                              gen._intern_string(gimple_ctypes._c_escape(_nm)))
-        gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
-        return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
+        gen._rt_void('mojo_set_unavailable_callable_name', [_slit])
+        return ('void *', gen._rt_call('void *', 'mojo_unavailable_callable_ptr', []))
     return _null_default_pair(param_ctype)
+
+# `module.attr` callables the runtime implements, as function VALUES (the
+# `_w` wrappers take and return int64_t words). `glob.glob` and `glob.iglob`
+# are the same function here: both answer an eager list.
+_RUNTIME_CALLABLE_VALUES = {
+    'os.walk': 'mojo_os_walk_w',
+    'glob.glob': 'mojo_glob_w',
+    'glob.iglob': 'mojo_glob_w',
+    'csv.reader': 'mojo_csv_reader_w',
+}
 
 def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) -> dict | None:
     """Pick the candidate overload matching a call site's argument count/
@@ -538,6 +571,19 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
         if _score(_c2) == best_score:
             ties.append(_c2)
     if len(ties) > 1:
+        # Type erasure cannot tell `def __iter__(var self)` from `def
+        # __iter__(ref self)` (both are `(Struct *)`), but a call on a
+        # receiver that is not consumed (`l.__iter__()`, no `^`) can only mean
+        # the non-consuming overload: real Mojo prefers it, and picking the
+        # owning one typed `LinkedList.__iter__()`'s result as the
+        # `IteratorOwnedType` stub. Explicit loop (self-host: no comprehension).
+        _kept = []
+        for _c4 in ties:
+            if not _c4.get('self_owned'):
+                _kept.append(_c4)
+        if _kept:
+            ties = _kept
+    if len(ties) > 1:
         gimple_ctypes._debug_note('ambiguous or type-indistinguishable overload, picking first in declaration order',
                     f"candidates={[c['overload_id'] for c in ties]}")
     return ties[0]
@@ -553,10 +599,10 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
 
     String values go through mojo_dict_set_str so the dict's own value
     type is right (mojo_dict_set_int would store the char* as an integer
-    and later read it back as one). Everything else — ints, doubles,
-    pointers — goes through mojo_dict_set_int, which _emit_call coerces,
+    and later read it back as one), doubles through mojo_dict_set_double.
+    Everything else — ints, pointers — goes through mojo_dict_set_int, which _emit_call coerces,
     matching how `d[k] = v` already lowers a subscript store."""
-    d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
+    d = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
     _val_ty = ''
     _kwp = kwarg_pairs if kwarg_pairs else {}
     for kname in _kwp:
@@ -574,6 +620,14 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
             gen._emit_call('void', '', 'mojo_dict_set_str',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
                              ('char *', kv)])
+        elif kt == 'double':
+            # Not `mojo_dict_set_int`: `_emit_call` would coerce the double to
+            # an integer and `run(g, scale=2.5)` would arrive as 2. The slot
+            # carries the double kind, which `mojo_dyn_call` also reads to
+            # route it to a float register (or refuse it for a plain pointer).
+            gen._emit_call('void', '', 'mojo_dict_set_double',
+                            [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
+                             ('double', kv)])
         else:
             gen._emit_call('void', '', 'mojo_dict_set_int',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
@@ -828,14 +882,29 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         _csym = gen._struct_method_csym(struct_name, _dunder, '')
         if gen.func_return_types.get(_csym) != 'char *':
             continue
-        _call = gen._call_expr('char *', _csym, [(ctype, _local)])
         # Same null semantics the generated field-dump has: a NULL object
         # reprs as "None" rather than crashing. Interned through
         # `_intern_string` because a bare `"None"` literal is not a GIMPLE
         # r-value (see its own docstring).
         _none = gen._intern_string('None')
-        return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
+        # The select is real control flow, not a `(cond ? call : lit)`
+        # expression: gcc `-fgimple` rejects the parenthesized conditional
+        # and the call-armed ternary alike. The call stays LAZY — `then_val`
+        # is a thunk `_select_val` invokes inside the taken block only, so
+        # a NULL receiver still reprs as "None" without ever calling the
+        # user's dunder. (A value passed here would be emitted eagerly,
+        # ahead of the branch, and would run the dunder on NULL.)
+        return gen._select_val('char *', ctype, _local,
+                               lambda: gen._call_expr('char *', _csym,
+                                                      [(ctype, _local)]),
+                               _none)
     return None
+
+
+# Frame attributes that are plain stored words on the frame record, and their runtime ids
+# (fire_runtime.c mojo_frame_get_attr / mojo_frame_set_attr / mojo_frame_del_attr). One table
+# for the read, store and `del` lowerings, so the three cannot disagree about an id.
+FRAME_SETTABLE_IDS = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
 
 
 def _py_box_expr(gen, node):
@@ -884,3 +953,40 @@ def _py_box_expr(gen, node):
     if tn == 'UnaryOp':
         return _py_box_expr(gen, getattr(node, 'operand', None))
     return False, False
+
+
+# Binary operator -> the dunder a user struct defines for it.
+_STRUCT_OP_DUNDER = {
+    '+': '__add__', '-': '__sub__', '*': '__mul__', '/': '__truediv__',
+    '//': '__floordiv__', '%': '__mod__', '**': '__pow__', '&': '__and__',
+    '|': '__or__', '^': '__xor__', '<<': '__lshift__', '>>': '__rshift__',
+}
+
+
+def _struct_operator_receiver(gen, op: str, left_node, aug: bool) -> str | None:
+    """The user struct whose operator method `left_node OP right` calls, or None.
+
+    A struct pointer on the left whose OWN methods include the operator's dunder
+    (`__itruediv__` for `/=` when `aug`, else `__truediv__`) is that method call,
+    not integer arithmetic on the pointer (`result /= part` in
+    std/pathlib/path.mojo was `(int64_t)result / part`, a pointer divided by a
+    string). Skipped inside a DUNDER method of the same struct: the stdlib's
+    builtin scalar wrappers (`Int`, `Scalar`, ...) implement their dunders with
+    raw arithmetic on `self` -- the boxed-scalar convention the cast further down
+    serves -- and dispatching there would recurse into the method being defined."""
+    dunder = _STRUCT_OP_DUNDER.get(op)
+    if dunder is None:
+        return None
+    if aug:
+        dunder = '__i' + dunder[2:]
+    qt = _as_str(gen._quick_type(left_node))
+    if not qt.endswith(' *') or qt in ('char *', 'void *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+        return None
+    sname = gimple_exprtypes._struct_name_of(qt)
+    if sname not in gen.struct_field_types:
+        return None
+    if dunder not in gen._struct_method_names.get(sname, ()):
+        return None
+    if _as_str(getattr(gen, 'current_func_name', '')).startswith(sname + '___'):
+        return None
+    return dunder

@@ -33,6 +33,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -571,7 +572,7 @@ def run_cpython(src: str, tmp: str, tag: str):
     with open(path, "w") as f:
         f.write(_py_source(src))
     p = subprocess.run([sys.executable, path], capture_output=True, text=True,
-                       timeout=60)
+                       timeout=RUN_TIMEOUT_S)
     return p.stdout, p.returncode, p.stderr
 
 
@@ -595,11 +596,13 @@ def run_compiled(src: str, tmp: str, name: str):
                     ("fire_coro_gen.c", "fire_coro.c", "fire_async_sched.c",
                      arch)]
     r = subprocess.run([find_gcc(), "-fgimple", "-I" + RUNTIME, "-o", exe,
-                        *sources], capture_output=True, text=True, timeout=600)
+                        *sources], capture_output=True, text=True,
+                        timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError("generated C rejected by gcc -fgimple:\n"
                            + r.stderr[-3000:])
-    p = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+    p = subprocess.run([exe], capture_output=True, text=True,
+                       timeout=RUN_TIMEOUT_S)
     return p.stdout, p.returncode, p.stderr
 
 

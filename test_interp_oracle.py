@@ -311,7 +311,7 @@ def main():
     # This is the shape `test_runtime_diff.py` structurally CANNOT see, which is
     # why it is here: that suite compares the two ENGINES, and the compiled
     # path had this bug too (a module global a module writes was published as
-    # a constant, `bugs/FORMAL_module_state_no_storage.md` §(2)) — so a
+    # a constant, `FORMAL_module_state_no_storage.md (deleted)` §(2)) — so a
     # diff between them was clean while both were wrong. This case is the third
     # opinion.
     #
@@ -389,6 +389,108 @@ def main():
     print(len("\u00e9"), len("\U0001F600"), len("\N{LATIN SMALL LETTER E WITH ACUTE}"))
     print(len("\101"), "\101", "\0" == "\x00")
     print("a\u00e9b")
+''',
+    # A user struct with `__iter__`/`__next__` is an iterator to BOTH
+    # `next(c)` and `for x in c`. The interpreter's `next` builtin is
+    # CPython's, which looks `__next__` up on the TYPE, and MojoInstance only
+    # forwards attribute reads, so `next(c)` raised "'MojoInstance' object is
+    # not an iterator" and `for x in c` fell through to `__getitem__` and died
+    # with KeyError: 0. The exhaustion signal is `raise StopIteration`, a
+    # bare exception CLASS, which the interpreter used to stash as a Mojo
+    # value instead of raising. The factory case pins that the receiver's
+    # value is the same whether it came from a constructor or a call.
+    "user_iterator_struct_next_and_for": '''\
+class Counter:
+    def __init__(self, start, stop):
+        self.i = start
+        self.stop = stop
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.i >= self.stop:
+            raise StopIteration
+        v = self.i
+        self.i = v + 1
+        return v
+
+def make(a, b):
+    return Counter(a, b)
+
+def main():
+    c = Counter(5, 8)
+    print(next(c))
+    print(next(c))
+    print(next(Counter(9, 10)))
+    print(next(make(1, 1), "done"))
+    for x in Counter(1, 4):
+        print(x)
+    print([x * 2 for x in Counter(1, 4)])
+    print(list(Counter(1, 4)))
+    print(tuple(Counter(1, 4)))
+    print(sum(Counter(1, 4)))
+    print(sorted(Counter(1, 4), reverse=True))
+    print(list(enumerate(Counter(1, 4))))
+    print(list(zip(Counter(1, 4), Counter(5, 9))))
+    print(max(Counter(1, 4)), min(Counter(1, 4)))
+    print(any(Counter(0, 3)), all(Counter(1, 4)))
+    print(max(3, 7))
+    print(list(map(lambda x: x * 10, Counter(1, 4))))
+    print(list(filter(lambda x: x > 1, Counter(1, 4))))
+    try:
+        list(reversed(Counter(1, 4)))
+    except TypeError as e:
+        print(e)
+''',
+    # Python 3.15 adds `frozendict` as a builtin immutable mapping type.
+    # The interpreter must expose it and preserve CPython's behavior/repr.
+    "frozendict_builtin_basic": '''\
+def main():
+    d = frozendict({"b": 2, "a": 1})
+    print(len(d))
+    print(d["a"])
+    print(d.get("c", 9))
+    print("a" in d)
+    print("z" in d)
+    print(list(d))
+    print(list(d.keys()))
+    print(list(d.values()))
+    print(list(d.items()))
+    e = frozendict(a=3)
+    print(e["a"])
+    print(frozendict())
+    print(frozendict(d))
+    print(d == frozendict({"b": 2, "a": 1}))
+''',
+    # A class's own `__str__` / `__repr__` must be called by `str()`, `print()`
+    # and `repr()`. The interpreter's MojoInstance only consulted Mojo's
+    # `write_to` / `write_repr_to`, so these printed `<Item instance>`.
+    # CPython's `str()` prefers `__str__`, then falls back to `__repr__`.
+    "python_str_and_repr_dunders_are_called": '''\
+class Item:
+    def __init__(self, n):
+        self.n = n
+
+    def __str__(self):
+        return "I" + str(self.n)
+
+    def __repr__(self):
+        return "Item(" + str(self.n) + ")"
+
+class OnlyRepr:
+    def __init__(self, n):
+        self.n = n
+
+    def __repr__(self):
+        return "R" + str(self.n)
+
+def main():
+    print(str(Item(1)))
+    print(Item(1))
+    print(repr(Item(2)))
+    print(str(OnlyRepr(3)))
+    print(repr(OnlyRepr(4)))
 ''',
 }
 

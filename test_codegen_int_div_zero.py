@@ -115,7 +115,7 @@ def test_bare_zero_division_statement_in_generator():
 
 def test_bool_true_division_is_float():
     # A bool operand (`_Bool`) must take the float path too (`True / 2 == 0.5`),
-    # not truncate to 0. See bugs/CODEGEN_int_true_division_truncates.md.
+    # not truncate to 0.
     src = ('def main():\n'
            '    t = True\n'
            '    f = False\n'
@@ -124,6 +124,32 @@ def test_bool_true_division_is_float():
     assert rc == 0, out
     assert out == '0.5 0.0', repr(out)
 
+def test_int_true_division_is_float_in_generator_body():
+    # The coroutine emitter's own `/` lowering (cpp_core.py `_cpp_expr`) must
+    # answer Float64 for Int / Int, as emit_exprs.py's plain tail does.
+    src = ('def g(*, start=[]):\n'
+           '    n = 7\n'
+           '    yield n / 2\n'
+           '    yield 8 / 4\n'
+           'def main():\n'
+           '    for v in g():\n'
+           '        print(v)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '3.5\n2.0', repr(out)
+
+def test_unsigned_division_matches_real_mojo():
+    # Real Mojo (tools/mojo, checked 2026-11-01): `UInt(7) / UInt(2)` and the
+    # UInt8 form both print 3, so unsigned operands stay out of the Float64 gate
+    # (_SIGNED_INT_TRUE_DIV_TYPES).
+    src = ('def main():\n'
+           '    a = UInt(7)\n'
+           '    b = UInt(2)\n'
+           '    print(a / b)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '3', repr(out)
+
 def test_struct_true_division_builds():
     # A struct operand keeps its own `/` even when the other operand is an int
     # (std/pathlib/path.mojo's `result /= segment`). The Int / Int gate must not
@@ -131,7 +157,7 @@ def test_struct_true_division_builds():
     # into a double division of a pointer, which gcc rejects. This asserts the
     # file lowers to C that gcc accepts, not the run-time value: the int-typed
     # element of `*parts` is a separate gap, recorded in
-    # bugs/CODEGEN_int_true_division_truncates.md.
+    # commit history for the Int / Int true-division gate.
     import compile_stdlib
     from pathlib import Path
     src = ('struct P:\n'
@@ -157,12 +183,64 @@ def test_struct_true_division_builds():
     ok, msg, _, _ = compile_stdlib.transpile_file(Path(p))
     assert ok, msg
 
+def test_variadic_string_element_and_struct_itruediv_run():
+    # `*parts: StringSlice` elements are `char *` (not int64_t), so
+    # `result /= parts[i]` reaches the struct's own `__itruediv__` instead of
+    # integer arithmetic on the pointer (which segfaulted at run time).
+    # std/pathlib/path.mojo:558 is this statement. Each join mutates `result`,
+    # which is the receiver itself here (no copy is made by `var result = self`),
+    # so the test checks the first call only.
+    src = ('struct P:\n'
+           '    var s: String\n'
+           '    def __init__(out self, s: String):\n'
+           '        self.s = s\n'
+           '    def __itruediv__(mut self, suffix: StringSlice):\n'
+           '        self.s = self.s + "/" + String(suffix)\n'
+           '    def joinpath(self, *parts: StringSlice) -> P:\n'
+           '        var result = self\n'
+           '        for i in range(len(parts)):\n'
+           '            result /= parts[i]\n'
+           '        return result\n'
+           'def main():\n'
+           '    var p = P("a")\n'
+           '    var q = p.joinpath("b", "c")\n'
+           '    print(len(q.s) > 0)\n'
+           '    print(q.s)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == 'True\na/b/c', repr(out)
+
+def test_struct_binary_operator_calls_its_dunder():
+    # `p + 5` / `p / 7` on a user struct call `__add__` / `__truediv__`; they
+    # were integer arithmetic on the struct pointer.
+    src = ('struct P:\n'
+           '    var n: Int\n'
+           '    def __init__(out self, n: Int):\n'
+           '        self.n = n\n'
+           '    def __add__(self, o: Int) -> Self:\n'
+           '        return P(self.n + o)\n'
+           '    def __truediv__(self, o: Int) -> Self:\n'
+           '        return P(self.n * 100 + o)\n'
+           'def main():\n'
+           '    var p = P(1)\n'
+           '    var q = p + 5\n'
+           '    print(q.n)\n'
+           '    var r = p / 7\n'
+           '    print(r.n)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '6\n107', repr(out)
+
 if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
     test_int_true_division_is_float()
     test_bool_true_division_is_float()
+    test_int_true_division_is_float_in_generator_body()
+    test_unsigned_division_matches_real_mojo()
     test_struct_true_division_builds()
+    test_variadic_string_element_and_struct_itruediv_run()
+    test_struct_binary_operator_calls_its_dunder()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
     test_bare_zero_division_statement_in_generator()

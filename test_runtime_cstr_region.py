@@ -9,8 +9,8 @@ string, straddles the terminator, or is empty. The tokenizer's quote scans
 (`fire_compiler.py::replace_multiline_strings`, `_scan_string_end`) are only
 correct if those answers are right at exactly those edges, and nothing else
 pinned them: the memchr rewrite of the scan (see the Status of
-bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md) changed how the length
-is found, and this is the test that says the answers did not move.
+CODEGEN_selfhost_tokenize_region_eq_quadratic was fixed by caching char access in
+`mojo_char_at_str` (and the memchr rewrite); this test says the answers did not move.
 
 The model is Python's own `e[start:stop] == needle`, where `e` is the string up
 to its first NUL (a C string ends there). Only non-negative and small negative
@@ -20,7 +20,6 @@ not what the scan uses.
 Run with:  python3 test_runtime_cstr_region.py
 """
 
-import itertools
 import os
 import random
 import subprocess
@@ -98,8 +97,9 @@ def _cases(rng: random.Random):
     bounds = range(-8, 13)
     for s in strings:
         for needle in needles:
-            for start, stop in itertools.product(bounds, bounds):
-                yield s, start, stop, needle
+            for start in bounds:
+                for stop in bounds:
+                    yield s, start, stop, needle
 
 
 def main() -> int:

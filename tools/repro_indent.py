@@ -10,7 +10,8 @@ import monomorphize as mm
 from elaborate import extract_struct_source
 from fire_compiler import py_tokenize, Parser
 
-STDLIB = '/Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib/std'
+from module_loader import STDLIB_PATH
+STDLIB = os.path.join(STDLIB_PATH, 'std') if STDLIB_PATH else '/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/std'
 
 CASES = [
     ('utils/coord.mojo', 'Coord', {'*element_types': ["'Int'", "'Int'"]}),

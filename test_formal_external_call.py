@@ -39,6 +39,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+from exec_budget import COMPILE_TIMEOUT_S  # per-child budgets
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -693,7 +694,7 @@ def _header_variadic_map():
         with open(src, "w") as f:
             f.write(HEADERS)
         r = subprocess.run([clang, "-E", "-P", src], capture_output=True,
-                           text=True, timeout=120)
+                           text=True, timeout=COMPILE_TIMEOUT_S)
         if r.returncode != 0:
             return None
         text = r.stdout

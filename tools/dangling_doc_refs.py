@@ -98,7 +98,7 @@ SUFFIXES = ('.md', '.py')
 # requires the `bugs/` prefix, so a comment that wrote
 # `FORMAL_dataclass_partial_construction` with no directory — which is how all
 # eleven sites in `formal/` and its tests were written, and how the survey at
-# `bugs/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
+# `bugs/hard/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
 # doc — was invisible to a census whose entire job is to find those.
 #
 # It is a SEPARATE class rather than a second regex over one list, because the
@@ -464,7 +464,7 @@ def stale_baseline_entries(by_file, baseline=None):
     were the same observation.
 
     That is not hypothetical, and the entry it hid is this tree's
-    `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1`, raised on purpose
+    `bugs/mid/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1`, raised on purpose
     by `--write-baseline` for a citation that was since rewritten to name the
     symptom instead of the doc. It has been dead weight in the ledger since, and
     it inflated the corpus by one citation for every reader counting the baseline.
@@ -613,6 +613,9 @@ SAID_TO_STATUS = {
     'refused': 'refused',
     'too-large': 'too-large',
     'sorry': 'sorry',
+    # The census records a crashed run as its own verdict (`fib`,
+    # `for_two_bounds`); it is a status the reader owns, like the others.
+    'crash': 'crash',
 }
 
 

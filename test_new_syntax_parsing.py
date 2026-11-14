@@ -278,6 +278,16 @@ def test_capture_lists():
           _parse('def o():\n    def h() {imm i}:\n        pass\n')[0]
           .body[0].captures == [('i', 'imm')])
 
+    # `^` in closure capture lists (bug fix)
+    check("capture_var_caret_bare",
+          _parse('def o():\n    def h() {var^}:\n        pass\n')[0]
+          .body[0].captures == [(None, 'owned')],
+          repr(_parse('def o():\n    def h() {var^}:\n        pass\n')[0].body[0].captures))
+    check("capture_caret_after_name",
+          _parse('def o():\n    def h() {x^}:\n        pass\n')[0]
+          .body[0].captures == [('x', 'owned')],
+          repr(_parse('def o():\n    def h() {x^}:\n        pass\n')[0].body[0].captures))
+
     # A lambda's `{...}` is its capture TEXT, not a name list — a different
     # field on a different node, and the two must not be confused.
     lam = _parse('g = lambda () {ref} -> T: 1\n')[0].value
@@ -347,6 +357,90 @@ def test_multi_target_comptime():
     one = _parse('def f():\n    comptime a = g()\n')[0].body
     check("single_target_comptime_unaffected",
           len(one) == 1 and one[0].target == 'a', repr(one))
+
+
+# ── 7b. Nested tuple patterns in a comptime assignment target ──────────
+def test_nested_target_comptime():
+    # PARSER_nested_tuple_unpack_comptime: `comptime a, (b, c) = 1, (2, 3)`
+    # used to die with "Unexpected COMMA" — the multi-target loop accepted
+    # only ONE more NAME directly followed by the `=`, so the `(` after the
+    # comma (and a third flat target, whose peek(2) saw the second comma)
+    # fell through to a bare `ExprStmt(IdentExpr('a'))` and the rest of the
+    # line to the statement parser.
+    #
+    # Each leaf name becomes one ComptimeVarStmt bound to the WHOLE
+    # right-hand side — the same name-to-expression model the flat
+    # `comptime a, b = g()` spelling above pins, and the one every
+    # ComptimeVarStmt consumer (the interpreter's scope.define, gimple's
+    # _comptime_vals table) already reads.
+    src = ('def f():\n'
+           '    comptime a, (b, c) = 1, (2, 3)\n')
+    body = _parse(src)[0].body
+    check("nested_target_comptime_yields_three_statements", len(body) == 3,
+          repr([type(s).__name__ for s in body]))
+    check("nested_target_comptime_targets",
+          all(isinstance(s, N.ComptimeVarStmt) for s in body)
+          and [s.target for s in body] == ['a', 'b', 'c'],
+          repr([getattr(s, 'target', None) for s in body]))
+    # The right-hand side is the BARE tuple `1, (2, 3)` — a TupleExpr whose
+    # second element is the inner 2-tuple — and every leaf name shares that
+    # one node.
+    if len(body) == 3:
+        val = body[0].value
+        check("nested_target_comptime_rhs_is_bare_tuple",
+              isinstance(val, N.TupleExpr) and len(val.elements) == 2,
+              repr(val))
+        check("nested_target_comptime_rhs_inner_tuple",
+              isinstance(val, N.TupleExpr)
+              and isinstance(val.elements[1], N.TupleExpr)
+              and len(val.elements[1].elements) == 2,
+              repr(val))
+        check("nested_target_comptime_all_names_share_rhs",
+              all(s.value is body[0].value for s in body),
+              repr([id(s.value) for s in body]))
+
+    # Deeper nesting flattens to one statement per leaf name, and a single
+    # (non-tuple) right-hand side is shared by all of them, unchanged.
+    deep = _parse('def f():\n    comptime a, (b, (c, d)) = g()\n')[0].body
+    check("deeply_nested_target_comptime_targets",
+          len(deep) == 4
+          and [s.target for s in deep] == ['a', 'b', 'c', 'd']
+          and all(isinstance(s, N.ComptimeVarStmt) for s in deep),
+          repr([getattr(s, 'target', None) for s in deep]))
+    check("deeply_nested_target_comptime_rhs_is_the_call",
+          len(deep) == 4
+          and all(s.value is deep[0].value for s in deep)
+          and isinstance(deep[0].value, N.CallExpr),
+          repr([type(s.value).__name__ for s in deep]))
+
+    # A THIRD flat target — the same limited loop broke on it: peek(2) saw
+    # the second comma, not the `=`, so it fell out of the loop too.
+    flat3 = _parse('def f():\n    comptime a, b, c = g()\n')[0].body
+    check("three_flat_target_comptime_targets",
+          len(flat3) == 3
+          and [s.target for s in flat3] == ['a', 'b', 'c']
+          and all(isinstance(s, N.ComptimeVarStmt) for s in flat3),
+          repr([getattr(s, 'target', None) for s in flat3]))
+
+    # The bare-tuple right-hand side is the same fix with a single target:
+    # `comptime A = 1, 2` used to die on the comma the same way.
+    single = _parse('def f():\n    comptime A = 1, 2\n')[0].body
+    check("single_target_bare_tuple_rhs",
+          len(single) == 1 and isinstance(single[0], N.ComptimeVarStmt)
+          and isinstance(single[0].value, N.TupleExpr)
+          and len(single[0].value.elements) == 2,
+          repr(single))
+
+    # NEGATIVE half: a target list that is not a comma-list of names/groups
+    # must not be swallowed as a binding — the whole attempt rolls back and
+    # the statement parser still rejects it, rather than silently binding a
+    # subset of the names.
+    check_raises("nested_target_comptime_eq_after_comma_still_rejected",
+                 'def f():\n    comptime a, = g()\n')
+    check_raises("nested_target_comptime_unclosed_group_still_rejected",
+                 'def f():\n    comptime a, (b = g()\n')
+    check_raises("nested_target_comptime_empty_group_still_rejected",
+                 'def f():\n    comptime a, () = g()\n')
 
 
 # ── 8. Function type in subscript (index) position ───────────────────────
@@ -519,6 +613,14 @@ def test_used_idents_covers_new_syntax():
           free('def f(s):\n    match s:\n        case [x, y]:\n            return x + a\n'
                '        case _:\n            return 0\n') == {'s', 'a'},
           "sequence-pattern elements bind")
+    check("match_seq_pattern_binds_star",
+          free('def f(s):\n    match s:\n        case [x, *rest]:\n            return x + a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "sequence-pattern starred element binds")
+    check("match_tuple_pattern_binds",
+          free('def f(s):\n    match s:\n        case (x, y):\n            return x + a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "tuple-pattern elements bind")
     check("match_dict_pattern_binds",
           free('def f(s):\n    match s:\n        case {"k": z}:\n            return z + a\n'
                '        case _:\n            return 0\n') == {'s', 'a'},
@@ -805,14 +907,44 @@ def test_comptime_rhs_misparse_is_refused():
                   "%s: %s" % (type(e).__name__, e))
 
 
+def test_let_declaration_parses_as_vardecl():
+    # `let` in statement position is a declaration sigil like `var`. It used to fall
+    # through to expression parsing, yielding ExprStmt(IdentExpr('let')) and a
+    # separate AssignStmt, so the declaration silently vanished from the tree.
+    from fire_compiler import VarDecl, ExprStmt, IdentExpr, AssignStmt
+    fn = _fns(_parse("def main():\n    let a = 2.5\n"))[0]
+    check("let_body_is_one_statement", len(fn.body) == 1, repr(fn.body))
+    if fn.body:
+        s = fn.body[0]
+        check("let_is_vardecl", isinstance(s, VarDecl), type(s).__name__)
+        if isinstance(s, VarDecl):
+            check("let_vardecl_name", s.name == "a", repr(s.name))
+            check("let_vardecl_value_is_float",
+                  type(s.value).__name__ == "FloatLiteral", type(s.value).__name__)
+        check("let_is_not_identexpr_stmt",
+              not (isinstance(s, ExprStmt) and isinstance(s.value, IdentExpr)
+                   and s.value.name == 'let'))
+    # `var` and `let` agree on every declaration shape: an annotation is kept,
+    # and a `let` after a `var` is its own VarDecl.
+    fn2 = _fns(_parse("def main():\n    let b: Int = 3\n"))[0]
+    s2 = fn2.body[0] if fn2.body else None
+    check("let_annotated_is_vardecl", isinstance(s2, VarDecl), type(s2).__name__)
+    if isinstance(s2, VarDecl):
+        check("let_annotated_keeps_type", s2.type_ann is not None)
+    fn3 = _fns(_parse("def main():\n    var c = 1\n    let d = 2\n"))[0]
+    kinds = [type(s).__name__ for s in fn3.body]
+    check("var_then_let_both_vardecl", kinds == ["VarDecl", "VarDecl"], repr(kinds))
+
+
 def run_tests():
     print("=" * 70)
     print("PARSER: new-modular syntax")
     print("=" * 70)
     for fn in (test_dotted_literal, test_match, test_lambda, test_capture_lists,
                test_imm_convention, test_struct_where,
-               test_multi_target_comptime, test_fn_type_in_subscript,
+               test_multi_target_comptime, test_nested_target_comptime, test_fn_type_in_subscript,
                test_decorated_import, test_multi_statement_result,
+               test_let_declaration_parses_as_vardecl,
                # Both sides of this merge appended a case to the same list
                # and neither was a revert of the other: this branch brought
                # the bracket/comptime cases, master brought the struct-param
@@ -821,7 +953,8 @@ def run_tests():
                test_used_idents_covers_new_syntax,
                test_bracket_mixing_keyword_and_positional,
                test_bracket_param_default_is_captured,
-               test_comptime_rhs_misparse_is_refused):
+               test_comptime_rhs_misparse_is_refused,
+               test_comptime_type_constraint_ampersand):
         print(f"\n--- {fn.__name__}")
         fn()
     print()
@@ -831,5 +964,34 @@ def run_tests():
     return _FAIL == 0
 
 
+def test_comptime_type_constraint_ampersand():
+    # PARSER_ampersand_in_comptime_type_constraints: & in comptime type constraints
+    stmts = _parse("comptime C = ImplicitlyCopyable & Movable\n")
+    check("comptime_ampersand_parses", len(stmts) == 1)
+    from fire_compiler import ComptimeVarStmt, BinaryOp
+    if stmts and isinstance(stmts[0], ComptimeVarStmt):
+        check("comptime_ampersand_is_binaryop", isinstance(stmts[0].value, BinaryOp))
+        if isinstance(stmts[0].value, BinaryOp):
+            check("comptime_ampersand_op_is_and", stmts[0].value.op == '&')
+
+
+# The ampersand case joins the run list here rather than in __main__, which
+# used to call ONLY that one test: the file is registered in tools/suite.py
+# as `python3 test_new_syntax_parsing.py`, so run_tests()'s other fifteen
+# functions — including test_multi_target_comptime (this file's parser area)
+# and test_comptime_rhs_misparse_is_refused, which pins _skip_comptime_rhs —
+# had never run in the gate. Every test now runs through run_tests, the same
+# way test_parser_param_for.py does.
+
+
 if __name__ == '__main__':
-    sys.exit(0 if run_tests() else 1)
+    try:
+        run_tests()
+        print()
+        print("=" * 70)
+        print(f"Results: {_PASS} passed, {_FAIL} failed")
+        print("=" * 70)
+        sys.exit(0 if _FAIL == 0 else 1)
+    except Exception as e:
+        print(e)
+        sys.exit(1)

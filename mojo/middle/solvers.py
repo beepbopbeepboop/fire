@@ -437,7 +437,7 @@ class DispatchSolver:
         self.struct_methods: dict[str, dict] = {}
         self._pattern_counter = 0
 
-    def analyze(self, all_stmts: list):
+    def analyze(self, all_stmts: list) -> None:
         """Run complete dispatch analysis on entire closure.
 
         Includes three core dispatch analyses plus new complementary analyses:
@@ -871,7 +871,7 @@ class FunctionCompilability:
         self.compilable_funcs: set = set()
         self.uncompilable_funcs: dict = {}
 
-    def analyze(self, stmts: list):
+    def analyze(self, stmts: list) -> None:
         """Determine which functions are C-compilable."""
         candidates = self._find_candidates(stmts)
         for func_name, func_def, is_method in candidates:
@@ -1014,7 +1014,7 @@ class TypePromotionSolver:
         self.promoted_types: dict = {}
         self.type_conflicts: dict = {}
 
-    def analyze(self, stmts: list, all_funcs: dict):
+    def analyze(self, stmts: list, all_funcs: dict) -> None:
         """Propagate types across closure.
 
         Args:
@@ -1106,3 +1106,15 @@ class ClosureInfo:
         # `gen` — the value belongs to this lifted function, not to the
         # whole compile.
         self.call_site_param_types: dict = {}
+    def value_ctype(self) -> str:
+        """The C type of this closure when it is referenced as a VALUE: a
+        variadic def (`def gen(*a, **kw)`) is a `MojoVarargFn` (a word whose
+        call packs its arguments, like a variadic lambda), any other capturing
+        closure a `MojoBoundMethod *`, and a capture-free one a bare function
+        pointer."""
+        if not self.env_struct:
+            return 'void *'
+        for _pn, _pa in self.inner_def.params:
+            if _pn.startswith('*'):
+                return 'void *'
+        return 'MojoBoundMethod *'

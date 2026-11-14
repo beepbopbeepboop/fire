@@ -12,7 +12,7 @@
            <original body; yield e -> __mojo_coro_yield_i(__c, box e);
                             return e -> __mojo_gen_set_return(__c, box e); return>
        fn __mgco_g_start(a, b) -> Int:  return __mojo_gen_new_2(__mgco_g_body, a, b)
-       fn __mgco_g_resume(g) -> Bool:   return __mojo_gen_resume(g, 0)
+       fn __mgco_g_resume(g) -> Bool:   return __mojo_gen_resume(g, mojo_box_none ())
        fn __mgco_g_value(g)  -> T:      return __mojo_gen_value(g)
        fn __mgco_g_destroy(g):          __mojo_gen_destroy(g)
    and _generator_api[g] points the ordinary for/next/yield-from consumers
@@ -24,6 +24,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+extern int64_t mojo_box_none(void);
+extern void mojo_exc_type_set(int64_t);
+extern void mojo_exc_msg_set(char *);
+extern void mojo_exc_obj_set(void *);
+extern void mojo_exc_pending_set(int);
+extern void mojo_raise(void);
+extern void mojo_exc_value_set(int64_t w);
+extern int __mojo_coro_has_return(MojoCoro *c);
+extern void mojo_frame_set_resuming(int64_t gen);
 
 /* The generated-code exception frame stack (runtime/fire_runtime.h), needed
    by __mojo_gen_close's local landing pad below. fire_coro.h declares neither,
@@ -50,7 +60,10 @@ typedef struct MojoGen {
     int64_t   value;      /* last yielded box */
     int64_t   retval;     /* return box once done */
     int       done;
+    int       started;
     int       pending_exc;
+    int       started_once; /* the body has been entered (its first frame bound to this generator) */
+    int64_t   frame;       /* heap frame object handed out as `gi_frame` (0 until asked for) */
 } MojoGen;
 
 /* The trampoline Layer 2 actually enters (void(MojoCoro*, void*)); it
@@ -244,9 +257,9 @@ __mojo_coro_yield_i(int64_t coro, int64_t v)
 }
 
 int64_t
-__mojo_coro_yield_p(int64_t coro, void *v)
+__mojo_coro_yield_p(int64_t coro, int64_t v)
 {
-    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, (int64_t)(uintptr_t)v);
+    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, v);
 }
 
 int64_t
@@ -303,12 +316,22 @@ __mojo_gen_send_d(int64_t bits)
    bits to the yield as one int64_t. */
 extern void   *mojo_list_new(void);
 extern void    mojo_list_append_int(void *, int64_t);
+extern void    mojo_list_append_word(void *, int64_t);
+extern void    mojo_mark_as_tuple(void *);
 
+/* Each slot goes in through `mojo_list_append_word`: the stored word is the same raw bits
+   `mojo_list_append_int` stored, but the slot's KIND is recorded as well (a string pointer, a
+   None / bool / float box, a list), so a consumer that reads the yielded tuple dynamically -- a loop
+   over the result of a call through a function value, or a generator that re-yields what it was given,
+   or `list(gen)` -- spells a None as None and a string as a string instead of as an integer.
+   The box is a TUPLE, so it is marked as one (see mojo_mark_as_tuple): without the mark, its repr
+   was list brackets, `[[1, 2], 0]` for `([1, 2], 0)`. */
 static int64_t
 tuple_box(const int64_t *slots, int n)
 {
     void *l = mojo_list_new();
-    for (int i = 0; i < n; i++) mojo_list_append_int(l, slots[i]);
+    for (int i = 0; i < n; i++) mojo_list_append_word(l, slots[i]);
+    mojo_mark_as_tuple(l);
     return (int64_t)(uintptr_t)l;
 }
 
@@ -424,12 +447,70 @@ __mojo_gen_resume(int64_t gen, int64_t send)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)gen;
     if (!g || g->done) return 0;
+    extern int64_t mojo_box_none(void);
+    if (!g->started) {
+        if (send != mojo_box_none()) {
+            mojo_exc_type_set(348628165);
+            mojo_exc_msg_set((char *)"can't send non-None value to a just-started generator");
+            mojo_exc_pending_set(1);
+            mojo_raise();
+            return 0;
+        }
+        g->started = 1;
+    }
     int64_t out = 0;
+    if (!g->started_once) { g->started_once = 1; mojo_frame_set_resuming(gen); }
     int r = __mojo_coro_resume(g->coro, send, &out);
+    mojo_frame_set_resuming(0);
     if (r == 1) { g->value = out; return 1; }
     g->retval = out;
     g->done = 1;
     return 0;
+}
+
+
+/* ── gi_frame ─────────────────────────────────────────────────────────────
+   The generator's frame object (runtime/fire_runtime.c, mojo_frame_for_gen): a heap record
+   naming this generator, refreshed from the frame records the parked coroutine holds. State for
+   `frame.clear()`: 0 not started, 1 suspended, 2 running, 3 finished. */
+extern int64_t (*_mojo_gen_state_hook)(int64_t);
+extern int64_t mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file,
+                                  int64_t firstlineno, int64_t lineno);
+extern int     mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line);
+extern void   *__mojo_coro_slice_of(MojoCoro *c);
+extern int     __mojo_coro_is_running(MojoCoro *c);
+
+int64_t
+__mojo_gen_state(int64_t gen)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)gen;
+    if (!g || g->done) return 3;
+    if (!g->started) return 0;
+    return __mojo_coro_is_running(g->coro) ? 2 : 1;
+}
+
+int64_t
+__mojo_gen_frame(int64_t gen)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)gen;
+    if (!g || g->done) return 0;        /* an exhausted generator's gi_frame is None */
+    const char *name = 0, *file = 0; int64_t first = 0, line = 0;
+    if (!mojo_coro_slice_peek(__mojo_coro_slice_of(g->coro), &name, &file, &first, &line))
+        name = 0;
+    g->frame = mojo_frame_for_gen(gen, g->frame, name, file, first, line);
+    _mojo_gen_state_hook = __mojo_gen_state;
+    return g->frame;
+}
+
+
+/* A finished generator/coroutine is about to raise StopIteration: attach its `return` value (when
+   the body had a valued return) so `ex.value` reads it. Called right after mojo_exc_type_set. */
+void
+__mojo_gen_stop_value(int64_t gen)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)gen;
+    if (g && __mojo_coro_has_return(g->coro))
+        mojo_exc_value_set(g->retval);
 }
 
 int64_t __mojo_gen_value(int64_t gen)
@@ -554,7 +635,9 @@ __mojo_gen_close(int64_t gen, int64_t ge_type)
 void
 __mojo_gen_resume_once(int64_t gen)
 {
-    (void)__mojo_gen_resume(gen, 0);
+    /* A plain resume: the just-started check in `__mojo_gen_resume` refuses
+       anything other than the shared None box (a raw 0 is the integer 0). */
+    (void)__mojo_gen_resume(gen, mojo_box_none());
 }
 
 /* Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
@@ -806,9 +889,10 @@ typedef struct MojoFutureCB {
     struct MojoFutureCB *next;
 } MojoFutureCB;
 
-/* Mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
-   capturing closure referenced as a value: { fn, self }. Kept local so
-   this TU needn't pull in the whole runtime header. */
+/* Prefix mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
+   capturing closure referenced as a value: { fn, self, boxes, nboxes }. This
+   TU only reads fn and self (the leading fields, same layout), so it needs
+   neither the trailing box list nor the whole runtime header. */
 typedef struct { void *fn; void *self; } MojoCoroBoundMethod;
 
 typedef struct MojoFuture {

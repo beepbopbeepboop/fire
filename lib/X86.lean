@@ -182,6 +182,8 @@ def x86_rex_w (b : UInt8) : Bool := (b.toNat &&& 8) != 0
 
 def x86_rex_r (b : UInt8) : Nat := if (b.toNat &&& 4) != 0 then 8 else 0
 
+def x86_rex_x (b : UInt8) : Nat := if (b.toNat &&& 2) != 0 then 8 else 0
+
 def x86_rex_b (b : UInt8) : Nat := if (b.toNat &&& 1) != 0 then 8 else 0
 
 /-! ### REX bit decoding, as `simp` facts
@@ -200,7 +202,28 @@ one-line `simp` over the bytes it was handed.
 -- The no-prefix case, which every instruction lemma for a plain opcode needs.
 @[simp] theorem x86_rex_w_zero : x86_rex_w (0 : UInt8) = false := rfl
 @[simp] theorem x86_rex_r_zero : x86_rex_r (0 : UInt8) = 0 := rfl
+@[simp] theorem x86_rex_x_zero : x86_rex_x (0 : UInt8) = 0 := rfl
 @[simp] theorem x86_rex_b_zero : x86_rex_b (0 : UInt8) = 0 := rfl
+
+-- REX.X extends the SIB index register; the two indexed byte forms the
+-- float-repr helper emits read it through this, so the same sixteen-by-one
+-- `simp` treatment the other three bits get is what lets their step lemma close.
+@[simp] theorem x86_rex_x_41 : x86_rex_x (0x41 : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_42 : x86_rex_x (0x42 : UInt8) = 8 := by decide
+@[simp] theorem x86_rex_x_43 : x86_rex_x (0x43 : UInt8) = 8 := by decide
+@[simp] theorem x86_rex_x_45 : x86_rex_x (0x45 : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_46 : x86_rex_x (0x46 : UInt8) = 8 := by decide
+@[simp] theorem x86_rex_x_47 : x86_rex_x (0x47 : UInt8) = 8 := by decide
+@[simp] theorem x86_rex_x_40 : x86_rex_x (0x40 : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_44 : x86_rex_x (0x44 : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_48 : x86_rex_x (0x48 : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_4c : x86_rex_x (0x4c : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_49 : x86_rex_x (0x49 : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_4a : x86_rex_x (0x4a : UInt8) = 8 := by decide
+@[simp] theorem x86_rex_x_4b : x86_rex_x (0x4b : UInt8) = 8 := by decide
+@[simp] theorem x86_rex_x_4d : x86_rex_x (0x4d : UInt8) = 0 := by decide
+@[simp] theorem x86_rex_x_4e : x86_rex_x (0x4e : UInt8) = 8 := by decide
+@[simp] theorem x86_rex_x_4f : x86_rex_x (0x4f : UInt8) = 8 := by decide
 
 @[simp] theorem x86_rex_w_40 : x86_rex_w (0x40 : UInt8) = false := by decide
 @[simp] theorem x86_rex_r_40 : x86_rex_r (0x40 : UInt8) = 0 := by decide
@@ -321,7 +344,21 @@ def x86_mem_addr (s : X86State) (code : Nat → UInt8) (rex modrm : UInt8)
       if ripRel then endAddr
       else if noSib then (x86_get_reg s (rm + x86_rex_b rex)).toNat
       else (x86_get_reg s ((code (atp + 1) &&& 7).toNat + x86_rex_b rex)).toNat
-    some ((Int.ofNat base + disp).toNat, sibExtra + dispN)
+    -- The SIB index register, when the SIB carries one, adds `index * 2^scale`
+    -- to the address.  Index field 4 means "no index" — the shape of every
+    -- displacement form this backend emits — so the contribution is 0 there and
+    -- every existing SIB step is unchanged.  The float-repr helper's
+    -- `[base + index]` byte forms (`encode_mov_rm8_r8_idx`,
+    -- `encode_movzx_r64_rm8_idx`) are the ones that read a real index register,
+    -- and `x86_rex_x` extends it, exactly as `x86_rex_b` extends the base.
+    let indexContribution : Nat :=
+      if noSib then 0
+      else
+        let sib := code (atp + 1)
+        let indexField := (sib.toNat >>> 3) &&& 7
+        if indexField = 4 then 0
+        else (x86_get_reg s (indexField + x86_rex_x rex)).toNat * 2 ^ ((sib.toNat >>> 6) &&& 3)
+    some ((Int.ofNat (base + indexContribution) + disp).toNat, sibExtra + dispN)
 
 /-- The low `n` bytes as a mask, for `n ≤ 7`; all ones from 8 up.
 
@@ -1830,7 +1867,7 @@ theorem x86_step_and_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
         x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
         x86_rm_write, x86_flags_logic, x86_flags_logic8, x86_msb,
-        h_rip, h_b0, h_b1, h_mod]
+        h_rip, h_b0, h_b1, h_mod] <;> (repeat' apply And.intro) <;> congr
 
 /-- `or r/m8, r8` (08 /r, mod=3): the `!=` half of `x86_step_and_r8_r8`'s
     conjunction, and the same instruction with the other opcode.  Two theorems
@@ -2432,7 +2469,7 @@ theorem x86_step_neg_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_flags_sub,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_ndigit2, h_rm,
-        h_dst, h_dst_lt]
+        h_dst, h_dst_lt] <;> (repeat' apply And.intro) <;> congr
 
 /-- `add r64, r64` (REX.W 01 /r, mod=3), general over both registers. -/
 theorem x86_step_add_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2451,7 +2488,7 @@ theorem x86_step_add_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `sub r64, r64` (REX.W 29 /r, mod=3), general over both registers. -/
 theorem x86_step_sub_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2470,7 +2507,7 @@ theorem x86_step_sub_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-! The three LOGIC ALU forms -- `and` (0x21), `or` (0x09), `xor` (0x31) -- as
     three theorems rather than one.
@@ -2515,7 +2552,7 @@ theorem x86_step_and_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `or r64, r64` (REX.W 09 /r, mod=3). -/
 theorem x86_step_or_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2785,7 +2822,7 @@ theorem x86_step_add_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `sub r64, imm32` (REX.W 81 /5 id, mod=3) — the exact sibling of
     `x86_step_add_ri32` with `x86_flags_sub` where that one has `x86_flags_add`.
@@ -2817,7 +2854,7 @@ theorem x86_step_sub_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `and r64, imm32` (REX.W 81 /4 id, mod=3). -/
 theorem x86_step_and_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2836,7 +2873,7 @@ theorem x86_step_and_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `cmp r64, imm8` (REX.W 83 /7 ib, mod=3): flags only, and the result is NOT
     written back — the one form in this family whose successor names no
@@ -2857,7 +2894,7 @@ theorem x86_step_cmp_ri8 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-! `mov r64, r/m64` in its two shapes.  These two cover every instance the
     backend emits -- 170 across the examples, and `mov_r64_rm64` was the single
@@ -3262,6 +3299,58 @@ theorem x86_step_mov_mem_sib_disp32 (s : X86State) (code : Nat → UInt8)
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
         h_rb]
+
+-- The two SIB-INDEXED byte forms: the same opcodes as the displacement forms
+-- above, but the SIB carries a real index register, so the effective address is
+-- `base + index * 2^scale` rather than `base + disp`.  They are the digit
+-- store/load of the float-repr helper, and the decoder used to refuse them
+-- outright (`bugs/FORMAL_x86_64_decoder_refuses_sib_indexed_forms.md`); the
+-- model reads the index through `x86_mem_addr`, which the `indexContribution`
+-- term above makes it compute.  Pinned to the helper's SIB `0x0b` (scale 0,
+-- index `rcx`, base `r11` — `h_rb`/`h_rx` say which REX bits put the base in
+-- r8-r15 and keep the index in r0-r7), general over the rest of the REX byte
+-- the way the `rsp`-base siblings are, because the SOURCE/DESTINATION register
+-- is the ModRM `reg` field extended by `REX.R` and that varies.
+
+/-- `mov [r11 + rcx], r8b` (REX 88 /r, ModRM mod=00 rm=100, SIB 0b: scale 0,
+    index rcx, base r11) — the byte store half of the pair above. -/
+theorem x86_step_mov_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x88)
+    (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x0b)
+    (h_rex : x86_is_rex rex = true)
+    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b rex = 8) (h_rx : x86_rex_x rex = 0) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem
+                (Int.ofNat ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat)).toNat
+                (x86_get_reg s (reg + x86_rex_r rex)) 1,
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_mod, h_rm, h_reg, h_rb, h_rx]
+
+/-- `movzx r8, byte [r11 + rcx]` (REX 0F B6 /r, ModRM mod=00 rm=100, SIB 0b) —
+    the byte load half of the pair: one byte read, zero-extended (the identity
+    for a one-byte `x86_narrow_extend`), into the `REX.R`-extended destination. -/
+theorem x86_step_movzx_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x0f)
+    (h_b2 : code (m + 2) = 0xb6) (h_b3 : code (m + 3) = modrm)
+    (h_b4 : code (m + 4) = 0x0b)
+    (h_rex : x86_is_rex rex = true)
+    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b rex = 8) (h_rx : x86_rex_x rex = 0) :
+    x86_step s code = some
+      { x86_set_reg s (reg + x86_rex_r rex)
+          (mem_read_bytes s.mem
+               (Int.ofNat ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat)).toNat 1)
+        with rip := m + 5 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_narrow_extend,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_b4, h_rex, h_mod, h_rm, h_reg, h_rb, h_rx]
 
 /-- `mov r64, qword [rsp + 0]` (REX.W 8B /r, ModRM mod=00 rm=100, SIB 24: scale 0,
     index none, base rsp).

@@ -5,7 +5,7 @@ Sources: doc/ORCHESTRATION.html
 """
 
 import os
-from datetime import datetime
+import time
 
 # ---------------------------------------------------------------------------
 # DATA EXTRACTED FROM doc/ORCHESTRATION.html
@@ -64,7 +64,6 @@ ENVIRONMENT = {
         {"id": "opencode/space-bunny-free", "use": "hard problems, hard merges", "note": "Free, replenishes daily. Rate limited only on explicit 429/Rate limit exceeded. A worker that stops with exit 0 and no error is NOT rate limited."},
         {"id": "omlx/Qwen3.8-27B-oQ4e-mtp", "use": "local, slow; light merging", "note": "Server http://127.0.0.1:8000. Has exited early and with 'oMLX memory guard abort'. Too slow for hard conflict merges."},
         {"id": "opencode/claude-* / openrouter/anthropic/*", "use": "—", "note": "Failed with 'Insufficient account funds' / 'Key limit exceeded'. Do not rely on them. (Claude Opus/Sonnet available only as Claude Code subagents when the controller is Claude Code.)"},
-        {"id": "opencode/fledge-alpha-free", "use": "—", "note": "Hung for hours once. Do not use unless the owner says it is back."},
     ],
 }
 
@@ -780,7 +779,7 @@ def main():
   <header>
     <h1>mojo-reference Fleet Dashboard</h1>
     <p class="subtitle">Orchestration system overview — claims, workers, architecture, and system state</p>
-    <div class="meta">Generated from <code>doc/ORCHESTRATION.html</code> · Orchestration guide for the mojo-reference fleet · {esc(datetime.now().strftime('%Y-%m-%d %H:%M'))}</div>
+    <div class="meta">Generated from <code>doc/ORCHESTRATION.html</code> · Orchestration guide for the mojo-reference fleet · {esc(time.strftime('%Y-%m-%d %H:%M'))}</div>
   </header>
 
   <div class="grid">

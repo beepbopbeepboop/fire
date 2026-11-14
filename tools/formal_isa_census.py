@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which emitted instruction forms are actually CHECKED, on both backends.
 
-`bugs/FORMAL_arm64_instruction_coverage.md` is a survey with a number in it, and
+`bugs/hard/FORMAL_arm64_instruction_coverage.md` is a survey with a number in it, and
 the number answers one question: *what can this backend not emit?* This tool
 answers the other four, for every instruction form the code generators CAN emit:
 
@@ -158,6 +158,11 @@ _ARM64_OVERRIDES = {
     "encode_fmov_v_to_gpr": (0, 1),
     "encode_scvtf_dn_xn": (0, 1),
     "encode_fcvtzs_xn_dn": (0, 1),
+    "encode_ccmp_xn_xm": (3, 4, 4, "eq"),
+    "encode_ccmp_xn_imm5": (3, 5, 4, "eq"),
+    "encode_csinc_xd_xm_cond": (0, 3, 4, "eq"),
+    "encode_csinv_xd_xm_cond": (0, 3, 4, "eq"),
+    "encode_csneg_xd_xm_cond": (0, 3, 4, "eq"),
 }
 _ARM64_REG_ARGS = {
     "xd": 0, "wd": 0, "xt": 0, "wt": 0, "rd": 0, "dd": 0,
@@ -583,34 +588,15 @@ BACKLOG = {
     # now `(0xffe07c00, 0x9b407c00)` with `work_step_smulh`, and the row's LEAN
     # column reads `yes` — measured, `formal_model_fuzz.py --mix flagged
     # --cases 400 --length 1 --seed 11` reports 400/400 AGREE with no NOSTEP.
-    "encode_csel_xd_xm_cond": (
-        "bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md",
-        "six call sites emit it and `arm64_step` has no branch; the blocked "
-        "reason is measured in that doc (the certificate size, not the "
-        "instruction)"),
-    "encode_fadd_dd_dn_dm": (
-        "bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-        "IEEE-754 binary64, scalar: ten encoders the emitter calls, no arm in "
-        "`arm64_step`, and no V register file in the harness"),
-    "encode_fsub_dd_dn_dm": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                             "as `encode_fadd_dd_dn_dm`"),
-    "encode_fmul_dd_dn_dm": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                             "as `encode_fadd_dd_dn_dm`"),
-    "encode_fdiv_dd_dn_dm": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                             "as `encode_fadd_dd_dn_dm`"),
-    "encode_fneg_dd_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                          "as `encode_fadd_dd_dn_dm`"),
-    "encode_fcmp_dn_dm": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                         "as `encode_fadd_dd_dn_dm`; the one whose FLAGS the "
-                         "floating comparison is decided from"),
-    "encode_fmov_gpr_to_v": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                             "as `encode_fadd_dd_dn_dm`"),
-    "encode_fmov_v_to_gpr": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                             "as `encode_fadd_dd_dn_dm`"),
-    "encode_scvtf_dn_xn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                           "as `encode_fadd_dd_dn_dm`"),
-    "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
-                            "as `encode_fadd_dd_dn_dm`"),
+    # `encode_csel_xd_xm_cond` WAS here until 2026-11-01 and is not any more:
+    # the six call sites (a ternary is a CSEL) emitted it modelled nowhere, so
+    # every image with a conditional expression was unsteppable.  `arm64_step`'s
+    # last arm is now `(0xffe00c00, 0x9a800000)` with `work_step_csel`, and the
+    # whole class is measured in rather than sampled: all 444,416 words the
+    # encoder can produce (every `Rn`/`Rm` including 31, every condition code)
+    # decode to that row, and no CSET word does — its encoder sets bit 10,
+    # which the class keeps clear — with the row's LEAN column reading `yes`.
+
     # ── x86-64: NO BACKLOG ROW AT ALL, as of 2026-10-08 ─────────────────
     #
     # `encode_imul_r64_r64_imm` was removed on 2026-10-06
