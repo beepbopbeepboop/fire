@@ -5057,6 +5057,35 @@ def _check_signature_binding_violations(gen, stmts):
 
 
 
+def _cpp_generator_param_names(fn, receiver: str = '') -> list:
+    """Source parameter names, one per slot `_gen_cpp_generator_unit` returns
+    in its ctype list — the `param_names` key every registered compiled
+    generator's api carries (module_gen's registrations, cpp_async's
+    self-recursion snapshot, coro.py's stack-switch meta).
+
+    A generator method's receiver is its own leading slot (`self`/`cls`) and
+    is NOT part of `fn.params[1:]`; a `*args`/`**kwargs` parameter occupies
+    the slot its C representation occupies, under its bare name (the same
+    names `_gen_cpp_generator_unit` registers). Having this list align 1:1
+    with the ctype slots is what lets a delegated call bind keyword arguments
+    by NAME rather than guessing that they are written in declaration order
+    in the trailing slots."""
+    names = []
+    _params = list(getattr(fn, 'params', None) or [])
+    if receiver:
+        names.append(_as_str(receiver))
+        _params = _params[1:]
+    for _pn, _pt in _params:
+        _pns = _as_str(_pn)
+        if _pns.startswith('**'):
+            names.append(_pns[2:])
+        elif _pns.startswith('*'):
+            names.append(_pns[1:])
+        else:
+            names.append(_pns)
+    return names
+
+
 def gen_module_impl(self, stmts: list):
     self._stmts = stmts
     self._current_module_stmts = stmts
@@ -5083,6 +5112,11 @@ def gen_module_impl(self, stmts: list):
                 for _em, _ea in _s.extra:
                     _imported_names.add(_ea if _ea else _em.split('.')[-1])
     self._gmi_imported_names = _imported_names
+    # Two `from M import X` of one name from different modules is an error at
+    # module scope too (modular's import_ambiguous). Raised before anything is
+    # lowered, with every conflict in the file gathered into the one message.
+    import mojo.middle.import_ambiguity as _import_ambiguity
+    _import_ambiguity.check_module_from_imports(self, stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
     # A function called with a list at one site and a str at another, and
     # iterated in its body, gets one clone per argument kind before any
@@ -13945,6 +13979,14 @@ def gen_module_impl(self, stmts: list):
         self._supported_generators[s.name] = s
         self._generator_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+            # The SOURCE parameter names, one per `params` slot, in order.
+            # Every consumer that binds a call's keyword arguments to slots
+            # by name reads this (`cpp_core._cpp_generator_call_slot_pairs`);
+            # without it a keyword argument was appended positionally, so
+            # `f(n - step, bump=bump, step=step)` bound `bump` to `step`.
+            # Foreign modules see it because the home-registry value IS this
+            # very api dict (`_generator_home_api` below).
+            'param_names': _cpp_generator_param_names(s),
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
             'mixed_slots': self._cpp_last_mixed_slots,
             # Value-carrying `return` support (asyncio/futures.py's
@@ -14353,6 +14395,11 @@ def gen_module_impl(self, stmts: list):
             self._supported_generator_methods[key] = m
             self._generator_method_api[key] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                # Source parameter names, one per `params` slot (see
+                # `_register_free_generator`'s identical key): keyword
+                # arguments at a delegated call bind to their slot by name.
+                'param_names': _cpp_generator_param_names(
+                    m, _cpp_method_receiver_name(m)),
                 # Which SOURCE parameter, if any, is the receiver slot a
                 # caller must fill -- see mojo/middle/coro.py's identical
                 # key for why the registered `params` (bare ctype strings)

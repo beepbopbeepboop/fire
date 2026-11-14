@@ -36,6 +36,7 @@ _ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
 import ownership_check
+import unknown_decl_check
 import mlir
 import mojo.middle.coro as gimple_gen_coro
 import regex_compile
@@ -6462,6 +6463,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
+    unknown_decl_check.check_module(stmts, mojo_src, filename)
     # Early diagnostics: trait method requirement evidence (part 2).
     try:
         import elaborate as _elab_diag

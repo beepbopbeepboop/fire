@@ -945,7 +945,8 @@ ELAB_DEPTH: list = [0]
 
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 gcc: str = None, nested_defs: list = None,
-                renames: list = None, conformance_bases: dict = None) -> tuple:
+                renames: list = None, conformance_bases: dict = None,
+                origin_module: str = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.
     Returns (mangled_name, object_path_or_None, hit, cpp_object_path_or_None)
     — both object results are PATHS into the CAS (cas.get_or_build's own
@@ -964,6 +965,10 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     `conformance_bases` is an optional {name: [base names/exprs]} map of
     struct/trait declarations visible to the instantiation, used to fold
     `conforms_to(...)` in comptime conditions inside the instantiated body.
+
+    `origin_module` (optional) is the name of the module that declares the
+    template's structs; it names them in diagnostics only and is not part of
+    the CAS key, since a diagnostic never produces an artifact.
 
     `cpp_object_path` is non-None exactly when the instantiated template
     contains a nested `async def`/generator this codegen compiles to a real
@@ -1152,6 +1157,10 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         gen._is_elaborated_instantiation = True
         if conformance_bases:
             gen._conformance_bases_extra = dict(conformance_bases)
+        # Diagnostics only (never the artifact or its CAS key): the module that
+        # declares the template's structs, so a diagnostic names `mod::Struct`
+        # rather than the instantiation's own mangled file name.
+        gen._diag_module_name = origin_module
         c = gen.gen_module(Parser(py_tokenize(concrete)).with_filename(mfile).parse_module())
         # The defining unit's OWN return decision for the instantiated
         # function (an annotation, or the body's inferred type when the

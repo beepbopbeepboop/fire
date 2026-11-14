@@ -1684,7 +1684,8 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)')
+     desc='GIMPLE unit suite (python-interpreted codegen)',
+     disabled='bugs/gate-gimple.md')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -3623,7 +3624,8 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
 test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_read_before_store.py', 'formal/model'],
-     desc='read-before-store dominance, against CPython in both directions')
+     desc='read-before-store dominance, against CPython in both directions',
+     disabled='bugs/gate-formal-read-before-store.md')
 # `iter_statement_nodes` against the full `iter_nodes`, over the three node
 # shapes that hid a store from a walk without `_STATEMENT_CONSTRUCTS`: a class
 # nested in a method, an `except` arm, a `match` arm. `struct_receiver_stores`

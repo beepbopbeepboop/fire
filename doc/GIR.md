@@ -1,6 +1,6 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0, 1, 2a and 3a landed 2026-11-13. This file is the plan and the rules. Read it
+Status: stages 0, 1, 2a, 3a and 3b landed (2026-11-14). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
 
 ## 1. What is wrong today (measured 2026-11-13)
@@ -188,12 +188,15 @@ that is meant to be behaviour-preserving:
   Nothing matches `startswith('return ')` or slices a value out of a line any
   more, and `_emit_raw` no longer infers "terminal" from text. `gen._emit`
   REFUSES a jump or return spelled as text (it would skip the teardown).
-- **Stage 3b. Ownership is told, not recognised.** `_emit_raw` still finds
-  ` = mojo_` in the line to decide a value is a fresh container
-  (`_fresh_vals`, `_owned_str_elem_vals`). Move that into `_rt_call` /
-  `_rt_into` / `_emit_call`, which know the callee. Blocked on the calls
-  whose text is built from a computed callee name or by concatenation; when
-  `TEXT_CALL_BASELINE` is 0 and those are converted, delete the sniff.
+- **Stage 3b (landed 2026-11-14). Ownership is told, not recognised.**
+  `note_call_result(gen, dst, fname)` (`emit_infra.py`) records that a call
+  to a `_FRESH_CONTAINER_RETURNS` / `_FRESH_STRING_RETURNS` function hands
+  back a brand-new object. `_rt_call`, `_rt_into` and `_emit_call` call it;
+  they know the callee. `_emit_raw` no longer searches a line for ` = mojo_`.
+  It now appends the line and its `#line` directive and does nothing else.
+  CONSEQUENCE: a call with a result that is spelled as text
+  (`gen._new_val(t, f"{fn} ({x})")`) is never marked fresh, so its result
+  leaks. Use `gen._rt_call(t, fn, [x])` -- a computed callee name is fine.
 - **Stage 3c. Statements are `Instr`, not strings.** `gen.body_lines` becomes
   a list of `Instr`; the four function-assembly sites print it.
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
