@@ -2193,8 +2193,20 @@ def _compute_pointer_evidence(stmts: list) -> None:
                             changed = True
     # Carried on the node as well: the table is per lower() call, and an imported
     # module's functions are inferred after the importing module's lower() has run.
+    # `_ptr_evidence` is the DURABLE copy of this pass's own answer: a nested
+    # module compile (the importing module's own `_compile_imported_module`
+    # recursion) calls `lower()` too, and its `_compute_pointer_evidence`
+    # clears/refills these bare-name tables -- so a reader that runs AFTER
+    # that recursion (the cpp C++20-coroutine path typing a generator
+    # parameter, `cpp_async._gen_cpp_generator_unit`) saw the LAST module's
+    # evidence, not this one's. Real: `c_common/tables.py` imported by a
+    # consumer, `read_table`'s `infile` was typed `char *` (from string call
+    # sites) instead of the word `isinstance(infile, str)` needs, and the
+    # imported module's generated .cpp failed to compile (the failure
+    # surfaced only as undefined `_mojogen_*` symbols at link).
     for nm, fd in fds.items():
         fd._ptr_forwarded = frozenset(_PTR_FORWARDED.get(nm, ()))
+        fd._ptr_evidence = frozenset(_PTR_EVIDENCE.get(nm, ()))
 
 
 def _index_generator_defs(stmts: list) -> None:

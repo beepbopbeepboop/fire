@@ -2675,6 +2675,126 @@ def test_imported_global_accessor_in_link_mode() -> bool:
     return True
 
 
+def test_imported_module_path_word_generator_unit_compiles() -> bool:
+    """Regression test for
+    bug:COMPILE_FAIL_Tools_c-analyzer_c_common_tables_consumer_link.
+
+    A consumer that imports a module whose cpp-path generator takes an
+    unannotated path-word parameter (`read_rows(path, *, _open=open)` with
+    `isinstance(path, str)` + `with _open(path) as path:`) must get that
+    parameter typed as the runtime word, not `char *`, when the module is
+    compiled as a TRANSITIVE IMPORT.
+
+    Why it used to be `char *`: `coro._compute_pointer_evidence` fills a
+    MODULE-LEVEL, bare-function-name table, and the importing module's own
+    imports are compiled (each through `lower()`, which clears and refills
+    that table) before this module's C++ coroutine unit is emitted. So the
+    unit was typed against the LAST nested module's evidence; `infile` fell
+    back to `char *` from its string call sites, the with-open arm's
+    `(int64_t)mojo_open_file_ex(...)` assignment stopped type-checking, and
+    g++'s failure was swallowed -- the program then failed to link with
+    `Undefined symbols ... _mojogen_<module>_*`. The fix stamps the evidence
+    on every FunctionDef (`_ptr_evidence`) and has the cpp emitter read that.
+
+    The check is the link-mode compile itself: the imported module's
+    companion C++ object must be produced (before the fix it is dropped, and
+    `needs_cxx` is consequently False)."""
+    td = tempfile.mkdtemp(prefix='mojo_lm_pathword_')
+    try:
+        pkg = {
+            'pkg/__init__.py': '',
+            'pkg/other.py': 'def tag(x):\n    return x\n',
+            'pkg/helper.py': (
+                'from . import other\n'
+                '\n'
+                'def read_rows(path, *, _open=open):\n'
+                '    if isinstance(path, str):\n'
+                '        with _open(path) as path:\n'
+                '            yield from read_rows(path)\n'
+                '            return\n'
+                '    for line in path:\n'
+                '        yield other.tag(line.strip())\n'),
+            'pkg/main.py': (
+                'from pkg.helper import read_rows\n'
+                '\n'
+                'def main():\n'
+                "    for row in read_rows('data.tsv'):\n"
+                '        print(row)\n'
+                '\n'
+                'main()\n'),
+        }
+        for rel, src in pkg.items():
+            path = os.path.join(td, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(src)
+        entry = os.path.join(td, 'pkg', 'main.py')
+        entry_src = pkg['pkg/main.py']
+
+        import gimple_codegen
+        code, _dylibs, objects, _cpp, needs_cxx = gimple_codegen.compile_linked(
+            entry_src, filename=entry)
+
+        want = '_mojogen_pkg_helper_read_rows_start'
+        if want not in code:
+            print(f"  ✗ imported_path_word_unit: the client C does not "
+                  f"reference {want}")
+            return False
+        if not needs_cxx:
+            print("  ✗ imported_path_word_unit: the imported module's "
+                  "coroutine unit was never produced (needs_cxx False) -- "
+                  "its C++ compile failed and was swallowed")
+            return False
+        if len(objects) != 1 or not os.path.isfile(objects[0]) \
+                or os.path.getsize(objects[0]) == 0:
+            print(f"  ✗ imported_path_word_unit: expected exactly one "
+                  f"companion object, got {objects!r}")
+            return False
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("  PASS  imported_path_word_unit")
+    return True
+
+
+def test_link_inline_cpp_unit_failure_reports_compiler_stderr() -> bool:
+    """Regression test for the diagnostic half of
+    bug:COMPILE_FAIL_Tools_c-analyzer_c_common_tables_consumer_link: when an
+    imported module's generated C++ does not compile, the note must carry
+    g++'s OWN message, not just "returned non-zero exit status 1".
+
+    `_compile_link_inline_cpp_unit` deliberately returns None instead of
+    aborting (link-mode's convention), so the note under MOJO_DEBUG is the
+    only place the reason can appear; without the stderr the symptom is
+    eight lines later at link ("Undefined symbols ... _mojogen_*"), naming
+    the wrong problem."""
+    from mojo.backend_gimple import emit_infra
+    old = os.environ.get('MOJO_DEBUG')
+    os.environ['MOJO_DEBUG'] = '1'
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            obj = emit_infra._compile_link_inline_cpp_unit(
+                None, 'int broken() { this is not c++; }\n')
+    finally:
+        if old is None:
+            os.environ.pop('MOJO_DEBUG', None)
+        else:
+            os.environ['MOJO_DEBUG'] = old
+    note = buf.getvalue()
+    if obj is not None:
+        print("  ✗ cpp_unit_diagnostic: invalid C++ compiled?!")
+        return False
+    if 'failed to compile link-mode inline-module cpp unit' not in note:
+        print(f"  ✗ cpp_unit_diagnostic: no failure note, got {note!r}")
+        return False
+    if 'error:' not in note:
+        print(f"  ✗ cpp_unit_diagnostic: note has no compiler stderr: "
+              f"{note!r}")
+        return False
+    print("  PASS  cpp_unit_diagnostic")
+    return True
+
+
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_extern_import_keyword_call_pads_trailing_default,
@@ -2724,6 +2844,8 @@ CASES = [
     test_same_module_call_to_generic_with_default_binds_instantiation,
     test_two_modules_specialize_one_generic_differently,
     test_imported_global_accessor_in_link_mode,
+    test_imported_module_path_word_generator_unit_compiles,
+    test_link_inline_cpp_unit_failure_reports_compiler_stderr,
 ]
 
 
