@@ -848,18 +848,18 @@ def _expr_start(e):
     return getattr(e, 'line', 0), getattr(e, 'col', 0)
 
 
-def _constraint_text(e):
+def _constraint_text(e, subst=None):
     """The modular compiler's spelling of a constraint expression
     (`(n > Int(0))`), or None for a shape not verified against it."""
     if hasattr(e, 'left') and hasattr(e, 'right') and hasattr(e, 'op'):
-        l = _constraint_text(e.left)
-        r = _constraint_text(e.right)
+        l = _constraint_text(e.left, subst)
+        r = _constraint_text(e.right, subst)
         if l is None or r is None:
             return None
         return f"({l} {e.op} {r})"
     if hasattr(e, 'func') and hasattr(e, 'args') and not getattr(e, 'kwargs', None):
         fn = e.func.name if hasattr(e.func, 'name') else getattr(e.func, 'member', None)
-        parts = [_constraint_text(a) for a in e.args]
+        parts = [_constraint_text(a, subst) for a in e.args]
         if fn is None or any(p is None for p in parts):
             return None
         return f"{fn}({', '.join(parts)})"
@@ -867,6 +867,8 @@ def _constraint_text(e):
             and e.obj.name == 'Self'):
         return e.member          # `Self.T` is spelled `T`
     if hasattr(e, 'name') and not hasattr(e, 'args'):
+        if subst and e.name in subst:
+            return '$' + str(subst.index(e.name))
         return e.name
     if hasattr(e, 'value') and hasattr(e, 'raw') and isinstance(e.value, int):
         return f"Int({e.value})"
@@ -905,12 +907,17 @@ def where_violation_record(filename, node, loc, cond, site, bare=False):
             after = len(callee.member)
     elif hasattr(callee, 'name') and not bare:
         after = len(callee.name) - 1     # `^~~~` over the whole name
+    cond_note = {'file': loc[0], 'line': wl, 'col': wc, 'name': None,
+                 'message': f"constraint declared here evaluated to False, expected '{text}'"}
+    if loc[0] in _SYNTHETIC_FILES:
+        # No source: the note shows the constraint with its parameters spelled
+        # by position.
+        cond_note['synth'] = _constraint_text(cond, list(node.comptime_params))
     return msg, {
         'file': filename, 'line': site.line, 'caret': caret,
         'tilde_from': tilde_from, 'after': after, 'message': msg,
         'notes': [
-            {'file': loc[0], 'line': wl, 'col': wc, 'name': None,
-             'message': f"constraint declared here evaluated to False, expected '{text}'"},
+            cond_note,
             {'file': loc[0], 'line': loc[1], 'name': node.name,
              'message': 'function declared here'}]}
 
@@ -985,15 +992,48 @@ def _trait_closure(name, scope, out, seen):
 _STATIC_MODULES = {}
 
 
+# Packages that exist only as a precompiled `<pkg>.mojoc` (the source deleted):
+# path -> source text the artifact carried, and the set of such paths. A
+# diagnostic that points into one renders a synthetic signature instead of a
+# source line, as the modular compiler does.
+_VIRTUAL_SOURCES = {}
+_SYNTHETIC_FILES = set()
+
+
+def _read_text(path):
+    if path in _VIRTUAL_SOURCES:
+        return _VIRTUAL_SOURCES[path]
+    with open(path, encoding='utf-8') as fh:
+        return fh.read()
+
+
 def _static_module_file(module, from_file):
     """Path of the .mojo file or package `module` names, looked up beside the
-    importing file; None when it is not there (a stdlib or unknown module)."""
+    importing file; None when it is not there (a stdlib or unknown module).
+    When only a `<pkg>.mojoc` is there, the path is a virtual one whose text is
+    the source the artifact embedded."""
     base = os.path.dirname(os.path.abspath(from_file)) if from_file else os.getcwd()
-    rel = os.path.join(*module.split('.'))
+    parts = module.split('.')
+    rel = os.path.join(*parts)
     for cand in (os.path.join(base, rel + '.mojo'),
                  os.path.join(base, rel, '__init__.mojo')):
         if os.path.isfile(cand):
             return cand
+    art = os.path.join(base, parts[0] + '.mojoc')
+    if os.path.isfile(art):
+        try:
+            import json
+            with open(art, encoding='utf-8') as fh:
+                data = json.load(fh)
+            key = '__init__.mojo' if len(parts) == 1 else '/'.join(parts[1:]) + '.mojo'
+            text = (data.get('sources') or {}).get(key)
+            if text is not None:
+                vpath = os.path.join(base, parts[0], key)
+                _VIRTUAL_SOURCES[vpath] = text
+                _SYNTHETIC_FILES.add(vpath)
+                return vpath
+        except (OSError, ValueError):
+            pass
     return None
 
 
@@ -1036,8 +1076,7 @@ def _static_load_module(path, depth):
         return _STATIC_MODULES[key]
     _STATIC_MODULES[key] = {}
     try:
-        with open(path, encoding='utf-8') as fh:
-            text = fh.read()
+        text = _read_text(path)
         stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
         scope = _static_traits(stmts, path, text, depth)
     except Exception:
@@ -1096,8 +1135,7 @@ def _static_funcs_of_file(path):
     if key not in _STATIC_FUNCS:
         _STATIC_FUNCS[key] = {}
         try:
-            with open(path, encoding='utf-8') as fh:
-                text = fh.read()
+            text = _read_text(path)
             stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
             _STATIC_FUNCS[key] = _top_level_functions(stmts)
         except Exception:
@@ -1171,8 +1209,7 @@ def _scope_of_file(path):
     if key not in _STATIC_SCOPES:
         _STATIC_SCOPES[key] = {'local': {}, 'mods': {}, 'froms': {}, 'structs': {}}
         try:
-            with open(path, encoding='utf-8') as fh:
-                text = fh.read()
+            text = _read_text(path)
             stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
             _STATIC_SCOPES[key] = _scope_from_stmts(stmts, path)
         except Exception:
@@ -1383,6 +1420,7 @@ def _predicate_call_record(filename, c, cfile, cond, env, site, bare):
             {'file': cfile, 'line': c.line, 'name': c.name,
              'message': 'cannot prove constraint for candidate'},
             {'file': cfile, 'line': wl, 'col': wc, 'name': None,
+             'nosnippet': cfile in _SYNTHETIC_FILES,
              'message': f"constraint declared here needs evidence for '{pname}({shown})'"},
             {'file': pfile, 'line': pred.line, 'name': pname,
              'message': 'cannot evaluate call to non-builtin function declared here'},
@@ -1611,6 +1649,7 @@ def _candidate_selection_record(st, filename, order):
             if kinds is None or kinds.count('valid') != 1 or kinds.count('unknown') != 1:
                 continue
             notes = [{'file': ent['file'], 'line': tm.line, 'name': tm.name,
+                      'nosnippet': ent['file'] in _SYNTHETIC_FILES,
                       'message': f"ambiguous reference to '{tm.name}': lacking evidence to select candidate"}]
             for m, k in zip(cands, kinds):
                 if k == 'unknown':
@@ -1639,7 +1678,7 @@ def _candidate_selection_record(st, filename, order):
     return None
 
 
-def static_module_diagnostics(stmts, filename, source):
+def static_module_diagnostics(stmts, filename, source, werror=False):
     """Diagnostics found by looking at the module's declarations alone, before
     anything runs -- the modular compiler reports these statically and reports
     every one, in source order. Returns (text, number of errors); text is None
@@ -1666,7 +1705,7 @@ def static_module_diagnostics(stmts, filename, source):
     records = []
 
     def record(st, msg, notes):
-        records.append(((st.line, 0), {'file': filename, 'line': st.line, 'caret': 0,
+        records.append(((1, st.line, 0), {'file': filename, 'line': st.line, 'caret': 0,
                                   'tilde_from': 0, 'name': st.name,
                                   'message': msg, 'notes': notes}))
 
@@ -1748,7 +1787,7 @@ def static_module_diagnostics(stmts, filename, source):
                 else:
                     continue
                 items.append((pos[0], {'file': ent['file'], 'line': pos[0], 'col': pos[1],
-                                       'name': None, 'message': msg}))
+                                       'name': None, 'synth': mn, 'message': msg}))
             if not items:
                 continue
             items.sort(key=lambda it: it[0])
@@ -1764,10 +1803,16 @@ def static_module_diagnostics(stmts, filename, source):
         sel = _candidate_selection_record(st, filename, order)
         if sel is not None:
             record(st, sel[0], sel[1])
-    records.extend(_static_call_records(stmts, filename, source))
-    records.extend(_static_conversion_records(stmts, filename, source))
+    # Function bodies are checked before struct declarations (measured: a
+    # struct above `main` is still reported after main's call errors).
+    for key, rec in (_static_call_records(stmts, filename, source)
+                     + _static_conversion_records(stmts, filename, source)):
+        records.append(((0,) + tuple(key), rec))
     if not records:
         return None, 0
+    if werror:
+        for r in records:
+            r[1]['kind'] = 'error'
     records.sort(key=lambda r: r[0])
     errors = sum(1 for r in records if r[1].get('kind', 'error') == 'error')
     return '\n'.join(_render_record_text(r[1], filename, source) for r in records), errors
@@ -1871,13 +1916,88 @@ def _record_source_line(rec_file, line, filename, source):
         lines = source.splitlines()
     else:
         try:
-            with open(rec_file, encoding='utf-8') as fh:
-                lines = fh.read().splitlines()
+            lines = _read_text(rec_file).splitlines()
         except (OSError, TypeError, ValueError):
             return None
     if 1 <= line <= len(lines):
         return lines[line - 1]
     return None
+
+
+_VIRTUAL_STMTS = {}
+
+
+def _int_default_text(e):
+    if isinstance(e, N.IntLiteral):
+        return f"Int({e.value})"
+    return None
+
+
+def _synthetic_text(path, line, name):
+    """The signature the modular compiler prints for a declaration of a
+    precompiled package (`def f[n: Int]() where (n > Int(0))`, `struct S[a:
+    Int, /, c: Int = Int(9)]`, `trait T`, `def __init__(out self, value: Int)`):
+    the declaration named `name` at (or just under the decorators of) `line`,
+    rendered from the AST of the source the artifact embedded."""
+    if path not in _VIRTUAL_STMTS:
+        try:
+            _VIRTUAL_STMTS[path] = N.Parser(N.py_tokenize(
+                _VIRTUAL_SOURCES[path])).with_filename(path).parse_module()
+        except Exception:
+            _VIRTUAL_STMTS[path] = []
+    decls = []
+    for st in _VIRTUAL_STMTS[path]:
+        decls.append(st)
+        if isinstance(st, (N.StructDef, N.TraitDef)):
+            decls.extend(getattr(st, 'methods', []))
+    node = None
+    for d in decls:
+        if getattr(d, 'name', None) != name:
+            continue
+        span = len(getattr(d, 'decorators', []) or [])
+        if d.line <= line <= d.line + span:
+            node = d
+            break
+    if node is None:
+        return None
+    if isinstance(node, N.TraitDef):
+        return f"trait {name}"
+    if isinstance(node, N.StructDef):
+        lines = _VIRTUAL_SOURCES[path].splitlines()
+        for k in range(node.line - 1, min(node.line + 6, len(lines))):
+            m = re.match(r'^\s*struct\s+' + re.escape(name) + r'(\[.*\])?', lines[k])
+            if m:
+                br = m.group(1) or ''
+                br = re.sub(r'=\s*(-?\d+)\b', lambda mm: '= Int(' + mm.group(1) + ')', br)
+                return f"struct {name}{br}"
+        return f"struct {name}"
+    # FunctionDef
+    brackets = ''
+    if node.comptime_params:
+        parts = []
+        anns = getattr(node, 'comptime_param_annotations', {}) or {}
+        defs = getattr(node, 'comptime_param_defaults', {}) or {}
+        for pn in node.comptime_params:
+            t = pn + (f": {anns[pn]}" if anns.get(pn) else '')
+            d = _int_default_text(defs.get(pn)) if pn in defs else None
+            if d is not None:
+                t += f" = {d}"
+            parts.append(t)
+        brackets = '[' + ', '.join(parts) + ']'
+    params = []
+    convs = getattr(node, 'param_convs', {}) or {}
+    for p in node.params:
+        pn, ann = (p[0], p[1]) if isinstance(p, tuple) else (str(p), None)
+        c = convs.get(pn)
+        params.append((c + ' ' if c and c not in ('read', 'imm') else '') + pn
+                      + (f": {ann}" if ann else ''))
+    ret = f" -> {node.return_type}" if getattr(node, 'return_type', None) else ''
+    where = ''
+    if getattr(node, 'where_clause', None) is not None and not isinstance(node.where_clause, list):
+        t = _constraint_text(node.where_clause)
+        if t is not None:
+            where = f" where {t}"
+    return f"def {name}{brackets}({', '.join(params)}){ret}{where}"
 
 
 def _render_record_text(rec, filename, source):
@@ -1889,8 +2009,10 @@ def _render_record_text(rec, filename, source):
               rec['tilde_from'], rec['message'], rec.get('name'))]
     synthetic = {}
     extras = {}
+    nd = {}
     for n in rec['notes']:
         items.append(('note', n['file'], n['line'], n.get('col', 0), 0, n['message'], n['name']))
+        nd[len(items) - 1] = n
         if n.get('text') is not None:
             synthetic[len(items) - 1] = n['text']
         if n.get('after') or n.get('fixit'):
@@ -1916,9 +2038,31 @@ def _render_record_text(rec, filename, source):
                         line, text, m = line + k, t2, m2
                         break
             caret = m.start(1) + 1 if m else 0
+        syn = f in _SYNTHETIC_FILES
+        if syn and idx > 0:
+            # A package with no source: `file:line:1`, the declaration's
+            # synthetic signature (or a compiler-generated one) and a caret in
+            # column 1; a few notes carry no snippet at all.
+            note = nd[idx]
+            caret = 1
+            if note.get('nosnippet'):
+                out.append(f"{f}:{line}: {kind}: {message}")
+                continue
+            if idx in synthetic:
+                text = synthetic[idx]
+            elif note.get('synth') is not None:
+                text = note['synth']
+            elif name is not None:
+                text = _synthetic_text(f, line, name)
+            else:
+                text = None
+            if text is not None:
+                text = text + ('' if idx in synthetic and 'generated' in text
+                               else '    # note - synthetic signature' if idx not in synthetic
+                               and not text.startswith('(') else '')
         if caret < 1:
             caret = 1
-        if f != rec['file'] and source is not None:
+        if f != rec['file'] and source is not None and not syn:
             # A candidate declared in another file is introduced by the
             # importing statement: `Imported from <this file>:<line>:`.
             base = os.path.basename(f)

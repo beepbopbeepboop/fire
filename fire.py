@@ -178,6 +178,22 @@ def _extract_diagnostic_format(args: list):
     return fmt, rest
 
 
+def _extract_werror(args: list):
+    """Pull --Werror / --Wno-error out of an argument list (last wins). Returns
+    (werror, remaining_args): warnings the static pass finds are reported as
+    errors, and stop the program, under --Werror."""
+    werror = False
+    rest = []
+    for a in args:
+        if a == '--Werror':
+            werror = True
+        elif a == '--Wno-error':
+            werror = False
+        else:
+            rest.append(a)
+    return werror, rest
+
+
 def _extract_use_mlir_diagnostics(args: list, diagnostic_format: str):
     """Pull --use-mlir-diagnostics[=true|false] out of an argument list. There
     is no MLIR layer here, so the flag has no effect on text output, but the
@@ -778,7 +794,8 @@ def _format_error_message(e):
     return msg
 
 
-def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format='text'):
+def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format='text',
+                          werror=False):
     """Runs the interpretation in a worker thread with a large native stack.
 
     Deep *Mojo-level* recursion (e.g. a recursive-descent parser written in
@@ -812,7 +829,8 @@ def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format=
             interpreter = Interpreter(filename=filename, argv=argv)
             # Declaration-level errors the modular compiler reports before
             # anything runs (all of them, in source order).
-            static_diag, static_errors = static_module_diagnostics(stmts, filename, src_code)
+            static_diag, static_errors = static_module_diagnostics(
+                stmts, filename, src_code, werror)
             if static_diag is not None:
                 print(static_diag, file=sys.stderr)
             if static_errors:
@@ -1374,6 +1392,7 @@ def main():
     auto_gpu, rest = _extract_gpu_flags(rest)
     diagnostic_format, rest = _extract_diagnostic_format(rest)
     rest = _extract_use_mlir_diagnostics(rest, diagnostic_format)
+    werror, rest = _extract_werror(rest)
     if formal and not backend_explicit:
         # --formal alone means the arm64 formal backend, but an explicit
         # --backend wins: `build --formal --backend=x86_64` is how the x86-64
@@ -1808,7 +1827,7 @@ def main():
     # `fire run <file>`: force the interpreter, no compile attempt at all.
     if run_interp:
         interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args,
-                          diagnostic_format=diagnostic_format)
+                          diagnostic_format=diagnostic_format, werror=werror)
         return
 
     # Default for a .mojo program: compile and run it through the module-cache
@@ -1843,7 +1862,7 @@ def main():
 
     # Otherwise interpret as Mojo
     interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args,
-                          diagnostic_format=diagnostic_format)
+                          diagnostic_format=diagnostic_format, werror=werror)
 
 if __name__ == '__main__':
     main()
