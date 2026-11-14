@@ -1,3 +1,5 @@
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part1, CODEGEN_stdlib_dylib_lazy_undefined_refs-part2, CODEGEN_stdlib_dylib_lazy_undefined_refs-part3
+
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
 **Job:** none. This is the latent half of `stdlib-dylib`, which now passes because the JOB's contract is

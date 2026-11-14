@@ -1,6 +1,6 @@
 # SUITE_silentnoop-part1-part1: Capture silentnoop run evidence
 
-**Parent:** bugs/hard/SUITE_silentnoop-part1.md  
+**Parent:** SUITE_silentnoop-part1 (concluded; its doc was removed on master)  
 **Class:** easy
 
 ## Goal

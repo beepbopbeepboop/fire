@@ -5006,6 +5006,21 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _clc = getattr(fn, 'col', 0) or 0
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}error: violated constraint")
+            # Part 2: a bracket parameter's TRAIT BOUND whose argument is
+            # neither provable nor provably false. `check_bounds`'s oracle
+            # (`check_conformance`) answers (True, []) for anything it cannot
+            # resolve, so without this the declaration compiles silently.
+            # AFTER the where-clause check: a provably-false requirement is the
+            # stronger finding and must be the one reported.
+            _diag = _elaborate_mod.check_signature_param_bound_evidence(
+                struct_module_src or module_src or '', tmpl, targs,
+                _elaborate_mod._fn_type_param_bounds(fn))
+            if _diag:
+                _cfn = getattr(gen, '_current_filename', '') or ''
+                _cln = getattr(fn, 'line', 0) or 0
+                _clc = getattr(fn, 'col', 0) or 0
+                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                raise RuntimeError(f"{_cat}{_diag}")
         except RuntimeError:
             raise
         except Exception as e:
@@ -7474,13 +7489,16 @@ def gen_module_impl(self, stmts: list):
             _omo = _as_structdef_node(_omo)
             _own_method_ids[id(_omo)] = {
                 id(_as_funcdef_node(_m)) for _m in _omo.methods}
-    # Declaration-time conditional conformance checks (trait conformance parts 1, 4).
+    # Declaration-time conditional conformance checks (trait conformance parts 1, 3, 4).
     from elaborate import (check_conformance_declarations as _check_conf_decls,
                            check_conditional_rp_origin as _check_rp_origin,
-                           check_copy_move_synthesis as _check_copy_move_synth)
+                           check_copy_move_synthesis as _check_copy_move_synth,
+                           check_conditional_conformance_candidates as _check_conf_candidates)
     _all_struct_def_nodes = [s for s in all_struct_defs if isinstance(s, StructDef)]
     _all_trait_def_nodes = [s for s in all_struct_defs if isinstance(s, TraitDef)]
     _check_conf_decls(_all_struct_def_nodes, _all_trait_def_nodes)
+    _check_conf_candidates(_all_struct_def_nodes, _all_trait_def_nodes,
+                            module_src=getattr(self, '_source_text', '') or '')
     _all_stmts_for_rp = list(stmts)
     _all_stmts_for_rp.extend(getattr(self, '_stripped_generic_fns', []) or [])
     if self.do_imports or self.link_imports:

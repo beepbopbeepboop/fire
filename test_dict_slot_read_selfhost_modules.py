@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression test: the compiler's own modules must compile through the compiled path.
 
-Bug (bugs/mid/CODEGEN_dict_slot_reads_refuse_compiler_sources.md, found 2026-11-10): after the dict-slot read
+Bug (bugs/hard/CODEGEN_dict_slot_reads_refuse_compiler_sources.md, found 2026-11-10): after the dict-slot read
 work (7ae229803) a dict subscript read was tagged as a generator word, so a name later rebound to a str or
 float C type was refused with MIXED_NAME_NON_INT64_REFUSAL. The fire.ci self-host build then refused
 `ast_rewriter.py` ('node') and `module_shared.py` ('_fd'); `coro.py` was refused in the same family.

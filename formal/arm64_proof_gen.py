@@ -4974,13 +4974,6 @@ def _step_rhs(w: int, idx: int):
         if (w & 0xffe00c00) == 0xda800000:
             return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                     f"{cond} s.nzcv then arm64_reg {rn_c} s else arm64_reg {rm_c} s ^^^ (0xffffffffffffffff : UInt64)))")
-    if idx == 86:  # CSNEG
-        cond = (w >> 12) & 0xf
-        rn_c = (w >> 5) & 0x1f
-        rm_c = (w >> 16) & 0x1f
-        if (w & 0xffe00c00) == 0xda800400:
-            return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
-                    f"{cond} s.nzcv then arm64_reg {rn_c} s else (0 : UInt64) - arm64_reg {rm_c} s))")
     if idx == 86:  # ADD Xd, Xn, Xm, UXTX #imm3 (extended register, SP class)
         rn = (w >> 5) & 0x1f
         rm = (w >> 16) & 0x1f
