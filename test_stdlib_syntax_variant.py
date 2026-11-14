@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin for bugs/gate-stdlib-syntax.md: std/utils/variant.mojo must transpile."""
+"""Pin for the stdlib-syntax red fixed by commit 478a03b82: std/utils/variant.mojo must transpile."""
 
 import os
 import sys

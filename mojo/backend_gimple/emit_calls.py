@@ -33,6 +33,7 @@ import regex_compile
 import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
+import mojo.middle.simd_width as _simd_width
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.stmts_shared import _annotation_container_elem_type
@@ -1830,6 +1831,19 @@ def _emit_bits_to_float(gen, target, at, av):
     return target, t
 
 
+def _dtype_arg_name(e):
+    """The dtype VALUE spelling a bracket argument names — `DType.float32`,
+    the dot-relative `.float32`, or the scalar name `Float32` — or '' when it
+    is not a dtype value (an expression, a parameter name)."""
+    if isinstance(e, gimple_ctypes.DottedLiteral):
+        return _as_str(e.path)
+    if isinstance(e, gimple_ctypes.MemberExpr):
+        return _as_str(e.member)
+    if isinstance(e, gimple_ctypes.IdentExpr):
+        return _as_str(e.name)
+    return ''
+
+
 def _dtype_cast_ctype(e):
     """C type named by a dtype bracket argument — `DType.int32` or the
     dot-relative `.int32` — or None when it is anything else (a parameter, an
@@ -3290,6 +3304,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # "indirect call via SubscriptExpr" placeholder for these ctors.
             _idx = node.func.index
             _idxs = _idx.elements if isinstance(_idx, gimple_ctypes.TupleExpr) else [_idx]
+            # The lane count is a compile-time constant at this spelling
+            # (`SIMD[DType.float32, 3]`). Reject an illegal one BEFORE lowering,
+            # exactly as the interpreter's `_MojoSIMDType.__getitem__` does for
+            # `fire.py run`; a width that does not fold (`SIMD[dtype, width]`
+            # inside a still-generic body) is not this guard's to decide.
+            if base == 'SIMD' and len(_idxs) >= 2:
+                _w = gen._eval_const_int(_idxs[1])
+                if _w is not None:
+                    _simd_width.reject_invalid_width(_w, _dtype_arg_name(_idxs[0]))
             _dt_ctype = _dtype_cast_ctype(_idxs[0]) if _idxs else None
             # Fallback: resolve a bare/spelled dtype name to its C type.
             if _dt_ctype is None and _idxs:
