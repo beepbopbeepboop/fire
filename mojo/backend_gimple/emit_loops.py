@@ -327,7 +327,7 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
         gen._emit(f'  {fn_ptr_t} = {static_name};')
         env_t = gen._new_temp('void *')
         if env_var != '0':
-            gen._emit(f'  {env_t} = (void *){env_var};')
+            gen._cast_into(env_t, 'void *', f"{env_var}")
         else:
             gen._emit(f'  {env_t} = (void *)0;')
         return fn_ptr_t, env_t
@@ -356,7 +356,7 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
             env_t = gen._call_expr('void *', 'mojo_bound_method_self',
                                    [('void *', cb_val)])
             return fn_ptr_t, env_t
-        fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
+        fn_ptr_t = gen._cast('void *', cb_val)
         env_t = gen._new_val('void *', '(void *)0')
         return fn_ptr_t, env_t
     # Fallback: treat callback as a simple function pointer.
@@ -393,7 +393,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     # The parser contract guarantees the string form, so use it directly.
     text_type, text_val = gen.lower_expr(node.iterable.args[0])
     if text_type != 'char *':
-        text_val = gen._new_val('char *', f'(char *){gen._ensure_local(text_type, text_val)}')
+        text_val = gen._cast('char *', gen._ensure_local(text_type, text_val))
 
     if pattern not in gen._regex_progs:
         prog_id = f"re{len(gen._regex_progs)}"
@@ -415,9 +415,9 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     # exactly 64 bits (C99 7.18.1.1), so 8 is the width, not a guess.
     gsize = gen._new_val('int64_t', str(8 * (ngroups + 1)))
     gstart_vp = gen._rt_call('void *', 'malloc', [gsize])
-    gstart_var = gen._new_val('int64_t *', f'(int64_t *){gstart_vp}')
+    gstart_var = gen._cast('int64_t *', gstart_vp)
     gend_vp = gen._rt_call('void *', 'malloc', [gsize])
-    gend_var = gen._new_val('int64_t *', f'(int64_t *){gend_vp}')
+    gend_var = gen._cast('int64_t *', gend_vp)
     mstart_var = gen._new_temp('int64_t')
     mend_var = gen._new_temp('int64_t')
     ok_var = gen._new_temp('int')
@@ -516,9 +516,9 @@ def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
     # Group-offset array byte size: why this is a literal is noted in _gen_for_regex_iter.
     gsize = gen._new_val('int64_t', str(8 * (ngroups + 1)))
     gstart_vp = gen._rt_call('void *', 'malloc', [gsize])
-    gstart_var = gen._new_val('int64_t *', f'(int64_t *){gstart_vp}')
+    gstart_var = gen._cast('int64_t *', gstart_vp)
     gend_vp = gen._rt_call('void *', 'malloc', [gsize])
-    gend_var = gen._new_val('int64_t *', f'(int64_t *){gend_vp}')
+    gend_var = gen._cast('int64_t *', gend_vp)
     mstart_var = gen._new_temp('int64_t')
     mend_var = gen._new_temp('int64_t')
     ok_var = gen._new_temp('int')
@@ -632,8 +632,7 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
 
     text_type, text_val = gen.lower_expr(text_node)
     if text_type != 'char *':
-        text_val = gen._new_val(
-            'char *', f'(char *){gen._ensure_local(text_type, text_val)}')
+        text_val = gen._cast('char *', gen._ensure_local(text_type, text_val))
 
     ngroups = _regex_prog_for(gen, pattern)['ngroups']
     res = gen._call_expr('MojoList *', 'mojo_list_new', [])
@@ -664,7 +663,7 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         # twice the iterations and a null second slot.)
         _tup = gen._call_expr('MojoList *', 'mojo_list_new', []) if ngroups >= 2 else None
         for _gi in range(ngroups):
-            _gi64 = gen._new_val('int64_t', f'(int64_t){_gi + 1}')
+            _gi64 = gen._cast('int64_t', f"{_gi + 1}")
             _gsp = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gstart}, {_gi64})')
             _gep = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gend}, {_gi64})')
             _gsv = gen._new_temp('int64_t')
@@ -1756,14 +1755,14 @@ def _gen_for_zip_longest(gen, node):
             if vt == 'double' and raw_ct == 'double':
                 gen._emit(f"  {cvn} = {sel};")
             elif vt == 'char *':
-                cs = gen._new_val('char *', f"(char *){sel}")
+                cs = gen._cast('char *', sel)
                 gen._emit(f"  {cvn} = {cs};")
             elif vt == 'int64_t':
                 gen._emit(f"  {cvn} = {sel};")
             else:
                 # struct pointer / other declared ctype: unbox via a cast
                 # initializer temp, then plain same-type assignment.
-                cp = gen._new_val(vt, f"({vt}){sel}")
+                cp = gen._cast(vt, sel)
                 gen._emit(f"  {cvn} = {cp};")
     finally:
         del gen._ziptmp
@@ -1866,7 +1865,7 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
         if vt == 'char *':
             gen._emit(f"  {cvn} = {raw};")
         else:
-            ip = gen._new_val('int64_t', f"(int64_t){raw}")
+            ip = gen._cast('int64_t', raw)
             gen._emit(f"  {cvn} = {ip};")
             # Recover the real string type for later reads (print(),
             # f-strings, call args) — see _gen_for_list's identical note.
@@ -2134,7 +2133,7 @@ def _gen_for_enumerate(gen, node):
     start_val = None
     if len(node.iterable.args) >= 2:
         _, start_raw = gen.lower_expr(node.iterable.args[1])
-        start_val = gen._new_val('int64_t', f"(int64_t){start_raw}")
+        start_val = gen._cast('int64_t', start_raw)
 
     # PART 6 (2026-10-23, family S): `for i, byte in enumerate(s.bytes())` —
     # the argument is the hand-built bytes iterator, not a list local /
@@ -2323,7 +2322,7 @@ def _gen_for_enumerate(gen, node):
                 if gen.var_types.get(vname, pair_elem) == 'char *':
                     gen._emit(f"  {cv} = {ts};")
                 else:
-                    ip = gen._new_val('int64_t', f"(int64_t){ts}")
+                    ip = gen._cast('int64_t', ts)
                     gen._emit(f"  {cv} = {ip};")
                     gen._actual_types[vname] = 'char *'
             else:
@@ -2354,7 +2353,7 @@ def _gen_for_enumerate(gen, node):
         if gen._type_of(val_var) == 'char *':
             gen._emit(f"  {cval_var} = {temp_str};")
         else:
-            int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
+            int_ptr = gen._cast('int64_t', temp_str)
             gen._emit(f"  {cval_var} = {int_ptr};")
     else:
         elem64 = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{list_ptr}", idx_t])
@@ -2625,7 +2624,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 if vt == 'char *':
                     gen._emit(f"  {cvn} = {ts};")
                 else:
-                    ip = gen._new_val('int64_t', f"(int64_t){ts}")
+                    ip = gen._cast('int64_t', ts)
                     gen._emit(f"  {cvn} = {ip};")
                     # Recover the real string type on later reads (print(),
                     # f-strings, method args) — otherwise the char* boxed
@@ -2735,7 +2734,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 gen._emit(f"  {cvar} = {temp_str};")
             else:
                 # Cast char* to int64_t (opaque pointer storage)
-                int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
+                int_ptr = gen._cast('int64_t', temp_str)
                 gen._emit(f"  {cvar} = {int_ptr};")
         else:
             elem64 = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{list_ptr}", idx_t])
@@ -3415,8 +3414,8 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 cvn0 = _slot_cnames[0]
                 vt0 = _slot_ctypes[0]
                 if vt0 in ('int64_t', 'int', 'int32_t'):
-                    vp = gen._new_val('void *', f'(void *){key_tmp}')
-                    box = gen._new_val('int64_t', f'(int64_t){vp}')
+                    vp = gen._cast('void *', f"{key_tmp}")
+                    box = gen._cast('int64_t', vp)
                     gen._emit(f"  {cvn0} = {box};")
                 else:
                     gen._emit(f"  {cvn0} = (char *) {key_tmp};")
@@ -3434,8 +3433,8 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
         if vt in ('int64_t', 'int', 'int32_t'):
-            vp = gen._new_val('void *', f'(void *){key_tmp}')
-            box = gen._new_val('int64_t', f'(int64_t){vp}')
+            vp = gen._cast('void *', f"{key_tmp}")
+            box = gen._cast('int64_t', vp)
             gen._emit(f"  {cvar} = {box};")
         else:
             gen._emit(f"  {cvar} = (char *) {key_tmp};")
@@ -3942,7 +3941,7 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
             if vt == 'char *':
                 gen._emit(f"  {cvn} = {ts};")
             else:
-                ip = gen._new_val('int64_t', f"(int64_t){ts}")
+                ip = gen._cast('int64_t', ts)
                 gen._emit(f"  {cvn} = {ip};")
                 # Recover the real string type on later reads (print(),
                 # f-strings, method args) — mirrors _gen_for_list's
@@ -4505,8 +4504,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
             if elem_type == 'MojoList *':
                 _listptr = nxt
             else:
-                _listptr = gen._new_val(
-                    'MojoList *', f'(MojoList *){nxt}')
+                _listptr = gen._cast('MojoList *', nxt)
             _slot_acc = {'char *': 'mojo_list_get_str',
                          'int64_t': 'mojo_list_get_int',
                          '_Bool': 'mojo_list_get_bool',
@@ -4565,7 +4563,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                             _gll_sms_key(_csn, '__init__'))
                         if _ccands:
                             _pv = gen._new_temp(_tc)
-                            gen._emit(f"  {_pv} = ({_tc}){_w};")
+                            gen._cast_into(_pv, _tc, _w)
                             _recv_expr = gimple_ctypes.IdentExpr(name=_pv)
                             _cch = gen._resolve_overload(
                                 _ccands, [], [('copy', _recv_expr)])
@@ -4577,7 +4575,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                                     _csn, '__init__', _cch['overload_id'])
                                 gen._emit(f"  {_init_fname} ({_cp}, {_pv});")
                     if _cp is None:
-                        _sv = gen._new_val(_tc, f"({_tc}){_w}")
+                        _sv = gen._cast(_tc, _w)
                         gen._emit(f"  {gen._cname(_tn)} = {_sv};")
                     else:
                         gen._emit(f"  {gen._cname(_tn)} = {_cp};")

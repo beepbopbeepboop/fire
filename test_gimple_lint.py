@@ -259,6 +259,55 @@ def count_text_calls() -> tuple:
     return n, where
 
 
+# Casts still spelled as TEXT.  `gen._cast(ctype, v)` / `gen._cast_into(dst,
+# ctype, v)` state the type once, so the temp's declaration and the written
+# cast cannot disagree.  May only shrink.
+TEXT_CAST_BASELINE = 8
+
+
+def count_text_casts() -> tuple:
+    import ast
+    import glob
+    import re
+    new_val_pat = re.compile(r'^\([\w \*]*\)$')
+    emit_pat = re.compile(r'^\s* = \([\w \*]*\);$')
+    n = 0
+    where: list[str] = []
+    files = ([os.path.join(ROOT, 'gimple_codegen.py')]
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_*.py')))
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'middle', '*.py'))))
+    for path in files:
+        with open(path, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('_emit', '_new_val') and node.args
+                    and isinstance(node.args[-1], ast.JoinedStr)):
+                continue
+            text = ''.join(v.value for v in node.args[-1].values
+                           if isinstance(v, ast.Constant) and isinstance(v.value, str))
+            pat = new_val_pat if node.func.attr == '_new_val' else emit_pat
+            if pat.match(text):
+                n += 1
+                where.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}")
+    return n, where
+
+
+def test_text_casts() -> None:
+    print("text casts: casts spelled as text may only shrink")
+    n, where = count_text_casts()
+    if n > TEXT_CAST_BASELINE:
+        for w in where:
+            print("        " + w)
+        check(False, f"{n} casts are spelled as text, baseline {TEXT_CAST_BASELINE} -- "
+                     f"use gen._cast(ctype, v) / gen._cast_into(dst, ctype, v)")
+    elif n < TEXT_CAST_BASELINE:
+        check(False, f"{n} casts are spelled as text, baseline {TEXT_CAST_BASELINE} -- "
+                     f"fixed! lower TEXT_CAST_BASELINE to {n} in test_gimple_lint.py")
+    else:
+        check(True, f"{n} casts spelled as text (baseline {TEXT_CAST_BASELINE})")
+
+
 def test_text_calls() -> None:
     print("text calls: runtime calls spelled as text may only shrink")
     n, where = count_text_calls()
@@ -340,6 +389,7 @@ def main() -> int:
         test_unit()
         test_rt_sigs()
         test_text_calls()
+        test_text_casts()
     if 'ratchet' in which:
         test_ratchet()
     print(f"\n{'FAILED' if _fails else 'passed'}: {_fails} failure(s)")

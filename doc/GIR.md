@@ -154,6 +154,12 @@ that is meant to be behaviour-preserving:
   byte-identical before and after. `TEXT_CALL_BASELINE` in
   `test_gimple_lint.py` (26) may only shrink; the remainder is
   `bugs/CODEGEN_runtime_calls_spelled_as_text.md`.
+- **Stage 2a, casts (landed 2026-11-13).** `gen._cast(ctype, v)` and
+  `gen._cast_into(dst, ctype, v)` state the type once. A script rewrote 540 of
+  548 casts spelled as text; `TEXT_CAST_BASELINE` (8) may only shrink.
+  `gimple-lint` is in the LANDING gate (`tools/gates.json`), so a branch that
+  adds a text-spelled runtime call or cast, or a call-argument finding, does
+  not land.
 - **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
   `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
   `label`. Each returns a typed value and appends an `Instr`.

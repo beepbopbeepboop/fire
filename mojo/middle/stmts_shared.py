@@ -393,7 +393,7 @@ def _assign_target(gen, tgt, et, ev):
         # (unpacks the dict's keys), not just an ambiguous boxed handle.
         lp = gen._materialize_as_list(et, ev)
         for i, sub in enumerate(tgt.elements):
-            idx64 = gen._new_val('int64_t', f"(int64_t){i}")
+            idx64 = gen._cast('int64_t', f"{i}")
             elem_type = gen._elem_of(lp)
             suf = gimple_ctypes.TypeLattice.list_suffix(elem_type)
             set_et = elem_type if elem_type != 'unknown' else 'int64_t'

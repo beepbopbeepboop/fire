@@ -2634,7 +2634,7 @@ def _repr_fix_args(gen, fname: str, args: list) -> list:
                 if d is not None and (rt_call.arg_needs_repr_cast(p, _as_str(d))
                                       or rt_call.arg_needs_word_cast(p, _as_str(d))):
                     t = gen._new_temp(p)
-                    gen._emit(f"  {t} = ({p}){a};")
+                    gen._cast_into(t, p, f"{a}")
                     a = t
         out.append(a)
         i += 1
@@ -2861,7 +2861,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             pp = gen._new_temp(ptype)
             aval_local = gen._ensure_local('int64_t', aval)
             gen._emit(f'  {ip3} = {aval_local};')
-            gen._emit(f'  {pp} = ({ptype}){ip3};')
+            gen._cast_into(pp, ptype, ip3)
             coerced_args.append(pp)
         elif ptype == 'void *' and actual_atype in ('int', 'int64_t', '_Bool'):
             ip = gen._new_temp('int64_t')
@@ -2872,28 +2872,28 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 aval_local = gen._ensure_local('int64_t', aval)
                 gen._emit(f'  {ip} = {aval_local};')
             else:
-                gen._emit(f'  {ip} = (int64_t){aval};')
-            gen._emit(f'  {vp} = (void *){ip};')
+                gen._cast_into(ip, 'int64_t', f"{aval}")
+            gen._cast_into(vp, 'void *', ip)
             coerced_args.append(vp)
         elif ptype == 'void *' and actual_atype.endswith(' *'):
-            vp = gen._new_val('void *', f'(void *){aval}')
+            vp = gen._cast('void *', f"{aval}")
             coerced_args.append(vp)
         elif ptype == 'int64_t' and (actual_atype in ('int', '_Bool', 'char *', 'void *') or actual_atype.endswith(' *')):
             ct = gen._new_temp('int64_t')
             if atype == 'char *':
                 aval_local = gen._ensure_local('char *', aval)
-                ip2 = gen._new_val('void *', f'(void *){aval_local}')
-                gen._emit(f'  {ct} = (int64_t){ip2};')
+                ip2 = gen._cast('void *', aval_local)
+                gen._cast_into(ct, 'int64_t', ip2)
             elif atype == 'void *':
                 aval_local = gen._ensure_local('void *', aval)
-                gen._emit(f'  {ct} = (int64_t){aval_local};')
+                gen._cast_into(ct, 'int64_t', aval_local)
             elif atype.endswith(' *'):
                 # Any struct pointer → void * → int64_t
                 aval_local = gen._ensure_local(atype, aval)
-                vp = gen._new_val('void *', f'(void *){aval_local}')
-                gen._emit(f'  {ct} = (int64_t){vp};')
+                vp = gen._cast('void *', aval_local)
+                gen._cast_into(ct, 'int64_t', vp)
             else:
-                gen._emit(f'  {ct} = (int64_t){aval};')
+                gen._cast_into(ct, 'int64_t', f"{aval}")
             coerced_args.append(ct)
         elif ptype == 'char *' and atype in ('int', 'int64_t', 'char', 'double', '_Bool'):
             # A raw single char whose DECLARED type was widened to
@@ -2920,7 +2920,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 # char — cast it to a real `char` lvalue first so the
                 # mojo_char_to_str call below isn't passing an int64_t
                 # variable where GIMPLE expects an exact `char` match.
-                cv = aval if atype == 'char' else gen._new_val('char', f'(char){aval}')
+                cv = aval if atype == 'char' else gen._cast('char', f"{aval}")
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
             else:
@@ -3015,7 +3015,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                         gen._stringify_value(actual_atype, aval, _anode))
                 else:
                     _iv = (aval if atype == 'int64_t'
-                           else gen._new_val('int64_t', f'(int64_t){aval}'))
+                           else gen._cast('int64_t', f"{aval}"))
                     if aval in getattr(gen, '_boxed_vals', ()):
                         # a runtime-kinded list element read as a BOX: the string
                         # is the word inside it (a box's own address is not one)
@@ -3072,7 +3072,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     and aval in getattr(gen, '_scalar_annotated_locals', ())):
                 _ap = gen._new_val(f'{atype} *', f'&{aval}')
                 pp = gen._new_temp(ptype)
-                gen._emit(f'  {pp} = ({ptype}){_ap};')
+                gen._cast_into(pp, ptype, _ap)
                 coerced_args.append(pp)
             else:
                 # If parameter expects pointer and we have int/int64_t, cast through void*
@@ -3084,37 +3084,37 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     aval_local = gen._ensure_local('int64_t', aval)
                     gen._emit(f'  {ip3} = {aval_local};')
                 else:
-                    gen._emit(f'  {ip3} = (int64_t){aval};')
-                gen._emit(f'  {pp} = ({ptype}){ip3};')
+                    gen._cast_into(ip3, 'int64_t', f"{aval}")
+                gen._cast_into(pp, ptype, ip3)
                 coerced_args.append(pp)
         elif ptype == 'int64_t' and atype.endswith(' *'):
             # pointer passed where int64_t expected — cast via int64_t
-            ip = gen._new_val('int64_t', f'(int64_t){aval}')
+            ip = gen._cast('int64_t', f"{aval}")
             coerced_args.append(ip)
         elif ptype == 'int' and atype in ('int64_t', '_Bool'):
-            ct = gen._new_val('int', f'(int){aval}')
+            ct = gen._cast('int', f"{aval}")
             coerced_args.append(ct)
         elif ptype == 'int' and atype.endswith(' *'):
             # char*/pointer passed where int expected — convert via int64_t
             ip = gen._new_temp('int64_t')
             it = gen._new_temp('int')
-            gen._emit(f'  {ip} = (int64_t){aval};')
-            gen._emit(f'  {it} = (int){ip};')
+            gen._cast_into(ip, 'int64_t', f"{aval}")
+            gen._cast_into(it, 'int', ip)
             coerced_args.append(it)
         elif ptype.endswith(' *') and atype == 'int':
             # int passed where pointer expected — convert via int64_t
             ip = gen._new_temp('int64_t')
             pp = gen._new_temp(ptype)
-            gen._emit(f'  {ip} = (int64_t){aval};')
-            gen._emit(f'  {pp} = ({ptype}){ip};')
+            gen._cast_into(ip, 'int64_t', f"{aval}")
+            gen._cast_into(pp, ptype, ip)
             coerced_args.append(pp)
         elif ptype == 'char *' and atype == 'void *':
             # void* to char* conversion
-            cp = gen._new_val('char *', f'(char *){aval}')
+            cp = gen._cast('char *', f"{aval}")
             coerced_args.append(cp)
         elif ptype == 'void *' and atype == 'char *':
             # char* to void* conversion
-            vp = gen._new_val('void *', f'(void *){aval}')
+            vp = gen._cast('void *', f"{aval}")
             coerced_args.append(vp)
         elif ptype == 'Span *' and actual_atype == 'char *':
             # A String (or string literal) passed to a StringSlice parameter. A Span is the fat pointer
@@ -3132,15 +3132,15 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # char* passed where other pointer type expected
             ip = gen._new_temp('int64_t')
             pp = gen._new_temp(ptype)
-            gen._emit(f'  {ip} = (int64_t){aval};')
-            gen._emit(f'  {pp} = ({ptype}){ip};')
+            gen._cast_into(ip, 'int64_t', f"{aval}")
+            gen._cast_into(pp, ptype, ip)
             coerced_args.append(pp)
         elif ptype == 'ModuleLoader *' and atype in ('int', 'int64_t'):
             # Handle ModuleLoader* type coercions
             ip = gen._new_temp('int64_t')
             pp = gen._new_temp('ModuleLoader *')
-            gen._emit(f'  {ip} = (int64_t){aval};')
-            gen._emit(f'  {pp} = (ModuleLoader *){ip};')
+            gen._cast_into(ip, 'int64_t', f"{aval}")
+            gen._cast_into(pp, 'ModuleLoader *', ip)
             coerced_args.append(pp)
         elif (actual_atype == 'MojoList *' and ptype.endswith(' *')
                 and ptype[:-2] in _LIST_MARSHAL_ELEMS):
@@ -3207,7 +3207,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # sites and for what to delete here once it lands.
             _cv = _convert_container_kind(gen, ptype, atype, aval)
             coerced_args.append(_cv if _cv is not None
-                                else gen._new_val(ptype, f'({ptype}){aval}'))
+                                else gen._cast(ptype, f"{aval}"))
         elif ptype and ptype != atype:
             ct = gen._new_temp(ptype)
             gen._safe_coerce_emit(atype, ptype, aval, ct)
@@ -3491,7 +3491,7 @@ def _ensure_local(gen, ctype: str, val: str) -> str:
     declared = gen._declared_int_ctype(val)
     if declared is not None and declared != ctype and ctype in gimple_ctypes._SCALAR_INT_TYPES:
         t = gen._new_temp(ctype)
-        gen._emit(f'  {t} = ({ctype}){val};')
+        gen._cast_into(t, ctype, val)
         return t
     t = gen._new_val(ctype, f'{val}')
     return t
@@ -3545,7 +3545,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
             return 'char *', _dk
         actual = gen._actual_types.get(val)
         if actual == 'char':
-            cv = gen._new_val('char', f'(char){val}')
+            cv = gen._cast('char', val)
             return 'char *', gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
         if actual is not None and actual.endswith(' *'):
             # A KNOWN-boxed pointer (a char*/MojoDict*/... value that was
@@ -3558,8 +3558,8 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
             # no pointer record → char) truncated such a local to a
             # single byte, so `name in self.var_types` looked up the low
             # byte of the pointer as the key and ALWAYS missed.
-            ip = gen._new_val('int64_t', f'(int64_t){val}')
-            return 'char *', gen._new_val('char *', f'(char *){ip}')
+            ip = gen._cast('int64_t', val)
+            return 'char *', gen._cast('char *', ip)
         # No tracked boxed-pointer origin: this is a genuine numeric Int
         # dict key (e.g. `Dict[Int, V]`'s `d[k] = v` / `k in d` / `d[k]`)
         # — convert it to its decimal string, the same way
@@ -3620,7 +3620,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
                 # that consumes it, so an Int-keyed dict in a hot loop still
                 # leaks nothing.
                 iv = (val if typ == 'int64_t'
-                      else gen._new_val('int64_t', f'(int64_t){val}'))
+                      else gen._cast('int64_t', val))
                 ikey = gen._call_expr('char *', 'mojo_int_str_transient',
                                      [('int64_t', iv)])
                 gen._cstr_key_src[ikey] = val
@@ -3633,8 +3633,8 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
             # `char *` returned here is only a placeholder for `_apply_kw_keys` to
             # recognise; if it reaches a function without a `_kw` twin, that
             # function materialises the string the old way.
-            ipw = gen._new_val('int64_t', f'(int64_t){val}')
-            marker = gen._new_val('char *', f'(char *){ipw}')
+            ipw = gen._cast('int64_t', val)
+            marker = gen._cast('char *', ipw)
             gen._kw_key_src[marker] = val
             return 'char *', marker
         key = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', val)])
@@ -3703,8 +3703,8 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # `ipw`, not `val`: `_apply_kw_keys` emits the registered expression
         # as the `int64_t` argument of the `_kw` twin verbatim, and this
         # codegen rejects an implicit pointer-to-integer conversion.
-        ipw = gen._new_val('int64_t', f'(int64_t){val}')
-        marker = gen._new_val('char *', f'(char *){ipw}')
+        ipw = gen._cast('int64_t', val)
+        marker = gen._cast('char *', ipw)
         gen._kw_key_src[marker] = ipw
         return 'char *', marker
     if typ != 'char *':
@@ -3741,12 +3741,12 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
                                  [('int64_t', word)])
             gen._cstr_key_src[key] = word
             return 'char *', key
-        return 'char *', gen._new_val('char *', f'(char *){val}')
+        return 'char *', gen._cast('char *', val)
     # A local declared `char *` by a LATER assignment but which earlier held
     # a known integer (see `_track_pointer_actual_type`'s carry): consult the
     # provenance before bit-casting, since the integer's bits are not a pointer.
     if val in getattr(gen, '_int_word_vals', ()):
-        iv = gen._new_val('int64_t', f'(int64_t){val}')
+        iv = gen._cast('int64_t', val)
         ikey = gen._call_expr('char *', 'mojo_int_str_transient',
                               [('int64_t', iv)])
         # The release's `orig` is the int64_t WORD, not `val`: `val` is a
@@ -5731,7 +5731,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     if enode is not None and et in ('int', 'int64_t') \
             and gimple_exprtypes.is_python_bool_expr(gen, enode):
         return gen._call_expr('char *', 'mojo_bool_to_str',
-                              [('int', gen._new_val('int', f'(int){ev}'))])
+                              [('int', gen._cast('int', ev))])
     # A container/scalar name (`mixed_value_locals`) is a box-holding word
     # whose kind changes with each store: the static `_actual_types` retyping
     # below would read the bare int of the LAST store through the container
@@ -5762,7 +5762,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     # it points to, not its decimal address. Without this, f-strings /
     # %s of such a value emitted `static char * <address> = "<address>"`.
     if et in ('int', 'int64_t') and gen._get_actual_type(et, ev) == 'char *':
-        return gen._new_val('char *', f'(char *){ev}')
+        return gen._cast('char *', ev)
     # A slot read at a non-constant index may be a float BOX: `str(t[i])` and `f'{t[i]}'` render it as `mojo_repr_boxed`
     # does, the same as print (print(t[i]) already did; str() printed the box's integer word, 1 for 1.5).
     if et in ('int', 'int64_t') and _as_str(ev) in getattr(gen, '_boxed_vals', ()):
@@ -5778,7 +5778,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         _real = gen._get_actual_type(et, ev)
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             et = _real
-            ev = gen._new_val(_real, f'({_real}){ev}')
+            ev = gen._cast(_real, ev)
     if et == 'MojoList *' or et == 'MojoSet *':
         # A plain container value (a literal, or a local whose static type
         # is already known) reaches here directly, same value the `print`
@@ -5820,7 +5820,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             return _sv
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float', '__fp16'):
-        fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
+        fv = ev if et == 'double' else gen._cast('double', ev)
         return gen._call_expr('char *', 'mojo_repr_float', [('double', fv)])
     if et.endswith(' *') and et != 'void *':
         # A struct value: consult the receiver's OWN dunder, `__str__`
@@ -6048,12 +6048,12 @@ def _to_int64(gen, ctype: str, val: str) -> str:
     if ctype.endswith(' *'):
         # Pointer → int64_t requires void* intermediate in GIMPLE
         val_local = gen._ensure_local(ctype, val)
-        vp = gen._new_val('void *', f"(void *){val_local}")
-        gen._emit(f"  {t} = (int64_t){vp};")
+        vp = gen._cast('void *', val_local)
+        gen._cast_into(t, 'int64_t', vp)
     else:
         # Non-pointer, non-int64_t: load global then cast
         val_local = gen._ensure_local(ctype, val)
-        gen._emit(f"  {t} = (int64_t){val_local};")
+        gen._cast_into(t, 'int64_t', val_local)
     return t
 
 
@@ -6190,7 +6190,7 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
                     _target = '_Bool'   # a GIMPLE ternary's condition is a _Bool
                 if arg_types[i] != _target:
                     _vt = gen._new_temp(_target)
-                    gen._emit(f'  {_vt} = ({_target}){vals[i]};')
+                    gen._cast_into(_vt, _target, f"{vals[i]}")
                     vals[i] = _vt
     res = gimple_ctypes.mlir.lower_op(func.member, vals, attr_members, result_hint=hint)
     if res is None:
@@ -6260,12 +6260,12 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
             # -fgimple (GCC does NOT apply usual arithmetic conversions
             # across a GIMPLE comparison statement) — test_deque.py's
             # `list(range(50, 150))` ctor lowering.
-            stop_v = gen._new_val('int64_t', f"(int64_t){stop_v}")
+            stop_v = gen._cast('int64_t', stop_v)
     elif len(args) == 2:
         start_t, start_v = gen.lower_expr(args[0])
         _stop_t, stop_v  = gen.lower_expr(args[1])
         if _stop_t != 'int64_t':
-            stop_v = gen._new_val('int64_t', f"(int64_t){stop_v}")
+            stop_v = gen._cast('int64_t', stop_v)
         # `start_v` (unlike `stop_v`, only ever used in a comparison,
         # which undergoes GIMPLE's usual arithmetic conversion) feeds a
         # DIRECT `{target} = {start_v};` assignment below into an
@@ -6278,7 +6278,7 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
         # was never covered for. Materialize as a real int64_t temp,
         # mirroring `one64`/the 1-arg branch's own `start_v` construction.
         if start_t != 'int64_t':
-            start_v = gen._new_val('int64_t', f"(int64_t){start_v}")
+            start_v = gen._cast('int64_t', start_v)
 # `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
 # legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
 # error ("expected expression before '(' token") that takes out the whole
@@ -6290,7 +6290,7 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
         start_t, start_v = gen.lower_expr(args[0])
         _stop_t, stop_v  = gen.lower_expr(args[1])
         if _stop_t != 'int64_t':
-            stop_v = gen._new_val('int64_t', f"(int64_t){stop_v}")
+            stop_v = gen._cast('int64_t', stop_v)
         se = args[2]
         if isinstance(se, gimple_ctypes.IntLiteral) and se.value < 0:
             cond_op = '>'
@@ -6312,9 +6312,9 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
         # increment. `dynamic_step`'s own comparisons (`{t_sp} = {step_v}
         # > 0;`) are fine uncast, same reasoning as `stop_v` above.
         if start_t != 'int64_t':
-            start_v = gen._new_val('int64_t', f"(int64_t){start_v}")
+            start_v = gen._cast('int64_t', start_v)
         if step_t != 'int64_t':
-            step_v = gen._new_val('int64_t', f"(int64_t){step_v}")
+            step_v = gen._cast('int64_t', step_v)
     else:
         # A `range()` of more than three arguments lowers nothing. Nothing
         # downstream consumed the bind above, so undo it (a no-op for the
@@ -6567,7 +6567,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 if vt == 'char *':
                     gen._emit(f"  {cv} = {sub_str};")
                 else:
-                    sub_val = gen._new_val('int64_t', f"(int64_t){sub_str}")
+                    sub_val = gen._cast('int64_t', sub_str)
                     gen._emit(f"  {cv} = {sub_val};")
                     gen._actual_types[vn] = 'char *'
             else:
@@ -6679,7 +6679,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
             gen._emit(f"  {_tgt} = {temp_str};")
         else:
             # Cast to int64_t if target is opaque
-            int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
+            int_ptr = gen._cast('int64_t', temp_str)
             gen._emit(f"  {_tgt} = {int_ptr};")
     else:
         raw64 = gen._rt_call('int64_t', 'mojo_list_get_int', [_iv, idx64])
@@ -6850,8 +6850,8 @@ def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     vt = gen.var_types.get(tgt, 'char *')
     tgt_c = gen._cname(tgt)
     if vt in ('int64_t', 'int', 'int32_t'):
-        vp = gen._new_val('void *', f'(void *){key_tmp}')
-        box = gen._new_val('int64_t', f'(int64_t){vp}')
+        vp = gen._cast('void *', key_tmp)
+        box = gen._cast('int64_t', vp)
         gen._emit(f"  {tgt_c} = {box};")
     else:
         gen._emit(f"  {tgt_c} = (char *) {key_tmp};")
@@ -7970,7 +7970,7 @@ def _float_operand_as_double(gen, ctype: str, val: str, maybe_box: bool) -> str:
         return _as_str(val)
     # Operands are bare names: a parenthesised operand is `expected expression
     # before '(' token` inside a `__GIMPLE` function.
-    return _as_str(gen._new_val('double', f'(double){_as_str(val)}'))
+    return _as_str(gen._cast('double', _as_str(val)))
 
 
 def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str,
@@ -8495,7 +8495,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 continue
             real = gen._get_actual_type(atype, aval)
             if real == 'char *':
-                aval = gen._new_val('char *', f'(char *){aval}')
+                aval = gen._cast('char *', f"{aval}")
                 atype = 'char *'
             elif real == 'MojoDict *':
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', aval)
@@ -8505,7 +8505,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 aval = rv
                 atype = 'char *'
             elif real in ('MojoList *', 'MojoSet *'):
-                lp = gen._new_val(real, f'({real}){aval}')
+                lp = gen._cast(real, f"{aval}")
                 if real == 'MojoList *':
                     fn, fn_args = gen._list_repr_call(aval, lp)
                 else:
@@ -8537,7 +8537,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             if isinstance(_wact, str) and _wact.endswith(' *') \
                     and _wact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
                 _wct = _wact
-                aval = gen._new_val(_wact, f'({_wact}){aval}')
+                aval = gen._cast(_wact, f"{aval}")
         if _wct is not None and gen._struct_defines_method(
                 _wct[:-2], '__next__'):
             _wout = gen._materialize_in_tu_wrapper(_wct[:-2], aval)
@@ -8582,7 +8582,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             rv = gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', aval)])
             gen._emit(f'  {print_fn} ({rv});')
         elif atype in ('double', 'float', '__fp16'):
-            dv = aval if atype == 'double' else gen._new_val('double', f'(double){aval}')
+            dv = aval if atype == 'double' else gen._cast('double', f"{aval}")
             rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoList *':
@@ -8662,7 +8662,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             _ft = gen._new_val('char *', _lit)
             _fp = gen._new_temp('void *')
             _fs = gen._new_temp('char *')
-            gen._emit(f'  {_fp} = (void *){aval};')
+            gen._cast_into(_fp, 'void *', f"{aval}")
             gen._emit(f'  {_fp} = (void *)(intptr_t)(int64_t){_fp};')
             gen._rt_into(_fs, 'mojo_sprintf_ptr', [_ft, _fp])
             gen._emit(f'  {print_fn} ({_fs});')

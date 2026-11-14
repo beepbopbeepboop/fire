@@ -439,8 +439,8 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
                 # branch and the submod.GLOBAL branch both emit).
                 raw_ptr = gen._new_val(_gv_decl, f'{_gv_field}')
-                vp = gen._new_val('void *', f'(void *){raw_ptr}')
-                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t){vp};")
+                vp = gen._cast('void *', raw_ptr)
+                gen._cast_into(f"{gen._cname(symbol_name)}", 'int64_t', vp)
             else:
                 gen._emit(f"  {gen._cname(symbol_name)} = {_gv_field};")
             continue
