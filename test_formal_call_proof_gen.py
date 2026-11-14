@@ -1313,14 +1313,13 @@ SP_IN_RN_FORMS = (
     # reached, which is the whole point: the old table named the NEG arm, checked
     # its source text, and said nothing about the word.
     ("neg x0, x7", "= 0xcb000000 then", "zr", "lands here"),
-    # The three SP spellings the assembler accepts in the EXTENDED-register
-    # class (UXTX, option=011, bit 21 set).  These words are modelled by
-    # branches 86-88 (`0x8b206000`/`0xcb206000`/`0xeb206000`, mask
-    # `0xffe0e000`): `Rn` is read as SP in that class, and the shifted-register
-    # class (bit 21 clear) reads register 31 as the zero register instead.
-    ("add x0, sp, x16", "= 0x8b206000 then", "sp", "lands here"),
-    ("sub x0, sp, x16", "= 0xcb206000 then", "sp", "lands here"),
-    ("cmp sp, x16", "= 0xeb206000 then", "sp", "lands here"),
+    # The three SP spellings the assembler DOES accept in the register class.
+    # Each reaches the extended-register class instead, which no branch decodes,
+    # so the model makes no claim about it — asserted as exactly that, because
+    # "the model's branch for this form" was never a question about these.
+    ("add x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("sub x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("cmp sp, x16", "= 0x91000000 then", "sp", "extended"),
     # …and the five whose 31 is the ZERO register with no SP encoding at all.
     # They are in the table because they are the direction a "31 means SP
     # everywhere" change gets wrong, and a test that only checked the accepting
