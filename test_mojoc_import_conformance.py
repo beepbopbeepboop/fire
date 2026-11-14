@@ -16,7 +16,8 @@ reuses the source path's conformance checker on the artifact's trait records
 (`mojo/middle/mojoc_conformance.py`), at the same point a source-defined
 generic struct would have been checked.
 
-Part 1 of `bugs/mid/DIAGNOSTICS_mojoc_imports-part1.md`.
+The bug: a precompiled import whose stored signature violates a trait bound
+was accepted silently (modular `import_mojoc_conformance_error.mojo`).
 """
 
 import os

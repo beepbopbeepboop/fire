@@ -1,9 +1,9 @@
 """Conformance checking for structs imported from a `.mojoc` artifact.
 
-Part 1 of `bugs/mid/DIAGNOSTICS_mojoc_imports-part1.md`: importing a
-precompiled module whose stored signature violates a trait/conformance
-constraint must report the ordinary conformance diagnostic, not succeed
-silently.
+The bug this closes: importing a precompiled module whose stored signature
+violates a trait/conformance constraint must report the ordinary conformance
+diagnostic, not succeed silently (modular
+`import_mojoc_conformance_error.mojo`).
 
 The artifact reader (`mojo/middle/mojoc_artifact.py`) is deliberately a pure
 record store — it carries the *stored* signature a source build would have
