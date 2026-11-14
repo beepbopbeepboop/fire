@@ -24,8 +24,9 @@ enclosing generator to a stack-switch body, so a fixture that fell into that
 path would not exercise this defect.
 
 Run: `python3 test_nested_generator_yield_from_in_coroutine.py`
-Cases: `minimal`, `main`/`main-shape`, `negative` (and `tagged` when added).
-With no argument, runs `minimal` and `main-shape` (the original positive cases).
+Cases: `minimal`, `main`/`main-shape`, `negative`, `tagged`.
+With no argument, runs `minimal`, `main-shape`, and `tagged` (the positive
+cases).
 """
 import os
 import subprocess
@@ -132,6 +133,31 @@ def test_yield_from_captured_nested_generator_main_shape():
     _check('main-shape', MAIN_SHAPE_SRC)
 
 
+# --- part 3 (tagged): the delegated value slot keeps the nested generator's
+# compiled kind. `section` yields an int and a str, so the compiler boxes each
+# site into one TAGGED int64_t word (`mojo_box_from_str` for the string). The
+# delegating `yield from` loop must read that word as the nested generator
+# wrote it -- previously the enclosing generator's own value slot was typed
+# `char *` (no nested value type was consulted), so the delegated word was
+# either mis-typed at `co_yield` or rendered as a raw pointer by consumers.
+# The capture (`items`) keeps the nested generator on the claimed path.
+TAGGED_SRC = '''def fmt(analysis: list):
+    items = list(analysis)
+    def section():
+        yield 1
+        if items:
+            yield 'a'
+    yield from section()
+
+for v in fmt([2, 3]):
+    print(v)
+'''
+
+
+def test_yield_from_tagged_nested_generator_delegation_matches_cpython():
+    _check('tagged', TAGGED_SRC)
+
+
 # --- part 3 (negative): shapes the capture model must NOT claim stay refused ---
 # Each must still produce the refusal it produces on master. The nested
 # generator `section` reads the enclosing `items`, so today the compiler reports
@@ -199,9 +225,10 @@ _CASES = {
     'main': [test_yield_from_captured_nested_generator_main_shape],
     'main-shape': [test_yield_from_captured_nested_generator_main_shape],
     'negative': [test_negative_unclaimed_nested_generator_shapes_stay_refused],
+    'tagged': [test_yield_from_tagged_nested_generator_delegation_matches_cpython],
 }
 
-_DEFAULT_CASES = ['minimal', 'main-shape']
+_DEFAULT_CASES = ['minimal', 'main-shape', 'tagged']
 
 
 if __name__ == '__main__':
