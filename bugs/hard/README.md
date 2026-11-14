@@ -28,4 +28,3 @@ deleted in the same commit, as for any bug.
 | `GPU_offload_validation_modular.md` | see doc | workers |
 | `SUITE_gimplerunner_21_failing.md` | see doc | workers |
 | `SUITE_silentnoop.md` | see doc | workers |
-| `SUITE_silentnoop-part1.md` | see doc | workers |
