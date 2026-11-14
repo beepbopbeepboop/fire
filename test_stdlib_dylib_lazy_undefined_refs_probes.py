@@ -37,7 +37,7 @@ def _compile_stdlib(rel):
                                  linkable=False)
 
 
-# part 1 (bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part1.md):
+# part 1 (landed 2026-11-14; its tracking doc is gone):
 # a free function re-exported through a package `__init__.mojo` is referenced
 # by the defining unit's qualifier (`std_memory_memory_...`), never by the
 # re-exporting package's (`std_memory___init__...`).
