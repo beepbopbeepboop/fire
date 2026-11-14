@@ -5185,6 +5185,8 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
     # sub-second.
     ('trait-requirement-evidence-diagnostic',
      'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
+    ('reg-conditional-conformance-candidate-diagnostic',
+     'test_conditional_conformance_candidate_diagnostic.py', 'part 3'),
     ('reg-conditional-conformance-synthesis-diagnostic',
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
     ('trait-comptime-member-conformance-diagnostic',
