@@ -1,3 +1,4 @@
+SPLIT: FORMAL_arm64_instruction_coverage-part1, FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
 # FORMAL: the extended-register class is claimed by the step table but the generator has no right-hand side for it; the coverage census this doc is is missing
 
 **Status: OPEN.** Measured 2026-11-12 on the merge of the
