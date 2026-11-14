@@ -830,42 +830,21 @@ def check_conformance(module_src: str, type_name: str, trait_name: str):
     return (not missing), missing
 
 
-_FLOAT_DTYPES = {
-    'Float64', 'Float32', 'Float16', 'BFloat16', 'Float8_E5M2', 'Float8_E4M3FN',
-    'Float8_E5M2FNUZ', 'Float8_E4M3FNUZ', 'Float8_E4M3B11FNUZ'
-}
-
-
 def _is_float_dtype(t: str) -> bool:
-    t = str(t).strip()
-    if t in _FLOAT_DTYPES:
-        return True
-    # DType.float32 style
-    if t.startswith('DType.'):
-        name = t.split('.')[-1]
-        if name in {'float64', 'float32', 'float16', 'bfloat16'}:
-            return True
-        if 'float' in name.lower():
-            return True
-    if 'float' in t.lower() and 'int' not in t.lower():
-        # be conservative but check common cases
-        if t in {'Float64', 'Float32'}:
-            return True
-    return False
+    """Is the concrete type argument `t` a float dtype?
+
+    A `dtype: DType` parameter reaches this checker as the SUBSTITUTED text, so
+    every spelling of one dtype must answer the same: the scalar type
+    (`Float32`), the qualified value (`DType.float32`) and the dot-relative
+    value (`.float32`, which is what a DottedLiteral renders as). The dtype
+    tables live in the shared comptime folder, which folds the same predicate
+    for `comptime if`, so there is one definition of which names are floats.
+    A spelling that is not a known dtype keeps the old conservative answer."""
+    return _comptime.dtype_predicate_for_spelling(t, 'is_floating_point') is True
 
 
 def _is_int_dtype(t: str) -> bool:
-    t = str(t).strip()
-    if t.startswith('Int') or t.startswith('UInt'):
-        # exclude floats
-        if t.startswith('Float'):
-            return False
-        return True
-    if t.startswith('DType.'):
-        name = t.split('.')[-1]
-        if name.startswith('int') or name.startswith('uint'):
-            return True
-    return False
+    return _comptime.dtype_predicate_for_spelling(t, 'is_integral') is True
 
 
 def _template_where_clauses(template_src: str):

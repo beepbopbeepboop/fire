@@ -15049,6 +15049,71 @@ def main():
     _run_isolated(_test_comptime_dead_gpu_arm_pruned_in_instance,
                   'gate_stdlib_syntax_comptime_gpu_arm_pruned')
 
+    # gate-stdlib-syntax (class 2): a bare `List(...)` is the container
+    # constructor with its element type inferred from the argument, so every
+    # form must be a `MojoList *`. It used to reach `_lower_opaque_ctor`'s
+    # uppercase rule (there is no bracket argument for the generic-container
+    # arm to match), which returns an `int64_t`: `var a = List([1, 2])` then
+    # made `a * 3` integer multiplication and the compiled program SEGFAULTED
+    # where the interpreter answers. The length/fill form is the shape
+    # `test/builtin/test_sort_issue_1018.mojo` and `test/builtin/test_simd.mojo`
+    # build once their `dtype`/`name` bracket arguments are elaborated, and its
+    # length is a runtime value, so it is a synthetic `[fill for _ in
+    # range(length)]` rather than a static unroll.
+    def _test_bare_list_constructor_keeps_its_container_type():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_bare_list_constructor"
+        src = '''\
+def main():
+    var a = List([1, 2])
+    print(len(a))
+    print(a[0], a[1])
+    var n = 4
+    var b = List(length=n, fill=7)
+    print(len(b), b[0], b[3])
+    var c = List()
+    print(len(c))
+    var d = List(a)
+    print(len(d), d[1])
+    var e = List(1, 2, 3)
+    print(len(e), e[2])
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if not ok:
+            print(f"FAIL  {name}: gcc -fgimple -x c failed")
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            c_file = os.path.join(td, 'bare_list.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'bare_list.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc link failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        want = '2\n1 2\n4 7 7\n0\n2 2\n3 3\n'
+        if run.returncode != 0 or run.stdout != want:
+            print(f"FAIL  {name}: printed {run.stdout!r} "
+                  f"(exit {run.returncode}), want {want!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(_test_bare_list_constructor_keeps_its_container_type,
+                  'gate_stdlib_syntax_bare_list_constructor')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:

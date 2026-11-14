@@ -319,6 +319,41 @@ def _dtype_name_from_value(v):
     return None
 
 
+def _dtype_spelling_name(text) -> str | None:
+    """The lowercase dtype name a concrete SPELLING denotes, or None.
+
+    A `dtype: DType` bracket parameter is instantiated with any of
+    `DType.float32`, `.float32` and `Float32`; a caller that holds only the
+    substituted TEXT (the where-clause checker, which is handed
+    `{param: rendered_arg}`) cannot tell those apart without this, and a
+    spelling it does not recognize must stay unrecognized rather than become
+    a wrong `False`."""
+    s = str(text).strip()
+    if s.startswith('DType.'):
+        s = s[len('DType.'):]
+    elif s.startswith('dtype.'):
+        s = s[len('dtype.'):]
+    elif s.startswith('.'):
+        s = s[1:]
+    s = _DTYPE_TYPE_NAMES.get(s, s).lower()
+    return s or None
+
+
+def dtype_predicate_for_spelling(text, method: str) -> bool | None:
+    """Evaluate a DType predicate for a concrete spelling of a dtype.
+
+    `dtype_predicate_for_spelling('.float32', 'is_floating_point')` is True,
+    exactly as it is for `DType.float32` and `Float32`: all three are the same
+    dtype, and monomorphization substitutes whichever spelling the call site
+    wrote. Returns None when the spelling is not a dtype this folder knows, so
+    a caller keeps its own conservative answer instead of reading "not a
+    known dtype" as "not floating"."""
+    name = _dtype_spelling_name(text)
+    if name is None or name not in _KNOWN_DTYPE_NAMES:
+        return None
+    return _eval_dtype_predicate(name, method)
+
+
 def _resolve_dtype_name(node, bindings, platform=None):
     """Resolve `node` to a DType name string, or None."""
     # A scalar TYPE spelling used as a dtype value: `Float32` (see
