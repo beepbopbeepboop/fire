@@ -1,4 +1,4 @@
-SPLIT: GATE_red_recover-land_2026-11-02-part1, GATE_red_recover-land_2026-11-02-part2, (part3 fixed: container-annotated parameter membership diagnostic), GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
+SPLIT: GATE_red_recover-land_2026-11-02-part2, GATE_red_recover-land_2026-11-02-part3, GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
 
 # GATE red: 4 landing-gate job(s) red on `recover-land` (gate red)
 
@@ -95,7 +95,10 @@ Split into five parts, all under `bugs/`:
 
 - part 1 — a module-alias call to a sibling module's top-level function must
   resolve when the caller is compiled first (the import-cycle case). This is
-  the 17 private/table names above.
+  the 17 private/table names above. **Landed 2026-11-13** (doc deleted): the
+  self-host sibling branch of `_lower_method_call` now registers the member
+  through the same shared helper the generic branch uses; pinned by
+  `test_selfhost_cycle_sibling_call.py`.
 - part 2 — a function-body `from X import Y as Z` binds `Z` for a class
   (`MojoParser`).
 - part 3 — a container-annotated parameter is not "provably Int" in the
@@ -108,15 +111,16 @@ Split into five parts, all under `bugs/`:
 
 Re-measured 2026-11-13, so a later round does not have to:
 
-1. **part 1 reproduces.** A 3-file probe (`mojo/middle/aa.py` and `bb.py`
-   importing each other, each calling the other's top-level function through
-   its alias, a root calling both) compiles with 2 weak stubs and the built
-   binary prints `3` then `b_use: unavailable in compiled mode0` where CPython
-   prints `3\n2\n`, exit 0. It is not the private-name check:
-   `_func_qualifier` already answers `mojo_middle_aa`, but `_func_csym` returns
-   the bare name because the MEMBER is not in `imported_symbols` — the exact
-   gap the *generic* module-qualified branch already fills
-   (`emit_methods.py:3721-3785`).
+1. **part 1 reproduced** (fixed 2026-11-13). A 3-file probe (`mojo/middle/aa.py`
+   and `bb.py` importing each other, each calling the other's top-level
+   function through its alias, a root calling both) compiled with 2 weak stubs
+   and the built binary printed `3` then `b_use: unavailable in compiled
+   mode0` where CPython prints `3\n2\n`, exit 0. It was not the private-name
+   check: `_func_qualifier` already answered `mojo_middle_aa`, but `_func_csym`
+   returned the bare name because the MEMBER was not in `imported_symbols` —
+   the exact gap the *generic* module-qualified branch already filled
+   (`emit_methods.py:3721-3785`). Both branches now call
+   `_register_sibling_module_member`.
 2. **part 2 reproduces.** `def f(): from m import Thing as Alias; Alias(3)` (a
    function-body class alias) emits a weak `Alias` stub; module-level aliases
    and function aliases do not. `myinterpreter.py:5255` is the `MojoParser`
@@ -137,7 +141,7 @@ unannotated receiver compile to runtime dispatch (0 stubs); `class A(object)`,
 clean; a nested `_walk_lists` defined and called in one module resolves; and a
 module-level `from rootmod import helper` called across modules resolves. They
 are expected to be downstream of part 1 (or of the lifted-lambda placeholder
-filed in `bugs/hard/CODEGEN_selfhost_link_two_unqualified_calls.md`); any
+filed in `bugs/mid/CODEGEN_selfhost_link_two_unqualified_calls.md`); any
 survivor is part 5's inventory.
 
 Also recorded: `mojoc` is no longer in this doc's OFF entry. It, and

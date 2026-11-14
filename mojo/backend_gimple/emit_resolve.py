@@ -2474,8 +2474,7 @@ def _copy(gen, dst: str, src: str) -> None:
 
 def _goto(gen, label: str) -> None:
     """`goto label;` -- THE way to emit an unconditional jump."""
-    label = _as_str(label)
-    ginf._emit_cf(gen, 'goto', '  goto ' + label + ';', label, len(gen._emit_frames) - 1)
+    gen._emit('  goto ' + _as_str(label) + ';')
 
 
 def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
@@ -2487,13 +2486,12 @@ def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
 
 def _ret(gen, val: str) -> None:
     """`return val;` -- THE way to return a value from the function."""
-    val = _as_str(val)
-    ginf._emit_cf(gen, 'ret', '  return ' + val + ';', val, len(gen._emit_frames) - 1)
+    gen._emit('  return ' + _as_str(val) + ';')
 
 
 def _ret_void(gen) -> None:
     """`return;` -- THE way to return from a void function."""
-    ginf._emit_cf(gen, 'retv', gimple_codegen._RETURN, '', len(gen._emit_frames) - 1)
+    gen._emit(gimple_codegen._RETURN)
 
 
 def _void_call(gen, fname: str, arg_pairs: list) -> tuple:

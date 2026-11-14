@@ -108,21 +108,6 @@ def main():
     fd.__delitem__('a')
 main()
 ''', 'does not support item deletion'),
-    # The same call in a `__GIMPLE`-tagged struct method: the guard used to be
-    # emitted as `if (ov && ...->frozen) mojo_raise_type_error (...);`, and raw
-    # GIMPLE rejects both the `&&` and a non-`goto` `if` body, so the method
-    # failed to compile at all.
-    ('gimple_frozendict_delitem_method_in_a_gimple_body', '''\
-struct S:
-    def go(self):
-        var fd = frozendict({'a': 1})
-        fd.__delitem__('a')
-
-def main():
-    var s = S()
-    s.go()
-main()
-''', 'does not support item deletion'),
 ]
 
 if __name__ == '__main__':

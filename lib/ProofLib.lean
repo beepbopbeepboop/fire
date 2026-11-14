@@ -1846,14 +1846,12 @@ shifted-register class, where 31 is the zero register for `ADD`, `SUB` and
 `SUBS` alike.  `NEG Xd, Xn` is `SUB Xd, XZR, Xn`, which is a shifted-register
 word, which is why reading `Rn` as SP there modelled `-x` as `sp - x`.
 
-**Coverage note (UXTX extended-register class).**  The SP encoding for `Rn`
-in the add/subtract extended-register class is modelled for the UXTX option
-(`option=011`, `imm3 <= 4`) by `arm64_step` branches 86-88
-(`0x8b206000`/`0xcb206000`/`0xeb206000`, mask `0xffe0e000`), so words such as
-`add x0, sp, x16`, `sub x0, sp, x16`, and `cmp sp, x16` are decoded and
-stepped with `Rn` read as SP.  Other extend options (e.g. UXTW/SXTW/SXTX) in
-that class remain outside the model and are refused rather than mis-read;
-`bugs/hard/FORMAL_arm64_instruction_coverage.md` is where their census belongs.
+**And the form this helper is NOT for includes one the tree does not yet
+model**: nothing in `arm64_step` decodes the extended-register class, so
+`add x0, sp, x16` assembles to a word this function answers nothing about.  That
+is a coverage gap rather than a wrong answer (the generator refuses such a word
+rather than mis-reading it), and `bugs/hard/FORMAL_arm64_instruction_coverage.md` is
+where the census of it belongs.
 
 The 7 spellings this replaces were `if rn = 31 then s.sp else arm64_reg rn s`
 inline, in the unsigned-offset load/store cases, the unscaled LDUR/STUR ones,
