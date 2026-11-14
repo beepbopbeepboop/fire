@@ -6509,11 +6509,7 @@ def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     n64 = gen._new_val('int64_t', rec['full'])
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    cond_t = gen._cmp(f"{rec_cur}", '<', n64)
-    gen._cond_goto(cond_t, bb_body, bb_after)
-    gen._emit_label(bb_body)
+    gen._loop_head(f"{rec_cur}", n64, bb_cond, bb_body, bb_post, bb_after, False)
     _evct, ev = itc.read_at(gen, rec, rec_cur)
     # `_safe_coerce_emit`, not a bare assignment: the loop variable may have
     # been first declared elsewhere in this function with a different C type
@@ -6521,15 +6517,9 @@ def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     # `_compr_list_loop`'s single-target arm spells out at length.
     gen._safe_coerce_emit(_evct, gen._type_of(_as_str(gen0.target)), ev, _tgt)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._goto(bb_post)
-    gen._emit_label(bb_post)
     # `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple OPERAND,
     # which `_compr_list_loop`'s own tuple arm records.
-    one64 = gen._new_val('int64_t', "1LL")
-    st = gen._binop('int64_t', f"{rec_cur}", '+', one64)
-    gen._copy(f"{rec_cur}", st)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(f"{rec_cur}", bb_cond, bb_post, bb_after, False)
     _restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
@@ -6641,11 +6631,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
         bb_post = gen._new_bb(); bb_after = gen._new_bb()
-        gen._goto(bb_cond)
-        gen._emit_label(bb_cond)
-        cond_t = gen._cmp(idx64, '<', len64)
-        gen._cond_goto(cond_t, bb_body, bb_after)
-        gen._emit_label(bb_body)
+        gen._loop_head(idx64, len64, bb_cond, bb_body, bb_post, bb_after, False)
         raw_elem = gen._rt_call('int64_t', 'mojo_list_get_int', [_iv, idx64])
         sub_list = gen._coerce_to_type('int64_t', 'MojoList *', raw_elem)
 
@@ -6710,18 +6696,12 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 _slot_i = gen._binop('int64_t', _base, '+', _off)
             _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-        gen._goto(bb_post)
-        gen._emit_label(bb_post)
 # `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
 # legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
 # error ("expected expression before '(' token") that takes out the whole
 # self-host closure. The `LL` suffix is the tree's existing idiom for a
 # width-correct int64_t literal and needs no cast.
-        one64 = gen._new_val('int64_t', "1LL")
-        st = gen._binop('int64_t', idx64, '+', one64)
-        gen._copy(idx64, st)
-        gen._goto(bb_cond)
-        gen._emit_label(bb_after)
+        gen._loop_tail(idx64, bb_cond, bb_post, bb_after, False)
         for _sn, _st in saved_slots:
             _restore_binding(gen, _sn, _st)
         return

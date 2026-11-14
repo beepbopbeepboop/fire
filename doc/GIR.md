@@ -239,10 +239,11 @@ that is meant to be behaviour-preserving:
   bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of
   `while idx < n: ...; idx += 1`: the test, the branch, the body label, the
   `loop_stack` / depth bookkeeping of a `for` statement, the increment and
-  the exit label. 14 of the hand-written copies use them. NOT converted yet:
-  the copies that spell the increment constant `1LL` (comprehension loops in
-  `emit_infra.py`), the cursor loops with no increment, and the nested
-  mini-loops in `emit_calls.py` / `emit_methods.py`.
+  the exit label. 16 of the hand-written copies use them (two comprehension
+  loops spelled the increment constant `1LL`; they now emit `(int64_t)1`
+  like the rest, the one output change of this step). NOT converted yet:
+  the cursor loops with no increment, and the three-block mini-loops (no
+  `bb_post`) in `emit_calls.py` / `emit_methods.py` / `loops_shared.py`.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.
