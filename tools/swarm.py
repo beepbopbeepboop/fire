@@ -10,8 +10,10 @@ One pass, repeated:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
   2. REFILL  `control.py refill --target N --prefix bug-,fix-` -- a worker that finishes frees its slot at once.
-  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py --stdlib` (gate = the stdlib compile only); a
-             conflicting branch is handed to a merge-fixer task (integrate.enqueue_merge_fix).
+  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py`; a conflicting branch is handed to a merge-fixer
+             task (integrate.enqueue_merge_fix). The campaign is tools/pool.json `mode`: `build` lands everything fast
+             behind the light --stdlib gate; `drain` (the default) lands batches of 8 behind the full landing gate,
+             finishing work (fix-gate/fix-merge/fix-proof/fix-orch) first, in priority.json order.
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
@@ -914,10 +916,12 @@ def fresh_first(names, tasks):
     return fresh if fresh else names
 
 
-def probe(batch):
+def probe(batch, stdlib=True):
     """Merge and gate `batch` exactly as a landing would, changing NO state (integrate.py --probe). Returns
-    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs."""
-    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--probe", "--only"] + batch,
+    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs.
+    `stdlib=True` (build mode) gates on the light --stdlib gate; drain mode passes the same full landing gate the landing pays."""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if stdlib else []) +
+                       ["--probe", "--only"] + batch,
                        capture_output=True, text=True, cwd=C.MAIN)
     out = r.stdout + r.stderr
     if "another integrator" in out:                  # the lock is held (the post-landing verifier runs under it)
@@ -951,10 +955,14 @@ def find_culprit(seq, failing):
 
 
 def land():
-    # No batch cap. The cap (8) existed because a batch meant one HEAVY gate run and one conflict storm. The landing
-    # gate is now cheap (tools/gates.json `landing`: stdlib-syntax; the rest runs after landing in verify_landed.py),
-    # a conflicting branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit
-    # by find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
+    # build mode (tools/pool.json `mode`): high volume - the light --stdlib gate, no batch cap. The cap (8) existed
+    # because a batch meant one HEAVY gate run and one conflict storm; the landing gate is cheap now, a conflicting
+    # branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit by
+    # find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
+    # drain mode: work the master patch down - batches of 8 (a red full gate poisons few; the rest land next pass),
+    # the FULL landing gate per probe and per landing, and finishing work lands before fresh docs.
+    build = C.mode() == "build"
+    LAND_BATCH = 0 if build else 8
     proofs = []
     names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     for n, deleted in proofs:               # a DONE branch that deletes a doc without a test: a reviewer decides, not a person
@@ -964,12 +972,19 @@ def land():
                 % (n, " ".join(deleted)))
             I.enqueue_proof_review(n, tn, deleted)
     names = fresh_first(names, C.load())
+    if not build:
+        # drain: the work that carries finished patches to master goes first, in priority.json order, then the rest.
+        names = sorted(names, key=lambda n: (0 if n.startswith(C.FINISHING_PREFIXES) else 1, C.priority_key(n)))
+    else:
+        names = sorted(names, key=C.priority_key)
     if not names:
         return None
     tasks = C.load()
     batch, landed = list(names), False
+    if LAND_BATCH:
+        batch = batch[:LAND_BATCH]                     # drain: a red full gate poisons few; the rest land next pass
     while batch:
-        verdict, merged, failing, out = probe(batch)
+        verdict, merged, failing, out = probe(batch, stdlib=build)
         for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
                 log("conflict %s: handing it to a merge fixer" % c)
@@ -981,7 +996,7 @@ def land():
         if verdict == "EMPTY" or not merged:
             break
         if verdict == "GREEN":
-            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + merged,
+            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if build else []) + ["--only"] + merged,
                                capture_output=True, text=True, cwd=C.MAIN)
             for line in (r.stdout + r.stderr).splitlines():
                 if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved", "landing waits")):
