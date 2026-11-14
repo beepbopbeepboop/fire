@@ -26,7 +26,7 @@ The console is the first thing a reader of the stdlib run looks at. Refusal text
 a `passed` line reads as a failure, or as noise nobody can act on. Either way the reader cannot
 tell which lines matter. This is the output-side symptom of two underlying problems:
 
-- The refusal itself is a false positive: `bugs/CODEGEN_simd_exp_staticTuple_refusal.md`.
+- The refusal itself was a false positive in `std/simd.mojo` (the SIMD exp StaticTuple `advance without converging` refusal), fixed 2026-11-14.
 - The run counts the module as PASSED despite the message: `bugs/CODEGEN_stdlib_failed_elaboration_counted_as_pass.md`.
 
 Fixing the verdict alone (the second doc) would make the module FAILED and the output honest, but
@@ -37,7 +37,7 @@ output should carry only what the reader must act on.
 
 1. Route `CAUGHT_IN_MAIN_LOOP` (and the per-module elaboration block) to the run's log file, not
    the console, unless the run is verbose. Keep a one-line count on the console instead.
-2. Once the refusal is fixed (first doc), the simd lines stop appearing by themselves. Do not
+2. Once that refusal is fixed, the simd lines stop appearing by themselves. Do not
    silence them before then; the count line keeps the signal visible.
 3. Confirm the module-level verdict change from the second doc is in the same change, so a silent
    console cannot hide a FAILED module.
