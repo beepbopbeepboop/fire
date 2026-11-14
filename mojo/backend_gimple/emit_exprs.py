@@ -611,7 +611,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     _tds = getattr(gen, '_tagged_dyn_src', None)
     if _tds and name in _tds:
         box, pos = _tds[name]
-        _w = gen._new_val('int64_t', f'mojo_tagged_word_dyn ((int64_t){box}, {pos})')
+        _w = gen._rt_call('int64_t', 'mojo_tagged_word_dyn', [f"(int64_t){box}", f"{pos}"])
         if not hasattr(gen, '_tagged_dyn_vals'):
             gen._tagged_dyn_vals = {}
         gen._tagged_dyn_vals[_w] = (box, pos)
@@ -2447,7 +2447,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # class-ref temps expecting the raw, unresolved type).
         _ret = gen._resolve_type(gen.func_return_types.get(_fn_name, 'int64_t'))
         ot = _ret
-        ov = gen._new_val(_ret, f'{_c_fn} ()')
+        ov = gen._rt_call(_ret, f"{_c_fn}", [])
     else:
         ot, ov = gen.lower_expr(node.obj)
         # A `char *`-declared local that is really a word of unknown kind
@@ -2768,7 +2768,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # node.obj (`type(x)`) was already lowered above to ov = the
             # runtime type tag; map it to the struct name.
             ov64 = gen._cast('int64_t', f"{ov}")
-            t = gen._new_val('char *', f"_mojo_type_name ({ov64})")
+            t = gen._rt_call('char *', '_mojo_type_name', [f"{ov64}"])
             gen._needs_type_name_table = True
             return 'char *', t
         struct_name_check = gimple_exprtypes._struct_name_of(ot)
@@ -3404,7 +3404,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                 suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
                 ev_cast = gen._cast_for_list(vtype, vv, suf)
-                gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
+                gen._rt_void(f"mojo_list_set_{suf}", [obj_v, idx64, ev_cast])
             else:
                 if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, vv, vtype):
                     # For RefSubscript/RLValue (without __setitem__), assign through reference
@@ -5398,14 +5398,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             gen._ptr_helpers_needed.add(elem)
             rv64 = rv if rt == 'int64_t' else gen._cast('int64_t', f"{rv}")
             off = rv64 if op == '+' else gen._new_val('int64_t', f"-{rv64}")
-            pt = gen._new_val(lt, f"_mojo_at_{cn} ({lv}, {off})")
+            pt = gen._rt_call(lt, f"_mojo_at_{cn}", [f"{lv}", f"{off}"])
             return lt, pt
         if op == '+' and _is_raw_ptr(rt) and not lt.endswith(' *'):
             elem = gimple_ctypes._elem_type(rt)
             cn = gimple_ctypes._c_id(elem)
             gen._ptr_helpers_needed.add(elem)
             lv64 = lv if lt == 'int64_t' else gen._cast('int64_t', f"{lv}")
-            pt = gen._new_val(rt, f"_mojo_at_{cn} ({rv}, {lv64})")
+            pt = gen._rt_call(rt, f"_mojo_at_{cn}", [f"{rv}", f"{lv64}"])
             return rt, pt
 
     # Cast struct pointer operands through int64_t so C arithmetic is valid.
@@ -5595,7 +5595,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if c_op == '%' and res_type in ('double', 'float'):
         fn = 'mojo_div_double' if res_type == 'double' else 'mojo_div_float'
         div_t = gen._call_expr(res_type, fn, [(res_type, lv), (res_type, rv)])
-        floor_t = gen._new_val(res_type, f"__builtin_floor ({div_t})")
+        floor_t = gen._rt_call(res_type, '__builtin_floor', [div_t])
         mul_t = gen._new_val(res_type, f"{floor_t} * {rv}")
         mod_t = gen._new_val(res_type, f"{lv} - {mul_t}")
         return res_type, mod_t
@@ -6124,7 +6124,7 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     if lt in gimple_ctypes._FLOAT_TYPES or rt in gimple_ctypes._FLOAT_TYPES:
         td = gimple_ctypes.TypeLattice.join(lt, rt)
         t1 = gen._new_val(td, f"{lv} / {rv}")
-        t2 = gen._new_val(td, f"__builtin_floor ({t1})")
+        t2 = gen._rt_call(td, '__builtin_floor', [t1])
         return td, t2
     # Coerce struct pointers to int64_t before integer floor division
     if lt.endswith(' *') and lt not in ('void *', 'char *'):
@@ -6258,10 +6258,10 @@ def _lower_matmul(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                   f'non-struct/unannotated operand)"); return (int64_t)0; }}\n#endif')
         if _stub not in gen._elaborated_externs:
             gen._elaborated_externs.append(_stub)
-        t = gen._new_val('int64_t', f"{mangled} ({lv}, {rv})")
+        t = gen._rt_call('int64_t', mangled, [lv, rv])
         return 'int64_t', t
     result_type = gen.func_return_types.get(mangled, 'int64_t')  # Default: assume int result
-    t = gen._new_val(result_type, f"{mangled} ({lv}, {rv})")
+    t = gen._rt_call(result_type, mangled, [lv, rv])
     return result_type, t
 
 
@@ -6726,7 +6726,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         else:
             suf = gimple_ctypes.TypeLattice.list_suffix(list_elem)
             xv_cast = gen._cast_for_list(xt, xv, suf)
-            gen._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")
+            gen._rt_into(ti, f"mojo_list_contains_{suf}", [f"{rv}", xv_cast])
     elif rt == 'MojoDict *':
         # A bytes key gets its OWN key domain in the runtime (see
         # _DictSlot.keykind) so `d[b'x']` and `d['x']` stay the two distinct
@@ -7004,7 +7004,7 @@ def _lower_mlir_mem(gen, kind: str, arg_pairs: list) -> tuple[str, str]:
     cn = gimple_ctypes._c_id(et)
     gen._ptr_helpers_needed.add(et)
     idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-    addr = gen._new_val(pt, f"_mojo_at_{cn} ({pv}, {idx64})")
+    addr = gen._rt_call(pt, f"_mojo_at_{cn}", [f"{pv}", idx64])
     return pt, addr
 
 
@@ -7027,7 +7027,7 @@ def _lower_mlir_struct(gen, kind: str, index, arg_pairs: list):
         et = gimple_ctypes._elem_type(pt)
         cn = gimple_ctypes._c_id(et)
         gen._ptr_helpers_needed.add(et)
-        addr = gen._new_val(pt, f"_mojo_at_{cn} ({pv}, {index})")
+        addr = gen._rt_call(pt, f"_mojo_at_{cn}", [f"{pv}", f"{index}"])
         t = gen._new_val(et, f"*{addr}")
         return et, t
 
@@ -7160,7 +7160,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         if use == 'str' and ev_cast.startswith('_slit_'):
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
-        gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+        gen._rt_void(f"mojo_list_append_{use}", [t, f"{ev_cast}"])
         # A callable held in a LIST or TUPLE LITERAL, so a later
         # `lst[0](...)` / `tup[0](...)` can dispatch. This append loop is the
         # single chokepoint every literal element passes through, and the
@@ -8094,7 +8094,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         if use == 'str' and ev_cast.startswith('_slit_'):
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
-        gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+        gen._rt_void(f"mojo_list_append_{use}", [t, f"{ev_cast}"])
         # A callable held in a LIST or TUPLE LITERAL, so a later
         # `lst[0](...)` / `tup[0](...)` can dispatch. This append loop is the
         # single chokepoint every literal element passes through, and the
@@ -8244,7 +8244,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # name came back a decimal heap address — the container got DECLARED
     # with that address as its C identifier (`MojoList * (36016041152);`),
     # different every run. Re-tag so the char* bits survive.
-    res = _as_str(gen._new_val(res_type, f"{res_new} ()"))
+    res = _as_str(gen._rt_call(res_type, f"{res_new}", []))
 
     # `for i, x in enumerate(seq)` / `enumerate(seq, start)` inside a
     # comprehension's `for` clause — a genuinely separate lowering path

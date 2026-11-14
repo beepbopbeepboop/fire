@@ -156,6 +156,14 @@ that is meant to be behaviour-preserving:
   `gen._cond_goto` and `gen._rt_void`: raw GIMPLE rejects both `&&` and a
   non-`goto` `if` body, so the conditional shape could not be spelled as text
   in a `__GIMPLE`-tagged method at all.
+- **Stage 2a, computed callees (landed 2026-11-14).** The same three
+  primitives take a COMPUTED callee name: `gen._rt_call('_Bool',
+  f"{base}_resume", [h])`, `gen._rt_void(f"mojo_list_set_{suf}", [l, i, v])`.
+  178 such calls (generator `_resume`/`_value`/`_destroy`, `_alloc_X`,
+  `_mojo_at_X`, `mojo_list_get_X`, `setjmp`, the function-pointer helpers)
+  were text and are not any more. `TEXT_ANY_CALL_BASELINE` (7: the primitive
+  itself, two `free` lines inside a C `if` block, a function header, a Metal
+  `for`) counts a call of ANY callee spelled as text and may only shrink.
 - **Stage 2a, casts (landed 2026-11-13).** `gen._cast(ctype, v)` and
   `gen._cast_into(dst, ctype, v)` state the type once. A script rewrote 540 of
   548 casts spelled as text, and the last 8 by hand (2026-11-13, one of them a

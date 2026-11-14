@@ -287,6 +287,42 @@ def count_text_calls() -> tuple:
     return n, where
 
 
+# ANY call still spelled as text, whatever its callee: a computed name
+# (`f"{base}_resume ({h})"`, `f"mojo_list_set_{suf} (...)"`), a user function,
+# a libc function.  `_rt_call` / `_rt_into` / `_rt_void` take a computed callee
+# name too.  May only shrink.
+TEXT_ANY_CALL_BASELINE = 7
+
+
+def count_text_any_calls() -> tuple:
+    import ast
+    import glob
+    import re
+    pat = re.compile(r'^ *(?:[^=(]+ = )?([\w{}]*[\w}]) \(')
+    n = 0
+    where: list[str] = []
+    files = (sorted(glob.glob(os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_*.py')))
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'middle', '*.py'))))
+    for path in files:
+        with open(path, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('_emit', '_new_val') and node.args):
+                continue
+            arg = node.args[-1]
+            text = ''
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                text = arg.value
+            elif isinstance(arg, ast.JoinedStr):
+                text = ''.join(v.value if isinstance(v, ast.Constant) else '{}' for v in arg.values)
+            m = pat.match(text)
+            if m and m.group(1) not in ('if', 'sizeof', 'while'):
+                n += 1
+                where.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}: {text.strip()}")
+    return n, where
+
+
 # Casts still spelled as TEXT.  `gen._cast(ctype, v)` / `gen._cast_into(dst,
 # ctype, v)` state the type once, so the temp's declaration and the written
 # cast cannot disagree.  May only shrink.
@@ -411,6 +447,17 @@ def test_text_calls() -> None:
                      f"fixed! lower TEXT_CALL_BASELINE to {n} in test_gimple_lint.py")
     else:
         check(True, f"{n} runtime calls spelled as text (baseline {TEXT_CALL_BASELINE})")
+    n, where = count_text_any_calls()
+    if n > TEXT_ANY_CALL_BASELINE:
+        for w in where:
+            print("        " + w)
+        check(False, f"{n} calls are spelled as text, baseline {TEXT_ANY_CALL_BASELINE} -- "
+                     f"use gen._rt_call / gen._rt_into / gen._rt_void (a computed callee name is fine)")
+    elif n < TEXT_ANY_CALL_BASELINE:
+        check(False, f"{n} calls are spelled as text, baseline {TEXT_ANY_CALL_BASELINE} -- "
+                     f"fixed! lower TEXT_ANY_CALL_BASELINE to {n} in test_gimple_lint.py")
+    else:
+        check(True, f"{n} calls of any callee spelled as text (baseline {TEXT_ANY_CALL_BASELINE})")
 
 
 def dump_corpus(out_dir: str) -> list[str]:

@@ -356,7 +356,7 @@ def _cattr_restore_begin(gen, body) -> None:
             # declared in a method failed to compile with "expected expression
             # before '(' token"). module_gen emits the accessor beside the
             # global's declaration, so it exists exactly when the global does.
-            gen._emit(f"  {gimple_ctypes.cattr_unwind_push(_gname)} ({_saved});")
+            gen._rt_void(f"{gimple_ctypes.cattr_unwind_push(_gname)}", [_saved])
 
 
 def _cattr_snapshot(gen) -> list:
@@ -2213,8 +2213,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return 'int64_t', result
         base, vct = api['base'], api['value_ctype']
         handle_expr = _wait_obj.name
-        gen._emit(f"  mojo_async_run_until_complete ();")
-        gen._emit(f"  {base}_translate_pending_exc ({handle_expr});")
+        gen._rt_void('mojo_async_run_until_complete', [])
+        gen._rt_void(f"{base}_translate_pending_exc", [f"{handle_expr}"])
         # 'int', not '_Bool': fire_runtime.h's real prototype is `int
         # mojo_exc_pending_get(void);` -- a '_Bool'-typed temp here is
         # invalid under STRICT `-fgimple` mode ("invalid conversion in
@@ -2235,7 +2235,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._cond_goto(pending_t, bb_pending, bb_ok)
         gen._emit_label(bb_pending)
         gen._rt_void('mojo_exc_pending_set', ['0'])
-        gen._emit(f"  {base}_destroy ({handle_expr});")
+        gen._rt_void(f"{base}_destroy", [f"{handle_expr}"])
         gen._rt_void('mojo_raise', [])
         gen._emit_label(bb_ok)
         # A genuinely void-returning task (mutable-capture project:
@@ -2252,10 +2252,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # exercised before the mutable-capture work, since every prior
         # `create_task`/`.wait()` test drove a value-returning task.
         if vct == 'void':
-            gen._emit(f"  {base}_destroy ({handle_expr});")
+            gen._rt_void(f"{base}_destroy", [f"{handle_expr}"])
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
-        result = gen._new_val(vct, f"{base}_value ({handle_expr})")
-        gen._emit(f"  {base}_destroy ({handle_expr});")
+        result = gen._rt_call(vct, f"{base}_value", [f"{handle_expr}"])
+        gen._rt_void(f"{base}_destroy", [f"{handle_expr}"])
         return vct, result
 
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
@@ -2341,15 +2341,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._cond_goto(cond_t, bb_body, bb_after)
             gen._emit_label(bb_body)
             raw_h = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{list_expr}", idx64])
-            gen._emit(f"  __mojo_async_run_gen ({raw_h});")
-            gen._emit(f"  __mojo_gen_destroy ({raw_h});")
+            gen._rt_void('__mojo_async_run_gen', [raw_h])
+            gen._rt_void('__mojo_gen_destroy', [raw_h])
             one64 = gen._new_val('int64_t', "(int64_t)1")
             nxt = gen._new_val('int64_t', f"{idx64} + {one64}")
             gen._copy(idx64, nxt)
             gen._goto(bb_cond)
             gen._emit_label(bb_after)
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
-        gen._emit(f"  mojo_async_run_until_complete ();")
+        gen._rt_void('mojo_async_run_until_complete', [])
         if tg_api['base'] is not None:
             base = tg_api['base']
             len64 = gen._rt_call('int64_t', 'mojo_list_len', [f"{list_expr}"])
@@ -2363,7 +2363,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit_label(bb_body)
             raw_h = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{list_expr}", idx64])
             h_expr = gen._cast('MojoAsync *', raw_h)
-            gen._emit(f"  {base}_translate_pending_exc ({h_expr});")
+            gen._rt_void(f"{base}_translate_pending_exc", [f"{h_expr}"])
             # 'int', not '_Bool' -- see the identical comment on this
             # same pattern a bit further up in this method.
             pending_t = gen._rt_call('int', 'mojo_exc_pending_get', [])
@@ -2372,10 +2372,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._cond_goto(pending_t, bb_pending, bb_ok)
             gen._emit_label(bb_pending)
             gen._rt_void('mojo_exc_pending_set', ['0'])
-            gen._emit(f"  {base}_destroy ({h_expr});")
+            gen._rt_void(f"{base}_destroy", [f"{h_expr}"])
             gen._rt_void('mojo_raise', [])
             gen._emit_label(bb_ok)
-            gen._emit(f"  {base}_destroy ({h_expr});")
+            gen._rt_void(f"{base}_destroy", [f"{h_expr}"])
             gen._goto(bb_post)
             gen._emit_label(bb_post)
             one64 = gen._new_val('int64_t', "(int64_t)1")
@@ -4580,11 +4580,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # integer without a cast".
                     t = gen._new_temp(f'{_csn} *')
                     gen._struct_allocs_needed.add(_csn)
-                    gen._emit(f"  {t} = _alloc_{_csn} ();")
+                    gen._rt_into(t, f"_alloc_{_csn}", [])
                     init_fname = gen._struct_method_csym(
                         _csn, '__init__', _cch['overload_id'])
-                    gen._emit(
-                        f"  {init_fname} ({t}, {_recv_local});")
+                    gen._rt_void(f"{init_fname}", [f"{t}", _recv_local])
                     return f'{_csn} *', t
                 # (b) no copy __init__ resolvable on the `copy` kwarg
                 # (the fieldwise structs: _ListIterOwned, and the
@@ -4605,7 +4604,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if _cf:
                     t = gen._new_temp(f'{_csn} *')
                     gen._struct_allocs_needed.add(_csn)
-                    gen._emit(f"  {t} = _alloc_{_csn} ();")
+                    gen._rt_into(t, f"_alloc_{_csn}", [])
                     _recv_local = gen._ensure_local(ot, ov)
 
                     def _emit_fw_copy(dst, src_local, sname, depth):
@@ -4623,8 +4622,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                         gen, '_intu_prereg_structs', ())):
                                 _sub = gen._new_temp(_ft)
                                 gen._struct_allocs_needed.add(_fsn)
-                                gen._emit(
-                                    f"  {_sub} = _alloc_{_fsn} ();")
+                                gen._rt_into(_sub, f"_alloc_{_fsn}", [])
                                 # PART 6 (2026-10-23, family D piece 2): a
                                 # field whose struct type registers an
                                 # EXPLICIT copy constructor (an __init__
@@ -4655,8 +4653,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     init_fname = gen._struct_method_csym(
                                         _fsn, '__init__',
                                         _fch['overload_id'])
-                                    gen._emit(
-                                        f"  {init_fname} ({_sub}, {_fv});")
+                                    gen._rt_void(f"{init_fname}", [_sub, f"{_fv}"])
                                 else:
                                     _emit_fw_copy(
                                         _sub, _fv, _fsn, depth + 1)
@@ -6732,7 +6729,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
         # a mutator's value is int 0 (shared with append/extend/reverse).
         return 'int', gen._new_val('int', '0')
     if method in ('reverse', 'clear'):
-        gen._emit(f"  mojo_list_{method} ({ov});")
+        gen._rt_void(f"mojo_list_{method}", [ov])
         return 'int', gen._new_val('int', '0')
     if method == 'copy':
         return 'MojoList *', gen._rt_call('MojoList *', 'mojo_list_copy', [ov])
@@ -6928,7 +6925,7 @@ def _lower_pointer_method(gen, ov: str, ot: str, method: str, args: list) -> tup
         cn = gimple_ctypes._c_id(elem)
         gen._ptr_helpers_needed.add(elem)
         idx64 = gen._new_val('int64_t', f"(int64_t) {nv}")
-        return ot, gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
+        return ot, gen._rt_call(ot, f"_mojo_at_{cn}", [ov, idx64])
     if method == 'free':
         gen._rt_void('free', [ov])
         return 'int', gen._new_val('int', '0')
@@ -7358,7 +7355,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         _sn = {'bytes': '_SIterBytes', 'codepoints': '_SIterCodepoints',
                'codepoint_slices_reversed': '_SIterCodepointSlices'}[method]
         if _sn in (gen.struct_field_types or {}):
-            t = gen._new_val(f'{_sn} *', f'_alloc_{_sn} ({cstr_ov})')
+            t = gen._rt_call(f'{_sn} *', f"_alloc_{_sn}", [f"{cstr_ov}"])
             return f'{_sn} *', t
     if method == 'encode':
         # str.encode(encoding='utf-8', errors='strict') -> bytes. It was an

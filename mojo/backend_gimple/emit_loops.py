@@ -668,8 +668,8 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         _tup = gen._call_expr('MojoList *', 'mojo_list_new', []) if ngroups >= 2 else None
         for _gi in range(ngroups):
             _gi64 = gen._cast('int64_t', f"{_gi + 1}")
-            _gsp = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gstart}, {_gi64})')
-            _gep = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gend}, {_gi64})')
+            _gsp = gen._rt_call('int64_t *', '_mojo_at_int64_t', [f"{gstart}", f"{_gi64}"])
+            _gep = gen._rt_call('int64_t *', '_mojo_at_int64_t', [f"{gend}", f"{_gi64}"])
             _gsv = gen._new_temp('int64_t')
             _gev = gen._new_temp('int64_t')
             gen._emit(f'  {_gsv} = *{_gsp};')
@@ -2153,8 +2153,7 @@ def _gen_for_enumerate(gen, node):
             and '_SIterBytes' in getattr(gen, '_intu_prereg_structs', ())
             and for_target_is_tuple(node.target)):
         _start_v = start_val if start_val is not None else '0'
-        _wp = gen._new_val('_SIterEnumPair *',
-                           f'_alloc__SIterEnumPair ({lst_val}, {_start_v})')
+        _wp = gen._rt_call('_SIterEnumPair *', '_alloc__SIterEnumPair', [lst_val, f"{_start_v}"])
         _gen_for_struct_iter(gen, node.target, '_SIterEnumPair *', _wp,
                              node.body, node=node)
         return
@@ -3505,7 +3504,7 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
         gen._rt_into(_slot, 'mojo_set_iter_pos', [iter_t])
         gen._rt_into(gen._cname(var), 'mojo_set_val_bytes', [it_val, _slot])
     else:
-        gen._emit(f"  {gen._cname(var)} = {_read} ({iter_t});")
+        gen._rt_into(gen._cname(var), f"{_read}", [iter_t])
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -4072,12 +4071,12 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     gen._goto(bb_cond)
 
     gen._emit_label(bb_cond)
-    cond_t = gen._new_val('_Bool', f"{base}_resume ({gen_val})")
+    cond_t = gen._rt_call('_Bool', f"{base}_resume", [gen_val])
     gen._cond_goto(cond_t, bb_body, bb_check_exc)
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    val = gen._new_val(vct, f"{base}_value ({gen_val})")
+    val = gen._rt_call(vct, f"{base}_value", [gen_val])
     if api.get('boxed_container'):
         gen._boxed_container_vals.add(val)
     if is_tuple_target:
@@ -4126,7 +4125,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     gen._emit_generator_pending_exc_check(gen_val, base, destroy_after, bb_after)
     gen._emit_label(bb_after)
     if destroy_after:
-        gen._emit(f"  {base}_destroy ({gen_val});")
+        gen._rt_void(f"{base}_destroy", [gen_val])
 
 
 def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
@@ -4147,7 +4146,7 @@ def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
     gen._emit_label(bb_pending)
     gen._rt_void('mojo_exc_pending_set', ['0'])
     if destroy_after:
-        gen._emit(f"  {base}_destroy ({gen_val});")
+        gen._rt_void(f"{base}_destroy", [gen_val])
     gen._rt_void('mojo_raise', [])
 
 
@@ -4249,11 +4248,11 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     bb_post = gen._new_bb(); bb_after = gen._new_bb(); bb_check_exc = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    cond = gen._new_val('_Bool', f"{base}_resume ({gen_val})")
+    cond = gen._rt_call('_Bool', f"{base}_resume", [gen_val])
     gen._cond_goto(cond, bb_body, bb_check_exc)
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    val = gen._new_val(vct, f"{base}_value ({gen_val})")
+    val = gen._rt_call(vct, f"{base}_value", [gen_val])
     if api.get('boxed_container'):
         gen._boxed_container_vals.add(val)
     gen._copy(f"{cidx}", ctr)
@@ -4271,7 +4270,7 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._emit_generator_pending_exc_check(gen_val, base, destroy_after, bb_after)
     gen._emit_label(bb_after)
     if destroy_after:
-        gen._emit(f"  {base}_destroy ({gen_val});")
+        gen._rt_void(f"{base}_destroy", [gen_val])
 
 
 def _gen_for_struct_iter(gen, var: str, struct_type: str,
@@ -4367,7 +4366,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
             and (base, '__iter__') not in gen._ambiguous_struct_methods):
         iter_type = gen.func_return_types[iter_fn]
         iter_var  = gen._new_temp(iter_type)
-        gen._emit(f"  {iter_var} = {iter_fn} ({obj_val});")
+        gen._rt_into(iter_var, f"{iter_fn}", [obj_val])
         iter_base = gimple_exprtypes._struct_name_of(iter_type)
     else:
         iter_type = struct_type
@@ -4454,13 +4453,13 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         gen._emit(f"  _mojo_exc_top = {temp_inc};")
         gen._emit(f"  {temp_top2} = _mojo_exc_top;")
         gen._rt_void('mojo_cleanup_checkpoint_save', [])
-        gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
+        gen._rt_into(sj_ret, 'setjmp', [f"_mojo_exc_stack[{temp_top2}]"])
         gen._emit(f"  {cond_t} = {sj_ret} != 0;")
         gen._cond_goto(cond_t, f"{bb_exc}", bb_body)
     elif has_next_fn in gen.func_return_types:
         hn_t   = gen._new_temp('int')
         cond_t = gen._new_temp('_Bool')
-        gen._emit(f"  {hn_t} = {has_next_fn} ({iter_var});")
+        gen._rt_into(hn_t, f"{has_next_fn}", [f"{iter_var}"])
         gen._emit(f"  {cond_t} = {hn_t} != 0;")
         gen._cond_goto(cond_t, bb_body, bb_after)
     else:
@@ -4491,7 +4490,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     if next_fn in gen.func_return_types:
-        nxt = gen._new_val(elem_type, f"{next_fn} ({iter_var})")
+        nxt = gen._rt_call(elem_type, f"{next_fn}", [f"{iter_var}"])
         if _slot_ctypes is not None:
             # per-slot read from the list-backed tuple return (slot i =
             # argument i's element, the factory record's slot order). The
@@ -4572,10 +4571,10 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                             if _cch is not None:
                                 gen._struct_allocs_needed.add(_csn)
                                 _cp = gen._new_temp(f'{_csn} *')
-                                gen._emit(f"  {_cp} = _alloc_{_csn} ();")
+                                gen._rt_into(_cp, f"_alloc_{_csn}", [])
                                 _init_fname = gen._struct_method_csym(
                                     _csn, '__init__', _cch['overload_id'])
-                                gen._emit(f"  {_init_fname} ({_cp}, {_pv});")
+                                gen._rt_void(f"{_init_fname}", [f"{_cp}", _pv])
                     if _cp is None:
                         _sv = gen._cast(_tc, _w)
                         gen._copy(f"{gen._cname(_tn)}", f"{_sv}")
@@ -4589,7 +4588,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                         f"  /* multi-target loop: unsupported slot ctype "
                         f"{_tc} for target {_tn} */")
                     continue
-                _sv = gen._new_val(_tc, f"{_acc} ({_listptr}, {_i})")
+                _sv = gen._rt_call(_tc, f"{_acc}", [f"{_listptr}", f"{_i}"])
                 gen._copy(f"{gen._cname(_tn)}", f"{_sv}")
         else:
             gen._copy(f"{gen._cname(var)}", nxt)

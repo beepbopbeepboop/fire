@@ -2149,7 +2149,7 @@ def free_fresh_container(gen, val: str, ctype: str) -> None:
     forget it so it can never be freed twice."""
     fn = owned_free_fn_for(gen, val, ctype)
     if fn != '':
-        gen._emit(f"  {fn} ({val});")
+        gen._rt_void(f"{fn}", [val])
         gen._fresh_vals.discard(val)
         gen._owned_str_elem_vals.discard(val)
 
@@ -2168,7 +2168,7 @@ def claim_loop_iterable_temp(gen, node, val: str, ctype: str) -> None:
     free_fn = owned_free_fn_for(gen, val, ctype)
     if push_fn == '' or free_fn == '':
         return
-    gen._emit(f"  {push_fn} ({val});")
+    gen._rt_void(f"{push_fn}", [val])
     _scope_register(gen, val, free_fn)
     gen._fresh_vals.discard(val)
     gen._owned_str_elem_vals.discard(val)
@@ -3232,7 +3232,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # prints the value). The String is NUL-terminated, so its byte length is mojo_strlen.
             gen._struct_allocs_needed.add('Span')
             _sp = gen._new_temp('Span *')
-            gen._emit(f'  {_sp} = _alloc_Span ();')
+            gen._rt_into(_sp, '_alloc_Span', [])
             gen._emit(f'  {_sp}->_data = {aval};')
             gen._rt_into(f'{_sp}->_len', 'mojo_strlen', [f"{aval}"])
             coerced_args.append(_sp)
@@ -3618,13 +3618,13 @@ def _tagged_dyn_read(gen, val: str, want: str) -> str | None:
         return None
     box, pos = _tdv[val]
     if want == 'str':
-        return gen._new_val('char *', f"mojo_tagged_str ((int64_t){box}, {pos})")
+        return gen._rt_call('char *', 'mojo_tagged_str', [f"(int64_t){box}", f"{pos}"])
     if want == 'list':
-        _raw = gen._new_val('int64_t', f"mojo_tagged_list ((int64_t){box}, {pos})")
+        _raw = gen._rt_call('int64_t', 'mojo_tagged_list', [f"(int64_t){box}", f"{pos}"])
         return gen._coerce_to_type('int64_t', 'MojoList *', _raw)
     if want == 'double':
-        return gen._new_val('double', f"mojo_tagged_double ((int64_t){box}, {pos})")
-    return gen._new_val('int64_t', f"mojo_tagged_int ((int64_t){box}, {pos})")
+        return gen._rt_call('double', 'mojo_tagged_double', [f"(int64_t){box}", f"{pos}"])
+    return gen._rt_call('int64_t', 'mojo_tagged_int', [f"(int64_t){box}", f"{pos}"])
 
 
 def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: bool = False) -> tuple[str, str]:
@@ -5162,10 +5162,10 @@ def _generator_to_list(gen, value: str) -> str:
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    more = gen._new_val('_Bool', f"{base}_resume ({_iv})")
+    more = gen._rt_call('_Bool', f"{base}_resume", [_iv])
     gen._cond_goto(more, bb_body, bb_after)
     gen._emit_label(bb_body)
-    val = gen._new_val(vct, f"{base}_value ({_iv})")
+    val = gen._rt_call(vct, f"{base}_value", [_iv])
     if api.get('mixed_slots') and vct == 'int64_t':
         # a TAGGED-word generator: each value is appended under the kind it
         # carries (a float box as a double, a bool box as a bool, a string as a
@@ -5749,7 +5749,7 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     gen._emit(f'  _mojo_exc_top = {fpush};')
     ftop = gen._new_val('int64_t', '_mojo_exc_top')
     gen._void_call('mojo_cleanup_checkpoint_save', [])
-    fret = gen._new_val('int64_t', f'setjmp (_mojo_exc_stack[{ftop}])')
+    fret = gen._rt_call('int64_t', 'setjmp', [f"_mojo_exc_stack[{ftop}]"])
     fnz = gen._new_val('_Bool', f'{fret} != 0')
     gen._cond_goto(fnz, bb_exc, bb_body)
     gen._emit_label(bb_body)
@@ -5768,7 +5768,7 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
         # (the same marked-pair representation the old `mojo_zip` lowering
         # printed through). The pair's element words come from the tuple
         # struct's registered fields, in declaration order.
-        tup = gen._new_val(_ret, f'{nxsym} ({w})')
+        tup = gen._rt_call(_ret, f"{nxsym}", [w])
         _flds = list((gen.struct_field_types.get(_ret) or {}).keys())
         _pair_by_value = False
         if _flds:
@@ -5783,11 +5783,11 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
             gen._void_call('mojo_list_append_int', [
                 ('MojoList *', out), ('int64_t', f'(int64_t)(intptr_t){_pair}')])
         else:
-            e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
+            e64 = gen._rt_call('int64_t', f"{nxsym}", [w])
             gen._void_call('mojo_list_append_int', [
                 ('MojoList *', out), ('int64_t', e64)])
     else:
-        e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
+        e64 = gen._rt_call('int64_t', f"{nxsym}", [w])
         gen._void_call('mojo_list_append_int', [('MojoList *', out), ('int64_t', e64)])
     gen._goto(bb_body)
     bb_reraise = gen._new_bb()
@@ -6902,10 +6902,10 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    cond_t = gen._new_val('_Bool', f"{base}_resume ({_iv})")
+    cond_t = gen._rt_call('_Bool', f"{base}_resume", [_iv])
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
-    val = gen._new_val(vct, f"{base}_value ({_iv})")
+    val = gen._rt_call(vct, f"{base}_value", [_iv])
     if is_tuple_target:
         gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, None, tuple_slot_elems)
     else:
@@ -7825,14 +7825,14 @@ def _repr_boxed_container(gen, value: str):
     gen._cond_goto(isd, bb_dict, bb_not_dict)
     gen._emit_label(bb_dict)
     _dp = gen._coerce_to_type('int64_t', 'MojoDict *', _it64)
-    gen._emit(f'  {_res} = _mojo_repr_dict ({_dp});')
+    gen._rt_into(_res, '_mojo_repr_dict', [_dp])
     gen._goto(bb_after)
     gen._emit_label(bb_not_dict)
     iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', _it64)])
     gen._cond_goto(iss, bb_set, bb_not_set)
     gen._emit_label(bb_set)
     _sp = gen._coerce_to_type('int64_t', 'MojoSet *', _it64)
-    gen._emit(f'  {_res} = _mojo_repr_set ({_sp});')
+    gen._rt_into(_res, '_mojo_repr_set', [_sp])
     gen._goto(bb_after)
     gen._emit_label(bb_not_set)
     isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', _it64)])
@@ -8391,7 +8391,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
     def _emit_literal_print(escaped: str, print_fn: str):
         slit = gen._intern_string(escaped)
         t = gen._new_val('char *', slit)
-        gen._emit(f'  {print_fn} ({t});')
+        gen._rt_void(print_fn, [t])
 
     if not args:
         _emit_literal_print('', print_fn)
@@ -8464,12 +8464,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
             bb_list = gen._new_bb(); bb_chk2 = gen._new_bb()
             bb_dbl = gen._new_bb(); bb_int = gen._new_bb()
             bb_done = gen._new_bb()
-            _tag = gen._new_val('int64_t', f"mojo_tagged_tag_dyn ((int64_t){box}, {pos})")
-            _sp = gen._new_val('char *', f"mojo_tagged_str ((int64_t){box}, {pos})")
+            _tag = gen._rt_call('int64_t', 'mojo_tagged_tag_dyn', [f"(int64_t){box}", f"{pos}"])
+            _sp = gen._rt_call('char *', 'mojo_tagged_str', [f"(int64_t){box}", f"{pos}"])
             _lp = gen._coerce_to_type(
                 'int64_t', 'MojoList *',
-                gen._new_val('int64_t', f"mojo_tagged_list ((int64_t){box}, {pos})"))
-            _dp = gen._new_val('double', f"mojo_tagged_double ((int64_t){box}, {pos})")
+                gen._rt_call('int64_t', 'mojo_tagged_list', [f"(int64_t){box}", f"{pos}"]))
+            _dp = gen._rt_call('double', 'mojo_tagged_double', [f"(int64_t){box}", f"{pos}"])
             gen._cond_goto(f"{_tag} == 1", bb_str, bb_chk3)
             gen._emit_label(bb_str)
             gen._copy(_res, _sp)
@@ -8680,7 +8680,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             if gimple_exprtypes.is_python_bool_expr(gen, args[i]):
                 _stat = '_Bool'
         if atype == 'char *':
-            gen._emit(f'  {print_fn} ({aval});')
+            gen._rt_void(print_fn, [f"{aval}"])
         elif atype in ('int', 'int64_t') and aval in getattr(gen, '_boxed_vals', ()):
             # A slot read out of a heterogeneous list at a NON-constant index
             # is a BOX when its runtime kind is a float: a heap cell, because
@@ -8690,11 +8690,11 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # a value that is not a box it is the same integer text (and the
             # same allocation) the generic path produces.
             rv = gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', aval)])
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif atype in ('double', 'float', '__fp16'):
             dv = aval if atype == 'double' else gen._cast('double', f"{aval}")
             rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif atype == 'MojoList *':
             # print(a_list) previously fell to the generic numeric
             # sprintf path below via printf_fmt('MojoList *'), printing
@@ -8704,17 +8704,17 @@ def _gen_print(gen, args: list, kwargs: list = None):
             _lf, _largs = gen._list_repr_call(aval)
             rv = _own_repr(gen, _lf, gen._call_expr('char *', _lf, _largs),
                            _owned_reprs)
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif atype == 'MojoDict *':
             rv = _own_repr(gen, '_mojo_repr_dict',
                            gen._call_expr('char *', '_mojo_repr_dict',
                                           [('MojoDict *', aval)]), _owned_reprs)
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif atype == 'MojoBytes *':
             rv = _own_repr(gen, 'mojo_bytes_repr',
                            gen._call_expr('char *', 'mojo_bytes_repr',
                                           [('MojoBytes *', aval)]), _owned_reprs)
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif atype == 'MojoSet *':
             # print({1, 2}) with no boxing involved (a set LITERAL's lowered
             # type is statically MojoSet *, so it never reaches the boxed
@@ -8726,7 +8726,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             rv = _own_repr(gen, '_mojo_repr_set',
                            gen._call_expr('char *', '_mojo_repr_set',
                                           [('MojoSet *', aval)]), _owned_reprs)
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif _stat in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *') \
                 and atype not in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *', 'char *'):
             # A container-typed call result whose LOWERED type is `void *`:
@@ -8750,14 +8750,14 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     _fn, _fargs = '_mojo_repr_set', [(_stat, _lp)]
                 rv = _own_repr(gen, _fn, gen._call_expr('char *', _fn, _fargs),
                                _owned_reprs)
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif atype == '_Bool' or (_stat == '_Bool' and atype in ('int', 'int64_t', 'char *', 'long')):
             # Python prints True/False; the generic numeric path below would
             # sprintf a _Bool with "%d" and print 1. Also reached for
             # `_Bool`-typed locals, which is how a comparison or a
             # builtin-returning bool (any/all/isinstance/in) reaches here.
             rv = gen._call_expr('char *', 'mojo_repr_bool', [('_Bool', aval)])
-            gen._emit(f'  {print_fn} ({rv});')
+            gen._rt_void(print_fn, [f"{rv}"])
         elif aval in getattr(gen, '_func_value_names', ()):
             # A FUNCTION OBJECT. `TypeLattice.printf_fmt` has no format for a
             # pointer, so this used to reach the generic path below and
@@ -8775,7 +8775,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._cast_into(_fp, 'void *', f"{aval}")
             gen._emit(f'  {_fp} = (void *)(intptr_t)(int64_t){_fp};')
             gen._rt_into(_fs, 'mojo_sprintf_ptr', [_ft, _fp])
-            gen._emit(f'  {print_fn} ({_fs});')
+            gen._rt_void(print_fn, [_fs])
         else:
             _opt_ptr_niche_emit = False
             if isinstance(_stat, str) and _stat.startswith('Optional[') and 'Pointer[' in _stat:
@@ -8800,12 +8800,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 gen._emit_label(bb_some)
                 _some_lit = gen._intern_string('Optional(Some)')
                 _some_t = gen._new_val('char *', _some_lit)
-                gen._emit(f'  {print_fn} ({_some_t});')
+                gen._rt_void(print_fn, [_some_t])
                 gen._goto(bb_done)
                 gen._emit_label(bb_none)
                 _none_lit = gen._intern_string('Optional(None)')
                 _none_t = gen._new_val('char *', _none_lit)
-                gen._emit(f'  {print_fn} ({_none_t});')
+                gen._rt_void(print_fn, [_none_t])
                 gen._goto(bb_done)
                 gen._emit_label(bb_done)
             elif atype in ('int', 'int64_t'):
@@ -8814,7 +8814,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 # discriminator so None/bool/float kinds and string pointers print
                 # correctly. For a plain integer it returns the same decimal text.
                 rv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', aval)])
-                gen._emit(f'  {print_fn} ({rv});')
+                gen._rt_void(print_fn, [f"{rv}"])
                 gen._emit_call('void', '', 'mojo_cstr_or_int_release',
                                [('int64_t', aval), ('char *', rv)])
             else:
@@ -8828,7 +8828,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 gen._rt_into(vp, 'malloc', ['256'])
                 gen._emit(f'  {t} = (char *) {vp};')
                 gen._rt_void('sprintf', [t, fmt_t, f"{aval}"])
-                gen._emit(f'  {print_fn} ({t});')
+                gen._rt_void(print_fn, [t])
                 gen._rt_void('free', [t])
         if i < len(parts) - 1:
             _emit_literal_print(' ', print_fn)
@@ -9597,7 +9597,7 @@ def emit_container_new(gen, t: str, ctype: str) -> None:
     st = gen._literal_storage
     if st != '' and gen._literal_storage_ctype == ctype:
         gen._literal_storage = ''
-        gen._emit(f"  {_owned_stack_init_fn(ctype)} (&{st});")
+        gen._rt_void(f"{_owned_stack_init_fn(ctype)}", [f"&{st}"])
         gen._emit(f"  {t} = &{st};")
         return
     if ctype == 'MojoDict *':
@@ -9783,7 +9783,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # type keyword: "expected expression before 'unsigned'". The free at
         # `_emit_owned_local_frees` below had the identical bug on the same
         # name.
-        gen._emit(f"  {push_fn} ({gen._cname(name)});")
+        gen._rt_void(f"{push_fn}", [f"{gen._cname(name)}"])
         pushed.add(name)
         if name in gen._scope_armed:
             _scope_register(gen, name, free_fn)
@@ -9857,7 +9857,7 @@ def _emit_owned_local_frees(gen):
             # `_cname(name)`, for the same reason as the cleanup push in
             # `_maybe_push_owned_local` — a keyword-named local is declared
             # under a renamed identifier and must be freed under it too.
-            gen._emit(f"  {runtime_fn} ({gen._cname(name)});")
+            gen._rt_void(f"{runtime_fn}", [f"{gen._cname(name)}"])
             freed += 1
     # Block-scoped candidates still live at this exit (a `return` inside a
     # loop body, after the declaration): the same free, the same cancel.
@@ -9975,7 +9975,7 @@ def _emit_scope_frees(gen, lo: int) -> int:
     while i >= lo:
         fn = gen._scope_live_fn[i]
         if fn != '':
-            gen._emit(f"  {fn} ({gen._cname(gen._scope_live[i])});")
+            gen._rt_void(f"{fn}", [f"{gen._cname(gen._scope_live[i])}"])
             n += 1
         i -= 1
     return n
@@ -10271,12 +10271,12 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value, ann=None) -> bool:
     gen.temp_counter += 1
     storage = f'_owned_storage{gen.temp_counter}_{name}'
     gen.decls.append(f"  {struct_name} {storage};")
-    gen._emit(f"  {init_fn} (&{storage});")
+    gen._rt_void(f"{init_fn}", [f"&{storage}"])
     gen._declare_var(name, ctype,
                      _annotation_container_elem_type(gen, ann, ctype))
     gen._emit(f"  {gen._write_dest(name)} = &{storage};")
     push_fn = _OWNED_STACK_PUSH_RUNTIME_FN[ctype]
-    gen._emit(f"  {push_fn} ({gen._cname(name)});")
+    gen._rt_void(f"{push_fn}", [f"{gen._cname(name)}"])
     pushed.add(name)
     gen._owned_stack_allocated.add(name)
     if name in gen._scope_armed:

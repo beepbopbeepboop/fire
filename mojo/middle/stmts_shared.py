@@ -397,7 +397,7 @@ def _assign_target(gen, tgt, et, ev):
             elem_type = gen._elem_of(lp)
             suf = gimple_ctypes.TypeLattice.list_suffix(elem_type)
             set_et = elem_type if elem_type != 'unknown' else 'int64_t'
-            sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
+            sev = gen._rt_call(set_et, f"mojo_list_get_{suf}", [lp, f"{idx64}"])
             # No element record for the unpacked value at all: each slot is a
             # word whose kind only the runtime knows (`r, p, m = TABLE[k]`
             # over a dict of tuples, `m` a str or None).

@@ -4549,7 +4549,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         if suf == 'str' and ev_cast.startswith('_slit_'):
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
-        gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
+        gen._rt_void(f"mojo_list_append_{suf}", [res, f"{ev_cast}"])
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
         # A CALLABLE comprehension element, so `[f for ...][0](...)` can
