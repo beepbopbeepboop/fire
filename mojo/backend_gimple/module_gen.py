@@ -3257,31 +3257,6 @@ def _is_dispatch_name(_n) -> bool:
     return dispatch_table_global_ctype(_as_str(_n)) is not None
 
 
-def _unique_module_globals(items: list) -> list:
-    """One entry per C field NAME, in first-seen order, for the struct and the
-    accessors emitted from `_module_globals[mod]`. That list is keyed on the whole
-    (name, c_type, g_mtype) triple on purpose (see the note where it is filled),
-    so a name registered under two different mtypes -- `tokens` in
-    ownership_check's and ownership_destruct's `if __name__ == '__main__'` block
-    -- is listed twice, and used to be emitted twice: `duplicate member 'tokens'`
-    plus a redefined `__mojo_global_get_` accessor (the self-host's GCC errors).
-    Every emitter of a module's globals struct must go through here: the module's
-    own block AND the sibling-module preamble. Two different C types for one name
-    can only be held in the box."""
-    out = []
-    index = {}
-    for _it in items:
-        _nm = _c_field_name(_as_str(_it[0]))
-        if _nm not in index:
-            index[_nm] = len(out)
-            out.append(_it)
-        else:
-            _prev = out[index[_nm]]
-            if _as_str(_prev[1]) != _as_str(_it[1]):
-                out[index[_nm]] = (_prev[0], 'int64_t', _prev[2])
-    return out
-
-
 def _gmi_assigns_global_at_toplevel(stmt_list: list, gname: str) -> bool:
     """True when the module body `stmt_list` binds `gname` itself at top
     level (a plain/annotated assignment, a `var`, or one target of a chained
@@ -6685,9 +6660,6 @@ def gen_module_impl(self, stmts: list):
             # '_comptime_rhs_failures'` / `'_struct_param_names'`.
             '_comptime_rhs_failures': 'MojoList *',
             '_struct_param_names': 'MojoList *',
-            # Parser._struct_bracket_param_info: the per-struct accumulator that
-            # becomes StructDef.bracket_param_info (same missing-row failure).
-            '_struct_bracket_param_info': 'MojoList *',
             # `Parser._lazy_import_blockers` (PEP 810 lazy imports): the stack
             # `parse_funcdef`/`parse_struct`/`parse_trait`/`parse_try` push the
             # enclosing scope onto and `parse_lazy_import` reads the innermost
@@ -7239,11 +7211,6 @@ def gen_module_impl(self, stmts: list):
         # mojo/middle/types.py's presence-bit helpers).
         'align_expr': 'int64_t',
         'presence_fields': 'MojoList *',
-        # `(name, annotation, default text)` per bracket parameter
-        # (fire_compiler.StructDef.bracket_param_info); the dataclass field
-        # landed without a row, so gcc rejected `'StructDef' has no member
-        # named 'bracket_param_info'`.
-        'bracket_param_info': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
@@ -9313,10 +9280,10 @@ def gen_module_impl(self, stmts: list):
                             exports[_fn] = {
                                 'kind': 'function', 'mojoc': _fr,
                                 'return_type': _ret,
-                                'c_return_type': _mojo_type(_ret) if _ret else 'int64_t',
+                                'c_return_type': self._mojo_type(_ret) if _ret else 'int64_t',
                                 'parameters': [],
                                 'c_parameters': [],
-                                'signature': f"{_mojo_type(_ret) if _ret else 'int64_t'} {_fn} (...)",
+                                'signature': f"{self._mojo_type(_ret) if _ret else 'int64_t'} {_fn} (...)",
                             }
                 except Exception:
                     pass
@@ -10503,35 +10470,8 @@ def gen_module_impl(self, stmts: list):
             _xg_body = (gimple_gen_coro.generator_base_name(
                             _xg_hfn, _gmiq(_as_str(self.module_name)))
                         + '_body')
-            _xg_fn = None
-            for _s in all_functions:
-                if isinstance(_s, FunctionDef) and _as_str(_s.name) == _xg_hfn:
-                    _xg_fn = _s
-                    break
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
-                _xg_is_path_word = False
-                if _xg_fn is not None:
-                    _ptr_ev = getattr(_xg_fn, '_ptr_evidence', ())
-                    if (_xg_pn in _ptr_ev
-                            and any(isinstance(_n, gimple_ctypes.CallExpr)
-                                    and isinstance(_n.func, gimple_ctypes.IdentExpr)
-                                    and _n.func.name == 'isinstance' and len(_n.args) == 2
-                                    and isinstance(_n.args[0], gimple_ctypes.IdentExpr)
-                                    and _n.args[0].name == _xg_pn
-                                    and isinstance(_n.args[1], gimple_ctypes.IdentExpr)
-                                    and _n.args[1].name in ('str', 'bytes')
-                                    for _n in gimple_exprtypes._walk_ast(_xg_fn))):
-                        _xg_is_path_word = True
-                if _xg_is_path_word:
-                    # The function's own body proves this parameter is a runtime
-                    # word (e.g. `isinstance(p, str)` then rebound/used as a
-                    # file handle or other object). Call-site hints from a
-                    # particular importer must not narrow it to char* / a
-                    # container pointer; that typing is a property of the module.
-                    _xg_tgt[_xg_pn] = 'int64_t'
-                    self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
-                    continue
                 if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
                 if _xg_ct == 'char *':
@@ -17392,7 +17332,7 @@ def gen_module_impl(self, stmts: list):
             parts.append(f'#ifndef {_toplev_guard}')
             parts.append(f'#define {_toplev_guard}')
             parts.append(f'typedef struct {struct_name} {{')
-            for _kf in _unique_module_globals(_known_fields):
+            for _kf in _known_fields:
                 # Index, don't unpack: reading `_kf_ctype`/`_kf_name` out of the
                 # 3-tuple re-boxes the str slots to int64_t on the self-hosted
                 # path, so the field decl came out `<addr> ANY;` — a live heap
@@ -18339,7 +18279,7 @@ def gen_module_impl(self, stmts: list):
     # compiled program got an empty `typedef struct _<mod>_toplev {}` /
     # `_<mod>_globals = {}` block even with no module-level globals.
     if len(_mg_list) > 0:
-        globals_list = _unique_module_globals(_mg_list)
+        globals_list = _mg_list
         current_mod_str = str(current_mod_name) if current_mod_name else "root"
         safe_name = _c_field_name(current_mod_str) if current_mod_str else "root"
         typedef_name = f"_{safe_name}_toplev"
@@ -19220,19 +19160,6 @@ def gen_module_impl(self, stmts: list):
                             signature)
                         if _m_sig:
                             _eff_list = _as_list(_def_pts)
-                            # In a whole-program INLINE compile (`do_imports`) every
-                            # sibling's definition lands in this translation unit,
-                            # whatever order the modules compile in, so an extern for a
-                            # `*args` function must spell the definition's own packed
-                            # `MojoList *` (`cas__hash (MojoList *)`). A per-file
-                            # compile (the stdlib: `do_imports` off) defines it in
-                            # another unit and keeps the sentinel spelling every
-                            # other extern of it uses (`std_os_path_path_join
-                            # (char *, ...)` is declared twice in one unit and the
-                            # two must agree). The local-definition test is NOT the
-                            # right switch: it is empty exactly when the importer
-                            # compiles before the definition, which is the case.
-                            _def_in_this_tu = bool(self.do_imports)
                             _scan_sig = _as_str(_m_sig.group(2))
                             if _scan_sig.strip() in ('', 'void'):
                                 _scan_parts = []
@@ -19247,18 +19174,8 @@ def gen_module_impl(self, stmts: list):
                                            == len(_eff_list))
                             for _pi in range(len(_eff_list)):
                                 _tp = _as_str(_eff_list[_pi])
-                                # `...` in a parameter list is this codegen's
-                                # PACKING SENTINEL for a `*args` parameter (call
-                                # sites pack the extra arguments into one list),
-                                # never C's variadic: the definition takes the
-                                # packed `MojoList *`, so that is what the
-                                # prototype must say. Spelled `...` it is
-                                # `extern char * f (... parts)` ("expected ')'
-                                # before 'parts'") or, nameless, a prototype that
-                                # conflicts with the definition's own.
-                                if _tp == '...' and _def_in_this_tu:
-                                    _tp = 'MojoList *'
-                                if _keep_names and _tp != '...':
+                                _is_vararg = (_tp == '...')
+                                if _keep_names:
                                     _toks = _scan_parts[_pi].split()
                                     if len(_toks) >= 2 and re.match(
                                             r'^[A-Za-z_]\w*$',
@@ -19266,13 +19183,13 @@ def gen_module_impl(self, stmts: list):
                                         _tp = _tp + ' ' + _as_str(
                                             _toks[len(_toks) - 1])
                                 _new_parts.append(_tp)
-                                # C's `...` must be last. `_signature_ctypes` keeps params
-                                # that follow `*args` so call sites can still
-                                # coerce them, but a prototype cannot spell
-                                # `(int64_t, ..., int64_t)`; drop the tail,
-                                # exactly as the loader's own scan does for
-                                # that shape.
-                                if _tp == '...':
+                                # C's `...` must be last. `_signature_ctypes`
+                                # keeps params that follow `*args` so call
+                                # sites can still coerce them, but a prototype
+                                # cannot spell `(int64_t, ..., int64_t)`; drop
+                                # the tail, exactly as the loader's own scan
+                                # does for that shape.
+                                if _is_vararg:
                                     break
                             signature = (_m_sig.group(1) + '('
                                          + ', '.join(_new_parts) + ')')
@@ -19339,14 +19256,10 @@ def gen_module_impl(self, stmts: list):
                     # (`char *`, `MojoList *`) ending where the function
                     # NAME begins — `safe` — so replace up to the first
                     # occurrence of the name, not just the first token.
-                    # NOT `_m`: the compiled path types a local by its bare
-                    # NAME across the function, and `_m` is a FunctionDef loop
-                    # variable elsewhere in `gen_module_impl`, so `_m.end()`
-                    # became a call to `FunctionDef_end` (undefined at link).
-                    _rt_match = re.match(r'.*?' + re.escape(safe), signature)
-                    if _rt_match and _rt_match.end() < len(signature):
+                    _m = re.match(r'.*?' + re.escape(safe), signature)
+                    if _m and _m.end() < len(signature):
                         signature = (_home_ret_hit + ' ' + safe
-                                     + signature[_rt_match.end():])
+                                     + signature[_m.end():])
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
             _raw_ret = _as_str(sym_info.get('return_type', 'int64_t'))

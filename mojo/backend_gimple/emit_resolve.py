@@ -2859,39 +2859,13 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         # immediate build-time error naming both types and the value.
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
-        if not line:
-            # `_current_line` is rarely set; the statement the failing store
-            # belongs to is named by the last `#line N "file"` directive
-            # already emitted above it.
-            _bl = getattr(gen, 'body_lines', None) or []
-            _k = len(_bl) - 1
-            while _k >= 0 and _k > len(_bl) - 400:
-                _ln = _bl[_k]
-                if _ln.startswith('#line '):
-                    _parts = _ln.split()
-                    if len(_parts) >= 2 and _parts[1].isdigit():
-                        line = int(_parts[1])
-                    break
-                _k -= 1
         loc = f'{filename}:{line}' if line else filename
         _fn = getattr(gen, 'current_func_name', None)
         if _fn:
             loc = f'{loc} in function `{_fn}`'
-        # The last few statements emitted for the failing store: the temps in
-        # the message (`_t111`) only mean something next to the C that made them.
-        _ctx = []
-        _bl2 = getattr(gen, 'body_lines', None) or []
-        _k2 = len(_bl2) - 1
-        while _k2 >= 0 and len(_ctx) < 6 and _k2 > len(_bl2) - 200:
-            _l2 = _bl2[_k2].strip()
-            if _l2 and not _l2.startswith('#'):
-                _ctx.append(_l2)
-            _k2 -= 1
-        _ctx.reverse()
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
-            f'at {loc}: value={v!r} dest={dest!r}; last emitted: '
-            + ' | '.join(_ctx))
+            f'at {loc}: value={v!r} dest={dest!r}')
     # part 4 (measured 2026-10-22): a RUNTIME (list-backed) tuple stored into
     # a synthesized by-value `MojoTuple_*` struct. A direct `(MojoTuple_...)
     # <ptr/word>` cast is invalid C ("conversion to non-scalar type requested"
