@@ -2069,7 +2069,19 @@ def _register_link_imports(gen, stmts: list) -> list:
                     # above (populated whether or not a dylib exists).
                     if source:
                         import module_loader as _mlmod
-                        _qual = _mlmod.module_name_for_path(source)
+                        # The DEFINING module when this statement only
+                        # reaches the name through a re-exporting package
+                        # `__init__` (`''` for a direct import / an
+                        # unresolvable name, where `source` is already the
+                        # right answer). `_note_own_func_home` is the SAME
+                        # registry `_emit_stdlib_import_externs` writes
+                        # later in the same compile, so the two must agree:
+                        # registering the named module here and the definer
+                        # there would mark the name _AMBIGUOUS_FUNC_HOME for
+                        # every reference instead of resolving it.
+                        _qual = (gen._reexported_defining_qualifier(
+                                     stmt.module, name, 'fn')
+                                 or _mlmod.module_name_for_path(source))
                         if _qual:
                             # _own_imported_func_home (per-instance): see
                             # its own comment — this module's own import
