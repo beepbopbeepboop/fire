@@ -7209,7 +7209,7 @@ BOTH_ARCH_CASES = [
     # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
     # 0 — under 256 because the exit status is a byte, and a weighted sum wide
     # enough to overflow it would compare against `expected & 0xFF` and invent a
-    # mismatch (the lesson `bugs/mid/FORMAL_arm64_instruction_coverage.md` §"Every
+    # mismatch (the lesson `bugs/hard/FORMAL_arm64_instruction_coverage.md` §"Every
     # expected value must fit in a byte" records, having been learned there).
     # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
     # has to put the bare name where an operand goes, and a row that only

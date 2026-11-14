@@ -589,7 +589,22 @@ def test_every_declaration_is_seen():
     # `mojo_bound_method_fn` / `mojo_bound_method_self` are `static inline`,
     # which the scanner does not count, so they move nothing.
     # fire_runtime.c grew by 62 lines with the three (811763 bytes, 793 KB).
-    for header, want in (('fire_runtime.h', 829),   # --fix writes the live figure
+    # 829 -> 830 (2026-11-13, the gate fix for `formal-doc-truth` at 4eba365d99):
+    # ONE name, read off the call on the live header, from a912f5987 ("codegen:
+    # model open() as context manager in compiled generator with-stmts"),
+    # which landed after the 829 rung without one:
+    #   +1  `mojo_open_file_ex` — `open()` with optional mode and newline
+    #       (`newline == NULL` means "not provided"). Word-shaped (three `char *`
+    #       in, one int64_t out, every one a single word), word 430 -> 431,
+    #       total 939 -> 940. Box figure unchanged.
+    # fire_runtime.c grew by 70 lines with it (814067 bytes, 795 KB).
+    # 830 -> 832 (7553dd570, "codegen: a float's bit accessors and bitcast are
+    # bit reinterpretations"): TWO names, read off the live header:
+    #   +1  `mojo_float_from_bits` (int64_t in, float out)
+    #   +1  `mojo_float_to_bits`   (float in, int64_t out)
+    #       Both carry a float across the boundary, so neither is word-shaped:
+    #       total 940 -> 942, word 431 unchanged, box 509 -> 511.
+    for header, want in (('fire_runtime.h', 832),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -841,9 +856,15 @@ CENSUS_QUOTES = (
     ('FORMAL.md',
      r'\| not word-shaped \| \*\*(\d+)\*\* \|',
      ('box',)),
+    # The same sentence's PERCENTAGE is a third derived figure, and the one the
+    # fixer used to leave behind: 9bd4ce75c moved the total 940 -> 942 with
+    # `word` unchanged, `--fix` rewrote the two counts it could see, and the
+    # published share stayed at 45.9% — the ratio of the OLD pair — until
+    # formal-doc-truth went red on it. A derived figure a tool does not write is
+    # a figure a human has to remember.
     ('FORMAL.md',
-     r'So \*\*(\d+) of (\d+) \([\d.]+%\)\*\* is the reachable-surface ceiling',
-     ('word', 'total')),
+     r'So \*\*(\d+) of (\d+) \(([\d.]+)%\)\*\* is the reachable-surface ceiling',
+     ('word', 'total', 'word_pct')),
     # The RESTATEMENTS of the census outside §2.2's table (§3.2's non-word
     # sentence, §5's "N of the box-crossing", §6's phase-2 word row and the two
     # sentences below it). They are in this table because they were exactly what
@@ -904,6 +925,12 @@ def live_census():
     arithmetic on the table's figures, because the two questions are answered
     by two different predicates and subtracting one from the other would
     answer neither.
+
+    `word_pct` is the share §2.2 publishes beside those two counts. It is
+    derived HERE, from the same two figures the table publishes, with the same
+    one-decimal rounding `test_formal_doc_truth.py` checks against — because a
+    percentage written down beside a count is a second copy of the ratio, and
+    the copy that no tool writes is the copy that goes stale.
     """
     sys.path.insert(0, HERE)
     from formal import model as M
@@ -923,6 +950,7 @@ def live_census():
         'total': total,
         'word': word,
         'box': box,
+        'word_pct': round(100 * word / total, 1) if total else 0.0,
         'return_word': return_word,
         'return_box': total - return_word,
         'sqlite_word': sum(1 for e in sqlite.values() if e['word']),
@@ -1035,6 +1063,43 @@ def test_the_fixer_touches_only_the_figures():
           'the narrower figure was spliced at a stale offset')
 
 
+def test_the_word_share_is_a_fixable_quote():
+    """The §2.2 percentage is a DERIVED figure, so `--fix` must rewrite it.
+
+    The census refresh at 9bd4ce75c moved the total 940 -> 942 with `word`
+    unchanged and left `45.9%` behind: 431/940 is 45.85% (45.9) and 431/942 is
+    45.75% (45.8), so FORMAL.md published the share of a pair that no longer
+    existed and `formal-doc-truth` went red on that one figure. The sentence's
+    two counts were in the quote table below and its percentage was not, which
+    is the whole defect: the half a tool could not write is the half that went
+    stale, and it left a human to notice a ratio the tool had the inputs for.
+    This pins the ratio into that same table row.
+    """
+    live = live_census()
+    check('word_pct' in live,
+          'live_census() publishes the word-shaped share')
+    sentence = (r'So \*\*(\d+) of (\d+) \(([\d.]+)%\)\*\* is the '
+                r'reachable-surface ceiling')
+    rows = [keys for _path, pattern, keys in CENSUS_QUOTES
+            if 'reachable-surface ceiling' in pattern]
+    check(any('word_pct' in keys for keys in rows),
+          'the §2.2 word share is a figure `--fix` rewrites',
+          'no CENSUS_QUOTES row for the §2.2 sentence captures the '
+          'percentage, so a census refresh leaves it describing the old pair')
+    text = (f'So **{live["word"]} of {live["total"]} (99.9%)** is the '
+            f'reachable-surface ceiling')
+    m = re.search(sentence, text)
+    check(m is not None, 'the §2.2 word-share sentence has its fixable shape')
+    if m is not None and 'word_pct' in live:
+        got = splice_quoted_figures(text, m, ('word', 'total', 'word_pct'),
+                                    live)
+        want = (f'So **{live["word"]} of {live["total"]} '
+                f'({live["word_pct"]}%)** is the reachable-surface ceiling')
+        check(got == want,
+              'the fixer rewrites the word share to the live ratio',
+              f'got {got!r}, want {want!r}')
+
+
 def test_the_quoted_census_is_the_live_census():
     """Every prose copy of the ABI census agrees with `runtime_abi()`.
 
@@ -1066,9 +1131,12 @@ def test_the_quoted_census_is_the_live_census():
                   f'is a stale TABLE, not a passing check')
             continue
         for i, key in enumerate(keys, start=1):
-            got = int(m.group(i))
+            # `word_pct` is the one ratio in the table, so it is read as a
+            # float; every other figure is a count.
+            got = (float(m.group(i)) if key == 'word_pct'
+                   else int(m.group(i)))
             check(got == live[key],
-                  f'{path}: the quoted {key} count is {live[key]}',
+                  f'{path}: the quoted {key} figure is {live[key]}',
                   f'the text says {got}; `runtime_abi()` says {live[key]}')
 
 
@@ -1124,6 +1192,7 @@ def main():
     test_every_declaration_is_seen()
     test_non_exports_stay_excluded()
     test_the_fixer_touches_only_the_figures()
+    test_the_word_share_is_a_fixable_quote()
     test_the_quoted_census_is_the_live_census()
     test_call_arity_families_are_whole()
     npass = sum(1 for ok, _w in RESULTS if ok)

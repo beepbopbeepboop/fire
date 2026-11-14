@@ -27,8 +27,8 @@ facts that must not drift back:
    path; the commit that closed the bug is the one that removed the marker and doc).
 
 Next to `test_runtime_header_scan.py`, whose own checks are the evidence for
-the census figures; this file pins only the gate wiring. Not registered in
-tools/suite.py.
+the census figures; this file pins only the gate wiring. Registered as the
+`reg-gate-rthdrscan` regression job, so the pin itself cannot go unrun.
 """
 import os
 import re

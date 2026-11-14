@@ -597,10 +597,11 @@ REPLAN_TASK = """You REPLAN a bug doc. You do NOT fix the bug.
 Read %(doc)s. It sits at a class the pool cannot serve (%(cls)s has no slot: %(slots)s), so it can
 never be worked as written. Decompose it instead:
 
-1. Decide the parts. Each part is a self-contained piece of work, small enough for a class the pool
-   CAN serve: %(servable)s. Never file a part at %(cls)s.
-2. File each part as a new doc named "<base>-part1", "<base>-part2", ... under bugs/ or bugs/mid/
-   — the highest class you can argue it needs, within %(servable)s. Each part doc must have:
+1. Decide the parts. Each part is a self-contained piece of work, small enough for the EASY class
+   (bugs/), which the pool serves. Never file a part at %(cls)s.
+2. File each part as a new doc named "<base>-part1", "<base>-part2", ... under bugs/ (easy).
+   A hard doc's replan produces easy work by policy: do not file parts under bugs/mid/ or bugs/hard/.
+   Each part doc must have:
    - a title and a Goal;
    - a "## Acceptance" section with the observable result;
    - a "## Done when" section naming ONE quick test (a file path and the command that runs it,
@@ -622,7 +623,9 @@ def replan_unserved():
     """Queue a replan for every doc at a class the pool cannot serve. Returns how many.
 
     This is the only way such a doc can move without breaking the ladder: an easy worker decomposes
-    it into parts filed at classes that DO have capacity, and the original is marked SPLIT."""
+    it into parts filed at EASY (bugs/), and the original is marked SPLIT. A hard-doc replan's parts
+    are easy work by policy (2026-11-13): filing them at mid put the backlog on the one iceman slot
+    and left qwen idle, and the parts had never been easy, so there was no ladder step to preserve."""
     pool = C.load_pool()
     unserved = unserved_classes(pool)
     if not unserved:
@@ -649,15 +652,21 @@ def replan_unserved():
                         json.dump(it, f, indent=1)
                     log("replan %s: corrected its queued class %s -> easy" % (name, old))
                 continue
-            if name in C.load() or split_reason("%s/%s" % (cls, base)) or claim_held(base):
+            _prev = C.load().get(name)
+            # A live entry, or one with unlanded commits, is work in flight or work to land: leave it.
+            # A TERMINAL entry with no commits is a dead attempt (the replan died before filing anything);
+            # treating any entry as "already queued" parked the doc forever (2026-11-13).
+            if _prev is not None and (C.state_of(_prev) not in C.TERMINAL or C.ahead(_prev) > 0):
+                continue
+            if split_reason("%s/%s" % (cls, base)) or claim_held(base):
                 continue
             text = REPLAN_TASK % {"doc": "bugs/%s/%s.md" % (cls, base), "cls": cls,
                                   "slots": ", ".join(slots), "servable": ", ".join(servable)}
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name,
                             "--claim", "bug:" + base, "--task", text, "--cls", "easy"],
                            capture_output=True, text=True, cwd=C.MAIN)
-            log("replan bugs/%s/%s.md: class %s has no slot (%s); queued %s to split it into parts at %s"
-                % (cls, base, cls, ", ".join(slots), name, ", ".join(servable)))
+            log("replan bugs/%s/%s.md: class %s has no slot (%s); queued %s to split it into parts at easy"
+                % (cls, base, cls, ", ".join(slots), name))
             made += 1
     return made
 

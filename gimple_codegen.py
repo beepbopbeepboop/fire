@@ -36,6 +36,7 @@ _ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
 import ownership_check
+import unknown_decl_check
 import mlir
 import mojo.middle.coro as gimple_gen_coro
 import regex_compile
@@ -1855,6 +1856,11 @@ class GimpleGen:
         # here with a literal container gives _collect_self_assigns the real
         # C type AND guarantees the field is valid from construction.
         self._comptime_vals: dict = {}
+        # Module-level `alias NAME = <type>` declarations (annotation spelling
+        # of the target). Populated by the module pre-pass and expanded by
+        # `_resolve_type` and call lowering so an alias behaves like the type
+        # it names. Part 1/2 of CODEGEN_simd_and_array_values_erase_to_int64.
+        self._type_aliases: dict = {}
         # Nesting depth of runtime-degraded `comptime if` emission. When > 0,
         # branch bodies are being generated for a comptime-if whose conditions
         # could not be resolved statically (so all branches are emitted as a
@@ -3231,6 +3237,24 @@ class GimpleGen:
         self._extra_search_paths: list = []
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
+        # Struct/trait records read from a `.mojoc` artifact, name -> record
+        # (see mojo/middle/mojoc_artifact.py). A precompiled import has no
+        # source path to register in `_imported_generic_structs`; the stored
+        # signature itself is what an instantiation is checked against
+        # (`emit_resolve._ensure_generic_struct`), so the structural
+        # conformance failure of the modular `import_mojoc_conformance_error`
+        # case is reported instead of the instantiation silently falling
+        # through to the un-elaborated template.
+        self._mojoc_structs: dict = {}
+        # Dual-mount / alias resolution for precompiled packages: one
+        # artifact file reached under two different package names is the same
+        # package. realpath(artifact) -> canonical package name, and
+        # alias package name -> canonical package name.
+        self._mojoc_pkg_canonical: dict = {}
+        self._mojoc_pkg_alias: dict = {}
+        # Loaded mojoc package records (canonical/alias package name ->
+        # {'structs': {...}, 'functions': {...}}) for symbol lookup.
+        self._mojoc_pkg_records: dict = {}
         # Why an imported generic struct could NOT be elaborated for a
         # construction, one entry per occurrence. The codegen falls back to
         # the un-elaborated template (see
@@ -3377,6 +3401,8 @@ class GimpleGen:
         'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
         'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
         'mojo_isinstance_type': ('int', ['int64_t']),
+        'mojo_is_classword':   ('int', ['int64_t']),
+        'mojo_issubclass_rtclass': ('int', ['int64_t', 'int64_t']),
         'mojo_type_of':        ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
@@ -4568,6 +4594,9 @@ class GimpleGen:
     def _lower_builtin_isinstance(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_isinstance(self, node)
 
+    def _lower_builtin_issubclass(self, node: CallExpr) -> tuple[str, str]:
+        return ggc._lower_builtin_issubclass(self, node)
+
     def _lower_builtin_all_any(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_all_any(self, fname_raw, node)
 
@@ -5070,6 +5099,9 @@ class GimpleGen:
                                  depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
                                            depth=depth, want_abs=want_abs)
+    def _reexported_defining_qualifier(self, module: str, name: str,
+                                       kind: str = 'fn') -> str:
+        return gfn._reexported_defining_qualifier(self, module, name, kind)
     def _register_imported_symbol(self, name: str, info, original_name=None,
                                   write_param_types: bool = True):
         import mojo.middle.funcs_shared as _fn2
@@ -5863,6 +5895,38 @@ class GimpleGen:
         return grsl._bool_and(self, left, right)
     def _void_call(self, fname: str, arg_pairs: list) -> tuple:
         return grsl._void_call(self, fname, arg_pairs)
+    def _rt_call(self, ret_type: str, fname: str, args: list) -> str:
+        return grsl._rt_call(self, ret_type, fname, args)
+    def _rt_into(self, dst: str, fname: str, args: list) -> None:
+        grsl._rt_into(self, dst, fname, args)
+    def _rt_void(self, fname: str, args: list) -> None:
+        grsl._rt_void(self, fname, args)
+    def _cast(self, ctype: str, val: str) -> str:
+        return grsl._cast(self, ctype, val)
+    def _cast_into(self, dst: str, ctype: str, val: str) -> None:
+        grsl._cast_into(self, dst, ctype, val)
+    def _copy(self, dst: str, src: str) -> None:
+        grsl._copy(self, dst, src)
+    def _binop(self, ctype: str, a: str, op: str, b: str) -> str:
+        return grsl._binop(self, ctype, a, op, b)
+    def _cmp(self, a: str, op: str, b: str) -> str:
+        return grsl._cmp(self, a, op, b)
+    def _binop_into(self, dst: str, a: str, op: str, b: str) -> None:
+        grsl._binop_into(self, dst, a, op, b)
+    def _loop_head(self, idx: str, n: str, bb_cond: str, bb_body: str,
+                   bb_post: str, bb_after: str, stmt: bool) -> None:
+        grsl._loop_head(self, idx, n, bb_cond, bb_body, bb_post, bb_after, stmt)
+    def _loop_tail(self, idx: str, bb_cond: str, bb_post: str, bb_after: str,
+                   stmt: bool) -> None:
+        grsl._loop_tail(self, idx, bb_cond, bb_post, bb_after, stmt)
+    def _goto(self, label: str) -> None:
+        grsl._goto(self, label)
+    def _cond_goto(self, cond: str, then_label: str, else_label: str) -> None:
+        grsl._cond_goto(self, cond, then_label, else_label)
+    def _ret(self, val: str) -> None:
+        grsl._ret(self, val)
+    def _ret_void(self) -> None:
+        grsl._ret_void(self)
     def _emit_label(self, label: str, freq_hint: str=''):
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:
@@ -6428,6 +6492,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
+    unknown_decl_check.check_module(stmts, mojo_src, filename)
     # Early diagnostics: trait method requirement evidence (part 2).
     try:
         import elaborate as _elab_diag

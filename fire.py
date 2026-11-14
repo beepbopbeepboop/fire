@@ -151,6 +151,33 @@ def _extract_codegen_flags(args: list):
     return opt_flag, debug_flag, remaining
 
 
+def _extract_diagnostic_format(args: list):
+    """Pull --diagnostic-format <text|json> (or --diagnostic-format=<fmt>) out
+    of an argument list. Returns (fmt, remaining_args); 'text' is the default.
+    The json form is the modular compiler's machine-readable diagnostic
+    stream (see myinterpreter.mojo_diagnostic)."""
+    fmt = 'text'
+    rest = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--diagnostic-format' and i + 1 < len(args):
+            fmt = args[i + 1]
+            i += 2
+            continue
+        if a.startswith('--diagnostic-format='):
+            fmt = a.split('=', 1)[1]
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+    if fmt not in ('text', 'json'):
+        print(f"error: unknown --diagnostic-format '{fmt}' (expected text or json)",
+              file=sys.stderr)
+        sys.exit(2)
+    return fmt, rest
+
+
 def _extract_backend(args: list):
     """Pull --backend=<name> (or --backend <name>) out of an argument list.
 
@@ -724,7 +751,7 @@ def _format_error_message(e):
     return msg
 
 
-def interpret_and_execute(src_code, filename=None, argv=None):
+def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format='text'):
     """Runs the interpretation in a worker thread with a large native stack.
 
     Deep *Mojo-level* recursion (e.g. a recursive-descent parser written in
@@ -752,7 +779,7 @@ def interpret_and_execute(src_code, filename=None, argv=None):
         try:
             sys.argv = argv if argv is not None else [filename or "<stdin>"]
             from fire_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
-            from myinterpreter import Interpreter
+            from myinterpreter import Interpreter, mojo_diagnostic
             tokens = py_tokenize(src_code)
             stmts = Parser(tokens).with_filename(filename or "<stdin>").parse_module()
             interpreter = Interpreter(filename=filename, argv=argv)
@@ -790,6 +817,14 @@ def interpret_and_execute(src_code, filename=None, argv=None):
             base_msg = str(e)
             msg = _format_error_message(e)
             tb_lines = None
+            # An unknown declaration in Mojo source is a diagnostic, not a
+            # crash: print the modular-format block (file:line:col, the
+            # source line, the caret) and no Python traceback.
+            diag = mojo_diagnostic(e, filename, src_code, diagnostic_format)
+            if diag is not None:
+                print(diag, file=sys.stderr)
+                exit_code.append(1)
+                return
             if msg != base_msg:
                 # A 3.15 suggestion was appended — CPython prints it on the
                 # exception's own final line, so the traceback's last line
@@ -1302,6 +1337,7 @@ def main():
     # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
     # and never reaches the executed program as an argument of its own.
     auto_gpu, rest = _extract_gpu_flags(rest)
+    diagnostic_format, rest = _extract_diagnostic_format(rest)
     if formal and not backend_explicit:
         # --formal alone means the arm64 formal backend, but an explicit
         # --backend wins: `build --formal --backend=x86_64` is how the x86-64
@@ -1390,6 +1426,21 @@ def main():
               "(X0) and requires --formal", file=sys.stderr)
         sys.exit(2)
     formal_test_input = _pop_test_input(sys.argv)
+
+    # precompile: parse a package directory and write a .mojoc signature
+    # artifact (no codegen/compilation). Used by the mojoc import diagnostics
+    # path to carry signatures across a source-deleted boundary.
+    if sys.argv[1] == 'precompile':
+        sys.argv.pop(1)
+        pre_out = _pop_flag_value(sys.argv, '-o')
+        pre_inputs = [a for a in sys.argv[1:] if not a.startswith('-')]
+        if not pre_inputs or pre_out is None:
+            print(f"{_tool_name()} precompile: usage: precompile <pkg-dir> -o <out>.mojoc",
+                  file=sys.stderr)
+            sys.exit(2)
+        from mojo.middle import mojoc_artifact
+        mojoc_artifact.write_artifact(pre_inputs[0], pre_out)
+        return
 
     # Check for dylib command: compile one or more .mojo LIBRARY modules
     # (no main()/top-level entry point needed — same "library module" shape
@@ -1720,7 +1771,8 @@ def main():
 
     # `fire run <file>`: force the interpreter, no compile attempt at all.
     if run_interp:
-        interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args)
+        interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args,
+                          diagnostic_format=diagnostic_format)
         return
 
     # Default for a .mojo program: compile and run it through the module-cache
@@ -1754,7 +1806,8 @@ def main():
             sys.exit(rc)
 
     # Otherwise interpret as Mojo
-    interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args)
+    interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args,
+                          diagnostic_format=diagnostic_format)
 
 if __name__ == '__main__':
     main()

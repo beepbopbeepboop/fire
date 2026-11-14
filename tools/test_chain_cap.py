@@ -42,6 +42,7 @@ class MergeFixDepth(unittest.TestCase):
         name = "fix-merge-fix-merge-fix-merge-fix-x"                   # three levels: at the cap
         reg = {name: {"state": "exited-ok"}}
         with mock.patch.object(I.C, "registry") as reg_cm, \
+             mock.patch.object(I.C, "ahead_since_base", return_value=2), \
              mock.patch.object(I.C, "cmd_enqueue") as enq:
             reg_cm.return_value.__enter__.return_value = reg
             reg_cm.return_value.__exit__.return_value = False
@@ -49,6 +50,40 @@ class MergeFixDepth(unittest.TestCase):
             enq.assert_not_called()
             self.assertEqual(reg[name]["state"], "abandoned")
             self.assertTrue(reg[name]["merge_capped"])         # pick_candidates skips it: no re-probe every pass
+
+    def _requeue(self, name, ahead, **extra):
+        """Run enqueue_merge_fix for NAME whose own round added AHEAD commits; return (queued meta or None, reg)."""
+        reg = {name: {"state": "exited-ok"}}
+        t = {"branch": "work/x", "summary": "s", "claims": [], "cls": "easy", **extra}
+        with mock.patch.object(I.C, "registry") as reg_cm, \
+             mock.patch.object(I.C, "ahead_since_base", return_value=ahead), \
+             mock.patch.object(I.C, "doc_exists_for", return_value=True), \
+             mock.patch.object(I.C, "free_task_name", side_effect=lambda n: n), \
+             mock.patch.object(I.C, "cmd_enqueue") as enq:
+            reg_cm.return_value.__enter__.return_value = reg
+            reg_cm.return_value.__exit__.return_value = False
+            I.enqueue_merge_fix(name, t, "")
+        return (enq.call_args[0][0].meta if enq.called else None), reg
+
+    def test_a_fixer_that_committed_nothing_is_not_a_level(self):
+        # 2026-11-13: the third fixer of bug-mid-codegen-simd-and-array reported DONE without merging master; the next
+        # conflict hit the depth cap although the chain had not tried a third merge.
+        name = "fix-merge-fix-merge-fix-merge-x"
+        meta, reg = self._requeue(name, ahead=0)
+        self.assertIsNotNone(meta, "an idle round must be retried, not capped")
+        self.assertEqual(meta["merge_depth"], 3)               # the level the idle fixer held, not one deeper
+        self.assertEqual(meta["merge_idle"], 1)
+        self.assertNotIn("merge_capped", reg[name])
+
+    def test_idle_rounds_are_forgiven_only_a_few_times_in_a_row(self):
+        name = "fix-merge-fix-merge-fix-merge-x"
+        meta, reg = self._requeue(name, ahead=0, merge_depth=3, merge_idle=I.MERGE_FIX_IDLE)
+        self.assertIsNone(meta)
+        self.assertTrue(reg[name]["merge_capped"])
+
+    def test_a_fixer_that_committed_counts_and_resets_the_idle_run(self):
+        meta, _ = self._requeue("fix-merge-x", ahead=1, merge_depth=1, merge_idle=1)
+        self.assertEqual((meta["merge_depth"], meta["merge_idle"]), (2, 0))
 
     def test_a_branch_whose_doc_is_gone_gets_no_fixer(self):
         name = "bug-x"

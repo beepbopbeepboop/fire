@@ -262,6 +262,7 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
 
 
 MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
+MERGE_FIX_IDLE = 2    # consecutive fixer rounds that committed nothing before they count as depth like any other
 
 
 def _cap_merge_fix(name, why, kind=None):
@@ -285,7 +286,14 @@ def enqueue_merge_fix(name, t, conflict_text):
     import argparse as _ap
     # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
     # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
-    if C.fixer_depth(name, t, "merge_depth") >= MERGE_FIX_DEPTH:
+    # A fixer that finished without committing anything did not try the merge (2026-11-13: the third fixer of
+    # bug-mid-codegen-simd-and-array found an old merge commit "already present", reported DONE, left the branch
+    # untouched and the next probe conflicted again). That round converged nothing, so it is not a level of the chain:
+    # the next fixer takes its depth, up to MERGE_FIX_IDLE times in a row, then it counts like any other round.
+    depth = C.fixer_depth(name, t, "merge_depth")
+    idle = t.get("merge_idle", 0)
+    forgive = depth > 0 and idle < MERGE_FIX_IDLE and C.ahead_since_base(t) == 0
+    if depth - forgive >= MERGE_FIX_DEPTH:
         _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name, kind="merge-fix depth")
         return
     if not C.doc_exists_for(t.get("claims") or []):
@@ -305,12 +313,35 @@ def enqueue_merge_fix(name, t, conflict_text):
             "Commit the merge. Finish with the REPORT block and a CONTROL-STATUS line."
             % (t["branch"], t["summary"][:150], ", ".join(files) or "see `git merge master`"))
     mname = C.free_task_name("fix-merge-" + name)
+    meta = C.depth_meta(t, "merge_depth", name)
+    meta["merge_depth"] -= forgive                  # an idle round is not a level
+    meta["merge_idle"] = idle + 1 if forgive else 0
     C.cmd_enqueue(_ap.Namespace(name=mname, claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"),
-                                meta=C.depth_meta(t, "merge_depth", name)))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"), meta=meta))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
+
+
+def commit_gate_doc(path, job, branch):
+    """Commit one gate doc onto master as a PATH-LIMITED commit. A worker is cut from a git commit, so a doc that is
+    only an untracked file in MAIN is invisible to it and blocks the ledger merge (2026-11-13: "would be overwritten by
+    merge", every job's marker held on verify-ledger). `commit --only -- <path>` takes that one path and leaves the rest
+    of MAIN's index and working tree exactly as they were. Nothing is committed when the doc is already tracked and
+    unchanged."""
+    top = C.git("rev-parse", "--show-toplevel", cwd=C.MAIN, check=False)
+    if not top or os.path.realpath(top) != os.path.realpath(C.MAIN):
+        # MAIN must be its own repository root. Otherwise `git add` would stage into an ENCLOSING repo (a scratch
+        # directory under a worktree's .tmp does exactly this), and the commit would land in the wrong tree.
+        sys.exit("gate doc %s: MAIN %s is not a git repository root (toplevel %r); refusing to commit into another repo"
+                 % (path, C.MAIN, top))
+    rel = os.path.relpath(path, C.MAIN)
+    C.git("add", "--", rel, cwd=C.MAIN)
+    if not C.git("diff", "--cached", "--name-only", "--", rel, cwd=C.MAIN):
+        return
+    C.git("commit", "-q", "--only", "-m",
+          "gate: %s is red on master (branch %s); the doc is the work\n\nFiled by the integrator's gate round."
+          % (job, branch), "--", rel, cwd=C.MAIN)
 
 
 def gate_doc(culprit, t, failing, files=()):
@@ -341,17 +372,18 @@ def gate_doc(culprit, t, failing, files=()):
     for j in jobs:
         p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
         paths.append(p)
-        if os.path.exists(p):
-            continue
-        with open(p, "w") as f:
-            f.write(
-                "# Gate: %s is red on master\n\n"
-                "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
-                "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
-                "It is red on `%s`: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
-                % (j, j, branch, culprit or "master", branch, j))
-            if files:
-                f.write("\nFailing files at the time:\n%s\n" % "\n".join("- `%s`" % x for x in files))
+        if not os.path.exists(p):
+            with open(p, "w") as f:
+                f.write(
+                    "# Gate: %s is red on master\n\n"
+                    "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
+                    "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
+                    "It is red on `%s`: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
+                    % (j, j, branch, culprit or "master", branch, j))
+                if files:
+                    f.write("\nFailing files at the time:\n%s\n" % "\n".join("- `%s`" % x for x in files))
+        # Tracked from the moment it exists, so a worktree cut from master sees it (an existing doc is left as written).
+        commit_gate_doc(p, j, branch)
     return paths
 
 

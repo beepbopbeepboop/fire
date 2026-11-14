@@ -200,6 +200,50 @@ def test_positive_required_method_inherited_from_base_struct():
     _assert_ok(POS_BASE_METHOD)
 
 
+# Positive: a trait's generic method may be implemented under its own
+# type-parameter name. The requirement is renaming-invariant — `std/utils/
+# variant.mojo`'s `_NicheStorage.as_uninit[T]` is implemented by
+# `_DefaultNicheStorage.as_uninit[U]` — so a declaration-time check must not
+# report the renamed parameter as a signature mismatch.
+POS_RENAMED_GENERIC = r'''
+trait First:
+    def first[T: AnyType](self, x: List[T]) -> List[T]: ...
+
+struct S(First):
+    def first[U: AnyType](self, x: List[U]) -> List[U]:
+        return x
+
+def main():
+    pass
+'''
+
+
+def test_positive_generic_parameter_renamed_in_implementation():
+    _assert_ok(POS_RENAMED_GENERIC)
+
+
+# Negative control for the same rule: renaming the parameter is free, using a
+# different parameter in the same position is not.
+NEG_RENAMED_GENERIC_WRONG_RETURN = r'''
+trait First:
+    def first[T: AnyType](self, x: List[T]) -> List[T]: ...
+
+struct S(First):
+    def first[U: AnyType](self, x: List[U]) -> U:
+        return x
+
+def main():
+    pass
+'''
+
+
+def test_negative_renamed_generic_still_checks_the_signature():
+    _assert_err(
+        NEG_RENAMED_GENERIC_WRONG_RETURN,
+        "does not implement all requirements for 'First'",
+    )
+
+
 if __name__ == '__main__':
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_') and callable(v)]
     for fn in tests:

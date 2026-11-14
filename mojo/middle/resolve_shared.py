@@ -610,6 +610,26 @@ def _quick_type(gen, node) -> str:
             _sot = gen.var_types.get(node.func.obj.name, '')
         if not (_sot and _sot.endswith(' *')):
             _sot = gen._quick_type(node.func.obj)
+        if (not (isinstance(_sot, str) and _sot.endswith(' *'))
+                and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+                and node.func.obj.name in ('self', 'cls')):
+            # `cls.<method>(...)` / `self.<method>(...)` in a method body:
+            # `cls`/`self` are the erased int64_t receiver in `var_types`,
+            # so the generic receiver resolution above cannot see the
+            # struct. Resolve against the method's own struct instead —
+            # the same mangled-symbol lookup the typed-receiver branch
+            # below does. Without this, a method whose only `return` is
+            # `return cls._other(...)` inferred int64_t (the fallback),
+            # and a call site that treats the result as the container the
+            # callee really builds then emitted an uncast int64_t call
+            # into a `MojoList *` slot ("invalid conversion in gimple
+            # call"). Real: Tools/c-analyzer's `ColumnSpec._normalize`
+            # (`return cls._parse(...)`) feeding `*values, _ = ...`.
+            _cstruct = getattr(gen, '_current_struct_name', None)
+            if _cstruct:
+                _crt = gen.func_return_types.get(f"{_cstruct}_{node.func.member}")
+                if _crt:
+                    return _crt
         if isinstance(_sot, str) and _sot.endswith(' *'):
             _ssn = gimple_exprtypes._struct_name_of(_sot)
             if _ssn in gen.struct_field_types:

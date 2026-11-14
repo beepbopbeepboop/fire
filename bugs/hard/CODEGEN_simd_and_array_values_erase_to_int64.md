@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part1, CODEGEN_simd_and_array_values_erase_to_int64-part2, CODEGEN_simd_and_array_values_erase_to_int64-part3, CODEGEN_simd_and_array_values_erase_to_int64-part4
+SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part1, CODEGEN_simd_and_array_values_erase_to_int64-part2, CODEGEN_simd_and_array_values_erase_to_int64-part3
 
 # CODEGEN: SIMD values and `Array`/`Span` elements erase to `int64_t`, so their real type is unknown
 
@@ -107,8 +107,6 @@ own mid part under `bugs/mid/`:
 - `CODEGEN_simd_and_array_values_erase_to_int64-part3.md` — a `comptime`-bound
   float DType resolves in a signature, an annotated local, and a SIMD
   constructor's dtype argument.
-- `CODEGEN_simd_and_array_values_erase_to_int64-part4.md` — `Array` /
-  `FixedSizeArray` parameters keep the element type their annotation declares.
 
 `(1)` landed in this worktree: `_lower_call`'s generic container constructors arm
 now handles `Array`/`FixedSizeArray`, builds `mojo_list_new()`, records

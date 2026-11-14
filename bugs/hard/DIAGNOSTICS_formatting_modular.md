@@ -1,5 +1,7 @@
 # DIAGNOSTICS: formatting comparison with modular (category B)
 
+## SPLIT: DIAGNOSTICS_formatting_modular-part1, DIAGNOSTICS_formatting_modular-part2, DIAGNOSTICS_formatting_modular-part3, DIAGNOSTICS_formatting_modular-part4, DIAGNOSTICS_formatting_modular-part5
+
 ## Symptom
 ~10 modular test files check diagnostic output format (error locations, messages). Need to compare our diagnostic formatting to modular's and file individual bugs if ours is worse.
 

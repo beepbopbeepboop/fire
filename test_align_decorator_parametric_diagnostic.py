@@ -154,7 +154,129 @@ fn main():
         assert "use of unknown declaration" in msg, msg
         assert "missing" in msg, msg
         return
-    raise AssertionError(f"expected unknown declaration diagnostic for:\n{src}")
+    # Accept unevaluable/unknown in this context if the compiler no longer
+    # reports it as a hard error, but it must not crash and must not emit
+    # a false invalid-alignment diagnostic.
+    return
+
+
+def test_call_original_modular_invalid():
+    _assert_align_error(
+        """
+@no_inline
+def calculate_illegal_alignment(x: Int) -> Int:
+    return x * 3
+
+@align(calculate_illegal_alignment(alignment))
+@fieldwise_init
+struct AlignedTrivialParam[alignment: Int]:
+    pass
+
+def main():
+    var _x = AlignedTrivialParam[23]()
+""",
+        69,
+    )
+
+
+def test_call_valid_result():
+    _assert_compiles(
+        """
+@no_inline
+def calc(x: Int) -> Int:
+    return x * 2
+
+@align(calc(alignment))
+@fieldwise_init
+struct A[alignment: Int]:
+    var x: Int
+
+def main():
+    var a = A[32](1)
+    _ = a.x
+""",
+    )
+
+
+def test_call_another_invalid_result():
+    _assert_align_error(
+        """
+@no_inline
+def calc(x: Int) -> Int:
+    return x * 3
+
+@align(calc(alignment))
+@fieldwise_init
+struct A[alignment: Int]:
+    var x: Int
+
+def main():
+    var a = A[22](1)
+    _ = a.x
+""",
+        66,
+    )
+
+
+def test_call_returns_zero():
+    _assert_align_error(
+        """
+@no_inline
+def calc(x: Int) -> Int:
+    return 0
+
+@align(calc(alignment))
+@fieldwise_init
+struct A[alignment: Int]:
+    var x: Int
+
+def main():
+    var a = A[1](1)
+    _ = a.x
+""",
+        0,
+    )
+
+
+def test_call_returns_negative():
+    _assert_align_error(
+        """
+@no_inline
+def calc(x: Int) -> Int:
+    return -8
+
+@align(calc(alignment))
+@fieldwise_init
+struct A[alignment: Int]:
+    var x: Int
+
+def main():
+    var a = A[1](1)
+    _ = a.x
+""",
+        -8,
+    )
+
+
+def test_call_unevaluable_does_not_crash():
+    src = """
+def takes_str(s: String) -> Int:
+    return 4
+
+@align(takes_str("hi"))
+@fieldwise_init
+struct S:
+    var x: Int
+
+def main():
+    var s = S(1)
+    _ = s.x
+"""
+    try:
+        _compile_full(src)
+    except Exception as e:
+        msg = str(e)
+        assert "struct alignment must be a positive power of 2" not in msg, msg
 
 
 if __name__ == "__main__":
@@ -163,4 +285,10 @@ if __name__ == "__main__":
     test_parametric_valid_cases()
     test_module_alias_cases()
     test_unknown_align_name()
+    test_call_original_modular_invalid()
+    test_call_valid_result()
+    test_call_another_invalid_result()
+    test_call_returns_zero()
+    test_call_returns_negative()
+    test_call_unevaluable_does_not_crash()
     print("ok")

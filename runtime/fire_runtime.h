@@ -960,6 +960,13 @@ double  mojo_list_get_double(MojoList *l, int64_t i);
 double  mojo_double_from_bits(int64_t bits);
 int64_t mojo_double_to_bits(double v);
 
+/* A FLOAT (32-bit) travels the same way: its IEEE-754 bit pattern in the low
+ * 32 bits of the word, zero-extended. `mojo_float_from_bits` reads the low 32
+ * bits and ignores the rest. `x.to_bits()` / `x._to_bits_signed()` on a float
+ * and `bitcast[Float32]` lower through these. */
+float   mojo_float_from_bits(int64_t bits);
+int64_t mojo_float_to_bits(float v);
+
 int64_t mojo_list_len(MojoList *l);
 
 int mojo_list_contains_int(MojoList *l, int64_t v);
@@ -1568,6 +1575,8 @@ int     mojo_is_classobj(int64_t w);
 int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6);
 int     mojo_isinstance_rtclass(int64_t obj, int64_t cls);
 int     mojo_isinstance_type(int64_t w);
+int     mojo_is_classword(int64_t w);
+int     mojo_issubclass_rtclass(int64_t a, int64_t b);
 int64_t mojo_type_of(int64_t w);
 int64_t mojo_classobj_tag(int64_t w);
 void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);

@@ -16,7 +16,8 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from module_loader import STDLIB_PATH
 from build_config import find_gcc
-from build_stdlib_dylib import compile_module_to_c_cached, stdlib_codegen_key
+from build_stdlib_dylib import (compile_module_to_c_cached, last_degradations,
+                                stdlib_codegen_key)
 
 import cas
 
@@ -106,6 +107,14 @@ def discover_roots(base: Path) -> list:
 # FLOOR-GREEN-but-ladder-partial classification (the test_set precedent).
 
 EXPECTED_FAILURES = {
+    # std/simd.mojo was listed here on 2026-11-14 while its
+    # `SIMD[exp.dtype, self.length]` elaboration was refused ("advance without
+    # converging") and the degraded module still parsed, so the sweep reported
+    # it FAILED with that reason. The refusal was a false positive and is
+    # fixed (2026-11-14; only simple stepping operands count as a progressing
+    # bracket argument), so the entry went with it: the module is clean and
+    # `transpile_file` sees no degradation.
+
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(
     # <call>)`, and the `var t = create_task(<call>); ...; await t` shape
@@ -785,11 +794,23 @@ def _gcc_syntax_cached(c_src: str) -> tuple:
 def transpile_file(mojo_file):
     """Compile a .mojo file through cached codegen + cached GCC syntax check.
 
-    Returns (success, msg, cg_was_hit, gcc_was_hit).
+    Returns (success, msg, cg_was_hit, gcc_was_hit, refusals).
     cg_was_hit / gcc_was_hit are True/False indicating whether each stage was a CAS
     cache hit. Both True ⇒ the file was fully cached. Worker processes return these
     so the parent can aggregate cas.stats across processes (the same pattern as
     build_stdlib_dylib._compile_module_job).
+
+    `success` is False for a module whose generic-struct elaboration failed even
+    when its C parses: the produced C is not the program its source describes,
+    so counting it as passed would report a green run over a wrong artifact
+    (see the model's own "NOT the program its source describes" message).
+    `refusals` is that same per-call list (`build_stdlib_dylib.
+    last_degradations()`, read in this worker's own frame right after its one
+    compile): empty for a clean module, and empty on a CAS hit, which ran no
+    codegen at all — an L1 hit answers with the stored list, so a replay of a
+    degraded module is still a FAILED verdict. The parent aggregates the list
+    into the one console count line; the module name and reasons go to the
+    run's refusal log (see `main` and `--verbose`), not the console.
 
     `auto_gpu` defaults OFF here, which is `--no-gpu`. This sweep is a
     syntax/coverage instrument, not a GPU target, and automatic offload costs
@@ -804,6 +825,7 @@ def transpile_file(mojo_file):
         src = open(mojo_file).read()
         rel = os.path.relpath(mojo_file, STDLIB_PATH)
         name = os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
+        refusals = []
 
         # Pre-check codegen CAS key so we can report hit-or-miss (the
         # pre-check stat call is ~1 ms; the actual function reads/writes
@@ -815,11 +837,29 @@ def transpile_file(mojo_file):
         try:
             c_src = compile_module_to_c_cached(src, str(mojo_file), name,
                                                linkable=False)
+            refusals = last_degradations()
         except Exception as e:
-            return False, f"codegen: {str(e)[:120]}", False, False
+            return False, f"codegen: {str(e)[:120]}", False, False, []
+
+        # A module built through a failed generic-struct elaboration is NOT
+        # the program its source describes: the struct was lowered against its
+        # un-elaborated template, so its type parameters are `int64_t` where
+        # the source says otherwise. It still parses, which is exactly why
+        # this verdict has to be taken HERE rather than left to gcc: without
+        # it the file counts as PASSED while the compiler itself says the C is
+        # wrong. `last_degradations()` is the machine-readable fact, for THIS
+        # module (a cache hit answers for itself, never for its predecessor).
+        # The same list is carried back to the parent so the sweep can log the
+        # refusal's module name and reason and print its one count line.
+        if refusals:
+            return (False,
+                    f"elaboration: {len(refusals)} generic struct "
+                    f"elaboration(s) failed, so the C is not the program its "
+                    f"source describes: {refusals[0]}",
+                    cg_was_hit, False, refusals)
 
         if not c_src.strip():
-            return True, None, cg_was_hit, True  # empty file, no gcc step needed
+            return True, None, cg_was_hit, True, refusals  # empty file, no gcc step needed
 
         # Stage 2: GCC syntax check (CAS-cached)
         # Pre-check so we can report hit-or-miss independently of the
@@ -829,17 +869,17 @@ def transpile_file(mojo_file):
 
         rc, stderr = _gcc_syntax_cached(c_src)
         if rc is None:  # timeout
-            return False, "timeout in gcc (>10s)", cg_was_hit, False
+            return False, "timeout in gcc (>10s)", cg_was_hit, False, refusals
 
         if rc != 0:
             first_err = next((l for l in stderr.splitlines()
                               if ': error:' in l), stderr.splitlines()[0] if stderr else '')
-            return False, f"gcc: {first_err[:120]}", cg_was_hit, gcc_was_hit
+            return False, f"gcc: {first_err[:120]}", cg_was_hit, gcc_was_hit, refusals
 
-        return True, None, cg_was_hit, gcc_was_hit
+        return True, None, cg_was_hit, gcc_was_hit, refusals
 
     except Exception as e:
-        return False, f"{type(e).__name__}: {str(e)[:100]}", False, False
+        return False, f"{type(e).__name__}: {str(e)[:100]}", False, False, []
 
 def main():
     parser = argparse.ArgumentParser(description="Attempt to transpile Mojo stdlib")
@@ -851,6 +891,11 @@ def main():
                              'instance + gcc subprocess). Default: os.cpu_count(). Use -j1 '
                              'for sequential (deterministic ordering, easier to read failures '
                              'as they happen).')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Print each generic-struct elaboration refusal to the console '
+                             'as it happens. Without it the refusals are written to '
+                             'build/stdlib-refusals.log and the console carries only the '
+                             'one-line count, so a clean-looking run stays clean-looking.')
     args = parser.parse_args()
 
     # `--roots` overrides discovery (an explicit ask for a subset); with no
@@ -906,6 +951,12 @@ def main():
     # docstring on why worker-process cas.stats don't propagate on their own).
     cg_hits = 0
     gcc_hits = 0
+    # Generic-struct elaboration refusals per module, as (rel_path, [reason]).
+    # The refusal is a load-bearing call-site fallback (the fallback stays), but
+    # its DETAIL is never console text: it goes to build/stdlib-refusals.log
+    # and into last_degradations() for the count line; --verbose also echoes
+    # it to the console. bug:CODEGEN_stdlib_run_prints_elaboration_refusals
+    refusals_by_module = []
 
     def _results():
         """Yield (rel_path, transpile_file result) — parallel or serial."""
@@ -919,10 +970,18 @@ def main():
             for rel_path, abs_path in mojo_files:
                 yield rel_path, transpile_file(abs_path)
 
-    for rel_path, (success, error, cg_hit, gcc_hit) in _results():
+    for rel_path, (success, error, cg_hit, gcc_hit, refusals) in _results():
         cg_hits += cg_hit
         gcc_hits += gcc_hit
         done += 1
+        if refusals:
+            if args.verbose:
+                print(f"  {rel_path}: {len(refusals)} generic struct "
+                      f"elaboration(s) failed, so this module's C is NOT the "
+                      f"program its source describes and it is NOT being cached:")
+                for _r in refusals:
+                    print(f"      {_r}")
+            refusals_by_module.append((rel_path, refusals))
         if success:
             passed.append(rel_path)
         else:
@@ -971,6 +1030,34 @@ def main():
         print(f"Codegen  CAS: {cg_hits}/{done} hits  ({100 * cg_hits // done}%)")
         print(f"GCC      CAS: {gcc_hits}/{done} hits  ({100 * gcc_hits // done}%)")
     print("="*70)
+
+    # Refusal OUTPUT contract (bug:CODEGEN_stdlib_run_prints_elaboration_
+    # refusals): the console carries one count line, never the refusal text;
+    # the module name and reason go to this run's log file. `--verbose` adds
+    # the detail back to the console, per module, as it happens. A refusal is
+    # still a fact about the module (its `.ci` is not published), so the
+    # count line is printed even at zero — a silent console must not read as
+    # a silent refusal.
+    _refusal_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'build', 'stdlib-refusals.log')
+    try:
+        os.makedirs(os.path.dirname(_refusal_log_path), exist_ok=True)
+        with open(_refusal_log_path, 'w') as _rl:
+            _rl.write(f"{len(refusals_by_module)} module(s) with refused "
+                      f"generic-struct elaboration(s)\n")
+            for _rp, _rs in refusals_by_module:
+                _rl.write(f"{_rp}: {len(_rs)} generic struct elaboration(s) "
+                          f"failed, so this module's C is NOT the program its "
+                          f"source describes and it is NOT being cached:\n")
+                for _r in _rs:
+                    _rl.write(f"    {_r}\n")
+    except OSError as _rl_err:
+        print(f"WARNING: could not write {_refusal_log_path}: {_rl_err}",
+              file=sys.stderr)
+    print(f"Refusals: {sum(len(_rs) for _rp, _rs in refusals_by_module)} "
+          f"generic struct elaboration(s) failed in "
+          f"{len(refusals_by_module)} module(s)"
+          + (f" — detail in {_refusal_log_path}" if refusals_by_module else ""))
 
     if expected_failed:
         print("\nExpected (documented) failures:")
