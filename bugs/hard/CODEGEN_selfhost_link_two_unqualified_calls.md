@@ -1,3 +1,4 @@
+SPLIT: CODEGEN_selfhost_link_two_unqualified_calls-part1
 # CODEGEN: two undefined symbols left in the self-host link
 
 **Found:** 2026-11-13, `fire.py build fire.py` after the compile errors were

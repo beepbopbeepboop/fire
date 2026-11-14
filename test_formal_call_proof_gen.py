@@ -62,6 +62,7 @@ catching without a 27MB library build.
     python3 test_formal_call_proof_gen.py [-v]
 """
 import ast
+import glob
 import hashlib
 import os
 import re
@@ -1672,18 +1673,30 @@ the text; it does not find out whether any word can arrive there.  So:
                     f"on this arm, would then be wrong")
 
     def test_the_generator_keeps_its_own_spelling_and_why(self):
-        """`_step_rhs` says `s.sp`/`arm64_reg` where the library says the
-        helper, and that is deliberate.
+        """The generator's CMP right-hand sides are the model's, arm for arm.
 
-        The step-result lemma is closed by `exact`-ing the library's lemma
-        INSTANTIATED AT THE CONCRETE WORD, so the two right-hand sides only have
-        to be defeq — and they are, because `arm64_reg_or_sp 3 s` and
-        `s.sp`/`arm64_reg 3 s` both reduce on a literal index.  Emitting the
-        helper from the generator instead would make that exact, but the
-        generated text is what every downstream `simp only [..., arm64_reg,
-        arm64_set_reg]` goal consumes, and those lists do not carry the helper:
-        the change would put `arm64_reg_or_sp 3 s` in every value-flow goal and
-        break them.  Recorded here because the asymmetry looks like a bug.
+        Two CMP-register forms reach this generator and they read `Rn = 31`
+        differently, because the architecture does:
+
+        * the SHIFTED-register CMP (`0xeb1003ff` = `SUBS XZR, X31, X16`,
+          branch 6) has no SP encoding, so `Rn = 31` is the ZERO register and
+          the arm spells `arm64_reg 31 s`, exactly as the library's
+          `0xeb000000` arm does.  The branch CANNOT fire for a word whose
+          `Rn` is SP: clang assembles `cmp sp, x16` as `0xeb3063ff`, the
+          extended-register form, which is the next case.
+        * the EXTENDED-register CMP (`0xeb3063ff` = `cmp sp, x16`, branch 88)
+          DOES have an SP encoding, so the arm reads `Rn` through
+          `arm64_reg_or_sp 31 s`, exactly as the library's `0xeb206000` arm
+          does.  Spell it `arm64_reg 31 s` and the step-RESULT lemma states
+          `arm64_subs_flags 0 x16`, a proof about a different instruction that
+          typechecks.
+
+        The shift is spelled CONCRETELY on both arms (`<<< UInt64.ofNat 0` for
+        this word) while the library reads it through `arm64_shifted_reg`;
+        `arm64_shifted_reg_zero` is the library fact that makes the two reads
+        defeq on a zero shift field, and the step-result lemma is closed by
+        `exact`-ing (or rewriting with) the library lemma at this word.
+        `test_regression_shifted_register_arm.py` pins the non-zero shift.
 
         **The pin is the WHOLE right-hand side, `arm64_set_reg rd` included, and
         that is a merge of two facts rather than one.**  The library's CMP arm
@@ -1695,17 +1708,46 @@ the text; it does not find out whether any word can arrive there.  So:
         the flags-only `some { s with nzcv := … }` — a `_step_rhs` that stops
         writing `rd` models every `subs xd, xn, xm` in an image as "set the
         flags, change no register", and every theorem over it still typechecks.
+
+        **And the generated lemma is checked, not just the right-hand side**:
+        Lean is the only reader that rejects a step-RESULT lemma stating a step
+        `arm64_step` does not compute, so a Python-only pin would pass while the
+        proof file failed to typecheck.
         """
         import formal.arm64_proof_gen as G
-        self.assertEqual(G._step_rhs(0xeb1003ff, 6),
-                         "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
-                         "arm64_reg 16 s)) with nzcv := arm64_subs_flags "
-                         "(arm64_reg 31 s) (arm64_reg 16 s) }",
-                         "`_step_rhs`'s CMP-register arm changed shape; if it "
-                         "now emits `arm64_reg_or_sp`, the `simp only` lists in "
-                         "this generator need the helper in them too — and if it "
-                         "stops writing `arm64_set_reg rd`, it has reverted to "
-                         "modelling `subs xd, xn, xm` as a flag-only CMP")
+        shifted = G._step_rhs(0xeb1003ff, 6)
+        self.assertEqual(
+            shifted,
+            "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
+            "(arm64_reg 16 s <<< UInt64.ofNat 0))) with nzcv := "
+            "arm64_subs_flags (arm64_reg 31 s) "
+            "(arm64_reg 16 s <<< UInt64.ofNat 0) }",
+            "`_step_rhs`'s shifted-register CMP arm changed shape; if it now "
+            "emits `arm64_reg_or_sp`, it has copied the extended-register "
+            "arm's SP read into a class where register 31 is the ZERO "
+            "register — and if it stops writing `arm64_set_reg rd`, it has "
+            "reverted to modelling `subs xd, xn, xm` as a flag-only CMP")
+        self.assertNotIn("arm64_reg_or_sp", shifted,
+                         "the shifted-register CMP has no SP encoding")
+
+        sp = G._step_rhs(0xeb3063ff, 88)
+        self.assertEqual(
+            sp,
+            "some { (arm64_set_reg 31 s ((arm64_reg_or_sp 31 s) - "
+            "((arm64_reg 16 s) <<< UInt64.ofNat 0))) with nzcv := "
+            "arm64_subs_flags (arm64_reg_or_sp 31 s) "
+            "((arm64_reg 16 s) <<< UInt64.ofNat 0) }",
+            "`_step_rhs`'s extended-register CMP (SP) arm changed shape; it "
+            "must read Rn through `arm64_reg_or_sp`, or the step-RESULT "
+            "lemma for `cmp sp, x16` states a comparison against zero")
+        self.assertNotIn("arm64_reg 31 s", sp,
+                         "`cmp sp, x16` must not read Rn as the zero register")
+
+        code = struct.pack("<I", 0xeb3063ff)
+        lemma = G._gen_step_result_lemmas("syn", code, 0x1000)
+        self.assertIn(sp, lemma,
+                      "the generated step-RESULT lemma does not state the "
+                      "right-hand side `_step_rhs` says `arm64_step` computes")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
         # The SHIFTED-register `imm6` field, on BOTH the generator and the
@@ -1718,12 +1760,14 @@ the text; it does not find out whether any word can arrive there.  So:
                       "`_step_rhs`'s ADD-register arm dropped the shift again")
         self.assertIn("<<< UInt64.ofNat 4", G._step_rhs(0xcb021027, 3),
                       "`_step_rhs`'s SUB-register arm dropped the shift again")
-        self.assertEqual(
-            self.lib.count("arm64_shifted_reg insn s xm"), 2,
-            "the model's ADD and SUB (shifted register) arms must BOTH read "
-            "`imm6` through `arm64_shifted_reg insn s xm`; a shift read in one "
-            "arm and dropped in the other is the duplicate-decoder defect this "
-            "replaces")
+        for key in ("= 0x8b000000 then", "= 0xcb000000 then"):
+            branch = _arm64_step_branch(self.lib, key)
+            self.assertIsNotNone(branch, f"the model lost its {key!r} arm")
+            self.assertIn(
+                "arm64_shifted_reg insn s xm", branch,
+                f"the model's {key!r} arm dropped `imm6`; a shift read in one "
+                f"arm and dropped in the other is the duplicate-decoder defect "
+                f"this replaces")
 
     def test_no_arm_of_the_generic_rhs_builder_raises(self):
         """EVERY index the decoder can produce builds a right-hand side.
@@ -7557,6 +7601,164 @@ class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
             self._cert(words, pcs, svc_assumed={self.BASE: "svc_write_assumed"}),
             "an assumption admitted a write svc whose result x0 is read "
             "before it is rewritten")
+
+
+def _svc_census(words, base, code):
+    """One record per `svc` in `words`: its static x16 and, for a non-exit
+    `svc`, whether the fall-through rewrites x0 before anything reads it.
+
+    The readers are the proof generator's OWN (`_is_svc`, `_cfg_blocks`,
+    `_svc_static_x16`, `_x0_reassigned_after_write`), called rather than
+    copied: a private encoding table here would measure a corpus with the
+    wrong instrument and could agree with a generator that had drifted.  The
+    range is the executable region (`_exec_code_limit`), the same one the
+    generator's own scans use, so an interned string whose bytes decode as an
+    `svc` is not counted as an instruction.
+
+    A record is `{"pc": int, "x16": int | None, "x0_reassigned": bool | None}`,
+    where `x16 is None` means dynamic and `x0_reassigned` is None only for a
+    static exit (x16 == 1), which halts and so has no fall-through.
+    """
+    import formal.arm64_proof_gen as G
+    end = base + G._exec_code_limit(code)
+    blocks = G._cfg_blocks(words, base, end)
+    leaders = frozenset(b["start"] for b in blocks)
+    records = []
+    for pc in sorted(p for p in words if p < end and G._is_svc(words[p])):
+        x16 = G._svc_static_x16(words, pc, leaders)
+        records.append({
+            "pc": pc,
+            "x16": x16,
+            "x0_reassigned": (
+                None if x16 == 1
+                else G._x0_reassigned_after_write(words, pc)),
+        })
+    return records
+
+
+class TestSvcProvenanceCensus(unittest.TestCase):
+    """Every emitted `svc`'s x16, and every write's x0 use, measured.
+
+    Part 1 of `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` is "measure
+    before assuming": the proof walk now distinguishes an exit `svc` (x16 = 1,
+    a halt) from a write `svc` (x16 = 4, a fall-through whose x0 return value
+    the model does not model), and that distinction is only as good as the
+    emitter's own discipline.  Nothing measured that discipline, so a later
+    emitter change could turn a static site dynamic, or put a read of x0
+    between a write and its rewrite, without any test noticing.
+
+    This class is that measurement: a census over every arm64 image in
+    `formal/examples`, using the generator's readers.  The corpus is clean
+    today (439 svc: 220 exit, 219 write, 0 dynamic, 0 unrewritten write), and
+    the two assertions below are what makes a future violation a red test
+    naming the program, pc and word rather than a fact a reader must infer.
+
+    Two hand-built images prove the census can FAIL: one with an `svc` at the
+    entry and no preceding `movz x16` (dynamic), and one with a write `svc`
+    followed by `add x1, x0, x2` before any x0 rewrite.  A third image, with
+    the write followed by `movz x0, #0`, is the control that says the
+    unrewritten finding is about the read and not an instrument that always
+    answers "unrewritten".
+    """
+
+    BASE = 0x10000000
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+    MOVZ_X0_0 = 0xd2800000          # `movz x0, #0`
+    ADD_X1_X0_X2 = 0x8b020001      # `add x1, x0, x2`
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    def _census(self, ws):
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        words = {self.BASE + 4 * i: w for i, w in enumerate(ws)}
+        return _svc_census(words, self.BASE, code)
+
+    def test_the_corpus_has_no_dynamic_svc_and_no_unrewritten_write_x0(self):
+        import formal.build as fb
+        corpus = os.path.join(HERE, "formal", "examples")
+        sources = sorted(glob.glob(os.path.join(corpus, "*.mojo")))
+        self.assertTrue(sources, f"no examples under {corpus}")
+        total = exits = writes = dynamics = unrewritten = 0
+        bad = []
+        with tempfile.TemporaryDirectory(prefix="svc-census-") as tmp:
+            for src in sources:
+                name = os.path.splitext(os.path.basename(src))[0]
+                out = os.path.join(tmp, name + ".aout")
+                try:
+                    r = fb.compile_formal(src, arch="arm64", output=out,
+                                          prove=False, check=False)
+                except Exception as e:      # noqa: BLE001 -- report, do not skip
+                    self.fail(
+                        f"{name}: the arm64 image build refused, so its svcs "
+                        f"cannot be censused: {type(e).__name__}: {e}")
+                code = r["code"]
+                words = {r["info"]["base_addr"] + i:
+                         int.from_bytes(code[i:i + 4], "little")
+                         for i in range(0, len(code) - len(code) % 4, 4)}
+                records = _svc_census(words, r["info"]["base_addr"], code)
+                total += len(records)
+                for rec in records:
+                    word = words[rec["pc"]]
+                    if rec["x16"] is None:
+                        dynamics += 1
+                        bad.append(
+                            f"{name}: dynamic x16 at pc {rec['pc']:#x} "
+                            f"word {word:#010x}: no `movz x16` immediately "
+                            f"before it, or the svc is a block entry")
+                    elif rec["x16"] == 1:
+                        exits += 1
+                    else:
+                        writes += 1
+                        if not rec["x0_reassigned"]:
+                            unrewritten += 1
+                            bad.append(
+                                f"{name}: write svc (x16={rec['x16']}) at pc "
+                                f"{rec['pc']:#x} word {word:#010x}: the "
+                                f"fall-through reads x0 before rewriting the "
+                                f"byte count the model does not model")
+        print(f"svc census over {len(sources)} examples: {total} svc, "
+              f"{exits} exit, {writes} write, {dynamics} dynamic, "
+              f"{unrewritten} write-with-x0-read")
+        self.assertGreater(total, 0,
+                           "the census scanned no svc at all, so its two "
+                           "assertions are about nothing")
+        self.assertEqual(
+            bad, [],
+            "the emitted arm64 corpus violates the svc discipline the proof "
+            "walk relies on:\n  " + "\n  ".join(bad))
+
+    def test_a_dynamic_fixture_is_classified_dynamic(self):
+        # svc at the entry with no `movz x16` before it: x16 is unknown, and
+        # the entry is a block leader anyway, so no path fixes it.
+        records = self._census([self.SVC, self.MOVZ_X0_0, self.RET])
+        self.assertEqual(len(records), 1, records)
+        self.assertIsNone(
+            records[0]["x16"],
+            "an svc at the entry with no preceding movz was not classified "
+            "dynamic, so the census cannot see the case it exists to find")
+
+    def test_a_write_fixture_whose_x0_is_read_first_is_unrewritten(self):
+        records = self._census([self._movz_x16(4), self.SVC,
+                                self.ADD_X1_X0_X2, self.RET])
+        self.assertEqual(len(records), 1, records)
+        self.assertEqual(records[0]["x16"], 4, records)
+        self.assertFalse(
+            records[0]["x0_reassigned"],
+            "a write svc followed by `add x1, x0, x2` was reported as "
+            "rewriting x0 first, so the unrewritten-write finding is blind")
+
+    def test_a_write_fixture_whose_x0_is_rewritten_is_the_control(self):
+        records = self._census([self._movz_x16(4), self.SVC,
+                                self.MOVZ_X0_0, self.RET])
+        self.assertEqual(len(records), 1, records)
+        self.assertEqual(records[0]["x16"], 4, records)
+        self.assertTrue(
+            records[0]["x0_reassigned"],
+            "a write svc followed by `movz x0, #0` was reported as "
+            "unrewritten, so the failure above is not about the read")
 
 
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
