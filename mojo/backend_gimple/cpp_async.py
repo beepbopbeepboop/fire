@@ -213,13 +213,17 @@ def _cpp_with_guard_type_name(gen, expr) -> str | None:
 
 def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
     """True when `iterable` is a call this compile can potentially
-    delegate to via `_cpp_for_generator_delegate` — either a bare
-    `name(...)` naming a free-function generator, or `self.method(...)`
+    delegate to via `_cpp_for_generator_delegate` — a bare
+    `name(...)` naming a free-function generator, `self.method(...)`
     naming a generator METHOD on the SAME struct this body belongs to
     (`self._cpp_gen_self_struct`, set by `_gen_cpp_generator_unit`
     while compiling a generator method's body — None for a free
     function, so the method-call branch below naturally never matches
-    there). Uses `self._all_generator_names` (every generator name
+    there), or `module.gen(...)` naming a compiled generator the
+    whole-program registry resolves (`_cpp_resolve_generator_call_api`;
+    an unresolvable module-qualified callee is NOT delegatable, so it
+    keeps the generic emitter's honest refusal). Uses
+    `self._all_generator_names` (every generator name
     anywhere in the module, computed once up front — see that
     attribute's own docstring) rather than `self._generator_api`/
     `self._generator_method_api` directly, so a callee that's a real
@@ -237,14 +241,25 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
                 or (name in gen._generator_api))
     if isinstance(iterable.func, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
-        return bool(_self_struct
-                    and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
-                    and iterable.func.obj.name in ('self', 'cls')
-                    and (iterable.func.member in gen._all_generator_names
-                         # a method the stack-switch path already compiled
-                         # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
-                         # entry points) is driven exactly like a coroutine one
-                         or (_self_struct, iterable.func.member) in gen._generator_method_api))
+        if (_self_struct
+                and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
+                and iterable.func.obj.name in ('self', 'cls')
+                and (iterable.func.member in gen._all_generator_names
+                     # a method the stack-switch path already compiled
+                     # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
+                     # entry points) is driven exactly like a coroutine one
+                     or (_self_struct, iterable.func.member) in gen._generator_method_api)):
+            return True
+        # A MODULE-QUALIFIED call to a foreign module's compiled generator:
+        # `<module>.<gen>(...)` (c_common/tables.py's parse_table doing
+        # `for line, filename in strutil.parse_entries(entries,
+        # ignoresep=sep):`). Delegatable only when the whole-program
+        # registry actually resolves the callee through the SAME resolver
+        # the expression sites use (`_cpp_resolve_generator_call_api`) —
+        # an unresolvable `<module>.<name>` must keep falling through to
+        # the generic emitter's honest refusal rather than be guessed at.
+        if gcc_._cpp_resolve_generator_call_api(gen, iterable.func) is not None:
+            return True
     return False
 
 
