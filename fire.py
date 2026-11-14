@@ -794,6 +794,24 @@ def _format_error_message(e):
     return msg
 
 
+def static_gate(src_code, filename, werror=False):
+    """Declaration-level diagnostics the modular compiler reports before
+    compiling anything (see myinterpreter.static_module_diagnostics): print them
+    and return True when any is an error, so `build`/the bare compile-and-run
+    path stop exactly as `run` does. A source that does not parse is left to
+    the compiler's own error."""
+    try:
+        from fire_compiler import py_tokenize, Parser
+        from myinterpreter import static_module_diagnostics
+        stmts = Parser(py_tokenize(src_code)).with_filename(filename or "<stdin>").parse_module()
+        text, errors = static_module_diagnostics(stmts, filename, src_code, werror)
+    except Exception:
+        return False
+    if text is not None:
+        print(text, file=sys.stderr)
+    return bool(errors)
+
+
 def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format='text',
                           werror=False):
     """Runs the interpretation in a worker thread with a large native stack.
@@ -1683,6 +1701,8 @@ def main():
                 arch=backend, check_contracts=check_contracts,
                 loop_invariants=loop_invariants, opt=opt))
 
+        if static_gate(src, input_file, werror):
+            sys.exit(1)
         try:
             import driver
             rc = driver.compile_program(
@@ -1848,6 +1868,8 @@ def main():
                 prove, run_it=True, arch=backend,
                 check_contracts=check_contracts,
                 loop_invariants=loop_invariants, opt=opt))
+        if static_gate(src, input_file, werror):
+            sys.exit(1)
         try:
             import driver
             rc = driver.compile_program(
