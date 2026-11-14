@@ -779,10 +779,17 @@ def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format=
         try:
             sys.argv = argv if argv is not None else [filename or "<stdin>"]
             from fire_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
-            from myinterpreter import Interpreter, mojo_diagnostic
+            from myinterpreter import Interpreter, mojo_diagnostic, static_module_diagnostics
             tokens = py_tokenize(src_code)
             stmts = Parser(tokens).with_filename(filename or "<stdin>").parse_module()
             interpreter = Interpreter(filename=filename, argv=argv)
+            # Declaration-level errors the modular compiler reports before
+            # anything runs (all of them, in source order).
+            static_diag = static_module_diagnostics(stmts, filename, src_code)
+            if static_diag is not None:
+                print(static_diag, file=sys.stderr)
+                exit_code.append(1)
+                return
             for stmt in stmts:
                 interpreter.execute(stmt)
 

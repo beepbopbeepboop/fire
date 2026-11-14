@@ -180,3 +180,23 @@ clauses on struct declarations and `comptime _ = pkg.constraint_fn[0, 1]`
 (group G); constraint expressions beyond identifiers, int literals and binary
 operators; the compiled path's own (already existing) ConformanceError output
 is a different format and is not unified with this one. Groups C-F, H-L remain.
+
+### 2026-11-14 (later still): group J landed for same-module traits; static pass exists
+
+`static_module_diagnostics` (`myinterpreter.py`, called from `fire.py`'s run
+path before execution) is the first STATIC diagnostic pass: it reports, in
+source order and all of them, a struct that names a trait of the same module as
+a base but does not implement a required function (body `...`):
+`'S' does not implement all requirements for 'T'`, a `required function 'f' is
+not implemented` note per missing function (declaration order), then `trait 'T'
+declared here`; one error per trait in the base closure, bases first. Byte-
+identical to `tools/mojo build` on three shapes (inherited requirement, direct,
+two missing in one trait, a default method in the trait is not required).
+Test: `test_trait_requirements_diagnostic.py`.
+
+Not covered: traits imported from another module (the test's own `diags_package`
+case), `where`-conditional trait conformances, generic bases, JSON output.
+Next groups on the same pass: H (parameter name conflict), I (conflicting
+default implementations), L (comptime members), K (candidate selection).
+Separate gap seen while testing, not this bug: the interpreter does not give a
+struct the DEFAULT methods of its trait (`S().extra()` raises AttributeError).

@@ -915,6 +915,79 @@ def check_where_clause(interp, func, node, scope):
         raise err
 
 
+def _is_required_method(m):
+    """A trait method with no default implementation: its body is just `...`
+    (docstrings aside)."""
+    seen_ellipsis = False
+    for st in m.body:
+        v = getattr(st, 'value', None)
+        if isinstance(v, N.EllipsisLiteral):
+            seen_ellipsis = True
+        elif not (isinstance(v, N.StringLiteral)):
+            return False
+    return seen_ellipsis
+
+
+def _trait_closure(name, traits, out, seen):
+    """`name`'s trait and its bases, bases first, each once, restricted to the
+    traits this module defines."""
+    base = name.split('[')[0].strip()
+    if base in seen or base not in traits:
+        return
+    seen.add(base)
+    for b in traits[base].bases:
+        _trait_closure(b, traits, out, seen)
+    out.append(base)
+
+
+def static_module_diagnostics(stmts, filename, source):
+    """Diagnostics found by looking at the module's declarations alone, before
+    anything runs -- the modular compiler reports these statically and reports
+    every one, in source order. Text form, or None when there are none.
+
+    Implemented: a struct that names a trait (declared in this same module) as
+    a base but does not implement a method the trait requires (`'S' does not
+    implement all requirements for 'T'`, one error per trait that has a
+    missing requirement, one note per missing function in declaration order,
+    then the trait note) -- measured against `tools/mojo build`."""
+    traits = {}
+    for st in stmts:
+        if isinstance(st, N.TraitDef):
+            traits[st.name] = st
+    records = []
+    for st in stmts:
+        if not isinstance(st, N.StructDef):
+            continue
+        order = []
+        seen = set()
+        for b in st.bases:
+            _trait_closure(b, traits, order, seen)
+        have = {m.name for m in st.methods}
+        for tn in order:
+            for m in traits[tn].methods:
+                if not _is_required_method(m):
+                    have.add(m.name)
+        for tn in order:
+            tr = traits[tn]
+            missing = [m for m in tr.methods
+                       if _is_required_method(m) and m.name not in have]
+            if not missing:
+                continue
+            msg = f"'{st.name}' does not implement all requirements for '{tn}'"
+            notes = [{'file': filename, 'line': m.line, 'name': m.name,
+                      'message': f"required function '{m.name}' is not implemented"}
+                     for m in missing]
+            notes.append({'file': filename, 'line': tr.line, 'name': tn,
+                          'message': f"trait '{tn}' declared here"})
+            records.append((st.line, {'file': filename, 'line': st.line, 'caret': 0,
+                                      'tilde_from': 0, 'name': st.name,
+                                      'message': msg, 'notes': notes}))
+    if not records:
+        return None
+    records.sort(key=lambda r: r[0])
+    return '\n'.join(_render_record_text(r[1], filename, source) for r in records)
+
+
 def _callee_start(func):
     """(line, col) of the leftmost token of a call's callee expression:
     `a.b.f` starts at `a`, whereas a MemberExpr's own col is its last dot."""
@@ -1002,13 +1075,13 @@ def _render_record_text(rec, filename, source):
     (`~` from tilde_from up to the caret, `^` at the caret column)."""
     out = []
     items = [('error', rec['file'], rec['line'], rec['caret'],
-              rec['tilde_from'], rec['message'], None)]
+              rec['tilde_from'], rec['message'], rec.get('name'))]
     for n in rec['notes']:
         items.append(('note', n['file'], n['line'], n.get('col', 0), 0, n['message'], n['name']))
     for kind, f, line, caret, tilde_from, message, name in items:
         text = _record_source_line(f, line, filename, source)
         if name is not None and text is not None:
-            m = re.search(r'\b(?:def|fn)\s+(' + re.escape(name) + r')\b', text)
+            m = re.search(r'\b(?:def|fn|struct|trait)\s+(' + re.escape(name) + r')\b', text)
             caret = m.start(1) + 1 if m else 0
         if caret < 1:
             caret = 1
