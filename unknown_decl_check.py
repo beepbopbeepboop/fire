@@ -68,9 +68,16 @@ _KEYWORDS = frozenset({
 })
 
 # Names the runtime supplies in every scope without a declaration.
+# Compile-time intrinsics the compiler lowers by name, with no declaration in
+# any source file. `constrained` is handled in myinterpreter.py and in
+# mojo/backend_gimple/emit_calls.py (the `name == 'constrained'` sites).
+# `conforms_to` is NOT listed here: it is
+# in GimpleGen._KNOWN_SIGS, read by _compiler_runtime_names().
+_COMPILE_TIME_INTRINSICS = frozenset({'constrained'})
+
 _RUNTIME_NAMES = frozenset({
     'self', 'Self', '__file__', '__name__', '__init__', '__class__',
-}) | _KEYWORDS | frozenset(getattr(N, '_BUILTIN_NAMES', ()))
+}) | _KEYWORDS | _COMPILE_TIME_INTRINSICS | frozenset(getattr(N, '_BUILTIN_NAMES', ()))
 
 _STDLIB_DECL_RE = re.compile(
     r'^(?:def|fn|struct|trait|class|alias|comptime|var)\s+([A-Za-z_]\w*)'
@@ -106,9 +113,22 @@ def _stdlib_declared_names(stdlib_root: str) -> frozenset:
     return frozenset(names)
 
 
+def _compiler_runtime_names() -> frozenset:
+    """Every function the compiler provides to a program at run time.
+
+    `GimpleGen._KNOWN_SIGS` is the one table of those (it includes the
+    compile-time builtins such as `conforms_to`, which the compiler lowers
+    specially and no source file declares). It is read lazily because
+    gimple_codegen imports this module at load time.
+    """
+    import gimple_codegen
+    return frozenset(gimple_codegen.GimpleGen._KNOWN_SIGS)
+
+
 def _known_names() -> frozenset:
     import module_loader
     return (frozenset(dir(_py_builtins)) | _RUNTIME_NAMES
+            | _compiler_runtime_names()
             | _stdlib_declared_names(module_loader.STDLIB_PATH))
 
 

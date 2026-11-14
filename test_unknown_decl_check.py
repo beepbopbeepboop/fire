@@ -130,6 +130,17 @@ def test_wildcard_import_disables_the_check():
     assert _reads(src) == [], _reads(src)
 
 
+def test_compiler_builtins_are_not_reported():
+    # `conforms_to` is lowered by the compiler and declared by no source
+    # file; it must be a known name, or every comptime assert that uses it
+    # becomes a build error (regression seen when this check was merged).
+    src = (
+        "def f[T: AnyType]():\n"
+        "    comptime assert conforms_to(T, Copyable), \"no\"\n"
+    )
+    assert _reads(src) == [], _reads(src)
+
+
 if __name__ == "__main__":
     test_unknown_name_reports_modular_layout()
     test_every_name_is_reported_in_source_order()
