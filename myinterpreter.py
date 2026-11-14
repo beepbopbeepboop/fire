@@ -1781,7 +1781,7 @@ def static_module_diagnostics(stmts, filename, source, werror=False):
                 have_t = st.comptime_member_types.get(mn)
                 if mn not in st.comptime_aliases and have_t is None:
                     msg = f"required member '{mn}' is not specified"
-                elif have_t is not None and have_t != mt:
+                elif have_t and have_t != mt:   # an unannotated alias has no type to compare
                     msg = (f"comptime member '{mn}' type '{have_t}' does not conform "
                            f"to trait's required type '{mt}'")
                 else:
