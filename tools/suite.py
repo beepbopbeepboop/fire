@@ -4499,6 +4499,15 @@ test('mojoc-synthetic-signature-default',
      extra=['test_mojoc_synthetic_signature_default.py'],
      desc='a synthetic signature renders an implicit conversion default '
           'without materializing it')
+# Landed on master after this branch's last merge, with no `test(...)` entry,
+# which put `suite-self-test`'s estate row back to red (bug:SUITE_self_test_red).
+# In-process (writes and reads a `.mojoc`, runs the import-time checker); no
+# native build, so it belongs in the everyday loop.
+test('mojoc-implicit-default-conformance',
+     [PY, 'test_mojoc_implicit_default_conformance.py'], cache=True, mem='tiny',
+     extra=['test_mojoc_implicit_default_conformance.py'],
+     desc='a `.mojoc` implicit-default bracket parameter reports the full '
+          'three-line conformance diagnostic from the stored signature')
 
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
@@ -5013,6 +5022,7 @@ BUCKETS['check'].append('function-body-alias-class-import')
 BUCKETS['check'].append('gpu-offload-validation-part3')
 BUCKETS['check'].append('mojoc-import-conformance')
 BUCKETS['check'].append('mojoc-synthetic-signature-default')
+BUCKETS['check'].append('mojoc-implicit-default-conformance')
 BUCKETS['check'].append('trait-comptime-member-conformance-diagnostic')
 
 # A name that is both a bucket and a test would make `suite.py <name>` mean

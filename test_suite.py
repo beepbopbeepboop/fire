@@ -1315,7 +1315,12 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # three are the overflow-trapping hole-count rows in
                      # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
-                     'gimplerunner': 20,
+     # `gimplerunner` at 1 (was 20): its 2026-11-13 re-run on master reports
+     # `626 passed, 1 failed` of 627, and the registry marker states that 1.
+     # The census had gone stale against the marker, which is the drift this
+     # check exists to catch (bug:SUITE_self_test_red). The remaining failure
+     # is `c_accessor_helpers_emitted_once_across_modules`.
+                     'gimplerunner': 1,
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
      # deleted with the work and the marker was retired with it (2026-11-13).
@@ -1326,8 +1331,11 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'per-item verdicts rather than against a summary line, see '
           f'`observed_fanout_failures`; the registry no longer carries one '
           f'(the stage2 dumps stopped failing the way the marker described). '
-          f'`gimplerunner` is here at 20 (bugs/hard/SUITE_gimplerunner_21_failing.md: '
-          f'its run prints `Results: 592 passed, 20 failed`). `formal-x86-endtoend` is the only '
+          f'`gimplerunner` is here at 1, the count its registry marker and '
+          f'its 2026-11-13 re-run both state (`626 passed, 1 failed` of 627; '
+          f'the one failure is '
+          f'`c_accessor_helpers_emitted_once_across_modules`). '
+          f'`formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
             f'interpreted one, and the count is checkable at all only because '
             f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
@@ -5274,9 +5282,10 @@ _SUITE_SELF_TEST_REGISTRATIONS = (
     # (spec name, test file) — the test files the estate row named after they
     # landed on master with no spec (bug:SUITE_self_test_red). The first five
     # were there when this branch started; the next four arrived on master
-    # during the merge and put the job back to red. Each is a cheap in-process
-    # pin (measured: 0.0-0.1 GB peak, sub-second to ~12 s, no build), so they
-    # belong in `check`, which `gate` expands.
+    # during the merge, and `test_mojoc_implicit_default_conformance.py` after
+    # its last one, each putting the job back to red. Each is a cheap
+    # in-process pin (measured: 0.0-0.1 GB peak, sub-second to ~12 s, no
+    # build), so they belong in `check`, which `gate` expands.
     ('binding-evidence', 'test_binding_evidence.py'),
     ('interp-list-ctor', 'test_interp_list_ctor.py'),
     ('module-globals-compiled', 'test_module_globals_compiled.py'),
@@ -5288,6 +5297,8 @@ _SUITE_SELF_TEST_REGISTRATIONS = (
     ('mojoc-import-conformance', 'test_mojoc_import_conformance.py'),
     ('mojoc-synthetic-signature-default',
      'test_mojoc_synthetic_signature_default.py'),
+    ('mojoc-implicit-default-conformance',
+     'test_mojoc_implicit_default_conformance.py'),
 )
 
 
