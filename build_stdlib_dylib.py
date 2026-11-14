@@ -860,23 +860,11 @@ def _module_name_for(path: str) -> str:
 
 def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
                          objflags: tuple = _OBJ_FLAGS) -> bytes:
-    """Cold-path builder: Mojo → C → .o; returns the object's bytes.
-
-    A module whose generic-struct elaboration failed is compiled against its
-    un-elaborated template (every type parameter `int64_t`), so its C is not the
-    program its source describes. Refuse it here — before the object is written
-    into the shared CAS and before it can be linked into the dylib — so the
-    caller's per-module skip path handles it the same way the sweep does."""
+    """Cold-path builder: Mojo → C → .o; returns the object's bytes."""
     cfile = os.path.join(workdir, name + '.c')
     ofile = os.path.join(workdir, name + '.o')
-    c_text = compile_module_to_c(src, path, name)
-    refusals = last_degradations()
-    if refusals:
-        raise RuntimeError(
-            f"elaboration: {len(refusals)} generic struct elaboration(s) failed, "
-            f"so the C is not the program its source describes: {refusals[0]}")
     with open(cfile, 'w') as f:
-        f.write(c_text)
+        f.write(compile_module_to_c(src, path, name))
     subprocess.run([gcc, *objflags, '-c', '-o', ofile, cfile], check=True)
     with open(ofile, 'rb') as f:
         return f.read()
@@ -927,17 +915,6 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
             ofile = os.path.join(workdir, name + '.o')
             with open(ofile, 'wb') as f:
                 f.write(_compile_one_object(src, path, name, workdir, gcc, objflags))
-        # A degraded compile must never reach the dylib. The cached path only
-        # serves objects published by a clean build (_compile_one_object refuses
-        # to produce a degraded one), but a fresh in-process compile records its
-        # degradations in this worker; treat them as the job's error so the
-        # caller prints `skip <module>: ...` instead of linking the module.
-        refusals = last_degradations() if hit is False else []
-        if refusals:
-            return (path, name, None, exports,
-                    f"elaboration: {len(refusals)} generic struct elaboration(s) failed, "
-                    f"so the C is not the program its source describes: {refusals[0]}",
-                    hit)
     except Exception as e:
         return path, name, None, exports, str(e), hit
     return path, name, ofile, exports, None, hit

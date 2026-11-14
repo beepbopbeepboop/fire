@@ -47,8 +47,8 @@ order otherwise, a cycle falls back to name order); the three identical inline `
 `test_gimple_runner.py` 554 passed / 15 failed, the same 15 as pristine master.
 
 `mojoc` is re-enabled in THIS doc's OFF entry (`tools/gates.json`). It is still named by the separate underscore
-entry (the deleted `GATE_red_recover_land_2026-11-02` doc, the 23-job one), which another worker held; turn it on there with
-`control.py gate on` when that entry lands.
+entry (`GATE_red_recover_land_2026-11-02.md`, the 23-job one), which another worker holds; turn it on there with
+`control.py gate on` when that doc lands.
 
 NEXT (the real remaining blocker for the three bootstrap jobs, which stay OFF): the built binary segfaults on the
 simplest use, `./mojoc FILE.py --dump` on a 20-line program: `EXC_BAD_ACCESS (address=0x9)` in `mojo_dict_len`
@@ -155,9 +155,9 @@ survivor is part 5's inventory.
 
 Also recorded: `mojoc` is no longer in this doc's OFF entry. It, and
 `bootstrap-stage1-transitive`, are still matched by the 23-job `recover-land`
-OFF entry whose original doc (deleted `bugs/mid/GATE_red_recover_land_2026-11-02`)
-was removed; the entry is now re-pointed at `bugs/mid/GATE_recover_land_remainder.md`
-(fixed by `test_gates_off_entries_name_a_doc.py`). Part 5 still cannot turn
-stage1-transitive on without narrowing that 23-job entry.
+entry whose doc was deleted — filed as
+`bugs/mid/GATE_off_entry_doc_missing.md`, because that entry can never be
+discharged as written and part 5 cannot turn stage1-transitive on without
+narrowing it.
 
 

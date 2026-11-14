@@ -9,17 +9,18 @@ of the parent doc; parts 1–4 are the code that has to be true first.
 `python3 tools/control.py gate list` shows the three jobs OFF under TWO
 entries:
 
-    OFF  ^(…|bootstrap-stage1-transitive|…)…$   …  doc bugs/mid/GATE_recover_land_remainder.md
+    OFF  ^(…|bootstrap-stage1-transitive|…)…$   …  doc <the mid GATE doc, deleted; see GATE_off_entry_doc_missing.md>
     OFF  ^(bootstrap\-stage1\-transitive|bootstrap\-stage2\-dumps|bootstrap\-stage3\-dumps)$
          …  doc bugs/hard/GATE_red_recover-land_2026-11-02.md
 
-The first entry originally named the deleted `bugs/mid/GATE_red_recover_land_2026-11-02` doc
-(removed in `d44f44787`), leaving 23 jobs owned by no doc. That orphan-off-entry
-bug was fixed by re-pointing the entry to `bugs/mid/GATE_recover_land_remainder.md`
-and adding `test_gates_off_entries_name_a_doc.py` as the pinning test. This part
-must not leave `bootstrap-stage1-transitive` matched by that 23-job entry either
-— narrow that entry (drop the bootstrap name) or delete the entry as part of the
-same commit, and say which in the commit message.
+The first entry's doc no longer exists on disk (`git log` shows it deleted in
+`d44f44787`), so that entry can never be discharged by the "remove this report
+in the same commit" rule. It matches 23 jobs, including `bootstrap-stage1-transitive`,
+`mojoc`, `gimple`, `linkmode` and `selfhost`. That orphan is filed separately
+as `bugs/mid/GATE_off_entry_doc_missing.md`; this part must not depend on it being
+fixed first, but it must not leave `bootstrap-stage1-transitive` matched by it
+either — narrow that entry (drop the bootstrap name) or delete the entry as
+part of the same commit, and say which in the commit message.
 
 `mojoc` is NOT in this doc's entry any more (the parent doc's 2026-11-03 status
 said it had been re-enabled here); it is still held OFF by the orphaned first
