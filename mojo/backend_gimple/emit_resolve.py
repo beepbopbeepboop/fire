@@ -2419,11 +2419,18 @@ def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
 
     THE way to call a runtime function for its value.  Do not spell the call
     as text inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
-    return gen._new_val(ret_type, fname + ' (' + _rt_args(gen, fname, args) + ')')
+    rhs: str = fname + ' (' + _rt_args(gen, fname, args) + ')'
+    if _dtrace.enabled():
+        _dtrace.note(_dtrace.str_hash(_as_str(ret_type)) ^ _dtrace.str_hash(rhs))
+    t: str = gen._new_temp(ret_type)
+    ginf.note_call_result(gen, t, fname)
+    gen._emit('  ' + t + ' = ' + rhs + ';')
+    return t
 
 
 def _rt_into(gen, dst: str, fname: str, args: list) -> None:
     """`dst = fname (args);` for a runtime function, into an existing temp."""
+    ginf.note_call_result(gen, _as_str(dst).strip(), fname)
     gen._emit('  ' + _as_str(dst) + ' = ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
 
 

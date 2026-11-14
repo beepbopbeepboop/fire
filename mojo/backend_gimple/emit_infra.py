@@ -2260,6 +2260,22 @@ def _emit_cf(gen, kind: str, line: str, val: str, level: int) -> None:
     _emit_cf(gen, kind, line, val, level - 1)
 
 
+def note_call_result(gen, dst: str, fname: str) -> None:
+    """`dst` is about to receive the result of a call to `fname`: record what
+    that says about who owns it.
+
+    A runtime function in `_FRESH_CONTAINER_RETURNS` / `_FRESH_STRING_RETURNS`
+    always returns a brand-new object, so a consumer that receives exactly
+    this value may free it once it has read it; one in `_OWNS_STR_ELEMS`
+    also owns the strings inside it.  Called by the three things that emit a
+    call with a result (`_rt_call`, `_rt_into`, `_emit_call`), which KNOW the
+    callee -- the emitter used to recover it from the line's text."""
+    if fname in _FRESH_CONTAINER_RETURNS or fname in _FRESH_STRING_RETURNS:
+        gen._fresh_vals.add(dst)
+        if fname in _OWNS_STR_ELEMS:
+            gen._owned_str_elem_vals.add(dst)
+
+
 def _goto_raw(gen, label: str) -> None:
     """A jump that leaves NO protected region, whatever frames are open (a
     loop's own back edge inside its own exception frame).  Everything else
@@ -2292,21 +2308,6 @@ def _emit_raw(gen, line: str):
     if _d and line.strip() and not line.lstrip().startswith('#'):
         gen.body_lines.append(_d)
     gen.body_lines.append(line)
-    # Track values produced by a runtime call that always returns a brand-new
-    # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives
-    # exactly such a value, from an operand node that can only have produced
-    # it, may free it once it has read it.
-    _fi = line.find(' = mojo_')
-    if _fi < 0:
-        _fi = line.find(' = string_')
-    if _fi > 0:
-        _rest = line[_fi + 3:]
-        _pi = _rest.find(' (')
-        if _pi > 0 and (_rest[:_pi] in _FRESH_CONTAINER_RETURNS
-                        or _rest[:_pi] in _FRESH_STRING_RETURNS):
-            gen._fresh_vals.add(line[:_fi].strip())
-            if _rest[:_pi] in _OWNS_STR_ELEMS:
-                gen._owned_str_elem_vals.add(line[:_fi].strip())
     # Not a terminal statement, as far as this function knows: the three
     # that are (`goto`, `return v`, `return`) are emitted by `_emit_cf` /
     # `_goto_raw`, which set the flag after this returns.
@@ -3285,9 +3286,11 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             imported_ret = fn_ret
     if result_var and imported_ret and imported_ret != ret_type:
         call_tmp = gen._new_temp(imported_ret)
+        note_call_result(gen, _as_str(call_tmp), fname)
         gen._emit(f'  {call_tmp} = {fname} ({args_str});')
         gen._safe_coerce_emit(imported_ret, ret_type, call_tmp, result_var)
     elif result_var:
+        note_call_result(gen, _as_str(result_var).strip(), fname)
         gen._emit(f'  {result_var} = {fname} ({args_str});')
     else:
         gen._emit(f'  {fname} ({args_str});')
