@@ -794,6 +794,18 @@ def _format_error_message(e):
     return msg
 
 
+def _is_user_diagnostic(exc):
+    """True for an exception that IS the program's compile error (a
+    RuntimeError whose text is a modular-style `error: ...` diagnostic, with or
+    without a leading `file:line:col:`), as opposed to the compiler failing to
+    handle the program. The first must be reported and stop the build; the
+    second may fall back to another path."""
+    if not isinstance(exc, RuntimeError):
+        return False
+    text = str(exc).lstrip()
+    return text.startswith('error:') or ': error: ' in text.split('\n', 1)[0]
+
+
 def static_gate(src_code, filename, werror=False):
     """Declaration-level diagnostics the modular compiler reports before
     compiling anything (see myinterpreter.static_module_diagnostics): print them
@@ -1708,7 +1720,10 @@ def main():
             rc = driver.compile_program(
                 input_file, src, output=build_output, run=False,
                 opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
-        except Exception:
+        except Exception as e:
+            if _is_user_diagnostic(e):
+                print(f"Error building: {e}", file=sys.stderr)
+                sys.exit(1)
             rc = None
         if rc is None:
             success = build_executable(input_file, src, output=build_output,
@@ -1877,6 +1892,9 @@ def main():
                 debug_flag=debug_flag, program_args=program_args,
                 auto_gpu=auto_gpu)
         except Exception as e:
+            if _is_user_diagnostic(e):
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
             print(f"driver error, interpreting instead: {e}", file=sys.stderr)
             rc = None
         if rc is not None:
