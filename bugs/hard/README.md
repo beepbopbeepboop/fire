@@ -15,13 +15,15 @@ deleted in the same commit, as for any bug.
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_cases_generator_analyzer.md` | see doc | workers |
-| `DIAGNOSTICS_align_decorator.md` | see doc | workers |
+| `COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md` | see doc | workers |
 | `DIAGNOSTICS_binding_deferrals.md` | see doc | workers |
+| `DIAGNOSTICS_binding_deferrals-part2.md` | see doc | workers |
 | `DIAGNOSTICS_formatting_modular.md` | see doc | workers |
 | `DIAGNOSTICS_lsp_error_recovery.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
 | `DIAGNOSTICS_mlir_annotations.md` | see doc | workers |
 | `DIAGNOSTICS_mojoc_imports.md` | see doc | workers |
+| `DIAGNOSTICS_mojoc_imports-part2.md` | see doc | workers |
 | `DIAGNOSTICS_trait_conformance.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |
 | `SUITE_gimplerunner_21_failing.md` | see doc | workers |
