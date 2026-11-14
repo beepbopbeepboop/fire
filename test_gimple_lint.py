@@ -198,6 +198,28 @@ def test_unit() -> None:
     check(rep.unknown == {}, f"nothing unresolved (got {rep.unknown})")
 
 
+def test_gate_wiring() -> None:
+    """The gate's gimple-lint job is enabled, and its red-gate doc is deleted.
+
+    The doc's contract is that its existence means the job is red.  It was
+    fixed by 37f7325cc (both text-call/cast baselines back to 0), so the
+    queue must not keep claiming otherwise.  This also pins the job itself:
+    a red job is fixed or declared with a live bug doc, never switched off
+    with a silent `disabled=` marker.
+    """
+    print("gate wiring: the gimple-lint job stays on, and its red-gate doc stays deleted")
+    import re
+    with open(os.path.join(ROOT, 'tools', 'suite.py'), encoding='utf-8') as f:
+        suite = f.read()
+    m = re.search(r"test\('gimple-lint'.*?(?=\ntest\()", suite, re.S)
+    check(m is not None, 'gimple-lint is registered in tools/suite.py')
+    check(m is not None and 'disabled=' not in m.group(0),
+          'gimple-lint is enabled (no disabled= marker)')
+    doc = os.path.join(ROOT, 'bugs', 'gate-gimple-lint.md')
+    check(not os.path.exists(doc),
+          'the gate-gimple-lint doc is deleted (its presence means the job is red)')
+
+
 def test_rt_sigs() -> None:
     print("rt_sigs: the generated runtime signature table is current")
     r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'gen_rt_sigs.py'),
@@ -455,6 +477,7 @@ def main() -> int:
     which = sys.argv[1:] or ['unit', 'ratchet']
     if 'unit' in which:
         test_unit()
+        test_gate_wiring()
         test_rt_sigs()
         test_text_calls()
         test_text_casts()
