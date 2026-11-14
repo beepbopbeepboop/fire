@@ -1,8 +1,15 @@
-SPLIT: parts 1-3; part 1 (the CMP-register SP-form spelling) landed on master
-with 3049e7aa7, part 2 (the UXTX SP-form branches 86-88) landed on master with
-2a3ab7d27, and part 3 (the scalar-double FP class, entries 70-79) landed with
-aca4f2bbf. No part remains open; the still-unmodelled extend options below are
-not one the step table claims.
+SPLIT: FORMAL_arm64_instruction_coverage-part1, FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
+
+The first split's three parts landed: the CMP-register SP-form spelling with
+3049e7aa7 (on master), the UXTX SP-form branches 86-88 with 2a3ab7d27 (on
+master), and the scalar-double FP class, entries 70-79, with aca4f2bbf. What
+remains open is the census of the other extend options in the same class
+(UXTW/SXTW/SXTX and the 8/16-bit sign/zero extends, the 32-bit spellings, and
+the `imm3 <= 4` half of the "option=011, imm3 <= 4" qualifier), which the
+`arm64_reg_or_sp` coverage note in `lib/ProofLib.lean` names as this doc's.
+That census is the three parts the line above names: pinned as a test, the
+refusal naming the word's own option/imm3/sf fields, and the emitter-dormancy
+pin. Replanned 2026-11-14 (this doc stays at hard; the parts are easy).
 
 # FORMAL: the extended-register class is claimed by the step table but the generator has no right-hand side for it; the coverage census this doc is is missing
 
