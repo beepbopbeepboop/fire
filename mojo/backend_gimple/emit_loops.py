@@ -1819,7 +1819,15 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
         nested_ptr = gen._coerce_to_type('int64_t', 'MojoList *', raw)
         nested_elem = gen._nested_elem_types.get(list_ptr, 'int64_t')
         for j, nn in enumerate(gen._split_top_level_comma(vn[1:-1].strip())):
-            _zip_bind_slot(gen, nn, nested_ptr, nested_elem, j)
+            # `j` is a Python int, and `idx_t` reaches `_rt_call` as a C
+            # EXPRESSION. `_as_str` is deliberately identity (see its
+            # docstring), so `_rt_args`' `', '.join(...)` would raise
+            # "sequence item 1: expected str instance, int found" -- which
+            # `_gen_stmt_ForStmt` catches and turns into the generic
+            # zero-iteration `mojo_unsupported_iter` fallback, silently
+            # dropping the whole loop. The pre-`_rt_call` spelling was an
+            # f-string, which stringified `j` and hid this.
+            _zip_bind_slot(gen, nn, nested_ptr, nested_elem, str(j))
         return
     if starred_slot_index([vn]) >= 0:
         # The starred slot: read this sequence's element with the same
