@@ -45,7 +45,7 @@ passing suite row, so the count is 2 higher than master's own run).
    | `...-part5.md` | same |
    | `mid/DIAGNOSTICS_mojoc_imports-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports.md` |
    | `mid/DIAGNOSTICS_mojoc_imports-part3.md` | same |
-   | `mid/DIAGNOSTICS_mojoc_imports-part2-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md` |
+   | `mid/DIAGNOSTICS_mojoc_imports-part2-part1.md` | the part-2 doc, deleted 2026-11-13 when it landed |
    | `...-part2-part2.md` | same |
    | `...-part2-part3.md` | same |
    | `mid/GPU_offload_validation_modular-part1.md` | `bugs/GPU_offload_validation_modular-part2.md`, `...-part3.md` |
