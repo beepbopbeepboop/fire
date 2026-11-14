@@ -68,6 +68,18 @@ Green with `TEXT_CALL_BASELINE = 0`. Red today if you set it to 0: it lists the
 Partial progress is fine: convert some sites, lower `TEXT_CALL_BASELINE` to the
 new count in the same commit, and leave this doc with the remaining count.
 
+## Also: 8 casts spelled as text
+
+The same command lists them when `TEXT_CAST_BASELINE` is set to 0. The rewrite:
+
+    t = gen._new_val('int64_t', f"(int64_t){v}")     ->  t = gen._cast('int64_t', v)
+    gen._emit(f"  {t} = (char *){v};")               ->  gen._cast_into(t, 'char *', v)
+
+`gen._cast` states the type once, so the temp's declared type and the written
+cast cannot disagree. If a site's two types DO differ today, do not convert it:
+say so in this doc instead, with the file and line. Done when
+`TEXT_CAST_BASELINE = 0` is green too.
+
 ## Where to start
 
 `mojo/backend_gimple/emit_methods.py` has 12 of the 26, eight of them the same

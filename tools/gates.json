@@ -1,6 +1,7 @@
 {
   "landing": [
-    "stdlib-syntax"
+    "stdlib-syntax",
+    "gimple-lint"
   ],
   "full_every_minutes": 30,
   "off": {

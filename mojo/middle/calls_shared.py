@@ -166,13 +166,13 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     _vshapes = getattr(gen, '_variadic_func_shape', None) or {}
     _vshape = _vshapes.get(_target) or _vshapes.get(_c_name) or _vshapes.get(_fname)
     if _vshape is not None:
-        _fnv = gen._new_val('void *', f'(void *){_target}')
+        _fnv = gen._cast('void *', f"{_target}")
         _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
                              [('void *', _fnv), ('void *', '0'),
                               ('int64_t', f'({_vshape[0]})'),
                               ('int64_t', f'({_vshape[1]})'),
                               ('int64_t', '(0)')])
-        return 'void *', gen._new_val('void *', f'(void *){_vf}')
+        return 'void *', gen._cast('void *', _vf)
     if cxx:
         return ('void *', f'(void *){_target}')
     gen._funcptr_builtins_needed.add(_c_name)
@@ -435,7 +435,7 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
         # int64_t-in/int64_t-out ABI `mojo_fnptr_call_N` dispatches through.
         _rt_fn = _RUNTIME_CALLABLE_VALUES.get(_nm)
         if _rt_fn is not None:
-            return ('void *', gen._new_val('void *', f'(void *){_rt_fn}'))
+            return ('void *', gen._cast('void *', f"{_rt_fn}"))
         _slit = gen._new_val('char *',
                              gen._intern_string(gimple_ctypes._c_escape(_nm)))
         gen._rt_void('mojo_set_unavailable_callable_name', [_slit])

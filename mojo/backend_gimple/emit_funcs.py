@@ -439,10 +439,10 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
                 # branch and the submod.GLOBAL branch both emit).
                 raw_ptr = gen._new_val(_gv_decl, f'{_gv_field}')
-                vp = gen._new_val('void *', f'(void *){raw_ptr}')
-                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t){vp};")
+                vp = gen._cast('void *', raw_ptr)
+                gen._cast_into(f"{gen._cname(symbol_name)}", 'int64_t', vp)
             else:
-                gen._emit(f"  {gen._cname(symbol_name)} = {_gv_field};")
+                gen._copy(f"{gen._cname(symbol_name)}", _gv_field)
             continue
         # BUG-2026-021: resolve the name for real when the module is
         # resolvable — a function-scoped `from sibling import f` used to fall
@@ -790,13 +790,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_merge = gen._new_bb()
             bb_true = gen._new_bb()
             bb_false = bb_merge
-            gen._emit(f"  if ({cond_v_bool}) goto {bb_true}; else goto {bb_false};")
+            gen._cond_goto(f"{cond_v_bool}", bb_true, f"{bb_false}")
             gen._emit_label(bb_true)
             _bscope = ginf._open_block_scope(gen)
             for s in node.then_body:
                 gen.gen_stmt(s)
             ginf._close_block_scope(gen, _bscope)
-            gen._emit(f"  goto {bb_merge};")
+            gen._goto(bb_merge)
             gen._emit_label(bb_merge)
             if getattr(node, 'else_body', None):
                 for s in node.else_body:
@@ -828,7 +828,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             # Unknown at compile time: emit as runtime branch
             _, cv = gen.lower_expr(elif_cond)
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
-            gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
+            gen._cond_goto(cv, bb_t, bb_m)
             gen._emit_label(bb_t)
             gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
             try:
@@ -838,7 +838,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 gen._close_block_scope(_bscope)
             finally:
                 gen._comptime_runtime_depth -= 1
-            gen._emit(f"  goto {bb_m};")
+            gen._goto(bb_m)
             gen._emit_label(bb_m)
             return
         if node.else_body:
@@ -860,13 +860,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
         else:
             bb_false = bb_merge
         bb_true = gen._new_bb()
-        gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
+        gen._cond_goto(cond_v, bb_true, f"{bb_false}")
         gen._emit_label(bb_true)
         _bscope = gen._open_block_scope()
         for s in node.then_body:
             gen.gen_stmt(s)
         gen._close_block_scope(_bscope)
-        gen._emit(f"  goto {bb_merge};")
+        gen._goto(bb_merge)
         # elif chains
         for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
             gen._emit_label(bb_false)
@@ -877,20 +877,20 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 bb_false = gen._new_bb()
             else:
                 bb_false = bb_merge
-            gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
+            gen._cond_goto(f"{elif_cv}", bb_elif_true, f"{bb_false}")
             gen._emit_label(bb_elif_true)
             _bscope = gen._open_block_scope()
             for _elif_stmt in elif_body:
                 gen.gen_stmt(_elif_stmt)
             gen._close_block_scope(_bscope)
-            gen._emit(f"  goto {bb_merge};")
+            gen._goto(bb_merge)
         if has_else:
             gen._emit_label(bb_false)
             _bscope = gen._open_block_scope()
             for s in node.else_body:
                 gen.gen_stmt(s)
             gen._close_block_scope(_bscope)
-            gen._emit(f"  goto {bb_merge};")
+            gen._goto(bb_merge)
         gen._emit_label(bb_merge)
     finally:
         gen._comptime_runtime_depth -= 1
@@ -3889,7 +3889,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         _n_body_lines = len(gen.body_lines)
         _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
         if not _last_body_line.strip().startswith('return'):
-            gen._emit('  return 0;')
+            gen._ret('0')
 
     # For main function in root module, rename to _gimple_main and create wrapper
     # For main function in library module, rename to _{module}_main to avoid collision

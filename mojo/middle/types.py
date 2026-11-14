@@ -28,6 +28,7 @@ import ast_rewriter
 import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
+import mojo.middle.simd_width as _simd_width
 
 def _debug_note(where: str, detail: object='') -> None:
     """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
@@ -1405,6 +1406,17 @@ def _mojo_type(ann: str | type | None) -> str:
             # of the dtype. Integer and unresolvable dtypes fall through to
             # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
             # `infra_infer._resolve_type`, not here.
+            #
+            # The lane count is validated here as well as at the constructor
+            # (`emit_calls._lower_call`): an ANNOTATION is the other spelling
+            # that builds a `SIMD[dtype, width]` type, so `var x:
+            # SIMD[DType.float32, 3]` must be rejected even when no
+            # constructor call is lowered. A symbolic width is not decided.
+            _parts = _split_top_level_commas(inner)
+            if len(_parts) >= 2:
+                _w = _simd_width.concrete_width(_parts[1])
+                if _w is not None:
+                    _simd_width.reject_invalid_width(_w, _parts[0])
             dt = _simd_float_dtype_ctype(inner)
             if dt is not None:
                 return dt
@@ -1788,7 +1800,7 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     # own basic block (the same goto shape `_lower_IfExpr` uses).
     bb_raise = gen._new_bb()
     bb_ok = gen._new_bb()
-    gen._emit(f"  if ({got} == 0ULL) goto {bb_raise}; else goto {bb_ok};")
+    gen._cond_goto(f"{got} == 0ULL", bb_raise, bb_ok)
     gen._emit_label(bb_raise)
     gen._emit_call('void', '', 'mojo_raise_attribute_error',
                    [('char *', gen._intern_string(msg))])

@@ -1313,7 +1313,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # longer chokes on the dead stack-floor trap arm), so its
                      # marker states 3 and the reader sees 3. The remaining
                      # three are the overflow-trapping hole-count rows in
-                     # bugs/mid/FORMAL_svc_exit_handling_incomplete.md.
+                     # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
                      'gimplerunner': 20,
                      'x86-containers': 1,

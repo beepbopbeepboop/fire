@@ -48,7 +48,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     decimal pointers. Resolve the actual type first, then pick the
     accessor from the element type, mirroring the MojoList* branch."""
     real = gen._get_actual_type(vtype, v)
-    idx64 = gen._new_val('int64_t', f"(int64_t){idx}")
+    idx64 = gen._cast('int64_t', f"{idx}")
     if real == 'MojoList *':
         elem = gen._elem_of(v)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -147,7 +147,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             gen._dyn_word_vals.add(_ev)
             return 'int64_t', _ev
         raw = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
-        return elem, gen._new_val(elem, f"({elem}){raw}")
+        return elem, gen._cast(elem, raw)
     # Non-container / untracked: despite this function's name, its real
     # callers include plain multi-assign unpacking (`a, b = x`) over ANY
     # iterable, not just a syntactic tuple/call-return — `a, b = some_dict`
@@ -283,13 +283,13 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
     gen._rt_into(_lst, 'mojo_list_new', [])
-    gen._emit(f"  {_dst} = {_lst};")
+    gen._copy(f"{_dst}", _lst)
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
-    gen._emit(f"  goto {_cond};")
+    gen._goto(_cond)
     gen._emit_label(_cond)
     _c = gen._new_val('_Bool', f"{_i} < {_as_str(stop)}")
-    gen._emit(f"  if ({_c}) goto {_body}; else goto {_after};")
+    gen._cond_goto(_c, _body, _after)
     gen._emit_label(_body)
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         _rd = gen._rt_call('char *', 'mojo_list_get_str', [_lp, _i])
@@ -302,8 +302,8 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
         gen._void_call('mojo_list_append_int', [('MojoList *', _dst), ('int64_t', _rd)])
     _one = gen._new_val('int64_t', "1LL")
     _nxt = gen._new_val('int64_t', f"{_i} + {_one}")
-    gen._emit(f"  {_i} = {_nxt};")
-    gen._emit(f"  goto {_cond};")
+    gen._copy(_i, _nxt)
+    gen._goto(_cond)
     gen._emit_label(_after)
 
 
@@ -330,7 +330,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
     gen._rt_into(_lst, 'mojo_list_new', [])
-    gen._emit(f"  {_dst} = {_lst};")
+    gen._copy(f"{_dst}", _lst)
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', _dst), ('char *', _as_str(value))])
@@ -338,7 +338,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
         gen._void_call('mojo_list_append_double',
                        [('MojoList *', _dst), ('double', _as_str(value))])
     else:
-        _iv = gen._new_val('int64_t', f"(int64_t){_as_str(value)}")
+        _iv = gen._cast('int64_t', _as_str(value))
         gen._void_call('mojo_list_append_int',
                        [('MojoList *', _dst), ('int64_t', _iv)])
 
@@ -405,14 +405,14 @@ def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
     gen._rt_into(_lst, 'mojo_list_new', [])
-    gen._emit(f"  {_dst} = {_lst};")
-    _src = gen._new_val('char *', f"(char *){_as_str(cstr)}")
+    gen._copy(f"{_dst}", _lst)
+    _src = gen._cast('char *', _as_str(cstr))
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
-    gen._emit(f"  goto {_cond};")
+    gen._goto(_cond)
     gen._emit_label(_cond)
     _c = gen._new_val('_Bool', f"{_i} < {_as_str(stop)}")
-    gen._emit(f"  if ({_c}) goto {_body}; else goto {_after};")
+    gen._cond_goto(_c, _body, _after)
     gen._emit_label(_body)
     _one = gen._new_val('int64_t', "1LL")
     _next = gen._new_val('int64_t', f"{_i} + {_one}")
@@ -420,8 +420,8 @@ def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None
     _chr = gen._rt_call('char *', 'mojo_cstr_slice', [_as_str(_src), _i, _as_str(_stop)])
     gen._void_call('mojo_list_append_str',
                    [('MojoList *', _dst), ('char *', _as_str(_chr))])
-    gen._emit(f"  {_i} = {_next};")
-    gen._emit(f"  goto {_cond};")
+    gen._copy(_i, _next)
+    gen._goto(_cond)
     gen._emit_label(_after)
 
 

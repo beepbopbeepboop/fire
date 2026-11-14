@@ -1,7 +1,7 @@
 # SUITE_silentnoop-part2: Make the `silentnoop` job pass
 
 **Parent BUG:** bugs/hard/SUITE_silentnoop.md  
-**Depends on:** bugs/mid/SUITE_silentnoop-part1.md  
+**Depends on:** bugs/hard/SUITE_silentnoop-part1.md  
 **Class:** mid
 
 *Filed under `bugs/mid/` (the class this part argues it needs).*

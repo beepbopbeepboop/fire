@@ -44,7 +44,6 @@ passing suite row, so the count is 2 higher than master's own run).
    | `...-part4.md` | same |
    | `...-part5.md` | same |
    | `mid/DIAGNOSTICS_mojoc_imports-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports.md` |
-   | `mid/DIAGNOSTICS_mojoc_imports-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports.md` |
    | `mid/DIAGNOSTICS_mojoc_imports-part3.md` | same |
    | `mid/DIAGNOSTICS_mojoc_imports-part2-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md` |
    | `...-part2-part2.md` | same |

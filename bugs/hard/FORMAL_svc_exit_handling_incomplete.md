@@ -1,3 +1,5 @@
+SPLIT: FORMAL_svc_exit_handling_incomplete-part1, FORMAL_svc_exit_handling_incomplete-part2, FORMAL_svc_exit_handling_incomplete-part3, FORMAL_svc_exit_handling_incomplete-part4, FORMAL_svc_exit_handling_incomplete-part5
+
 # FORMAL: `svc` exit handling is not structurally complete
 
 Status: PARTIALLY LANDED 2026-11-11. Parent: the overflow-guard wrong-spec fix (the guarded contract in `formal/arm64_proof_gen.py::_dylib_contract_proof`, 2026-11-12).

@@ -212,6 +212,12 @@ def test_rt_sigs() -> None:
     check(rt_call.arg_needs_repr_cast('double', 'int64_t'), 'int64_t -> double needs a cast')
     check(not rt_call.arg_needs_repr_cast('int', '_Bool'), '_Bool -> int is already the right bits')
     check(rt_call.arg_needs_word_cast('MojoDict *', 'int64_t'), 'a word passed as a pointer is cast')
+    check(not rt_call.arg_needs_repr_cast('_Bool', 'int64_t'), 'nothing is ever cast TO _Bool')
+    check(rt_call.copy_needs_cast('int64_t', 'int'), 'copy: int into int64_t is cast')
+    check(rt_call.copy_needs_cast('int', '_Bool'), 'copy: _Bool into int is cast')
+    check(not rt_call.copy_needs_cast('_Bool', 'int'), 'copy: nothing is cast to _Bool')
+    check(rt_call.copy_needs_cast('MojoList *', 'int64_t'), 'copy: a word into a pointer is cast')
+    check(not rt_call.copy_needs_cast('MojoList *', 'MojoDict *'), 'copy: container kinds are not a cast')
     check(not rt_call.arg_needs_word_cast('MojoDict *', 'MojoList *'), 'two pointer kinds are not a word cast')
     check(not rt_call.arg_needs_repr_cast('uint64_t', 'int64_t'), 'same width, other sign: no cast')
     check(not rt_call.arg_needs_repr_cast('char *', 'int64_t'), 'pointers are not this rule\'s')
@@ -257,6 +263,117 @@ def count_text_calls() -> tuple:
                 n += 1
                 where.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}: {hit[0]}")
     return n, where
+
+
+# Casts still spelled as TEXT.  `gen._cast(ctype, v)` / `gen._cast_into(dst,
+# ctype, v)` state the type once, so the temp's declaration and the written
+# cast cannot disagree.  May only shrink.
+TEXT_CAST_BASELINE = 8
+
+
+def count_text_casts() -> tuple:
+    import ast
+    import glob
+    import re
+    new_val_pat = re.compile(r'^\([\w \*]*\)$')
+    emit_pat = re.compile(r'^\s* = \([\w \*]*\);$')
+    n = 0
+    where: list[str] = []
+    files = ([os.path.join(ROOT, 'gimple_codegen.py')]
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_*.py')))
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'middle', '*.py'))))
+    for path in files:
+        with open(path, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('_emit', '_new_val') and node.args
+                    and isinstance(node.args[-1], ast.JoinedStr)):
+                continue
+            text = ''.join(v.value for v in node.args[-1].values
+                           if isinstance(v, ast.Constant) and isinstance(v.value, str))
+            pat = new_val_pat if node.func.attr == '_new_val' else emit_pat
+            if pat.match(text):
+                n += 1
+                where.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}")
+    return n, where
+
+
+def test_text_casts() -> None:
+    print("text casts: casts spelled as text may only shrink")
+    n, where = count_text_casts()
+    if n > TEXT_CAST_BASELINE:
+        for w in where:
+            print("        " + w)
+        check(False, f"{n} casts are spelled as text, baseline {TEXT_CAST_BASELINE} -- "
+                     f"use gen._cast(ctype, v) / gen._cast_into(dst, ctype, v)")
+    elif n < TEXT_CAST_BASELINE:
+        check(False, f"{n} casts are spelled as text, baseline {TEXT_CAST_BASELINE} -- "
+                     f"fixed! lower TEXT_CAST_BASELINE to {n} in test_gimple_lint.py")
+    else:
+        check(True, f"{n} casts spelled as text (baseline {TEXT_CAST_BASELINE})")
+
+
+# Control flow still spelled as TEXT.  `gen._goto(l)`, `gen._cond_goto(c, a, b)`,
+# `gen._ret(v)` and `gen._ret_void()` are the only spellings of a jump or a
+# return, so the code that must see every exit from a `try` / `with` region
+# has one place to look.  May only shrink.
+TEXT_CF_BASELINE = 1
+
+
+def count_text_cf() -> tuple:
+    import ast
+    import glob
+    import re
+    pat = re.compile(r'^\s*(goto |return\b|if \(.*\) goto )')
+    n = 0
+    where: list[str] = []
+    files = ([os.path.join(ROOT, 'gimple_codegen.py')]
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_*.py')))
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'middle', '*.py'))))
+    for path in files:
+        if os.path.basename(path) == 'emit_metal.py':
+            continue        # the Metal shader emitter: its own language, its own `_emit`
+        with open(path, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        helpers = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in (
+                    '_goto', '_cond_goto', '_ret', '_ret_void'):
+                for sub in ast.walk(node):
+                    helpers.add(id(sub))
+        for node in ast.walk(tree):
+            if id(node) in helpers:
+                continue
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == '_emit' and node.args):
+                continue
+            arg = node.args[-1]
+            text = ''
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                text = arg.value
+            elif isinstance(arg, ast.JoinedStr):
+                text = ''.join(v.value if isinstance(v, ast.Constant) else 'X'
+                               for v in arg.values)
+            if pat.match(text):
+                n += 1
+                where.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}: {text.strip()[:50]}")
+    return n, where
+
+
+def test_text_cf() -> None:
+    print("text control flow: jumps and returns spelled as text may only shrink")
+    n, where = count_text_cf()
+    if n > TEXT_CF_BASELINE:
+        for w in where:
+            print("        " + w)
+        check(False, f"{n} jumps/returns are spelled as text, baseline {TEXT_CF_BASELINE} -- "
+                     f"use gen._goto / gen._cond_goto / gen._ret / gen._ret_void")
+    elif n < TEXT_CF_BASELINE:
+        check(False, f"{n} jumps/returns are spelled as text, baseline {TEXT_CF_BASELINE} -- "
+                     f"fixed! lower TEXT_CF_BASELINE to {n} in test_gimple_lint.py")
+    else:
+        check(True, f"{n} jumps/returns spelled as text (baseline {TEXT_CF_BASELINE})")
 
 
 def test_text_calls() -> None:
@@ -340,6 +457,8 @@ def main() -> int:
         test_unit()
         test_rt_sigs()
         test_text_calls()
+        test_text_casts()
+        test_text_cf()
     if 'ratchet' in which:
         test_ratchet()
     print(f"\n{'FAILED' if _fails else 'passed'}: {_fails} failure(s)")
