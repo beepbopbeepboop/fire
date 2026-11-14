@@ -9,7 +9,7 @@ of the parent doc; parts 1–4 are the code that has to be true first.
 `python3 tools/control.py gate list` shows the three jobs OFF under TWO
 entries:
 
-    OFF  ^(…|bootstrap-stage1-transitive|…)…$   …  doc bugs/mid/GATE_red_recover_land_2026-11-02.md
+    OFF  ^(…|bootstrap-stage1-transitive|…)…$   …  doc <the mid GATE doc, deleted; see GATE_off_entry_doc_missing.md>
     OFF  ^(bootstrap\-stage1\-transitive|bootstrap\-stage2\-dumps|bootstrap\-stage3\-dumps)$
          …  doc bugs/hard/GATE_red_recover-land_2026-11-02.md
 

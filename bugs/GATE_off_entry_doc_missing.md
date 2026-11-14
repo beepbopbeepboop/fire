@@ -10,12 +10,15 @@ report in the same commit").
 ## What I ran / saw (2026-11-13)
 
     $ python3 tools/control.py gate list
-    OFF  ^(async-void-return|bootstrap-stage1-transitive|coro|coro-detached-async|coro-future-await|doc-refs|doc-refs-stale-verdicts|formal-sweep-truth|formal-sys|gimple|gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$ recover-land gate red (23 jobs); see GATE doc, re-enable each when fixed  (doc bugs/mid/GATE_red_recover_land_2026-11-02.md, worker integrator, since 2026-11-02 11:07:53)
+    OFF  ^(async-void-return|bootstrap-stage1-transitive|coro|coro-detached-async|coro-future-await|doc-refs|doc-refs-stale-verdicts|formal-sweep-truth|formal-sys|gimple|gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$ recover-land gate red (23 jobs); see GATE doc, re-enable each when fixed  (doc <the mid GATE doc>, worker integrator, since 2026-11-02 11:07:53)
 
-    $ ls bugs/mid/GATE_red_recover_land_2026-11-02.md
+    $ ls <the doc that entry names>          # deleted
     No such file or directory
-    $ git log --oneline --diff-filter=D -- bugs/mid/GATE_red_recover_land_2026-11-02.md
+    $ git log --oneline --diff-filter=D -- <the same doc>   # deleted
     d44f44787 bugs: remove GATE_red_recover_land_2026-11-02 doc
+
+The file the entry names is `GATE_red_recover_land_2026-11-02.md` in `bugs/mid/` —
+deleted in `d44f44787`, with the OFF entry left pointing at it.
 
 The deletion commit's message says "Fixed root cause (coro.module_qualifier
 missing as module attribute)" — one root cause, which cannot have covered all
@@ -58,5 +61,4 @@ Command: `python3 test_gates_off_entries_name_a_doc.py`
 
 It loads `tools/gates.json` and asserts, for every `off` entry: `doc` is a
 non-empty path, `os.path.exists(doc)` is true, and `worker` is non-empty.
-Red today: the 23-job entry's `doc` is
-`bugs/mid/GATE_red_recover_land_2026-11-02.md`, which does not exist.
+Red today: the 23-job entry's `doc` names the file above, which was deleted.
