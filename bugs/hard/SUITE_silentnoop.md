@@ -31,9 +31,10 @@ def main():
 ```
 
 The loop body never runs, so `1 2 9` is missing. This is a regression guard on
-a lowering that already worked (the case's own comment says so), and it
-appeared in the same run that confirmed part 1's fix, so `e4a2cc2ed` is the
-prime suspect — not yet bisected. Re-run:
+a lowering that already worked (the case's own comment says so). It is **not**
+from `e4a2cc2ed`: the case passes at `1a7b1f413` (where it was added, 2026-09-28)
+and at the 2026-11-11 tip `aca94072a`, and fails at `7f9788007~1`, so the
+regression is in the 2026-11-11..11-14 window. Re-run:
 `python3 test_silent_noop_iter.py zip_nested_tuple_target`.
 
 The kept artifact
@@ -49,10 +50,9 @@ mojo_unsupported_iter (_t13);
 ```
 
 so the whole `for` was replaced by `mojo_unsupported_iter`, and both
-arguments reached `mojo_zip` through a `void *` cast. `e4a2cc2ed` is the
-literal-kind clone pass; its new `_literal_arg_kind` arm maps `None` to a
-`none` kind and `_LITERAL_KIND_CLONE_CTYPE['none'] = 'int64_t'`, so the first
-thing to check is whether `f`'s parameters were retyped to the opaque
-spelling by that pass and the `zip` iterable then stopped being recognized.
+arguments reached `mojo_zip` through a `void *` cast. A plain `ValueError` out
+of the zip lowering is what makes `_gen_stmt_ForStmt` fall back to that
+zero-iteration generic path (see `ZipLongestFillRefusal`'s own docstring), so
+the question is which narrowing now raises for a nested-tuple target.
 
 The fix doc is `bugs/SUITE_silentnoop-part2.md`.
