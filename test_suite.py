@@ -2189,6 +2189,21 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_disjoint_bases.py': 2,
     'test_python315_lazy_imports.py': 2,
     'test_unpacking_in_comprehensions.py': 1,
+    # +4 on 2026-11-13, the same day the three new test files below were
+    # registered (they had landed unregistered, so the estate check named them).
+    # Every one of these literals is a `subprocess` timeout on a COMPILE or a RUN
+    # the case itself performs — the RUN kind the census exists for, not a stale
+    # per-child budget: `test_interp_list_ctor.py` compiles then runs the
+    # interpreter and the compiled binary; `test_module_globals_compiled.py`
+    # builds with `fire.py build` (120 s), runs the produced executable (60 s)
+    # and allows 300 s for the whole build; the two
+    # `test_regress_gpu_offload_validation_modular_part*.py` rows are another
+    # workstream's, landing in the same commit only because the census is a
+    # ratchet and their literals arrived with them.
+    'test_interp_list_ctor.py': 1,
+    'test_module_globals_compiled.py': 3,
+    'test_regress_gpu_offload_validation_modular_part1.py': 1,
+    'test_regress_gpu_offload_validation_modular_part4.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
