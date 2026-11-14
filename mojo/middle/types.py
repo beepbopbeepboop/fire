@@ -2744,7 +2744,7 @@ _FOREIGN_CALLABLES = {
     'glob.iglob': _CPP_CALLABLE_CTYPE,
     # Builtin open: modeled as a file-handle-producing callable for
     # callable-valued parameters and context-manager lowering in compiled
-    # generator bodies (see COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2).
+    # generator bodies (the tables.py `read_table` `with open(...)` fix).
     'open': _CPP_CALLABLE_CTYPE,
 }
 _FOREIGN_CALLABLE_ITER_ELEM = {

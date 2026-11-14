@@ -5277,7 +5277,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
         gen._goto(bb_cond)
         gen._emit_label(bb_cond)
-        cond = gen._cmp(idx, '<', len_t)
+        cond = gen._new_val('_Bool', f"{idx} < {len_t}")
         gen._cond_goto(cond, bb_body, bb_after)
         gen._emit_label(bb_body)
         byte = gen._rt_call('int64_t', 'mojo_bytes_get', [value, idx])
@@ -5289,7 +5289,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # would compute `idx + 1` once, re-assign that same value every
         # iteration, and the loop would never terminate.
         one = gen._new_val('int64_t', '(int64_t)1')
-        nidx = gen._binop('int64_t', idx, '+', one)
+        nidx = gen._new_val('int64_t', f'{idx} + {one}')
         gen._copy(idx, nidx)
         gen._goto(bb_cond)
         gen._emit_label(bb_after)
@@ -5750,7 +5750,7 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     ftop = gen._new_val('int64_t', '_mojo_exc_top')
     gen._void_call('mojo_cleanup_checkpoint_save', [])
     fret = gen._rt_call('int64_t', 'setjmp', [f"_mojo_exc_stack[{ftop}]"])
-    fnz = gen._cmp(fret, '!=', '0')
+    fnz = gen._new_val('_Bool', f'{fret} != 0')
     gen._cond_goto(fnz, bb_exc, bb_body)
     gen._emit_label(bb_body)
     nxsym = gen._struct_method_csym(csn, '__next__', '')
@@ -5799,7 +5799,8 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     # the comparison is not a valid raw-GIMPLE operand (measured
     # 2026-10-21 part 4 integration), and the single-branch if-goto form
     # is rejected outright ("expected else statement").
-    iss = gen._cmp(tag, '==', gen._new_val("int64_t", str(gen._exc_type_id("StopIteration"))))
+    iss = gen._new_val(
+        '_Bool', f'{tag} == {gen._new_val("int64_t", str(gen._exc_type_id("StopIteration")))}')
     gen._cond_goto(iss, bb_after, bb_reraise)
     gen._emit_label(bb_reraise)
     gen._void_call('mojo_raise', [])
@@ -6450,12 +6451,12 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
     if dynamic_step:
         t_lt = gen._new_temp('_Bool'); t_gt = gen._new_temp('_Bool')
         t_sp = gen._new_temp('_Bool'); cond_t = gen._new_temp('_Bool')
-        gen._binop_into(t_lt, f"{tgt_c}", '<', f"{stop_v}")
-        gen._binop_into(t_gt, f"{tgt_c}", '>', f"{stop_v}")
-        gen._binop_into(t_sp, f"{step_v}", '>', '0')
+        gen._emit(f"  {t_lt} = {tgt_c} < {stop_v};")
+        gen._emit(f"  {t_gt} = {tgt_c} > {stop_v};")
+        gen._emit(f"  {t_sp} = {step_v} > 0;")
         gen._emit(f"  {cond_t} = {t_sp} ? {t_lt} : {t_gt};")
     else:
-        cond_t = gen._binop('_Bool', f"{tgt_c}", cond_op, f"{stop_v}")
+        cond_t = gen._new_val('_Bool', f"{tgt_c} {cond_op} {stop_v}")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
@@ -6470,7 +6471,7 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
     # range(...)]` and friends), not just some narrow edge case.
     # Found via pathlib/__init__.py's `tuple(self[i] for i in
     # range(*idx.indices(len(self))))`.
-    st = gen._binop('int64_t', f"{tgt_c}", '+', f"{step_v}")
+    st = gen._new_val('int64_t', f"{tgt_c} + {step_v}")
     gen._copy(f"{tgt_c}", st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
@@ -6511,7 +6512,7 @@ def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    cond_t = gen._cmp(f"{rec_cur}", '<', n64)
+    cond_t = gen._new_val('_Bool', f"{rec_cur} < {n64}")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     _evct, ev = itc.read_at(gen, rec, rec_cur)
@@ -6526,7 +6527,7 @@ def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     # `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple OPERAND,
     # which `_compr_list_loop`'s own tuple arm records.
     one64 = gen._new_val('int64_t', "1LL")
-    st = gen._binop('int64_t', f"{rec_cur}", '+', one64)
+    st = gen._new_val('int64_t', f"{rec_cur} + {one64}")
     gen._copy(f"{rec_cur}", st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
@@ -6643,7 +6644,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         bb_post = gen._new_bb(); bb_after = gen._new_bb()
         gen._goto(bb_cond)
         gen._emit_label(bb_cond)
-        cond_t = gen._cmp(idx64, '<', len64)
+        cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
         gen._cond_goto(cond_t, bb_body, bb_after)
         gen._emit_label(bb_body)
         raw_elem = gen._rt_call('int64_t', 'mojo_list_get_int', [_iv, idx64])
@@ -6697,7 +6698,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 _stop = _sub_len
                 if n_after:
                     _na = gen._new_val('int64_t', f"{n_after}LL")
-                    _stop = gen._binop('int64_t', f"{_sub_len}", '-', _na)
+                    _stop = gen._new_val('int64_t', f"{_sub_len} - {_na}")
                 _emit_starred_slot_list(gen, sub_list,
                                         starred_slot_name(_as_str(vn)),
                                         f"{i}LL", _stop,
@@ -6707,7 +6708,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
             if star_idx >= 0 and i > star_idx:
                 _base = gen._new_val('int64_t', f"{_sub_len} - {n_after}LL")
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
-                _slot_i = gen._binop('int64_t', _base, '+', _off)
+                _slot_i = gen._new_val('int64_t', f"{_base} + {_off}")
             _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
         gen._goto(bb_post)
@@ -6718,7 +6719,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
 # self-host closure. The `LL` suffix is the tree's existing idiom for a
 # width-correct int64_t literal and needs no cast.
         one64 = gen._new_val('int64_t', "1LL")
-        st = gen._binop('int64_t', idx64, '+', one64)
+        st = gen._new_val('int64_t', f"{idx64} + {one64}")
         gen._copy(idx64, st)
         gen._goto(bb_cond)
         gen._emit_label(bb_after)
@@ -6766,7 +6767,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
+    cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -6810,7 +6811,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
+    st = gen._new_val('int64_t', f"{idx64} + {one64}")
     gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
@@ -6951,7 +6952,7 @@ def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     gen._rt_into(more_t, 'mojo_dict_iter_next', [iter_t])
-    cond_t = gen._cmp(more_t, '!=', '0')
+    cond_t = gen._new_val('_Bool', f"{more_t} != 0")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     key_tmp = gen._rt_call('const char *', 'mojo_dict_iter_key', [iter_t])
@@ -7197,7 +7198,7 @@ def _compr_set_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     gen._rt_into(more_t, 'mojo_set_iter_next', [iter_t])
-    cond_t = gen._cmp(more_t, '!=', '0')
+    cond_t = gen._new_val('_Bool', f"{more_t} != 0")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     if _sv_is_str:
@@ -7760,7 +7761,7 @@ def lower_module_globals_setitem(gen, node) -> None:
             continue
         _lit = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(_name)))
         _cmp = gen._rt_call('int', 'mojo_cstr_cmp', [f"{_key}", _lit])
-        _cond = gen._cmp(_cmp, '==', '0')
+        _cond = gen._new_val('_Bool', f'{_cmp} == 0')
         _arms.append((_name, _ft, _cond))
     for _i, (_name, _ft, _cond) in enumerate(_arms):
         _kw = 'if' if _i == 0 else 'else if'
@@ -8125,10 +8126,10 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         if op == '//':
             dres = dfl
         else:
-            dprod = gen._binop('double', _as_str(dr), '*', _as_str(dfl))
-            dres = gen._binop('double', _as_str(dl), '-', _as_str(dprod))
+            dprod = gen._new_val('double', f'{_as_str(dr)} * {_as_str(dfl)}')
+            dres = gen._new_val('double', f'{_as_str(dl)} - {_as_str(dprod)}')
     else:
-        dres = gen._binop('double', _as_str(dl), op, _as_str(dr))
+        dres = gen._new_val('double', f'{_as_str(dl)} {op} {_as_str(dr)}')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     # The integer answer reads a maybe-box operand as its integer
@@ -8138,7 +8139,7 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
     if op == '//':
         ires = gen._rt_call('int64_t', '__mojo_floordiv', [_as_str(ilv), _as_str(irv)])
     else:
-        ires = gen._binop('int64_t', _as_str(ilv), op, _as_str(irv))
+        ires = gen._new_val('int64_t', f'{_as_str(ilv)} {op} {_as_str(irv)}')
     return gen._call_expr('int64_t', 'mojo_float_arith_select', [
         ('int64_t', _as_str(lv) if lp else '0'),
         ('int64_t', _as_str(rv) if rp else '0'),
@@ -8582,7 +8583,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     bb_done = gen._new_bb()
                     _res = gen._new_temp('char *')
                     _cond = gen._new_temp('_Bool')
-                    gen._binop_into(_cond, f"{aval}", '!=', '0')
+                    gen._emit(f'  {_cond} = {aval} != 0;')
                     gen._cond_goto(_cond, bb_some, bb_none)
                     gen._emit_label(bb_some)
                     _some_lit = gen._intern_string('Optional(Some)')

@@ -2412,7 +2412,7 @@ def _inc_val(gen, base: str) -> str:
     Tools/cases_generator/analyzer.py failed to compile on it — the
     module-level refusal is `cannot compile module` for the whole file
     because a GIMPLE parse error is not recoverable per-function."""
-    return gen._binop('int64_t', base, '+', '1LL')
+    return gen._new_val('int64_t', f'{base} + 1LL')
 
 
 def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
@@ -2462,7 +2462,7 @@ def _bool_not(gen, ctype: str, val: str) -> str:
     zero = (gen._new_val('int64_t', '0LL') if zt == 'int64_t'
             else gen._new_val('int', '(int)0'))
     t = gen._new_temp('_Bool')
-    gen._binop_into(t, f"{iv}", '==', f"{zero}")
+    gen._emit(f'  {t} = {iv} == {zero};')
     return t
 
 
@@ -2483,7 +2483,7 @@ def _bool_and(gen, left: str, right: str) -> str:
     that were already computed.
     """
     t = gen._new_temp('_Bool')
-    gen._binop_into(t, left, '&', right)
+    gen._emit(f'  {t} = {left} & {right};')
     return t
 
 
@@ -2546,84 +2546,6 @@ def _cast_into(gen, dst: str, ctype: str, val: str) -> None:
     """`dst = (ctype) val;` into an existing temp, which must be declared
     `ctype`."""
     gen._emit('  ' + _as_str(dst) + ' = (' + _as_str(ctype) + ')' + _as_str(val) + ';')
-
-
-_C_COMPARE_OPS: dict[str, bool] = {'==': True, '!=': True, '<': True, '>': True,
-                             '<=': True, '>=': True}
-
-
-def _widen_operand(gen, want: str, v: str) -> str:
-    """`v`, converted by its own cast statement when it is a variable whose
-    declared scalar type differs from `want` in class or width (`int` in an
-    `int64_t` sum, an integer in a `double` product, a `_Bool` in integer
-    arithmetic).  Pointers, literals and expressions are returned unchanged."""
-    dt = gen.var_types.get(v)
-    if dt is None:
-        return v
-    dts: str = _as_str(dt)
-    if dts == want:
-        return v
-    if rt_call.arg_needs_repr_cast(want, dts):
-        return gen._cast(want, v)
-    if rt_call._SCALAR_CLASS.get(want) == 'int' and rt_call._SCALAR_CLASS.get(dts) == 'bool':
-        return gen._cast(want, v)
-    return v
-
-
-def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
-    """The right-hand side `a op b`, operands converted as GIMPLE requires.
-
-    Arithmetic: both operands must have the result's type, so a narrower or
-    differently-classed variable is widened to `ctype`.  Comparison: the two
-    operands must have each other's type, so the narrower is widened to the
-    wider (and an integer to a `double`); `ctype` (`_Bool`) is not consulted."""
-    a = _as_str(a)
-    b = _as_str(b)
-    if op in _C_COMPARE_OPS:
-        at = gen.var_types.get(a)
-        bt = gen.var_types.get(b)
-        if at is not None and bt is not None:
-            ats: str = _as_str(at)
-            bts: str = _as_str(bt)
-            if ats != bts:
-                ac = rt_call._SCALAR_CLASS.get(ats)
-                bc = rt_call._SCALAR_CLASS.get(bts)
-                if ac is not None and bc is not None:
-                    a_up = (bc == 'float' and ac != 'float') or (
-                        ac == bc and rt_call._SCALAR_BITS[ats] < rt_call._SCALAR_BITS[bts]) or (
-                        ac == 'bool' and bc == 'int')
-                    b_up = (ac == 'float' and bc != 'float') or (
-                        ac == bc and rt_call._SCALAR_BITS[bts] < rt_call._SCALAR_BITS[ats]) or (
-                        bc == 'bool' and ac == 'int')
-                    if a_up:
-                        a = gen._cast(bts, a)
-                    elif b_up:
-                        b = gen._cast(ats, b)
-    elif ctype != '':
-        a = _widen_operand(gen, ctype, a)
-        b = _widen_operand(gen, ctype, b)
-    return a + ' ' + op + ' ' + b
-
-
-def _binop(gen, ctype: str, a: str, op: str, b: str) -> str:
-    """`t = a op b;` in a new temp of type `ctype` -- THE way to emit
-    arithmetic, a bit operation or a comparison.  `op` is the C operator
-    ('+', '<<', '==', ...).  An operand is a temp, a local or literal text;
-    a variable operand of the wrong scalar type is converted first."""
-    return gen._new_val(ctype, _binop_text(gen, ctype, a, op, b))
-
-
-def _cmp(gen, a: str, op: str, b: str) -> str:
-    """`t = a op b;` in a new `_Bool` temp: a comparison."""
-    return gen._new_val('_Bool', _binop_text(gen, '_Bool', a, op, b))
-
-
-def _binop_into(gen, dst: str, a: str, op: str, b: str) -> None:
-    """`dst = a op b;` into an existing variable; see `_binop`."""
-    dst = _as_str(dst)
-    dt = gen.var_types.get(dst)
-    dts: str = '' if dt is None else _as_str(dt)
-    gen._emit('  ' + dst + ' = ' + _binop_text(gen, dts, a, op, b) + ';')
 
 
 def _copy(gen, dst: str, src: str) -> None:
@@ -4289,11 +4211,11 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
+    cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     if start_val is not None:
-        disp_idx = gen._binop('int64_t', idx64, '+', f"{start_val}")
+        disp_idx = gen._new_val('int64_t', f"{idx64} + {start_val}")
         gen._copy(f"{idx_c}", disp_idx)
     else:
         gen._copy(f"{idx_c}", idx64)
@@ -4350,7 +4272,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
+    st = gen._new_val('int64_t', f"{idx64} + {one64}")
     gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
@@ -4369,7 +4291,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
+    cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str_cp', [f"mojo_str_data({_iv})", idx64])
@@ -4377,7 +4299,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
+    st = gen._new_val('int64_t', f"{idx64} + {one64}")
     gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
@@ -4412,7 +4334,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
     gen._emit_label(bb_cond)
-    cond_t = gen._cmp(idx64, '<', len64)
+    cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     # `mojo_char_at_str`, for _gen_for_cstr's reason in full: gimple rejects a
@@ -4431,7 +4353,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
-    st = gen._binop('int64_t', idx64, '+', one64)
+    st = gen._new_val('int64_t', f"{idx64} + {one64}")
     gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)

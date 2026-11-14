@@ -1380,7 +1380,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # an int64_t SSA name is a hard gcc verifier error ("type
             # mismatch in binary expression"), not a warning.
             n_after64 = gen._cast('int64_t', f"{n_after}")
-            star_stop = gen._binop('int64_t', total, '-', f"{n_after64}")
+            star_stop = gen._new_val('int64_t', f"{total} - {n_after64}")
             star_v = gen._rt_call('MojoList *', 'mojo_list_slice', [f"{lp}", star_start, star_stop])
             if lp in getattr(gen, '_maybe_kinds_vals', ()):
                 gen._maybe_kinds_vals.add(star_v)
@@ -1394,7 +1394,7 @@ def _gen_stmt_AssignStmt(gen, node):
             gen._assign_target(star_target, 'MojoList *', star_v)
             for j, tgt in enumerate(after):
                 j64 = gen._cast('int64_t', f"{j}")
-                idx64 = gen._binop('int64_t', star_stop, '+', f"{j64}")
+                idx64 = gen._new_val('int64_t', f"{star_stop} + {j64}")
                 sev = gen._rt_call(set_et, f"mojo_list_get_{suf}", [f"{lp}", f"{idx64}"])
                 gen._assign_target(tgt, set_et, sev)
             return
@@ -2812,7 +2812,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                             # pattern already used for `calloc(1, sizeof(...))`
                                             # struct allocation elsewhere in this codegen.
                                             _esz = gen._new_val('int64_t', f"(int64_t) sizeof({_ect})")
-                                            _nbytes = gen._binop('int64_t', _esz, '*', f"{_acnt}")
+                                            _nbytes = gen._new_val('int64_t', f"{_esz} * {_acnt}")
                                         gen._emit(f"  memcpy({addr}->{safe_fn}, {v}->{safe_fn}, {_nbytes});")
                                         continue
                                     fv = gen._new_val(ftype, f"{v}->{safe_fn}")
@@ -3040,7 +3040,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             if rtype != arith:
                 ct = gen._cast(arith, rv)
                 rv_a = ct
-            tmp = gen._binop(arith, f"{lv_a}", f"{c_op}", f"{rv_a}")
+            tmp = gen._new_val(arith, f"{lv_a} {c_op} {rv_a}")
             vtype, v = arith, tmp
         else:
             # Skip emitting comment to avoid GIMPLE global-passing issues
@@ -3982,12 +3982,12 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         b = gen._new_temp('_Bool')
         zero = gen._new_temp('int64_t')
         gen._emit(f"  {zero} = (int64_t)0;")
-        gen._binop_into(b, n, '!=', zero)
+        gen._emit(f"  {b} = {n} != {zero};")
         return b
     if ctype == 'char *':
         n = gen._call_expr('int', 'mojo_truthy_cstr', [('char *', val)])
         b = gen._new_temp('_Bool')
-        gen._binop_into(b, n, '!=', '0')
+        gen._emit(f"  {b} = {n} != 0;")
         return b
     if ctype in ('void *',) or (ctype.endswith(' *') and ctype != '_Bool'):
         ip   = gen._new_temp('int64_t')
@@ -3995,7 +3995,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         b    = gen._new_temp('_Bool')
         gen._cast_into(ip, 'int64_t', val)
         gen._emit(f"  {zero} = (int64_t)0;")
-        gen._binop_into(b, ip, '!=', zero)
+        gen._emit(f"  {b} = {ip} != {zero};")
         return b
     if ctype == 'int64_t' and (
             val in gen._dyn_word_vals or val in gen._dyn_word_locals
@@ -4008,7 +4008,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         # it emitted `extern int64_t NonlocalStmt (...)` for a class.
         n = gen._call_expr('int', 'mojo_truthy_word', [('int64_t', val)])
         b = gen._new_temp('_Bool')
-        gen._binop_into(b, n, '!=', '0')
+        gen._emit(f"  {b} = {n} != 0;")
         return b
     if ctype == 'int64_t':
         # PART 6 (2026-10-22, family C): a temp holding a READ of a tagged
@@ -4027,7 +4027,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
         gen._emit(f"  {zero} = (int64_t)0;")
-        gen._binop_into(b, f"{val}", '!=', zero)
+        gen._emit(f"  {b} = {val} != {zero};")
         return b
     # int and other integer types: avoid GIMPLE type-mismatch by going through int64_t
     if ctype not in ('_Bool',):
@@ -4036,7 +4036,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         z64 = gen._new_temp('int64_t')
         gen._cast_into(v64, 'int64_t', val)
         gen._emit(f"  {z64} = (int64_t)0;")
-        gen._binop_into(b, v64, '!=', z64)
+        gen._emit(f"  {b} = {v64} != {z64};")
         return b
     return val
 
@@ -6667,7 +6667,7 @@ def _gen_stmt_TryStmt(gen, node):
     temp_top2 = gen._new_temp('int')
     temp_addr = gen._new_temp('void *')  # jmp_buf is int[48], use void* to avoid type mismatch
     gen._emit(f"  {temp_top1} = _mojo_exc_top;")
-    gen._binop_into(temp_inc, temp_top1, '+', '1')
+    gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
     gen._emit(f"  _mojo_exc_top = {temp_inc};")
     gen._emit(f"  {temp_top2} = _mojo_exc_top;")
     # Snapshot the cleanup-thunk stack depth this level unwinds back down to
@@ -6680,7 +6680,7 @@ def _gen_stmt_TryStmt(gen, node):
     _cell_snap = gmp._cattr_snapshot(gen)
     # GIMPLE: pass array element directly to setjmp (decays to int*)
     gen._rt_into(sj_ret, 'setjmp', [f"_mojo_exc_stack[{temp_top2}]"])
-    gen._binop_into(cond_t, sj_ret, '!=', '0')
+    gen._emit(f"  {cond_t} = {sj_ret} != 0;")
     gen._cond_goto(cond_t, bb_exc, bb_try)
 
     bb_finally = gen._new_bb() if node.finally_body else None
@@ -6881,12 +6881,12 @@ def _gen_stmt_TryStmt(gen, node):
                 tid_t = gen._new_temp('int64_t')
                 gen._cast_into(tid_t, 'int64_t', f"{tid}")
                 one_match = gen._new_temp('_Bool')
-                gen._binop_into(one_match, exc_type_t, '==', tid_t)
+                gen._emit(f"  {one_match} = {exc_type_t} == {tid_t};")
                 if is_match is None:
                     is_match = one_match
                 else:
                     combined = gen._new_temp('_Bool')
-                    gen._binop_into(combined, f"{is_match}", '|', one_match)
+                    gen._emit(f"  {combined} = {is_match} | {one_match};")
                     is_match = combined
             if i == 0:
                 # Untagged (0) is treated leniently and falls to the
@@ -6897,14 +6897,14 @@ def _gen_stmt_TryStmt(gen, node):
                 zero_t = gen._new_temp('int64_t')
                 gen._emit(f"  {zero_t} = (int64_t)0;")
                 is_untagged = gen._new_temp('_Bool')
-                gen._binop_into(is_untagged, exc_type_t, '==', zero_t)
+                gen._emit(f"  {is_untagged} = {exc_type_t} == {zero_t};")
                 combined = gen._new_temp('_Bool')
                 # Bitwise, not `||`: both operands are already plain 0/1
                 # _Bool values, and this file's raw-GIMPLE dialect wants
                 # one simple binary op per statement, not a short-circuit
                 # operator (see the and/or eager-evaluation note in
                 # PLAN.md for the same underlying constraint).
-                gen._binop_into(combined, is_untagged, '|', f"{is_match}")
+                gen._emit(f"  {combined} = {is_untagged} | {is_match};")
                 is_match = combined
             # Raw-GIMPLE wants both branches of every conditional
             # explicit — no implicit fallthrough — so each check needs
@@ -7324,7 +7324,7 @@ def _gen_stmt_WithStmt(gen, node):
             temp_inc  = gen._new_temp('int')
             temp_top2 = gen._new_temp('int')
             gen._emit(f"  {temp_top1} = _mojo_exc_top;")
-            gen._binop_into(temp_inc, temp_top1, '+', '1')
+            gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
             gen._emit(f"  _mojo_exc_top = {temp_inc};")
             gen._emit(f"  {temp_top2} = _mojo_exc_top;")
             _ar_cell_snap = gmp._cattr_snapshot(gen)
@@ -7332,7 +7332,7 @@ def _gen_stmt_WithStmt(gen, node):
             # except idiom: on the longjmp the runtime unwinds to it.
             gen._rt_void('mojo_cleanup_checkpoint_save', [])
             gen._rt_into(sj_ret, 'setjmp', [f"_mojo_exc_stack[{temp_top2}]"])
-            gen._binop_into(cond_t, sj_ret, '!=', '0')
+            gen._emit(f"  {cond_t} = {sj_ret} != 0;")
             gen._cond_goto(cond_t, bb_exc, bb_try)
 
             gen._emit_label(bb_try)
@@ -7439,14 +7439,14 @@ def _gen_stmt_WithStmt(gen, node):
         temp_top2 = gen._new_temp('int')
         temp_addr = gen._new_temp('void *')  # jmp_buf is int[48], use void* to avoid type mismatch
         gen._emit(f"  {temp_top1} = _mojo_exc_top;")
-        gen._binop_into(temp_inc, temp_top1, '+', '1')
+        gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
         gen._emit(f"  _mojo_exc_top = {temp_inc};")
         gen._emit(f"  {temp_top2} = _mojo_exc_top;")
         # See _gen_stmt_TryStmt's identical checkpoint-save call for why.
         gen._rt_void('mojo_cleanup_checkpoint_save', [])
         # GIMPLE: pass array element directly to setjmp (decays to int*)
         gen._rt_into(sj_ret, 'setjmp', [f"_mojo_exc_stack[{temp_top2}]"])
-        gen._binop_into(cond_t, sj_ret, '!=', '0')
+        gen._emit(f"  {cond_t} = {sj_ret} != 0;")
         gen._cond_goto(cond_t, bb_exc, bb_try)
 
         gen._emit_label(bb_try)
@@ -7529,7 +7529,7 @@ def _gen_stmt_WithStmt(gen, node):
         # exits.
         _pend = gen._call_expr('int', 'mojo_exc_pending_get', [])
         _has_pend = gen._new_temp('_Bool')
-        gen._binop_into(_has_pend, _pend, '!=', '0')
+        gen._emit(f"  {_has_pend} = {_pend} != 0;")
         _bb_reraise = gen._new_bb()
         _bb_supp = gen._new_bb()
         gen._cond_goto(_has_pend, _bb_reraise, _bb_supp)
