@@ -35,7 +35,7 @@ passing suite row, so the count is 2 higher than master's own run).
    registered; only its census row is missing.)
 
 4. **dangling refs: the corpus outside `test_suite.py` is empty.**
-   10 citations of deleted `bugs/mid/...` paths remain in docs that master's
+   9 citations of deleted `bugs/mid/...` paths remain in docs that master's
    `bugs/` reorganisation moved to `bugs/` root without updating the citations:
 
    | cited (absent) | citing file |
@@ -43,7 +43,7 @@ passing suite row, so the count is 2 higher than master's own run).
    | `mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md` | `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` |
    | `...-part4.md` | same |
    | `...-part5.md` | same |
-   | `mid/DIAGNOSTICS_binding_deferrals-part2-part1.md` | `bugs/DIAGNOSTICS_binding_deferrals-part2-part2.md` |
+   | `mid/DIAGNOSTICS_mojoc_imports-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports.md` |
    | `mid/DIAGNOSTICS_mojoc_imports-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports.md` |
    | `mid/DIAGNOSTICS_mojoc_imports-part3.md` | same |
    | `mid/DIAGNOSTICS_mojoc_imports-part2-part1.md` | `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md` |
