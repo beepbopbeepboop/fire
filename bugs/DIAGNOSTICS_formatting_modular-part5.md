@@ -71,3 +71,13 @@ instantiation-chain notes the real compiler prints; merging the second
 `_comptime_conforms_to_pred` in `emit_stmts.py` with the one in `emit_calls.py`;
 `_imported_overloads` calls in statement position take the same fast path and
 probably have the same defect (not measured).
+
+### 2026-11-14 (evening): duplicate predicate merged
+
+`emit_stmts._comptime_conforms_to_pred` (an inlined copy of the one in
+`emit_calls.py`, identical merge logic) is deleted; `emit_stmts` calls
+`ggc._comptime_conforms_to_pred`. `compile_stdlib.py` FAILED 0 (0 expected, 0
+unexpected), `build_stdlib_dylib.py` 249 modules / 0 skip lines.
+Still open: the location lines and instantiation-chain notes, an end-to-end
+`fire build` exit-code confirmation, and the `_imported_overloads` statement-path
+question.
