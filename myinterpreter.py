@@ -2992,43 +2992,10 @@ class _MojoListType:
             return list(kwargs['copy'])
         if 'capacity' in kwargs or 'unsafe_uninit_length' in kwargs:
             return []
-        if 'length' in kwargs:
-            # `List(length=, fill=)` is a synthetic `[fill] * length` and
-            # `List(length=, fill_with=<callable>)` fills slot i with
-            # `fill_with(i)`: the same synthetic-comprehension reading the
-            # compiled path gives it (`_lower_bare_list_ctor` in
-            # emit_calls.py). A `fill` is evaluated ONCE by the caller and
-            # copied into every slot, never re-evaluated; a `fill_with` is a
-            # value call per slot, and a MojoFunction answers one like any
-            # other call (`MojoFunction.__call__` resolves its own
-            # interpreter). A `length=` with no filler (`capacity=` beside
-            # it, a misspelt one) builds nothing: an empty list, matching
-            # the compiled path's `mojo_list_new ()` fallback.
-            length = kwargs['length']
-            if 'fill' in kwargs:
-                fill = kwargs['fill']
-                return [fill] * length
-            if 'fill_with' in kwargs:
-                fill_with = kwargs['fill_with']
-                return [fill_with(i) for i in range(length)]
-            return []
-        if len(args) == 1 and isinstance(args[0], (list, tuple, set,
-                                                   frozenset, dict, range,
-                                                   str, bytes)):
-            # `List(<iterable>)` is a COPY in the container's iteration
-            # order, exactly as `list(<iterable>)` is — one walk, the same
-            # one the compiled path reuses in `_lower_bare_list_ctor`
-            # (emit_calls.py). Before this arm existed the sole iterable
-            # was wrapped as ONE element: `List([1, 2])` answered
-            # `[[1, 2]]` and the two engines disagreed on it
-            # (bug:INTERP_list_ctor_wraps_its_iterable).
-            return list(args[0])
         # `List(1, 2, 3, __list_literal__=NoneType())` - real Mojo's
         # list-literal-desugaring init; drop the marker kwarg, keep the
         # positional values as the initial contents. Plain `List[Int]()`
-        # (no positional args) falls through the same path to `[]`, and a
-        # lone NON-iterable (`List(5)`) is wrapped as one element, as it
-        # always was.
+        # (no positional args) falls through the same path to `[]`.
         return list(args)
 
     def alloc(self, count, *args, **kwargs):
