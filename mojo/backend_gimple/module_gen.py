@@ -4591,6 +4591,7 @@ def _declare_posthoc_class_attrs(stmts: list) -> None:
 
 
 _LITERAL_KIND_CLONE_CTYPE = {
+    'none': 'int64_t',
     'str': 'char *',
     'list': 'MojoList *',
     'dict': 'MojoDict *',
@@ -4599,13 +4600,18 @@ _LITERAL_KIND_CLONE_CTYPE = {
 
 
 def _literal_arg_kind(a):
-    """The container-or-str kind a call argument PROVABLY is, or None.
+    """The container-or-str-or-none kind a call argument PROVABLY is, or None.
 
-    Only literals qualify: a string literal is `str`, a list/tuple, dict or set
-    display is its container. Anything else (a name, a call, a number) is
-    None, and a call site whose argument is None blocks the clone pass for its
-    function, so the existing behaviour stands for it.
+    Only literals qualify: ``None`` is ``none``, a string literal is ``str``,
+    and a list/tuple, dict or set display is its container. Anything else (a
+    name, a call, a number) is None, and a call site whose argument is None
+    blocks the clone pass for its function, so the existing behaviour stands
+    for it.
     """
+    if isinstance(a, gimple_ctypes.NoneLiteral):
+        return 'none'
+    if isinstance(a, gimple_ctypes.IdentExpr) and _as_str(a.name) == 'None':
+        return 'none'
     if isinstance(a, gimple_ctypes.StringLiteral):
         return 'str'
     if isinstance(a, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
@@ -4731,6 +4737,17 @@ def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
                 break
             if (isinstance(_bn, SubscriptExpr) and isinstance(_bn.obj, IdentExpr)
                     and _as_str(_bn.obj.name) == _pname):
+                _iterated = True
+                break
+            _bn_iter = None
+            if isinstance(_bn, gimple_ctypes.Comprehension):
+                _gens = getattr(_bn, 'generators', None) or []
+                if _gens:
+                    _bn_iter = getattr(_gens[0], 'iterable', None) or getattr(_gens[0], 'iter', None)
+            elif type(_bn).__name__ == 'Generator':
+                _bn_iter = getattr(_bn, 'iterable', None) or getattr(_bn, 'iter', None)
+            if (isinstance(_bn_iter, IdentExpr)
+                    and _as_str(_bn_iter.name) == _pname):
                 _iterated = True
                 break
         if not _iterated:
