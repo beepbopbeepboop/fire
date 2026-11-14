@@ -2,7 +2,7 @@
 
 Part 3 of 3 of `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`. Depends on
 the precompiled signature artifact/reader (part 1, landed) and
-`DIAGNOSTICS_mojoc_imports-part2-part2.md` (synthetic signature printer).
+`mojo/middle/mojoc_signature.py` (synthetic signature printer, landed).
 
 ## Class
 mid. It wires an existing conformance check to the imported signature and
@@ -40,7 +40,7 @@ Use the existing diagnostic emitter. Do not add a second message formatter.
 ## Measure first (the worker's first step)
 
 Before changing code, write the three-file fixture from the modular test
-(a `Marked` trait, a `Wrapper` with an `__init__(out self, Int)`, and
+(a `Marked` trait, a `Wrapper` with an `__init>(out self, Int)`, and
 `Container[T: Marked, W: Wrapper = Wrapper(4)]`) under `.tmp/`, run
 `python3 fire.py precompile` (or the part-1 command) and `python3 fire.py build`
 on a `main.mojo` that instantiates `Container[NotMarked]`, and record the exact
