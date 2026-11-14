@@ -4945,6 +4945,39 @@ def _step_rhs(w: int, idx: int):
         cond = (w >> 12) & 0xf
         return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                 f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
+    # 70-79: the scalar-double FP class.  `arm64_step` decodes all ten and
+    # `_WORK_STEP` already names a library lemma for each, so leaving them out
+    # here made `_step_result_plan` drop every one: the decoder claimed the
+    # entry, the proof side had no right-hand side, and the step-OK lemma had
+    # to re-reduce the whole `arm64_step` chain (when it was emitted at all).
+    #
+    # Each spelling below is the `work_step_*` conclusion instantiated at this
+    # word, because `_gen_step_result_lemmas` closes the lemma by `exact`-ing
+    # it: `arm64_reg_d` for a V/D read, `arm64_set_reg_d` for a V/D write, and
+    # the IEEE-754 bit helper named by the model's own arm.  The value helpers
+    # operate on `UInt64` BITS (`lib/IEEE754.lean`), not on `Float`, so they
+    # have the decidable equality the lemma's `rfl` closer needs.
+    if idx == 70:  # FCMP Dn, Dm: flags only, no register write
+        return (f"some {{ s with nzcv := fcmp_nzcv "
+                f"(arm64_reg_d {rn} s) (arm64_reg_d {rm} s) }}")
+    if idx in (71, 72, 73, 74):  # FADD/FSUB/FMUL/FDIV Dd, Dn, Dm
+        helper = {71: "faddBits", 72: "fsubBits",
+                  73: "fmulBits", 74: "fdivBits"}[idx]
+        return (f"some (arm64_set_reg_d {rd} s ({helper} "
+                f"(arm64_reg_d {rn} s) (arm64_reg_d {rm} s)))")
+    if idx == 75:  # FNEG Dd, Dn
+        return (f"some (arm64_set_reg_d {rd} s "
+                f"(fnegBits (arm64_reg_d {rn} s)))")
+    if idx == 76:  # FMOV Dd, Xn: GPR -> V/D
+        return f"some (arm64_set_reg_d {rd} s (arm64_reg {rn} s))"
+    if idx == 77:  # FMOV Xd, Dn: V/D -> GPR
+        return f"some (arm64_set_reg {rd} s (arm64_reg_d {rn} s))"
+    if idx == 78:  # SCVTF Dd, Xn: signed 64-bit int -> double
+        return (f"some (arm64_set_reg_d {rd} s "
+                f"(scvtfBits (arm64_reg {rn} s)))")
+    if idx == 79:  # FCVTZS Xd, Dn: double -> signed 64-bit int
+        return (f"some (arm64_set_reg {rd} s "
+                f"(fcvtzsBits (arm64_reg_d {rn} s)))")
     # CSINC/CSINV/CSNEG (handle by word to be robust to table layout)
     if (w & 0xffe00c00) == 0x9a800400 and not ((w & 0xffff0fe0) == 0x9a9f07e0):  # CSINC, not CSET
         cond = (w >> 12) & 0xf
@@ -5320,6 +5353,29 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
                 f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
                 f"else arm64_reg {_RM} s))")
+    # 70-79: the scalar-double FP class, word-relative twin of `_step_rhs`'s
+    # arms.  None of these reads the pc, so the closer takes its `exact` path.
+    if idx == 70:  # FCMP
+        return (f"some {{ s with nzcv := fcmp_nzcv "
+                f"(arm64_reg_d {_RN} s) (arm64_reg_d {_RM} s) }}")
+    if idx in (71, 72, 73, 74):
+        helper = {71: "faddBits", 72: "fsubBits",
+                  73: "fmulBits", 74: "fdivBits"}[idx]
+        return (f"some (arm64_set_reg_d {_RD} s ({helper} "
+                f"(arm64_reg_d {_RN} s) (arm64_reg_d {_RM} s)))")
+    if idx == 75:
+        return (f"some (arm64_set_reg_d {_RD} s "
+                f"(fnegBits (arm64_reg_d {_RN} s)))")
+    if idx == 76:
+        return f"some (arm64_set_reg_d {_RD} s (arm64_reg {_RN} s))"
+    if idx == 77:
+        return f"some (arm64_set_reg {_RD} s (arm64_reg_d {_RN} s))"
+    if idx == 78:
+        return (f"some (arm64_set_reg_d {_RD} s "
+                f"(scvtfBits (arm64_reg {_RN} s)))")
+    if idx == 79:
+        return (f"some (arm64_set_reg {_RD} s "
+                f"(fcvtzsBits (arm64_reg_d {_RN} s)))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 85):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
@@ -6650,13 +6706,22 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
 
 def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                   exit_pc: int = 0, code_name: str = None,
-                  sr_name: str = None):
+                  sr_name: str = None, svc_assumed: dict = None):
     """Emit wrapper defs + a runs-certificate for a straight-line run.
 
     `code_name` / `sr_name` name the SHARED code and step-lemma families when
     the run belongs to a function other than the one they were emitted for --
     which is the by-reference receiver case, where one image's step lemmas are
     used by every method's contract.
+
+    `svc_assumed` maps the pc of a write `svc` whose x16 is not statically
+    known to the NAME of the hypothesis that stands in for it: a binder
+    `(NAME : ¬ arm64_reg 16 ({S}_qS{k} st) = 1)` on every emitted theorem
+    whose proof uses that site's `hx{k}`.  The hypothesis is assumed, never
+    proved here and never invented: a dynamic write `svc` with no entry in
+    this map is still refused.  With no map (the default) the behaviour is
+    exactly the pre-assumption one, so every existing caller is unchanged
+    until the universal walk supplies the assumption.
 
     A run is a maximal straight-line sequence of instructions (no branches in
     the middle); it may end in a RET.  Returns (defs_text, cert_name,
@@ -6692,9 +6757,11 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # discharged from the reg-16 chain and not assumed about an arbitrary
     # state), and the fall-through rewrites x0 before anything reads the
     # byte count the model does not model.  An exit `svc` has no successor
-    # to certify, and a dynamic one has no provenance at all, so both are
-    # still refused.
+    # to certify and is still refused.  A dynamic write has no chain, so it
+    # is admitted only by the caller's named `svc_assumed` hypothesis; with
+    # none supplied it is refused exactly as before.
     svc_write = {}
+    svc_dynamic = {}
     for k, pc in enumerate(run_pcs):
         if not _is_svc(words.get(pc, 0)):
             continue
@@ -6705,7 +6772,17 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             x16 = (prev >> 5) & 0xffff
         else:
             x16 = None
-        if x16 is None or x16 == 1:
+        if x16 is None:
+            # No `movz x16` in this run to chain from.  The write form is
+            # still sound when the caller supplies the named hypothesis the
+            # step lemma needs (`¬ arm64_reg 16 s = 1`) AND the fall-through
+            # rewrites x0 before reading it; otherwise this is a refusal.
+            binder = (svc_assumed or {}).get(pc)
+            if not binder or not _x0_reassigned_after_write(words, pc):
+                return None
+            svc_dynamic[pc] = binder
+            continue
+        if x16 == 1:
             return None
         if not _x0_reassigned_after_write(words, pc):
             return None
@@ -6760,9 +6837,23 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                         + _pc_proof(k))
     step_facts = []
     hx_facts = []
+    # A dynamic write `svc` is admitted by the caller's named hypothesis, so
+    # every theorem whose proof applies that site's step lemma carries the
+    # hypothesis as a binder.  Its type is fixed HERE, at the run's own
+    # pre-svc state (`{S}_qS{k} st`), so the same name can be passed to the
+    # self/mid/runs theorems without re-stating the state.
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
         if _is_svc(words[pc]):
+            if pc in svc_dynamic:
+                hx_facts.append(
+                    f"  have hx{k} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1 := "
+                    f"{svc_dynamic[pc]}")
+                step_facts.append(
+                    f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
+                    f"= some ({S}_qT{k} st) :=\n"
+                    f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k}) (hx{k})")
+                continue
             # The step lemma is `work_step_svc_write`, under its `hx`
             # hypothesis.  Discharge that from the run's OWN reg-16 chain:
             # the preceding `movz` is in this run (the admission above
@@ -6791,6 +6882,20 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                               f"{code_name} = some ({S}_qT{k} st) :=\n"
                               f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
 
+    # Binder group for a theorem whose proof uses the first `upto` steps'
+    # `hx` facts.  A dynamic site's name is the caller's; its type is the
+    # write form's own side condition at that site's pre-state, so the
+    # hypothesis is ASSUMED (never proved here) and every theorem that
+    # applies the site's step lemma must carry it.
+    def _svc_binders(upto):
+        return [f"({svc_dynamic[pc]} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1)"
+                for k, pc in enumerate(run_pcs[:upto])
+                if pc in svc_dynamic]
+
+    def _svc_binder_args(upto):
+        return [svc_dynamic[pc] for k, pc in enumerate(run_pcs[:upto])
+                if pc in svc_dynamic]
+
     # The `hseq` side condition of `runs_cons_seq` is discharged two ways, and
     # the split is not stylistic.  For the block's FIRST instruction the source
     # state is `S_qS0 st`, which is `st` (`def S_qS0 := st`), so the condition
@@ -6810,7 +6915,10 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # first-step `sp` one).
     # self_k theorems: arm64_runs code k st = some (qS_k st) for 1 <= k <= m-1
     for k in range(1, m):
-        A(f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
+        head = f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]})"
+        for b in _svc_binders(k):
+            head += f"\n    {b}"
+        A(head + " :")
         A(f"    arm64_runs {code_name} {k} st = some ({S}_qS{k} st) := by")
         A("\n".join(pc_facts[:k + 1]))
         A("\n".join(hx_facts[:k]))
@@ -6825,7 +6933,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                 A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
-            A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
+            self_args = " ".join([f"{S}_self{k - 1} st hpc"]
+                                 + _svc_binder_args(k - 1))
+            A(f"  rw [runs_append {code_name} {k - 1} 1 st, {self_args}]")
             A(f"  simp only []")
             if pc_writes[k - 1]:
                 A(f"  rw [runs_cons_jump ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
@@ -6853,10 +6963,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         # RET-ending run: the jump side-condition (RET pc != current pc) is a
         # value-flow hypothesis the caller must supply.  `hjump` is stated on
         # the pre-RET state's x30 (the return address).
-        A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
-        A(f"    (hjump : ({S}_qS{m - 1} st).x30.toNat ≠ {run_pcs[-1]}) :")
+        head = (f"theorem {S}_runs (st : Arm64State) "
+                f"(hpc : st.pc = {run_pcs[0]})")
+        head += (f"\n    (hjump : ({S}_qS{m - 1} st).x30.toNat "
+                 f"≠ {run_pcs[-1]})")
     else:
-        A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
+        head = (f"theorem {S}_runs (st : Arm64State) "
+                f"(hpc : st.pc = {run_pcs[0]})")
+    for b in _svc_binders(m):
+        head += f"\n    {b}"
+    A(head + " :")
     A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
     A("\n".join(pc_facts))
     A("\n".join(hx_facts))
@@ -6877,7 +6993,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
     else:
-        A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
+        self_args = " ".join([f"{S}_self{m - 1} st hpc"]
+                             + _svc_binder_args(m - 1))
+        A(f"  rw [runs_append {code_name} {m - 1} 1 st, {self_args}]")
         A(f"  simp only []")
         if last_moves_pc:
             A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
@@ -6904,8 +7022,12 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # `∀ p ∈ [p₀, …], p ≠ exit` leaf-by-leaf, so the cost scales with block
     # length instead of failing.  `work_mid_hk` turns it into the per-case fact.
     pcs_lit = ", ".join(str(pc) for pc in run_pcs)
-    A(f"theorem {S}_mid (exit : Nat) (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
-    A(f"    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit) :")
+    mid_head = (f"theorem {S}_mid (exit : Nat) (st : Arm64State) "
+                f"(hpc : st.pc = {run_pcs[0]})")
+    mid_head += f"\n    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit)"
+    for b in _svc_binders(m):
+        mid_head += f"\n    {b}"
+    A(mid_head + " :")
     A(f"    ∀ u < {m}, ∀ su, arm64_runs {code_name} u st = some su → su.pc ≠ exit := by")
     A("  intro u hu su hsu")
     cases = " ∨ ".join(f"u = {k}" for k in range(m))
@@ -6921,7 +7043,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A("    exact hk")
         else:
             A(f"    have hself : arm64_runs {code_name} {k} st = some ({S}_qS{k} st) :=")
-            A(f"      {S}_self{k} st hpc")
+            self_args = " ".join([f"{S}_self{k} st hpc"]
+                                 + _svc_binder_args(k))
+            A(f"      {self_args}")
             A(f"    have heq : some ({S}_qS{k} st) = some su := hself.symm.trans hsu")
             A("    injection heq with hq")
             A("    subst hq")
@@ -6933,7 +7057,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
 
 def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                    exit_pc: int, code_name: str = None, sr_name: str = None,
-                   leaders=frozenset()):
+                   leaders=frozenset(), svc_assumed: dict[int, str] | None = None):
     """Emit the pieces of a proof that a straight-line run ENDS the program.
 
     The run is a block whose last instruction is a statically-known exit `svc`
@@ -6963,12 +7087,20 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     if not _is_svc_exit(words, run_pcs[-1], leaders):
         return None
     svc_x16 = {}
+    dynamic_writes = set()
     for pc in run_pcs:
         if not _is_svc(words.get(pc, 0)):
             continue
         x = _svc_static_x16(words, pc, leaders)
         if x is None:
-            return None
+            if pc == run_pcs[-1]:
+                return None
+            if not (svc_assumed and pc in svc_assumed):
+                return None
+            if not _x0_reassigned_after_write(words, pc):
+                return None
+            dynamic_writes.add(pc)
+            continue
         svc_x16[pc] = x
     for pc, x in svc_x16.items():
         if pc != run_pcs[-1] and x == 1:
@@ -7012,6 +7144,8 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
 
     A = L.append
     A(f"theorem {S}_halts (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
+    if dynamic_writes:
+        A(f"    (svc_write_assumed : ¬ arm64_reg 16 st = 1)")
     A(f"    (f : Nat) (hf : {total} < f) :")
     A(f"    arm64_go_exit st {code_name} {exit_pc} f = none := by")
 
@@ -7020,10 +7154,37 @@ def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     for j, (kind, pcs) in enumerate(segs):
         if kind == "svc":
             pc = pcs
-            x = svc_x16[pc]
             hpc = f"hpc_svc_{j}"
             hpc_proof = cur_pc_fact
             A(f"  have {hpc} : ({cur_state}).pc = {pc} := {hpc_proof}")
+            if pc in dynamic_writes:
+                if pc == run_pcs[-1]:
+                    return None
+                hx = f"hx_svc_{j}"
+                # Binder is stated over the entry state `st`; dynamic writes are
+                # admitted only at the block entry (no preceding run), so the
+                # pre-svc state is `st`.
+                A(f"  have {hx} : ¬ arm64_reg 16 ({cur_state}) = 1 := svc_write_assumed")
+                i = (pc - base) // 4
+                tgt = f"{{ {cur_state} with pc := {pc + 4} }}"
+                A(f"  have hstep_w_{j} : arm64_step ({cur_state}) {code_name} = "
+                  f"some ({tgt} : Arm64State) := by")
+                A(f"    have hsr := {sr_name}_sr_{i} ({cur_state}) {hpc} {hx}")
+                A(f"    rw [hsr, {hpc}]")
+                A(f"    try rfl")
+                A(f"  have hne_w_{j} : ({tgt} : Arm64State).pc ≠ ({cur_state}).pc := by")
+                A(f"    rw [{hpc}]")
+                A(f"    change {pc + 4} ≠ {pc}")
+                A(f"    decide")
+                A(f"  have hgj_w_{j} := arm64_go_exit_step_jump_at ({cur_state}) "
+                  f"({tgt}) {code_name} {exit_pc} ({cur_fuel} - 1) {pc} "
+                  f"hstep_w_{j} hne_w_{j} {hpc} (by decide)")
+                A(f"  rw [show ({cur_fuel} - 1) + 1 = {cur_fuel} from by omega] at hgj_w_{j}")
+                A(f"  rw [hgj_w_{j}]")
+                cur_state, cur_pc, cur_fuel, cur_pc_fact = tgt, pc + 4, f"({cur_fuel} - 1)", "by rfl"
+                prev_run = None
+                continue
+            x = svc_x16[pc]
             if prev_run is None:
                 # The number is static in the IMAGE but not in this run: no
                 # preceding movz is in the segment, so there is no chain from

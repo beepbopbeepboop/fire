@@ -794,6 +794,92 @@ def import_error_suggestion(mod_name, name_from):
     return f". Did you mean: '{suggestion}' ({suggestion!a})?"
 
 
+def name_error_candidate(name, candidates, self_obj):
+    """The single name CPython 3.15's NameError suggestion would offer for
+    `name`, or None. Shared by the CPython-rendered suffix
+    (name_error_suggestion) and the Mojo-rendered diagnostic
+    (mojo_diagnostic_text), so both pick the same candidate: the NFKC
+    normalisation match, then the `self.<name>` refinement, then the shared
+    distance match over `candidates`."""
+    if not isinstance(name, str) or candidates is None:
+        return None
+    d = [x for x in candidates if isinstance(x, str)]
+    name_n, not_normalized = _suggestion_normalize(name)
+    if not_normalized and name_n in d:
+        return name_n
+    if self_obj is not None:
+        try:
+            if hasattr(self_obj, name_n):
+                return f"self.{name_n}"
+        except Exception:
+            pass
+    return _suggestion_after_pool(d, name_n, not_normalized)
+
+
+def mojo_diagnostic(exc, filename, source, fmt='text'):
+    """The modular-format rendering of an unknown-declaration error, or None
+    when `exc` carries no Mojo source location (an error raised from a
+    synthetic node, or one that never reached eval_IdentExpr). `fmt` is
+    'text' (the default) or 'json' (`--diagnostic-format json`).
+
+    One record is built here (the position, the source line, the message and
+    the suggestion) and rendered two ways, matching the modular compiler's
+    output for the same file:
+
+    text, `mojo build`'s shape:
+
+        <file>:<line>:<col>: error: use of unknown declaration '<name>'
+            <the source line, verbatim>
+            <spaces to the column>^~~~ (one ~ per further character of name)
+
+    with a suggestion the head gains `; did you mean '<s>'?` and the
+    suggestion is printed on its own line under the caret, at the column.
+
+    json, one object per record with sorted keys and 0-based columns in
+    `location` and `ranges`, 1-based line/column in `fixIts` (the suggestion
+    replaces the identifier). The driver's closing `failed to parse` record
+    is part of that stream, so it is emitted here too."""
+    loc = getattr(exc, 'mojo_loc', None)
+    name = getattr(exc, 'name', None)
+    if loc is None or not isinstance(name, str) or not filename or source is None:
+        return None
+    line, col, width = loc
+    lines = source.splitlines()
+    if line < 1 or line > len(lines) or col < 1:
+        return None
+    text = lines[line - 1]
+    suggestion = name_error_candidate(name, getattr(exc, 'candidates', None),
+                                      getattr(exc, 'self_obj', None))
+    if suggestion is not None and not suggestion.isascii():
+        suggestion = None
+    message = f"use of unknown declaration '{name}'"
+    if suggestion is not None:
+        message += f"; did you mean '{suggestion}'?"
+    if fmt == 'json':
+        import json
+        diagnostic = {
+            'file': filename,
+            'fixIts': [] if suggestion is None else [{
+                'start': {'line': line, 'column': col},
+                'end': {'line': line, 'column': col + width},
+                'text': suggestion}],
+            'location': {'line': line, 'column': col - 1},
+            'ranges': [{'start': col - 1, 'end': col - 1 + width}],
+            'text': text}
+        records = [{'diagnostic': diagnostic, 'kind': 'error', 'message': message},
+                   {'kind': 'error',
+                    'message': 'failed to parse the provided Mojo source module'}]
+        return '\n'.join(json.dumps(r, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=False)
+                         for r in records)
+    out = [f"{filename}:{line}:{col}: error: {message}", text]
+    pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:col - 1])
+    out.append(pad + '^' + '~' * max(width - 1, 0))
+    if suggestion is not None:
+        out.append(' ' * (col - 1) + suggestion)
+    return '\n'.join(out)
+
+
 def name_error_suggestion(name, candidates, self_obj):
     """CPython 3.15's print-time NameError suggestion, as the suffix to
     append to the message: '' when there is nothing to add. CPython reads
@@ -815,20 +901,7 @@ def name_error_suggestion(name, candidates, self_obj):
     '<name>'?` when there is none."""
     if not isinstance(name, str) or candidates is None:
         return ''
-    d = [x for x in candidates if isinstance(x, str)]
-    name_n, not_normalized = _suggestion_normalize(name)
-    suggestion = None
-    if not_normalized and name_n in d:
-        suggestion = name_n
-    else:
-        if self_obj is not None:
-            try:
-                if hasattr(self_obj, name_n):
-                    suggestion = f"self.{name_n}"
-            except Exception:
-                pass
-        if suggestion is None:
-            suggestion = _suggestion_after_pool(d, name_n, not_normalized)
+    suggestion = name_error_candidate(name, candidates, self_obj)
     if suggestion is None:
         if name in _STDLIB_MODULE_NAMES:
             return f". Did you forget to import '{name}'?"
@@ -7478,9 +7551,15 @@ class Interpreter:
             # scope.get raises through _tag_name_error (name/candidates/
             # self_obj), and this new exception must carry the same fields
             # for CPython 3.15's print-time NameError suggestion.
-            raise _tag_name_error(
+            exc = _tag_name_error(
                 NameError(f"{self._loc(expr)}name '{expr.name}' is not defined"),
                 self.scope, expr.name)
+            # The source span for the modular-format top-level diagnostic
+            # (mojo_diagnostic_text). Synthetic IdentExprs carry no position
+            # and keep the plain message.
+            if expr.line > 0 and expr.col > 0:
+                setattr(exc, 'mojo_loc', (expr.line, expr.col, len(expr.name)))
+            raise exc
 
     def _resolve_Self(self, expr):
         """Resolve Self to the current struct type (when inside a struct method)."""
