@@ -104,21 +104,6 @@ typedef struct { void *fn; void *self; void **boxes; int64_t nboxes; } MojoBound
  * self.m; f()`). */
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
 int mojo_is_bound_method(void *p);
-/* Runtime function usable as the `fn` of a bound-method box for a BUILTIN
- * container method referenced as a value (`cb = l.append`):
- * `mojo_bound_method_new((void *)mojo_builtin_list_append, l)` yields a
- * REGISTERED bound method, so a call through the generic dispatch
- * (`mojo_fnptr_call_N` / `mojo_maybe_bound_call_N` -> `mojo_bound_method_
- * call_N`, which calls `bm->fn(bm->self, args)`) appends the argument word
- * to the receiver list — the same slot word a direct `l.append(item)`
- * spelling pushes (`mojo_list_append_int` stores int, pointer and string
- * elements identically). Without a real box, a builtin method value that
- * ESCAPES its creating function (passed as a callback argument, returned,
- * stored) keeps the container pointer itself as the "callable" and the
- * dispatch's bare-fnptr arm jumps into the list's heap allocation (SIGBUS —
- * COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fix, root
- * cause #6: analyzer.py's `find_stores_in_tokens(stmt.contents, res.append)`). */
-int64_t mojo_builtin_list_append(void *self, int64_t item);
 /* Append one `{mut}` box the environment holds to `bm`, so `mojo_closure_free`
  * frees it with the environment. The list is grown with `realloc` (a `NULL`
  * start is a `malloc`), and `bm` owns it: `mojo_closure_free` frees every box
@@ -651,12 +636,6 @@ int64_t mojo_tb_lineno(int64_t t);
  * after bumping `_mojo_exc_top` for a new try/except level, before its
  * `setjmp`. */
 void mojo_cleanup_checkpoint_save(void);
-/* Record the checkpoint for a RUNTIME-pushed level (coroutine pad, gen
- * close pad): the level's unwind must run exactly the `nc` records that
- * sit above the caller's own depth right now (the coroutine body's
- * re-pushed slice records), leaving the caller's own records alone. See
- * the definition's comment in fire_runtime.c. */
-void mojo_cleanup_pad_checkpoint(int lvl, int nc);
 
 /* ── Compiled-generator (C++20 coroutine) exception boundary ─────────────
  * A coroutine body can't use setjmp/longjmp directly (the C stack frame
@@ -721,12 +700,6 @@ MojoList *mojo_exc_args(void *obj);
 
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
-/* Open-file words the runtime handed out (`mojo_open`/`mojo_open_file`/
- * `mojo_open_file_ex`). Positive evidence only, so a `for` over an untyped
- * word can tell a file from a list/dict/set. `mojo_file_lines` materializes
- * its lines (NULL when the word is not a registered file). */
-int      mojo_is_registered_file(int64_t addr);
-MojoList *mojo_file_lines(int64_t v);
 int mojo_boxed_is_str(int64_t v);
 int mojo_is_str_box(int64_t v);
 int64_t mojo_str_box_word(int64_t v);
@@ -895,10 +868,6 @@ int64_t     mojo_list_get_boxed(MojoList *l, int64_t i);
 int         mojo_is_boxed(int64_t v);
 double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
-/* `int(x)` on a word of unknown kind (see mojo_int_of_word's own comment):
- * plain int stays, bare/boxed string parses, double box truncates, None or
- * a container raises TypeError. */
-int64_t     mojo_int_of_word(int64_t w);
 /* A double that must travel in an int64_t slot beside integers (see
  * `_int64_may_hold_float`): a fresh kind-'d' box, never freed, whose address
  * is the word. mojo_repr_boxed / mojo_box_double read it back. */
@@ -982,11 +951,6 @@ void    mojo_list_append_str(MojoList *l, const char *v);
 
 int64_t mojo_list_get_int(MojoList *l, int64_t i);
 double  mojo_list_get_double(MojoList *l, int64_t i);
-/* Checked twins: an out-of-range EXPLICIT subscript raises a catchable
- * IndexError instead of answering 0 (see the C file for the split, the
- * mirror of mojo_bytes_get_checked). */
-int64_t mojo_list_get_int_checked(MojoList *l, int64_t i);
-double  mojo_list_get_double_checked(MojoList *l, int64_t i);
 
 /* A double travels as its IEEE-754 BITS inside an int64_t — a list slot, a
  * box, or the int64_t the homogenized `mojo_fnptr_call_N` helpers return for
@@ -1031,7 +995,6 @@ void     mojo_list_insert_str(MojoList *l, int64_t i, char *v);
 void     mojo_list_set_double(MojoList *l, int64_t i, double v);
 void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
-char    *mojo_list_get_str_checked(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
 /* Extended (with-step) list slice: `lst[a:b:c]` — see the C file for the
  * step==0 convention; step-less slices keep mojo_list_slice. */
@@ -1669,10 +1632,6 @@ void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
  * it every plain `0` in a dict printed as `None`, because the generic value
  * repr answers "None" for a zero word. */
 void        mojo_dict_set_none(MojoDict *d, char *key);
-/* An `int | None` field read off a struct (see the definition in
- * fire_runtime.c for the word-model bound): kind 4 when the word is zero
- * (the field's annotation says the zero may be None), kind 0 otherwise. */
-void        mojo_dict_set_opt_int(MojoDict *d, char *key, int64_t v);
 void        mojo_dict_set_none_key(MojoDict *d, int64_t v);
 void        mojo_dict_set_none_key_int(MojoDict *d, int64_t v);
 void        mojo_dict_set_none_key_str(MojoDict *d, char *v);
@@ -2384,8 +2343,6 @@ MojoList *mojo_py_tokenize(char *source);
 int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
 /* open() with optional mode/newline; newline==NULL means "not provided". */
 int64_t mojo_open_file_ex(char *path, char *mode, char *newline);
-/* The builtin `open` as a dynamic-call word (a `_f=open` parameter default). */
-int64_t mojo_open_default(int64_t path, int64_t mode, int64_t newline);
 
 /* Wrappers for C library functions that take pointer-to-pointer args.
    Generated GIMPLE code passes int64_t/void* opaque values; these wrappers
@@ -2760,33 +2717,3 @@ char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClas
  * Returns a list of rows, each row a MojoList* of string fields. */
 int64_t   mojo_csv_reader_vf(int64_t lines_word, MojoList *packed, MojoDict *kw);
 extern void *mojo_csv_reader_w;
-
-/* Round a double to the nearest value of a float8 format, ties to even. The
- * format is the four numbers of mojo/middle/float8_dtype.FLOAT8_FORMATS:
- * exponent bits, mantissa bits, bias, and kind (0 ieee, 1 fn, 2 fnuz,
- * 3 ue8m0). Overflow past the largest finite value is inf (ieee), NaN (fn,
- * fnuz); an ue8m0 saturates to its largest power of two. */
-double mojo_f8_round(double x, int ebits, int mbits, int bias, int kind);
-
-/* A float8 scalar travelling in a TAGGED word: a box whose bits are its double
- * value and whose kind byte names the format ('A'..'F', in float8_dtype's
- * FLOAT8_FORMATS order; 'G' is an unknown spelling). The interpreter's
- * `_MojoFloat8Value` lowers to this in the self-hosted compiler. */
-int64_t     mojo_box_from_f8(double v, const char *spelling);
-int         mojo_is_f8_box(int64_t v);
-const char *mojo_f8_spelling(int64_t v);
-
-/* CPU lowering of `llvm_intrinsic[...]` (emit_calls._lower_llvm_intrinsic): integer
- * bit operations at an explicit width w (8, 16, 32 or 64). Results are masked to w
- * bits, as the intrinsic's own type is w bits wide. */
-int64_t mojo_fshl(int64_t a, int64_t b, int64_t s, int64_t w);
-int64_t mojo_fshr(int64_t a, int64_t b, int64_t s, int64_t w);
-int64_t mojo_ctpop(int64_t x, int64_t w);
-int64_t mojo_ctlz(int64_t x, int64_t w);
-int64_t mojo_cttz(int64_t x, int64_t w);
-int64_t mojo_bswap(int64_t x, int64_t w);
-int64_t mojo_usub_sat(int64_t a, int64_t b, int64_t w);
-/* A llvm_intrinsic with no CPU lowering, reached at run time: prints its name and
- * exits nonzero. Never returns, so no value is ever read from it. */
-void mojo_unsupported_intrinsic(const char *name);
-

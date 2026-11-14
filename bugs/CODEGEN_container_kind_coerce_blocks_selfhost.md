@@ -1,0 +1,85 @@
+# CODEGEN: `cannot coerce <Set/Dict> * to MojoList *` blocks the selfhost, `--dump-full` and the bootstrap gate jobs
+
+**Found:** 2026-11-13, while fixing the membership false positive that had been
+refusing two of the compiler's own modules (see the commit that landed
+`_definitive_binding_type`'s scalar-annotation check). That refusal stopped
+compilation early and MASKED these; with it gone, `--dump-full
+mojo/middle/exprtypes.py` proceeds and reports three:
+
+```
+# ERROR: compiling imported module 'comptime' from comptime.py:
+  cannot coerce MojoSet * to MojoList * (incompatible container kinds)
+  at comptime.py in function `_build_dylib_build`: value='_t3' dest='_t6'
+# ERROR: compiling imported module 'gimple_codegen' from gimple_codegen.py:
+  cannot coerce MojoDict * to MojoList * (incompatible container kinds)
+  at gimple_codegen.py in function `_run_pipeline__walk_diag_fns`: value='_t37' dest='_t29'
+# ERROR: compiling imported module 'monomorphize' from monomorphize.py:
+  cannot coerce MojoSet * to MojoList * (incompatible container kinds)
+  at monomorphize.py in function `instantiate_build`: value='_t22' dest='_t25'
+```
+
+The first of these was already visible before the membership fix (the same
+`gimple_codegen._run_pipeline__walk_diag_fns` line appears in the pre-fix
+log), so this is not a regression from that change — it is a pre-existing
+defect that the earlier refusal hid.
+
+## Why it matters
+
+These three are what still block, in order:
+
+- `python3 fire.py --dump-full fire.py` (the repro in
+  `bugs/hard/GATE_red_recover-land_2026-11-02.md` for the bootstrap jobs),
+- `make mojoc` / the selfhost,
+- `bootstrap-stage1-transitive` and its stage2/stage3 siblings, which are
+  turned OFF in `tools/gates.json` until that repro is clean.
+
+## Reproduce
+
+```
+cd /Users/mrs/net/gcc/gcc/fire/fire
+python3 fire.py --dump-full mojo/middle/exprtypes.py 2>&1 | grep 'cannot coerce'
+```
+
+(Compiling any module that imports the three above reaches the same errors.)
+
+## Next step
+
+Read each `dest=` binding: the emitter has decided the destination is a
+`MojoList *` while the value it is handed is a `MojoSet *` / `MojoDict *`.
+Either the destination's recorded kind is wrong (the same
+`_infer_param_types`-vs-USES mismatch as a parameter whose call sites disagree
+on container kind while its body rebinds it to one container kind) or the
+value's is. Start with `monomorphize.instantiate_build` (`_t22` -> `_t25`), the
+smallest of the three.
+
+## Done when
+
+`python3 fire.py --dump-full mojo/middle/exprtypes.py` reports no
+`cannot coerce ... (incompatible container kinds)` line, and the selfhost /
+bootstrap chain in `bugs/hard/GATE_red_recover-land_2026-11-02.md` can be
+re-enabled.
+
+## Sites, re-measured 2026-11-14 (temporary instrumentation at the chokepoint)
+
+The three sites named above are not the whole set. Printing
+`gen._current_filename` / `gen.current_func_name` / the enclosing
+`gen._current_func_node` at `_sce_simple_emit`'s refusal gives, in one
+`--dump-full comptime.py` run:
+
+| file | `current_func_name` | enclosing node | value -> dest |
+|---|---|---|---|
+| gimple_codegen.py | `_merge_struct_inheritance_resolve` | `_selfhost_syms` (line 653) | `MojoDict *` -> `MojoList *` |
+| gimple_codegen.py | `_run_pipeline__walk_diag_fns` | `_relocate_module_instance_defs` (6285) | `MojoDict *` -> `MojoList *` |
+| monomorphize.py | `instantiate_build` | `compile_fn` (915) | `MojoSet *` -> `MojoList *` |
+| comptime.py | `_build_dylib_build` | — | `MojoSet *` -> `MojoList *` |
+
+Two notes for whoever fixes it. First, `gen._current_line` is `None` in the
+refusal, so the error message's `file:line` is line-less and the mangled
+`current_func_name` (`_merge_struct_inheritance_resolve`, `instantiate_build`,
+`_build_dylib_build`) does NOT appear in the source — those are derived names,
+so grep for them finds nothing. The enclosing top-level function is the
+source-visible handle. Second, all four are the SAME shape: a destination the
+inference said `MojoList *` and a value that is really a `MojoDict *`/`MojoSet *`,
+which is the parameter container-kind inference class that the silentnoop
+`pick` refusal belonged to (fixed in e4a2cc2ed, "specialize literal-kind mixed
+params including None/comprehensions").

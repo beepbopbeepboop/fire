@@ -9564,7 +9564,7 @@ def _unmodelled_instruction(word: int):
         12-bit-offset access cannot express, which in practice means a NEGATIVE
         frame offset (measured: `0xf81a83a0` is `stur x0, [x29, #-0x58]`, and
         `#-0x58` is exactly what a spill below the frame base needs).
-        the arm64 instruction-coverage survey lists this pair as the one
+        `bugs/hard/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
         instruction whose emission carried a real bug, and the step table still
         has no arm for it.
       * **the EXTENDED-register `ADD`/`SUB`** — bits 28..23 = `010111`, bit 21
@@ -9596,37 +9596,26 @@ def _unmodelled_instruction(word: int):
                 f"Emitted by the `through_value` arm of a call in "
                 f"`formal/arm64_codegen.py` (indirect call through x{n}).")
     if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
-        # Extended register class: model ONLY option=011 (UXTX/LSL), 64-bit
-        sf = (word >> 31) & 1
+        sf = (word >> 31) & 0x1
         option = (word >> 13) & 0x7
-        if sf == 1 and option == 0x3 and ((word & 0xffe0e000) in (0x8b206000, 0xcb206000, 0xeb206000)):
-            # Should be modelled by our new rows; fall through to unmodelled only if not matched
-            pass
-        else:
-            which = ("SUBS/CMP extended" if (word >> 29) & 1 else
-                     "SUB extended" if (word >> 30) & 1 else "ADD extended")
-            # The word's OWN fields, by architectural name. A reader holding a
-            # hex word (the position this refusal fires from, on an image the
-            # emitter grew a new encoder for) otherwise has to re-decode sf,
-            # option and imm3 by hand; the paragraph above explains the CLASS,
-            # not this word.
-            _opt = (word >> 13) & 0x7
-            _imm3 = (word >> 10) & 0x7
-            _sf = (word >> 31) & 0x1
-            _opts = ("UXTB", "UXTH", "UXTW", "UXTX",
+        imm3 = (word >> 10) & 0x7
+        which = ("SUBS/CMP extended" if (word >> 29) & 1 else
+                 "SUB extended" if (word >> 30) & 1 else "ADD extended")
+        opt_names = ("UXTB", "UXTH", "UXTW", "UXTX",
                      "SXTB", "SXTH", "SXTW", "SXTX")
-            _dec = ("32-bit, " if _sf == 0 else "")
-            _dec = _dec + f"option={_opt:03b} ({_opts[_opt]}), imm3={_imm3}"
-            return (which,
-                    "A64's EXTENDED-register `ADD`/`SUB` — bits 28..24 = 01011 with "
-                    "bit 21 set — which is where the architecture keeps the SP "
-                    "encoding for `Rn`. The shifted-register row the step table has "
-                    "(`0x8b000000` / `0xcb000000`) is a DIFFERENT class and reads "
-                    "`Rn = 31` as the zero register. This class is modelled for UXTX "
-                    "(option=011), 64-bit only; the other extend options remain unmodelled. "
-                    "Measured by assembling the spelling and running it: `add x0, sp, x1, uxtw` "
-                    "remains unmodelled while `add x0, sp, x1, lsl #0` (UXTX) is modelled. "
-                    + _dec)
+        decode = f"option={option:03b} ({opt_names[option]}), imm3={imm3}"
+        if sf == 0:
+            decode = f"32-bit, {decode}"
+        return (which,
+                "A64's EXTENDED-register `ADD`/`SUB` — bits 28..24 = 01011 with "
+                "bit 21 set — which is where the architecture keeps the SP "
+                "encoding for `Rn`. The shifted-register row the step table has "
+                "(`0x8b000000` / `0xcb000000`) is a DIFFERENT class and reads "
+                "`Rn = 31` as the zero register. This class is modelled for UXTX "
+                "(option=011), 64-bit only; the other extend options remain unmodelled. "
+                "Measured by assembling the spelling and running it: `add x0, sp, x1, uxtw` "
+                "remains unmodelled while `add x0, sp, x1, lsl #0` (UXTX) is modelled. "
+                f"This word: {decode}.")
     top = word & 0xffc00000
     if top in (0xf8000000, 0xf8400000):
         which = "STUR" if top == 0xf8000000 else "LDUR"
@@ -9634,7 +9623,7 @@ def _unmodelled_instruction(word: int):
                 f"the unscaled (9-bit displacement) form, which is how a "
                 f"frame access at a NEGATIVE offset is reached; the step table "
                 f"has arms for the scaled `STR`/`LDR` and not for these, and "
-                f"the arm64 instruction-coverage survey lists the pair "
+                f"`bugs/hard/FORMAL_arm64_instruction_coverage.md` lists the pair "
                 f"as uncovered.")
     return (None, "")
 
@@ -9769,37 +9758,6 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
                 f"that value, so the fall-through must rewrite x0 before any "
                 f"instruction reads it; this one does not, or it crosses a "
                 f"branch the walk cannot see through.")
-    # A CALL. Measured 2026-11-16 on the dylib export proofs: this is the cause
-    # for both `csetval` and `branched`, and the generic sentence below does not
-    # mention it -- so a reader was left with three candidate classes and no way
-    # to pick, while the walk's own condition (`any(b["kind"] == "bl" ...)`)
-    # refused on the call. Named here so the message keeps its promise.
-    _bl_pc = next((pc for pc in sorted(p for p in words
-                                       if func_entry <= p < func_end)
-                    if (words[pc] >> 26) == 0x25), None)
-    if _bl_pc is not None:
-        _w = words[_bl_pc]
-        _imm = _w & 0x3ffffff
-        if _imm & 0x2000000:
-            _imm -= 0x4000000
-        _tgt = _bl_pc + _imm * 4
-        _where = ("inside this export's own range"
-                  if func_entry <= _tgt < func_end else
-                  "OUTSIDE this export's own range "
-                  f"[#{func_entry:#x}, #{func_end:#x})")
-        return (
-            f"universal theorem: CFG decomposition unsupported for this "
-            f"function shape, and every instruction in its own code has a "
-            f"step, so the cause is not an unmodelled word: it is the call at "
-            f"{_bl_pc:#x} in {name}'s own code, targeting {_tgt:#x} "
-            f"({_where}). The walk's CFG is the export's OWN range and it "
-            f"refuses any block of kind `bl`; the callee may well be in the "
-            f"image (measured: both csetval and branched call the same "
-            f"helper, outside either export's extent) but it is outside the "
-            f"range this walk certificates. The other reasons this walk "
-            f"returns None are a shape with no `RET`, a block whose runs "
-            f"certificate is empty, and a fixed-fuel caller whose budget is "
-            f"below the instruction count.")
     return ("universal theorem: CFG decomposition unsupported for this function "
             "shape, and every instruction in its own code has a step, so the "
             "cause is not an unmodelled word: the walk returns None for a shape "
@@ -12058,31 +12016,13 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  have hguard_{bi} : {_condtxt} := by")
                 if m_run > 0 and cert_name is not None:
                     A(f"{IND}    rw [hsid_{bi}]")
-                # The guard's state is a CHAIN: `hsid_{bi}` names `s_{bi}` in
-                # terms of the previous block's state, which `hsid_{prev}`
-                # names in turn, back to `Arm64State.init`.  Unfolding only
-                # this block's own defs leaves the earlier `s_k` as free
-                # variables, and `native_decide` refuses a goal that has any
-                # ("Expected type must not contain free variables") -- so the
-                # path-scoped hsids and block defs go in, exactly as the
-                # taken-dead `cbz` arm's `hne` does above.
-                _unfold = list(reversed(ctx.get("flow_hsid") or [])) + list(
-                    ctx.get("flow_defs") or []) + list(def_names) + [
+                _unfold = list(def_names) + [
                     'arm64_reg', 'arm64_set_reg', 'Arm64State.init',
                     'arm64_subs_flags', 'arm64_matches_condition',
                     'mem_read_u64', 'mem_write_u64', 'mem_write_u32',
                     'mem_write_u16', 'mem_write_u8']
                 A(f"{IND}    simp only [{', '.join(_unfold)}]")
-                # The prologue stored the free input (`n`, a callee-saved
-                # register's value) on the stack, so the floor-word read still
-                # MENTIONS it under the write chain even though the answer does
-                # not depend on it; `native_decide` takes only a closed goal.
-                # The address facts are decidable, so resolve the reads first
-                # (the taken-dead `cbz` arm's `hne` does the same), then
-                # decide what is left.
-                A(f"{IND}    try simp (disch := decide) [mem_read_after_write_u64, "
-                  f"mem_read_after_write_u64_ne, mem_read_two_writes_same]")
-                A(f"{IND}    all_goals native_decide")
+                A(f"{IND}    native_decide")
                 A(f"{IND}  exact absurd hguard_{bi} hc_{bi}")
                 return
             if _is_sc_self:

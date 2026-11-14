@@ -1,4 +1,4 @@
-SPLIT: GPU_offload_validation_modular-part5 (fixed 2026-11-15, doc deleted), part 6 (test only -- `test_regress_gpu_offload_validation_modular_part6.py`; no doc was ever filed), GPU_offload_validation_modular-part7
+SPLIT: bugs/GPU_offload_validation_modular-part2, bugs/GPU_offload_validation_modular-part3 (part1 triage landed and its doc deleted 2026-11-13: the per-case matrix is below; part4 dispositioned 2026-11-13: `test_regress_gpu_offload_validation_modular_part4.py`)
 # GPU: offload validation for modular test cases (category C)
 
 ## Symptom
@@ -34,77 +34,6 @@ these, so they fail or produce wrong code.
 - The compiled path is a separate world from the interpreter: a guard added to
   `myinterpreter.py` does not validate a `fire.py <file>` build. Measure both.
 
-## Replan (2026-11-15): the live parts are 5-7
-
-Parts 1-4 were the 2026-11-13 dispositions and are kept below, because their
-measurements are what the remaining work is sized from. The work that can be
-done at the easy class is filed as three parts; each one names one quick test.
-
-| part | doc | covers | pinned by |
-|---|---|---|---|
-| 5 | fixed 2026-11-15, doc deleted | `compile_offload_unbound_param_error.mojo`, interpreted half: an under-supplied specialization is a diagnostic, not `None` | `test_regress_gpu_offload_validation_modular_part5.py` |
-| 6 | (no doc filed; pinned by `test_regress_gpu_offload_validation_modular_part6.py`) | the same case, compiled half: the build must refuse it instead of answering `0` | `test_regress_gpu_offload_validation_modular_part6.py` |
-| 7 | fixed 2026-11-16, doc deleted | `compile_offload_missing_symbol_error.mojo`: `std.compile.compile_info` refuses an unsliceable runtime-pointer kernel with `cannot slice out exported symbol` | `test_regress_gpu_offload_validation_modular_part7.py` |
-
-Part 8 is fully fixed (2026-11-15 interpreter half, 2026-11-16 compiled
-host half): its doc was deleted with the interpreter fix, the follow-up
-compiled-half doc was deleted with the compiled fix, and both refusals on
-both paths are pinned by
-`test_regress_gpu_offload_validation_modular_part8.py`. A conversion is
-refused at every DECLARED-type site — `var` initialiser, argument binding,
-return slot, assignment to a declared name and field store — not only at the
-`var` initialiser. Only the NVPTX half of the row remains, and it is
-target-specific (no device toolchain in this tree).
-
-The old mid-class part 2 is superseded by parts 5-7 and is deleted in the
-commit that adds them: it bundled three cases, one of which
-(`compile_offload_bundle_order.mojo`) is target-specific and not easy work, and
-it had no runnable test.
-
-What is NOT a part, and why:
-
-- `compile_offload_bundle_order.mojo` and
-  `end_to_end_thunk_with_direct_compile.mojo` are `modular-target-specific`:
-  they need a device toolchain and target model (`A100.target`, NVPTX/PTX
-  emission, offload bundling). No test in this tree can prove them fixed.
-- the two `enqueue_function_device_passable_closure_*` cases are BLOCKED on the
-  MAX host runtime (Dispositions below).
-- `sanitize_address.mojo` and `sanitize_address_inlined.mojo` are sanitizer
-  toolchain integration; Modular itself marks them `UNSUPPORTED: asan`.
-- the NVPTX half of `op_with_unsupported_type_error.mojo` is target-specific
-  too; the host half (interpreter and compiled codegen) is fixed and pinned
-  by `test_regress_gpu_offload_validation_modular_part8.py`.
-
-## Dispositions (2026-11-13, kept)
-
-- part1 (the triage) landed 2026-11-13; its doc was deleted and the per-case
-  matrix is the `## Triage (part 1)` section below.
-- part3 dispositioned 2026-11-13 (BLOCKED: the enqueue-time device-passable
-  closure arg type/layout validation requires MAX `DeviceContext` /
-  `compile_function` + compiled-kernel metadata and `DevicePassable` device encoding/layout support not present in this tree) with pinning test
-  `test_gpu_offload_validation_part3.py`, doc deleted.
-- part4 dispositioned 2026-11-13:
-  `test_regress_gpu_offload_validation_modular_part4.py` pins the SIMD-width
-  guards and records the ASAN/FP8/NVPTX blockers.
-- part8 fixed 2026-11-15 (interpreter half) and 2026-11-16 (compiled host
-  half): the float8 dtype family is in the type table
-  (`size_of[DType.float8_e3m4]()` answers 1 under `fire run`) and a value of
-  one refuses a
-  conversion to another declared type and a binary operation with the two
-  Modular messages, exit 1, no traceback. The compiled path resolves the
-  same family through `mojo/middle/float8_dtype.py` (one table, also read by
-  the interpreter), holds a value of one in its `double` representation
-  behind a private C typedef, and refuses the two uses at the coercion
-  (`emit_resolve._safe_coerce_emit`) and binary-operation
-  (`emit_exprs._lower_binary_tail`) chokepoints. The interpreter refuses the
-  conversion at every declared-type site (var initialiser, argument
-  binding, return slot, assignment, field store), not only the `var`
-  initialiser: before 2026-11-17 the other four silently accepted a float8
-  value (exit 0, `1.0`) while the compiled path refused it. Both docs were
-  deleted with their fixes; both paths are pinned by
-  `test_regress_gpu_offload_validation_modular_part8.py`. Only the NVPTX
-  half of the row remains, target-specific.
-
 ## Triage (part 1, measured 2026-11-13 in this worktree)
 
 Every observation below was taken from this worktree. `fire run FILE` is the
@@ -121,7 +50,7 @@ with interpreter fallback. Each was wrapped:
 | `enqueue_function_device_passable_closure_arg_layout_error.mojo` | Build-time enqueue check for a `DevicePassable` whose device encoding is smaller than its host layout: `constraint failed: … encodes to 16 bytes but … is 32 bytes`, plus the `host_args=` hint. | Only the `max` import failure (exit 1). No `DevicePassable`/`DeviceTypeEncoder` support and no layout check. | `feasible-without-gpu-backend` for the check (same reasoning as the case above; the encoding-size comparison is elaboration-side). | GPU runtime shims + layout validation. Model `DevicePassable` device-encoding size and compare it with the declared parameter layout during the enqueue check; emit the `host_args=` hint. | `part3` |
 | `sanitize_address.mojo` | `%mojo-build -O0 --sanitize address`, then the binary must be stopped by ASAN with a heap-buffer-overflow report (`WRITE of size 8`, frame at `sanitize_address.mojo`). | `fire`: exit 245 with no output and no ASAN report. `fire run`: `NameError: … name 'alloc' is not defined` (`sanitize_address.mojo:27:13`), exit 1. The Modular source itself is marked `UNSUPPORTED: asan`. | `modular-target-specific` (sanitizer toolchain integration; Modular's own suite skips it unless ASAN is enabled). | Runtime/toolchain. Plumb `--sanitize address` through build/link/runtime, provide `alloc`, and produce/format the ASAN report — or record it as unsupported exactly as Modular does. | `part4` |
 | `sanitize_address_inlined.mojo` | Same ASAN case at O3, requiring the inlined `step_b` frame in the report (`atos -i`). | `fire`: exit 245, prints `argv: unavailable in compiled mode`, no ASAN report. `fire run`: `AttributeError: 'str' object has no attribute 'byte_length'` at `sanitize_address_inlined.mojo:45:21`, exit 1. Modular marks it `UNSUPPORTED: asan, system-linux`. | `modular-target-specific` (ASAN + debug-info/inlining/symbolizer specifics). | Runtime/toolchain + debug info. Depends on `sanitize_address`; then preserve and symbolize inlined frames. | `part4` |
-| `op_with_unsupported_type_error.mojo` | `kgen -emit=llvm` (host and `nvptx64 … sm_89`) must reject `float8_e3m4` conversions/ops: "conversion from 'f8e3m4' to 'f32' is not implemented" / "operation with a type 'f8e3m4' is not implemented". | Fixed on both host paths (interpreter 2026-11-15, compiled 2026-11-16): `fire run` and `fire`/`fire.py build` refuse the conversion and the operation with the two messages above, exit 1, no traceback — pinned by `test_regress_gpu_offload_validation_modular_part8.py`. `fire run`'s `size_of[DType.float8_e3m4]()` answers 1; the compiled path holds a value of one in its `double` representation behind a private C typedef. (`size_of[DType.*]()` on the compiled path answers 0 for EVERY dtype — a pre-existing limitation, not this dtype.) The NVPTX-target parity in the source's second RUN line is still untested: no device toolchain in this tree. | `feasible-without-gpu-backend` for the semantic/legality guard; landed on both host paths. The NVPTX-target emission parity is `modular-target-specific`. | Codegen/type lowering + diagnostics. Landed: `mojo/middle/float8_dtype.py` is the one family/spelling table the interpreter and the compiled path read; the compiled resolver (`mojo/middle/types.py`) keeps the dtype, and the refusals are at `emit_resolve._safe_coerce_emit` and `emit_exprs._lower_binary_tail`. Remaining: gate NVPTX parity separately. | out-of-scope as `modular-target-specific` (NVPTX half) |
+| `op_with_unsupported_type_error.mojo` | `kgen -emit=llvm` (host and `nvptx64 … sm_89`) must reject `float8_e3m4` conversions/ops: "conversion from 'f8e3m4' to 'f32' is not implemented" / "operation with a type 'f8e3m4' is not implemented". | `fire`: exit 0, no output, no diagnostic. `fire run`: exit 0, no output. The exported functions are accepted silently. | `feasible-without-gpu-backend` for the semantic/legality guard; the NVPTX-target emission parity in the source's second RUN line is `modular-target-specific`. | Codegen/type lowering + diagnostics. Add legality checks for unsupported scalar/FP8 dtype conversions and binary ops in the lowering path and emit the two Modular messages; verify host path first, gate NVPTX parity separately. | `part4` |
 | `end_to_end_thunk_with_direct_compile.mojo` | Cross-compile to NVPTX (`--emit asm --target-accelerator nvidia:sm_90a`): a kernel offloaded directly and through an `enqueue_function` thunk must not duplicate `kgen.offload.kernelid`, and must surface once in PTX with its mangled linkage name. | Only the `max` import failure (`from max.gpu import global_idx`, `from max.gpu.host import DeviceContext`; exit 1). No PTX/offload metadata path exists. | `modular-target-specific` (NVPTX emission + MAX GPU APIs + offload thunk/metadata machinery). | GPU backend/codegen. Implement the NVPTX emission path and kernel-id dedup/routing for thunked vs direct offloads. | `part4` (blocked) |
 | `simd_bad_size_lowering.mojo` | `not %mojo`: reject `SIMD[.float32, N]` for N = 0, -1, 3 with `error: SIMD vector length must be a power of two between 1 and 2^15, found '!kgen.simd<N, f32>'`. | Compiled path: guarded where the `SIMD[dtype, width]` type is built from a concrete integer width — `mojo.middle.types._mojo_type` (annotations) and `emit_calls._lower_call` (constructors) — through the shared rule in `mojo/middle/simd_width.py`. `fire` on `SIMD[.float32, 3](1.0)` now prints `error: SIMD vector length must be a power of two between 1 and 2^15, found '!kgen.simd<3, f32>'` and exits non-zero; it previously printed `1.0`, exit 0. Interpreter path: `fire run` rejects 0/-1/3 via `_mojo_simd_width_is_valid` (`myinterpreter.py`), which now delegates to the same shared rule. The canonical source's dot-relative `.float32` still stops the interpreter at `eval_DottedLiteral` (a separate inference gap), but the compiled path emits the width diagnostic before that fallback. Both modes are pinned by `test_regress_gpu_offload_validation_modular_part4.py`. | `feasible-without-gpu-backend`; width guards landed on both paths. | Codegen/type lowering. Landed: reject an illegal concrete width before lowering and word the diagnostic with the lowered `!kgen.simd<N, dtype>` type the canonical test checks. | `part4` |
 

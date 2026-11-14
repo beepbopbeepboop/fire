@@ -37,53 +37,66 @@ class ChainDepth(unittest.TestCase):
             self.assertEqual(reg[name]["state"], "abandoned")
 
 
-class ConflictBecomesLandDoc(unittest.TestCase):
-    """A conflicting branch is capped (never re-probed) and gets a LAND doc, however many fixer rounds it had before."""
-    def _hand(self, name, claims=()):
+class MergeFixDepth(unittest.TestCase):
+    def test_a_fixer_of_a_fixer_past_the_cap_is_abandoned_not_queued(self):
+        name = "fix-merge-fix-merge-fix-merge-fix-x"                   # three levels: at the cap
         reg = {name: {"state": "exited-ok"}}
-        t = {"branch": "work/x", "summary": "s", "claims": list(claims), "cls": "easy"}
         with mock.patch.object(I.C, "registry") as reg_cm, \
-             mock.patch.object(I, "land_doc") as ld, \
+             mock.patch.object(I.C, "ahead_since_base", return_value=2), \
              mock.patch.object(I.C, "cmd_enqueue") as enq:
             reg_cm.return_value.__enter__.return_value = reg
             reg_cm.return_value.__exit__.return_value = False
-            I.hand_to_land_doc(name, t, "CONFLICT (content): Merge conflict in a/b.py\n")
-        enq.assert_not_called()                                # no fixer task is queued any more
-        return reg, ld
+            I.enqueue_merge_fix(name, {"branch": "work/x", "summary": "s", "claims": [], "cls": "easy"}, "")
+            enq.assert_not_called()
+            self.assertEqual(reg[name]["state"], "abandoned")
+            self.assertTrue(reg[name]["merge_capped"])         # pick_candidates skips it: no re-probe every pass
 
-    def test_conflict_caps_the_branch_and_files_a_land_doc(self):
-        reg, ld = self._hand("bug-x", ["bug:X"])
-        self.assertEqual(reg["bug-x"]["state"], "abandoned")
-        self.assertTrue(reg["bug-x"]["merge_capped"])          # pick_candidates skips it: no re-probe every pass
-        ld.assert_called_once()
-        self.assertIn("a/b.py", ld.call_args[0][3])            # the doc names the conflicting files
+    def _requeue(self, name, ahead, **extra):
+        """Run enqueue_merge_fix for NAME whose own round added AHEAD commits; return (queued meta or None, reg)."""
+        reg = {name: {"state": "exited-ok"}}
+        t = {"branch": "work/x", "summary": "s", "claims": [], "cls": "easy", **extra}
+        with mock.patch.object(I.C, "registry") as reg_cm, \
+             mock.patch.object(I.C, "ahead_since_base", return_value=ahead), \
+             mock.patch.object(I.C, "doc_exists_for", return_value=True), \
+             mock.patch.object(I.C, "free_task_name", side_effect=lambda n: n), \
+             mock.patch.object(I.C, "cmd_enqueue") as enq:
+            reg_cm.return_value.__enter__.return_value = reg
+            reg_cm.return_value.__exit__.return_value = False
+            I.enqueue_merge_fix(name, t, "")
+        return (enq.call_args[0][0].meta if enq.called else None), reg
 
-    def test_a_deep_old_fixer_name_is_no_special_case(self):
-        reg, ld = self._hand("fix-merge-fix-merge-fix-merge-fix-x")
-        self.assertTrue(reg["fix-merge-fix-merge-fix-merge-fix-x"]["merge_capped"])
-        ld.assert_called_once()
+    def test_a_fixer_that_committed_nothing_is_not_a_level(self):
+        # 2026-11-13: the third fixer of bug-mid-codegen-simd-and-array reported DONE without merging master; the next
+        # conflict hit the depth cap although the chain had not tried a third merge.
+        name = "fix-merge-fix-merge-fix-merge-x"
+        meta, reg = self._requeue(name, ahead=0)
+        self.assertIsNotNone(meta, "an idle round must be retried, not capped")
+        self.assertEqual(meta["merge_depth"], 3)               # the level the idle fixer held, not one deeper
+        self.assertEqual(meta["merge_idle"], 1)
+        self.assertNotIn("merge_capped", reg[name])
 
-    def test_a_not_done_branch_with_no_doc_is_reported_stuck(self):
-        t = {"slot": 1, "state": "exited-ok", "branch": "b", "worktree": "/w", "claims": ["bug:GONE"]}
-        stuck = []
-        with mock.patch.object(I.C, "load", return_value={"n": t}), \
-             mock.patch.object(I.C, "state_of", return_value="exited-ok"), \
-             mock.patch.object(I.C, "verdict", return_value="BLOCKED"), \
-             mock.patch.object(I.C, "ahead", return_value=2), \
-             mock.patch.object(I.C, "doc_exists_for", return_value=False):
-            self.assertEqual(I.pick_candidates(quiet=True, stuck_out=stuck), [])
-        self.assertEqual([n for n, _, _ in stuck], ["n"])
+    def test_idle_rounds_are_forgiven_only_a_few_times_in_a_row(self):
+        name = "fix-merge-fix-merge-fix-merge-x"
+        meta, reg = self._requeue(name, ahead=0, merge_depth=3, merge_idle=I.MERGE_FIX_IDLE)
+        self.assertIsNone(meta)
+        self.assertTrue(reg[name]["merge_capped"])
 
-    def test_a_done_branch_with_a_dirty_tree_is_reported_stuck(self):
-        t = {"slot": 1, "state": "exited-ok", "branch": "b", "worktree": "/w", "claims": ["bug:X"]}
-        stuck = []
-        with mock.patch.object(I.C, "load", return_value={"n": t}), \
-             mock.patch.object(I.C, "state_of", return_value="exited-ok"), \
-             mock.patch.object(I.C, "verdict", return_value="DONE"), \
-             mock.patch.object(I.C, "ahead", return_value=1), \
-             mock.patch.object(I.C, "tree_extras", return_value=["a.py"]):
-            self.assertEqual(I.pick_candidates(quiet=True, stuck_out=stuck), [])
-        self.assertIn("a.py", stuck[0][2])
+    def test_a_fixer_that_committed_counts_and_resets_the_idle_run(self):
+        meta, _ = self._requeue("fix-merge-x", ahead=1, merge_depth=1, merge_idle=1)
+        self.assertEqual((meta["merge_depth"], meta["merge_idle"]), (2, 0))
+
+    def test_a_branch_whose_doc_is_gone_gets_no_fixer(self):
+        name = "bug-x"
+        reg = {name: {"state": "exited-ok"}}
+        with mock.patch.object(I.C, "registry") as reg_cm, \
+             mock.patch.object(I.C, "doc_exists_for", return_value=False), \
+             mock.patch.object(I.C, "cmd_enqueue") as enq:
+            reg_cm.return_value.__enter__.return_value = reg
+            reg_cm.return_value.__exit__.return_value = False
+            I.enqueue_merge_fix(name, {"branch": "work/x", "summary": "s", "claims": ["bug:GONE"], "cls": "easy"}, "")
+            enq.assert_not_called()
+            self.assertTrue(reg[name]["merge_capped"])
+            self.assertNotIn("fixer", reg[name])
 
     def test_pick_candidates_skips_a_capped_branch(self):
         t = {"slot": 1, "state": "exited-ok", "merge_capped": "x", "branch": "b", "worktree": "/w", "claims": []}
@@ -91,57 +104,6 @@ class ConflictBecomesLandDoc(unittest.TestCase):
              mock.patch.object(I.C, "state_of", return_value="exited-ok"), \
              mock.patch.object(I.C, "verdict", side_effect=AssertionError("a capped branch is not even probed")):
             self.assertEqual(I.pick_candidates(quiet=True), [])
-
-
-class ConflictTextIsPerBranch(unittest.TestCase):
-    """A probe prints every branch in turn; a branch's LAND doc must name only its own files."""
-    def test_section_stops_at_the_next_branch(self):
-        out = ("merged a\nCONFLICT b:\nCONFLICT (content): Merge conflict in x.py\n(probe) b conflicts: left out\n"
-               "CONFLICT c:\nCONFLICT (content): Merge conflict in y.py\nMERGED: a\n")
-        self.assertEqual(I.conflict_section(out, "b"), "CONFLICT (content): Merge conflict in x.py")
-        self.assertEqual(I.conflict_section(out, "c"), "CONFLICT (content): Merge conflict in y.py")
-
-    def test_conflict_lines_keeps_every_file(self):
-        out = "Auto-merging q\n" + "".join("CONFLICT (content): Merge conflict in f%d.py\n" % i for i in range(40))
-        self.assertEqual(len(I.conflict_lines(out).splitlines()), 40)
-
-
-class AppendOnlyTestConflictsMerge(unittest.TestCase):
-    """Two branches that each append a test at the same place in test_gimple.py both land; an edit of the same
-    existing line is still a conflict."""
-    def _repo(self, base, ours, theirs, fname="test_gimple.py"):
-        import tempfile, subprocess, os
-        d = tempfile.mkdtemp()
-        def g(*a):
-            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t"] + list(a), cwd=d,
-                                  capture_output=True, text=True)
-        g("init", "-q", "-b", "master")
-        def put(text, msg):
-            with open(os.path.join(d, fname), "w") as fh:
-                fh.write(text)
-            g("add", fname); g("commit", "-q", "-m", msg)
-        put(base, "base")
-        g("switch", "-q", "-c", "side"); put(theirs, "theirs")
-        g("switch", "-q", "master"); put(ours, "ours")
-        r = g("merge", "--no-ff", "-m", "m", "side")
-        self.assertTrue(r.returncode)
-        return d, fname
-
-    def test_both_added_blocks_are_kept(self):
-        import os
-        d, f = self._repo("a = 1\n\nz = 9\n", "a = 1\n\nb = 2\n\nz = 9\n", "a = 1\n\nc = 3\n\nz = 9\n")
-        self.assertTrue(I.union_resolve(d))
-        text = open(os.path.join(d, f)).read()
-        self.assertIn("b = 2", text); self.assertIn("c = 3", text); self.assertNotIn("<<<<<<<", text)
-
-    def test_an_edit_of_the_same_line_is_left_alone(self):
-        d, f = self._repo("a = 1\n", "a = 2\n", "a = 3\n")
-        self.assertFalse(I.union_resolve(d))
-
-    def test_other_files_are_never_resolved(self):
-        d, f = self._repo("a = 1\n\nz = 9\n", "a = 1\n\nb = 2\n\nz = 9\n", "a = 1\n\nc = 3\n\nz = 9\n",
-                          fname="emit_calls.py")
-        self.assertFalse(I.union_resolve(d))
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
-STEM = "FORMAL_arm64_instruction_coverage_retired"
+STEM = "FORMAL_arm64_instruction_coverage"
 
 
 def test_every_spelling_of_one_document_is_one_claim():

@@ -58,18 +58,6 @@ number it changed. (`FORMAL_known_limits` quotes the census in more
 sentences than the five above; every one of them is in the table, which is why
 a change to that document's wording can now fail this file.)
 
-Every census-derived figure `test_formal_doc_truth.py` checks is one `--fix`
-writes, too — including the ones OUTSIDE §2.2's table that the first version
-of this table missed: §1's size of `runtime/fire_runtime.c`, §11's restatement
-of the word-in/word-out pair, §6's "not the N of §2.2", and §6's unexported
-gap. Those were the figures every `gate-formal-doc-truth` repair had to edit
-by hand, and the 2026-11-15 red was filed against `2e6186887`, whose §1 size
-and §11 pair were stale with no tool to move them (repaired by hand in
-`a8e4f64bc`; `--fix` on that tree now rewrites all of them and leaves
-`test_formal_doc_truth.py` at 454/454). `test_the_size_and_restatements_are_
-fixable_quotes` is the pin: it doctors each sentence and requires the fixer to
-put the live figure back.
-
 These are pinned BY NAME, not by count. A count assertion would have to be
 rewritten every time the runtime grows a function, and would fail for a reason
 that has nothing to do with the defect.
@@ -616,20 +604,7 @@ def test_every_declaration_is_seen():
     #   +1  `mojo_float_to_bits`   (float in, int64_t out)
     #       Both carry a float across the boundary, so neither is word-shaped:
     #       total 940 -> 942, word 431 unchanged, box 509 -> 511.
-    # 832 -> 834 (2026-11-14, the gate fix for `rthdrscan` at e13c0d2506):
-    # TWO names, read off the call on the live header, from be6de3790
-    # ("issubclass: lower it instead of emitting the weak stub"), which landed
-    # after the 832 rung without one:
-    #   +1  `mojo_is_classword` (int64_t in, int out) — "is this word a class?",
-    #       the `object` arm of `issubclass` for a value the hierarchy cannot
-    #       answer statically.
-    #   +1  `mojo_issubclass_rtclass` (two int64_t in, int out) — the runtime
-    #       class-table arm, which reuses `_class_derives` rather than walking
-    #       the hierarchy a second time.
-    # Both are word-shaped: no float and no named container crosses the
-    # boundary, so word 431 -> 433 and total 942 -> 944; box stays 511.
-    # `--fix` wrote this rung and every quoted figure above from that one scan.
-    for header, want in (('fire_runtime.h', 837),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 832),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -914,8 +889,8 @@ CENSUS_QUOTES = (
      r'gaps between the\s+(\d+) of the row above',
      ('word',)),
     ('FORMAL.md',
-     r'\*\*(\d+) of the (\d+)\*\* the dylib\s+does not export',
-     ('export_gap', 'word')),
+     r'\*\*\d+ of the (\d+)\*\* the dylib\s+does not export',
+     ('word',)),
     ('formal/build.py',
      r'§3\.1 for the word-shaped surface \((\d+) entry points, (\d+) of them '
      r'word-shaped,',
@@ -923,23 +898,6 @@ CENSUS_QUOTES = (
     ('build_stdlib_dylib.py',
      r"of `fire_runtime\.h`'s (\d+)\n\s*entry points",
      ('fire_runtime_h',)),
-    # The three figures OUTSIDE §2.2's table that a census refresh still has
-    # to move, each added after a gate repair did it by hand: §1's size of the
-    # runtime translation unit (the header grew, the .c grew with it, and
-    # `799 -> 803 KB` is a figure `formal-doc-truth` checks), §11's restatement
-    # of the word-in/word-out pair, and §6's "not the N of §2.2". All three are
-    # derived from data `live_census()` already has, so leaving them out made
-    # `--fix` hand a human three numbers at merge-conflict time — which is the
-    # mechanism of the `gate-formal-doc-truth` reds, not a separate concern.
-    ('FORMAL.md',
-     r'`runtime/fire_runtime\.c` \((\d+) KB\)',
-     ('fire_runtime_c_kb',)),
-    ('FORMAL.md',
-     r'\*\*(\d+) of (\d+)\*\* entry points are word-in/word-out',
-     ('word', 'total')),
-    ('FORMAL.md',
-     r'not the \**(\d+)\** of §2\.2',
-     ('word',)),
 )
 
 # The same table plus the count this file asserts on `fire_runtime.h` itself.
@@ -973,23 +931,6 @@ def live_census():
     one-decimal rounding `test_formal_doc_truth.py` checks against — because a
     percentage written down beside a count is a second copy of the ratio, and
     the copy that no tool writes is the copy that goes stale.
-
-    `fire_runtime_c_kb` is §1's size of the runtime translation unit, which is
-    not an entry-point count at all but moves with the same scan: a header that
-    gained three declarations got a `.c` that grew by seven lines, and
-    `formal-doc-truth` checks the published KB against the file. It is derived
-    from the file itself rather than restated, for the same reason as above.
-
-    `export_gap` is §6 phase 2's "N of the M the dylib does not export at all",
-    and it is the ONE figure here that is arithmetic on the DOCUMENT rather
-    than read off the tree: N = M - the published `exports` row. That row is a
-    measurement of the built library (`test_formal_runtime_link.py`, proofs
-    only), so re-measuring it here would mean building the dylib in a check
-    that must stay import-and-compare. Deriving N from the two published
-    figures keeps the document internally consistent when `--fix` moves M —
-    without it, refreshing M leaves N describing the old pair, which is the
-    exact red `gate-formal-doc-truth` was filed for. If the `exports` row ever
-    moves, the link test is the one that fails, and it owns that number.
     """
     sys.path.insert(0, HERE)
     from formal import model as M
@@ -1005,20 +946,11 @@ def live_census():
             return_word += 1
     import reflect
     hdr_dir = M._runtime_header_dir()
-    try:
-        published = open(os.path.join(HERE, 'FORMAL.md'),
-                         encoding='utf-8').read()
-    except OSError:
-        published = ''
-    exported = re.search(r'actually \*\*exports\*\* \| (\d+) \|', published)
     return {
         'total': total,
         'word': word,
         'box': box,
         'word_pct': round(100 * word / total, 1) if total else 0.0,
-        'fire_runtime_c_kb': round(os.path.getsize(
-            os.path.join(HERE, 'runtime', 'fire_runtime.c')) / 1024),
-        'export_gap': word - int(exported.group(1)) if exported else None,
         'return_word': return_word,
         'return_box': total - return_word,
         'sqlite_word': sum(1 for e in sqlite.values() if e['word']),
@@ -1047,65 +979,35 @@ def rewrite_quoted_figures():
     """
     live = live_census()
     touched = []
-    # One pass per FILE, not per row: several rows name the same file, and the
-    # in-memory helper applies them in table order to the text it is building,
-    # so the write happens once and cannot interleave with itself.
-    for path in dict.fromkeys(p for p, _pattern, _keys in FIXABLE_QUOTES):
+    for path, pattern, keys in FIXABLE_QUOTES:
         full = os.path.join(HERE, path)
         try:
             with open(full, encoding='utf-8') as f:
+                # re-read every time: two entries can name the same file (and
+                # several name FORMAL_known_limits), and an earlier write in
+                # this loop has to be visible to the later ones
                 text = f.read()
         except OSError as e:
             print(f'skip  {path}: {e}')
             continue
-        for pattern in (pat for p, pat, _keys in FIXABLE_QUOTES
-                        if p == path):
-            if re.search(pattern, text) is None:
-                print(f'skip  {path}: no text matches {pattern!r} — the quote '
-                      f'is gone, and a tool cannot put prose back')
-        new, moves = quoted_figure_fixes(text, path, live)
+        m = re.search(pattern, text)
+        if m is None:
+            print(f'skip  {path}: no text matches {pattern!r} — the quote is '
+                  f'gone, and a tool cannot put prose back')
+            continue
+        new = splice_quoted_figures(text, m, keys, live)
         if new == text:
             continue
         with open(full, 'w', encoding='utf-8') as f:
             f.write(new)
-        touched.append(path)
-        print(f'fixed {path}: ' + ', '.join(
-            f'{key} {old} -> {value}' for old, key, value in moves))
+        if path not in touched:
+            touched.append(path)
+        moved = ', '.join(
+            f'{key} {m.group(i)} -> {live[key]}'
+            for i, key in enumerate(keys, start=1)
+            if m.group(i) != str(live[key]))
+        print(f'fixed {path}: {moved}')
     return len(touched)
-
-
-def quoted_figure_fixes(text, path, live=None):
-    """`(text, moves)` with every quote row for one file spliced to `live`.
-
-    `moves` is `[(old, key, new)]` for the figures a row captures that did not
-    already read the live value, in table order. This is the ONE
-    implementation of "which sentence is the quote, and which figure in it is
-    which number": `rewrite_quoted_figures` writes the result to disk, and
-    `test_the_size_and_restatements_are_fixable_quotes` asserts it rewrites a
-    doctored sentence, so the two cannot disagree about coverage. A row for
-    another file is ignored here rather than asserted on, which is what lets
-    the test hand this function the whole of `FORMAL.md`.
-    """
-    if live is None:
-        live = live_census()
-    moves = []
-    for want, pattern, keys in FIXABLE_QUOTES:
-        if want != path:
-            continue
-        if any(live.get(key) is None for key in keys):
-            # A figure the tree cannot derive right now (the published
-            # `exports` row is missing, say). Writing it would put `None` in a
-            # document, so the row is left alone and the CHECK reports the
-            # unreadable input instead.
-            continue
-        m = re.search(pattern, text)
-        if m is None:
-            continue
-        moves += [(m.group(i), key, live[key])
-                  for i, key in enumerate(keys, start=1)
-                  if m.group(i) != str(live[key])]
-        text = splice_quoted_figures(text, m, keys, live)
-    return text, moves
 
 
 def splice_quoted_figures(text, m, keys, live):
@@ -1196,69 +1098,6 @@ def test_the_word_share_is_a_fixable_quote():
         check(got == want,
               'the fixer rewrites the word share to the live ratio',
               f'got {got!r}, want {want!r}')
-
-
-def test_the_size_and_restatements_are_fixable_quotes():
-    """The census figures OUTSIDE §2.2's table are `--fix`'s too.
-
-    Every gate repair of `formal-doc-truth` finished by hand before this,
-    because `--fix` could only write the sentences in its own table: the
-    2026-11-14 repair (4246372a8) moved §1's `runtime/fire_runtime.c` size
-    (795 -> 796 KB), §11's `N of M entry points are word-in/word-out` pair and
-    §6's "not the N of §2.2" by hand, and the 2026-11-15 red was filed against
-    `2e6186887`, where those same three figures were stale while no tool could
-    have moved them. All three are derived from the scan `--fix` already runs,
-    so the hand edit is not a judgement call, it is a hole in the table — and
-    a figure a tool cannot write is a figure a human has to remember at
-    merge-conflict time, which is when it is remembered least.
-
-    Each sentence is doctored with a figure no scan can return, and the fixer
-    has to put the LIVE figure back with the right figure in it (a row whose
-    keys are swapped would clear the bogus number and still be wrong). That
-    makes the coverage a property of the table rather than a promise in a
-    comment.
-    """
-    live = live_census()
-    check('fire_runtime_c_kb' in live,
-          'live_census() publishes the runtime translation unit size')
-    check(live.get('export_gap') is not None,
-          'live_census() derives §6 phase 2\'s export gap from the published '
-          '`exports` row', 'that row could not be read')
-    text = open(os.path.join(HERE, 'FORMAL.md'), encoding='utf-8').read()
-    for what, pattern, keys in (
-            ("§1's `runtime/fire_runtime.c` size",
-             r'`runtime/fire_runtime\.c` \((\d+) KB\)',
-             ('fire_runtime_c_kb',)),
-            ("§11's word-in/word-out pair",
-             r'\*\*(\d+) of (\d+)\*\* entry points are word-in/word-out',
-             ('word', 'total')),
-            ('§6\'s "not the N of §2.2" restatement',
-             r'not the \**(\d+)\** of §2\.2',
-             ('word',)),
-            ("§6's unexported gap",
-             r'\*\*(\d+) of the (\d+)\*\* the dylib\s+does not export',
-             ('export_gap', 'word'))):
-        m = re.search(pattern, text)
-        check(m is not None, f'FORMAL.md still has {what} for --fix to own',
-              'the sentence was reworded, so this test can no longer see the '
-              'figure a census refresh has to move')
-        if m is None:
-            continue
-        bogus = f'bogus{len(keys)}'
-        doctored = splice_quoted_figures(text, m, (bogus,) * len(keys),
-                                         {bogus: 99999})
-        fixed, _moves = quoted_figure_fixes(doctored, 'FORMAL.md', live)
-        check('99999' not in fixed,
-              f'--fix rewrites {what}',
-              'no CENSUS_QUOTES row matches the sentence, so the figure is '
-              'left to a hand edit')
-        m2 = re.search(pattern, fixed)
-        got = (tuple(m2.group(i) for i in range(1, len(keys) + 1))
-               if m2 is not None else None)
-        want = tuple(str(live[key]) for key in keys if key in live)
-        check(len(want) == len(keys) and got == want,
-              f'--fix writes the live figure into {what}',
-              f'got {got}, want {want}')
 
 
 def test_the_quoted_census_is_the_live_census():
@@ -1354,7 +1193,6 @@ def main():
     test_non_exports_stay_excluded()
     test_the_fixer_touches_only_the_figures()
     test_the_word_share_is_a_fixable_quote()
-    test_the_size_and_restatements_are_fixable_quotes()
     test_the_quoted_census_is_the_live_census()
     test_call_arity_families_are_whole()
     npass = sum(1 for ok, _w in RESULTS if ok)

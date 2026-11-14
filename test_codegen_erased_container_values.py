@@ -8,14 +8,10 @@ registered gate job: a red probe belongs to its bug doc's command, not to the
 green regression bucket. The landed parts' tests are in
 test_codegen_erased_container_values_pins.py.
 
-Open parts (2026-11-15 replan):
-
-    python3 test_codegen_erased_container_values.py ctor_dtype_spelling
-    python3 test_codegen_erased_container_values.py simd_value_across_return
-
-`p1_alias`, `p2_alias_ctor` and `p3_comptime` below are landed (their docs were
-deleted with their fixes) and stay green here until they are moved into the
-registered pins file. A bare run executes every probe in this file.
+Run one probe:  python3 test_codegen_erased_container_values.py p1_alias
+                python3 test_codegen_erased_container_values.py p2_alias_ctor
+                python3 test_codegen_erased_container_values.py p3_comptime
+A bare run executes every open probe and is red until they all land.
 """
 
 import re
@@ -24,7 +20,7 @@ import sys
 from test_codegen_erased_container_values_pins import _compile, _defn
 
 
-# part 1 (landed; doc deleted):
+# part 1 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
 # a module-level `alias` of a type is expanded wherever an annotation is
 # resolved -- a parameter, a return, an explicitly annotated local, and a
 # container's element type.
@@ -111,7 +107,7 @@ def test_p2_alias_ctor_expands_callee():
     assert 'mojo_list_get_double' in abody, abody
 
 
-# part 3 (landed 2026-11-14, a0f321f1c):
+# part 3 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
 # a `comptime` name bound to a float DType resolves in a module-scope
 # signature, in a function-scope annotated local, and in the dtype argument
 # of a SIMD constructor.
@@ -156,85 +152,6 @@ def test_p3_comptime_dtype_resolves_in_all_type_positions():
     dbody = _defn(c, 'p3_comptime_id64')
     dsig = dbody.splitlines()[1].strip()
     assert dsig.startswith('double ') and dsig.endswith('(double x)'), dbody
-
-
-# part 1 of the 2026-11-15 replan (doc: bugs/
-# CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
-# a float SIMD/Scalar constructor whose dtype is written with the SCALAR TYPE
-# NAME (`SIMD[Float32, 4]`, `Scalar[Float32]`) keeps that scalar C type, the
-# same way the `DType.float32` / `.float32` / `float32` spellings already do.
-CTOR_DTYPE_SPELLING_SRC = (
-    'def f32():\n'
-    '    var v = SIMD[Float32, 4](1.5)\n'
-    '    return v\n'
-    '\n'
-    'def f64():\n'
-    '    var w = SIMD[Float64, 2](2.5)\n'
-    '    return w\n'
-    '\n'
-    'def sc():\n'
-    '    var x = Scalar[Float32](0.5)\n'
-    '    return x\n'
-    '\n'
-    'def i32():\n'
-    '    var i = SIMD[Int32, 4](1)\n'
-    '    return i\n'
-)
-
-
-def test_ctor_dtype_spelling_simd_scalar_name_keeps_float_ctype():
-    c = _compile(CTOR_DTYPE_SPELLING_SRC, 'ctor_dtype_spelling')
-    assert 'indirect call via SubscriptExpr' not in c, c
-    for fn, decl in (('f32', 'float v;'), ('f64', 'double w;'),
-                     ('sc', 'float x;')):
-        body = _defn(c, 'ctor_dtype_spelling_' + fn)
-        assert decl in body, (fn, body)
-        assert 'int64_t ' + decl.split()[1] not in body, (fn, body)
-    # An integer dtype keeps today's int64_t lowering: the fix widens the
-    # dtype SPELLINGS the constructor arm recognizes, it does not turn every
-    # SIMD value into a float.
-    ibody = _defn(c, 'ctor_dtype_spelling_i32')
-    assert 'int64_t i;' in ibody, ibody
-
-
-# part 3 of the 2026-11-15 replan (doc: bugs/
-# CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
-# an unannotated function whose return value is a local bound to a float SIMD
-# constructor keeps the float's scalar C type (a SIMD value is scalar-erased,
-# so `float` IS the value's type). The body's local is already float; only the
-# inferred SIGNATURE erases it to int64_t today.
-SIMD_VALUE_RETURN_SRC = (
-    'def mk32():\n'
-    '    var v = SIMD[DType.float32, 4](1.5)\n'
-    '    return v\n'
-    '\n'
-    'def mk64():\n'
-    '    var w = SIMD[DType.float64, 2](2.5)\n'
-    '    return w\n'
-    '\n'
-    'def mi():\n'
-    '    var i = SIMD[DType.int32, 4](1)\n'
-    '    return i\n'
-    '\n'
-    'def use():\n'
-    '    var a = mk32()\n'
-    '    return a\n'
-)
-
-
-def test_simd_value_across_return_keeps_float_ctype():
-    c = _compile(SIMD_VALUE_RETURN_SRC, 'simd_value_return')
-    b32 = _defn(c, 'simd_value_return_mk32')
-    assert b32.splitlines()[1].strip().startswith('float '), b32
-    b64 = _defn(c, 'simd_value_return_mk64')
-    assert b64.splitlines()[1].strip().startswith('double '), b64
-    # The caller's local inherits the same answer.
-    ubody = _defn(c, 'simd_value_return_use')
-    assert 'float a;' in ubody, ubody
-    assert 'int64_t a;' not in ubody, ubody
-    # An integer SIMD value keeps the int64_t word.
-    ibody = _defn(c, 'simd_value_return_mi')
-    assert ibody.splitlines()[1].strip().startswith('int64_t '), ibody
 
 
 if __name__ == '__main__':

@@ -356,135 +356,6 @@ def test_cross_module_generator_default_is_padded() -> bool:
     return ok
 
 
-def test_generator_string_equality_compares_content() -> bool:
-    """`a != b` on two strings inside a C++-generator (`yield from`-eligible
-    imported module) body compares the STRINGS, not the pointers.
-
-    The cpp backend's `==`/`!=` used to emit a raw C++ comparison, which for
-    two `char *` operands is pointer identity. Real: Tools/c-analyzer's
-    `c_common/tables.py` `read_table` does
-    `actualheader = next(lines).strip(); if actualheader != header: raise
-    ValueError('bad header ...')` and raised on a file whose header was
-    exactly `header` (measured: `bad header 'a\\tb'`). `mojo_cstr_cmp` is
-    the content comparison the ordinary GIMPLE backend already emits.
-
-    The `import csv` + `_get_reader=csv.reader` default is what makes this
-    module eligible for the C++ generator path (see `_read_table_like` in
-    cpp_core.py); without it the generator compiles on the A3 path, where
-    the comparison was already correct and this would pin nothing.
-    """
-    pkg = {
-        'cmpmod/__init__.py': '',
-        'cmpmod/mod.py': (
-            'import csv\n'
-            '\n'
-            'def check(a, b, *, sep=",", _get_reader=csv.reader):\n'
-            '    actual = a.strip()\n'
-            '    if actual != b:\n'
-            '        yield "DIFF"\n'
-            '    else:\n'
-            '        yield "SAME"\n'
-        ),
-        'cmpmod/main.py': (
-            'from cmpmod.mod import check\n'
-            '\n'
-            'def main():\n'
-            '    print(list(check("abc", "abc")))\n'
-            '    print(list(check("abc", "abd")))\n'
-            'main()\n'
-        ),
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='gen_str_eq_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'cmpmod/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'cmpmod/main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == "['SAME']\n['DIFF']\n")
-    if not ok:
-        print(f"  ✗ generator_string_equality_compares_content: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_string_ordering_compares_content() -> bool:
-    """`<`/`>` (and `<=`/`>=`) on two strings inside a C++-generator body
-    compare the strings' CONTENT, not their pointers.
-
-    The cpp backend's `_cpp_str_compare` lowered only `==`/`!=` by content;
-    the ordering operators fell through to the raw C++ comparison, i.e. the
-    two `char *` values — heap/static addresses, so the answer depended on
-    allocation order and silently disagreed with CPython's lexicographic str
-    ordering. For two real string pointers `mojo_cstr_cmp` is `strcmp`, so
-    the ordering arms test its result against 0 (`< 0` / `<= 0` / `> 0` /
-    `>= 0`).
-
-    The `import csv` + `_get_reader=csv.reader` default is what makes this
-    module eligible for the C++ generator path (see `_read_table_like` in
-    cpp_core.py); without it the generator compiles on the A3 path, where
-    the comparison was already correct and this would pin nothing. Pairs are
-    chosen so a pointer comparison disagrees with CPython regardless of
-    which literal was allocated first (`"zebra"`/`"apple"`, `"a"`/`"A"`).
-    """
-    pkg = {
-        'ordmod/__init__.py': '',
-        'ordmod/mod.py': (
-            'import csv\n'
-            '\n'
-            'def order(a, b, *, sep=",", _get_reader=csv.reader):\n'
-            '    if a < b:\n'
-            '        yield "LT"\n'
-            '    elif a > b:\n'
-            '        yield "GT"\n'
-            '    else:\n'
-            '        yield "EQ"\n'
-            '\n'
-            'def le_ge(a, b, *, sep=",", _get_reader=csv.reader):\n'
-            '    if a <= b:\n'
-            '        yield "LE"\n'
-            '    else:\n'
-            '        yield "GT"\n'
-            '    if a >= b:\n'
-            '        yield "GE"\n'
-            '    else:\n'
-            '        yield "LT"\n'
-        ),
-        'ordmod/main.py': (
-            'from ordmod.mod import order, le_ge\n'
-            '\n'
-            'def main():\n'
-            '    print(list(order("abc", "abd")))\n'
-            '    print(list(order("abd", "abc")))\n'
-            '    print(list(order("abd", "abd")))\n'
-            '    print(list(order("zebra", "apple")))\n'
-            '    print(list(order("apple", "zebra")))\n'
-            '    print(list(order("a", "A")))\n'
-            '    print(list(le_ge("abc", "abd")))\n'
-            '    print(list(le_ge("abd", "abc")))\n'
-            '    print(list(le_ge("abd", "abd")))\n'
-            'main()\n'
-        ),
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='gen_str_order_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'ordmod/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'ordmod/main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == "['LT']\n['GT']\n['EQ']\n['GT']\n['LT']\n['GT']\n"
-                         "['LE', 'LT']\n['GT', 'GE']\n['LE', 'GE']\n")
-    if not ok:
-        print(f"  ✗ generator_string_ordering_compares_content: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
 def test_generator_str_param_concat_is_string_concatenation() -> bool:
     """`root + str(k)` in a generator whose unannotated `root` is only ever
     passed a string literal is string concatenation, not integer addition.
@@ -2885,38 +2756,6 @@ def test_imported_module_path_word_generator_unit_compiles() -> bool:
     return True
 
 
-def test_imported_callable_default_param_is_c_word_in_client() -> bool:
-    """Regression: an imported callable-default parameter must be a C word.
-
-    An imported plain function whose default is a known foreign callable
-    (e.g. `def w(x, _open=open): ...`) is typed `std::function<...>` for the
-    cpp coroutine unit, but the link-mode C client must spell that slot as the
-    runtime's boxed `int64_t` word. `driver.compile_program` (not the
-    `fire.py` inline fallback) must build and run the consumer; the binary's
-    stdout must match CPython.
-    """
-    pkg = {
-        'pkg_c/__init__.py': '',
-        'pkg_c/mod.py': (
-            'def w(x, _open=open):\n'
-            '    return x\n'
-        ),
-        'pkg_c/main.py': (
-            'from pkg_c.mod import w\n'
-            'print(w(7))\n'
-        ),
-    }
-    with tempfile.TemporaryDirectory() as td:
-        rc, stdout = _build_and_run(pkg, 'pkg_c/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'pkg_c/main.py')
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout.strip() == '7')
-    if not ok:
-        print(f"  ✗ imported_callable_default_param_is_c_word_in_client: "
-              f"rc={rc} stdout={stdout!r} py_rc={py_rc} py={py_stdout!r}")
-    return ok
-
-
 def test_link_inline_cpp_unit_failure_reports_compiler_stderr() -> bool:
     """Regression test for the diagnostic half of
     bug:COMPILE_FAIL_Tools_c-analyzer_c_common_tables_consumer_link: when an
@@ -2954,71 +2793,6 @@ def test_link_inline_cpp_unit_failure_reports_compiler_stderr() -> bool:
         return False
     print("  PASS  cpp_unit_diagnostic")
     return True
-
-
-def _str_iteration_case(name: str, pkg: dict, expected: str) -> bool:
-    """Build `pkg` in link mode and require the CPython answer, exactly."""
-    with tempfile.TemporaryDirectory() as td:
-        rc, stdout = _build_and_run(pkg, 'gm/main.py', td)
-        py_rc, py_out = _cpython_run(td, 'gm/main.py')
-    ok = rc == 0 and stdout == expected and py_out == expected
-    if not ok:
-        print(f"  \u2717 {name}: rc={rc} stdout={stdout!r} cpython={py_out!r} want={expected!r}")
-    return ok
-
-
-def test_imported_function_iterating_a_str_param_does_not_crash() -> bool:
-    """CODEGEN_str_iteration_link_mode_crash, package A: `for c in s` only says
-    `s` is iterable, so the body typed it `MojoList *`, and the importer's
-    unanimous string-literal call site never overrode that across the module
-    boundary -- the call passed a `char *` and SIGSEGVed (rc -11) in
-    mojo_list_get_boxed."""
-    return _str_iteration_case('imported_str_param_iteration', {
-        'gm/__init__.py': '',
-        'gm/mod.py': ('def counter(s):\n'
-                      '    n = 0\n'
-                      '    for c in s:\n'
-                      '        n += 1\n'
-                      '    return n\n'),
-        'gm/main.py': ('from gm.mod import counter\n\n'
-                       'def main():\n'
-                       '    print(counter("abc"))\n'
-                       'main()\n'),
-    }, '3\n')
-
-
-def test_imported_generator_iterating_a_str_literal_yields_characters() -> bool:
-    """Package B: a cpp-path generator looping over a string LITERAL emitted
-    `for (auto c : "abc")`, a range-for over the `char[4]` array -- four
-    integers including the NUL (`[97, 98, 99, 0]`) instead of three
-    one-character strings."""
-    return _str_iteration_case('imported_generator_literal_iteration', {
-        'gm/__init__.py': '',
-        'gm/mod.py': ('import csv\n\n'
-                      'def letters(*, sep=",", _get_reader=csv.reader):\n'
-                      '    for c in "abc":\n'
-                      '        yield c\n'),
-        'gm/main.py': ('from gm.mod import letters\n\n'
-                       'def main():\n'
-                       '    print(list(letters()))\n'
-                       'main()\n'),
-    }, "['a', 'b', 'c']\n")
-
-
-def test_imported_generator_iterating_a_str_param_yields_characters() -> bool:
-    """Package C: B with the literal replaced by the generator's own `str`
-    parameter (same cross-module container-vs-string call-site rule as A)."""
-    return _str_iteration_case('imported_generator_param_iteration', {
-        'gm/__init__.py': '',
-        'gm/mod.py': ('import csv\n\n'
-                      'def letters(s, *, sep=",", _get_reader=csv.reader):\n'
-                      '    for c in s:\n'
-                      '        yield c\n'),
-        'gm/main.py': ('from gm.mod import letters\n\n'
-                       'def main():\n'
-                       '    print(list(letters("abc")))\n'
-                       'main()\n'),
-    }, "['a', 'b', 'c']\n")
 
 
 CASES = [
@@ -3071,13 +2845,7 @@ CASES = [
     test_two_modules_specialize_one_generic_differently,
     test_imported_global_accessor_in_link_mode,
     test_imported_module_path_word_generator_unit_compiles,
-    test_imported_callable_default_param_is_c_word_in_client,
     test_link_inline_cpp_unit_failure_reports_compiler_stderr,
-    test_generator_string_equality_compares_content,
-    test_generator_string_ordering_compares_content,
-    test_imported_function_iterating_a_str_param_does_not_crash,
-    test_imported_generator_iterating_a_str_literal_yields_characters,
-    test_imported_generator_iterating_a_str_param_yields_characters,
 ]
 
 

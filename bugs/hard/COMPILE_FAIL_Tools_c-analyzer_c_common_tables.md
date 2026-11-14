@@ -1,55 +1,10 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3
-
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1
 
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
-(Found via full Python-3.14.6 source scan, not the earlier 100-file Lib/ sample.)
-
-## Status 2026-11-14 — part 1 fixed and its doc deleted; consumer program builds and runs
-
-A consumer program that imports `c_common.tables.read_table` now builds AND
-prints the expected rows. The part-1 doc is deleted with this entry.
-
-Root causes fixed at their source (all on the compiled path):
-
-- The imported-module cpp unit typed `read_table`'s `infile` parameter `char *`
-  from a list-shaped call-site hint, even though the module's own
-  `_ptr_evidence` (`isinstance(infile, str)`) says the slot must stay the
-  runtime word. `cpp_async._gen_cpp_generator_unit` / `module_gen` now keep
-  such a parameter `int64_t` and refuse to narrow it from importer hints.
-- `_compile_link_inline_cpp_unit` swallowed g++'s stderr, so a failed unit
-  surfaced later as undefined `_mojogen_*` symbols; it now reports the
-  compiler output unconditionally (`emit_infra`).
-- A `for line in <open file>` in a compiled generator read the FILE* as a
-  MojoList (zero iterations, hence `bad header ''`) or raised
-  `TypeError: object is not iterable` on the cpp path. The runtime now keeps
-  an open-file registry (`mojo_file_register`/`mojo_is_registered_file`) and
-  `mojo_file_lines`, which materializes the handle's lines; `mojo_iter_word`
-  gains a file arm, the A3 for-loop word dispatch checks for a file before
-  dict/list/set, and a cpp `with open(...) as f` alias is recorded as a word
-  so `for line in f` takes the word arm.
-- The cpp body emitter compared two `char *` strings by POINTER, so
-  `actualheader != header` was always true; it now lowers `==`/`!=` to
-  `mojo_cstr_cmp` / `mojo_cstr_cmp_word` by content.
-- `tuple(x)` in a cpp body now marks the copy as a tuple, and
-  `mojo_repr_boxed` renders a registered list instead of its address (so
-  `print(row)` prints `('1', '2')`).
-- A cpp generator's parameter defaults are registered in one signature only
-  when EVERY default is spellable; builtin `open` had no word, so
-  `read_table`'s whole signature was dropped and `_get_reader=csv.reader`
-  arrived as 0 (jump to address 0). `open` now maps to the runtime's
-  `mojo_open_default`, and A3 lowers `callable(x)` via
-  `mojo_is_callable_word` instead of a stub that printed
-  "callable: unavailable in compiled mode" to stdout.
-
-Verified: `python3 test_gimple_tables_consumer_link.py` PASS;
-`test_gimple_generator_runner.py` 503 passed / 1 failed (the pre-existing
-`gen_multi_slot_comprehension_target_over_one_value_generator_refused`
-tracked in `bugs/SUITE_gimplegenerators_multi_slot_comprehension.md`);
-`test_link_mode.py` 51 passed / 0 failed.
-
+(Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
 ## Status 2026-11-13 (part 1 DONE) — end-to-end build passes; its part doc deleted
 
@@ -83,8 +38,10 @@ coro.py's stack-switch meta). Regressions
 (fail before the fix — arity refusal, and 46 where CPython prints 64 — pass
 after; that file 509 passed / 0 failed).
 
-(A consumer program that imports `c_common.tables` later also built and
-ran; see the 2026-11-14 entry above.)
+Not fixed and not part of this acceptance: building a *consumer program*
+that imports `c_common.tables` still fails to link, because the imported
+module's generated `.cpp` does not compile (`_compile_imported_module`
+swallows the g++ failure). Filed separately rather than folded in here.
 
 ## Status 2026-11-13 — part 4 (module-qualified tuple-target `for`) fixed; doc deleted
 

@@ -207,7 +207,7 @@ def _scope_walk(node, out) -> None:
         _scope_walk(child, out)
 
 
-def scope_index(fd: FunctionDef) -> dict:
+def scope_index(fd) -> dict:
     """The census of ONE function's own scope: its params (bound to `fd`
     itself, which is never a literal, so a parameter always answers None) and
     every binder in its body that is not inside a nested def or class body."""

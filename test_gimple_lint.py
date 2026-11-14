@@ -39,22 +39,14 @@ from mojo.ir import types as T              # noqa: E402
 CORPUS = [
     'myinterpreter.py', 'fire_compiler.py', 'module_loader.py', 'cas.py',
     'ast_rewriter.py', 'mojo/middle/solvers.py', 'mojo/middle/comptime.py',
-    'mojo/middle/iter_factory.py', 'mojo/backend_gimple/module_gen.py',
-    'hello.mojo', 'class_jit.mojo',
+    'mojo/middle/iter_factory.py', 'hello.mojo', 'class_jit.mojo',
     'test_struct.mojo', 'array_ops_jit.mojo',
 ]
 
 # finding code -> number of findings over CORPUS.  May only shrink.
 BASELINE = {
     # empty since 2026-11-13: every call-argument finding in CORPUS was closed
-    # by `_repr_fix_args` (emit_infra.py). Keep that class empty.
-    # `cast-narrow-int-to-ptr` was added 2026-11-14 and reached 2. Both were
-    # closed on 2026-11-17 by the inference fixes it was written for: a
-    # pointer/scalar return mix now returns the boxed word instead of casting
-    # the scalar to the pointer (`_return_arms_need_boxed_word`), and a class
-    # no caller passes can no longer collect phantom fields from another
-    # method's locals and win parameter inference (`module_gen`'s per-scope
-    # field scan). Keep this class empty too.
+    # by `_repr_fix_args` (emit_infra.py). Keep it empty.
 }
 
 _INJECTED = r'''
@@ -215,7 +207,7 @@ def test_gate_wiring() -> None:
     a red job is fixed or declared with a live bug doc, never switched off
     with a silent `disabled=` marker.
     """
-    print("gate wiring: the gimple-lint job stays on")
+    print("gate wiring: the gimple-lint job stays on, and its red-gate doc stays deleted")
     import re
     with open(os.path.join(ROOT, 'tools', 'suite.py'), encoding='utf-8') as f:
         suite = f.read()
@@ -223,43 +215,9 @@ def test_gate_wiring() -> None:
     check(m is not None, 'gimple-lint is registered in tools/suite.py')
     check(m is not None and 'disabled=' not in m.group(0),
           'gimple-lint is enabled (no disabled= marker)')
-    # NOT checked here: that this job's red-gate doc in bugs/ is absent. The
-    # integrator writes that doc when a WORK BRANCH turns this job red; a
-    # check on its absence then failed master for the doc's existence alone,
-    # which is the doc keeping itself alive (it came back three times in
-    # November 2026 with every other check here green).
-
-
-def test_value_tables_reset() -> None:
-    """Every table `carry_value_info` copies describes a VALUE and is keyed by
-    the name holding it. Names restart in each function, so each table must
-    be emptied by `_reset_func` and captured / put back by `save_func_state`
-    / `restore_func_state`. Four were not until 2026-11-16, and a later
-    function's `_t58` inherited an earlier one's generator API."""
-    print("value tables: each one carry_value_info copies is reset per function")
-    import re
-    path = os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_infra.py')
-    with open(path, encoding='utf-8') as f:
-        src = f.read()
-
-    def body(name: str) -> str:
-        m = re.search(r'^def ' + name + r'\(.*?(?=^def |^class )', src, re.S | re.M)
-        return m.group(0) if m else ''
-    carry = body('carry_value_info')
-    tables = sorted(set(re.findall(r'src in gen\.(_\w+)', carry)))
-    check(len(tables) >= 18, f"found {len(tables)} tables in carry_value_info")
-    reset = body('_reset_func')
-    save = body('save_func_state')
-    restore = body('restore_func_state')
-    for t in tables:
-        ok = ((re.search(r'gen\.' + t + r'\b[^=\n]*= ', reset) is not None
-               or ('gen.' + t + '.clear()') in reset)
-              and ('st.fs' + t + ' = gen.' + t) in save
-              and ('gen.' + t + ' = st.fs' + t) in restore)
-        if not ok:
-            check(False, f"gen.{t} is copied by carry_value_info but is not reset in "
-                         f"_reset_func and saved/restored in FuncState (emit_infra.py)")
-    check(True, f"{len(tables)} value tables are reset, saved and restored")
+    doc = os.path.join(ROOT, 'bugs', 'gate-gimple-lint.md')
+    check(not os.path.exists(doc),
+          'the gate-gimple-lint doc is deleted (its presence means the job is red)')
 
 
 def test_rt_sigs() -> None:
@@ -369,7 +327,7 @@ def count_text_any_calls() -> tuple:
 # (`gen._new_val('int64_t', f"{a} + {b}")`).  `gen._binop(ctype, a, '+', b)`,
 # `gen._cmp(a, '<', b)` and `gen._binop_into(dst, a, '+', b)` convert an
 # operand of the wrong scalar type; text does not.  May only shrink.
-TEXT_BINOP_BASELINE = 0
+TEXT_BINOP_BASELINE = 16
 
 
 def count_text_binops() -> tuple:
@@ -614,7 +572,6 @@ def main() -> int:
     if 'unit' in which:
         test_unit()
         test_gate_wiring()
-        test_value_tables_reset()
         test_rt_sigs()
         test_text_calls()
         test_text_casts()

@@ -651,7 +651,7 @@ _SELFHOST_KWARGS_HAS_VARARG = {
 }
 
 
-def _selfhost_syms() -> list:
+def _selfhost_syms():
     """`[(qualified C symbol, return ctype, [param ctypes])]` for every
     `_SELFHOST_SIGS` entry, in a DETERMINISTIC order.
 
@@ -752,18 +752,13 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             by_name[_as_str(_sd0.name)] = _sd0
     resolved = set()
 
-    # NOT named `s`: the compiled path types a parameter/local per bare NAME
-    # across the module, and the other `s` in this file (the loop variable
-    # below, and the interpreter's `MojoClass`-typed ones in the closure) made
-    # `s.methods` a MojoDict read here (`cannot coerce MojoDict * to
-    # MojoList *` at `s.methods = inherited + s.methods`).
-    def resolve(sdef0):
-        sdef = _as_structdef_node(sdef0)
-        _sn = _as_str(sdef.name)
+    def resolve(s):
+        s = _as_structdef_node(s)
+        _sn = _as_str(s.name)
         if _sn in resolved:
             return
         resolved.add(_sn)  # mark first: guards against an inheritance cycle
-        _bases = getattr(sdef, 'bases', None) or []
+        _bases = getattr(s, 'bases', None) or []
         if not _bases:
             return
         merged_fields = []
@@ -778,16 +773,16 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             for m in base.methods:
                 merged_methods[_as_str(_as_funcdef_node(m).name)] = m
         own_names = set()
-        for m in sdef.methods:
+        for m in s.methods:
             own_names.add(_as_str(_as_funcdef_node(m).name))
         inherited = [m for name, m in sorted(merged_methods.items()) if name not in own_names]
-        sdef.fields = merged_fields + sdef.fields
-        sdef.methods = inherited + sdef.methods
+        s.fields = merged_fields + s.fields
+        s.methods = inherited + s.methods
         # An in-place AST mutation, so `_walk_ast`'s memo — keyed on node
         # identity, and therefore blind to "this node now reaches more
         # children than when it was last walked" — must not be able to answer
-        # for `sdef`, or for any node that contains it, again.
-        _walk_ast_invalidate(sdef)
+        # for `s`, or for any node that contains it, again.
+        _walk_ast_invalidate(s)
 
     for s in all_struct_defs:
         if isinstance(s, StructDef):
@@ -910,7 +905,7 @@ class GimpleGen:
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
                  emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False,
-                 no_mangle: set[str] = (), relaxed_imports: bool = False,
+                 no_mangle=(), relaxed_imports: bool = False,
                  auto_gpu: bool = True):
         # Function names that must NOT be overload-mangled in this TU — e.g. a
         # generic instantiation's own symbol, which is already uniquely named by
@@ -1138,30 +1133,6 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
-        # Per-value ownership, keyed by the SAME C temp-var name as
-        # _generator_var_api: True where the 'MojoGenerator *' value was
-        # produced at this very site by a fresh construction (a
-        # `<base>_start` call, a generator-returning call) and no other
-        # code path holds a named reference to it. The consumer that
-        # drains an owned value must destroy the coroutine after the
-        # drain — the exact ownership verdict _gen_for_iter reaches for a
-        # `for` whose iterable IS the construction call (emit_loops.py's
-        # `destroy_after = isinstance(node.iterable, CallExpr)`), extended
-        # to the two consumers that used to leave every unnamed temporary
-        # leaking one 256KB coro stack plus one live-handle-registry entry
-        # per drain (quadratic registry growth — the analyzer hang in
-        # COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc
-        # deleted with the fix).
-        # False or absent = the value may be read again (a named local, a
-        # module global, a function parameter) and the drain must leave it
-        # alive: CPython leaves an exhausted generator valid in the hand
-        # that still holds it (`g = counter(3); sum(g); sum(g)`), and
-        # destroying there made that second pass a real use-after-free
-        # (test_gimple_runner.py's gimple_genexp_local_consumed_twice).
-        # The absent default is the safe side: an unmarked value keeps
-        # today's leak-rather-than-crash behaviour, so no shape this table
-        # does not mark can regress into a UAF.
-        self._generator_value_owned: dict[str, bool] = {}
         # Module-GLOBAL analogue of `_generator_var_api`: global name -> the api
         # of the generator/coroutine its toplevel store bound to it. A global
         # lives in the `_<mod>_globals` struct, so reading it mints a FRESH
@@ -2057,15 +2028,10 @@ class GimpleGen:
         self._struct_qualified_cnames: set = set()
         self._struct_home_by_id: dict = {}
         # Compiler-pre-seeded AST/runtime layouts (e.g. IfStmt, Parser) that
-        # register their C name for the compiler's home even without a
-        # StructDef node in this compile unit. If a sibling module's StructDef
-        # claims one of these bare names, the bare-name first-wins rule makes
-        # the claimant OWN the bare C name: its real layout replaces the
-        # pre-seeded phantom table (the collision pass clears
-        # struct_field_types and the preseed block is skipped once any
-        # preseed name is claimed) instead of minting a module-qualified
-        # cname — the ctor, methods, importer and trampoline all keep
-        # spelling the bare name, so the single layout stays consistent.
+        # own their bare C name for the compiler's home even without a
+        # StructDef node in this compile unit. A sibling module's StructDef of
+        # the same bare name is a genuine cross-module collision and must get a
+        # module-qualified cname instead of reusing the pre-seeded layout.
         self._compiler_preseed_struct_home: dict = {
             _astn: 'fire_compiler' for _astn in (
                 'CallExpr', 'BinaryOp', 'CompareChain', 'UnaryOp', 'TernaryExpr',
@@ -2622,15 +2588,6 @@ class GimpleGen:
         # Populated from the CURRENT file's own AST only (same-file resolution);
         # a struct imported from elsewhere without local source has no entry here.
         self._struct_method_signatures: dict[str, list] = {}  # _sms_key(struct, method) -> [candidate-overload dicts]
-        # helper cname -> spec dict for the `_mojo_virt_<base_csym>` tag-
-        # switch helpers (emit_methods._virt_dispatch_plan registers them
-        # during the lower phase; module_gen emits prototype + definition).
-        # Shared across the root gen and every imported module's temp_gen
-        # (the `temp_gen._virt_dispatch_helpers = gen._virt_dispatch_helpers`
-        # alias in emit_resolve) so a helper registered while lowering an
-        # IMPORTED module's body is visible to the ROOT's
-        # _emit_reflection_dispatch, the only gen that emits definitions.
-        self._virt_dispatch_helpers: dict = {}
         # struct name -> {method name -> that method's mangled C symbol}, the
         # METHOD half of a generated `_mojo_getattr_<Struct>` (its FIELD half
         # is `struct_field_types`). Written by module_gen's
@@ -2642,51 +2599,6 @@ class GimpleGen:
         # `_lower_bound_method_value`), for the one receiver spelling it
         # cannot reach, a value erased to int64_t.
         self._getattr_method_arms: dict = {}
-        # struct name -> {property name -> the getter's mangled C symbol}: the
-        # PROPERTY half of a generated `_mojo_getattr_<Struct>`. Written by
-        # module_gen's `_emit_struct_method_prototypes` beside the same walk
-        # that fills `_getattr_method_arms` (one walk, one symbol per method
-        # name, so an arm can only ever name a symbol that walk declared), and
-        # read by `_emit_reflection_dispatch`, which emits a call to the
-        # getter: a `@property` read is the getter's RESULT, not a bound
-        # method (the typed-receiver read lowers to a call of the getter), so
-        # an erased receiver's dynamic getattr must answer the same value.
-        # The inherited copy of a base property already has its own mangled
-        # symbol per subclass (`_merge_struct_inheritance`'s merged method
-        # view materializes it), so the arm calls the struct's own copy.
-        self._getattr_property_arms: dict = {}
-        # (struct name, method name) -> the lazy wrapper-getter C name, for a
-        # method whose decorator is a SAME-MODULE FUNCTION (`@contextual` in
-        # Tools/cases_generator/parsing.py): the class attribute is the
-        # decorator's RESULT, a compiled closure, and every call must run it
-        # (it sets the parsed node's `context`; a raw call left it None and
-        # `Node.first_token`'s `assert context is not None` trapped — see
-        # COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc
-        # deleted with the fix).
-        # Written EARLY by module_gen's `_populate_decorated_method_wrapped`
-        # pre-pass (before the body loop that lowers call sites — the
-        # prototype walk that used to detect these runs AFTER the bodies, so
-        # a call site could never see the table it needed to route through
-        # the wrapper), read by emit_methods' `_lower_struct_method_call`.
-        # SHARED by reference into every temp_gen (emit_resolve's share
-        # block), first-occurrence-wins, exactly like the two arm tables
-        # above.
-        self._getattr_decorated_arms: dict = {}
-        self._decorated_method_wrapped: dict = {}
-        # (struct name, method name) -> the DECORATOR's mangled C symbol:
-        # the guarded declaration + the one-argument call the wrapper getter
-        # definition emits (the getter applies the decorator to the raw
-        # method symbol on first use). Written by the same pre-pass.
-        self._decorated_method_dec_csym: dict = {}
-        # getter C name -> None: one wrapper-getter DEFINITION per TU.
-        # SHARED by reference into every temp_gen (the whole do_imports
-        # closure splices into ONE translation unit): each module's
-        # prototype walk sees every struct in the closure's own-section
-        # walk plus, in link mode, the imported sections, so without a
-        # shared "I emitted it" set two sections would define the same
-        # `_wrapped_<S>_<m>` symbol and gcc would refuse the unit. Same
-        # reference-sharing pattern as `_emitted_ptr_helpers`.
-        self._emitted_decorated_getters: set = set()
         # mangled C symbol -> full param C-type list (incl. self), for a
         # not-yet-emitted overload's forward-referenced call to be coerced
         # correctly by _emit_call. Deliberately kept separate from the shared
@@ -3279,7 +3191,6 @@ class GimpleGen:
         # the suffix and the qualifier halves of one mangled symbol can
         # never disagree about which entry they mean.
         self._imported_home_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
-        self._private_struct_pts_cache: dict[str, list] = {}  # '<home module>\x00<fn name>' -> home-private-struct param ctypes, or [] (see _imported_private_struct_pts)
         # _pair_key(sanitized home-module qualifier, fn name) -> [param ctypes] —
         # the WHOLE-PROGRAM-SHARED definition-side truth for free-function
         # signatures, written ONLY by a unit that actually defines the name
@@ -3600,7 +3511,6 @@ class GimpleGen:
         'mojo_list_get_boxed':       ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_box_double':           ('double',    ['int64_t']),
         'mojo_box_int':              ('int64_t',   ['int64_t']),
-        'mojo_int_of_word':          ('int64_t',   ['int64_t']),
         'mojo_box_word':             ('int64_t',   ['int64_t']),
         'mojo_truthy_word':          ('int',       ['int64_t']),
         'mojo_list_set_kinds':       ('void',      ['MojoList *', 'const char *']),
@@ -4349,7 +4259,7 @@ class GimpleGen:
         # Time functions
         'time', 'clock', 'difftime', 'mktime', 'strftime',
         'gmtime', 'localtime', 'asctime', 'ctime',
-        'clock_gettime', 'clock_gettime_nsec_np', 'nanosleep', 'clock_nanosleep',
+        'clock_gettime', 'clock_gettime_nsec_np',
         # Signal
         'signal', 'raise',
         # Wide char (wchar.h)
@@ -4451,8 +4361,6 @@ class GimpleGen:
         'unsetenv': ('int', ['char *']),
         'clock_gettime': ('int', ['int', 'struct timespec *']),
         'clock_gettime_nsec_np': ('int64_t', ['int']),
-        'nanosleep': ('int', ['const struct timespec *', 'struct timespec *']),
-        'clock_nanosleep': ('int', ['int', 'int', 'const struct timespec *', 'struct timespec *']),
     }
 
     # ── _lower_call sub-handlers ──────────────────────────────────────────
@@ -5103,8 +5011,8 @@ class GimpleGen:
         return gfn._locally_binds_name(self, bare_name)
     def _func_mangleable(self, name: str) -> bool:
         return gfn._func_mangleable(self, name)
-    def _func_csym(self, bare_name: str, def_pts: list | None = None) -> str:
-        return gfn._func_csym(self, bare_name, def_pts)
+    def _func_csym(self, bare_name: str) -> str:
+        return gfn._func_csym(self, bare_name)
     def _c_sizeof_helper(self, struct_name: str) -> str:
         """Name of a `static int64_t` accessor returning `sizeof(struct_name)`,
         registering it for emission into the non-GIMPLE prelude.
@@ -5205,8 +5113,6 @@ class GimpleGen:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):
         return gfn._parsed_import(self, module)
-    def _home_signature_ctypes(self, module: str, fs) -> list:
-        return gfn._home_signature_ctypes(self, module, fs)
     def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
         return gfn._note_struct_import_alias(self, module, alias, orig_name)
     def _note_struct_attr_alias(self, module: str, alias: str, member: str):
@@ -5791,8 +5697,8 @@ class GimpleGen:
         return ginf._closure_info_for_ident(self, name)
     def _generator_value_ctype_for_next(self, arg):
         return ginf._generator_value_ctype_for_next(self, arg)
-    def _collect_return_types(self, stmts: list, acc: list, arms: list = None):
-        return ginf._collect_return_types(self, stmts, acc, arms)
+    def _collect_return_types(self, stmts: list, acc: list):
+        return ginf._collect_return_types(self, stmts, acc)
     def _coerce_to_type(self, src_type: str, dst_type: str, value: str) -> str:
         return ginf._coerce_to_type(self, src_type, dst_type, value)
     def _cpp_container_cast_prefix(self, kind: str, via_intptr: bool) -> str:
@@ -6039,8 +5945,6 @@ class GimpleGen:
         return grsl._closure_value_locals(self, body)
     def _quick_type(self, node) -> str:
         return grsl._quick_type(self, node)
-    def _and_or_operand_type(self, node) -> str:
-        return grsl._and_or_operand_type(self, node)
     def _module_attr_call_return_type(self, node):
         return grsl._module_attr_call_return_type(self, node)
     def _infer_list_elem_type(self, elements: list) -> str:
@@ -6588,14 +6492,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
-    # The multi-slot comprehension/`for` refusals ride BEFORE the unknown-
-    # declaration pass for the same reason the ownership check does: they are
-    # structural refusals that know the program cannot compile, and the
-    # unknown-decl pass would otherwise answer its own, less specific
-    # question first: `print([x for a, b in g()])` or `for a, b in g():
-    # print(x)` reports the undeclared `x` instead of the arity mismatch that
-    # makes the whole consumer uncompilable.
-    gimple_gen_coro.refuse_multi_slot_target_over_nontuple_generator(stmts)
     unknown_decl_check.check_module(stmts, mojo_src, filename)
     # Early diagnostics: trait method requirement evidence (part 2).
     try:
@@ -6896,16 +6792,13 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                     except Exception: pass
     except Exception:
         pass
-    # This module's own caches, cleared by NAME. Not `globals().get(name)` over a
-    # tuple of names: `globals()` is a stub in the compiled compiler ("globals:
-    # unavailable in compiled mode", four hits per compile), which then returned
-    # 0 and cleared nothing, so the self-hosted binary kept every table across
-    # compiles.
     try:
-        _SELFHOST_FUNC_RETURN_TYPES.clear()
-        _SELFHOST_PARAM_TYPES.clear()
-        _SELFHOST_GG_CACHE.clear()
-        _compile_cache.clear()
+        for _c in ('_SELFHOST_FUNC_RETURN_TYPES', '_SELFHOST_PARAM_TYPES',
+                   '_SELFHOST_GG_CACHE', '_compile_cache'):
+            _v = globals().get(_c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
     except Exception:
         pass
     # Clear remaining module-level caches/accumulators (coro, types, monomorphize,
@@ -7549,13 +7442,6 @@ def compile_linked(mojo_src: str, filename: str = "",
     # declaration and `_compile_imported_module`'s matching write site for
     # the full reasoning (“COMPILE_FAIL: Tools/cases_generator/parser.py”).
     needs_cxx = gen._link_needs_cxx or gen._link_needs_cxx_box[0] or bool(gen.generated_cpp)
-    # A callable-valued slot is `std::function<...>` in cpp coroutine typing
-    # but the C translation unit (client.c) must spell it as the runtime's
-    # boxed `int64_t` word. Sanitize any residual form at the C-emission
-    # boundary so link-mode clients never see C++-only types in C output.
-    if 'std::function<' in code:
-        import mojo.middle.types as _mtypes
-        code = _mtypes.c_client_sanitize_signature_text(code)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),
             list(dict.fromkeys(gen._link_objects)),

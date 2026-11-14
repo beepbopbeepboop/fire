@@ -10,14 +10,12 @@ One pass, repeated:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
   2. REFILL  `control.py refill --target N --prefix bug-,fix-` -- a worker that finishes frees its slot at once.
-  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py`; a conflicting branch is handed to a LAND doc
-             (bugs/LAND-*.md) (integrate.hand_to_land_doc). The campaign is tools/pool.json `mode`: `build` lands everything fast
-             behind the light --stdlib gate; `drain` (the default) lands batches of 8 behind the full landing gate,
-             finishing work (fix-gate/fix-merge/fix-proof/fix-orch, bug-land-*) first, in priority.json order.
+  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py --stdlib` (gate = the stdlib compile only); a
+             conflicting branch is handed to a merge-fixer task (integrate.enqueue_merge_fix).
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
-import argparse, atexit, fcntl, signal, glob, hashlib, json, os, re, subprocess, sys, time, traceback
+import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time, traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
@@ -153,8 +151,6 @@ def apply_orch_reviews():
       FIXED    the reviewer fixed the orchestration: wait until its branch has LANDED (its registry entry is gone), so
                the reset happens on the fixed code (a landing reloads the swarm), then reset.
       STOP / no verdict   the cap stays (a review that cannot help is not retried past MAX_CAP_REVIEWS)."""
-    for path in C.sweep_review_docs():
-        log("removed orchestration review doc %s: nothing still needs it" % os.path.relpath(path, C.MAIN))
     for name, t in C.load().items():
         cr = t.get("cap_review")
         if not cr or cr.get("applied"):
@@ -916,12 +912,10 @@ def fresh_first(names, tasks):
     return fresh if fresh else names
 
 
-def probe(batch, stdlib=True):
+def probe(batch):
     """Merge and gate `batch` exactly as a landing would, changing NO state (integrate.py --probe). Returns
-    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs.
-    `stdlib=True` (build mode) gates on the light --stdlib gate; drain mode passes the same full landing gate the landing pays."""
-    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if stdlib else []) +
-                       ["--probe", "--only"] + batch,
+    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs."""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--probe", "--only"] + batch,
                        capture_output=True, text=True, cwd=C.MAIN)
     out = r.stdout + r.stderr
     if "another integrator" in out:                  # the lock is held (the post-landing verifier runs under it)
@@ -940,75 +934,44 @@ def failed_files(out):
     return ff.group(1).split() if ff else []
 
 
-def find_culprit(seq, failing, stdlib=True):
+def find_culprit(seq, failing):
     """The branch that turns the gate red when added to the ones before it: binary search for the smallest red prefix
-    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green). The search
-    probes behind the SAME gate the batch was probed behind (`stdlib`): behind the light gate a branch that breaks only
-    a full-gate job looked green, and the last branch of the batch was blamed, held and archived (2026-11-15: a good
-    bootstrap branch was held for a comptime-dtype-diagnostic break that belonged to its batch-mate). A sub-probe that
-    is neither GREEN nor RED (the lock was busy, nothing to merge) proves nothing, so the search stops and names no
-    culprit: (None, [])."""
+    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green)."""
     lo, hi = 0, len(seq)
     while hi - lo > 1:
         mid = (lo + hi) // 2
-        v2, _, f2, _ = probe(seq[:mid], stdlib=stdlib)
+        v2, _, f2, _ = probe(seq[:mid])
         if v2 == "RED":
             hi, failing = mid, f2
-        elif v2 == "GREEN":
-            lo = mid
         else:
-            return None, []
+            lo = mid
     return seq[hi - 1], failing or []
 
 
 def land():
-    # build mode (tools/pool.json `mode`): high volume - the light --stdlib gate, no batch cap. The cap (8) existed
-    # because a batch meant one HEAVY gate run and one conflict storm; the landing gate is cheap now, a conflicting
-    # branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit by
-    # find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
-    # drain mode: work the master patch down - batches of 8 (a red full gate poisons few; the rest land next pass),
-    # the FULL landing gate per probe and per landing, and finishing work lands before fresh docs.
-    build = C.mode() == "build"
-    LAND_BATCH = 0 if build else 8
+    # No batch cap. The cap (8) existed because a batch meant one HEAVY gate run and one conflict storm. The landing
+    # gate is now cheap (tools/gates.json `landing`: stdlib-syntax; the rest runs after landing in verify_landed.py),
+    # a conflicting branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit
+    # by find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
     proofs = []
-    stuck = []
-    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs, stuck_out=stuck) if n.startswith(PREFIXES) and n not in BUSY["names"]]
+    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     for n, deleted in proofs:               # a DONE branch that deletes a doc without a test: a reviewer decides, not a person
         if n.startswith(PREFIXES) and n not in BUSY["names"]:
             tn = C.load()[n]
             log("proof review: %s deletes %s with no test changed; handing it to a reviewer (TEST or NOTESTCASE)"
                 % (n, " ".join(deleted)))
             I.enqueue_proof_review(n, tn, deleted)
-    for n, why, detail in stuck:            # a finished branch nothing will land or continue: its LAND doc carries it
-        if n.startswith(PREFIXES) and n not in BUSY["names"]:
-            tn = C.load()[n]
-            log("stuck: %s (%s); filing its LAND doc" % (n, why))
-            I._cap_merge_fix(n, "land doc: %s: %s" % (n, why))     # capped: no longer a candidate, never filed twice
-            I.land_doc(n, tn, why, "Branch: %s\n%s" % (tn["branch"], detail))
     names = fresh_first(names, C.load())
-    if not build:
-        # drain: the work that carries finished patches to master goes first, in priority.json order, then the rest.
-        names = sorted(names, key=lambda n: (0 if n.startswith(C.FINISHING_PREFIXES) else 1, C.priority_key(n)))
-    else:
-        names = sorted(names, key=C.priority_key)
     if not names:
         return None
     tasks = C.load()
     batch, landed = list(names), False
-    if LAND_BATCH:
-        batch = batch[:LAND_BATCH]                     # drain: a red full gate poisons few; the rest land next pass
     while batch:
-        log("landing: probing %d branch(es) behind the %s gate: %s" % (
-            len(batch), "light --stdlib" if build else "full", " ".join(batch)[:300]))
-        _t0 = time.time()
-        verdict, merged, failing, out = probe(batch, stdlib=build)
-        log("landing: probe %s in %.0f s (merged %d of %d)" % (verdict, time.time() - _t0, len(merged), len(batch)))
-        if verdict == "EMPTY":      # no PROBE line at all: the probe died or found nothing to merge; say what it printed
-            log("landing: probe printed no verdict; its last lines: %s" % " | ".join(out.strip().splitlines()[-4:])[:400])
+        verdict, merged, failing, out = probe(batch)
         for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
-                log("conflict %s: filing its LAND doc" % c)
-                I.hand_to_land_doc(c, tasks[c], I.conflict_section(out, c))
+                log("conflict %s: handing it to a merge fixer" % c)
+                I.enqueue_merge_fix(c, tasks[c], out)
                 batch.remove(c)
         if verdict == "BUSY":
             log("integrator busy (another integrator round holds the lock); landing waits for the next pass")
@@ -1016,7 +979,7 @@ def land():
         if verdict == "EMPTY" or not merged:
             break
         if verdict == "GREEN":
-            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if build else []) + ["--only"] + merged,
+            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + merged,
                                capture_output=True, text=True, cwd=C.MAIN)
             for line in (r.stdout + r.stderr).splitlines():
                 if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved", "landing waits")):
@@ -1025,11 +988,7 @@ def land():
             break
         # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
         # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
-        culprit, failing = find_culprit(merged, failing, stdlib=build)
-        if culprit is None:
-            log("red: the batch is red but the culprit search was inconclusive (a sub-probe gave no GREEN/RED); "
-                "nothing is held and no gate doc is filed, the next pass retries")
-            break
+        culprit, failing = find_culprit(merged, failing)
         log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))
         I.gate_doc(culprit, tasks[culprit], failing, failed_files(out))
@@ -1122,13 +1081,6 @@ def main():
         sys.stderr = _lf
     global _CODE_HASH, _LOCK_FD
     _LOCK_FD = take_lock()     # held until this process exits
-    # 2026-11-15: the swarm vanished mid-landing with no log line. Catchable signals now say so; a SIGKILL cannot be
-    # caught, but then the log ends with no "stopped" line, which is itself the evidence.
-    log("started: pid %d, ppid %d, target %s, mode %s" % (os.getpid(), os.getppid(), a.target, C.mode()))
-    atexit.register(lambda: log("stopped: pid %d exiting normally" % os.getpid()))
-    for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(_sig, lambda n, f: (log("stopped: pid %d got %s (ppid %d)" % (os.getpid(), signal.Signals(n).name, os.getppid())),
-                                          sys.exit(128 + n)))
     _CODE_HASH = code_hash()   # the code this process runs; a change means re-exec (stale_code)
     while True:
         try:
@@ -1169,9 +1121,7 @@ def main():
                 verify_async()
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")
-        except (Exception, SystemExit) as e:      # an unattended loop must survive one bad pass. SystemExit too: control.git()
-            #   and friends call sys.exit on a failed git command, which is not an Exception and used to end this
-            #   process with no log line (2026-11-14 13:43, 2026-11-15 10:31: a MERGE_RR.lock collision)
+        except Exception as e:      # an unattended loop must survive one bad pass
             log("pass failed: %r\n%s" % (e, traceback.format_exc()))   # the traceback names the line; the repr alone cost a code read (2026-11-12)
         if not a.interval:
             return

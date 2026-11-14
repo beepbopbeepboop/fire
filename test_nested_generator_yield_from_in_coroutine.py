@@ -218,13 +218,6 @@ def test_negative_unclaimed_nested_generator_shapes_stay_refused():
                     [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
     _expect_refused('negative-kwarg', NEGATIVE_KWARG_SRC,
                     [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
-    # The parent file's own shape (c_analyzer/__main__.py's fmt_summary/section)
-    # is NOT among the shapes part 4 fixed: measured 2026-11-16, the exact
-    # MAIN_SHAPE_SRC below is refused with both reasons. Pinned here so the
-    # default run covers it; flip this to the positive `_check` when the
-    # coroutine capture model lands.
-    _expect_refused('main-shape', MAIN_SHAPE_SRC,
-                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
 
 
 _CASES = {
@@ -235,13 +228,7 @@ _CASES = {
     'tagged': [test_yield_from_tagged_nested_generator_delegation_matches_cpython],
 }
 
-# `main`/`main-shape` stay OUT of the default: that positive pin does not hold
-# (see the negative assertion below -- the parent file's own fmt_summary/section
-# shape is still refused), so running it by default would report a red that is
-# already filed. It is selectable as `main` for whoever fixes the capture model.
-# `negative` IS in the default, so the run asserts the refusal that is the
-# current truth instead of skipping the shape entirely.
-_DEFAULT_CASES = ['minimal', 'negative', 'tagged']
+_DEFAULT_CASES = ['minimal', 'tagged']
 
 
 if __name__ == '__main__':

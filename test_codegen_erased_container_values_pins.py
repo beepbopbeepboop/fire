@@ -5,8 +5,8 @@ Every `test_*` here is the Done-when test of a part that has LANDED: its bug
 doc is deleted and the assertion is now a standing pin. This is the registered
 `reg-codegen-erased-container-values` job, so it must stay green.
 
-The per-part Done-when probes of the still-open parts (the 2026-11-15 replan:
-`ctor_dtype_spelling`, `simd_value_across_return`) live in
+The per-part Done-when probes of the still-open parts (p1_alias, p2_alias_ctor,
+p3_comptime) live in
 test_codegen_erased_container_values.py and run by their bug docs' commands; a
 probe moves here, in the same commit that lands its part.
 
@@ -155,64 +155,13 @@ def test_part1_list_ctor_unchanged():
     body = _body(_compile(LIST_SRC, 'lst'), 'lst_f')
     assert 'mojo_list_init (&_owned_storage1_l)' in body, body
     assert 'mojo_list_append_int (l, _t2)' in body, body
-    # An explicit subscript is the bounds-checked read: an out-of-range index raises
-    # IndexError (mojo_list_get_int_checked). The lenient mojo_list_get_int stays for
-    # loop-internal reads. Pinned here so the explicit read cannot silently go back.
-    assert 'mojo_list_get_int_checked (l, _t4)' in body, body
+    assert 'mojo_list_get_int (l, _t4)' in body, body
 
 
 # part2: Span(<tracked container>) inherits the element type.
 def test_part2_span_over_array_inherits_element_type():
     body = _body(_compile(SPAN_SRC, 'span'), 'span_f')
     assert '_mojo_at_char' not in body, body
-
-
-# part2 of the 2026-11-15 replan (its doc was deleted with the fix; the
-# Done-when probe moved here from the open-probe harness): a `List[T]()`
-# constructor's bracket element type is assigned evidence (exactly as a list
-# LITERAL's elements are), so a function returning that list hands its element
-# kind to the caller across the call boundary.
-LIST_ELEM_RETURN_SRC = (
-    'def mk_f32() -> List[Float32]:\n'
-    '    var l = List[Float32]()\n'
-    '    l.append(1.5)\n'
-    '    return l\n'
-    '\n'
-    'def f32():\n'
-    '    var a = mk_f32()\n'
-    '    return a[0]\n'
-    '\n'
-    'def mk_int() -> List[Int]:\n'
-    '    var l = List[Int]()\n'
-    '    l.append(2)\n'
-    '    return l\n'
-    '\n'
-    'def i():\n'
-    '    var a = mk_int()\n'
-    '    return a[0]\n'
-    '\n'
-    'def mk_str() -> List[String]:\n'
-    '    var l = List[String]()\n'
-    '    l.append("x")\n'
-    '    return l\n'
-    '\n'
-    'def s():\n'
-    '    var a = mk_str()\n'
-    '    return a[0]\n'
-)
-
-
-def test_part2_list_ctor_across_return_keeps_element_type():
-    c = _compile(LIST_ELEM_RETURN_SRC, 'list_elem_return')
-    fbody = _defn(c, 'list_elem_return_f32')
-    assert 'mojo_list_get_int' not in fbody, fbody
-    assert 'mojo_list_get_double' in fbody, fbody
-    # The two kinds that work today must not move.
-    ibody = _defn(c, 'list_elem_return_i')
-    assert 'mojo_list_get_int' in ibody, ibody
-    assert 'mojo_list_get_double' not in ibody, ibody
-    sbody = _defn(c, 'list_elem_return_s')
-    assert 'mojo_list_get_str' in sbody, sbody
 
 
 # part3: float SIMD constructors keep their scalar dtype.

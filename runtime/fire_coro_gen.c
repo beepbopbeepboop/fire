@@ -48,9 +48,8 @@ extern int     _mojo_exc_top;
 
 /* Layer 2 also needs a way to hand a body its stashed args: */
 extern void *__mojo_coro_env(MojoCoro *c);   /* defined in mojo_coro.c (added) */
-extern void  mojo_cleanup_pad_checkpoint(int lvl, int nc);  /* fire_runtime.c */
 
-#define MOJO_GEN_MAX_ARGS 12
+#define MOJO_GEN_MAX_ARGS 8
 
 typedef struct MojoGen {
     MojoCoro *coro;
@@ -192,23 +191,6 @@ int64_t __mojo_gen_new_5(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64
 
 int64_t __mojo_gen_new_6(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5)
 { int64_t a[6] = { a0,a1,a2,a3,a4,a5 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 6); }
-
-/* 7..12 argument slots (the compiler's own `_trait_method_requirements`
-   takes 8 parameters). Kept in step with MOJO_GEN_MAX_ARGS and with
-   `mojo/middle/coro.py::MAX_GEN_SLOTS`, which refuses a larger generator
-   instead of emitting a call to a symbol that does not exist. */
-int64_t __mojo_gen_new_7(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
-{ int64_t a[7] = { a0,a1,a2,a3,a4,a5,a6 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 7); }
-int64_t __mojo_gen_new_8(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7)
-{ int64_t a[8] = { a0,a1,a2,a3,a4,a5,a6,a7 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 8); }
-int64_t __mojo_gen_new_9(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7, int64_t a8)
-{ int64_t a[9] = { a0,a1,a2,a3,a4,a5,a6,a7,a8 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 9); }
-int64_t __mojo_gen_new_10(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7, int64_t a8, int64_t a9)
-{ int64_t a[10] = { a0,a1,a2,a3,a4,a5,a6,a7,a8,a9 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 10); }
-int64_t __mojo_gen_new_11(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7, int64_t a8, int64_t a9, int64_t a10)
-{ int64_t a[11] = { a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 11); }
-int64_t __mojo_gen_new_12(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7, int64_t a8, int64_t a9, int64_t a10, int64_t a11)
-{ int64_t a[12] = { a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 12); }
 
 /* Method variants: a0 is the receiver pointer (self/cls), passed to the
    body as a real 2nd argument; a1.. are the ordinary params. */
@@ -618,10 +600,6 @@ __mojo_gen_close(int64_t gen, int64_t ge_type)
     int saved_top = _mojo_exc_top;
     if (saved_top + 1 >= MOJO_EXC_STACK_MAX) return 0;
     _mojo_exc_top = saved_top + 1;
-    /* Like every other level, the pad must own a CURRENT checkpoint, or a
-       raise landing here would unwind with a stale one (the trampoline's
-       pad records its own; see mojo_cleanup_pad_checkpoint). */
-    mojo_cleanup_pad_checkpoint(_mojo_exc_top, 0);
     volatile int64_t ignored = 0;
     if (setjmp(_mojo_exc_stack[_mojo_exc_top]) == 0) {
         int64_t out = 0;

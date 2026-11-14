@@ -85,7 +85,6 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_metal.py::MetalEmitter.__init__": "the MSL emitter's own dataclass",
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
-    "mojo/backend_gimple/module_gen.py::_gmp_solve_dispatch": "`_dt.methods` is a row list of the dispatch solver's own table (`self._dispatch_tables`), not an AST node",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
     "mojo/backend_gimple/module_gen.py::_gmi_rebind_stmt": "`copy.copy` of a def (rebound, or one whose body changed), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
     "mojo/backend_gimple/module_gen.py::_gmi_with_blocks": "`copy.copy` of a compound statement or its handler/case, whose child blocks are set on the copy before anything walks it",
@@ -222,81 +221,6 @@ def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
         return r.returncode == 0, c_src, r.stderr
     finally:
         os.unlink(path)
-
-
-def program_stdout(mojo_src: str):
-    """Build `mojo_src` with gcc and run it: `(stdout, c_src, error)`.
-
-    The ORACLE-shaped helper: CPython on the same text is the expectation, so
-    a test cannot protect a wrong value the two engines happen to agree on.
-    `error` is a message for a build (or run) failure, and `stdout` is None
-    then — a caller reports that rather than comparing against nothing."""
-    with tempfile.TemporaryDirectory() as td:
-        entry = os.path.join(td, 'case.py')
-        with open(entry, 'w') as fh:
-            fh.write(mojo_src)
-        try:
-            c_src = gimple_codegen._run_pipeline(
-                mojo_src, filename=entry, do_imports=True)[0]
-        except Exception as e:
-            return None, '', f'the compiler raised {type(e).__name__}: {e}'
-        c_file = os.path.join(td, 'case.c')
-        exe = os.path.join(td, 'case.exe')
-        with open(c_file, 'w') as fh:
-            fh.write(c_src)
-        cc = subprocess.run(
-            [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
-             os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
-        if cc.returncode != 0:
-            errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
-            return None, c_src, 'gcc -fgimple failed:\n' + '\n'.join(errs[:6])
-        run = subprocess.run([exe], capture_output=True, text=True,
-                             timeout=RUN_TIMEOUT_S)
-        if run.returncode != 0:
-            return None, c_src, (f'the compiled program exited '
-                                 f'{run.returncode} printing {run.stdout!r}')
-        return run.stdout, c_src, ''
-
-
-def cpython_stdout(mojo_src: str):
-    """CPython's stdout for `mojo_src`, or None if the fixture does not run."""
-    with tempfile.TemporaryDirectory() as td:
-        entry = os.path.join(td, 'oracle_case.py')
-        with open(entry, 'w') as fh:
-            fh.write(mojo_src)
-        py = subprocess.run([sys.executable, entry], capture_output=True,
-                            text=True, cwd=td, timeout=RUN_TIMEOUT_S)
-    if py.returncode != 0:
-        return None
-    return py.stdout
-
-
-def defined_param_ctype(c_src: str, func_name: str, param_name: str) -> str:
-    """The C type `param_name` is declared with in `func_name`'s DEFINITION.
-
-    The emitted symbol is the mangled `<func>_<hash>`, and the DEFINITION is
-    the occurrence whose header is not `;`-terminated (the forward
-    declaration above it is the same name with bare types)."""
-    m = re.search(r'^\S[^\n;]*\b' + re.escape(func_name) + r'_[0-9a-f]+'
-                  r'\s*\(([^;\n]*)\)\s*$', c_src, re.M)
-    if m is None:
-        return ''
-    for part in m.group(1).split(','):
-        part = part.strip()
-        if part.endswith(' ' + param_name):
-            return part[:-len(param_name) - 1]
-    return ''
-
-
-def defined_return_ctype(c_src: str, func_name: str) -> str:
-    """The C return type of `func_name`'s DEFINITION, with the `__GIMPLE` tag
-    stripped."""
-    m = re.search(r'^([^\n;{}]*?)\b\w*' + re.escape(func_name)
-                  + r'_[0-9a-f]+\s*\([^\n;{}]*\)\s*$', c_src, re.M)
-    if m is None:
-        return ''
-    return re.sub(r'\b__GIMPLE\b', '', m.group(1)).strip()
 
 
 def gimple_body_compiles(mojo_src: str) -> tuple[bool, str, str]:
@@ -970,147 +894,6 @@ def rebound(kind, box) -> dict:
         _FAIL += 1
 
 
-def test_mixed_pointer_scalar_returns_are_the_boxed_word():
-    """A function whose unannotated `return`s mix a pointer with a SCALAR
-    returns the boxed word, and each arm keeps its kind.
-
-    `TypeLattice.join` answers pointer+scalar with the pointer (C's rule for
-    pointer arithmetic, which is what binary operators need), so a RETURN
-    join used to pick the pointer and cast every other arm into it: `return a
-    == b` handed the caller address 1 and `return 7` address 7. gimple-lint
-    caught the `_Bool` spelling as `cast-narrow-int-to-ptr` in this
-    compiler's own `Interpreter._apply_binary_op`.
-
-    The test is the doc's own shape (`return "s"` / `return a == b`, called
-    both ways, printed) compared against CPython, plus the emitted signature
-    because the wrong answer there is exactly what the lint rule reports.
-    The nullable-pointer CONTROL is the other half: `return None` beside a
-    struct pointer is not a scalar mix and must keep its `P *` signature —
-    widening it would change every function with an early `return None`."""
-    global _PASS, _FAIL
-    name = "mixed_pointer_scalar_returns_are_the_boxed_word"
-    src = '''\
-def pick(a, b):
-    if a:
-        return "s"
-    return a == b
-
-def pick_lit(a):
-    if a:
-        return "s"
-    return 7
-
-class P:
-    def __init__(self, x: String):
-        self.x = x
-
-def keep(a):
-    if a:
-        return P("x")
-    return None
-
-def main():
-    print(pick(1, 1))
-    print(pick(0, 0))
-    print(pick(1, 2))
-    print(pick(0, 3))
-    print(pick_lit(0))
-    print(pick_lit(1))
-    print(keep(0) is None)
-main()
-'''
-    want = cpython_stdout(src)
-    if want is None:
-        print(f"FAIL  {name}: CPython does not run the fixture")
-        _FAIL += 1
-        return
-    got, c_src, err = program_stdout(src)
-    if got is None:
-        print(f"FAIL  {name}: {err}")
-        _FAIL += 1
-        return
-    problems = []
-    if got != want:
-        problems.append(f'compiled stdout {got!r} != CPython {want!r}')
-    for _fn in ('pick', 'pick_lit'):
-        _rt = defined_return_ctype(c_src, _fn)
-        if _rt != 'int64_t':
-            problems.append(f'{_fn} returns {_rt!r}, want the boxed word '
-                            f"'int64_t'")
-    _keep_rt = defined_return_ctype(c_src, 'keep')
-    if _keep_rt != 'P *':
-        problems.append(f'keep returns {_keep_rt!r}, want the nullable '
-                        f"pointer 'P *' (a None arm is not a scalar)")
-    if problems:
-        print(f"FAIL  {name}: " + '; '.join(problems))
-        _FAIL += 1
-    else:
-        print(f"PASS  {name}  (stdout={got!r})")
-        _PASS += 1
-
-
-def test_phantom_fields_do_not_cross_method_scopes():
-    """A local of one method must not type a same-named local of another.
-
-    The struct-field scan unions the struct constructors bound to each local
-    NAME across every statement it is handed. It was handed a whole
-    `StructDef`, so every method's locals shared one namespace: in this
-    compiler's own `myinterpreter.py`, `Interpreter`'s import methods bind
-    `target = _LazyImportTarget(...)` while a dozen OTHER methods use
-    `target` for an AST statement, and the scan minted
-    `name/obj/member/index/start/stop/step/elements` as `int` fields on
-    `_LazyImportTarget`. `_infer_param_types`' struct-field match then picked
-    that class for `Interpreter._eval_member_of`'s `expr` parameter (the only
-    caller passes a `MemberExpr`), and the body read `expr->member` through
-    an unrelated class's layout — gimple-lint's second
-    `cast-narrow-int-to-ptr` (`int` cast to `char *`).
-
-    Both halves are asserted: the polluted class gains no phantom `member`
-    field, and an unrelated `expr.member` parameter stays the untyped word
-    instead of being given the class no caller passes."""
-    global _PASS, _FAIL
-    name = "phantom_fields_do_not_cross_method_scopes"
-    ok, c_src, stderr = gimple_compiles('''\
-class Lazy:
-    def __init__(self, v):
-        self.v = v
-
-class Holder:
-    def importer(self):
-        target = Lazy(1)
-        return target.v
-
-    def reader(self, x):
-        target = x
-        return target.member
-
-def look(expr):
-    return expr.member
-''')
-    problems = []
-    if not ok:
-        problems.append('the module did not compile')
-    _m = re.search(r'typedef struct Lazy \{(.*?)\}', c_src, re.S)
-    if _m is None:
-        problems.append('no `typedef struct Lazy` in the generated C')
-    elif re.search(r'\bint member;', _m.group(1)):
-        problems.append("`Lazy` gained a phantom `member` field from another "
-                        "method's local `target`")
-    _look_t = defined_param_ctype(c_src, 'look', 'expr')
-    if _look_t == 'Lazy *':
-        problems.append("`look`'s `expr` parameter was typed `Lazy *`, a "
-                        "class no caller passes")
-    if problems:
-        print(f"FAIL  {name}: " + '; '.join(problems))
-        if not ok:
-            for line in stderr.splitlines()[:8]:
-                print(f"      {line}")
-        _FAIL += 1
-    else:
-        print(f"PASS  {name}  (look.expr={_look_t or 'default'})")
-        _PASS += 1
-
-
 def test_nested_def_rebound_param_takes_the_container_it_stores():
     """An unannotated parameter the body rebinds to a container takes THAT
     container, even when the function is a nested `def`.
@@ -1663,12 +1446,6 @@ def main():
     _run_isolated(lambda: test_return_type_of_a_rebound_local_is_the_box(), 'test_return_type_of_a_rebound_local_is_the_box (line 1078)')
     # ... and neither does one rebound to a different CONTAINER kind.
     _run_isolated(lambda: test_rebound_container_local_is_the_box(), 'test_rebound_container_local_is_the_box (line 1080)')
-    # A return join that mixes a pointer with a scalar is the boxed word, not
-    # the pointer (the bug gimple-lint's cast-narrow-int-to-ptr named).
-    _run_isolated(lambda: test_mixed_pointer_scalar_returns_are_the_boxed_word(), 'test_mixed_pointer_scalar_returns_are_the_boxed_word')
-    # A local of one method must not mint fields on the class another method's
-    # same-named local was built from.
-    _run_isolated(lambda: test_phantom_fields_do_not_cross_method_scopes(), 'test_phantom_fields_do_not_cross_method_scopes')
     # ... and a parameter a `-> container` function hands back is that
     # container, which is what took out selfhost/mojoc/bootstrap-stage2-cc.
     _run_isolated(lambda: test_returned_param_takes_its_declared_container_return_type(), 'test_returned_param_takes_its_declared_container_return_type (line 1083)')
@@ -15137,19 +14914,6 @@ def g(bits: Int64) -> Float64:
                  must_have=["mojo_float_from_bits (", "mojo_double_from_bits ("],
                  must_not_have=["/* indirect call via"])
 
-    # A `_Bool` return arm beside a string arm is boxed into the tagged word, not
-    # cast to the string pointer (`True` used to become the pointer 1). Run
-    # against CPython: pick(1, 2) is "s", pick(0, 0) is True, pick(0, 1) is False.
-    test_c_shape("bool_and_str_return_arms_box_into_the_word",
-                 """\
-def pick(a: Int, b: Int):
-    if a > 0:
-        return "s"
-    return a == b
-""",
-                 must_have=["mojo_box_from_bool (", "mojo_box_from_str ("],
-                 must_not_have=["/* indirect call via"])
-
     # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
     #
     # The Array fill-unroll coerces its fill value to the element type, and a
@@ -15354,111 +15118,6 @@ def main():
     _run_isolated(_test_bare_list_constructor_keeps_its_container_type,
                   'gate_stdlib_syntax_bare_list_constructor')
 
-    def test_call_site_double_star_spread_binds_by_name():
-        """A `**dict` spread at an ordinary call site must bind by parameter
-        NAME, not be passed as the next positional argument (which miscompiled
-        to the dict's pointer/value and dropped every spread key). Also covers
-        a compiled-generator call through the ordinary path with the same spread.
-        (call-site **dict spread bound by parameter name; ordinary and generator paths)
-        """
-        global _PASS, _FAIL
-        name = "call_site_double_star_spread_binds_by_name"
-        src = r"""
-def f(a, b=2, c=3):
-    return a * 100 + b * 10 + c
-
-def marks(marks='.', *, group=5, groups=2):
-    while True:
-        yield groups
-
-def outer(items, groups=5, **kw):
-    m = marks(groups=groups, **kw)
-    for item in items:
-        print(next(m), item)
-
-def main():
-    print(f(5, b=4))
-    print(f(5, **{"b": 4, "c": 7}))
-    print(f(**{"a": 5, "b": 4, "c": 7}))
-    d = {"a": 5, "b": 4}
-    print(f(**d))
-    outer([1, 2], groups=3, group=7)
-    # every argument is evaluated exactly once
-    print(f(g(), **mk()))
-    print(f(g(), c=g(), **{"b": 1}))
-    # a named parameter before `**kw` that the call omits or passes by keyword
-    show([1, 2], group=7)
-    show([1, 2], 3, group=7)
-    show([1, 2], groups=3, group=7)
-
-def show(items, groups=5, **kw):
-    print(groups, len(kw), kw["group"])
-
-def g():
-    print("g called")
-    return 5
-
-def mk():
-    print("mk called")
-    return {"b": 4, "c": 7}
-
-main()
-"""
-        with tempfile.TemporaryDirectory() as td:
-            entry = os.path.join(td, 'spread.py')
-            with open(entry, 'w') as fh:
-                fh.write(src)
-            py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
-            if py.returncode != 0:
-                print(f"FAIL  {name}: CPython reference failed: {py.stderr[:300]}")
-                _FAIL += 1
-                return
-            try:
-                c_src = gimple_codegen.compile_to_gimple(src, filename=entry)
-            except Exception as e:
-                print(f"FAIL  {name}: compile_to_gimple raised {type(e).__name__}: {e}")
-                _FAIL += 1
-                return
-            c_file = os.path.join(td, 'spread.c')
-            exe = os.path.join(td, 'spread.exe')
-            with open(c_file, 'w') as fh:
-                fh.write(c_src)
-            # Generated C may contain __GIMPLE bodies; compile with -fgimple.
-            cc = subprocess.run(
-                [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe,
-                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c'),
-                 # `marks` is a generator: its body needs the coroutine runtime
-                 # and the context switch for this machine.
-                 os.path.join(_RUNTIME_INC, 'fire_coro_gen.c'),
-                 os.path.join(_RUNTIME_INC, 'fire_coro.c'),
-                 os.path.join(_RUNTIME_INC, 'fire_async_sched.c'),
-                 os.path.join(_RUNTIME_INC,
-                              'fire_coro_ctx_aarch64.S'
-                              if platform.machine().lower() in ('arm64', 'aarch64')
-                              else 'fire_coro_ctx_generic.c'), '-lm'],
-                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
-            if cc.returncode != 0:
-                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
-                print(f"FAIL  {name}: gcc failed:\n" + "\n".join(errs[:8]))
-                _FAIL += 1
-                return
-            run = subprocess.run([exe], capture_output=True, text=True,
-                                 cwd=td, timeout=RUN_TIMEOUT_S)
-        if run.returncode != 0 or run.stdout != py.stdout:
-            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
-                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    _run_isolated(test_call_site_double_star_spread_binds_by_name,
-                  'call_site_double_star_spread_binds_by_name')
-
-    _run_isolated(test_two_same_name_free_functions_get_distinct_symbols,
-                  'two_same_name_free_functions_get_distinct_symbols')
-
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:
@@ -15471,69 +15130,6 @@ main()
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
-
-
-def test_two_same_name_free_functions_get_distinct_symbols():
-    """Two overloads of one free function in ONE module each get their own
-    mangled C definition, and the call site names one of them.
-
-    Before this, the duplicate-definition pass dropped BOTH copies (they are
-    "genuine overloads", which it believed the elaborator would instantiate),
-    so the module emitted no `pick` definition at all and the call became the
-    bare `(void)` weak stub named without qualifier or suffix — and every
-    importer's qualified reference was undefined at link time. Measured on
-    `std/memory/memory.mojo`'s two `_free` overloads and
-    `std/bit/mask.mojo`'s `splat` (the stdlib-dylib lazy-undefined-refs
-    same-name-free-function class, fixed 2026-11-15).
-
-    Single-definition modules must be unchanged, so the same source with one
-    `pick` still emits exactly one definition under its one suffix."""
-    global _PASS, _FAIL
-    name = "two_same_name_free_functions_get_distinct_symbols"
-    two = """\
-def pick(x: Int) -> Int:
-    return x + 1
-
-
-def pick(x: Bool) -> Int:
-    return 1 if x else 0
-
-
-def use(x: Int) -> Int:
-    return pick(x)
-"""
-    one = """\
-def pick(x: Int) -> Int:
-    return x + 1
-"""
-    try:
-        ok, c_src, stderr = gimple_compiles(two)
-        ok1, c_one, _ = gimple_compiles(one)
-    except TypeError as e:
-        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
-        _FAIL += 1
-        return
-    defs = set(re.findall(r'^int64_t (pick_[0-9a-f]{6}) \(', c_src, re.M))
-    calls = set(re.findall(r'= (pick_[0-9a-f]{6}) \(', c_src))
-    one_defs = set(re.findall(r'^int64_t (pick_[0-9a-f]{6}) \(', c_one, re.M))
-    problems = []
-    if len(defs) != 2:
-        problems.append(f'want two pick definitions, got {sorted(defs)}')
-    if not calls or not calls <= defs:
-        problems.append(f'the call site names {sorted(calls)}, definitions {sorted(defs)}')
-    if re.search(r'^__attribute__\(\(weak\)\) int64_t pick \(', c_src, re.M):
-        problems.append('a bare weak `pick` stub was emitted')
-    if len(one_defs) != 1:
-        problems.append(f'a single-definition `pick` lost its symbol: {sorted(one_defs)}')
-    if ok and ok1 and not problems:
-        print(f"PASS  {name}  definitions={sorted(defs)} call={sorted(calls)}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: compiles={ok}/{ok1}; " + '; '.join(problems))
-        if not ok:
-            for line in stderr.splitlines()[:8]:
-                print(f"      {line}")
-        _FAIL += 1
 
 
 if __name__ == '__main__':

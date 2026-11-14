@@ -42,9 +42,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
-import mojo.middle.coro as coro_mod
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
 import mojo.backend_gimple.emit_methods as gmp
@@ -436,44 +434,13 @@ def _reset_func(gen, body: list = None, params: list = None,
     # 'inst'. A method call or `isinstance` on them goes to the class table, never to the
     # container/struct method guesses an untyped word otherwise gets.
     gen._rtobj_kinds: dict = {}
-    # Facts about a VALUE, keyed by the name that holds it. Names restart in
-    # every function (`_t1`, and locals such as `g`), so each of these starts
-    # empty: until 2026-11-16 these four were created once per module and
-    # never reset, and a later function's `_t7` or `g` inherited what an
-    # earlier function's had been (`test_gimple_lint.py` checks that every
-    # table `carry_value_info` copies is reset here).
-    gen._struct_formats = {}
-    gen._generator_var_api = {}
-    gen._async_var_api = {}
-    gen._taskgroup_var_api = {}
     # A parameter ANNOTATED `object` is such a word by declaration: whatever
     # the call sites pass, the function's own code may not assume a kind.
-    # The same holds for a parameter annotated with a BARE NAME this
-    # translation unit knows no type for — a TypeVar (`P = TypeVar("P",
-    # bound="Parser")` is an ordinary call the backend has no table for, so
-    # `self: P` arrives here as the bare name `P` with no recorded type and
-    # erases to the int64_t word). Whatever a call site binds, the function's
-    # own code may not assume a kind: a method call on it must ask the
-    # runtime (emit_methods' dyn-word dispatch), not the scalar identity
-    # stub. Measured origin: Tools/cases_generator/parsing.py's
-    # contextual_wrapper — the stubbed `self.getpos()` bound begin/end to
-    # the PARSER POINTER and dropped `self.setpos(begin)`, so every node
-    # it wrapped carried a context whose .begin/.owner were the parser
-    # (COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fix).
     if params is not None:
         for _dwp in params:
             if (isinstance(_dwp, (tuple, list)) and len(_dwp) > 1
                     and isinstance(_dwp[1], str) and _dwp[1].strip() == 'object'):
                 gen._dyn_word_locals.add(_as_str(_dwp[0]))
-            elif (isinstance(_dwp, (tuple, list)) and len(_dwp) > 1
-                    and isinstance(_dwp[1], str)):
-                _dwn = _as_str(_dwp[1]).strip()
-                if (re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', _dwn)
-                        and _dwn not in ('object', 'Self', 'self', 'Any', 'None', 'NoneType')
-                        and not gimple_ctypes.type_map_has(_dwn)
-                        and _dwn not in (gen.struct_field_types or {})
-                        and _dwn not in (getattr(gen, '_compiled_modules', None) or {})):
-                    gen._dyn_word_locals.add(_as_str(_dwp[0]))
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a
@@ -982,10 +949,6 @@ class FuncState:
         self.fs_dyn_word_locals: set = set()
         self.fs_dict_slot_reads: dict = {}
         self.fs_rtobj_kinds: dict = {}
-        self.fs_struct_formats: dict = {}
-        self.fs_generator_var_api: dict = {}
-        self.fs_async_var_api: dict = {}
-        self.fs_taskgroup_var_api: dict = {}
         self.fs_tagged_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
         self.fs_nested_mixed_names: set = set()
@@ -1097,10 +1060,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_dyn_word_locals = gen._dyn_word_locals
     st.fs_dict_slot_reads = gen._dict_slot_reads
     st.fs_rtobj_kinds = gen._rtobj_kinds
-    st.fs_struct_formats = gen._struct_formats
-    st.fs_generator_var_api = gen._generator_var_api
-    st.fs_async_var_api = gen._async_var_api
-    st.fs_taskgroup_var_api = gen._taskgroup_var_api
     st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fs_nested_mixed_names = gen._nested_mixed_names
@@ -1223,10 +1182,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._dyn_word_locals = st.fs_dyn_word_locals
     gen._dict_slot_reads = st.fs_dict_slot_reads
     gen._rtobj_kinds = st.fs_rtobj_kinds
-    gen._struct_formats = st.fs_struct_formats
-    gen._generator_var_api = st.fs_generator_var_api
-    gen._async_var_api = st.fs_async_var_api
-    gen._taskgroup_var_api = st.fs_taskgroup_var_api
     gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen._nested_mixed_names = st.fs_nested_mixed_names
@@ -1443,8 +1398,6 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         obj, _hit = cas.get_or_build(key, '.o', _build_fn)
         return obj
     except Exception as e:
-        msg = f'[gimple_codegen] failed to compile link-mode inline-module cpp unit: {e}'
-        print(msg, flush=True)
         gimple_ctypes._debug_note('failed to compile link-mode inline-module cpp unit', e)
         return None
 
@@ -1635,27 +1588,8 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
                 continue
             ret = info.get('c_return_type', 'int64_t')
             c_params = info.get('c_parameters') or []
-            # A callable-valued parameter is `std::function<...>` in the
-            # exported signature (the cpp coroutine unit's own typing), but a
-            # C translation unit / extern prototype can only spell that slot as
-            # the runtime's boxed word (`int64_t`). Map at the C-emission
-            # boundary so the client decl, stored param types and signature all
-            # agree.
-            ret = gimple_ctypes.c_client_callable_ctype(ret)
-            _c_params_sanitized = []
-            ptypes = []
-            for cp in c_params:
-                _parts = cp.rsplit(None, 1) if isinstance(cp, str) else [str(cp)]
-                if len(_parts) > 1:
-                    _pt, _pn = _parts[0], _parts[1]
-                    _pt = gimple_ctypes.c_client_callable_ctype(_pt)
-                    ptypes.append(_pt)
-                    _c_params_sanitized.append(f"{_pt} {_pn}")
-                else:
-                    _pt = gimple_ctypes.c_client_callable_ctype(_parts[0])
-                    ptypes.append(_pt)
-                    _c_params_sanitized.append(_pt)
-            c_params = _c_params_sanitized
+            ptypes = [' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
+                      for cp in c_params]
             # A name in _NEEDS_SELF_EXTERN has ONE true C prototype, pinned in
             # _LIBC_SIGS. The export-derived signature (module_loader maps the
             # exporting Mojo wrapper's Int64-level types to int64_t text) can
@@ -1692,12 +1626,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
                     _tail = sig.split(None, 1)
                     if len(_tail) == 2:
                         sig = ret + ' ' + _tail[1]
-            if not (sym in gen._NEEDS_SELF_EXTERN and gen._LIBC_SIGS.get(sym)):
-                # Only the C++-only callable spelling is rewritten. Rebuilding the whole signature from `c_params`
-                # (as an earlier version did) dropped every parameter of an export that carries only a `signature`
-                # text and no `c_parameters`: `std_bit_mask_splat(int64_t)` became `(void)`, and 208 stdlib files
-                # failed with "too many arguments ... expected 0, have 1".
-                sig = gimple_ctypes.c_client_sanitize_signature_text(sig)
             gen.func_return_types[sym] = ret
             gen.func_param_types[sym] = ptypes
             gen.imported_symbols[sym] = {
@@ -1713,18 +1641,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
             # Only for genuinely mangled functions — reserved renames (pipe →
             # mojo_pipe) are handled by other decl paths and must not change here.
             if gen._func_mangleable(sym):
-                # The definer's list when its home signature names a struct private
-                # to the defining module. Recorded here, once, so every later name
-                # for this import (call sites, which are generated before the
-                # import block is written) hashes the same list as the definition.
-                import mojo.backend_gimple.emit_funcs as _efn_pv
-                _home_pv = _efn_pv._imported_private_struct_pts(gen, sym)
-                if _home_pv:
-                    _hp_by = getattr(gen, '_home_private_pts_by_name', None)
-                    if _hp_by is None:
-                        _hp_by = {}
-                        gen._home_private_pts_by_name = _hp_by
-                    _hp_by[sym] = list(_home_pv)
                 _csym = gen._func_csym(sym)
                 if _csym != sym:
                     sig = gimple_ctypes._replace_first_ident(sig, sym, _csym)
@@ -5272,19 +5188,10 @@ def _generator_to_list(gen, value: str) -> str:
                        [('MojoList *', res), ('int64_t', boxed)])
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
-    # Ownership: a freshly constructed generator handed to us (a direct
-    # call — `sum(f())` / `list(f())` / `any(x for x in f())`) has no other
-    # reference, so destroy it after the drain, exactly as
-    # _gen_for_generator_iter does for `for x in f():`. Before this, every
-    # unnamed temporary drained here leaked its whole coroutine until
-    # process exit (the analyzer hang). A named local, a module global or a
-    # parameter is marked False/absent in _generator_value_owned and keeps
-    # the old leave-alive behaviour: `sum(g)` must leave `g` a valid,
-    # exhausted generator — `sum(g); sum(g)` prints the total and then 0,
-    # exactly like CPython, and destroying it here made that second pass a
-    # real use-after-free.
-    if gen._generator_value_owned.get(_iv):
-        gen._rt_void(f"{base}_destroy", [_iv])
+    # No `{base}_destroy` — same reason as `_compr_generator_loop`: draining
+    # a generator does not close it, and the caller may hold the handle
+    # (`sum(g)` must leave `g` a valid, exhausted generator, not a dangling
+    # pointer).
     return res
 
 
@@ -5368,7 +5275,11 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         idx = gen._new_temp('int64_t')
         gen._emit(f"  {idx} = (int64_t)0;")
         bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-        gen._loop_head(idx, len_t, bb_cond, bb_body, '', bb_after, False)
+        gen._goto(bb_cond)
+        gen._emit_label(bb_cond)
+        cond = gen._cmp(idx, '<', len_t)
+        gen._cond_goto(cond, bb_body, bb_after)
+        gen._emit_label(bb_body)
         byte = gen._rt_call('int64_t', 'mojo_bytes_get', [value, idx])
         gen._void_call('mojo_list_append_int',
                        [('MojoList *', res), ('int64_t', byte)])
@@ -5377,7 +5288,11 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # declaration at the current point, so calling it before the loop
         # would compute `idx + 1` once, re-assign that same value every
         # iteration, and the loop would never terminate.
-        gen._loop_tail(idx, bb_cond, '', bb_after, False)
+        one = gen._new_val('int64_t', '(int64_t)1')
+        nidx = gen._binop('int64_t', idx, '+', one)
+        gen._copy(idx, nidx)
+        gen._goto(bb_cond)
+        gen._emit_label(bb_after)
         # Bytes elements are always ints — record it so a consumer that
         # asks (enumerate's pair slot, set.update, star-unpack, ...) reads
         # the slots with the int accessor.
@@ -5830,7 +5745,7 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     gen._goto(bb_push)
     gen._emit_label(bb_push)
     fsave = gen._new_val('int64_t', '_mojo_exc_top')
-    fpush = gen._binop('int64_t', f'{fsave}', '+', '(int64_t)1')
+    fpush = gen._new_val('int64_t', f'{fsave} + (int64_t)1')
     gen._emit(f'  _mojo_exc_top = {fpush};')
     ftop = gen._new_val('int64_t', '_mojo_exc_top')
     gen._void_call('mojo_cleanup_checkpoint_save', [])
@@ -6029,30 +5944,14 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # container_spellings.md), one spelling over.
         #
         # The lookup is `user_dunder_repr_call`, SHARED with `_repr_value`
-        # so the two routes cannot drift apart. No dunder → for a struct
-        # this compile registered a FIELD TABLE for, CPython's `str(x)`
-        # falls back to `repr(x)`, so dispatch to the same generated repr
-        # the `repr()` route dispatches to (`_mojo_dispatch_repr`). The old
-        # `mojo_str` fallback read the pointer's raw header bytes as a C
-        # string — the `escaping_calls:` row of
-        # Tools/cases_generator/analyzer.py's `Properties.dump` (an
-        # f-string over an `EscapingCall` value) came out as garbage
-        # instead of `EscapingCall(stmt=..., call=..., kills=None)`. A
-        # struct type this compile never registered (a runtime pointer
-        # such as `MojoBoundMethod *`) keeps the historical `mojo_str`
-        # spelling below: it has no field table, no dispatch case, and
-        # the shared `mojo_repr_obj` placeholder its `repr()` route gets
-        # is spelled by the route that owns that decision.
+        # so the two routes cannot drift apart. No dunder → the generic
+        # `mojo_str` fallback below, exactly as before.
         _rsn = et[:-2].strip()
         if _rsn:
             _rcall = user_dunder_repr_call(gen, _rsn, et, ev,
                                            ('__str__', '__repr__'))
             if _rcall is not None:
                 return _rcall
-            if _rsn in gen.struct_field_types:
-                _vp = gen._cast('void *', ev)
-                return gen._call_expr('char *', '_mojo_dispatch_repr',
-                                      [('void *', _vp)])
     return gen._call_expr('char *', 'mojo_str', [(et, ev)])
 
 
@@ -6269,22 +6168,6 @@ def _to_int64(gen, ctype: str, val: str) -> str:
 
 
 
-
-def _erasure_free_context(gen) -> bool:
-    """True when the function being emitted is not inside a generic: its own
-    `def` takes no bracket parameters and its enclosing struct (if any) takes none.
-    Only there are the C types of the arguments the source's own types."""
-    _cur = getattr(gen, '_current_func_node', None)
-    if _cur is not None and getattr(_cur, 'comptime_params', None):
-        return False
-    _sname = getattr(gen, '_current_struct_name', None) or ''
-    if _sname:
-        for _st in getattr(gen, '_current_module_stmts', None) or []:
-            if (type(_st).__name__ == 'StructDef' and str(_st.name) == _sname
-                    and getattr(_st, 'bracket_params', None)):
-                return False
-    return True
-
 def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     """Resolve and elaborate an overloaded imported call (slice 4): lower the
     args, pick the matching overload by their C types, and emit the call to the
@@ -6308,23 +6191,6 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
-    # A call whose arity matches exactly ONE plain overload is that overload: no
-    # type choice is needed, so its home symbol is called rather than a private copy
-    # elaborated under the mangled name nothing else defines (stdlib `bit.mask`'s
-    # `splat(Bool)` reached from `codepoint.mojo`). Several arity matches keep the
-    # elaboration below.
-    import mojo.backend_gimple.emit_calls as _ec_el
-    _home_sym = _ec_el._imported_overload_call_symbol(gen, g, node, None)
-    if _home_sym is None and _erasure_free_context(gen):
-        # Several arity matches: choose by the lowered argument types, but only in a
-        # caller whose types are real. Inside a generic struct or function a
-        # parameter's C type can be erased to a word (`Scalar[dtype].cast[.uint32]()`
-        # lowers to int64_t), so there the choice would be a guess and it is not made.
-        _home_sym = _ec_el._imported_overload_call_symbol(
-            gen, g, node, [_ct for _ct, _ in arg_pairs])
-    if _home_sym is not None:
-        _hret = gen.func_return_types.get(_home_sym, 'int64_t')
-        return _hret, gen._call_expr(_hret, _home_sym, arg_pairs)
     try:
         module_src = gen._generic_source_text(source)
         import elaborate
@@ -6335,13 +6201,6 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
         info = None
     if not info:
         return None
-    # The overload symbol is mangled from the BARE name, so an IMPORTED
-    # overloaded function lost the defining module's qualifier and every call
-    # site emitted a symbol nothing defines (`pick__void` for
-    # `from m1 import pick`). Same composition `_func_csym` uses.
-    _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
-    if _q:
-        info['symbol'] = _q + '_' + info['symbol']
     return gen._emit_generic_instantiation(info, arg_pairs)
 
 
@@ -6717,22 +6576,6 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         is_dict_items = _iv in gen._dict_items_val_elems
         value_elem = gen._dict_items_val_elems.get(_iv) if is_dict_items else None
-        # Mirror of `_gen_for_list`'s `_tuple_boxed_slots`: a registered
-        # `.items()` list carries each pair's per-slot kinds row (mojo_dict_items
-        # sets it from the dict slot's setter), so the VALUE slot's word is a
-        # true int only when the slot says kind 0 — a bool/None/double read
-        # through the plain accessor prints as its raw word (1/0/IEEE bits)
-        # where CPython prints True/None/the decimal. `mojo_list_get_boxed`
-        # answers 'i' slots with the identical raw word, so an all-int pair is
-        # byte-identical. This comprehension path used to diverge from the
-        # `for` statement over the SAME `.items()` list exactly here:
-        # `Properties.dump`'s `[f"{key}: {value}" for (key, value) in
-        # simple_properties.items()]` printed `tier: 0` / `escapes: 1` where
-        # the `for` spelling prints `tier: None` / `escapes: False`.
-        _compr_boxed_slots = (_iv in getattr(gen, '_maybe_kinds_vals', ())
-                              or _as_str(_iv) in getattr(gen, '_maybe_kinds_vals', ())
-                              or is_dict_items
-                              or _as_str(_iv) in gen._dict_items_val_elems)
         slot_types = gen._tuple_slot_types.get(_iv)
         pair_elem = gen._nested_elem_types.get(_iv, 'int64_t')
         slot_elems = []
@@ -6792,7 +6635,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         raw_elem = gen._rt_call('int64_t', 'mojo_list_get_int', [_iv, idx64])
         sub_list = gen._coerce_to_type('int64_t', 'MojoList *', raw_elem)
 
-        def _emit_slot_assign(ptr, vn, i, se, boxed_slots):
+        def _emit_slot_assign(ptr, vn, i, se):
             # Nested tuple target: the slot is an opaque boxed pair —
             # cast and recurse one level (deeper nesting recurses
             # identically), mirroring _gen_for_list. Checked BEFORE any
@@ -6809,7 +6652,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 nested_ptr = gen._coerce_to_type('int64_t', 'MojoList *', raw_n)
                 nested_names = _split_top_level_comma(vn[1:-1].strip())
                 for j, nn in enumerate(nested_names):
-                    _emit_slot_assign(nested_ptr, nn, j, 'int64_t', False)
+                    _emit_slot_assign(nested_ptr, nn, j, 'int64_t')
                 return
             cv = gen._cname(vn)
             suf = gimple_ctypes.TypeLattice.list_suffix(se)
@@ -6823,23 +6666,11 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                     gen._copy(f"{cv}", f"{sub_val}")
                     gen._actual_types[vn] = 'char *'
             else:
-                if boxed_slots and vt == 'int64_t':
-                    # The pair records its own per-slot kinds: read the slot
-                    # BOXED so the target is spelled by its kind, exactly as
-                    # `_gen_for_list`'s `_emit_target_assign` does. The element
-                    # expression lowers in `_gen_compr_append` (called from the
-                    # loop body AFTER these assignments), so the `_boxed_vals`
-                    # mark is live when its f-string/str() read takes the
-                    # `mojo_repr_boxed` arm.
-                    raw = gen._rt_call('int64_t', 'mojo_list_get_boxed', [_p, f"{i}"])
-                    gen._boxed_vals.add(cv)
-                    gen._emit(f"  {cv} = {raw};")
+                raw = gen._rt_call('int64_t', 'mojo_list_get_int', [_p, f"{i}"])
+                if vt == 'int64_t':
+                    gen._copy(f"{cv}", raw)
                 else:
-                    raw = gen._rt_call('int64_t', 'mojo_list_get_int', [_p, f"{i}"])
-                    if vt == 'int64_t':
-                        gen._copy(f"{cv}", raw)
-                    else:
-                        gen._safe_coerce_emit('int64_t', vt, raw, cv)
+                    gen._safe_coerce_emit('int64_t', vt, raw, cv)
 
         # With a star in the target the row's own length decides the starred
         # slot's bounds and every slot after it, so it is read once; a
@@ -6860,10 +6691,10 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 continue
             _slot_i = i
             if star_idx >= 0 and i > star_idx:
-                _base = gen._binop('int64_t', f"{_sub_len}", '-', f"{n_after}LL")
+                _base = gen._new_val('int64_t', f"{_sub_len} - {n_after}LL")
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
                 _slot_i = gen._binop('int64_t', _base, '+', _off)
-            _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i], _compr_boxed_slots)
+            _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
 # `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
 # legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
@@ -7028,12 +6859,13 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     else:
         var_names = None
         if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
-            # The message lives in mojo/middle/coro.py beside the pipeline
-            # pre-pass that raises the same refusal earlier (before the
-            # unknown-declaration pass can answer with a less-specific
-            # diagnostic for the same program): one builder, one wording.
-            raise coro_mod.multi_slot_comprehension_refusal(gen0.target,
-                                                             api.get('base'))
+            raise RuntimeError(
+                "cannot compile a multi-slot comprehension target over a "
+                f"generator whose yield arity is not a tuple (`{gen0.target} "
+                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
+                "yields one value per resume, and unpacking that value needs a "
+                "runtime iterator protocol this scalar generator model does "
+                "not have")
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -7065,20 +6897,17 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     # name and for the tuple-target arm, which binds its slots through
     # `_gen_compr_append`'s own per-slot path.
     _restore_binding(gen, _tgt, saved_target)
-    # Ownership: when the drained value is a freshly constructed generator
-    # with no other reference (a direct call — `list(x for x in f())` /
-    # `any(x for x in f())`), this drain is its only chance to be freed, so
-    # destroy it, exactly as _gen_for_generator_iter does for `for x in
-    # f():`. Before this, every unnamed temporary consumed here leaked its
-    # whole coroutine (256KB stack + live-handle-registry entry) until
-    # process exit, and the registry's quadratic growth hung any program
-    # that drained enough of them (the Tools/cases_generator analyzer).
-    # A named local, a module global and a parameter are marked False/absent
-    # in _generator_value_owned and keep the old leave-alive behaviour:
-    # `g = f(); sum(g); sum(g)` must still see a valid, exhausted generator
-    # on the second pass, never a freed one.
-    if gen._generator_value_owned.get(_iv):
-        gen._rt_void(f"{base}_destroy", [_iv])
+    # Deliberately NO `{base}_destroy` here. Consuming a generator does not
+    # CLOSE it, in real Python or here: the handle belongs to whatever holds
+    # it (usually a variable), and this loop may be run again over the same,
+    # now-exhausted generator — `g = (x for x in xs); sum(x for x in g);
+    # sum(x for x in g)` must print the total and then 0, exactly like
+    # CPython. Destroying it here freed the coroutine while `g` still pointed
+    # at it, so that second pass was a use-after-free (a real SIGSEGV, found
+    # by test_gimple_runner.py's `gimple_genexp_local_consumed_twice` once
+    # generator expressions became real generators). An unnamed temporary
+    # (`list(x for x in xs)`) now simply lives until process exit, which is
+    # what CPython's GC does too.
 
 
 def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -7257,7 +7086,7 @@ def _bind_local_decl(gen, name, ctype):
         gen._block_scope_frames[-1].append((name, saved))
 
 
-def _open_block_scope(gen) -> list:
+def _open_block_scope(gen):
     """Open a block body (an if/else/elif, loop, with, try/except/finally or
     match-case body). Returns the frame `_close_block_scope` needs."""
     frame = []
@@ -7265,7 +7094,7 @@ def _open_block_scope(gen) -> list:
     return frame
 
 
-def _close_block_scope(gen, frame: list) -> None:
+def _close_block_scope(gen, frame: list):
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""
@@ -7856,44 +7685,6 @@ def lower_module_globals_read(gen, node=None) -> tuple[str, str]:
         _k = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(_name)))
         emit_dict_int_value_store(gen, _d, 'char *', _k, _ct, _v, None)
     return 'MojoDict *', _d
-
-
-def is_typing_cast_call(gen, node) -> bool:
-    """True for a two-positional-arg `cast(type, value)` call whose `cast`
-    arrived through a `from ... import cast` this compile could never
-    resolve (the name is in `_unresolved_import_aliases`) — the CPython
-    `typing.cast` shape. CPython's `typing.cast` is a run-time no-op that
-    returns `value` unchanged, so the call's result is just the value
-    argument. Without this the name binds to the weak "unavailable in
-    compiled mode" stub, which prints and returns 0 — the
-    Tools/cases_generator analyzer's `kind = cast(Literal["inst", "op"],
-    tkn.text)` then classified every instruction as None (the whole
-    Uops/Instructions section came out wrong) and the parse of the stack
-    effects fed 0 into the dataclass constructors.
-
-    `typing` is a CPython stdlib module this compiler does not compile
-    (Lib/typing.py itself fails: a `StructDef` without `body`), so its
-    imports can only ever answer this way; `_locally_binds_name` keeps a
-    user function/variable that happens to be called `cast` on the
-    ordinary path (real Python would shadow the import the same way).
-    """
-    return (isinstance(node, CallExpr)
-            and isinstance(node.func, IdentExpr)
-            and _as_str(node.func.name) == 'cast'
-            and len(node.args) == 2
-            and not getattr(node, 'kwargs', None)
-            and _as_str(node.func.name) in gen._unresolved_import_aliases
-            and not gen._locally_binds_name('cast'))
-
-
-def lower_typing_cast_call(gen, node) -> tuple[str, str]:
-    """`cast(type, value)` -> `value`: lower only the value argument and
-    hand its (ctype, val) back as the call's result — the object identity
-    CPython's cast has, with no call and no diagnostic. The type argument
-    is never evaluated: CPython evaluates it and discards it, and here it
-    is a subscript on an equally unresolved name (`Literal[...`), so
-    evaluating it would just burn a temp on a value nothing reads."""
-    return gen.lower_expr(node.args[1])
 
 
 def _mg_write_compatible(field_t: str, val_t: str) -> bool:
@@ -8551,19 +8342,10 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # (mojo_obj_getattr's stub). Detected here by AST shape at compile
     # time; see _is_sys_stderr.
     print_fn = 'mojo_print'
-    sep_node = None
     if kwargs:
         for kw_name, kw_val in kwargs:
             if kw_name == 'file' and gen._is_sys_stderr(kw_val):
                 print_fn = 'mojo_print_stderr'
-            elif kw_name == 'sep':
-                # print(..., sep=X): the string placed BETWEEN arguments.
-                # It was silently dropped before, so every `print(indent,
-                # text, sep="")` (Tools/cases_generator/analyzer.py's
-                # Properties.dump) printed a spurious default ' ' between
-                # its arguments. CPython's default is ' '; a None literal
-                # means the text "None".
-                sep_node = kw_val
 
     # Inline string-literal call arguments (e.g. `mojo_print (" ")`) are not
     # valid in __GIMPLE — every literal must go through the _slit_ pool and
@@ -8873,30 +8655,6 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     continue
         resolved_parts.append((atype, aval))
     parts = resolved_parts
-    # The `sep=` keyword's string, resolved ONCE before the argument loop
-    # (the loop prints it between every pair of arguments). The default
-    # (no sep given) keeps printing the ' ' literal it always did.
-    sep_var = None
-    _sep_owned = False
-    if sep_node is not None:
-        if isinstance(sep_node, gimple_ctypes.NoneLiteral):
-            _sep_lit = gen._intern_string('None')
-            sep_var = gen._new_val('char *', _sep_lit)
-        else:
-            _st, _sv = gen.lower_expr(sep_node)
-            if _st == 'char *':
-                sep_var = _sv
-            else:
-                # A word (an int, a None, a bool): str() through the
-                # runtime's word spelling — the same call the f-string
-                # parts use. The result is a FRESH copy the caller owns
-                # (`mojo_str_word_fresh`); release it after the trailing
-                # newline print, because every inter-argument print reads
-                # it in between.
-                sep_var = gen._call_expr('char *', 'mojo_str_word_fresh',
-                                          [('int64_t', gen._to_int64(_st, _sv))])
-                gen._note_fresh_result(sep_var)
-                _sep_owned = True
     for i, (atype, aval) in enumerate(parts):
         _stat = arg_static[i] if i < len(arg_static) else ''
         # A name recorded as holding a bool (`b = True`): its own static type
@@ -8922,14 +8680,6 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._rt_void(print_fn, [f"{rv}"])
         elif atype in ('double', 'float', '__fp16'):
             dv = aval if atype == 'double' else gen._cast('double', f"{aval}")
-            rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
-            gen._rt_void(print_fn, [f"{rv}"])
-        elif _float8_dtype.float8_spelling_of_ctype(atype) is not None:
-            # A scalar of a float8 dtype has no rule for anything but being
-            # held (mojo.middle.float8_dtype); its representation IS a
-            # double, so print it as a float rather than falling through to
-            # the generic integer formatter and reading the bits as an int.
-            dv = gen._cast('double', f"{aval}")
             rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
             gen._rt_void(print_fn, [f"{rv}"])
         elif atype == 'MojoList *':
@@ -9032,7 +8782,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 bb_none = gen._new_bb()
                 bb_done = gen._new_bb()
                 _cond = gen._new_temp('_Bool')
-                gen._binop_into(_cond, f'({aval})', '!=', '0')
+                gen._emit(f'  {_cond} = ({aval}) != 0;')
                 gen._cond_goto(_cond, bb_some, bb_none)
                 gen._emit_label(bb_some)
                 _some_lit = gen._intern_string('Optional(Some)')
@@ -9068,10 +8818,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 gen._rt_void(print_fn, [t])
                 gen._rt_void('free', [t])
         if i < len(parts) - 1:
-            if sep_var is not None:
-                gen._rt_void(print_fn, [sep_var])
-            else:
-                _emit_literal_print(' ', print_fn)
+            _emit_literal_print(' ', print_fn)
     # `_repr_boxed_container` borrows a boxed str but allocates every other
     # repr; free only the allocated arms (the runtime discriminator is the
     # same one the helper used).
@@ -9099,8 +8846,6 @@ def _gen_print(gen, args: list, kwargs: list = None):
     for _or_i in range(len(_owned_reprs)):
         gen._rt_void('free', [f"{_owned_reprs[_or_i]}"])
     _emit_literal_print('\\n', print_fn)
-    if _sep_owned:
-        gen._rt_void('free', [f"{sep_var}"])
 
 
 # The stdlib module that owns the zero-arg GPU target queries. The fold

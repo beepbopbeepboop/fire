@@ -16,7 +16,7 @@ def _parse_source(src, filename="<input>"):
 def main():
     failures = []
 
-    # Controls from the dict-slot-reads bug's part 3 (landed; doc gone)
+    # Controls from dict-slot-reads refuse compiler sources (part 3, deleted doc)
     try:
         _parse_source("trait Marked:\n    pass\n", "<trait-control>")
         # verify it declares a trait (StructDef/TraitDef) not an assignment?
