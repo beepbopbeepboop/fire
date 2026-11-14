@@ -200,3 +200,25 @@ Next groups on the same pass: H (parameter name conflict), I (conflicting
 default implementations), L (comptime members), K (candidate selection).
 Separate gap seen while testing, not this bug: the interpreter does not give a
 struct the DEFAULT methods of its trait (`S().extra()` raises AttributeError).
+
+### 2026-11-14 (end of day): groups H, I, L landed for same-module traits
+
+`static_module_diagnostics` now implements, per struct, the three phases in the
+order the real compiler stops at (a struct gets the errors of the FIRST phase
+that finds any; measured): H name conflict between a struct bracket parameter
+and a default trait method's parameter; I a method with default
+implementations in two traits of the closure that the struct does not
+implement (`conflicting default implementations in 'A' and 'B'`); then unmet
+requirements (J functions and L `comptime` members: missing, or declared with a
+different type than the trait's), member and function notes interleaved in the
+trait's declaration order; a trait's own default `comptime` member is not a
+requirement. Byte-identical to `tools/mojo build` on the shapes in
+`test_trait_members_diagnostic.py` (3 cases) and `test_trait_requirements_diagnostic.py`.
+
+Still open for this doc: traits and structs from an IMPORTED module (every
+group above only looks at the module's own declarations — the test's real
+shapes live in `diags_package`), K (candidate selection with `conforms_to`
+evidence), C (`@fieldwise_init` / positional-only parameter inference), D
+(`@implicit(deprecated=True)`), E/F (`lacking evidence`), G (`comptime _ =
+pkg.f[0, 1]` where-violation), `where`-conditional trait conformance, and the
+source-less rendering (precompiled package with the source deleted).

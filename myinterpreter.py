@@ -940,21 +940,52 @@ def _trait_closure(name, traits, out, seen):
     out.append(base)
 
 
+def _trait_member_line(source, trait, member):
+    """(line, col) of `comptime <member>` inside trait `trait` (1-based), found
+    in the source text: the AST keeps trait comptime members as bare tuples
+    with no position. None when the text cannot be found."""
+    lines = source.splitlines() if source else []
+    pat = re.compile(r'^(\s*)comptime\s+' + re.escape(member) + r'\b')
+    for n in range(trait.line, len(lines)):
+        m = pat.match(lines[n])
+        if m:
+            return n + 1, len(m.group(1)) + 1
+        if n > trait.line and lines[n].strip() and not lines[n][0].isspace():
+            break
+    return None
+
+
 def static_module_diagnostics(stmts, filename, source):
     """Diagnostics found by looking at the module's declarations alone, before
     anything runs -- the modular compiler reports these statically and reports
     every one, in source order. Text form, or None when there are none.
 
-    Implemented: a struct that names a trait (declared in this same module) as
-    a base but does not implement a method the trait requires (`'S' does not
-    implement all requirements for 'T'`, one error per trait that has a
-    missing requirement, one note per missing function in declaration order,
-    then the trait note) -- measured against `tools/mojo build`."""
+    For a struct that names traits of this same module as bases, in the order
+    the real compiler stops at (measured against `tools/mojo build`; a struct
+    gets the errors of the FIRST phase that finds any):
+
+    1. a bracket parameter of the struct that a DEFAULT trait method also
+       declares: `name conflict between parameter 'a' in the default trait
+       method and a parameter in the struct`;
+    2. a method with default implementations in two traits of the closure that
+       the struct does not implement: `trait method requirement 'm' has
+       conflicting default implementations in 'A' and 'B'; you must implement
+       it manually`;
+    3. unmet requirements, one error per trait (bases first): `'S' does not
+       implement all requirements for 'T'` with a note per missing required
+       function and per missing/mistyped required `comptime` member (in the
+       trait's declaration order), then `trait 'T' declared here`."""
     traits = {}
     for st in stmts:
         if isinstance(st, N.TraitDef):
             traits[st.name] = st
     records = []
+
+    def record(st, msg, notes):
+        records.append((st.line, {'file': filename, 'line': st.line, 'caret': 0,
+                                  'tilde_from': 0, 'name': st.name,
+                                  'message': msg, 'notes': notes}))
+
     for st in stmts:
         if not isinstance(st, N.StructDef):
             continue
@@ -962,26 +993,83 @@ def static_module_diagnostics(stmts, filename, source):
         seen = set()
         for b in st.bases:
             _trait_closure(b, traits, order, seen)
-        have = {m.name for m in st.methods}
+        if not order:
+            continue
+        own = {m.name for m in st.methods}
+
+        # 1. parameter name conflicts with a default trait method
+        found = False
+        for tn in order:
+            for m in traits[tn].methods:
+                if _is_required_method(m):
+                    continue
+                for pname in m.comptime_params:
+                    if pname in getattr(st, 'bracket_params', []):
+                        found = True
+                        record(st, f"name conflict between parameter '{pname}' in the "
+                                   f"default trait method and a parameter in the struct",
+                               [{'file': filename, 'line': m.line, 'name': m.name,
+                                 'message': 'trait method declared here'}])
+        if found:
+            continue
+
+        # 2. the same default method in two traits, not implemented here
+        defaults = {}
+        for tn in order:
+            for m in traits[tn].methods:
+                if not _is_required_method(m):
+                    defaults.setdefault(m.name, []).append((tn, m))
+        for mname, defs in defaults.items():
+            if len(defs) >= 2 and mname not in own:
+                found = True
+                (t1, m1), (t2, m2) = defs[0], defs[1]
+                record(st, f"trait method requirement '{mname}' has conflicting default "
+                           f"implementations in '{t1}' and '{t2}'; you must implement it "
+                           f"manually",
+                       [{'file': filename, 'line': m1.line, 'name': mname,
+                         'message': f"original default implementation from trait '{t1}' here"},
+                        {'file': filename, 'line': m2.line, 'name': mname,
+                         'message': f"conflicting implementation from trait '{t2}' here"}])
+        if found:
+            continue
+
+        # 3. unmet requirements
+        have = set(own)
         for tn in order:
             for m in traits[tn].methods:
                 if not _is_required_method(m):
                     have.add(m.name)
+        src_lines = source.splitlines() if source else []
         for tn in order:
             tr = traits[tn]
-            missing = [m for m in tr.methods
-                       if _is_required_method(m) and m.name not in have]
-            if not missing:
+            items = []   # (line, note)
+            for m in tr.methods:
+                if _is_required_method(m) and m.name not in have:
+                    items.append((m.line, {'file': filename, 'line': m.line, 'name': m.name,
+                                           'message': f"required function '{m.name}' is not implemented"}))
+            for (mn, mt, _w) in getattr(tr, 'comptime_members', []):
+                pos = _trait_member_line(source, tr, mn)
+                if pos is None:
+                    continue
+                if '=' in src_lines[pos[0] - 1]:
+                    continue    # the trait supplies a default
+                have_t = st.comptime_member_types.get(mn)
+                if mn not in st.comptime_aliases and have_t is None:
+                    msg = f"required member '{mn}' is not specified"
+                elif have_t is not None and have_t != mt:
+                    msg = (f"comptime member '{mn}' type '{have_t}' does not conform "
+                           f"to trait's required type '{mt}'")
+                else:
+                    continue
+                items.append((pos[0], {'file': filename, 'line': pos[0], 'col': pos[1],
+                                       'name': None, 'message': msg}))
+            if not items:
                 continue
-            msg = f"'{st.name}' does not implement all requirements for '{tn}'"
-            notes = [{'file': filename, 'line': m.line, 'name': m.name,
-                      'message': f"required function '{m.name}' is not implemented"}
-                     for m in missing]
+            items.sort(key=lambda it: it[0])
+            notes = [it[1] for it in items]
             notes.append({'file': filename, 'line': tr.line, 'name': tn,
                           'message': f"trait '{tn}' declared here"})
-            records.append((st.line, {'file': filename, 'line': st.line, 'caret': 0,
-                                      'tilde_from': 0, 'name': st.name,
-                                      'message': msg, 'notes': notes}))
+            record(st, f"'{st.name}' does not implement all requirements for '{tn}'", notes)
     if not records:
         return None
     records.sort(key=lambda r: r[0])
