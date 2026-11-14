@@ -1215,7 +1215,7 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
         return 'char *'
     return ctype
 
-def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None) -> str | None:
+def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, nested_generator_api: dict | None=None, outer_name: str | None=None) -> str | None:
     """The C type a `yield from <expr>` site contributes to its enclosing
     generator's overall yield-value type, for _generator_yield_ctype's
     same-type-everywhere check — None if `<expr>` isn't a bare call to a
@@ -1268,6 +1268,18 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         _mapi = generator_method_api.get((self_struct_name, _mname))
         if _mapi is not None:
             return _mapi.get('value_ctype')
+    if (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+            and nested_generator_api is not None and outer_name is not None):
+        # A nested generator claimed by cpp_async._compile_nested_generator_closures
+        # lives in _nested_generator_api, keyed (enclosing def, nested name) --
+        # the same registration source the emitter's `yield from` delegation
+        # reads. Consult it before the module-level `generator_api` so the
+        # enclosing generator's promise slot gets the nested generator's own
+        # value type (an int-yielding nested generator must not make the outer
+        # promise a `char *`, which would fail the co_yield conversion).
+        _ng_api = nested_generator_api.get((outer_name, call.func.name))
+        if _ng_api is not None:
+            return _ng_api.get('value_ctype')
     if generator_api is None:
         return None
     if isinstance(call, CallExpr) and isinstance(call.func, IdentExpr):
@@ -1614,7 +1626,7 @@ def _tuple_guarded_bare_yields(fn) -> set:
     return out
 
 
-def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None, nested_generator_api: dict | None=None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1760,7 +1772,9 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
                                                local_elem_types,
                                                generator_method_api,
-                                               self_struct_name)
+                                               self_struct_name,
+                                               nested_generator_api,
+                                               fn.name)
             if t is None:
                 return None
             if ctype is None:

@@ -1133,7 +1133,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             generator_method_api=gen._generator_method_api,
             self_struct_name=struct_name,
             self_struct_ctype=(f"{struct_name} *" if struct_name else None),
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None),
+            nested_generator_api=getattr(gen, '_nested_generator_api', None))
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-

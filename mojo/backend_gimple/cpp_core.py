@@ -2153,6 +2153,18 @@ def _cpp_typed_list_elem(gen, el):
     return ('int', f"(int64_t)({ev})")
 
 
+def _cpp_nested_generator_api(gen, name: str):
+    """The `_nested_generator_api` entry for a generator `name` defined in
+    the generator/coroutine body currently being compiled, or None.
+    cpp_async._compile_nested_generator_closures claims those generators
+    (keyed by (enclosing def name, nested name)) and keeps them OUT of
+    `_generator_api`, so every consumer that accepts a bare callee name has
+    to consult this second registration source (`_cpp_gen_self_name` is set
+    by `_gen_cpp_generator_unit` while this body is being emitted)."""
+    return getattr(gen, '_nested_generator_api', {}).get(
+        (getattr(gen, '_cpp_gen_self_name', None), name))
+
+
 def _cpp_call_arg_expr(gen, a):
     """One call-argument expression for a compiled-generator/coroutine call.
     A list LITERAL has no valid C++ text at an argument position (`_cpp_expr`
@@ -9003,8 +9015,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 # name, nested name) — not in _generator_api. Its _start call
                 # takes the user positional arguments first, then each
                 # captured enclosing name as an ordinary identifier in scope.
-                _ng = getattr(gen, '_nested_generator_api', {})
-                api = _ng.get((getattr(gen, '_cpp_gen_self_name', None), sub_name))
+                api = _cpp_nested_generator_api(gen, sub_name)
                 if api is not None:
                     _caps = api.get('captures') or []
                     _user_n = len(api.get('params') or []) - len(_caps)
@@ -11726,6 +11737,12 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                     f"{indent}}}"]
 
     call = yf.value
+    # Remember whether the `yield from` call was written with keywords before
+    # the delegation branch below flattens them into positional arguments (a
+    # simplification that is only valid for the ordinary compiled-generator
+    # path). A nested generator is claimed only in its plain positional form,
+    # so this flag keeps a keyword form refused instead of mis-slotting it.
+    _yf_call_had_kwargs = bool(getattr(call, 'kwargs', None))
     # `yield from <generator-handle local>` — delegate through an existing
     # compiled-generator handle's resume/value API (same protocol as the
     # call-start delegation below and as `for x in g:` / `next(g)` on a
@@ -11964,9 +11981,25 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 call.func.member = _self_method_name
     if is_self_gen_call and _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
         call.func.member = _self_method_name  # rewrite to actual generator method name
+    # A bare `yield from <nested>(...)` to a generator claimed by
+    # cpp_async._compile_nested_generator_closures (registered in
+    # _nested_generator_api, not _generator_api). Only the plain positional
+    # form is claimed here; a keyword form keeps falling through to the
+    # ordinary collection path, which refuses it with the unresolved-callee
+    # message it has always produced.
+    _yf_nested_probe = None
+    if (isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.IdentExpr)
+            and not _yf_call_had_kwargs):
+        _yf_nested_probe = _cpp_nested_generator_api(gen, call.func.name)
+        if _yf_nested_probe is not None:
+            _np_caps = _yf_nested_probe.get('captures') or []
+            if len(call.args) != (len(_yf_nested_probe.get('params') or [])
+                                  - len(_np_caps)):
+                _yf_nested_probe = None
     is_gen_call = is_self_recursive or is_cls_gen_call or is_self_gen_call or is_classname_gen_call or (
         isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
-        and call.func.name in gen._generator_api)
+        and (call.func.name in gen._generator_api or _yf_nested_probe is not None))
     if not is_gen_call:
         result_var = gen._cpp_fresh_name("_yf_result")
         coll_expr = gen._cpp_expr(call)
@@ -12054,6 +12087,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         call.kwargs = []
         _walk_ast_invalidate(call)
     receiver_exprs = []
+    # Set by the bare-name branch below when the callee is a claimed NESTED
+    # generator (see _nested_generator_api); its captures are appended to the
+    # argument list after the user positional arguments.
+    _nested_api = None
     if is_cls_gen_call or is_self_gen_call or is_classname_gen_call:
         if is_classname_gen_call:
             _call_struct = call.func.obj.name
@@ -12121,12 +12158,34 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         else:
             api = gen._generator_api.get(sub_name)
             if api is None or sub_name not in gen._supported_generators:
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"`yield from {sub_name}(...)` does not delegate to a "
-                    "generator this compile has itself already translated via "
-                    "the C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER in this module — "
-                    "the delegated-to generator must be defined earlier)")
+                # A nested generator defined inside this same compiled
+                # generator/coroutine and claimed by
+                # cpp_async._compile_nested_generator_closures: it lives in
+                # _nested_generator_api, keyed (enclosing def name, nested
+                # name), NOT in _generator_api. Its _start takes the user
+                # positional arguments first, then each captured enclosing
+                # name threaded as an ordinary identifier in scope -- the
+                # same convention _nested_generator_start_arg_pairs uses for
+                # the stack-switch construction path (emit_calls). Only the
+                # plain positional form is claimed; a keyword argument or a
+                # mismatched arity stays refused by the generic fallback
+                # below, with the same unresolved-callee message as before.
+                _ng_api = _cpp_nested_generator_api(gen, sub_name)
+                _ng_caps = (_ng_api.get('captures') or []) if _ng_api else []
+                _ng_user_n = (len(_ng_api.get('params') or []) - len(_ng_caps)
+                              if _ng_api else -1)
+                if (_ng_api is not None and not _yf_call_had_kwargs
+                        and len(call.args) == _ng_user_n):
+                    api = _ng_api
+                    _nested_api = _ng_api
+                    ggc._record_generator_value_kind(api)
+                else:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"`yield from {sub_name}(...)` does not delegate to a "
+                        "generator this compile has itself already translated via "
+                        "the C++20-coroutine path (either it's not a generator this "
+                        "codegen supports, or it's defined LATER in this module — "
+                        "the delegated-to generator must be defined earlier)")
 
     sub_params: list = api.get('params') or []
     # Same defaults-aware trailing-argument padding as
@@ -12139,6 +12198,14 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
     arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
+    if _nested_api is not None:
+        # A claimed nested generator's _start signature is
+        # (user args..., captured enclosing names...) — the same assembly
+        # emit_calls._nested_generator_start_arg_pairs performs for the
+        # stack-switch construction path. Each capture is an ordinary
+        # identifier in this enclosing generator's scope.
+        arg_exprs += [_cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn))
+                      for _cn, _ in (_nested_api.get('captures') or [])]
     while len(arg_exprs) < len(sub_params):
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
