@@ -237,3 +237,23 @@ running anything and stops, so the main-body diagnostics (which the real
 compiler prints first, by source position) never appear. Closing that needs the
 static pass to also check calls (where clauses, overloads) rather than the
 interpreter discovering them at run time.
+
+### 2026-11-14 (evening): static call checks; real test output now matches for A, B, H, I, J, L
+
+`static_module_diagnostics` now also reports, with the declaration errors and in
+source order, calls its own text proves wrong (`_static_call_records`): an
+overload failure for a same-module or imported-package function, and a
+bracketed `f[1, 2]()` whose `where` clause is provably False. Callees that a
+local binding could shadow, decorated candidates and `*`/`**` calls are skipped.
+Also measured and fixed: for "unexpected argument" with every candidate running
+out at the same argument, the caret is on that argument and the callee's name is
+underlined (`    ~    ^`). Tests: `test_static_call_diagnostics.py` (3 cases).
+
+Running the real `diagnostics_in_missing_locs.mojo` (package source present)
+now prints, in the real compiler's order and with the same messages/notes:
+A (47), B (56), H (103), I (113), J (123), L (156, 167, 178). Missing from the
+real list: C (63, `no matching function in initialization`), E (78) and F (88)
+(`lacking evidence to prove correctness`), G (96, `violated constraint` for a
+`comptime _ = pkg.f[0, 1]` binding), D (65, deprecated implicit conversion, is
+not even in the real source-bearing output above) and K (137, candidate
+selection; the real compiler names the struct `'UnprovableWithValidCandidate[T]'`).
