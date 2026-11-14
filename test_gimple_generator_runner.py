@@ -9627,6 +9627,25 @@ def main():
 main()
 """, "multi-slot comprehension target over a generator whose yield arity is not a tuple")
 
+    # The SET-comprehension spelling pins the precedence, not just the
+    # consumer: the unknown-declaration pass runs BEFORE codegen, so an
+    # element expression reading an undeclared name (here `x`) used to reach
+    # that pass first and die with `use of unknown declaration 'x'` instead
+    # of the arity mismatch that makes this comprehension uncompilable.
+    # The refusal is raised by a dedicated pipeline pre-pass
+    # (mojo/middle/coro.py's
+    # refuse_multi_slot_comprehension_over_nontuple_generator) that shares
+    # one message builder with _compr_generator_loop's own raise — which of
+    # the two stages noticed first no longer changes the diagnostic.
+    test_generator_refused("gen_multi_slot_set_comprehension_target_over_one_value_generator_refused", """\
+def g():
+    yield 1
+
+def main():
+    print({x for a, b in g()})
+main()
+""", "multi-slot comprehension target over a generator whose yield arity is not a tuple")
+
     # ── Generator EXPRESSIONS ────────────────────────────────────────────
     # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
     # fire_compiler.desugar_genexps rewrites it into a call to a

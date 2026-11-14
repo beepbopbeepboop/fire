@@ -6492,6 +6492,15 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
+    # The multi-slot comprehension refusal rides BEFORE the unknown-
+    # declaration pass for the same reason the ownership check does: it is a
+    # structural refusal that knows the program cannot compile, and the
+    # unknown-decl pass would otherwise answer its own, less specific
+    # question first (`print([x for a, b in g()])` reports the element's
+    # undeclared `x` instead of the arity mismatch that makes the whole
+    # comprehension uncompilable — bug:
+    # SUITE_gimplegenerators_multi_slot_comprehension).
+    gimple_gen_coro.refuse_multi_slot_comprehension_over_nontuple_generator(stmts)
     unknown_decl_check.check_module(stmts, mojo_src, filename)
     # Early diagnostics: trait method requirement evidence (part 2).
     try:
