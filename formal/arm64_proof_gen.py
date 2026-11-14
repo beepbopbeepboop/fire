@@ -16876,6 +16876,20 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     if exec_code_end is None:
         exec_code_end = _exec_code_limit(code)
     func_end = _export_extent(exports, entry, base, exec_code_end)
+    # The same admissible-site rule the walk itself asks
+    # (`_svc_write_assumed_sites`), over the same block partition: the
+    # universal theorem states `svc_write_assumed` over exactly these pcs, so
+    # this function must spell the same type or the application of
+    # `{ident}_halts` below is a type error.  Re-reading the walk's TEXT for
+    # the binder would work too and would be a second, weaker reader: a
+    # silent format drift in the walk would turn the assumption into a
+    # dropped premise instead of a compile failure, which is the defect part 5
+    # exists to close.
+    _words = {base + i: int.from_bytes(code[i:i + 4], "little")
+              for i in range(0, len(code) - len(code) % 4, 4)}
+    _blocks = _cfg_blocks(_words, entry, func_end)
+    _svc_sites = _svc_write_assumed_sites(
+        _blocks, _words, frozenset(b["start"] for b in _blocks))
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
@@ -16926,16 +16940,46 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     except (NotImplementedError, ValueError):
         walk = None
     if walk is None:
+        # The walk's own refusal, inside the obligation's docstring.  The
+        # sentence below names the CLASSES of shape it cannot decompose; this
+        # names the one site in THIS export (`_cfg_decomposition_refusal`),
+        # so "no proof because a dynamic svc at 0x…" is distinguishable from
+        # "no proof because a loop" without re-deriving the image by hand.
+        # The reason is not swallowed, and no unconditional `Total` is stated.
+        _why = _cfg_decomposition_refusal(ident, code, base, entry)
+        _why = _why.replace("-/", "- /")
         return (
             f"/-- OBLIGATION, not proved: this export's run terminates for every\n"
             f"    argument.  The constant-fuel CFG walk does not cover it: its\n"
             f"    control flow has a loop or a call, or a path ends in an exit\n"
             f"    `svc`, which the model steps to `none` (no final state). An\n"
             f"    overflow trap is such a path, so termination for every argument\n"
-            f"    is not a fact of the model. -/\n"
+            f"    is not a fact of the model.\n"
+            f"    The walk's refusal, so the reason is not swallowed:\n"
+            f"    {_why} -/\n"
             f"theorem {ident}_semantics_total :\n"
             f"    DylibExport.Total dylib_image {ident} := by\n"
             f"  sorry")
+    if _svc_sites:
+        # The export's termination is a fact only under the dynamic write
+        # `svc` assumption, and the theorem says so instead of dropping it.
+        # `total_of_halts` takes a function of `n`, so the walk's theorem is
+        # partially applied with the export's own `n` and then the
+        # assumption -- the order the walk's binder list has.
+        _hyp = _svc_write_assumed_type(_svc_sites)
+        return (
+            f"{walk}\n\n"
+            f"/-- TERMINATION, PROVED UNDER `svc_write_assumed`: `{ident}_halts`\n"
+            f"    walks this export's code from its entry to the exit for every\n"
+            f"    argument, at `exportFuel`, provided x16 at the dynamic write\n"
+            f"    `svc` pcs is never 1.  The hypothesis is the walk's own and is\n"
+            f"    passed through here; it is not discharged inside a private\n"
+            f"    certificate and dropped on the way out. -/\n"
+            f"theorem {ident}_semantics_total\n"
+            f"    (svc_write_assumed : {_hyp}) :\n"
+            f"    DylibExport.Total dylib_image {ident} :=\n"
+            f"  DylibExport.total_of_halts dylib_image {ident} "
+            f"(fun n => {ident}_halts n svc_write_assumed)")
     return (
         f"{walk}\n\n"
         f"/-- TERMINATION, PROVED: `{ident}_halts` walks this export's code from\n"

@@ -10884,5 +10884,89 @@ class TestSvcWriteAssumedUniversalWalk(unittest.TestCase):
                          "halt cannot be assumed")
 
 
+class TestSvcWriteAssumedDylibTotal(unittest.TestCase):
+    """Part 5: the dylib termination theorem EXPOSES the assumption.
+
+    Part 4 makes the universal theorem conditional on `svc_write_assumed`, but
+    `_dylib_total_proof` still applied `{ident}_halts` directly to
+    `total_of_halts`.  With the binder present that application is a type
+    error at best and a silently dropped premise at worst: the public
+    termination claim would say "terminates" where the proof says "terminates
+    IF x16 at those pcs is never 1".  This class pins the exposed form, the
+    byte-for-byte control, and the obligation that names the dynamic `svc` pc
+    when the assumption cannot be stated at all.
+
+    Text-only: hand-built bytes and hand-built export tables, no Lean, no
+    dylib build, no proofs bucket.
+    """
+
+    BASE = 0x10000000
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+
+    @staticmethod
+    def _movz(rt, imm):
+        return 0xd2800000 | (imm << 5) | rt
+
+    def _total(self, ws):
+        import formal.arm64_proof_gen as G
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        # `exec_code_end` is the image's CODE SIZE (the last RET's end), not an
+        # address: `_export_extent` adds `base` to it.  Left at its default so
+        # the test reads the same number the image's `codeSize` will.
+        return G._dylib_total_proof(
+            "f", code, self.BASE, self.BASE, [{"name": "f", "entry": self.BASE}])
+
+    def test_the_assumption_reaches_total_of_halts(self):
+        out = self._total([self.SVC, self._movz(0, 0), self.RET])
+        self.assertIn(
+            "theorem f_semantics_total\n"
+            "    (svc_write_assumed : ∀ s : Arm64State, s.pc ∈ [268435456] → "
+            "¬ arm64_reg 16 s = 1) :\n"
+            "    DylibExport.Total dylib_image f :=", out,
+            "the export's public termination claim does not state the "
+            "hypothesis its proof needs")
+        self.assertIn(
+            "DylibExport.total_of_halts dylib_image f "
+            "(fun n => f_halts n svc_write_assumed)", out,
+            "`total_of_halts` is applied without the assumption, so the "
+            "export either fails to elaborate or silently loses the premise")
+        self.assertNotIn("theorem f_semantics_total :", out,
+                         "`semantics_total` was left unconditional")
+
+    def test_the_control_image_keeps_the_old_application(self):
+        out = self._total([self._movz(0, 5), self.RET])
+        self.assertIn(
+            "theorem f_semantics_total :\n"
+            "    DylibExport.Total dylib_image f :=\n"
+            "  DylibExport.total_of_halts dylib_image f f_halts", out,
+            "a control export with no dynamic svc changed shape")
+        self.assertNotIn("svc_write_assumed", out,
+                         "a control export gained a hypothesis it does not use")
+
+    def test_an_unassumable_dynamic_svc_names_its_pc_in_the_obligation(self):
+        # `svc; add x1, x0, x2; ret`: the write form's result is read before
+        # it is rewritten, so no assumption can make the run sound.
+        out = self._total([self.SVC, 0x8b020001, self.RET])
+        self.assertIn("OBLIGATION, not proved", out)
+        self.assertIn("0x10000000", out,
+                      "the obligation does not name the dynamic svc's pc")
+        self.assertIn("x0", out,
+                      "the obligation does not say why the write form could "
+                      "not be assumed")
+        self.assertIn("theorem f_semantics_total :\n"
+                      "    DylibExport.Total dylib_image f := by\n"
+                      "  sorry", out,
+                      "a refused export claims an unconditional Total")
+        self.assertNotIn("total_of_halts dylib_image f f_halts", out)
+
+    def test_a_dynamic_final_svc_names_its_pc_in_the_obligation(self):
+        out = self._total([self.SVC, self._movz(0, 0), self.SVC])
+        self.assertIn("OBLIGATION, not proved", out)
+        self.assertIn("0x10000008", out,
+                      "the obligation does not name the dynamic final svc")
+        self.assertIn("dynamic-svc", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
