@@ -1,6 +1,6 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0, 1, 2a, 3a and 3b landed (2026-11-14). This file is the plan and the rules. Read it
+Status: stages 0, 1, 2a, 3a, 3b and 5a landed (2026-11-14). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
 
 ## 1. What is wrong today (measured 2026-11-13)
@@ -202,9 +202,23 @@ that is meant to be behaviour-preserving:
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet: counts of `.endswith(' *')` and `== 'int64_t'`.
-- **Stage 5. One value-info record.** The 57 name-keyed tables become fields
-  of one `ValueInfo` object per temp, with one `copy_info(dst, src)`.
-  `int64_t` splits into Int / Erased(T) / DynWord / Box in the value's info.
+- **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
+  `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
+  knows about a VALUE from one name to another, and `gen._copy` calls it for
+  every same-typed copy. It carries the 18 type tables (`_elem_types`,
+  `_dict_val_types`, `_actual_types`, `_tuple_slot_types`, the callable and
+  generator tables, ...), only FILLS (a fact already recorded for the
+  destination wins), and never carries ownership (`_fresh_vals`, `_owned_*`).
+  This CHANGES generated code: 33 compiler modules compile differently
+  (about 770 fewer statements; a boxed fallback read becomes a typed read
+  where the element type is now known). Small programs are unchanged.
+  NOT carried yet: the six dynamic-word SETS (`_boxed_vals`, `_dyn_word_vals`,
+  `_tagged_word_vals`, `_int_word_vals`, `_maybe_kinds_vals`,
+  `_boxed_container_vals`). Carrying them was measured and changes far more
+  (it adds ~1,200 box/repr calls); each needs its own look.
+- **Stage 5b. One value-info record.** The name-keyed tables become fields
+  of one `ValueInfo` object per temp. `int64_t` splits into
+  Int / Erased(T) / DynWord / Box in the value's info.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.
