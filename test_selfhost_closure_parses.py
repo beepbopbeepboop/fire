@@ -16,7 +16,7 @@ def _parse_source(src, filename="<input>"):
 def main():
     failures = []
 
-    # Controls from the dict-slot-reads bug's part 3 (landed; doc gone)
+    # Controls from bugs/CODEGEN_dict_slot_reads_refuse_compiler_sources-part3.md
     try:
         _parse_source("trait Marked:\n    pass\n", "<trait-control>")
         # verify it declares a trait (StructDef/TraitDef) not an assignment?

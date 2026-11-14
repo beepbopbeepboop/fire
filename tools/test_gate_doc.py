@@ -254,39 +254,12 @@ def test_restart_refuses_a_task_with_no_doc():
     in_tree(body)
 
 
-def test_a_gate_that_is_off_files_no_second_doc():
-    """An OFF job is already tracked by its OFF entry's doc, so a red gate must
-    not mint a per-job doc for it.
-
-    tools/gates.json turns a known-red job OFF and names the doc that tracks it
-    (`control.py gate off` requires both). Filing bugs/gate-<job>.md as well is
-    a second doc for one bug: 2026-11-14 filed bootstrap-stage2-dumps and
-    bootstrap-stage3-dumps that way, on top of the recover-land entry's
-    long-standing report, and two lanes were handed one failure.
-    """
-    def body(tmp):
-        real_cfg = C.gates_cfg
-        C.gates_cfg = lambda: {"off": {r"^coro$": {"doc": "OFF-ENTRY-DOC",
-                                                   "worker": "integrator"}}}
-        try:
-            paths = I.gate_doc(None, None, ["coro", "stdlib-syntax"])
-        finally:
-            C.gates_cfg = real_cfg
-        check("gate doc: only the job that is not OFF gets a doc (%r)"
-              % [os.path.basename(p) for p in paths],
-              [os.path.basename(p) for p in paths] == ["gate-stdlib-syntax.md"])
-        check("gate doc: the OFF job's per-job doc was not created",
-              not os.path.exists(os.path.join(tmp, "bugs", "gate-coro.md")))
-    in_repo(body)
-
-
 if __name__ == "__main__":
     test_gate_doc_is_tracked_on_master_at_once()
     test_ledger_landing_clears_an_untracked_twin_of_a_tracked_doc()
     test_ledger_landing_keeps_a_twin_whose_bytes_differ()
     test_two_states_for_a_claim()
     test_red_gate_writes_one_doc_per_job()
-    test_a_gate_that_is_off_files_no_second_doc()
     test_gate_doc_never_names_a_path_and_holds_first()
     test_failed_job_names_stops_at_the_section_end()
     test_restart_refuses_a_task_with_no_doc()

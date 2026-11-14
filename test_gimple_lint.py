@@ -46,11 +46,7 @@ CORPUS = [
 # finding code -> number of findings over CORPUS.  May only shrink.
 BASELINE = {
     # empty since 2026-11-13: every call-argument finding in CORPUS was closed
-    # by `_repr_fix_args` (emit_infra.py). Keep that class empty.
-    # Rule added 2026-11-14: a pointer made by casting a `_Bool` or an `int`
-    # (GCC's -Wint-to-pointer-cast). The work is
-    # bugs/CODEGEN_bool_cast_to_pointer_in_and_or_chain.md.
-    'cast-narrow-int-to-ptr': 13,
+    # by `_repr_fix_args` (emit_infra.py). Keep it empty.
 }
 
 _INJECTED = r'''

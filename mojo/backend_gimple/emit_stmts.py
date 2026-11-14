@@ -1245,7 +1245,7 @@ def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
     return '1'
 
 
-def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
+def _gen_stmt_AssignStmt(gen, node):
     # `globals()[key] = value` at module scope: a store through the module's
     # namespace dict, which in the compiled path IS the `_<mod>_globals`
     # struct. Lowered to a name dispatch over the statically-known module
@@ -4475,7 +4475,7 @@ def _gen_stmt_IfStmt(gen, node):
         gen._last_was_terminal = True
 
 
-def _gen_stmt_StructDef(gen, node: gimple_ctypes.StructDef) -> None:
+def _gen_stmt_StructDef(gen, node):
     """A `class` statement, reached only when it sits inside a function body
     (a module-level StructDef is emitted by gen_module, never through
     gen_stmt). The class body runs when the statement executes, so each
@@ -5698,23 +5698,6 @@ def _gen_stmt_ExprStmt(gen, node):
         _constrained_res = ggc._try_lower_constrained(gen, node.value)
         if _constrained_res is not None:
             return
-        # A bare call to a GENERIC function with inferred parameters
-        # (`invalid(Foo())`, no bracket): the instantiation is decided by
-        # `_lower_call`'s `_elaborate_generic_call` arm, which this
-        # statement fast path never reaches. Without this the call fell to
-        # the generic call-building path below as a plain extern named
-        # after the template (`invalid (_t1);`), which links against a
-        # weak "unavailable in compiled mode" stub: the program built, ran,
-        # and silently skipped the call -- including a call whose
-        # instantiation the elaborator REJECTS (bugs/
-        # DIAGNOSTICS_formatting_modular-part5: invalid_downcast_error.mojo
-        # built clean instead of reporting the missing witness table).
-        # Locally-bound names are excluded: a parameter or local shadowing
-        # the template is an ordinary call.
-        if (node.value.func.name in gen._imported_generics
-                and not gen._locally_binds_name(node.value.func.name)):
-            gen._lower_call(node.value)
-            return
         # A bare, value-discarding call to an offloaded DEVICE function.
         # This handler has its own fast path for statement-position calls and
         # never reaches _lower_call, so without this the launch hook only
@@ -6254,6 +6237,56 @@ def _comptime_assert_fail(gen, node, msg):
     raise RuntimeError(f'{loc}comptime assertion failed: {msg}')
 
 
+def _comptime_conforms_to_pred(gen):
+    try:
+        import mojo.middle.comptime as _comptime_eval
+        sb = getattr(gen, '_struct_bases', None) or {}
+        tb = getattr(gen, '_trait_bases', None) or {}
+        ex = getattr(gen, '_conformance_bases_extra', None) or {}
+        tbt = getattr(gen, '_conformance_trait_bases_text', None)
+        if tbt is None:
+            tbt = {}
+            try:
+                src = getattr(gen, '_source_text', '') or ''
+                if not src:
+                    fn = getattr(gen, '_current_filename', '') or ''
+                    if fn:
+                        with open(fn) as f:
+                            src = f.read()
+                if src:
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
+                        name = m.group(1)
+                        bstr = m.group(3) or ''
+                        blist = []
+                        for part in bstr.split(','):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            b = part.split('[')[0].split('.')[-1].strip()
+                            if b and re.match(r'^[A-Za-z_]\w*$', b):
+                                blist.append(b)
+                        tbt[name] = blist
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
+                        tbt.setdefault(m.group(1), [])
+            except Exception:
+                tbt = {}
+            try:
+                gen._conformance_trait_bases_text = tbt
+            except Exception:
+                pass
+        if not sb and not tb and not ex and not tbt:
+            return None
+        bases = dict(ex)
+        bases.update(sb)
+        bases.update(tb)
+        for k, v in (tbt or {}).items():
+            if v or k not in bases:
+                bases[k] = v
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
 def _eval_comptime_assert_msg(gen, node):
     msg = None
     msg_node = getattr(node, 'msg', None)
@@ -6261,7 +6294,7 @@ def _eval_comptime_assert_msg(gen, node):
         try:
             import mojo.middle.comptime as _comptime_eval
             m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {},
-                                          conforms_to_pred=ggc._comptime_conforms_to_pred(gen))
+                                          conforms_to_pred=_comptime_conforms_to_pred(gen))
             if isinstance(m, str):
                 msg = m
             elif m is not None:
@@ -6293,7 +6326,7 @@ def _gen_stmt_AssertStmt(gen, node):
     if getattr(node, 'is_comptime', False):
         import mojo.middle.comptime as _comptime_eval
         cvals = getattr(gen, '_comptime_vals', {}) or {}
-        _cpred = ggc._comptime_conforms_to_pred(gen)
+        _cpred = _comptime_conforms_to_pred(gen)
         try:
             _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), cvals,
                                                   conforms_to_pred=_cpred)

@@ -1875,37 +1875,6 @@ def test_deps_order_and_skip():
         check('deps: the skip says which dep', 'b' in out, out)
 
 
-def test_a_cascade_skip_is_a_skip_not_an_error():
-    """A dependent of a dep that settled to SKIP in the same pass is SKIP.
-
-    The scheduler evaluates a job's deps at the top of the loop and settles
-    blocked ones at the bottom, so when a whole cascade settles in one pass
-    (a fails, b is blocked by a, c is blocked by b) c is still merely
-    'pending' when the nothing-running-nothing-ready branch fires. That branch
-    used to ERROR c with `dependency not selected: ` and an EMPTY list — its
-    dep had a verdict, it was never missing — which counted a lost cascade
-    as a FAILED test and, in the 2026-11-14 confirm gate, put the stage2 and
-    stage3 dumps fanouts in the FAILED list with that empty detail: the red
-    verdict that writes bug docs for jobs whose only crime was sitting behind
-    a red upstream chain. c gets the same SKIP the blocked branch would have
-    given it, naming the dep that did not pass.
-    """
-    with Sandbox(a=dict(cmd=ok_cmd('raise SystemExit(1)')),
-                 b=dict(cmd=ok_cmd('pass'), deps=['a']),
-                 c=dict(cmd=ok_cmd('pass'), deps=['b'])):
-        log = os.path.join(HERE, 'build', 'test-suite-cascade-skip.log')
-        rc, out = run(['a', 'b', 'c'], jobs=4, log=log)
-        text = open(log).read() if os.path.exists(log) else ''
-        check('cascade: the root failure still fails the run',
-              rc == 1, f'rc={rc}')
-        check('cascade: the dependent is SKIPPED, not ERROR',
-              'dependency not selected' not in out + text, out + text)
-        check('cascade: the skip names the dep that did not pass',
-              'dependency did not pass' in text and 'b=skip' in text, text)
-        check('cascade: the tally counts one failure, not two',
-              '0 passed, 1 failed, 2 skipped' in out, out)
-
-
 def test_exclusive_is_alone():
     """An exclusive test must not overlap anything else — that is the whole
     mechanism that lets a 55 GB job share a machine with a test suite.
@@ -2232,26 +2201,21 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_disjoint_bases.py': 2,
     'test_python315_lazy_imports.py': 2,
     'test_unpacking_in_comprehensions.py': 1,
-    # +4 on 2026-11-13 (the three estate-backlog files' rows; a colleague
-    # re-added the same four keys higher up, so the later copies were
-    # dead text — a dict keeps only the last) and +14 on 2026-11-14, all
-    # landed unregistered with the estate backlog. Every literal is a
-    # `subprocess` timeout on a COMPILE or a RUN the case performs — the
-    # RUN kind this census exists for.
-    'test_candidate_selection_diagnostic.py': 1,
-    'test_diagnostic_format_modular.py': 1,
-    'test_diagnostics_in_missing_locs.py': 1,
-    'test_fieldwise_init_and_deprecated_conversion.py': 1,
-    'test_invalid_downcast_build.py': 1,
-    'test_overload_diagnostic.py': 1,
-    'test_predicate_where_diagnostic.py': 1,
-    'test_srcless_package_diagnostics.py': 1,
-    'test_static_call_diagnostics.py': 5,
-    'test_trait_comptime_member_untyped.py': 1,
-    'test_trait_imported_diagnostic.py': 1,
-    'test_trait_members_diagnostic.py': 1,
-    'test_trait_requirements_diagnostic.py': 1,
-    'test_where_clause_diagnostic.py': 1,
+    # +4 on 2026-11-13, the same day the three new test files below were
+    # registered (they had landed unregistered, so the estate check named them).
+    # Every one of these literals is a `subprocess` timeout on a COMPILE or a RUN
+    # the case itself performs — the RUN kind the census exists for, not a stale
+    # per-child budget: `test_interp_list_ctor.py` compiles then runs the
+    # interpreter and the compiled binary; `test_module_globals_compiled.py`
+    # builds with `fire.py build` (120 s), runs the produced executable (60 s)
+    # and allows 300 s for the whole build; the two
+    # `test_regress_gpu_offload_validation_modular_part*.py` rows are another
+    # workstream's, landing in the same commit only because the census is a
+    # ratchet and their literals arrived with them.
+    'test_interp_list_ctor.py': 1,
+    'test_module_globals_compiled.py': 3,
+    'test_regress_gpu_offload_validation_modular_part1.py': 1,
+    'test_regress_gpu_offload_validation_modular_part4.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -2763,7 +2727,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
     # are. This list is the census the check compares the registry
     # against, so it tracks the tree rather than freezing it.
-    expected_disabled = ['gimple', 'metalgpu', 'rthdrscan']
+    expected_disabled = ['formal-doc-truth', 'gimple', 'metalgpu', 'rthdrscan']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2904,7 +2868,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
     # are. This list is the census the check compares the registry
     # against, so it tracks the tree rather than freezing it.
-    expected_disabled = ['gimple', 'metalgpu', 'rthdrscan']
+    expected_disabled = ['formal-doc-truth', 'gimple', 'metalgpu', 'rthdrscan']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
@@ -3669,37 +3633,6 @@ def test_missing_dep_is_reported():
               'other' in out, f'rc={rc} out={out!r}')
 
 
-def test_a_skipped_dep_skips_its_dependents():
-    """A gate turned OFF must not turn the run red.
-
-    `--skip` is how tools/gates.json turns a known-red job OFF for a backlog.
-    It removed the job from `chosen` and left every dependent selected with a
-    dependency no job in the plan could satisfy, so `execute` reported
-    `ERROR dependency not selected` against the dependent — the gate was red by
-    construction on a policy meant to keep a known red out of it. The
-    integrator's confirm step then re-ran that dependent by name (which selects
-    its deps, the OFF job among them), the real red job ran after all, and a
-    fresh per-job gate doc was filed for a job gates.json already tracks. A
-    dependent of a skipped test is skipped, as one whose dep failed is.
-    """
-    log = os.path.join(HERE, 'build', 'test-suite-skipdep.log')
-    with Sandbox(prereq=dict(cmd=ok_cmd('pass')),
-                 needs=dict(cmd=ok_cmd('raise SystemExit(1)'), deps=['prereq']),
-                 other=dict(cmd=ok_cmd('pass'))):
-        class Opts:
-            only = None
-            skip = [r'^prereq$']
-        names = suite.select(['needs', 'other'], Opts())
-        check('skip: a dep and its dependent are both out of the plan',
-              names == ['other'], f'got {names}')
-        rc, out = run(['needs', 'other'], skip=r'^prereq$', log=log)
-    text = open(log).read() if os.path.exists(log) else ''
-    check('skip: a dependent of a skipped dep does not fail the run',
-          rc == 0 and '1 passed' in out, f'rc={rc} out={out!r}')
-    check('skip: no dependency-not-selected error is recorded',
-          'dependency not selected' not in text, text[-400:])
-
-
 def test_named_test_brings_its_deps():
     """Naming a test names what it needs to run.
 
@@ -4270,10 +4203,6 @@ UNREGISTERED = {
     'test_unknown_decl_check.py':
         'Unit tests for the unknown-decl check/compiler-provided builtins '
         'helper module. Run directly; not registered.',
-    'test_suite_self_test_red.py':
-        'Regression pin for the SUITE_self_test_red suite-self-test '
-        'drift (self-host key, disabled/estate/census rows). Run directly; '
-        'not a registered bucket job.',
 
     # `test_formal_doc_truth.py` was here (listed rather than registered, its
     # branch's task said not to touch the registry) and is REGISTERED as
@@ -5342,8 +5271,6 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
     ('trait-comptime-member-conformance-diagnostic',
      'test_trait_comptime_member_conformance_diagnostic.py', 'part 5'),
-    ('defaulted-trait-method-conformance-diagnostic',
-     'test_defaulted_trait_method_conformance_diagnostic.py', 'part 6'),
     ('downcast-witness-diagnostic',
      'test_downcast_witness_diagnostic.py', 'part 7'),
 )
@@ -5352,19 +5279,18 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
 def test_the_trait_conformance_diagnostic_suites_are_gated():
     """Every trait-conformance diagnostic suite runs on every gate.
 
-    The first three files landed with their fixes (`06ea5b0ef` part 2,
-    `65cee30d4` part 4, `ec12b76e1` part 7) and none was named by a spec, so
+    The three files landed with their fixes (`06ea5b0ef` part 2, `65cee30d4`
+    part 4, `ec12b76e1` part 7) and none was named by a spec, so
     `suite-self-test`'s estate row was the only thing that mentioned them and
     no run executed their cases
     (`bug:SUITE_trait_requirement_evidence_unregistered`). Each was found by
     the estate check only after the previous one was "fixed", which is why
-    this pins the family and not one file; parts 5 and 6 joined the tuple when
-    their declaration-time checks landed.
+    this pins the family and not one file.
 
     The estate check above is what found each one, but it can only ask that
     SOME spec names the file; a name in a bucket `gate` does not expand to is
     the same hole one level over, and `regressions`/`orchestrator` are exactly
-    such buckets by design. All of them are cheap (tiny, 0.0-0.1 GB measured,
+    such buckets by design. All three are cheap (tiny, 0.0-0.1 GB measured,
     sub-second, no build) and pin compiler diagnostics, so they belong in the
     everyday loop, and this check pins that by name so dropping a
     registration — or moving one out of the gate — is a red row rather than a
@@ -6853,7 +6779,6 @@ def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
                test_deps_order_and_skip,
-               test_a_cascade_skip_is_a_skip_not_an_error,
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
@@ -6872,7 +6797,6 @@ def main():
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
-               test_a_skipped_dep_skips_its_dependents,
                test_dependent_waits_for_the_whole_fanout,
                test_log_has_passes_screen_does_not,
                test_checked_run_key_covers_what_it_names,

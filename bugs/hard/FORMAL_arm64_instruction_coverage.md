@@ -1,6 +1,4 @@
-SPLIT: the three parts (their docs were deleted with their fixes -- part 1 the
-option census, part 2 the refusal naming the word's own sf/option/imm3, part 3
-the emitter-dormancy pin)
+SPLIT: FORMAL_arm64_instruction_coverage-part1, FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
 
 The first split's three parts landed: the CMP-register SP-form spelling with
 3049e7aa7 (on master), the UXTX SP-form branches 86-88 with 2a3ab7d27 (on
@@ -133,28 +131,3 @@ coverage note names this doc as where their census belongs.
 
 Related: `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` (the svc fix that
 un-masked this; its remaining item is the dynamic `svc`, a different gap).
-
-## Status 2026-11-14 (parts 2 and 3): the refusal names the word, and dormancy is pinned
-
-The paragraph above said all three parts had landed; parts 2 and 3 had not
-(neither test class existed). Both are now landed in `643fdf026`:
-
-- **Part 2** — `_unmodelled_instruction`'s extended arm decodes `sf` (bit 31),
-  `option` (bits 15-13) and `imm3` (bits 12-10) and appends them to the `why`
-  by architectural name: `option=010 (UXTW), imm3=0`, or for sf=0
-  `32-bit, option=011 (UXTX), imm3=0`. The class paragraph is kept whole, so
-  the existing `UXTX`-in-why pin still holds. Pinned by
-  `TestExtendRefusalNamesTheOption`.
-- **Part 3** — `TestExtendOptionsAreDormantInEmittedImages` compiles the same
-  fixture with `prove=True` and scans `code[:_exec_code_limit(code)]` word by
-  word with the SAME predicate the arm uses, failing on any class word whose
-  `sf != 1` or `option != 3`. The pass condition is that predicate, not a
-  count: the fixture carries no word of the class today (the dormant state),
-  and a count would be vacuous and stay green forever.
-
-Measured: `TestExtendRefusalNamesTheOption`, `TestExtendOptionsAreDormantInEmittedImages`,
-`TestExtendOptionCensus`, `TestRegister31` — 18 tests, OK.
-`test_formal_call_proof_gen.py` as a whole is UNCHANGED from HEAD: its 21
-failures / 6 errors reproduce with `643fdf026` stashed (a pre-existing
-`_Scope` object has no attribute `structs_by_name` in `_call_go`), so this
-change adds none.
