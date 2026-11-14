@@ -1854,6 +1854,19 @@ def _dtype_cast_ctype(e):
 def _comptime_conforms_to_pred(gen):
     try:
         import mojo.middle.comptime as _comptime_eval
+        bases = _comptime_conformance_map(gen)
+        if bases is None:
+            return None
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
+def _comptime_conformance_map(gen):
+    """The declared `{decl: [base, ...]}` map this generator knows, merged from
+    the struct bases, trait bases, the instantiation's extra bases and the
+    trait declarations read from the source text. None when it knows none."""
+    try:
         sb = getattr(gen, '_struct_bases', None) or {}
         tb = getattr(gen, '_trait_bases', None) or {}
         ex = getattr(gen, '_conformance_bases_extra', None) or {}
@@ -1896,7 +1909,7 @@ def _comptime_conforms_to_pred(gen):
         for k, v in (tbt or {}).items():
             if v or k not in bases:
                 bases[k] = v
-        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+        return bases
     except Exception:
         return None
 
@@ -2640,36 +2653,30 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                             # Only check when we can identify a concrete struct context.
                             # Accept if undecidable/generic-like.
                             if is_known_struct or (_src_t_res and _src_t_res[:1].isupper()):
-                                pred = _comptime_conforms_to_pred(gen)
-                                ok = None
-                                if pred is not None and _trait_t:
-                                    try:
-                                        ok = pred(_src_t_res, _trait_t)
-                                    except Exception:
-                                        ok = None
-                                else:
-                                    # try direct
+                                # Closed-world decision over the declared bases
+                                # (module declarations, then stdlib trait
+                                # declarations). ok None = undecidable: accept.
+                                modname = (getattr(gen, '_diag_module_name', None)
+                                           or getattr(gen, '_module_name', None) or '')
+                                if not modname:
+                                    fnm = getattr(gen, '_current_filename', '') or 't.mojo'
+                                    modname = os.path.splitext(os.path.basename(fnm))[0]
+                                ok, trait_qual = None, None
+                                if _trait_t:
                                     try:
                                         import mojo.middle.comptime as _ce
-                                        sb2 = getattr(gen, '_struct_bases', None) or {}
-                                        tb2 = getattr(gen, '_trait_bases', None) or {}
-                                        ex2 = getattr(gen, '_conformance_bases_extra', None) or {}
-                                        bases = dict(ex2); bases.update(sb2); bases.update(tb2)
-                                        ok = _ce.conforms_to(_src_t_res, _trait_t, bases)
+                                        ok, trait_qual = _ce.conforms_to_closed(
+                                            _src_t_res, _trait_t,
+                                            _comptime_conformance_map(gen) or {}, modname)
                                     except Exception:
-                                        ok = None
-                                # ok False => missing witness; ok True/None => accept (None = undecidable)
+                                        ok, trait_qual = None, None
                                 if ok is False:
-                                    modname = getattr(gen, '_module_name', None) or ''
-                                    if not modname:
-                                        fnm = getattr(gen, '_current_filename', '') or 't.mojo'
-                                        modname = os.path.splitext(os.path.basename(fnm))[0]
                                     struct_q = f"{modname}::{_src_t_res}" if modname else _src_t_res
-                                    trait_q = _trait_t or 'Trait'
-                                    line = getattr(node, 'line', None)
-                                    loc = f" (line {line})" if line else ''
+                                    trait_q = trait_qual or _trait_t or 'Trait'
+                                    # No location: `node.line` is a line of the
+                                    # instantiated copy, not of the user's file.
                                     raise RuntimeError(
-                                        f"function instantiation failed{loc}\n"
+                                        "error: function instantiation failed\n"
                                         f"note: struct '{struct_q}' does not have witness table for trait '{trait_q}'"
                                     )
             # Lower as identity: return the (single) argument.

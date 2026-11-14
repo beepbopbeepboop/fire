@@ -602,6 +602,113 @@ def conforms_to(struct_name, trait_name, bases_map):
     return trait_name in _conforms_to_bases(struct_name, bases_map)
 
 
+_STDLIB_TRAIT_INDEX = None
+
+
+def _stdlib_trait_index():
+    """`{trait name: (qualified name, [base, ...])}` for every trait the stdlib
+    declares, read from the stdlib sources once per process.
+
+    A name declared by more than one stdlib file maps to None: the bare name
+    does not then identify one trait, so nothing may be concluded from it.
+    The qualified name is the defining file's path under the stdlib root with
+    `/` read as `::` and the `.mojo` suffix dropped, which is the spelling the
+    real compiler prints (`std/format/__init__.mojo` -> `std::format::__init__`).
+    """
+    global _STDLIB_TRAIT_INDEX
+    if _STDLIB_TRAIT_INDEX is not None:
+        return _STDLIB_TRAIT_INDEX
+    import os
+    import re
+    from module_loader import STDLIB_PATH
+    index = {}
+    header = re.compile(r'^trait\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:\(([^)]*)\))?\s*:',
+                        re.MULTILINE)
+    root = os.path.join(STDLIB_PATH, 'std')
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if not fn.endswith('.mojo'):
+                continue
+            path = os.path.join(dirpath, fn)
+            try:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    text = f.read()
+            except OSError:
+                continue
+            rel = os.path.relpath(path, STDLIB_PATH)[:-len('.mojo')]
+            qual = rel.replace(os.sep, '::')
+            for m in header.finditer(text):
+                name = m.group(1)
+                bases = []
+                for part in (m.group(2) or '').split(','):
+                    part = part.split('[')[0].split('.')[-1].strip()
+                    if part and re.match(r'^[A-Za-z_]\w*$', part):
+                        bases.append(part)
+                if name in index:
+                    index[name] = None
+                else:
+                    index[name] = (qual + '::' + name, bases)
+    _STDLIB_TRAIT_INDEX = index
+    return index
+
+
+def conforms_to_closed(struct_name, trait_name, bases_map, module_name):
+    """Whether STRUCT_NAME conforms to TRAIT_NAME, deciding every case the
+    closed world allows: returns `(verdict, trait_qualified_name)` where
+    verdict is True, False, or None (undecidable).
+
+    `conforms_to` answers None for any trait the module's own declarations
+    do not mention, so a struct that never declared a stdlib trait (`Writable`
+    on a struct whose bases are `(ImplicitlyCopyable)`) was accepted as
+    conforming. Here the struct's transitive bases are walked through the
+    module's declarations and then the stdlib's trait declarations. The answer
+    is False only when every base reached is itself known, so the walk is
+    complete; a single base it cannot resolve (an unknown name, or a bare name
+    the stdlib declares twice) makes the verdict None.
+
+    `Copyable` and `Movable` are derived by the language and keep
+    `conforms_to`'s True answer.
+    """
+    if not isinstance(struct_name, str) or not isinstance(trait_name, str) or not bases_map:
+        return None, None
+    if struct_name not in bases_map:
+        return None, None
+    if trait_name in bases_map:
+        trait_q = f'{module_name}::{trait_name}' if module_name else trait_name
+    else:
+        index = _stdlib_trait_index()
+        entry = index.get(trait_name)
+        trait_q = entry[0] if entry else trait_name
+    if trait_name in _AUTO_DERIVED_TRAITS:
+        return True, trait_q
+    index = _stdlib_trait_index()
+    seen = set()
+    todo = [struct_name]
+    complete = True
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in bases_map:
+            bases = [b if isinstance(b, str) else _conforms_to_name(b)
+                     for b in (bases_map.get(name) or [])]
+        elif name in index and index[name] is not None:
+            bases = index[name][1]
+        else:
+            complete = False
+            continue
+        for b in bases:
+            if not b:
+                continue
+            if b == trait_name:
+                return True, trait_q
+            todo.append(b)
+    if not complete:
+        return None, trait_q
+    return False, trait_q
+
+
 def _fold_conforms_to_call(node, conforms_to_pred):
     if conforms_to_pred is None:
         return None
