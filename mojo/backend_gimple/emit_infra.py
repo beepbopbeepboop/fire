@@ -1537,17 +1537,33 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
             # such global mutable state — it's a pure function of
             # STDLIB_PATH/TEST_PATH.
             import module_loader as _mlmod
-            _imp_path = _mlmod._module_loader.resolve_module_path(mod)
-            if _imp_path and gimple_ctypes.os.path.exists(_imp_path):
-                _qual = _mlmod.module_name_for_path(_imp_path)
-                if _qual:
-                    # _own_imported_func_home (per-instance, see its own
-                    # comment): THIS module's own FromImportStmt is
-                    # authoritative for this bare name within this
-                    # module's own body — must win over any OTHER
-                    # module's claim on the same bare name in the shared
-                    # _imported_func_home fallback.
-                    gen._note_own_func_home(sym, _qual)
+            # The DEFINER's qualifier first, not the importing statement's
+            # own module: `from std.memory import unsafe_memset_zero`
+            # names the package `__init__.mojo`, which only re-exports the
+            # function (`from .memory import unsafe_memset_zero`), so the
+            # file the module string resolves to is not the file the
+            # definition was compiled under — deriving the qualifier from
+            # it emitted `std_memory___init___unsafe_memset_zero` (extern,
+            # `#ifndef` guard and call) against a definition emitted as
+            # `std_memory_memory_unsafe_memset_zero`. The shared walker
+            # (`_find_symbol_home_module`, also used by the function-body
+            # and struct paths) follows the re-export hops without any
+            # package special-case; `''` means the named module is the
+            # definer (a direct import, unchanged) or nothing reachable
+            # defines the name (today's behaviour, no invented home).
+            _qual = gen._reexported_defining_qualifier(mod, name, 'fn')
+            if not _qual:
+                _imp_path = _mlmod._module_loader.resolve_module_path(mod)
+                if _imp_path and gimple_ctypes.os.path.exists(_imp_path):
+                    _qual = _mlmod.module_name_for_path(_imp_path)
+            if _qual:
+                # _own_imported_func_home (per-instance, see its own
+                # comment): THIS module's own FromImportStmt is
+                # authoritative for this bare name within this
+                # module's own body — must win over any OTHER
+                # module's claim on the same bare name in the shared
+                # _imported_func_home fallback.
+                gen._note_own_func_home(sym, _qual)
             if sym in seen or sym in _C_BUILTINS or (
                     sym in gen._LIBC_DECLARED
                     and sym not in gen._NEEDS_SELF_EXTERN):

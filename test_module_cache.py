@@ -534,6 +534,42 @@ def test_elaboration_failure_is_not_cached(wd):
                   "replaying a wrong artifact",
                   cas.stats['misses'] == misses + 1 and t1 == t2,
                   f"misses did not advance: {cas.stats['misses']} vs {misses}")
+
+            # ... and the state the verdict reads describes THIS module. A
+            # sweep worker compiles dozens of modules in one process, so a
+            # clean module served from a cache after a degraded one must not
+            # inherit its failure (that would report a good module FAILED),
+            # and a degraded L1 hit must keep saying DEGRADED (it was not
+            # published, so "came from a cache" does not make it clean).
+            clean_src = "fn el_clean_probe():\n    pass\n"
+            clean_path = os.path.join(RUNTIME, 'el_clean_probe.mojo')
+            open(clean_path, 'w').write(clean_src)
+            try:
+                bsd.compile_module_to_c_cached(clean_src, clean_path,
+                                               'el_clean_probe')
+                check("elaborate: a clean compile reports no degradations",
+                      bsd.last_degradations() == [],
+                      f"last_degradations() = {bsd.last_degradations()[:2]}")
+                # t2 left the degraded module in the L1 (that artifact is not
+                # published, but it is kept for the rest of the process).
+                # Serve it while the previous state is CLEAN: a hit has to
+                # report its own entry, not the last build.
+                bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
+                check("elaborate: ... a degraded L1 hit still reports DEGRADED",
+                      bsd.last_degradations() != [],
+                      "a degraded module's own artifact is not published, so "
+                      "serving it from the L1 must keep its verdict")
+                bsd._stdlib_compile_cache.clear()
+                bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
+                bsd._stdlib_compile_cache.clear()   # force the shared-store lookup
+                bsd.compile_module_to_c_cached(clean_src, clean_path,
+                                               'el_clean_probe')
+                check("elaborate: ... so a cache hit answers for itself, not "
+                      "for the last degraded module",
+                      bsd.last_degradations() == [],
+                      f"last_degradations() = {bsd.last_degradations()[:2]}")
+            finally:
+                os.remove(clean_path)
         finally:
             stale = cas.lookup(key, '.ci')
             if stale:
@@ -542,6 +578,50 @@ def test_elaboration_failure_is_not_cached(wd):
     finally:
         mm.instantiate = real_instantiate
         os.remove(bl)
+
+
+def test_elaboration_failure_is_a_failed_verdict(wd):
+    """`compile_stdlib.transpile_file` reports a degraded elaboration as FAILED.
+
+    The sweep's verdict used to be gcc's opinion of the produced C only, so
+    `std/simd.mojo` counted as `passed` while the compiler printed that its C
+    was "NOT the program its source describes" and was not being cached —
+    `610 passed, 0 failed` over a wrong artifact. The producer of that fact is
+    `build_stdlib_dylib.compile_module_to_c_cached` (whose per-call state is
+    covered above); this pins the seam where the harness reads it.
+
+    The codegen boundary is stubbed on purpose: the assertion is about the
+    verdict wiring, and a test that depended on which stdlib module currently
+    degrades would go red the day that module's own bug is fixed.
+    """
+    import compile_stdlib
+    reason = ("SIMD[exp.dtype, self.length] from simd.mojo: RuntimeError: "
+              "cannot materialize instantiation of generic 'StaticTuple': "
+              "its bracket arguments advance without converging")
+    real = compile_stdlib.compile_module_to_c_cached
+
+    def _degraded(src, path, name, linkable=True):
+        # What the real function guarantees on return: the module-level state
+        # describes this call, and the C it produced is syntactically valid
+        # (which is why gcc cannot be the one to notice).
+        bsd._LAST_DEGRADED[:] = [reason]
+        return "int mojogen_elaboration_verdict_probe;\n"
+
+    path = os.path.join(RUNTIME, 'el_verdict_probe.mojo')
+    open(path, 'w').write("fn el_verdict_probe():\n    pass\n")
+    compile_stdlib.compile_module_to_c_cached = _degraded
+    try:
+        ok, msg, _cg, _gcc = compile_stdlib.transpile_file(path)
+        check("verdict: a module built through a failed elaboration is NOT a pass",
+              not ok, "transpile_file counted a degraded module as PASSED")
+        check("verdict: ... and the FAILED reason names the degradation",
+              bool(msg) and 'elaboration' in msg
+              and 'advance without converging' in msg,
+              f"msg = {msg!r}")
+    finally:
+        compile_stdlib.compile_module_to_c_cached = real
+        bsd._LAST_DEGRADED[:] = []
+        os.remove(path)
 
 
 # ── Elaboration slice 4: overload resolution ─────────────────────────────
@@ -2239,6 +2319,7 @@ def main():
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
         test_elaboration_failure_is_not_cached(wd)
+        test_elaboration_failure_is_a_failed_verdict(wd)
         test_instantiation_nested_gcc_is_retried(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)

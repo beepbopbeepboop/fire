@@ -8,8 +8,9 @@ the fix (tracked by `bugs/SUITE_silentnoop-part2.md`) has concrete inputs.
 `8784f44f8`), is reproduced by the replanned part 1 capture in
 `bugs/SUITE_silentnoop-part1-run.txt` — the `python3 tools/suite.py silentnoop`
 run and the direct `python3 test_silent_noop_iter.py` run. The same measurement
-is written up as the literal-kind mixed-parameter container refusal fixed by
-commit `d2bc1dd5d`, which is the defect this classification identified.
+is the defect this classification identified: a parameter passed mixed literal
+container/str/`None` kinds at different call sites and used as a container,
+refused at build time (fixed 2026-11-14, `e4a2cc2ed`).
 
 ## Classification
 
@@ -55,8 +56,8 @@ No other case fails and no case times out.
 
 ## Disposition
 
-The defect is not a one-line lowering fix, so it was filed on its own with the
-fixture, the CPython oracle, and the reason the case is a pin for a fix rather
-than a shape to mark as an expected refusal; it is fixed by commit
-`d2bc1dd5d`. Making the job green is
+The defect is not a one-line lowering fix, so it was filed with its own
+write-up carrying the fixture, the CPython oracle, and the reason the case is a
+pin for a fix rather than a shape to mark as an expected refusal. It is fixed
+2026-11-14 (`e4a2cc2ed`); making the job green is
 `bugs/SUITE_silentnoop-part2.md`.
