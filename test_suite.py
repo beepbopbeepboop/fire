@@ -4210,17 +4210,6 @@ UNREGISTERED = {
         'so not a registered gate job. Run one by its own bug doc\'s command '
         '(`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`).',
 
-    # A replan's Done-when checks, pytest-style (plain `test_*` functions with
-    # no runner of their own), so `python3 <file>` would run nothing. They pass
-    # only once that replan's deliverables exist, which is what their doc's
-    # command checks; a gate job here would be a red line about another lane's
-    # unfinished work.
-    'tests/test_suite_silentnoop_part1_replan.py':
-        'The pytest-style Done-when checks for the SUITE_silentnoop-part1 '
-        'replan, run by their own doc\'s command (`python3 -m pytest '
-        'tests/test_suite_silentnoop_part1_replan.py`). They assert that the '
-        'replan\'s evidence and findings files exist, so they are not a gate job.',
-
     # ── the formal backend's per-construct suites, run by hand ──
     #
     # Each of these BUILDS AND EXECUTES images on both architectures and
