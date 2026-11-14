@@ -2545,7 +2545,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `BUILTIN_VALUE_MAP` override for `_coro_resume_fn`/`_coro_destroy_fn`
     # when the stack-switch backend is enabled — see bugs/hard/CODEGEN_
     # coro_detached_async_take_handle.md.
-    if isinstance(func.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.UnaryOp)):
+    if (func.member in ('_set_noop_callback', '_take_handle')
+            and isinstance(func.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.UnaryOp))):
         _obj_type, _obj_val = gen.lower_expr(func.obj)
         if _obj_type in ('MojoAsync *', 'MojoGenerator *'):
             if func.member == '_set_noop_callback' and not node.args:
