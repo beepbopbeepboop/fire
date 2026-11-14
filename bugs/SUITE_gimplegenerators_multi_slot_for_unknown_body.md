@@ -1,4 +1,4 @@
-# Sibling of SUITE_gimplegenerators_multi_slot_comprehension: a `for` statement whose BODY reads an undeclared name dies with the unknown-declaration diagnostic, not the arity refusal
+# Sibling of the multi-slot comprehension fix: a `for` statement whose BODY reads an undeclared name dies with the unknown-declaration diagnostic, not the arity refusal
 
 ## Status 2026-11-14 — measured on work/bug-suite-gimplegenerators-multi-slot-co, found while fixing the comprehension sibling, not fixed here
 
@@ -29,11 +29,11 @@ SyntaxError: <source>:6:15: error: use of unknown declaration 'x'
 The `for`-statement arity refusal from `_gen_for_generator_iter`
 (emit_loops.py ~3917): "cannot compile a multi-slot `for` target over a
 generator whose yield arity is not a tuple" — the same diagnostic-priority
-collision the comprehension case
-(bugs/SUITE_gimplegenerators_multi_slot_comprehension.md, fixed 2026-11-14
-by mojo/middle/coro.py's
+collision the comprehension case — an undeclared element expression killing
+the compile with `use of unknown declaration 'x'` before the arity refusal
+was reached, fixed 2026-11-14 by mojo/middle/coro.py's
 `refuse_multi_slot_comprehension_over_nontuple_generator` running before
-`unknown_decl_check.check_module`) had: `unknown_decl_check` runs at
+`unknown_decl_check.check_module` (commit bef7368fd) — had: `unknown_decl_check` runs at
 `_run_pipeline` step 3 and answers its own, less specific question before
 codegen can answer the structural one. The for-statement body only has to
 read ONE undeclared name (`print(x)` above) for the pass to preempt the
