@@ -241,9 +241,25 @@ that is meant to be behaviour-preserving:
   `loop_stack` / depth bookkeeping of a `for` statement, the increment and
   the exit label. 16 of the hand-written copies use them (two comprehension
   loops spelled the increment constant `1LL`; they now emit `(int64_t)1`
-  like the rest, the one output change of this step). NOT converted yet:
-  the cursor loops with no increment, and the three-block mini-loops (no
-  `bb_post`) in `emit_calls.py` / `emit_methods.py` / `loops_shared.py`.
+  like the rest, the one output change of this step). Passing `''` for
+  `bb_post` makes the three-block form (an internal loop with no `continue`
+  target, the increment at the end of the body block); 7 more copies use
+  that. NOT converted: the cursor loops with no increment, and three loops
+  whose increment is not the last thing in the body.
+- **Stage 6, arms of the giant functions (started 2026-11-14).**
+  `tools/extract_arm.py` moves one top-level `if` arm of a function into its
+  own function and replaces it with a call. It computes what the arm reads
+  from the parent, refuses an arm whose inputs are not bound on every path,
+  that binds a name the parent reads later, or that calls a nested function,
+  and checks that the moved body is the same syntax tree. 35 arms were
+  moved: `_lower_call` 3,261 -> 2,060 lines (`_lc_*`), `_lower_method_call`
+  3,951 -> 1,423 (`_lmc_*`). Generated output is byte-identical; the new
+  parameters have the C types the parent's locals had in the compiler's own
+  self-compiled output. The remaining ~2,400 movable lines in eight other
+  functions are `bugs/CODEGEN_giant_lowering_functions_split_by_arm.md`.
+  `gen_module_impl` (15,491 lines) is NOT started: its file does not compile
+  in single-file `--dump` mode, so the parameter types of an extracted phase
+  cannot be checked the same way.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.
