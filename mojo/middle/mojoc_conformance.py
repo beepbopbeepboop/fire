@@ -30,7 +30,7 @@ must fail with
 
     error: 'Container' parameter 'T' has 'Marked' type, but value has type 'AnyStruct[NotMarked]'
     note: 'Container' declared here
-    struct Container[T: Marked, H: Helper = default_helper]  # note - synthetic signature
+    struct Container[T: Marked, H: Helper = default_helper]    # note - synthetic signature
 
 The last two lines are the part-3 half of the diagnostic: the note points at
 the imported declaration, and its detail line is the artifact record rendered

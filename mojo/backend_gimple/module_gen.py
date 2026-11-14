@@ -5083,6 +5083,11 @@ def gen_module_impl(self, stmts: list):
                 for _em, _ea in _s.extra:
                     _imported_names.add(_ea if _ea else _em.split('.')[-1])
     self._gmi_imported_names = _imported_names
+    # Two `from M import X` of one name from different modules is an error at
+    # module scope too (modular's import_ambiguous). Raised before anything is
+    # lowered, with every conflict in the file gathered into the one message.
+    import mojo.middle.import_ambiguity as _import_ambiguity
+    _import_ambiguity.check_module_from_imports(self, stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
     # A function called with a list at one site and a str at another, and
     # iterated in its body, gets one clone per argument kind before any
