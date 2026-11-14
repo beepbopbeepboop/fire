@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """Quick repro/test for importing c_common.tables from a consumer program.
 
-Regression for the c-analyzer `c_common/tables.py` consumer link failure
-(imported-module generator ptr-evidence typing, cpp-unit diagnostics, the
-file-object `for` lowering, cpp string equality and generator default
-registration). The bug doc that tracked it was deleted with the fix.
+Part of bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md.
 """
 import os
 import shutil

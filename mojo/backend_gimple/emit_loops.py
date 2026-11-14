@@ -820,28 +820,6 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     return lp
 
 
-_STR_METHOD_NAMES = frozenset(dir(str))
-
-
-def _loop_var_used_as_object(body, var) -> bool:
-    """True when the loop body reads an attribute of the loop variable that is
-    not a `str` method (`item.key`, `item.value`): the elements are then
-    records, so the `char *` element evidence is wrong and an OPEN-FILE arm
-    (whose lines are strings) has nothing to do with this loop. Lowering such a
-    body twice -- once per arm -- gave GCC an internal compiler error on
-    `Counter.subtract`'s `self._data.setdefault(item.key.copy(), 0) -= item.value`
-    (std/collections/counter.mojo)."""
-    if not isinstance(var, str):
-        return False
-    for n in gimple_exprtypes._walk_ast(body):
-        if (isinstance(n, gimple_ctypes.MemberExpr)
-                and isinstance(n.obj, gimple_ctypes.IdentExpr)
-                and _as_str(n.obj.name) == var
-                and _as_str(n.member) not in _STR_METHOD_NAMES):
-            return True
-    return False
-
-
 def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # `for m in <compile-time-known-pattern>.finditer(text):` — see
     # regex_compile.py / BACKLOG-CODEGEN.md §4f. Checked structurally,
@@ -1259,47 +1237,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and _as_str(node.iterable.name) in getattr(gen, '_gen_handle_word_locals', ())):
                 # also bound to a generator handle: the list evidence is one binding's
                 _lp_known = None
-            if (_lp_known is not None
-                    and gen._elem_of(_lp_known) == 'char *'
-                    and it_type in ('int', 'int64_t', 'void *')
-                    and not _loop_var_used_as_object(node.body, var)):
-                # A word with STRING-LIST evidence can still be an OPEN FILE
-                # HANDLE at run time. `c_common/strutil.py`'s
-                # `_iter_significant_lines(lines)` is the real shape: one
-                # caller passes `infile.read().splitlines()` (a list of
-                # strings, which is where the element evidence comes from) and
-                # another passes the open file object itself. Reading the
-                # FILE* as a MojoList gave a garbage length, so the body ran
-                # zero times and `read_table` raised `bad header ''`.
-                #
-                # File lines are strings, so both arms share one `char *`
-                # loop variable and one body lowering. `mojo_file_lines`
-                # answers NULL for anything that is not a file this runtime
-                # opened, which is the list arm.
-                _flp = gen._call_expr('MojoList *', 'mojo_file_lines',
-                                      [('int64_t', gen._to_int64(it_type, it_val))])
-                _flp64 = gen._to_int64('MojoList *', _flp)
-                _flpz = gen._new_val('int64_t', '0')
-                _flp_null = gen._new_val('_Bool', f'{_flp64} == {_flpz}')
-                # Push/free unconditionally (NULL is a no-op for both) so the
-                # scope-exit cancel count is static, as every other loop temp's
-                # is: a push emitted only in one arm would unbalance it.
-                gen._emit(f"  mojo_cleanup_push_list_strs ({_flp});")
-                ginf._scope_register(gen, _flp, 'mojo_list_free_owned_strs')
-                _bb_file = gen._new_bb()
-                _bb_list = gen._new_bb()
-                _bb_done = gen._new_bb()
-                gen._cond_goto(_flp_null, _bb_list, _bb_file)
-                gen._emit_label(_bb_file)
-                gen._elem_types[_flp] = 'char *'
-                gen._gen_for_list(var, _flp, node.body,
-                                  share_var_with_sibling_arm=True)
-                gen._goto(_bb_done)
-                gen._emit_label(_bb_list)
-                gen._gen_for_list(var, _lp_known, node.body,
-                                  share_var_with_sibling_arm=True)
-                gen._emit_label(_bb_done)
-            elif _lp_known is not None:
+            if _lp_known is not None:
                 gen._gen_for_list(var, _lp_known, node.body)
             elif it_type in ('int', 'int64_t', 'void *'):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
@@ -1307,32 +1245,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
                 bb_after = gen._new_bb()
                 it64 = gen._to_int64(it_type, it_val)
-                # A FILE OBJECT is a fourth iterable kind a word can be: a
-                # `for line in <file>` in a generator body (the ABI passes
-                # every param as an untyped word, and the scalar body model
-                # keeps `with open(...) as f`'s alias a word too). Its lines
-                # are strings, so the file arm shares the dict arm's `char *`
-                # loop-variable declaration. `mojo_file_lines` returns NULL
-                # for every non-file word, which falls through to the
-                # dict/list/set registries below unchanged. See the
-                # string-list-evidence arm above for the full rationale and
-                # the `_iter_significant_lines` repro.
-                if not _loop_var_used_as_object(node.body, var):
-                    _flw = gen._call_expr('MojoList *', 'mojo_file_lines',
-                                          [('int64_t', it64)])
-                    _flw64 = gen._to_int64('MojoList *', _flw)
-                    _flwz = gen._new_val('int64_t', '0')
-                    _flw_null = gen._new_val('_Bool', f'{_flw64} == {_flwz}')
-                    gen._emit(f"  mojo_cleanup_push_list_strs ({_flw});")
-                    ginf._scope_register(gen, _flw, 'mojo_list_free_owned_strs')
-                    bb_file = gen._new_bb(); bb_not_file = gen._new_bb()
-                    gen._cond_goto(_flw_null, bb_not_file, bb_file)
-                    gen._emit_label(bb_file)
-                    gen._elem_types[_flw] = 'char *'
-                    gen._gen_for_list(var, _flw, node.body,
-                                      share_var_with_sibling_arm=True)
-                    gen._goto(bb_after)
-                    gen._emit_label(bb_not_file)
                 isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
                 gen._cond_goto(isd, bb_dict, bb_not_dict)
                 gen._emit_label(bb_not_dict)
@@ -1907,15 +1819,7 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
         nested_ptr = gen._coerce_to_type('int64_t', 'MojoList *', raw)
         nested_elem = gen._nested_elem_types.get(list_ptr, 'int64_t')
         for j, nn in enumerate(gen._split_top_level_comma(vn[1:-1].strip())):
-            # `j` is a Python int, and `idx_t` reaches `_rt_call` as a C
-            # EXPRESSION. `_as_str` is deliberately identity (see its
-            # docstring), so `_rt_args`' `', '.join(...)` would raise
-            # "sequence item 1: expected str instance, int found" -- which
-            # `_gen_stmt_ForStmt` catches and turns into the generic
-            # zero-iteration `mojo_unsupported_iter` fallback, silently
-            # dropping the whole loop. The pre-`_rt_call` spelling was an
-            # f-string, which stringified `j` and hid this.
-            _zip_bind_slot(gen, nn, nested_ptr, nested_elem, str(j))
+            _zip_bind_slot(gen, nn, nested_ptr, nested_elem, j)
         return
     if starred_slot_index([vn]) >= 0:
         # The starred slot: read this sequence's element with the same

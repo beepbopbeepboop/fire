@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regression: precompile a package to a .mojoc signature artifact and read it
-back after deleting the sources.
+back after deleting the sources (DIAGNOSTICS_mojoc_imports-part2-part1).
 
 Parses/reads only; no compilation, no memslot wrapper needed.
 """

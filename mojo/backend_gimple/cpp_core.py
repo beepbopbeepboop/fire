@@ -2578,57 +2578,6 @@ def _cpp_is_str_expr(gen, node) -> bool:
         return False
 
 
-def _cpp_str_compare(gen, op, left_node, right_node, ltxt: str, rtxt: str) -> str | None:
-    """`<left> == / != <right>` where at least one side is a `char *` string,
-    lowered by CONTENT. Returns None when this is not a string comparison.
-
-    The raw C++ `==` this emitter used to produce compared POINTERS, so two
-    strings with equal contents were unequal unless they were the same
-    object. A compiled `yield from`-using generator hit that on
-    `c_common/tables.py`'s `read_table`:
-
-        actualheader = next(lines).strip()
-        if actualheader != header: raise ValueError(f'bad header ...')
-
-    which raised on a file whose header was exactly `header` (measured:
-    `bad header 'a\\tb'` for a TSV whose first line is `a<TAB>b`). Both
-    operands are statically `char *` there, but the same shape with one side
-    an unsolved `int64_t` word (`mojo_cstr_cmp_word`'s case — the ordinary
-    GIMPLE backend's `emit_exprs` string-equality arm) is lowered too, so
-    the two backends agree.
-
-    Deliberately `==`/`!=` only: `<`/`>` on strings are ordering comparisons
-    whose current pointer semantics are a separate (and much rarer) gap, and
-    widening this is not needed to make equality right. A `char *` against a
-    non-word scalar (a double, a container pointer) is left to the caller's
-    existing lowering; Python says those are never equal, but guessing here
-    could turn a genuinely numeric comparison into a string one.
-    """
-    if op not in ('==', '!='):
-        return None
-
-    def _ctok(n):
-        try:
-            return _cpp_expr_static_ctype(gen, n)
-        except Exception:
-            return None
-
-    lt = _ctok(left_node)
-    rt = _ctok(right_node)
-    if lt != 'char *' and rt != 'char *':
-        return None
-    _cmp = '!= 0' if op == '!=' else '== 0'
-    if lt == 'char *' and rt == 'char *':
-        return (f"(mojo_cstr_cmp((char *)({ltxt}), (char *)({rtxt})) {_cmp})")
-    if lt == 'char *' and rt in ('int', 'int64_t', 'void *'):
-        return (f"(mojo_cstr_cmp_word((char *)({ltxt}), "
-                f"(int64_t)({rtxt})) {_cmp})")
-    if rt == 'char *' and lt in ('int', 'int64_t', 'void *'):
-        return (f"(mojo_cstr_cmp_word((char *)({rtxt}), "
-                f"(int64_t)({ltxt})) {_cmp})")
-    return None
-
-
 def _cpp_and_or_is_tagged(gen, e) -> bool:
     """True when the `and`/`or` BinaryOp `e` lowers to a TAGGED word: its left
     operand is a tagged word. A str right operand now goes through the
@@ -3600,12 +3549,6 @@ def _cpp_expr(gen, e) -> str:
         if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
             _br = f"mojo_int_divisor((int64_t)({_br}))"
         if op in ('==', '!=', '<', '<=', '>', '>='):
-            # String equality is CONTENT equality, not pointer identity —
-            # see `_cpp_str_compare`'s docstring for the `read_table`
-            # header comparison that this fixes.
-            _scmp = _cpp_str_compare(gen, op, e.left, e.right, _bl, _br)
-            if _scmp is not None:
-                return _scmp
             # Mixed-pointerness guard — identical rationale to the
             # CompareChain branch's own copy above (this emitter's
             # single-comparison shape parses as a BinaryOp here, not a
@@ -3637,10 +3580,6 @@ def _cpp_expr(gen, e) -> str:
                 links.append(gen._cpp_in_link(a, a_node, b, b_node,
                                                negate=(op == 'not in')))
             else:
-                _scmp = _cpp_str_compare(gen, op, a_node, b_node, a, b)
-                if _scmp is not None:
-                    links.append(_scmp)
-                    continue
                 # Mixed pointerness guard: exactly one side is a
                 # statically-known `char *` (a string slice/subscript,
                 # e.g. pathlib's `path_str[-1] == sep`) while the other
@@ -4896,16 +4835,8 @@ def _cpp_expr(gen, e) -> str:
                         "operator char *() const { return (char *)w; } "
                         + gen._cpp_word_container_operator('MojoList', False)
                         + " }; "
-                        "MojoList *_mg_cp = mojo_list_copy("
-                        f"mojo_iter_word((int64_t)(intptr_t)({args[0]}))); "
-                        # `tuple(x)` IS a tuple in Python (a `list(x)` copy is
-                        # not): mark the copy so a later repr uses parens and
-                        # a tuple-specific consumer sees the same kind. The
-                        # copy helper deliberately does not propagate the
-                        # marker (see its own comment), so the constructor
-                        # that means tuple has to say so.
-                        + ("mojo_mark_as_tuple(_mg_cp); " if fname == 'tuple' else "")
-                        + "return _W{(int64_t)(intptr_t)_mg_cp}; }()")
+                        "return _W{(int64_t)(intptr_t)mojo_list_copy("
+                        f"mojo_iter_word((int64_t)(intptr_t)({args[0]})))}}; }}()")
             if fname == 'enumerate' and not gen._locally_binds_name('enumerate'):
                 # enumerate(iterable) → pair each element with its index.
                 # Emit the underlying iterable; the consumer's loop
@@ -9066,16 +8997,6 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     gen._cpp_func_scope_decls.append(f"int64_t {_alias_cname};")
                 else:
                     _alias_decl_lines.append(f"{indent}int64_t {_alias_cname};")
-            if _open_alias_name:
-                # The alias holds an OPEN FILE WORD, so it is an unsolved
-                # word like any callable/opaque value. Recording it is what
-                # makes `for line in f:` take `_cpp_for_stmt`'s word-iteration
-                # arm (`mojo_iter_word` -> `mojo_file_lines`) instead of the
-                # boxed-list arm, which read the FILE* as a MojoList (garbage
-                # length, loop body ran zero times silently).
-                if not hasattr(gen, '_cpp_word_locals'):
-                    gen._cpp_word_locals = set()
-                gen._cpp_word_locals.add(_open_alias_name)
         elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 "`with ... as name:` is not supported for an async "

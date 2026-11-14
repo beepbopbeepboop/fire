@@ -128,16 +128,36 @@ def _resolve_type(gen, ann: str | None) -> str:
         if base in ('Scalar', 'SIMD'):
             _parts = gimple_ctypes._split_top_level_commas(rest.rstrip(']').strip())
             _dtok = _parts[0].strip() if _parts else ''
-            # Any width: a `SIMD[<float dtype>, N]` value has the dtype's SCALAR
-            # C type in this codegen, so N does not change the answer. Width 1
-            # used to be the only case resolved, which left `SIMD[dt, 2]` on
-            # the int64_t fallback.
-            if _dtok:
+            _is_width1 = (base == 'Scalar' or (len(_parts) >= 2 and _parts[1].strip() == '1'))
+            if _is_width1 and _dtok:
                 def _dtype_ctype(tok):
-                    # The ONE resolver: every spelling (tuple, tuple-REPR,
-                    # DType./dtype./leading-dot, bare, f32/f64) and the one
-                    # table live in types._dtype_token_ctype.
-                    return gimple_ctypes._dtype_token_ctype(tok)
+                    if tok is None:
+                        return None
+                    if isinstance(tok, tuple) and len(tok) == 2:
+                        if tok[0] in ('.', 'DType', 'dtype'):
+                            tok = tok[1]
+                        else:
+                            tok = None
+                    s = str(tok).strip() if tok is not None else ''
+                    if not s:
+                        return None
+                    if s.startswith('DType.'):
+                        s = s[len('DType.'):]
+                    if s.startswith('dtype.'):
+                        s = s[len('dtype.'):]
+                    if s.startswith('.'):
+                        s = s[1:]
+                    # ONE dtype-spelling table (types._SIMD_FLOAT_DTYPE_CTYPE),
+                    # the same one `emit_calls._float_dtype_arg_ctype` reads, so
+                    # the resolver and the call lowerer cannot drift apart. Its
+                    # keys are the normalized spelling (`float32`, `Float32`,
+                    # `DType.float32`); `f32`/`f64` are the remaining aliases.
+                    sl = s.lower()
+                    if sl == 'f32':
+                        sl = 'float32'
+                    elif sl == 'f64':
+                        sl = 'float64'
+                    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(sl)
 
                 def _resolve_dtype_token(tok):
                     _ct = _dtype_ctype(tok)

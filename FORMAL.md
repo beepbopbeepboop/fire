@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (796 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (795 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -530,14 +530,14 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 So the honest statement of the surface is **328 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 433 of §2.2. The two gaps between the
+was written, and not the 431 of §2.2. The two gaps between the
 433 of the row above and 328 are
 both deliberate and both named:
 
 - **47 of the 375** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **58 of the 433** the dylib does not export at all, because
+- **56 of the 433** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c` 16, `fire_ncurses.c` 16, `fire_ssl.c` 11, `fire_metal.c` 5,
@@ -611,7 +611,7 @@ dylib is rebuilt and `test_formal_runtime_link.py` re-measures them —
 re-measured 2026-10-28: 241 / 201 (228 / 188 at the 2026-10-23 measurement,
 and the 56 / 40 gaps did not move), and re-measured 2026-11-13: 375 / 328 —
 the rows had sat at 369 / 323 in the meantime while the header census grew to
-433, so the rebuilt dylib exports six word-shaped entry points more than the
+431, so the rebuilt dylib exports six word-shaped entry points more than the
 rows said and five more are reachable; the unexported gap is 56 as at every
 measurement since 2026-10-23 (now the five optional units' 50 names plus the
 six word-shaped `mojo_python_*` the dylib never links), and the heap-handle
@@ -1276,7 +1276,7 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **433 of 944** entry points are word-in/word-out
+yet for any actual export. **431 of 942** entry points are word-in/word-out
 (§2.2) and **328** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the
