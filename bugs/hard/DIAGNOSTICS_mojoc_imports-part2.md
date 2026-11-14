@@ -1,3 +1,5 @@
+SPLIT: bugs/mid/DIAGNOSTICS_mojoc_imports-part2-part1.md, bugs/mid/DIAGNOSTICS_mojoc_imports-part2-part2.md, bugs/mid/DIAGNOSTICS_mojoc_imports-part2-part3.md
+
 # DIAGNOSTICS mojoc imports, part 2: implicit default param on precompiled import
 
 Parent: `bugs/hard/DIAGNOSTICS_mojoc_imports.md` (umbrella split; see also

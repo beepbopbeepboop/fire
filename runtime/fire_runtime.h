@@ -960,6 +960,13 @@ double  mojo_list_get_double(MojoList *l, int64_t i);
 double  mojo_double_from_bits(int64_t bits);
 int64_t mojo_double_to_bits(double v);
 
+/* A FLOAT (32-bit) travels the same way: its IEEE-754 bit pattern in the low
+ * 32 bits of the word, zero-extended. `mojo_float_from_bits` reads the low 32
+ * bits and ignores the rest. `x.to_bits()` / `x._to_bits_signed()` on a float
+ * and `bitcast[Float32]` lower through these. */
+float   mojo_float_from_bits(int64_t bits);
+int64_t mojo_float_to_bits(float v);
+
 int64_t mojo_list_len(MojoList *l);
 
 int mojo_list_contains_int(MojoList *l, int64_t v);

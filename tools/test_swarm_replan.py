@@ -137,6 +137,13 @@ class Split(unittest.TestCase):
         self.assertIn("ONE quick test", text)
         self.assertIn("SPLIT: <base>-part1", text)
 
+    def test_the_replan_prompt_files_parts_at_easy(self):
+        text = S.REPLAN_TASK % {"doc": "bugs/hard/Xcase.md", "cls": "hard", "slots": "opus",
+                                "servable": "easy, mid"}
+        self.assertIn("under bugs/ (easy)", text)
+        self.assertNotIn("under bugs/ or bugs/mid/", text)
+
+
     def test_why_reports_a_split(self):
         self.write("hard/Xcase.md", "# X\nSPLIT: X-part1\n")
         self.write("mid/X-part1.md", "# part 1\n")
@@ -152,6 +159,49 @@ class Split(unittest.TestCase):
              mock.patch.object(S.subprocess, "run", return_value=mock.Mock(stdout="", returncode=0)):
             self.assertIn("SPLIT", S.why("hard/Xcase"))
 
+
+class TerminalReplan(unittest.TestCase):
+    """A replan entry that is terminal with no commits must not park its doc: the doc is requeued."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.tmp, "bugs", "hard"))
+        open(os.path.join(self.tmp, "bugs", "hard", "X.md"), "w").write("# X\n")
+        self.q = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.q, ignore_errors=True)
+
+    def run_replan(self, reg):
+        with mock.patch.object(C, "MAIN", self.tmp), \
+             mock.patch.object(S, "unserved_classes", return_value={"hard": ["opus"]}), \
+             mock.patch.object(C, "load_pool", return_value={"slots": [], "skip": []}), \
+             mock.patch.object(C, "load", return_value=reg), \
+             mock.patch.object(C, "state_of", side_effect=lambda t: t.get("state")), \
+             mock.patch.object(C, "ahead", side_effect=lambda t: t.get("_ahead", 0)), \
+             mock.patch.object(C, "qdir", return_value=self.q), \
+             mock.patch.object(S, "split_reason", return_value=None), \
+             mock.patch.object(S, "claim_held", return_value=False), \
+             mock.patch.object(S, "skip_hits", return_value=False), \
+             mock.patch.object(S.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+            made = S.replan_unserved()
+        return made, run
+
+    def test_an_abandoned_replan_with_no_commits_is_requeued(self):
+        made, run = self.run_replan({"fix-replan-x": {"state": "abandoned", "_ahead": 0}})
+        self.assertEqual(made, 1)
+        self.assertTrue(run.called)
+
+    def test_an_abandoned_replan_with_commits_is_left_to_land(self):
+        made, run = self.run_replan({"fix-replan-x": {"state": "abandoned", "_ahead": 6}})
+        self.assertEqual(made, 0)
+        self.assertFalse(run.called)
+
+    def test_a_live_replan_is_not_requeued(self):
+        made, run = self.run_replan({"fix-replan-x": {"state": "running"}})
+        self.assertEqual(made, 0)
+        self.assertFalse(run.called)
 
 class QueuedClass(unittest.TestCase):
     def test_a_doc_task_follows_its_doc(self):

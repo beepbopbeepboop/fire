@@ -73,9 +73,16 @@ declared.
 ## Acceptance check
 
 Add `test_defaulted_trait_method_conformance_diagnostic.py` (next to the other
-`test_*_diagnostic.py` files; do NOT register it in `tools/suite.py`). Use a
-reduced, self-contained `Strategy`/`Map` pair copied from the modular shape
-(the `map` default returns the partially-applied struct type):
+`test_*_diagnostic.py` files) and **register it in `tools/suite.py`** as a
+`mem='tiny'` spec in `check` beside the other trait-conformance diagnostic
+suites. The old instruction here said to skip the registration; a
+`test_*.py` on disk that no gate-reachable spec names turns `test_suite.py`'s
+estate row red, which is `bug:SUITE_trait_requirement_evidence_unregistered`
+and recurred once per part until the registration became part of this
+acceptance check. `test_the_trait_conformance_diagnostic_suites_are_gated`
+pins the family. Use a reduced, self-contained `Strategy`/`Map` pair copied
+from the modular shape (the `map` default returns the partially-applied
+struct type):
 
 - the negative case raises `RuntimeError` containing
   `does not implement all requirements for 'Strategy'` and the
