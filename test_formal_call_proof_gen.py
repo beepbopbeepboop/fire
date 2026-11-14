@@ -3596,6 +3596,54 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
             "the set of step-table entries no word decodes to has changed; "
             "if one of them became reachable it needs a `_step_rhs` arm")
 
+    def test_the_scalar_double_class_is_modelled_not_merely_claimed(self):
+        """Entries 70-79 decode, and each names a `work_step_*` lemma.
+
+        That combination is the trap the census exists for: the decoder claimed
+        the word, the library lemma existed, and `_step_rhs` had no arm, so
+        `_step_result_plan` dropped the entry and the step-OK lemma either
+        disappeared or re-reduced `arm64_step`.  The total-over-the-table test
+        above catches the dropped entry; this one pins that the arm is the
+        model's own.  Each right-hand side has to name the IEEE-754 bits helper
+        (`faddBits`, `fcmp_nzcv`, …) and read/write the V/D bank through
+        `arm64_reg_d`/`arm64_set_reg_d`, because `_gen_step_result_lemmas`
+        closes by `exact`-ing `work_step_*` at this word — a plausible-looking
+        arm over GPRs would state the wrong machine and fail only in Lean.
+        """
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        expectations = {
+            70: ("work_step_fcmp", "fcmp_nzcv"),
+            71: ("work_step_fadd", "faddBits"),
+            72: ("work_step_fsub", "fsubBits"),
+            73: ("work_step_fmul", "fmulBits"),
+            74: ("work_step_fdiv", "fdivBits"),
+            75: ("work_step_fneg", "fnegBits"),
+            76: ("work_step_fmov_gpr_v", "arm64_set_reg_d"),
+            77: ("work_step_fmov_v_gpr", "arm64_reg_d"),
+            78: ("work_step_scvtf", "scvtfBits"),
+            79: ("work_step_fcvtzs", "fcvtzsBits"),
+        }
+        for j, (lemma, helper) in expectations.items():
+            with self.subTest(entry=j):
+                word = _STEP_ENTRY_WORD(G, j)
+                self.assertIsNotNone(word, f"entry {j} has no word to decode")
+                self.assertEqual(G._step_branch_index(word), j)
+                rhs = G._step_rhs(word, j)
+                self.assertIsNotNone(
+                    rhs, f"entry {j} decodes and names {lemma}, but has no "
+                         f"step right-hand side")
+                self.assertIn(helper, rhs,
+                              f"entry {j}'s right-hand side does not name "
+                              f"{helper}, so it is not the model's answer")
+                self.assertIsNotNone(G._step_rhs_generic(j),
+                                     f"entry {j}'s word-relative twin is missing")
+                sr = G._gen_step_result_lemmas(
+                    "syn", _struct.pack("<I", word), 0x1000)
+                self.assertIn(f"exact {lemma}", sr,
+                              f"entry {j}'s step-RESULT lemma does not close "
+                              f"with {lemma}")
+
     def test_the_fallback_covers_a_word_with_no_right_hand_side(self):
         """The guard is live code, exercised on a word with no right-hand side.
 
