@@ -239,7 +239,7 @@ def _lower_IntLiteral(gen, node) -> tuple[str, str]:
         gen._int_word_vals.add(_iv)
         return 'int', _iv
     t = gen._new_temp('int64_t')
-    gen._emit(f"  {t} = {_signed_int64_c_literal(value)};")
+    gen._copy(t, f"{_signed_int64_c_literal(value)}")
     gen._int_word_vals.add(t)
     return 'int64_t', t
 
@@ -1098,7 +1098,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             gen._cast_into(t, 'MojoGenerator *', vp)
         else:
             # Global is int64_t or same type as ctype — direct assignment is valid.
-            gen._emit(f'  {t} = {field_ref};')
+            gen._copy(f"{t}", field_ref)
         # The element kinds the global's last store recorded (see
         # _note_global_slot_kinds): carried onto this read's temp, which is what
         # the subscript and loop lowerings look up.
@@ -1986,7 +1986,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 # later string op / `==` on `t` isn't a bare integer compare.
                 gen._cast_into(f"{t}", ctype, field_ref)
             else:
-                gen._emit(f'  {t} = {field_ref};')
+                gen._copy(f"{t}", field_ref)
             return ctype, t
         # FALLBACK for a module whose globals struct was never registered in
         # `_module_globals` (an un-inlined stdlib marker like `os`/`sys`, where
@@ -2027,7 +2027,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 # later string op / `==` on `t` isn't a bare integer compare.
                 gen._cast_into(f"{t}", ctype, field_ref)
             else:
-                gen._emit(f'  {t} = {field_ref};')
+                gen._copy(f"{t}", field_ref)
             return ctype, t
 
         # __mlir_attr.`literal` — a typed MLIR attribute used as a value
@@ -2703,10 +2703,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _bb_h = gen._new_bb(); _bb_m = gen._new_bb(); _bb_e = gen._new_bb()
             gen._cond_goto(_hit, _bb_h, _bb_m)
             gen._emit_label(_bb_h)
-            gen._emit(f"  {t} = {_r};")
+            gen._copy(f"{t}", _r)
             gen._goto(_bb_e)
             gen._emit_label(_bb_m)
-            gen._emit(f"  {t} = {ov};")
+            gen._copy(f"{t}", f"{ov}")
             gen._goto(_bb_e)
             gen._emit_label(_bb_e)
             gen._dyn_word_vals.add(t)
@@ -2715,7 +2715,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             t = gen._new_temp('int64_t')
             if ot == 'void *':
                 vt = gen._cast('int64_t', f"{ov}")
-                gen._emit(f"  {t} = {vt};")
+                gen._copy(f"{t}", f"{vt}")
             else:
                 gen._cast_into(f"{t}", 'int64_t', f"{ov}")
             return 'int64_t', t
@@ -3579,7 +3579,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             gen._restore_isinstance_narrowings(_and_narrowed)
         if _bool_merge:
             _rb = gen._ensure_bool_cond(rtype, rval)
-            gen._emit(f"  {result} = {_rb};")
+            gen._copy(result, f"{_rb}")
         else:
             gen._safe_coerce_emit(rtype, res_type, rval, result)
         # A word result either of whose operands is a word of unknown kind is
@@ -5037,7 +5037,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             # gate step reports (checked_run's "self-host compile/link
             # regressed").
             _ans = 1 if op == '==' else 0
-            gen._emit(f'  {_t} = {_ans};')
+            gen._copy(_t, f"{_ans}")
             return '_Bool', _t
         if _ptr_ty == 'char *':
             # Same shape as the `is`/`is not` pointer-identity case below
@@ -5079,7 +5079,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 # Named local, not an in-f-string conditional — see the
                 # identical arm above for why.
                 _ans = 1 if op == '!=' else 0
-                gen._emit(f'  {_t} = {_ans};')
+                gen._copy(_t, f"{_ans}")
                 return '_Bool', _t
 
     # `==`/`!=` between two WORDS, at least one of unknown kind (an untyped
@@ -5116,7 +5116,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 # where `cwd = int_dirname(...)`).
                 _v = _as_str(var)
                 if typ == 'char *':
-                    t2 = gen._new_temp('char *'); gen._emit(f'  {t2} = {_v};'); return t2
+                    t2 = gen._new_temp('char *'); gen._copy(t2, _v); return t2
                 # A raw single character (real C 'char', or an 'int'/'int64_t'
                 # holding a small ASCII code with no tracked pointer identity)
                 # is a distinct representation from a char*-boxed-as-int64_t

@@ -63,6 +63,12 @@ def arg_needs_repr_cast(param: str, declared: str) -> bool:
     dc = _SCALAR_CLASS.get(declared)
     if pc is None or dc is None:
         return False
+    if pc == 'bool':
+        # Never convert TO `_Bool` by a cast: in C `(_Bool) 2` is 1, but GCC
+        # reads a GIMPLE cast by the left side's type and a conversion to a
+        # 1-bit type keeps the low bit, so `(_Bool) 2` would be 0.  Truthiness
+        # is a comparison (`x != 0`), and that is the caller's to emit.
+        return False
     if pc == 'int' and dc == 'bool':
         # A `_Bool` variable holds 0 or 1 in a full register, so passing it
         # to an integer parameter is already the right bits.  Left alone on
@@ -85,3 +91,19 @@ def arg_needs_word_cast(param: str, declared: str) -> bool:
     if param == 'int64_t' and declared.endswith('*'):
         return True
     return False
+
+
+def copy_needs_cast(dst: str, src: str) -> bool:
+    """Must `dst_var = src_var;` be written `dst_var = (dst) src_var;`, given
+    the two variables' declared types?
+
+    GCC's GIMPLE verifier rejects a copy between two scalars of different
+    class or width ("non-trivial conversion"), and between an integer and a
+    pointer.  A `_Bool` into an integer needs the cast here (unlike a call
+    argument, a copy IS verified).  Nothing is ever cast to `_Bool`; see
+    `arg_needs_repr_cast`."""
+    if dst == src:
+        return False
+    if arg_needs_repr_cast(dst, src) or arg_needs_word_cast(dst, src):
+        return True
+    return _SCALAR_CLASS.get(dst) == 'int' and _SCALAR_CLASS.get(src) == 'bool'

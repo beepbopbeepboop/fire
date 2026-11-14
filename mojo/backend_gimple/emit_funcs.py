@@ -442,7 +442,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                 vp = gen._cast('void *', raw_ptr)
                 gen._cast_into(f"{gen._cname(symbol_name)}", 'int64_t', vp)
             else:
-                gen._emit(f"  {gen._cname(symbol_name)} = {_gv_field};")
+                gen._copy(f"{gen._cname(symbol_name)}", _gv_field)
             continue
         # BUG-2026-021: resolve the name for real when the module is
         # resolvable — a function-scoped `from sibling import f` used to fall

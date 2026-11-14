@@ -306,7 +306,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
             and itc.iter_name_escapes_into_call(gen._cur_func_body, name)):
         _liw = gen._call_expr('int64_t', 'mojo_listiter_new', [(at, av)])
         gen._declare_var(name, 'int64_t')
-        gen._emit(f"  {gen._write_dest(name)} = {_liw};")
+        gen._copy(f"{gen._write_dest(name)}", _liw)
         gen._dyn_word_locals.add(name)
         return True
     if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):
@@ -328,7 +328,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     elem = gen._elem_of(av)
     if not _rebind:
         gen._declare_var(name, at)
-    gen._emit(f"  {gen._write_dest(name)} = {av};")
+    gen._copy(f"{gen._write_dest(name)}", av)
     cname = gen._cname(name)
     cur = gen._new_temp('int64_t')
     gen._emit(f"  {cur} = (int64_t)0;")
@@ -2466,7 +2466,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     _some_t = gen._new_val('_Bool', _some)
                 else:
                     _some_t = gen._new_temp('_Bool')
-                    gen._emit(f'  {_some_t} = {_some};')
+                    gen._copy(_some_t, f"{_some}")
                 gen._emit(f'  {ov}{op}{_sf}_is_some = {_some_t};')
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the
@@ -2851,11 +2851,11 @@ def _gen_stmt_AssignStmt(gen, node):
                         # lane, so assign the slot instead of emitting
                         # `scalar[i] = x`, which gcc rejects.
                         if vtype == ot:
-                            gen._emit(f"  {obj_v} = {v};")
+                            gen._copy(f"{obj_v}", f"{v}")
                         else:
                             _wv = gen._new_temp(ot)
                             gen._safe_coerce_emit(vtype, ot, v, _wv)
-                            gen._emit(f"  {obj_v} = {_wv};")
+                            gen._copy(f"{obj_v}", _wv)
                     else:
                         gen._emit(f"  {obj_v}[{idx_v}] = {v};")
     elif isinstance(node.target, gimple_ctypes.SliceExpr):
@@ -4201,9 +4201,9 @@ def _gen_stmt_IfStmt(gen, node):
                         except Exception:
                             bname_c = bname
                         try:
-                            gen._emit(f"  {bname_c} = {bev};")
+                            gen._copy(f"{bname_c}", bev)
                         except Exception:
-                            gen._emit(f"  {bname} = {bev};")
+                            gen._copy(f"{bname}", bev)
                     except Exception:
                         try:
                             gen._declare_var(bname, 'int64_t')
@@ -4213,9 +4213,9 @@ def _gen_stmt_IfStmt(gen, node):
                             except Exception:
                                 bname_c = bname
                             try:
-                                gen._emit(f"  {bname_c} = {ev};")
+                                gen._copy(f"{bname_c}", f"{ev}")
                             except Exception:
-                                gen._emit(f"  {bname} = {ev};")
+                                gen._copy(f"{bname}", f"{ev}")
                         except Exception:
                             pass
             except Exception:
@@ -4299,7 +4299,7 @@ def _gen_stmt_IfStmt(gen, node):
                                     gen._track_pointer_actual_type(bname, btype, bev, btype)
                                 except Exception:
                                     pass
-                                gen._emit(f"  {bname} = {bev};")
+                                gen._copy(f"{bname}", bev)
                             except Exception:
                                 try:
                                     try:
@@ -4312,9 +4312,9 @@ def _gen_stmt_IfStmt(gen, node):
                                     except Exception:
                                         bname_c = bname
                                     try:
-                                        gen._emit(f"  {bname_c} = {ev};")
+                                        gen._copy(f"{bname_c}", f"{ev}")
                                     except Exception:
-                                        gen._emit(f"  {bname} = {ev};")
+                                        gen._copy(f"{bname}", f"{ev}")
                                 except Exception:
                                     pass
                     except Exception:
@@ -4571,7 +4571,7 @@ def _gen_stmt_StructDef(gen, node):
                     _box_expr = (getattr(gen, '_gimple_mut_ptr', None)
                                  or {}).get(_src_name) or ''
             if _box_expr != '':
-                gen._emit(f"  {cattrs[aname]} = {_box_expr};")
+                gen._copy(f"{cattrs[aname]}", f"{_box_expr}")
                 continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so
@@ -4587,7 +4587,7 @@ def _gen_stmt_StructDef(gen, node):
                 gen._elaborated_externs.append(_cell_hd)
                 gen._elaborated_externs.append('')
             gen._emit(f'  {_cp} = {_cell_h} ();')
-            gen._emit(f'  {cattrs[aname]} = {_cp};')
+            gen._copy(f"{cattrs[aname]}", _cp)
         gen._gen_stmt_AssignStmt(gimple_ctypes.AssignStmt(
             target=gimple_ctypes.MemberExpr(
                 obj=gimple_ctypes.IdentExpr(name=node.name, line=node.line),
@@ -5149,7 +5149,7 @@ def _gen_stmt_MatchStmt(gen, node):
                 # Unbound bare name: assign subject to it, then this arm always
                 # runs (the pattern list stops here). The formal emitter's
                 # _lower_one_case has already bound this name in its local set.
-                gen._emit(f"  {pattern.name} = {subj_v};")
+                gen._copy(f"{pattern.name}", subj_v)
                 gen._goto(f"{arm_bb}")
                 break
             else:
@@ -5451,11 +5451,11 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 # instead of emitting `scalar[i] = x`, which gcc rejects with
                 # "subscripted value is neither array nor pointer nor vector".
                 if vtype == ot:
-                    gen._emit(f"  {obj_v} = {v};")
+                    gen._copy(obj_v, v)
                 else:
                     _wv = gen._new_temp(ot)
                     gen._safe_coerce_emit(vtype, ot, v, _wv)
-                    gen._emit(f"  {obj_v} = {_wv};")
+                    gen._copy(obj_v, _wv)
             elif not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                 gen._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:

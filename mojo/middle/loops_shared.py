@@ -283,7 +283,7 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
     gen._rt_into(_lst, 'mojo_list_new', [])
-    gen._emit(f"  {_dst} = {_lst};")
+    gen._copy(f"{_dst}", _lst)
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
     gen._goto(_cond)
@@ -302,7 +302,7 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
         gen._void_call('mojo_list_append_int', [('MojoList *', _dst), ('int64_t', _rd)])
     _one = gen._new_val('int64_t', "1LL")
     _nxt = gen._new_val('int64_t', f"{_i} + {_one}")
-    gen._emit(f"  {_i} = {_nxt};")
+    gen._copy(_i, _nxt)
     gen._goto(_cond)
     gen._emit_label(_after)
 
@@ -330,7 +330,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
     gen._rt_into(_lst, 'mojo_list_new', [])
-    gen._emit(f"  {_dst} = {_lst};")
+    gen._copy(f"{_dst}", _lst)
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', _dst), ('char *', _as_str(value))])
@@ -405,7 +405,7 @@ def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
     gen._rt_into(_lst, 'mojo_list_new', [])
-    gen._emit(f"  {_dst} = {_lst};")
+    gen._copy(f"{_dst}", _lst)
     _src = gen._cast('char *', _as_str(cstr))
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
@@ -420,7 +420,7 @@ def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None
     _chr = gen._rt_call('char *', 'mojo_cstr_slice', [_as_str(_src), _i, _as_str(_stop)])
     gen._void_call('mojo_list_append_str',
                    [('MojoList *', _dst), ('char *', _as_str(_chr))])
-    gen._emit(f"  {_i} = {_next};")
+    gen._copy(_i, _next)
     gen._goto(_cond)
     gen._emit_label(_after)
 

@@ -2860,7 +2860,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             ip3 = gen._new_temp('int64_t')
             pp = gen._new_temp(ptype)
             aval_local = gen._ensure_local('int64_t', aval)
-            gen._emit(f'  {ip3} = {aval_local};')
+            gen._copy(ip3, aval_local)
             gen._cast_into(pp, ptype, ip3)
             coerced_args.append(pp)
         elif ptype == 'void *' and actual_atype in ('int', 'int64_t', '_Bool'):
@@ -2870,7 +2870,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 # GIMPLE: can't cast a global int64_t to int64_t (redundant cast fails)
                 # Just load the value into a local temp directly
                 aval_local = gen._ensure_local('int64_t', aval)
-                gen._emit(f'  {ip} = {aval_local};')
+                gen._copy(f"{ip}", aval_local)
             else:
                 gen._cast_into(ip, 'int64_t', f"{aval}")
             gen._cast_into(vp, 'void *', ip)
@@ -3082,7 +3082,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 if actual_atype == 'int64_t' or atype == 'int64_t':
                     # GIMPLE: can't redundantly cast int64_t to int64_t when source is global
                     aval_local = gen._ensure_local('int64_t', aval)
-                    gen._emit(f'  {ip3} = {aval_local};')
+                    gen._copy(ip3, aval_local)
                 else:
                     gen._cast_into(ip3, 'int64_t', f"{aval}")
                 gen._cast_into(pp, ptype, ip3)
@@ -5180,7 +5180,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # iteration, and the loop would never terminate.
         one = gen._new_val('int64_t', '(int64_t)1')
         nidx = gen._new_val('int64_t', f'{idx} + {one}')
-        gen._emit(f"  {idx} = {nidx};")
+        gen._copy(idx, nidx)
         gen._goto(bb_cond)
         gen._emit_label(bb_after)
         # Bytes elements are always ints — record it so a consumer that
@@ -5203,7 +5203,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit_label(bb_dict)
         _dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
         _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', _dp)])
-        gen._emit(f"  {result} = {_dk};")
+        gen._copy(result, _dk)
         # Per-slot runtime typing: dict keys are all char*. The kind byte
         # marks every slot as 'p' (str) so mojo_list_get_boxed answers
         # correctly; the _maybe_kinds_vals marker tells loop/accessor
@@ -5236,7 +5236,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit_label(bb_set)
         _sp = gen._coerce_to_type('int64_t', 'MojoSet *', it64)
         _sl = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', _sp)])
-        gen._emit(f"  {result} = {_sl};")
+        gen._copy(result, _sl)
         gen._maybe_kinds_vals.add(str(result))
         gen._goto(bb_after)
         gen._emit_label(bb_not_set)
@@ -5252,7 +5252,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._cond_goto(isl, bb_list, bb_none)
         gen._emit_label(bb_list)
         _lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
-        gen._emit(f"  {result} = {_lp};")
+        gen._copy(result, _lp)
         gen._maybe_kinds_vals.add(str(result))
         gen._goto(bb_after)
         gen._emit_label(bb_none)
@@ -5270,7 +5270,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # absent are in `mojo_iter_boxed_list`'s definition.
         _ne = gen._call_expr('MojoList *', 'mojo_iter_boxed_list',
                              [('int64_t', it64)])
-        gen._emit(f"  {result} = {_ne};")
+        gen._copy(result, _ne)
         gen._maybe_kinds_vals.add(str(result))
         gen._emit_label(bb_after)
         return result
@@ -6333,7 +6333,7 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
     # Tools/scripts/summarize_stats.py's `{...: v for (index, v) in
     # enumerate(...)}` inside OpcodeStats.get_specialization_failure_kinds).
     tgt_c = gen._cname(gen0.target)
-    gen._emit(f"  {tgt_c} = {start_v};")
+    gen._copy(f"{tgt_c}", f"{start_v}")
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._goto(bb_cond)
@@ -6362,7 +6362,7 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
     # Found via pathlib/__init__.py's `tuple(self[i] for i in
     # range(*idx.indices(len(self))))`.
     st = gen._new_val('int64_t', f"{tgt_c} + {step_v}")
-    gen._emit(f"  {tgt_c} = {st};")
+    gen._copy(f"{tgt_c}", st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
     # The comprehension is over: the enclosing function's own binding for this
@@ -6418,7 +6418,7 @@ def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     # which `_compr_list_loop`'s own tuple arm records.
     one64 = gen._new_val('int64_t', "1LL")
     st = gen._new_val('int64_t', f"{rec_cur} + {one64}")
-    gen._emit(f"  {rec_cur} = {st};")
+    gen._copy(f"{rec_cur}", st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
     _restore_binding(gen, _as_str(gen0.target), saved_target)
@@ -6565,15 +6565,15 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
             if suf == 'str':
                 sub_str = gen._rt_call('char *', 'mojo_list_get_str', [_p, f"{i}"])
                 if vt == 'char *':
-                    gen._emit(f"  {cv} = {sub_str};")
+                    gen._copy(f"{cv}", sub_str)
                 else:
                     sub_val = gen._cast('int64_t', sub_str)
-                    gen._emit(f"  {cv} = {sub_val};")
+                    gen._copy(f"{cv}", f"{sub_val}")
                     gen._actual_types[vn] = 'char *'
             else:
                 raw = gen._rt_call('int64_t', 'mojo_list_get_int', [_p, f"{i}"])
                 if vt == 'int64_t':
-                    gen._emit(f"  {cv} = {raw};")
+                    gen._copy(f"{cv}", raw)
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cv)
 
@@ -6610,7 +6610,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
 # width-correct int64_t literal and needs no cast.
         one64 = gen._new_val('int64_t', "1LL")
         st = gen._new_val('int64_t', f"{idx64} + {one64}")
-        gen._emit(f"  {idx64} = {st};")
+        gen._copy(idx64, st)
         gen._goto(bb_cond)
         gen._emit_label(bb_after)
         for _sn, _st in saved_slots:
@@ -6676,11 +6676,11 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         temp_str = gen._rt_call('char *', 'mojo_list_get_str', [_iv, idx64])
         target_type = gen._type_of(_as_str(gen0.target))
         if target_type == 'char *':
-            gen._emit(f"  {_tgt} = {temp_str};")
+            gen._copy(f"{_tgt}", temp_str)
         else:
             # Cast to int64_t if target is opaque
             int_ptr = gen._cast('int64_t', temp_str)
-            gen._emit(f"  {_tgt} = {int_ptr};")
+            gen._copy(f"{_tgt}", f"{int_ptr}")
     else:
         raw64 = gen._rt_call('int64_t', 'mojo_list_get_int', [_iv, idx64])
         # The loop variable may have been first declared elsewhere in this
@@ -6702,7 +6702,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
-    gen._emit(f"  {idx64} = {st};")
+    gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
     # The comprehension is over: the enclosing function's own binding for this
@@ -6802,7 +6802,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
         # _cname, not the raw Python name: see _compr_range_loop's
         # reserved-identifier comment (`index` et al. are renamed by
         # _declare_var; body reads resolve through _c_names).
-        gen._emit(f"  {gen._cname(_tgt)} = {val};")
+        gen._copy(f"{gen._cname(_tgt)}", val)
         if api.get('mixed_slots') and vct == 'int64_t':
             gen._boxed_vals.add(gen._cname(_tgt))
             if not hasattr(gen, '_tagged_gen_vals'):
@@ -6852,7 +6852,7 @@ def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     if vt in ('int64_t', 'int', 'int32_t'):
         vp = gen._cast('void *', key_tmp)
         box = gen._cast('int64_t', vp)
-        gen._emit(f"  {tgt_c} = {box};")
+        gen._copy(f"{tgt_c}", f"{box}")
     else:
         gen._emit(f"  {tgt_c} = (char *) {key_tmp};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
@@ -7731,14 +7731,14 @@ def _repr_boxed_container(gen, value: str):
     _lp = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
     _fn, _fargs = gen._list_repr_call(value, _lp)
     _lv = gen._call_expr('char *', _fn, _fargs)
-    gen._emit(f'  {_res} = {_lv};')
+    gen._copy(_res, _lv)
     gen._goto(bb_after)
     gen._emit_label(bb_not_list)
     ibs = gen._call_expr('int', 'mojo_boxed_is_str', [('int64_t', _it64)])
     gen._cond_goto(ibs, bb_str, bb_not_str)
     gen._emit_label(bb_str)
     _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
-    gen._emit(f'  {_res} = {_sp2};')
+    gen._copy(_res, _sp2)
     gen._goto(bb_after)
     gen._emit_label(bb_not_str)
     # Every other word: a float/bool/None box renders by its own kind, a bare
@@ -8362,24 +8362,24 @@ def _gen_print(gen, args: list, kwargs: list = None):
             _dp = gen._new_val('double', f"mojo_tagged_double ((int64_t){box}, {pos})")
             gen._cond_goto(f"{_tag} == 1", bb_str, bb_chk3)
             gen._emit_label(bb_str)
-            gen._emit(f'  {_res} = {_sp};')
+            gen._copy(_res, _sp)
             gen._goto(bb_done)
             gen._emit_label(bb_chk3)
             gen._cond_goto(f"{_tag} == 3", bb_list, bb_chk2)
             gen._emit_label(bb_list)
             _lrfn, _lrargs = gen._list_repr_call(_lp)
             _lrepr = gen._call_expr('char *', _lrfn, _lrargs)
-            gen._emit(f'  {_res} = {_lrepr};')
+            gen._copy(_res, _lrepr)
             gen._goto(bb_done)
             gen._emit_label(bb_chk2)
             gen._cond_goto(f"{_tag} == 2", bb_dbl, bb_int)
             gen._emit_label(bb_dbl)
             _sd = _sprintf_one(gen, '%g', _dp)
-            gen._emit(f'  {_res} = {_sd};')
+            gen._copy(_res, f"{_sd}")
             gen._goto(bb_done)
             gen._emit_label(bb_int)
             _s = _sprintf_one(gen, '%ld', aval)
-            gen._emit(f'  {_res} = {_s};')
+            gen._copy(_res, f"{_s}")
             gen._emit_label(bb_done)
             resolved_parts.append(('char *', _res))
             continue
@@ -8460,12 +8460,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     gen._emit_label(bb_some)
                     _some_lit = gen._intern_string('Optional(Some)')
                     _some_t = gen._new_val('char *', _some_lit)
-                    gen._emit(f'  {_res} = {_some_t};')
+                    gen._copy(_res, _some_t)
                     gen._goto(bb_done)
                     gen._emit_label(bb_none)
                     _none_lit = gen._intern_string('Optional(None)')
                     _none_t = gen._new_val('char *', _none_lit)
-                    gen._emit(f'  {_res} = {_none_t};')
+                    gen._copy(_res, _none_t)
                     gen._emit_label(bb_done)
                     resolved_parts.append(('char *', _res))
                     continue

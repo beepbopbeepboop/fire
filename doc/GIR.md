@@ -166,6 +166,10 @@ that is meant to be behaviour-preserving:
   `TEXT_CF_BASELINE`). They still emit text that `_emit_through` and
   `_emit_raw` pattern-match; stage 3 moves that matching INTO these four
   functions and deletes it from the emitter.
+- **Stage 2a, copies (landed 2026-11-13).** `gen._copy(dst, src)` is the
+  only spelling of `dst = src;` (183 sites). It reads both variables'
+  declared types and writes the conversion out when their representations
+  differ, so a caller cannot emit a "non-trivial conversion" copy.
 - **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
   `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
   `label`. Each returns a typed value and appends an `Instr`.

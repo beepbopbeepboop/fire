@@ -381,7 +381,7 @@ def _cattr_restore_emit(gen, pairs=None) -> None:
     if pairs is None:
         pairs = gen._cattr_restores
     for _i in range(len(pairs)):
-        gen._emit(f'  {pairs[_i][0]} = {pairs[_i][1]};')
+        gen._copy(f"{pairs[_i][0]}", f"{pairs[_i][1]}")
 
 
 def _frame_enter(gen, node) -> None:
@@ -516,7 +516,7 @@ def _cattr_instance_dyn_read(gen, ov, ot, aname, gname, gtype):
     gen._goto(_bb_e)
     gen._emit_label(_bb_m)
     _fb = _cattr_instance_read(gen, ov, ot, aname, gname, gtype)
-    gen._emit(f"  {t} = {_fb};")
+    gen._copy(t, f"{_fb}")
     gen._goto(_bb_e)
     gen._emit_label(_bb_e)
     return gtype, t
@@ -2272,7 +2272,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit(f"  __mojo_gen_destroy ({raw_h});")
             one64 = gen._new_val('int64_t', "(int64_t)1")
             nxt = gen._new_val('int64_t', f"{idx64} + {one64}")
-            gen._emit(f"  {idx64} = {nxt};")
+            gen._copy(idx64, nxt)
             gen._goto(bb_cond)
             gen._emit_label(bb_after)
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
@@ -2307,7 +2307,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit_label(bb_post)
             one64 = gen._new_val('int64_t', "(int64_t)1")
             nxt = gen._new_val('int64_t', f"{idx64} + {one64}")
-            gen._emit(f"  {idx64} = {nxt};")
+            gen._copy(idx64, nxt)
             gen._goto(bb_cond)
             gen._emit_label(bb_after)
         return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
@@ -2844,7 +2844,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                 _jcat = gen._call_expr(
                                     'MojoList *', 'mojo_list_concat',
                                     [('MojoList *', _jl), ('MojoList *', _jav)])
-                                gen._emit(f'  {_jl} = {_jcat};')
+                                gen._copy(_jl, _jcat)
                                 continue
                             _javs = _jav if _jat == 'char *' else gen._stringify_value(_jat, _jav)
                             gen._emit_call('void', '', 'mojo_list_append_str',
@@ -4703,7 +4703,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _tw = gen._new_temp('int64_t')
         _twl = gen._ensure_local(ot, ov)
         if ot == 'int64_t':
-            gen._emit(f"  {_tw} = {_twl};")
+            gen._copy(_tw, _twl)
         else:
             gen._cast_into(_tw, 'int64_t', _twl)
         # List-only names: the only container kind that has them here is a
@@ -4731,12 +4731,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _lp = gen._call_expr('MojoList *', 'mojo_word_as_list',
                                  [('int64_t', _tw)])
             _lt, _lv = gen._lower_list_method(_lp, method, node.args)
-            gen._emit(f"  {_tw_res} = {_lv};")
+            gen._copy(_tw_res, f"{_lv}")
             gen._goto(_bb_after)
             gen._emit_label(_bb_str)
             _tx = gen._call_expr('char *', 'mojo_word_as_text', [('int64_t', _tw)])
             _st, _sv = gen._lower_str_method(_tx, method, node.args)
-            gen._emit(f"  {_tw_res} = {_sv};")
+            gen._copy(_tw_res, f"{_sv}")
             gen._emit_label(_bb_after)
             return 'int64_t', _tw_res
         # str-only names: unbox the kind-'p' text pointer (or a bare string)
@@ -4769,7 +4769,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
         if ot == 'int64_t':
-            gen._emit(f"  {ip} = {ov_local};")
+            gen._copy(ip, f"{ov_local}")
         else:
             gen._cast_into(ip, 'int64_t', ov_local)
         result = gen._new_temp('int')
@@ -4842,7 +4842,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
         if ot == 'int64_t':
-            gen._emit(f"  {ip} = {ov_local};")
+            gen._copy(ip, f"{ov_local}")
         else:
             gen._cast_into(ip, 'int64_t', ov_local)
         other_type, other_val = gen.lower_expr(node.args[0])
@@ -4867,7 +4867,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gen._rt_void('mojo_set_add_int', [sp, _elv])
             _one = gen._new_val('int64_t', "(int64_t)1")
             _nxt = gen._new_val('int64_t', f"{_idx} + {_one}")
-            gen._emit(f"  {_idx} = {_nxt};")
+            gen._copy(_idx, _nxt)
             gen._goto(bb_cond)
             gen._emit_label(bb_loop_after)
 
@@ -4931,7 +4931,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
         if ot == 'int64_t':
-            gen._emit(f"  {ip} = {ov_local};")  # same type, no cast
+            gen._copy(ip, f"{ov_local}")  # same type, no cast
         else:
             gen._cast_into(ip, 'int64_t', ov_local)
         # `setdefault` exists on dict alone. Through the generic boxed-receiver
@@ -4988,7 +4988,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and not (getattr(node, 'kwargs', None) or [])
             and gimple_exprtypes._struct_name_of(ot) not in (gen.struct_field_types or {})):
         t = gen._new_temp(ot)
-        gen._emit(f'  {t} = {ov};')
+        gen._copy(f"{t}", f"{ov}")
         return ot, t
     _RAW_PTR_METHODS = frozenset({
         'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
@@ -5288,7 +5288,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit(f"  {t} = {ov_local} {op} {av_local};")
             return '_Bool', t
         if method in ('cast', '__cast__', '__int__', '__index__', 'value', 'cast_value'):
-            t = gen._new_temp(ot); gen._emit(f"  {t} = {ov_local};"); return ot, t
+            t = gen._new_temp(ot); gen._copy(f"{t}", f"{ov_local}"); return ot, t
         if method == 'select' and len(node.args) >= 2:
             # Bool.select(true_val, false_val) — ternary. GIMPLE COND_EXPR
             # requires both branches and the result to share one type, so
@@ -5334,14 +5334,14 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             if re.match(r'^[A-Za-z_]\w*$', _as_str(_ut_var)):
                 _ut_lv = f'{_ut_var}->{gimple_ctypes._c_id(_ut_field)}'
                 t = gen._new_temp(ot)
-                gen._emit(f'  {t} = {_ut_lv};')
+                gen._copy(f"{t}", _ut_lv)
                 # GIMPLE wants the zero in a register first (a bare `0` is
                 # "non-trivial conversion in 'integer_cst'" and an inline
                 # cast store is "non-register as LHS of unary operation" —
                 # the same two-step temp pattern the loop emitters use).
                 z = gen._new_temp(ot)
                 gen._emit(f'  {z} = ({ot})0;')
-                gen._emit(f'  {_ut_lv} = {z};')
+                gen._copy(_ut_lv, z)
                 # PART 6 (2026-10-22, family C): the consume clears the
                 # field, so a TAGGED-Optional field's side-band must clear
                 # with it — the plain-AssignStmt writer hook in
@@ -5815,7 +5815,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and method not in gen._struct_method_names.get(_recv_struct, ())
             and _gmm_sms_key(_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
         t = gen._new_temp(ot)
-        gen._emit(f'  {t} = {ov};')
+        gen._copy(f"{t}", f"{ov}")
         return ot, t
     if (_recv_struct is not None and _recv_struct in gen.struct_field_types
             and method in gen.struct_field_types[_recv_struct]
@@ -6139,10 +6139,10 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             bb_done = gen._new_bb()
             gen._cond_goto(f"{cond}", bb_true, bb_false)
             gen._emit_label(bb_true)
-            gen._emit(f"  {t} = {raw_r};")
+            gen._copy(f"{t}", f"{raw_r}")
             gen._goto(bb_done)
             gen._emit_label(bb_false)
-            gen._emit(f"  {t} = {default_r};")
+            gen._copy(f"{t}", f"{default_r}")
             gen._emit_label(bb_done)
             if _container_vt:
                 _nd = gen._dict_nested_val_types.get(ov)
@@ -6793,7 +6793,7 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
             gen._rt_void('mojo_set_add_int', [ov, _elv])
         _one = gen._new_val('int64_t', "(int64_t)1")
         _nxt = gen._new_val('int64_t', f"{_idx} + {_one}")
-        gen._emit(f"  {_idx} = {_nxt};")
+        gen._copy(_idx, _nxt)
         gen._goto(bb_cond)
         gen._emit_label(bb_after)
         return 'int', gen._new_val('int', '0')

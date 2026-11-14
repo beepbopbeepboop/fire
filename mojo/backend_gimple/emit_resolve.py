@@ -45,6 +45,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
+import mojo.middle.rt_call as rt_call
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
@@ -2214,7 +2215,7 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
         else:
             gen._cast_into(t, ctype, rhs)
     else:
-        gen._emit(f'  {t} = {rhs};')
+        gen._copy(t, rhs)
     return t
 
 
@@ -2406,6 +2407,28 @@ def _cast_into(gen, dst: str, ctype: str, val: str) -> None:
     gen._emit('  ' + _as_str(dst) + ' = (' + _as_str(ctype) + ')' + _as_str(val) + ';')
 
 
+def _copy(gen, dst: str, src: str) -> None:
+    """`dst = src;` -- THE way to assign one value to another.
+
+    `dst` is a temp, a local, or an lvalue (`p->f`, `_root_globals.x`); `src`
+    is a temp, a local, or literal text.
+
+    When both are declared variables whose types differ in representation
+    (`int` vs `int64_t`, a pointer vs the `int64_t` it travels as), the
+    conversion is written out: `dst = (T) src;`.  A caller does not have to
+    know the two types to get a statement GCC's verifier accepts."""
+    dst = _as_str(dst)
+    src = _as_str(src)
+    dt = gen.var_types.get(dst)
+    st = gen.var_types.get(src)
+    if dt is not None and st is not None:
+        dts: str = _as_str(dt)
+        if rt_call.copy_needs_cast(dts, _as_str(st)):
+            gen._emit('  ' + dst + ' = (' + dts + ')' + src + ';')
+            return
+    gen._emit('  ' + dst + ' = ' + src + ';')
+
+
 def _goto(gen, label: str) -> None:
     """`goto label;` -- THE way to emit an unconditional jump."""
     gen._emit('  goto ' + _as_str(label) + ';')
@@ -2542,7 +2565,7 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     if needs_temp:
         t = gen._new_temp(dst)
         _sce_simple_emit(gen, t, val, src, dst)
-        gen._emit(f'  {lhs} = {t};')
+        gen._copy(lhs, t)
     else:
         _sce_simple_emit(gen, lhs, val, src, dst)
 
@@ -2630,7 +2653,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             elif d == '_Bool':
                 gen._cast_into(dest, '_Bool', f"{v}")
             else:
-                gen._emit(f'  {dest} = {v};')
+                gen._copy(dest, f"{v}")
             return
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
         if s == d:
@@ -2647,7 +2670,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 if declared is not None and declared != s and s in gimple_ctypes._SCALAR_INT_TYPES:
                     gen._cast_into(dest, s, f"{v}")
                 else:
-                    gen._emit(f'  {dest} = {v};')
+                    gen._copy(dest, f"{v}")
         elif s.endswith(' *') and d in ('int', 'int64_t'):
             # Load global into local before casting (GIMPLE restriction)
             v = gen._ensure_local(s, v)
@@ -2657,7 +2680,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 v = vp
             ip = gen._cast('int64_t', f"{v}")
             if d == 'int64_t':
-                gen._emit(f'  {dest} = {ip};')
+                gen._copy(dest, f"{ip}")
             else:
                 gen._cast_into(dest, 'int', ip)
         elif d == 'char *' and s == 'char':
@@ -2680,7 +2703,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # non-empty `prev`).
             v = gen._ensure_local(s, v)
             sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', v)])
-            gen._emit(f'  {dest} = {sv};')
+            gen._copy(dest, sv)
         elif d.endswith(' *') and s in ('int', 'int64_t', 'char'):
             # 'char' here too: a narrower-than-pointer scalar (e.g. a
             # single dereferenced byte from an unresolved generic
@@ -4015,9 +4038,9 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     gen._emit_label(bb_body)
     if start_val is not None:
         disp_idx = gen._new_val('int64_t', f"{idx64} + {start_val}")
-        gen._emit(f"  {idx_c} = {disp_idx};")
+        gen._copy(f"{idx_c}", disp_idx)
     else:
-        gen._emit(f"  {idx_c} = {idx64};")
+        gen._copy(f"{idx_c}", idx64)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     # An element whose kind nothing recorded is a word of unknown kind (see
     # `_dyn_word_locals`), exactly as in the `for` statement's enumerate.
@@ -4029,10 +4052,10 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
         temp_str = gen._rt_call('char *', 'mojo_list_get_str', [it_val, idx64])
         target_type = gen._type_of(val_var)
         if target_type == 'char *':
-            gen._emit(f"  {val_c} = {temp_str};")
+            gen._copy(f"{val_c}", temp_str)
         else:
             int_ptr = gen._cast('int64_t', temp_str)
-            gen._emit(f"  {val_c} = {int_ptr};")
+            gen._copy(f"{val_c}", f"{int_ptr}")
     else:
         raw64 = gen._rt_call('int64_t', 'mojo_list_get_int', [it_val, idx64])
         target_type = gen._type_of(val_var)
@@ -4056,15 +4079,15 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
             if _pair_suf == 'str':
                 _sv = gen._rt_call('char *', 'mojo_list_get_str', [_pair_ptr, f"{_vi}"])
                 if _vt == 'char *':
-                    gen._emit(f"  {_vc} = {_sv};")
+                    gen._copy(f"{_vc}", _sv)
                 else:
                     _bv = gen._cast('int64_t', _sv)
-                    gen._emit(f"  {_vc} = {_bv};")
+                    gen._copy(f"{_vc}", f"{_bv}")
                     gen._actual_types[_vn] = 'char *'
             else:
                 _iv = gen._rt_call('int64_t', 'mojo_list_get_int', [_pair_ptr, f"{_vi}"])
                 if _vt == 'int64_t':
-                    gen._emit(f"  {_vc} = {_iv};")
+                    gen._copy(f"{_vc}", _iv)
                 else:
                     gen._safe_coerce_emit('int64_t', _vt, _iv, _vc)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
@@ -4072,7 +4095,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
-    gen._emit(f"  {idx64} = {st};")
+    gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
     # The comprehension is over: every name it bound is the enclosing
@@ -4099,7 +4122,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
-    gen._emit(f"  {idx64} = {st};")
+    gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
     ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
@@ -4153,7 +4176,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
-    gen._emit(f"  {idx64} = {st};")
+    gen._copy(idx64, st)
     gen._goto(bb_cond)
     gen._emit_label(bb_after)
     ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
