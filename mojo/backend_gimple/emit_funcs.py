@@ -142,7 +142,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         env_var  = f"_env_{node.name}"
         alloc_fn = f"_alloc_{ci.env_struct}"
         gen._declare_var(env_var, f"{ci.env_struct} *")
-        gen._emit(f"  {env_var} = {alloc_fn} ();")
+        gen._rt_into(env_var, alloc_fn, [])
         for vname, vtype in ci.captures:
             # The FIELD's type, once, for every branch below — a by-reference
             # capture (`ci.mut_names`) is stored as a pointer to the owner's
@@ -3843,7 +3843,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
 
     # For main (in main module only), call class-attr initializer first
     if node.name == 'main' and gen.emit_struct_defs:
-        gen._emit('  _mojo_classattr_init ();')
+        gen._rt_void('_mojo_classattr_init', [])
 
     gen._seed_mut_captured_local_types(node.name)
     gen._seed_addressed_locals(node.body)

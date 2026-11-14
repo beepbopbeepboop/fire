@@ -3688,6 +3688,8 @@ def main():
         global _PASS, _FAIL
         import gimple_codegen
         src = """\
+import asyncio
+
 async def f():
     return 1
 
@@ -6101,6 +6103,8 @@ def main():
     # that could have accidentally regressed it by loosening the async-call
     # value-consumption rule).
     _run_isolated(lambda: test("async_bare_call", """\
+import asyncio
+
 async def f():
     await asyncio.sleep(0.01)
     return 42
@@ -6323,7 +6327,7 @@ def main():
     # any other unrecognized await target: falls through to "not a call to
     # asyncio.sleep nor to a known compiled async function".
     _run_isolated(lambda: test_raises("async_await_socket_like_expression_honest_fallback", """\
-async def f():
+async def f(some_socket):
     x = await some_socket.recv()
     return x
 """, "async function"), 'async_await_socket_like_expression_honest_fallback')

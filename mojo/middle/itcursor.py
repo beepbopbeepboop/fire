@@ -121,8 +121,7 @@ def read_at(gen, rec, idx):
         et_ptr = elem + ' *'
         cn = gimple_ctypes._c_id(elem)
         idx64 = _as_str(gen._new_val('int64_t', f"(int64_t) {_idx}"))
-        addr = gen._new_val(
-            et_ptr, f"_mojo_at_{cn} (({et_ptr}){_src}->{_data[0]}, {idx64})")
+        addr = gen._rt_call(et_ptr, f"_mojo_at_{cn}", [f"({et_ptr}){_src}->{_data[0]}", idx64])
         # No cast to `vct` here: for a struct-typed element that cast is not C,
         # and for a scalar one the dereference already has the element type.
         return vct, gen._new_val(vct, f"(*{_as_str(addr)})")
@@ -151,9 +150,9 @@ def read_at(gen, rec, idx):
     # MojoDict *, MojoSet *, MojoBytes *, MojoStr *, struct pointers) has
     # `suf == 'int'`, so this changes nothing for them.
     if elem and elem.endswith(' *') and suf == 'int':
-        raw = gen._new_val('int64_t', f"mojo_list_get_{suf} ({_src2}, {_idx2})")
+        raw = gen._rt_call('int64_t', f"mojo_list_get_{suf}", [_src2, _idx2])
         return elem, gen._cast(elem, raw)
-    return vct, gen._new_val(vct, f"mojo_list_get_{suf} ({_src2}, {_idx2})")
+    return vct, gen._rt_call(vct, f"mojo_list_get_{suf}", [_src2, _idx2])
 
 
 def remaining(gen, rec):
@@ -172,10 +171,10 @@ def remaining(gen, rec):
     total = gen._new_temp('int64_t')
     gen._copy(total, _full)
     left = gen._new_temp('int64_t')
-    gen._emit(f"  {left} = {total} - {_cur};")
+    gen._binop_into(left, total, '-', _cur)
     zero = gen._new_val('int64_t', "(int64_t)0")
     over = gen._new_temp('_Bool')
-    gen._emit(f"  {over} = {left} < {zero};")
+    gen._binop_into(over, left, '<', zero)
     out = gen._new_temp('int64_t')
     bb_neg = gen._new_bb(); bb_ok = gen._new_bb(); bb_merge = gen._new_bb()
     gen._cond_goto(over, bb_neg, bb_ok)
