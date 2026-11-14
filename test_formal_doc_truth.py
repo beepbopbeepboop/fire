@@ -55,6 +55,7 @@ which is what makes it cheap enough to belong in `check`.
 ## Groups
 
   census     FORMAL.md §2.2's runtime-ABI census, read out of the document
+  phase2     FORMAL.md §6 phase 2's measured rows and the prose gaps derived from them
   decisions  §4's decisions, and the tests they say pin them
   constants  the limits and budgets FORMAL.md and OPUS.md publish
   closed     the holes FORMAL.md §7 struck, and the ones it must not re-publish
@@ -991,8 +992,98 @@ def group_decisions():
               f"FORMAL.md §4.7's `_emit_try` is in {path}")
 
 
+# ── 1b. FORMAL.md §6 phase 2's prose, against its own measured rows ─────────
+
+def _phase2_row(text, label):
+    """`(arm64, x86_64)` for a §6 phase 2 table row, or None if it is gone.
+
+    The rows are `| label | arm64 | x86_64 |`, with the reachable row's figures
+    in bold. `label` is a regex matched against the raw text (the rows carry the
+    `…` and backtick characters and must not be flattened).
+    """
+    m = re.search(label + r' \| \**(\d+)\** \| \**(\d+)\**', text)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def group_phase2():
+    """The §6 phase 2 measured triple, and the two gaps the prose derives from it.
+
+    §6 publishes three rows (word-shaped, exported, reachable) and then states
+    two gaps in prose: how many of the word-shaped entry points the dylib does
+    not export at all, and how many of the exported ones take a `void *`. Both
+    are arithmetic on the rows, so both are checked against the rows here and
+    not against a second hand-kept copy. The rows themselves are measured by
+    `test_formal_runtime_link.py`, which builds the runtime dylib and is
+    `proofs`-only, so this group checks that the PROSE agrees with the rows
+    as published; it cannot tell whether the rows are current. That half is
+    `test_formal_runtime_link.py`'s — its 2026-11-13 re-measure moved the rows
+    to 375 / 328, and this group is what held the prose to them while the rows
+    sat stale at 369 / 323.
+
+    Like every group here, a published figure that cannot be found is a
+    FAILURE and not a skip: a reworded sentence must not quietly stop being
+    checked.
+    """
+    text = doc('FORMAL.md')
+    flat_text = flat(text)
+
+    word_row = _phase2_row(text, r'\| word-shaped entry points \(`runtime_abi`\)')
+    exp_row = _phase2_row(text, r'actually \*\*exports\*\*')
+    reach_row = _phase2_row(text, r'reachable with no heap handle the formal path cannot obtain')
+    check(word_row is not None, 'FORMAL.md §6 phase 2 has its word-shaped row')
+    check(exp_row is not None, 'FORMAL.md §6 phase 2 has its exported row')
+    check(reach_row is not None, 'FORMAL.md §6 phase 2 has its reachable row')
+    if word_row is None or exp_row is None or reach_row is None:
+        return
+    check(word_row[0] == word_row[1] and exp_row[0] == exp_row[1]
+          and reach_row[0] == reach_row[1],
+          'FORMAL.md §6 phase 2: arm64 and x86_64 publish the same triple',
+          f'{word_row} {exp_row} {reach_row}')
+    word, exported, reachable = word_row[0], exp_row[0], reach_row[0]
+
+    # §2.2 publishes the same word-shaped total. "not the N of §2.2" is a copy of
+    # it, so it must be the §2.2 figure and not a previous revision of it.
+    s22 = re.search(r'\*\*word in, word out\*\* \| \*\*(\d+)\*\*', text)
+    check(s22 is not None, 'FORMAL.md §2.2 still states a word-shaped total')
+    not_the = re.search(r'not the \**(\d+)\** of §2\.2', flat_text)
+    check(not_the is not None,
+          'FORMAL.md §6 phase 2 still compares its total with §2.2')
+    if s22 is not None and not_the is not None:
+        check(int(not_the.group(1)) == int(s22.group(1)),
+              f'FORMAL.md §6 phase 2 says "not the {not_the.group(1)} of §2.2", '
+              f'§2.2 publishes {s22.group(1)}')
+
+    # "N of the M the dylib does not export at all": M is the word-shaped total,
+    # and N is the gap the rows imply, word − exported.
+    gap = re.search(r'\*\*(\d+) of the (\d+)\*\* the dylib does not export at all',
+                    flat_text)
+    check(gap is not None, 'FORMAL.md §6 phase 2 still states the unexported gap')
+    if gap is not None:
+        check(int(gap.group(2)) == word,
+              f'FORMAL.md §6 phase 2 measures the unexported gap of '
+              f'{gap.group(2)}, its own word row says {word}')
+        check(int(gap.group(1)) == word - exported,
+              f'FORMAL.md §6 phase 2 says {gap.group(1)} are not exported, its rows '
+              f'say {word} - {exported} = {word - exported}')
+
+    # "N of the M the library exports take a `void *`": M is the exported total,
+    # and the reachable row is the exported total less that N.
+    void = re.search(r'\*\*(\d+) of the (\d+)\*\* the library exports take a '
+                     r'`void \*`', flat_text)
+    check(void is not None, 'FORMAL.md §6 phase 2 still states the void-pointer count')
+    if void is not None:
+        check(int(void.group(2)) == exported,
+              f'FORMAL.md §6 phase 2 measures the void-pointer count over '
+              f'{void.group(2)} exports, its exported row says {exported}')
+        check(exported - int(void.group(1)) == reachable,
+              f'FORMAL.md §6 phase 2 says {void.group(1)} of {exported} take a void *, '
+              f'so {exported - int(void.group(1))} are reachable; its reachable row '
+              f'says {reachable}')
+
+
 GROUPS = {
     'census': group_census,
+    'phase2': group_phase2,
     'decisions': group_decisions,
     'constants': group_constants,
     'closed': group_closed,

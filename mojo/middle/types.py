@@ -1300,6 +1300,30 @@ def _body_builds_struct_tuple(body) -> bool:
     return False
 
 
+# Dtype spellings for float SIMD annotations -> scalar C type. The one table
+# for this mapping: `_mojo_type` below, `emit_calls._float_dtype_arg_ctype`
+# and the `Scalar[X]` / `SIMD[X, 1]` arm of `infra_infer._resolve_type` (reached
+# as `GimpleGen._resolve_type`) all read it, so there is no second table.
+_SIMD_FLOAT_DTYPE_CTYPE = {
+    'DType.float32': 'float',
+    'Float32': 'float',
+    'float32': 'float',
+    'DType.float64': 'double',
+    'Float64': 'double',
+    'float64': 'double',
+}
+
+
+def _simd_float_dtype_ctype(inner: str) -> str | None:
+    """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
+    `<dtype>` when it is a float dtype spelling, else None (integer or
+    unresolvable -> caller keeps the conservative `int64_t` fallback)."""
+    parts = _split_top_level_commas(inner)
+    if not parts:
+        return None
+    return _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
+
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'
@@ -1333,20 +1357,14 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray', 'Array'):
-            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
-            # representation level, exactly like `List[T]`: one `MojoList *`
-            # with an element type, no separate fixed-size struct. It was
-            # missing here, so the annotation erased to `int64_t` and every
-            # use lost its static container type. The visible damage was a
-            # `for x in xs:` over an `Array[Int, N]`, where an untyped
-            # iterable emits the runtime dict-or-list dispatch and the DICT
-            # arm declares the loop variable `char *` (it is a key); the
-            # later `var val = <a double>` in the same function then assigned
-            # a double to that `char *` — "cannot convert to a pointer type"
-            # in the stdlib's test_math.mojo. Also in
-            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
-            # be an ordinary imported struct.
+        if base in ('List', 'list', 'InlineArray', 'Array', 'FixedSizeArray'):
+            # `List[T]`/`list[T]`, `InlineArray[T, N]`, `Array[T, N]` and
+            # `FixedSizeArray[T, N]` — Mojo's fixed-size arrays — are LISTs
+            # at this representation level: one `MojoList *` with an element
+            # type, no separate fixed-size struct. `FixedSizeArray` used to be
+            # missing here, so its annotation erased to `int64_t` and a
+            # parameter declared `int64_t a` (then cast to `MojoList *` at
+            # the call) — see `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1382,6 +1400,14 @@ def _mojo_type(ann: str | type | None) -> str:
             return 'Span *'
         if base == 'Optional':
             return _mojo_type(_split_top_level_commas(inner)[0].strip())
+        if base == 'SIMD':
+            # `SIMD[<float dtype>, N]` (any N) is scalar-erased to the C type
+            # of the dtype. Integer and unresolvable dtypes fall through to
+            # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
+            # `infra_infer._resolve_type`, not here.
+            dt = _simd_float_dtype_ctype(inner)
+            if dt is not None:
+                return dt
         ann = base
     if isinstance(ann, str) and len(ann) > 1 and (ann[0] == '*') and (ann[1] != '*'):
         inner = ann[1:].strip()

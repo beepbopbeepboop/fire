@@ -4889,6 +4889,159 @@ def _gmi_transform_enum_classes(self, stmts: list) -> list:
     return out if changed or out != stmts else stmts
 
 
+
+
+def _ann_to_str(gen, ann):
+    if ann is None:
+        return None
+    if isinstance(ann, str):
+        return ann
+    try:
+        return gen._type_expr_to_ann(ann)
+    except Exception:
+        try:
+            return str(ann)
+        except Exception:
+            return None
+
+
+def _split_top_level_bracket_args(text):
+    # Split "A, B[C, D], 0" at top-level commas inside the outermost [...].
+    out = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            if depth > 0:
+                depth -= 1
+        elif ch == ',' and depth == 0:
+            out.append(text[start:i].strip())
+            start = i + 1
+        i += 1
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def _parse_generic_inst_annotation(ann_str):
+    if not isinstance(ann_str, str):
+        return None, None
+    s = ann_str.strip()
+    lb = s.find('[')
+    if lb <= 0 or not s.endswith(']'):
+        return None, None
+    base = s[:lb].strip()
+    # base may be qualified like pkg.Struct in rare cases; take last component
+    # for struct-name lookup, but keep simple: only plain names.
+    if not re.match(r'^[A-Za-z_]\w*$', base):
+        return None, None
+    inner = s[lb + 1:-1]
+    args = _split_top_level_bracket_args(inner)
+    if not args:
+        return None, None
+    return base, args
+
+
+def _find_struct_template_source(gen, module_src, name):
+    # Local struct in current module.
+    if module_src:
+        try:
+            import elaborate as _elaborate_mod
+            tmpl = _elaborate_mod.extract_struct_source(module_src, name)
+            if tmpl:
+                return module_src, tmpl
+        except Exception:
+            pass
+    # Imported generic struct.
+    path = getattr(gen, '_imported_generic_structs', {}).get(name)
+    if path:
+        try:
+            text = open(path).read()
+        except Exception:
+            text = None
+        if text:
+            try:
+                import elaborate as _elaborate_mod
+                tmpl = _elaborate_mod.extract_struct_source(text, name)
+                if tmpl:
+                    return text, tmpl
+            except Exception:
+                pass
+    return None, None
+
+
+def _check_fn_signature_binding_violations(gen, fn, module_src):
+    params = getattr(fn, 'params', None) or []
+    if not params:
+        return
+    for item in params:
+        # params are typically (name, annotation[, ...]) tuples/lists.
+        try:
+            ptype = item[1] if len(item) > 1 else None
+        except Exception:
+            ptype = None
+        ann = _ann_to_str(gen, ptype)
+        base, args = _parse_generic_inst_annotation(ann)
+        if not base or not args:
+            continue
+        struct_module_src, tmpl = _find_struct_template_source(gen, module_src, base)
+        if not tmpl:
+            continue
+        try:
+            import elaborate as _elaborate_mod
+            targs = _elaborate_mod.bind_type_args(tmpl, list(args))
+            if targs is None:
+                continue
+            # Part 1: only provably-false where clauses (violated constraint).
+            try:
+                _elaborate_mod.check_where_clauses(struct_module_src or module_src or '', tmpl, targs)
+            except _elaborate_mod.WhereConformanceError as e:
+                _cfn = getattr(gen, '_current_filename', '') or ''
+                _cln = getattr(fn, 'line', 0) or 0
+                _clc = getattr(fn, 'col', 0) or 0
+                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                raise RuntimeError(f"{_cat}error: violated constraint")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            continue
+
+
+def _check_signature_binding_violations(gen, stmts):
+    try:
+        module_src = None
+        cfn = getattr(gen, '_current_filename', None)
+        if cfn and os.path.exists(cfn):
+            try:
+                with open(cfn) as f:
+                    module_src = f.read()
+            except Exception:
+                module_src = None
+        for s in (stmts or []):
+            if isinstance(s, FunctionDef):
+                _check_fn_signature_binding_violations(gen, s, module_src)
+            elif isinstance(s, StructDef):
+                for m in (getattr(s, 'methods', None) or []):
+                    if isinstance(m, FunctionDef):
+                        _check_fn_signature_binding_violations(gen, m, module_src)
+        # Generic function declarations may have been stripped from `stmts`
+        # earlier (kept in `_stripped_generic_fns`) but still need the same
+        # declaration-time signature binding check.
+        for s in (getattr(gen, '_stripped_generic_fns', None) or []):
+            if isinstance(s, FunctionDef):
+                _check_fn_signature_binding_violations(gen, s, module_src)
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
+
+
 def gen_module_impl(self, stmts: list):
     self._stmts = stmts
     self._current_module_stmts = stmts
@@ -5089,6 +5242,39 @@ def gen_module_impl(self, stmts: list):
     self._toplevel_dep_init_modules: list[str] = []
     self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)
+    # Harvest module-level `alias NAME = <type>` declarations (two-statement
+    # form: `ExprStmt(IdentExpr('alias'))` + `AssignStmt(target=IdentExpr,
+    # value=<type expr>)`). Stored as annotation text so `_resolve_type` and
+    # call lowering can expand the name wherever it is used as a type.
+    try:
+        _stmts_list = list(stmts)
+        _i_alias = 0
+        while _i_alias + 1 < len(_stmts_list):
+            _s0 = _stmts_list[_i_alias]
+            _s1 = _stmts_list[_i_alias + 1]
+            if (isinstance(_s0, ExprStmt)
+                    and isinstance(getattr(_s0, 'value', None), IdentExpr)
+                    and _as_str(getattr(_s0.value, 'name', None)) == 'alias'
+                    and isinstance(_s1, AssignStmt)
+                    and isinstance(getattr(_s1, 'target', None), IdentExpr)):
+                _aname = _as_str(getattr(_s1.target, 'name', None))
+                if _aname:
+                    try:
+                        _aval = self._type_expr_to_ann(_s1.value)
+                    except Exception:
+                        _aval = None
+                    if not _aval:
+                        try:
+                            _aval = _ann_to_str(self, _s1.value)
+                        except Exception:
+                            _aval = None
+                    if _aval:
+                        self._type_aliases[_aname] = _aval
+                _i_alias += 2
+                continue
+            _i_alias += 1
+    except Exception:
+        pass
     # Handle FromImportStmt (from X import NAME)
     for _fis in stmts:
         if not isinstance(_fis, FromImportStmt):
@@ -5499,6 +5685,7 @@ def gen_module_impl(self, stmts: list):
     self._register_imported_structs(stmts)
     self._register_imported_generics(stmts)
     self._register_imported_generic_structs(stmts)
+    _check_signature_binding_violations(self, stmts)
 
     # In-TU generic instantiation: materialize an imported generic as a REAL
     # definition in this translation unit rather than an `extern` beside a
@@ -6722,6 +6909,8 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['ComptimeVarStmt'] = {
         'target': 'char *',
         'value': 'int64_t',
+        'type_ann': 'char *',
+        'where_clause': 'char *',
         'line': 'int64_t',
         'col': 'int64_t',
     }
@@ -6927,6 +7116,8 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['StructDef'] = {
         'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
         'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
+        'comptime_member_types': 'MojoDict *',
+        'comptime_member_wheres': 'MojoDict *',
         'bases': 'MojoList *',
         # Parallel to `bases`: (base_name, where_text) per positional base.
         'base_constraints': 'MojoList *',
@@ -6955,6 +7146,7 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
         'bases': 'MojoList *',
+        'comptime_members': 'MojoList *',
         'line': 'int64_t', 'col': 'int64_t',
     }
     # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so
@@ -7282,19 +7474,19 @@ def gen_module_impl(self, stmts: list):
             _omo = _as_structdef_node(_omo)
             _own_method_ids[id(_omo)] = {
                 id(_as_funcdef_node(_m)) for _m in _omo.methods}
-    # Declaration-time conditional conformance checks (trait conformance part 1).
+    # Declaration-time conditional conformance checks (trait conformance parts 1, 4).
     from elaborate import (check_conformance_declarations as _check_conf_decls,
-                           check_conditional_rp_origin as _check_rp_origin)
-    _check_conf_decls(
-        [s for s in all_struct_defs if isinstance(s, StructDef)],
-        [s for s in all_struct_defs if isinstance(s, TraitDef)])
+                           check_conditional_rp_origin as _check_rp_origin,
+                           check_copy_move_synthesis as _check_copy_move_synth)
+    _all_struct_def_nodes = [s for s in all_struct_defs if isinstance(s, StructDef)]
+    _all_trait_def_nodes = [s for s in all_struct_defs if isinstance(s, TraitDef)]
+    _check_conf_decls(_all_struct_def_nodes, _all_trait_def_nodes)
     _all_stmts_for_rp = list(stmts)
     _all_stmts_for_rp.extend(getattr(self, '_stripped_generic_fns', []) or [])
     if self.do_imports or self.link_imports:
         _all_stmts_for_rp.extend(imported_stmts or [])
-    _check_rp_origin(
-        _all_stmts_for_rp,
-        [s for s in all_struct_defs if isinstance(s, StructDef)])
+    _check_rp_origin(_all_stmts_for_rp, _all_struct_def_nodes)
+    _check_copy_move_synth(_all_struct_def_nodes, _all_trait_def_nodes)
     _merge_struct_inheritance(all_struct_defs)
     # id(inherited method node) -> home module name, resolved by finding
     # which struct ORIGINALLY declared it.

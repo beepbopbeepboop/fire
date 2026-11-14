@@ -213,15 +213,15 @@ def _cpp_with_guard_type_name(gen, expr) -> str | None:
 
 def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
     """True when `iterable` is a call this compile can potentially
-    delegate to via `_cpp_for_generator_delegate` — either a bare
-    `name(...)` naming a free-function generator, `self.method(...)` /
-    `cls.method(...)` naming a generator METHOD on the SAME struct this
+    delegate to via `_cpp_for_generator_delegate` — a bare
+    `name(...)` naming a free-function generator, `self.method(...)`
+    / `cls.method(...)` naming a generator METHOD on the SAME struct this
     body belongs to (`self._cpp_gen_self_struct`, set by
     `_gen_cpp_generator_unit` while compiling a generator method's body
     — None for a free function, so the method-call branch below naturally
     never matches there), or `<module>.<name>(...)` naming a generator
     compiled in another module of the same whole-program build (resolved
-    later via the imported/cross-module generator api registries). Uses
+    via the whole-program/cross-module generator registries). Uses
     `self._all_generator_names` (every generator name anywhere in the
     module, computed once up front — see that attribute's own docstring)
     rather than `self._generator_api`/`self._generator_method_api`
@@ -250,29 +250,24 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
                      or (_self_struct, iterable.func.member) in gen._generator_method_api)):
             return True
         # `<module>.<name>(...)` — a generator in another module of this
-        # whole-program build. `self`/`cls` receivers (and any struct-typed
-        # receiver) were handled above; this is the module-namespace shape.
+        # whole-program build. `self`/`cls` receivers were handled above.
         if (isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
                 and iterable.func.obj.name not in ('self', 'cls')):
+            try:
+                _api = gcc_._cpp_resolve_generator_call_api(gen, iterable.func)
+            except Exception:
+                _api = None
+            if _api is not None:
+                return True
             _obj = iterable.func.obj.name
             _ma = getattr(gen, '_module_alias_names', None)
             if _ma and _obj in _ma:
-                try:
-                    from mojo.backend_gimple.cpp_core import _cpp_resolve_generator_call_api
-                    _api = _cpp_resolve_generator_call_api(gen, iterable.func)
-                except Exception:
-                    _api = None
-                if _api is not None:
-                    return True
                 # Not resolved/compiled yet in this pass, but the base is a
                 # module alias and the member names some generator in the
                 # whole-program build: treat as potentially delegatable so the
-                # delegate can raise a retriable UnsupportedGeneratorShape
-                # (retry passes pick it up once the module's generators land).
+                # delegate can raise a retriable UnsupportedGeneratorShape.
                 if iterable.func.member in gen._all_generator_names:
                     return True
-                # Conservative: module-qualified call on a known module alias;
-                # let the delegate decide (it resolves or refuses/retries).
                 return True
         return False
     return False
@@ -1000,7 +995,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `_cpp_yield_tuple` to consult; cleared in `finally` below.
     _pre_ok, _pre_slots = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
         fn, declared, self_fields, gen._async_api,
-        generator_api=gen._generator_api)
+        generator_api=gen._generator_api,
+        nested_generator_api=getattr(gen, '_nested_generator_api', None),
+        outer_fn_name=fn.name)
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     # Value-carrying `return <expr>` support (real CPython 3.14
     # asyncio/futures.py's `Future.__await__`: `yield self` ... `return
@@ -1193,7 +1190,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             generator_method_api=gen._generator_method_api,
             self_struct_name=struct_name,
             self_struct_ctype=(f"{struct_name} *" if struct_name else None),
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None),
+            nested_generator_api=getattr(gen, '_nested_generator_api', None),
+            outer_fn_name=fn.name)
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-
@@ -1207,7 +1206,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # _generator_yield_ctype itself came back non-None.
         has_tuple_yield, tuple_slot_ctypes = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
             fn, declared, self_fields, gen._async_api,
-            generator_api=gen._generator_api)
+            generator_api=gen._generator_api,
+            nested_generator_api=getattr(gen, '_nested_generator_api', None),
+            outer_fn_name=fn.name)
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
@@ -3969,7 +3970,9 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     # `finally` clearing, reused verbatim for the async-generator case.
     _pre_ok, _pre_slots = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
         fn, declared, None, gen._async_api,
-        generator_api=gen._generator_api)
+        generator_api=gen._generator_api,
+        nested_generator_api=getattr(gen, '_nested_generator_api', None),
+        outer_fn_name=fn.name)
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     # Same per-unit module-constant map as the other two unit emitters
     # (see _gen_cpp_generator_unit's seeding site), so an async GENERATOR
@@ -3997,7 +4000,9 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         # reused verbatim for the async-generator (`async for`) case.
         has_tuple_yield, tuple_slot_ctypes = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
             fn, declared, None, gen._async_api,
-            generator_api=gen._generator_api)
+            generator_api=gen._generator_api,
+            nested_generator_api=getattr(gen, '_nested_generator_api', None),
+            outer_fn_name=fn.name)
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None

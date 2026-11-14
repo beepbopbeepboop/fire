@@ -155,7 +155,8 @@ def test_failed_binding_reports_only_the_failing_error_no_deferred_noise():
 
 
 def test_signature_failed_binding_reports_violated_constraint():
-    # bugs/mid/DIAGNOSTICS_binding_deferrals-part1.md. The modular test's
+    # A provably-false binding in a function-signature parameter annotation
+    # must be rejected at declaration time. The modular test's
     # failing binding is a PARAMETER type in a function signature, not a body
     # instantiation. Its `where` clause (`n > 0`) is provably false at n == 0,
     # so the declaration must fail with modular's own wording and nothing else.
@@ -172,7 +173,7 @@ def test_signature_failed_binding_reports_violated_constraint():
 
 
 def test_signature_unproven_binding_reports_lacking_evidence():
-    # bugs/mid/DIAGNOSTICS_binding_deferrals-part2.md. `CondCopyable[U]` is
+    # bugs/hard/DIAGNOSTICS_binding_deferrals-part2.md. `CondCopyable[U]` is
     # Copyable only where `U: Copyable`; this signature only knows
     # `U: Movable & Deinitable`, so the `T: Copyable` requirement is neither
     # provable nor provably false. Modular reports `lacking evidence` and the
@@ -205,4 +206,5 @@ if __name__ == '__main__':
     test_explicit_failed_binding_uses_the_same_wording()
     test_satisfied_generic_binding_compiles()
     test_failed_binding_reports_only_the_failing_error_no_deferred_noise()
+    test_signature_failed_binding_reports_violated_constraint()
     print('ok')

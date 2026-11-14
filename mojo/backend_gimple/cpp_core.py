@@ -8958,7 +8958,12 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     in _unpack_opargs(original_code):`). `target` is either a plain str
     (single loop variable) or a list of names (a tuple target — see
     `_cpp_for_stmt`'s own "(a, b, ...)" string convention, already
-    unwrapped by the caller).
+    unwrapped by the caller). The callee is a bare same-module generator
+    name, a `self`/`cls` generator method, or a MODULE-QUALIFIED
+    `<module>.<gen>` resolved by `_cpp_resolve_generator_call_api` — all
+    three drive the same four-symbol ABI, so a foreign module's compiled
+    generator (cf. c_common/tables.py's `parse_table` consuming
+    `strutil.parse_entries(...)`) needs no separate drive loop.
 
     `index_var`/`index_start_expr`: optional support for `_cpp_for_stmt`'s
     NESTED-tuple-target `enumerate()` case (`for i, (y, m, d) in
@@ -9032,6 +9037,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # in this scalar body model, never through an arbitrary struct-typed
     # local — see the `isinstance(call.func.obj, IdentExpr) and ...
     # 'self'` guard below), never a separately-evaluated expression.
+    _module_qualified_api = None
     if isinstance(call.func, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         _is_self_method = bool(_self_struct
@@ -9072,23 +9078,25 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             else:
                 receiver_exprs = [call.func.obj.name]
         else:
-            # `<module>.<generator>(...)` — a generator compiled in another
-            # module of this whole-program build (e.g. `for a,b in
-            # strutil.parse_entries(...)` inside a compiled generator body).
-            # Resolved via the cross-module generator registries, the same
-            # way a plain handle construction resolves such calls.
-            sub_name = f"{call.func.obj.name}.{call.func.member}" if isinstance(call.func.obj, gimple_ctypes.IdentExpr) else '<member>'
-            _nested_capture_arg_exprs = None
-            is_self_recursive = False
-            api = _cpp_resolve_generator_call_api(gen, call.func)
-            if api is None:
+            # `<module>.<gen>(...)`: a FOREIGN module's compiled generator,
+            # resolved through the whole-program registry. The four-symbol
+            # `{base}_start/_resume/_value/_destroy` ABI is identical for a
+            # foreign unit (extern "C" preamble registered below via
+            # `_cpp_xmod_generator_refs`).
+            _module_qualified_api = _cpp_resolve_generator_call_api(
+                gen, call.func)
+            if _module_qualified_api is not None:
+                api = _module_qualified_api
+                sub_name = f"{call.func.obj.name}.{call.func.member}" if isinstance(call.func.obj, gimple_ctypes.IdentExpr) else '<member>'
+                receiver_exprs = []
+            else:
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"`for ... in {sub_name}(...)` does not consume a generator "
-                    "this compile has itself already translated via the "
-                    "C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER / not yet resolved "
-                    "in this module — the consumed generator must be defined earlier)")
-            receiver_exprs = []
+                    "`for ... in <expr>.<method>(...)` is only supported "
+                    "when <expr> is literally `self` (or `cls`) inside a generator "
+                    "method on the same struct, or when <expr> is a module name "
+                    "whose `<module>.<gen>` is a compiled generator this "
+                    "whole-program compile has already translated")
+
     else:
         sub_name = call.func.name
         # Self-recursion: `for <target> in <this-same-function>(...):`
@@ -12109,7 +12117,16 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 call.func.member = _self_method_name
     if is_self_gen_call and _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
         call.func.member = _self_method_name  # rewrite to actual generator method name
-    is_gen_call = is_self_recursive or is_cls_gen_call or is_self_gen_call or is_classname_gen_call or (
+    # A nested generator defined in this coroutine/generator's own body and
+    # claimed+registered by cpp_async._compile_nested_generator_closures.
+    _nested_yf_api = None
+    if (isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.IdentExpr)
+            and getattr(gen, '_cpp_gen_self_name', None) is not None):
+        _nested_yf_api = getattr(gen, '_nested_generator_api', {}).get(
+            (gen._cpp_gen_self_name, call.func.name))
+    is_nested_gen_call = _nested_yf_api is not None
+    is_gen_call = is_self_recursive or is_cls_gen_call or is_self_gen_call or is_classname_gen_call or is_nested_gen_call or (
         isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
         and call.func.name in gen._generator_api)
     if not is_gen_call:
@@ -12190,112 +12207,142 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
                 f"{indent}    co_yield {_yf_accessor}({result_var}, _i);",
                 f"{indent}}}"]
-    if len(call.kwargs or []) > 0:
-        # Append keyword arguments as positional args at the end.
-        # This is a simplification (correct only when kwargs match the
-        # LAST parameters in source order, which is the common case).
-        for kname, kexpr in call.kwargs:
-            call.args.append(kexpr)
-        call.kwargs = []
-        _walk_ast_invalidate(call)
     receiver_exprs = []
-    if is_cls_gen_call or is_self_gen_call or is_classname_gen_call:
-        if is_classname_gen_call:
-            _call_struct = call.func.obj.name
-        else:
-            _call_struct = cls_struct
-        sub_name = f"{_call_struct}.{call.func.member}"
-        api = gen._generator_method_api.get((_call_struct, call.func.member))
-        if (api is None or (_call_struct, call.func.member)
-                not in gen._supported_generator_methods):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from {call.func.obj.name}.{call.func.member}(...)` does not "
-                "delegate to a generator method this compile has itself "
-                "already translated via the C++20-coroutine path (either "
-                "it's not a generator this codegen supports, or it's "
-                "defined LATER among this struct's methods — the "
-                "delegated-to generator method must be defined earlier)")
-        # The receiver slot, when the callee HAS one, is the literal
-        # `cls` or `self` (the placeholder is passed positionally, never
-        # dereferenced in the classmethod case; for instance methods self is
-        # the real receiver). A `@staticmethod` generator method has no
-        # receiver parameter at all.
-        _rcv = api.get('receiver', _MISSING)
-        if _rcv is _MISSING:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from {call.func.obj.name}.{call.func.member}(...)`: the compiled "
-                "generator method's registration carries no `receiver` "
-                "key, so its receiver arity cannot be determined")
-        if _rcv in ('cls', 'self'):
-            # Pass receiver as the API expects (cls for classmethods, self for instance methods)
-            if _rcv == 'cls':
-                if is_classname_gen_call:
-                    receiver_exprs = [_call_struct]
-                elif call.func.obj.name == 'self':
-                    # Pass self as the receiver (instance); for classmethods the
-                    # class is resolved by name in the callee, so any value works
-                    receiver_exprs = ['self']
-                elif call.func.obj.name == 'cls':
-                    receiver_exprs = ['cls']
-                else:
-                    receiver_exprs = [_rcv]
-            elif _rcv == 'self':
-                if call.func.obj.name == 'self':
-                    receiver_exprs = ['self']
-                elif is_classname_gen_call:
-                    # calling instance method as ClassName.method() is unusual; pass instance?
-                    receiver_exprs = ['self']  # fallback
-                else:
-                    receiver_exprs = [_rcv]
-            else:
-                receiver_exprs = [_rcv]
-    else:
+    nested_start_arg_exprs = None
+    if is_nested_gen_call:
         sub_name = call.func.name
-        if is_self_recursive:
-            # Build the SAME {'base', 'params', ...} shape self.
-            # _generator_api's entry would eventually hold, straight from
-            # the locally-tracked self-context — no premature/partial
-            # registration into the real (still-being-built) dict needed.
-            api = {'base': gen._cpp_gen_self_base,
-                   'params': gen._cpp_gen_self_params}
-            # Tell _gen_cpp_generator_unit (after this body-emission pass
-            # completes) that `{base}_start`/`{_resume}`/`{_value}`/`{_destroy}`
-            # need forward declarations ahead of `{impl}`'s own definition
-            # — see that flag's own declaration comment for why.
-            gen._cpp_gen_self_recursed = True
-        else:
-            api = gen._generator_api.get(sub_name)
-            if api is None or sub_name not in gen._supported_generators:
+        api = _nested_yf_api
+        # Mirror emit_calls._nested_generator_start_arg_pairs: only the plain
+        # positional form is threaded (user args + captured enclosing values).
+        user_n = len(api.get('params') or []) - len(api.get('captures') or [])
+        if getattr(call, 'kwargs', None) or len(call.args) != user_n:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "cannot compile module: call to nested generator "
+                f"{api.get('nested_name', sub_name)!r} with keyword or defaulted "
+                "arguments is not supported (only the plain positional form is "
+                "threaded, together with its enclosing-scope captures)")
+        nested_start_arg_exprs = [_cpp_call_arg_expr(gen, a) for a in call.args]
+        for _cn, _ in api.get('captures') or []:
+            nested_start_arg_exprs.append(
+                gen._cpp_expr(gimple_ctypes.IdentExpr(
+                    gen._cpp_kw_param_renames.get(_cn, _cn))))
+        # Record the yielded value kind as the GIMPLE nested-start path does.
+        if api.get('value_ctype') == 'int64_t':
+            try:
+                from mojo.backend_gimple.emit_calls import _record_generator_value_kind
+            except Exception:
+                _record_generator_value_kind = None
+            if _record_generator_value_kind is not None:
+                _record_generator_value_kind(api)
+    else:
+        if len(call.kwargs or []) > 0:
+            # Append keyword arguments as positional args at the end.
+            # This is a simplification (correct only when kwargs match the
+            # LAST parameters in source order, which is the common case).
+            for kname, kexpr in call.kwargs:
+                call.args.append(kexpr)
+            call.kwargs = []
+            _walk_ast_invalidate(call)
+        if is_cls_gen_call or is_self_gen_call or is_classname_gen_call:
+            if is_classname_gen_call:
+                _call_struct = call.func.obj.name
+            else:
+                _call_struct = cls_struct
+            sub_name = f"{_call_struct}.{call.func.member}"
+            api = gen._generator_method_api.get((_call_struct, call.func.member))
+            if (api is None or (_call_struct, call.func.member)
+                    not in gen._supported_generator_methods):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"`yield from {sub_name}(...)` does not delegate to a "
-                    "generator this compile has itself already translated via "
-                    "the C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER in this module — "
-                    "the delegated-to generator must be defined earlier)")
+                    f"`yield from {call.func.obj.name}.{call.func.member}(...)` does not "
+                    "delegate to a generator method this compile has itself "
+                    "already translated via the C++20-coroutine path (either "
+                    "it's not a generator this codegen supports, or it's "
+                    "defined LATER among this struct's methods — the "
+                    "delegated-to generator method must be defined earlier)")
+            # The receiver slot, when the callee HAS one, is the literal
+            # `cls` or `self` (the placeholder is passed positionally, never
+            # dereferenced in the classmethod case; for instance methods self is
+            # the real receiver). A `@staticmethod` generator method has no
+            # receiver parameter at all.
+            _rcv = api.get('receiver', _MISSING)
+            if _rcv is _MISSING:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"`yield from {call.func.obj.name}.{call.func.member}(...)`: the compiled "
+                    "generator method's registration carries no `receiver` "
+                    "key, so its receiver arity cannot be determined")
+            if _rcv in ('cls', 'self'):
+                # Pass receiver as the API expects (cls for classmethods, self for instance methods)
+                if _rcv == 'cls':
+                    if is_classname_gen_call:
+                        receiver_exprs = [_call_struct]
+                    elif call.func.obj.name == 'self':
+                        # Pass self as the receiver (instance); for classmethods the
+                        # class is resolved by name in the callee, so any value works
+                        receiver_exprs = ['self']
+                    elif call.func.obj.name == 'cls':
+                        receiver_exprs = ['cls']
+                    else:
+                        receiver_exprs = [_rcv]
+                elif _rcv == 'self':
+                    if call.func.obj.name == 'self':
+                        receiver_exprs = ['self']
+                    elif is_classname_gen_call:
+                        # calling instance method as ClassName.method() is unusual; pass instance?
+                        receiver_exprs = ['self']  # fallback
+                    else:
+                        receiver_exprs = [_rcv]
+                else:
+                    receiver_exprs = [_rcv]
+        else:
+            sub_name = call.func.name
+            if is_self_recursive:
+                # Build the SAME {'base', 'params', ...} shape self.
+                # _generator_api's entry would eventually hold, straight from
+                # the locally-tracked self-context — no premature/partial
+                # registration into the real (still-being-built) dict needed.
+                api = {'base': gen._cpp_gen_self_base,
+                       'params': gen._cpp_gen_self_params}
+                # Tell _gen_cpp_generator_unit (after this body-emission pass
+                # completes) that `{base}_start`/`{_resume}`/`{_value}`/`{_destroy}`
+                # need forward declarations ahead of `{impl}`'s own definition
+                # — see that flag's own declaration comment for why.
+                gen._cpp_gen_self_recursed = True
+            else:
+                api = gen._generator_api.get(sub_name)
+                if api is None or sub_name not in gen._supported_generators:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"`yield from {sub_name}(...)` does not delegate to a "
+                        "generator this compile has itself already translated via "
+                        "the C++20-coroutine path (either it's not a generator this "
+                        "codegen supports, or it's defined LATER in this module — "
+                        "the delegated-to generator must be defined earlier)")
 
     sub_params: list = api.get('params') or []
-    # Same defaults-aware trailing-argument padding as
-    # _cpp_for_generator_delegate's consumption loop just above (shared
-    # helper + `_default_expr_to_pair` literal-text convention): a bare
-    # `yield from prod(n)` against `def prod(n, step=10)` must delegate
-    # with step=10, not refuse on arity. A slot with no default — or
-    # surplus arguments — still refuses honestly below, unchanged.
-    _dflts = (api.get('defaults')
-              or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
-              or [])
-    arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
-    while len(arg_exprs) < len(sub_params):
-        _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
-        if _dv is None:
+    if nested_start_arg_exprs is not None:
+        arg_exprs = nested_start_arg_exprs
+    else:
+        # Same defaults-aware trailing-argument padding as
+        # _cpp_for_generator_delegate's consumption loop just above (shared
+        # helper + `_default_expr_to_pair` literal-text convention): a bare
+        # `yield from prod(n)` against `def prod(n, step=10)` must delegate
+        # with step=10, not refuse on arity. A slot with no default — or
+        # surplus arguments — still refuses honestly below, unchanged.
+        _dflts = (api.get('defaults')
+                  or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
+                  or [])
+        arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
+        while len(arg_exprs) < len(sub_params):
+            _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
+            if _dv is None:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"`yield from {sub_name}(...)`: expected "
+                    f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+                    f"got {len(call.args)}")
+            arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
+        if len(arg_exprs) > len(sub_params):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from {sub_name}(...)`: expected "
-                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
-                f"got {len(call.args)}")
-        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
-    if len(arg_exprs) > len(sub_params):
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
-            f"argument(s), got {len(call.args)}")
+                f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
+                f"argument(s), got {len(call.args)}")
     # A word-typed slot (`int64_t`) fed a pointer-typed local (a list, a string) is
     # an implicit pointer->integer conversion g++ rejects.
     for _ai in range(len(arg_exprs)):

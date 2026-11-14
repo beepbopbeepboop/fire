@@ -63,6 +63,24 @@ def _resolve_type(gen, ann: str | None) -> str:
     # `auto` annotation resolves to the struct registered under `_kw_auto`.
     if isinstance(ann, str):
         ann = gen._c_kw_struct_renames.get(ann, ann)
+    # A module-local `alias NAME = <type>`: expand the name to the aliased
+    # type's annotation text before any other resolution, recursively with a
+    # seen-set so a cycle cannot hang codegen. Only module-local aliases are
+    # in scope (gen._type_aliases); unknown names fall through unchanged.
+    if isinstance(ann, str):
+        _ta = getattr(gen, '_type_aliases', None)
+        if _ta:
+            _ann_s = ann.strip()
+            _seen = set()
+            while _ann_s in _ta and _ann_s not in _seen:
+                _seen.add(_ann_s)
+                _expanded = _ta.get(_ann_s)
+                if _expanded is None:
+                    break
+                _ann_s = str(_expanded).strip()
+                if not _ann_s:
+                    break
+            ann = _ann_s
     if ann in gen.struct_field_types:
         return f"{ann} *"
     # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —
@@ -104,6 +122,71 @@ def _resolve_type(gen, ann: str | None) -> str:
             # instead of the correct "uint8_t *".
             if elem_ann in gen.struct_field_types and elem_ann not in gimple_ctypes._TYPE_MAP:
                 return f"{elem_ann} *"
+        # `Scalar[X]` (= `SIMD[X, 1]`): a width-1 SIMD is a plain scalar in C.
+        # Resolve X to its scalar C type when it is a known float dtype; keep
+        # unknown/unresolvable dtypes conservative (fall through, do not guess).
+        if base in ('Scalar', 'SIMD'):
+            _parts = gimple_ctypes._split_top_level_commas(rest.rstrip(']').strip())
+            _dtok = _parts[0].strip() if _parts else ''
+            _is_width1 = (base == 'Scalar' or (len(_parts) >= 2 and _parts[1].strip() == '1'))
+            if _is_width1 and _dtok:
+                def _dtype_ctype(tok):
+                    if tok is None:
+                        return None
+                    if isinstance(tok, tuple) and len(tok) == 2:
+                        if tok[0] in ('.', 'DType', 'dtype'):
+                            tok = tok[1]
+                        else:
+                            tok = None
+                    s = str(tok).strip() if tok is not None else ''
+                    if not s:
+                        return None
+                    if s.startswith('DType.'):
+                        s = s[len('DType.'):]
+                    if s.startswith('dtype.'):
+                        s = s[len('dtype.'):]
+                    if s.startswith('.'):
+                        s = s[1:]
+                    # ONE dtype-spelling table (types._SIMD_FLOAT_DTYPE_CTYPE),
+                    # the same one `emit_calls._float_dtype_arg_ctype` reads, so
+                    # the resolver and the call lowerer cannot drift apart. Its
+                    # keys are the normalized spelling (`float32`, `Float32`,
+                    # `DType.float32`); `f32`/`f64` are the remaining aliases.
+                    sl = s.lower()
+                    if sl == 'f32':
+                        sl = 'float32'
+                    elif sl == 'f64':
+                        sl = 'float64'
+                    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(sl)
+
+                def _resolve_dtype_token(tok):
+                    _ct = _dtype_ctype(tok)
+                    if _ct is not None:
+                        return _ct
+                    # comptime-bound local/param name: look up its folded value.
+                    if isinstance(tok, str):
+                        name = tok.strip()
+                        if not name:
+                            return None
+                        _cv = getattr(gen, '_comptime_vals', None)
+                        if _cv and name in _cv:
+                            _ct = _dtype_ctype(_cv.get(name))
+                            if _ct is not None:
+                                return _ct
+                        # Some comptime bindings may live on other maps; scan a
+                        # few common containers defensively.
+                        for _attr in ('_comptime_str_names',):
+                            _m = getattr(gen, _attr, None)
+                            # _comptime_str_names is a set of names; not a value map.
+                            if isinstance(_m, dict) and name in _m:
+                                _ct = _dtype_ctype(_m.get(name))
+                                if _ct is not None:
+                                    return _ct
+                    return None
+
+                _sct = _resolve_dtype_token(_dtok)
+                if _sct is not None:
+                    return _sct
     # Same gap as above, for Mojo's OTHER raw-pointer spelling: `*T`
     # (`fn f(p: *SomeStruct)`), parsed by fire_compiler.py as the literal
     # text "*" + T. `_mojo_type` (module-level, no struct_field_types

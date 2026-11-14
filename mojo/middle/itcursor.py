@@ -152,7 +152,7 @@ def read_at(gen, rec, idx):
     # `suf == 'int'`, so this changes nothing for them.
     if elem and elem.endswith(' *') and suf == 'int':
         raw = gen._new_val('int64_t', f"mojo_list_get_{suf} ({_src2}, {_idx2})")
-        return elem, gen._new_val(elem, f"({elem}){raw}")
+        return elem, gen._cast(elem, raw)
     return vct, gen._new_val(vct, f"mojo_list_get_{suf} ({_src2}, {_idx2})")
 
 

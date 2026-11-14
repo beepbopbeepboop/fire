@@ -332,7 +332,7 @@ def _assign_target(gen, tgt, et, ev):
         # `strdup` as a "type".
         if et == 'int64_t' and ev in getattr(gen, '_boxed_vals', ()):
             _un = gen._new_temp('int64_t')
-            gen._emit(f"  {_un} = mojo_unbox_plain ({ev});")
+            gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
             if ev in gen._dyn_word_vals:
                 gen._dyn_word_vals.add(_un)
             gen._boxed_vals.add(_un)
@@ -393,7 +393,7 @@ def _assign_target(gen, tgt, et, ev):
         # (unpacks the dict's keys), not just an ambiguous boxed handle.
         lp = gen._materialize_as_list(et, ev)
         for i, sub in enumerate(tgt.elements):
-            idx64 = gen._new_val('int64_t', f"(int64_t){i}")
+            idx64 = gen._cast('int64_t', f"{i}")
             elem_type = gen._elem_of(lp)
             suf = gimple_ctypes.TypeLattice.list_suffix(elem_type)
             set_et = elem_type if elem_type != 'unknown' else 'int64_t'

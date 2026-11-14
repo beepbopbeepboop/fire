@@ -1,9 +1,34 @@
-SPLIT: (no live parts — parts 1, 2 and 3 are fixed and their docs deleted)
+SPLIT: (no live parts — parts 1, 2, 3, 4 and 5 are fixed and their docs deleted; end-to-end tables.py build succeeds)
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+
+## Status 2026-11-13 — part 4 (module-qualified tuple-target `for`) fixed; doc deleted
+
+Part 4 (`parse_table`'s `for line, filename in strutil.parse_entries(entries,
+ignoresep=sep):`) is fixed; its red regression
+`_regression_tables_module_qualified_tuple_for` now PASSes and is wired into
+`run_tests()`. What landed:
+
+- `cpp_async._cpp_iterable_is_delegatable_generator_call` accepts a
+  module-qualified `CallExpr` only when `cpp_core._cpp_resolve_generator_call_api`
+  resolves it through the whole-program `_generator_home_api` (an
+  unresolvable `<module>.<name>` keeps the old honest refusal);
+- `cpp_core._cpp_for_generator_delegate` drives the foreign generator over the
+  same `{base}_start/_resume/_value/_destroy` protocol and unpacks the tuple
+  target per slot from its registered `tuple_slot_ctypes`, registering the four
+  extern "C" symbols via `_cpp_xmod_generator_refs`; keyword arguments keep
+  their existing positional-last handling;
+- `coro._static_env` types a local bound to `str.split()/rsplit()/splitlines()`
+  as a list of strings, so `parse_entries`' `yield item, None` gets a `char *`
+  slot instead of a bare `int64_t` word (the fixture body then yields strings
+  consistently).
+
+Re-measured on this tree: the `.tmp/ca/` build's `MOJO_DEBUG=1` output no
+longer reports the `parse_table` tuple-`for` shape; the ONLY remaining refusal
+was part 5's `read_table` callable-parameter one (see below).
 
 ## Status 2026-11-13 — part 2 (open context manager in compiled generator body) fixed; doc deleted
 
@@ -14,15 +39,14 @@ evaluates/binds modeled tabled-open managers (builtin `open` and parameters
 whose default is `open`) and emits close on the normal path, honoring `newline`
 via `mojo_open_file_ex`; untabled managers still refuse by name. Regression:
 `test_gimple_generator_runner._regression_with_tabled_open_in_generator`
-passes. Part 1 and part 3 remain.
-
+passes.
 ## Status 2026-11-12 — re-split: the csv.reader-family parts all landed; the file still refuses on two new, named shapes
 
 The 2026-10-29/2026-10-30 entries below describe the callable-valued-parameter (`_get_reader=csv.reader`) blocker; that work LANDED on 2026-11-12 (callables in dynamic calls and the foreign-callable table 4cb02b8c1; `csv.reader` runtime and the cpp `for` over a tabled callable 7e6a8ac5c; the earlier split's part 1 deleted with 373cf8633) and the previous split's three parts were all fixed and deleted. This doc is RE-SPLIT into a fresh part1/part2/part3 for what remains (the pool has no hard slot, so the work moves to mid):
 
 - part 1 (fixed 2026-11-13): `parse_table` — mixed-scalar tuple literal at a raise-message argument position in a compiled generator body (`raise NotImplementedError((header, line))`, tables.py:176) now lowers to a `char *` repr message instead of refusing.
 - part 2 (fixed 2026-11-13): `read_table` — `` `with <context manager> as <name>:` over a manager this codegen does not model is not supported in a compiled generator body `` (`with _open(infile, newline='') as infile:`, tables.py:92, `_open=open` a default-valued callable parameter) now evaluates/binds modeled tabled-open managers and emits close on the normal path; untabled managers still refuse by name. Its bug doc was deleted.
-- part 3 (fixed 2026-11-13): end-to-end `tables.py` build — the Done-when command now exits 0 and the built binary runs; its bug doc was deleted. See the top Status entry for the residuals that had to be fixed and the one semantic gap (tuple-slot string typing) left to part 4.
+- part 3 (fixed 2026-11-13): end-to-end `tables.py` build — the Done-when command now exits 0 and the built binary runs; its bug doc was deleted.
 
 Measured 2026-11-12 on this tree: sources copied from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`; `python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py` still fails, and `MOJO_DEBUG=1` reports exactly the two shapes above for pass 1 and both retry passes (peak 0.2 GB, child exit 1). The doc-refs ratchet is why the SPLIT line no longer narrates the deleted parts; it now names the three live part docs only.
 
