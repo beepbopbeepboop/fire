@@ -19,7 +19,9 @@ import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas, VarDecl,
                           AssignStmt, IdentExpr, TupleExpr, StringLiteral,
+                          BoolLiteral, IntLiteral, FloatLiteral,
                           ComptimeVarStmt, CallExpr, BinaryOp, UnaryOp,
+                          SubscriptExpr,
                           align_value_error, _expr_constraint_text, MemberExpr)
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
@@ -1065,6 +1067,241 @@ def _base_type_name(ann):
     return s.strip()
 
 
+# ── Comptime member requirements (trait conformance part 5) ──────────
+#
+# A trait may require a `comptime` member:
+#
+#     trait EnumLike:
+#         comptime _enum_is_exhaustive: Bool
+#
+# and a conforming struct supplies it as a struct-level comptime alias. This
+# check runs at declaration time, beside the conditional-conformance pass,
+# because only there is the trait's body visible next to every conformance;
+# `check_conformance` sees one instantiation at a use site.
+#
+# Two conservatisms keep it from rejecting legal stdlib code:
+#
+#   * A missing member is NOT an error. These members are routinely
+#     compiler-synthesised (`__copy_ctor_is_trivial` for `Copyable`,
+#     `_enum_case_names` for `EnumLike`) and never appear in this tree's AST
+#     for a struct that relies on the synthesis. Only a member the struct
+#     actually declares can be judged.
+#   * A value whose type the checker cannot name is accepted. `comptime
+#     Element = Self.T` under `comptime Element: Movable` is the common
+#     stdlib spelling and proves nothing either way here; only a known scalar
+#     (or value-literal) type that is a different scalar than the required
+#     one is rejected — exactly the `comptime _enum_is_exhaustive = 5` case.
+#     Unknown relations stay accepted, the rule part 2's evidence check uses.
+
+# A value-literal type and the scalar it materialises as. `IntLiteral[5]`
+# reaches `_base_type_name` as `IntLiteral`, which is why the comparison is on
+# the base name.
+_COMPTIME_MATERIALIZED = {
+    'Bool': ('Bool', 'BoolLiteral'),
+    'Int': ('Int', 'IntLiteral'),
+    'UInt': ('UInt', 'UIntLiteral'),
+    'String': ('String', 'StringLiteral'),
+    'Float64': ('Float64', 'FloatLiteral'),
+}
+_COMPTIME_KNOWN_SCALARS = {
+    'Bool', 'BoolLiteral', 'Int', 'IntLiteral', 'UInt', 'UIntLiteral',
+    'String', 'StringLiteral', 'Float64', 'FloatLiteral',
+}
+
+
+def _comptime_member_value_type(val):
+    """The scalar type a comptime member's literal value has, or ''.
+
+    Only a literal has a type this pass can name. An identifier, member
+    access or call (`Self.T`, `Int`, `Tuple[Int, T]`, `IsTriviallyMovable[T]`)
+    denotes a type or comptime value the checker cannot resolve, so it returns
+    '' and the caller accepts the declaration.
+    """
+    if isinstance(val, BoolLiteral):
+        return 'Bool'
+    if isinstance(val, IntLiteral):
+        return f'IntLiteral[{getattr(val, "value", 0)}]'
+    if isinstance(val, StringLiteral):
+        return 'StringLiteral'
+    if isinstance(val, FloatLiteral):
+        return 'FloatLiteral'
+    return ''
+
+
+def _comptime_member_effective_type(sd, name):
+    """(type_str, where_str, found) for the struct comptime member `name`."""
+    aliases = getattr(sd, 'comptime_aliases', None) or {}
+    if name not in aliases:
+        return '', '', False
+    member_types = getattr(sd, 'comptime_member_types', None) or {}
+    type_ann = _as_str(member_types.get(name, '')).strip()
+    if type_ann:
+        actual = type_ann
+    else:
+        actual = _comptime_member_value_type(aliases.get(name))
+    wheres = getattr(sd, 'comptime_member_wheres', None) or {}
+    return actual, _as_str(wheres.get(name, '')).strip(), True
+
+
+def _comptime_type_conforms(actual: str, required: str) -> bool:
+    """Conservative: reject only a KNOWN non-conformance.
+
+    A known scalar actual conforms to its own (materialised) scalar and to
+    `AnyType`; against a required scalar it is a different scalar, so reject.
+    A required trait/user type and an opaque actual are both outside the
+    model, so accept.
+    """
+    a = _base_type_name(actual)
+    r = _base_type_name(required)
+    if not a or not r:
+        return True
+    if a == r or r == 'AnyType':
+        return True
+    accepted = _COMPTIME_MATERIALIZED.get(r)
+    if accepted is None:
+        return True
+    if a in accepted:
+        return True
+    if a in _COMPTIME_KNOWN_SCALARS:
+        return False
+    return True
+
+
+def _struct_where_text(sd):
+    """The struct header's `where` clauses as one `and`-joined condition."""
+    w = getattr(sd, 'where_clause', None)
+    if w is None:
+        return ''
+    parts = []
+    for clause in (w if isinstance(w, list) else [w]):
+        if isinstance(clause, str):
+            cond = clause
+        else:
+            cond, _msg = _split_where_message(clause)
+        try:
+            text = cond if isinstance(cond, str) else _expr_constraint_text(cond)
+        except Exception:
+            continue
+        if text.strip():
+            parts.append(text.strip())
+    return ' and '.join(parts)
+
+
+def _constraint_expr_children(node):
+    """The sub-expressions of a `where` clause node this walker descends."""
+    if isinstance(node, CallExpr):
+        children = [node.func] + list(node.args or [])
+        for kwarg in (node.kwargs or []):
+            children.append(kwarg[1])
+        return children
+    if isinstance(node, BinaryOp):
+        return [node.left, node.right]
+    if isinstance(node, UnaryOp):
+        return [node.operand]
+    if isinstance(node, TupleExpr):
+        return list(getattr(node, 'elements', None) or [])
+    if isinstance(node, SubscriptExpr):
+        return [node.obj, node.index]
+    if isinstance(node, MemberExpr):
+        return [node.obj]
+    return []
+
+
+def _constraint_has_opaque_call(expr):
+    """True when the clause calls something the implication rules don't model.
+
+    `conforms_to` is the one call `_constraint_implied_for_evidence` reasons
+    about. Anything else (`some_predicate(Self.n)`, `Ts.all[...]()`) is
+    undecidable by design, and evaluating it yields FALSE rather than unknown,
+    so the caller must not turn that into a diagnostic.
+    """
+    if isinstance(expr, CallExpr):
+        if not (isinstance(expr.func, IdentExpr)
+                and expr.func.name == 'conforms_to'):
+            return True
+    for child in _constraint_expr_children(expr):
+        if child is not None and _constraint_has_opaque_call(child):
+            return True
+    return False
+
+
+def _comptime_member_errors(struct_defs, trait_defs):
+    """Declaration-time comptime member requirement diagnostics (part 5)."""
+    trait_by_name = {}
+    for td in (trait_defs or []):
+        if isinstance(td, TraitDef):
+            trait_by_name[_as_str(getattr(td, 'name', ''))] = td
+    if not trait_by_name:
+        return []
+    errors = []
+    for sd in (struct_defs or []):
+        if not isinstance(sd, StructDef):
+            continue
+        sline = getattr(sd, 'line', 0) or 0
+        base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+        if not base_constraints:
+            base_constraints = [(_as_str(b), '')
+                                for b in (getattr(sd, 'bases', []) or [])]
+        struct_where = _struct_where_text(sd)
+        for bname, wtext in base_constraints:
+            bbase, _ = _split_base_type_args(_as_str(bname))
+            td = trait_by_name.get(bbase)
+            if td is None:
+                continue
+            reqs = list(getattr(td, 'comptime_members', None) or [])
+            if not reqs:
+                continue
+            # The member's clause only has to hold under the conformance
+            # constraint: a struct listing `Trait where n >= 10`, or itself
+            # constrained by `n >= 10`, proves a `Self.n >= 10` member clause.
+            assumption = _as_str(wtext) if wtext is not None else ''
+            if struct_where:
+                assumption = (f"({assumption}) and ({struct_where})"
+                              if assumption else struct_where)
+            for req in reqs:
+                try:
+                    rname, rtype, _rwhere = req
+                except Exception:
+                    continue
+                rname = _as_str(rname)
+                rtype = _as_str(rtype).strip()
+                atype, awhere, found = _comptime_member_effective_type(
+                    sd, rname)
+                if not found:
+                    # Compiler-synthesised conformance member; nothing the
+                    # struct declared can be judged wrong.
+                    continue
+                bad = not _comptime_type_conforms(atype, rtype)
+                if not bad and awhere:
+                    try:
+                        bindings = _struct_targ_bindings('', sd, [])
+                    except Exception:
+                        bindings = {}
+                    # A member clause is written against `Self`, the struct
+                    # header clauses against the bare parameter name.
+                    for k in list(getattr(sd, 'bracket_params', []) or []):
+                        bindings.setdefault(f'Self.{k}', k)
+                    for k in list(getattr(sd, 'type_param_names', []) or []):
+                        bindings.setdefault(f'Self.{k}', k)
+                    if not _constraint_has_opaque_call(
+                            _parse_constraint_expr(awhere)):
+                        bad = not _constraint_implied_for_evidence(
+                            awhere, assumption, '', bindings)
+                if bad:
+                    msg = (f"'{_as_str(sd.name)}' does not implement all "
+                           f"requirements for '{bbase}'\n"
+                           f"note: comptime member '{rname}' type "
+                           f"'{atype or '?'}' does not conform to trait's "
+                           f"required type '{rtype or '?'}'")
+                    tline = getattr(td, 'line', 0) or 0
+                    if tline:
+                        msg += f"\nnote: trait '{bbase}' declared here"
+                    errors.append((sline, msg))
+                    break
+    return errors
+
+
+
 def _iter_function_defs(stmts):
     for s in (stmts or []):
         if isinstance(s, FunctionDef):
@@ -1187,6 +1424,9 @@ def check_conformance_declarations(struct_defs, trait_defs):
                     break
             if broke:
                 break
+
+    # Comptime member requirements (part 5)
+    errors.extend(_comptime_member_errors(struct_defs, trait_defs))
 
     if errors:
         line, msg = sorted(errors, key=lambda x: x[0])[0]
