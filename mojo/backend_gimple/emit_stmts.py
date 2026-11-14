@@ -4942,6 +4942,26 @@ def _extract_match_args_from_structdef(gen, sd, n_given, cname):
                     if tname.startswith('__') and tname.endswith('__'):
                         continue
                     names.append(tname)
+        # CPython's __match_args__ is the __init__ signature: base-class
+        # attributes of a NON-dataclass base and `field(init=False, ...)`
+        # fields are not in it. The `sd.fields` walk above sees the merged
+        # layout (base attributes first — the `Node.context` shape), so
+        # filter against the same provenance table the constructor path
+        # uses (module_gen's `_struct_noninit_fields`), or `case
+        # parser.InstDef(name)` binds the base slot instead of the first
+        # real init field.
+        _nif = getattr(gen, '_struct_noninit_fields', None)
+        if _nif is not None and cname in _nif:
+            _excl = _nif[cname]
+            if _excl:
+                _excl_set = set()
+                for _en in _excl:
+                    _excl_set.add(_as_str(_en))
+                _names2 = []
+                for _nm in names:
+                    if _nm not in _excl_set:
+                        _names2.append(_nm)
+                names = _names2
         return names, 'dataclass'
     # No __match_args__ and not dataclass
     return None, 'missing'
@@ -5700,6 +5720,15 @@ def _gen_stmt_ExprStmt(gen, node):
         # `dealloc(ThinAllocation(unsafe_owned_ptr=p).unsafe_with_layout(..))`
         # as a statement: this fast path never reaches _lower_call.
         if raw_name == 'dealloc' and gen._lower_dealloc_thin_allocation(node.value) is not None:
+            return
+        # `typing.cast(type, value)` as a bare statement: CPython discards
+        # its result here too, so only the value argument is evaluated for
+        # its side effects — the statement-level twin of _lower_call's
+        # identical interception (this fast path never reaches _lower_call,
+        # so without this the call would still bind to the weak "unavailable
+        # in compiled mode" stub). See emit_infra.is_typing_cast_call.
+        if ginf.is_typing_cast_call(gen, node.value):
+            gen.lower_expr(node.value.args[1])
             return
         # `fut.add_done_callback(cb)` / `.remove_done_callback(cb)` as a
         # bare statement (the async-body hook in gimple_gen_coro lowers

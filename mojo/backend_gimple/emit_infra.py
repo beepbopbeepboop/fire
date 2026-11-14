@@ -7608,6 +7608,44 @@ def lower_module_globals_read(gen, node=None) -> tuple[str, str]:
     return 'MojoDict *', _d
 
 
+def is_typing_cast_call(gen, node) -> bool:
+    """True for a two-positional-arg `cast(type, value)` call whose `cast`
+    arrived through a `from ... import cast` this compile could never
+    resolve (the name is in `_unresolved_import_aliases`) — the CPython
+    `typing.cast` shape. CPython's `typing.cast` is a run-time no-op that
+    returns `value` unchanged, so the call's result is just the value
+    argument. Without this the name binds to the weak "unavailable in
+    compiled mode" stub, which prints and returns 0 — the
+    Tools/cases_generator analyzer's `kind = cast(Literal["inst", "op"],
+    tkn.text)` then classified every instruction as None (the whole
+    Uops/Instructions section came out wrong) and the parse of the stack
+    effects fed 0 into the dataclass constructors.
+
+    `typing` is a CPython stdlib module this compiler does not compile
+    (Lib/typing.py itself fails: a `StructDef` without `body`), so its
+    imports can only ever answer this way; `_locally_binds_name` keeps a
+    user function/variable that happens to be called `cast` on the
+    ordinary path (real Python would shadow the import the same way).
+    """
+    return (isinstance(node, CallExpr)
+            and isinstance(node.func, IdentExpr)
+            and _as_str(node.func.name) == 'cast'
+            and len(node.args) == 2
+            and not getattr(node, 'kwargs', None)
+            and _as_str(node.func.name) in gen._unresolved_import_aliases
+            and not gen._locally_binds_name('cast'))
+
+
+def lower_typing_cast_call(gen, node) -> tuple[str, str]:
+    """`cast(type, value)` -> `value`: lower only the value argument and
+    hand its (ctype, val) back as the call's result — the object identity
+    CPython's cast has, with no call and no diagnostic. The type argument
+    is never evaluated: CPython evaluates it and discards it, and here it
+    is a subscript on an equally unresolved name (`Literal[...`), so
+    evaluating it would just burn a temp on a value nothing reads."""
+    return gen.lower_expr(node.args[1])
+
+
 def _mg_write_compatible(field_t: str, val_t: str) -> bool:
     """Can `val_t` be stored into a `field_t` field without a lie?
 

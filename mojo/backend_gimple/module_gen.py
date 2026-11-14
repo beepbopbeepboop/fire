@@ -7488,6 +7488,42 @@ def gen_module_impl(self, stmts: list):
     _check_rp_origin(_all_stmts_for_rp, _all_struct_def_nodes)
     _check_copy_move_synth(_all_struct_def_nodes, _all_trait_def_nodes)
     _merge_struct_inheritance(all_struct_defs)
+    # Post-merge: read back, per dataclass struct, the merged-layout names
+    # CPython's synthesized __init__/__match_args__ does NOT take a
+    # positional parameter for. The provenance is recorded in
+    # ast_rewriter's module-level registry (id(StructDef)-keyed — the
+    # nodes here are the very objects `desugar_field_defaults` processed)
+    # because that is the only pipeline point that sees the `init=` flag:
+    # the desugar loop that follows replaces each `field(...)` call with
+    # its `default` value, and the merge above has already rewritten
+    # `.fields` into the base-first view. A name is excluded when its
+    # DECLARING class is a base that is not itself a dataclass (CPython
+    # only inherits dataclass fields from dataclass bases — a plain
+    # base's annotated attribute is storage, not an init parameter) or
+    # the declaration there is `field(init=False, ...)`.
+    # `self._struct_noninit_fields` is keyed by the bare name (first
+    # definition wins, the `_struct_bases` convention); for a
+    # non-colliding struct that is exactly the `struct_field_types`/
+    # ctor-lookup name (a genuine cross-module collision is the only case
+    # where the cname differs, and there the consumers simply keep the
+    # legacy mapping). emit_calls' `_lower_struct_constructor` and
+    # emit_stmts' dataclass `__match_args__` synthesis filter against it.
+    # Without the filter, a `@dataclass class InstDef(Node)` whose `Node`
+    # declares `context: ... = field(init=False, ...)` maps its six
+    # positional constructor arguments onto the SEVEN-slot merged layout
+    # starting at `context`: every field reads back its neighbour (the
+    # measured Tools/cases_generator failure — `node.kind` answered
+    # `name`, `assert node.kind == "op"` trapped).
+    self._struct_noninit_fields = {}
+    for _ns0 in all_struct_defs:
+        if isinstance(_ns0, StructDef):
+            _ns0 = _as_structdef_node(_ns0)
+            _nsn = _as_str(_ns0.name)
+            if _nsn in self._struct_noninit_fields:
+                continue
+            _ns_noninit = ast_rewriter.dataclass_noninit_names(_ns0)
+            if _ns_noninit is not None:
+                self._struct_noninit_fields[_nsn] = _ns_noninit
     # id(inherited method node) -> home module name, resolved by finding
     # which struct ORIGINALLY declared it.
     _inherited_method_src: dict = {}

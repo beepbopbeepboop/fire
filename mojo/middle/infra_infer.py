@@ -101,7 +101,32 @@ def _resolve_type(gen, ann: str | None) -> str:
     if isinstance(ann, str) and '.' in ann:
         _bare = ann.rsplit('.', 1)[-1]
         if _bare in gen.struct_field_types:
-            return f"{_bare} *"
+            if ' | ' not in ann:
+                return f"{_bare} *"
+            # A union annotation is NOT one dotted name — the `_bare` above
+            # is the LAST member's bare name (measured: CPython
+            # Tools/cases_generator's analyzer.py `op: parser.InstDef |
+            # parser.Pseudo` resolved to `Pseudo *`, and the body's field
+            # reads used Pseudo's offsets on InstDef objects: `op->inputs`
+            # answered `kind`, a string, and iterating it segfaulted).
+            # When TWO OR MORE non-None members name known structs, no
+            # single pointer type has every member's layout, so skip the
+            # fast path: the `_mojo_type` union branch below boxes the
+            # value to int64_t and every member access lowers to the
+            # runtime tag dispatch (`_mojo_dispatch_getattr`), which reads
+            # each concrete type's field at its own offsets (the shape
+            # analyze_forest's boxed `node` already runs on). A one-struct
+            # union (`parser.Node | None`) keeps the fast path — the one
+            # struct IS the layout.
+            _nsm = 0
+            for _up in ann.split(' | '):
+                _up = _up.strip()
+                if _up == 'None':
+                    continue
+                if _up.rsplit('.', 1)[-1] in gen.struct_field_types:
+                    _nsm += 1
+            if _nsm < 2:
+                return f"{_bare} *"
     # _mojo_type is a stateless module-level function with no access to
     # struct_field_types, so a pointer-to-a-known-struct annotation like
     # `UnsafePointer[MoveOnly_Int, MutExternalOrigin]` would otherwise

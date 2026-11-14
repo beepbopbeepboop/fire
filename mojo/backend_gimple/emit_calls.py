@@ -2162,6 +2162,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `emit_infra.lower_module_globals_read` for the precise bound.
     if ginf.is_module_globals_call(gen, node):
         return ginf.lower_module_globals_read(gen, node)
+    # `typing.cast(type, value)`: the run-time no-op that returns value
+    # unchanged. `from typing import cast` lands in
+    # _unresolved_import_aliases (the compiler does not compile CPython's
+    # Lib/typing.py), and without this the call bound to the weak
+    # "unavailable in compiled mode" stub that returned 0 — the
+    # Tools/cases_generator analyzer's
+    # `kind = cast(Literal["inst", "op"], tkn.text)` then misclassified
+    # every instruction. See `emit_infra.is_typing_cast_call` for the
+    # precise bound.
+    if ginf.is_typing_cast_call(gen, node):
+        return ginf.lower_typing_cast_call(gen, node)
     _c = _try_lower_constrained(gen, node)
     if _c is not None:
         return _c
@@ -11495,6 +11506,35 @@ def _lower_struct_constructor(gen, struct_name: str,
         _fnames = []
         for _fn0 in _sft:
             _fnames.append(_as_str(_fn0))
+        # CPython's synthesized dataclass __init__ takes a positional
+        # parameter ONLY for init fields: a field declared in a base class
+        # that is not itself a dataclass is storage the constructor never
+        # takes an argument for, and so is a `field(init=False, ...)`
+        # declaration. `gen._struct_noninit_fields` (module_gen, recorded
+        # at desugar time — the only pipeline point that sees the `init=`
+        # flag — and read back post-merge, in the order the merged layout
+        # folds base attributes in) names exactly those merged-layout
+        # slots for every
+        # dataclass struct — filtering here is what keeps a
+        # `@dataclass class InstDef(Node)` with a `Node.context` base
+        # attribute from shifting its six positional constructor args one
+        # slot right (every node read then answered its neighbour — the
+        # measured Tools/cases_generator `assert node.kind == "op"` trap).
+        # A struct absent from the table (not a dataclass, or a
+        # cross-module collision the capture could not see) keeps the
+        # legacy full-layout mapping.
+        _nif = getattr(gen, '_struct_noninit_fields', None)
+        if _nif is not None and struct_name in _nif:
+            _excl = _nif[struct_name]
+            if _excl:
+                _excl_set = set()
+                for _en in _excl:
+                    _excl_set.add(_as_str(_en))
+                _fnames2 = []
+                for _fn in _fnames:
+                    if _fn not in _excl_set:
+                        _fnames2.append(_fn)
+                _fnames = _fnames2
         # Assign positional args first (by field declaration order)
         for i, arg in enumerate(args):
             if i < len(_fnames):
