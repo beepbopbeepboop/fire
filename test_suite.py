@@ -4203,6 +4203,10 @@ UNREGISTERED = {
     'test_unknown_decl_check.py':
         'Unit tests for the unknown-decl check/compiler-provided builtins '
         'helper module. Run directly; not registered.',
+    'test_suite_self_test_red.py':
+        'Regression pin for the SUITE_self_test_red suite-self-test '
+        'drift (self-host key, disabled/estate/census rows). Run directly; '
+        'not a registered bucket job.',
 
     # `test_formal_doc_truth.py` was here (listed rather than registered, its
     # branch's task said not to touch the registry) and is REGISTERED as
