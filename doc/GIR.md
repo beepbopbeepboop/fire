@@ -150,17 +150,13 @@ that is meant to be behaviour-preserving:
   and `gen._rt_void('mojo_x', [a, b])` (`emit_resolve.py`) are THE way to call
   a runtime function. They take values, never `(ctype, value)` claims, and
   run the same `_repr_fix_args` as `_emit_call`. A script rewrote 501 of the
-  527 text-spelled runtime calls, and the last 26 were rewritten by hand
-  (2026-11-13), so `TEXT_CALL_BASELINE` in `test_gimple_lint.py` is 0 and may
-  only shrink from there. A call guarded by an inline `if` is lowered with
-  `gen._cond_goto` and `gen._rt_void`: raw GIMPLE rejects both `&&` and a
-  non-`goto` `if` body, so the conditional shape could not be spelled as text
-  in a `__GIMPLE`-tagged method at all.
+  527 text-spelled runtime calls; non-compiler programs in the corpus are
+  byte-identical before and after. `TEXT_CALL_BASELINE` in
+  `test_gimple_lint.py` (26) may only shrink; the remainder is
+  `bugs/CODEGEN_runtime_calls_spelled_as_text.md`.
 - **Stage 2a, casts (landed 2026-11-13).** `gen._cast(ctype, v)` and
   `gen._cast_into(dst, ctype, v)` state the type once. A script rewrote 540 of
-  548 casts spelled as text, and the last 8 by hand (2026-11-13, one of them a
-  false positive of the lint's `_new_val` cast pattern: a parenthesized
-  DEREFERENCE is not a cast); `TEXT_CAST_BASELINE` is 0.
+  548 casts spelled as text; `TEXT_CAST_BASELINE` (8) may only shrink.
   `gimple-lint` is in the LANDING gate (`tools/gates.json`), so a branch that
   adds a text-spelled runtime call or cast, or a call-argument finding, does
   not land.

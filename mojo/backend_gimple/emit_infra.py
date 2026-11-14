@@ -3143,7 +3143,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             _sp = gen._new_temp('Span *')
             gen._emit(f'  {_sp} = _alloc_Span ();')
             gen._emit(f'  {_sp}->_data = {aval};')
-            gen._rt_into(f'{_sp}->_len', 'mojo_strlen', [f"{aval}"])
+            gen._emit(f'  {_sp}->_len = mojo_strlen ({aval});')
             coerced_args.append(_sp)
         elif ptype.endswith(' *') and atype == 'char *':
             # char* passed where other pointer type expected
@@ -7676,14 +7676,14 @@ def lower_module_globals_setitem(gen, node) -> None:
         gen._safe_coerce_emit(_vt, _ft, _v, _write_dest(gen, _name))
         gen._emit('  }')
     if not _arms:
-        gen._rt_void('mojo_raise_not_implemented',
-                     ['"globals()[name] = value: this compiled module has no '
-                      'assignable global field for that name"'])
+        gen._emit('  mojo_raise_not_implemented ((char *)'
+                  '"globals()[name] = value: this compiled module has no '
+                  'assignable global field for that name");')
     else:
         gen._emit('  else {')
-        gen._rt_void('mojo_raise_not_implemented',
-                     ['"globals()[name] = value: creating a new module global '
-                      'at run time is not supported by the compiled path"'])
+        gen._emit('    mojo_raise_not_implemented ((char *)'
+                  '"globals()[name] = value: creating a new module global '
+                  'at run time is not supported by the compiled path");')
         gen._emit('  }')
 
 

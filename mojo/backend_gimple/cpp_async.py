@@ -951,6 +951,29 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     for _spn0, _sct0 in param_ctypes:
         _self_cts.append(_sct0)
     gen._cpp_gen_self_params = _self_cts
+    # The PARAMETER NAMES parallel to `_cpp_gen_self_params`, one per slot.
+    # Every `_generator_api` entry carries the same `param_names` key (see
+    # `_register_free_generator`), which is what lets a delegated call bind
+    # its keyword arguments to the right slot by name; a self-recursive
+    # `yield from <this-same-function>(...)` builds its api locally (below),
+    # so it needs the names from here for exactly the same reason.
+    _self_pnames = []
+    for _spn1, _sct1 in param_ctypes:
+        _self_pnames.append(gimple_ctypes._as_str(_spn1))
+    gen._cpp_gen_self_param_names = _self_pnames
+    # This unit's own parameter defaults, in `param_defaults`' `[(name,
+    # default_ast), ...]` shape — the snapshot a self-recursive delegated
+    # call needs to pad an OMITTED trailing argument. Registration into
+    # `_func_param_defaults` only happens after this whole unit succeeds, so
+    # without this local copy `yield from <this-function>(n - 1)` against
+    # `def countdown(n, step=1)` had no default to pad with (and the old
+    # `yield from` padding loop, which computed a default but never appended
+    # it, hung instead of refusing). Indexed loop, not a `.items()`
+    # comprehension: see the tuple-unpack note at this function's return.
+    _self_dflts = []
+    for _sdk in (getattr(fn, 'param_defaults', None) or {}):
+        _self_dflts.append((_sdk, fn.param_defaults[_sdk]))
+    gen._cpp_gen_self_defaults = _self_dflts
     gen._cpp_os_path_aliases = gcc_._cpp_collect_os_path_aliases(fn)
     gen._cpp_tuple_guarded_yields = gimple_exprtypes._tuple_guarded_bare_yields(fn)
     # Set True by _cpp_yield_from the moment it actually emits a
@@ -1333,6 +1356,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_name = None
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
+        gen._cpp_gen_self_param_names = None
+        gen._cpp_gen_self_defaults = None
         gen._cpp_os_path_aliases = None
         gen._cpp_str_evidence_names = None
         gen._cpp_list_word_names = None
