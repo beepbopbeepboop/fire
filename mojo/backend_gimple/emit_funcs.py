@@ -2778,7 +2778,53 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
     to a different module, the unbound reference is ambiguous and is
     refused rather than silently resolved to either one."""
     for stmt in node_list:
-        if isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
+        if isinstance(stmt, gimple_ctypes.ImportStmt):
+            # A plain `import M as A` binds a MODULE NAMESPACE in this
+            # lexical scope, not a symbol: record it exactly as
+            # `_gen_stmt_ImportStmt` will when the body is emitted (module
+            # alias set + a `{module, return_type: 'unknown'}` entry), and
+            # record the name -> qualifier binding in the scope frame the
+            # same way the `FromImportStmt` branch below does. Without the
+            # frame entry, a lifted closure (`_gen_lifted_closure_body`
+            # seeds its scope from `_func_import_frames`, and the
+            # whole-module pre-scan fills that BEFORE any body is emitted)
+            # cannot see an alias its enclosing function binds, so
+            # `A.member(...)` inside the closure lowers on an unknown
+            # name: a placeholder receiver plus a bare/stubbed callee
+            # instead of the qualified symbol. Without the alias-set entry
+            # the module-marker branches (`_lower_MemberExpr`,
+            # `_lower_IdentExpr`, the module-qualified call paths) never
+            # recognize it as a namespace at all.
+            #
+            # `__impmod__` marks the binding as a plain-import alias so the
+            # `FromImportStmt` ambiguity check below does not treat a later
+            # `from Y import A` (a legal Python shadow, not an ambiguous
+            # same-name import) as an error.
+            for _im_mod_raw, _im_alias_raw in gimple_ctypes._import_targets(stmt):
+                _im_mod = gimple_ctypes._as_str(_im_mod_raw)
+                _im_alias = gimple_ctypes._as_str(_im_alias_raw)
+                # `import a.b` (no alias) binds the top-level package name
+                # `a` — same rule as `_gen_stmt_ImportStmt`.
+                if _im_alias:
+                    _im_local = _im_alias
+                elif '.' in _im_mod:
+                    _im_local = _im_mod[:_im_mod.index('.')]
+                else:
+                    _im_local = _im_mod
+                if not _im_local:
+                    continue
+                _im_q = gen._resolve_import_module_qualifier(_im_mod)
+                if not _im_q:
+                    continue
+                scope[_im_local] = _im_q
+                scope['__mod__' + _im_local] = _im_mod
+                scope['__impmod__' + _im_local] = _im_mod
+                gen._module_alias_names.add(_im_local)
+                gen.imported_symbols[_im_local] = {
+                    'module': _im_mod,
+                    'return_type': 'unknown',
+                }
+        elif isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
             for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
                 nm = gimple_ctypes._fi_name(_fip3)
                 alias = gimple_ctypes._fi_alias(_fip3)
@@ -2806,7 +2852,8 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     continue
                 _local_nm = alias if alias else nm
                 _prev_q = scope.get(_local_nm)
-                if _prev_q is not None and _prev_q != q:
+                if (_prev_q is not None and _prev_q != q
+                        and ('__impmod__' + _local_nm) not in scope):
                     # The same name imported from two different modules into
                     # one function scope is ambiguous (modular's
                     # import_fn_scope_ambiguous.mojo). A re-import from the

@@ -1,4 +1,3 @@
-SPLIT: CODEGEN_selfhost_link_two_unqualified_calls-part1
 # CODEGEN: two undefined symbols left in the self-host link
 
 **Found:** 2026-11-13, `fire.py build fire.py` after the compile errors were
@@ -19,7 +18,7 @@ Both are cross-module references emitted WITHOUT the module qualifier their
 definition carries — the same class as the `_mojo_type` extern fixed in
 `441bf6aae`, but on paths that fix did not reach.
 
-## 1. `_conforms_to` — a module alias is not captured into a lifted lambda
+## 1. `_conforms_to` — a module alias is not captured into a lifted lambda (same defect as §3; FIXED 2026-11-14)
 
 `mojo/backend_gimple/emit_{calls,stmts,infra}.py` each do a FUNCTION-BODY
 `import mojo.middle.comptime as _comptime_eval` inside
@@ -75,7 +74,7 @@ The deeper `_inline_module_qualifiers['']` collision is NOT fixed here — the
 guard only makes an empty name immune. If some other path reads that key, it
 will still see `mojo.middle`.
 
-## 3. `_conforms_to` — a module alias is not visible in a lifted lambda (OPEN)
+## 3. `_conforms_to` — a module alias is not visible in a lifted lambda (FIXED 2026-11-14)
 
 `mojo/backend_gimple/emit_{calls,stmts,infra}.py` each do a FUNCTION-BODY
 `import mojo.middle.comptime as _comptime_eval` inside
@@ -112,6 +111,22 @@ module-alias branch in the `_lower_call`/`_lower_method_call` callee path.
 Note the alias name itself is suspicious: `_comptime_eval` collides with the
 `_comptime_*` naming the comptime machinery uses, which may be why it reads as
 a comptime parameter. Worth checking first.
+
+**Fixed 2026-11-14.** The alias was indeed generic, not comptime-specific:
+`_collect_body_import_bindings` recorded only `FromImportStmt` bindings,
+so a plain `import M as A` never reached a lifted closure's scope frame
+(and the whole-module pre-scan could not seed it either). It now records
+every `ImportStmt` target: the name -> qualifier binding in the frame, the
+`gen._module_alias_names` entry, and the same
+`{module, return_type: 'unknown'}` entry `_gen_stmt_ImportStmt` writes.
+`_lower_IdentExpr` answers the `int64_t` module marker for a name in
+`_module_alias_names` instead of the `(int64_t)0 /* ct param or
+undeclared */` placeholder (after all real bindings, so a local/capture of
+the same name still shadows it). The receiver evaluation in
+`_lower_method_call`'s `MojoAsync *`/`MojoGenerator *` probe, which ran for
+every identifier receiver and left that spurious placeholder behind, is now
+gated on `_set_noop_callback`/`_take_handle`, the only members that use it.
+Pinned by `test_codegen_selfhost_link_two_unqualified_calls_part1.py`.
 
 ## Reproduce
 
