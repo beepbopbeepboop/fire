@@ -6776,11 +6776,7 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
     klen = gen._rt_call('int64_t', 'mojo_list_len', [it_val])
     kidx = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    kcond = gen._cmp(kidx, '<', klen)
-    gen._cond_goto(kcond, bb_body, bb_after)
-    gen._emit_label(bb_body)
+    gen._loop_head(kidx, klen, bb_cond, bb_body, '', bb_after, False)
     _read64 = gen._rt_call('int64_t', 'mojo_list_get_int', [it_val, kidx])
     if _kelem_t == 'double':
         _read = gen._rt_call('double', 'mojo_list_get_double', [it_val, kidx])
@@ -6825,11 +6821,7 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
     else:
         _kret = gen._to_int64(kret_t, kret_v)
         gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', _kret)])
-    kone = gen._new_val('int64_t', '(int64_t)1')
-    knew = gen._binop('int64_t', kidx, '+', kone)
-    gen._copy(kidx, knew)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(kidx, bb_cond, '', bb_after, False)
     return res
 
 
@@ -6953,11 +6945,7 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
     klen = gen._rt_call('int64_t', 'mojo_list_len', [av])
     kidx = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._goto(bb_cond)
-    gen._emit_label(bb_cond)
-    kcond = gen._cmp(kidx, '<', klen)
-    gen._cond_goto(kcond, bb_body, bb_after)
-    gen._emit_label(bb_body)
+    gen._loop_head(kidx, klen, bb_cond, bb_body, '', bb_after, False)
     _read64 = gen._rt_call('int64_t', 'mojo_list_get_int', [av, kidx])
     if _kelem_t == 'double':
         _read = gen._rt_call('double', 'mojo_list_get_double', [av, kidx])
@@ -7005,11 +6993,7 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
     else:
         kret = gen._to_int64(kret_t, kret_v)
         gen._void_call('mojo_list_append_int', [('MojoList *', keys), ('int64_t', kret)])
-    kone = gen._new_val('int64_t', '(int64_t)1')
-    knew = gen._binop('int64_t', kidx, '+', kone)
-    gen._copy(kidx, knew)
-    gen._goto(bb_cond)
-    gen._emit_label(bb_after)
+    gen._loop_tail(kidx, bb_cond, '', bb_after, False)
     return keys
 
 

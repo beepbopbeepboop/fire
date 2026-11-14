@@ -5275,11 +5275,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         idx = gen._new_temp('int64_t')
         gen._emit(f"  {idx} = (int64_t)0;")
         bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-        gen._goto(bb_cond)
-        gen._emit_label(bb_cond)
-        cond = gen._cmp(idx, '<', len_t)
-        gen._cond_goto(cond, bb_body, bb_after)
-        gen._emit_label(bb_body)
+        gen._loop_head(idx, len_t, bb_cond, bb_body, '', bb_after, False)
         byte = gen._rt_call('int64_t', 'mojo_bytes_get', [value, idx])
         gen._void_call('mojo_list_append_int',
                        [('MojoList *', res), ('int64_t', byte)])
@@ -5288,11 +5284,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # declaration at the current point, so calling it before the loop
         # would compute `idx + 1` once, re-assign that same value every
         # iteration, and the loop would never terminate.
-        one = gen._new_val('int64_t', '(int64_t)1')
-        nidx = gen._binop('int64_t', idx, '+', one)
-        gen._copy(idx, nidx)
-        gen._goto(bb_cond)
-        gen._emit_label(bb_after)
+        gen._loop_tail(idx, bb_cond, '', bb_after, False)
         # Bytes elements are always ints — record it so a consumer that
         # asks (enumerate's pair slot, set.update, star-unpack, ...) reads
         # the slots with the int accessor.
