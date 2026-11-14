@@ -67,6 +67,93 @@ and CPython on `bytecodes.c`, and compares stdout. Expected cost ~20 s, < 1 GB.
 5. Run the targeted quick tests: `python3 test_match_class_pattern_positional.py`,
    `python3 test_module_globals_compiled.py` (part 1), and the Done-when test.
 
+## Status (2026-11-13, measured on master `89ed58ab8`, before part 1)
+
+Landed in this lane (the end-to-end run itself is still blocked on part 1):
+
+1. **The 5 undefined entry points: root-caused and the report fixed.** Four of
+   the five are NOT undefined — their bodies ARE in the dylib, under a
+   differently-hashed overload suffix: the source scan hashes the signature's
+   param types as parsed from source, codegen hashes the LIVE inferred types,
+   and the two disagree, so the cross-check found neither the expected symbol
+   nor the raw name and classified the entry "declared with no definition in
+   this dylib" (a false claim — measured: the entry names
+   `std_collections_string_string_ord_9f63a2`, the dylib defines
+   `std_collections_string_string_ord_d719e0`; same shape for `ascii`, `atol`
+   [defined as `..._string_mojo_atol_e253d6`], and `standardize_string_slice`
+   [defined as `..._parsing_integers_standardize_string_slice_d719e0`]). This
+   is the export-table side of the suffix group in
+   `bugs/mid/CODEGEN_stdlib_dylib_lazy_undefined_refs.md` (the codegen fix
+   itself is that lane's). The fix landed here is the cross-check itself:
+   `build_stdlib_dylib.classify_export_entries` — the ONE classifier behind
+   the three call sites (build, runtime_export_entries, optional units), which
+   carried three copies of the check — now reports a suffix-mismatched
+   definition as misresolved and NAMES the definition that exists. The build
+   line went from `2049 of 2054 ... (0 misresolved, 5 undefined)` / `declared
+   with no definition in this dylib: standardize_string_slice, ord, ascii,
+   atol, py_tokenize` to `(4 misresolved, 1 undefined)` / `declared with no
+   definition in this dylib: py_tokenize` (advertised count unchanged: 2049).
+   `py_tokenize` is the one genuinely undefined entry: a `fire_runtime.h`
+   declaration satisfied by the self-hosted compiler image, not the runtime
+   (fire_runtime.h's own comment). Regression: `test_export_table_suffix_mismatch.py`
+   (pins the invariant in both states; fails before — the old logic puts all
+   four in `undefined` and the report half FAILs on the pre-fix build log —
+   passes after; `test_runtime_dylib.py` 130/130).
+2. **Reachability (acceptance item 3): none of the five is reached on the
+   `bytecodes.c` path — provable, not just unreachable-at-runtime.** The
+   compiled analyzer's binary has 217 undefined symbols; ZERO of them is any
+   of the five (raw or mangled). Its 190 dylib-resolved symbols are ALL
+   runtime-C: `re` lowers to `mojo_re_compile/_exec/_call`,
+   `itertools.zip_longest` (analyzer.py:376) lowers to a plain index loop over
+   the two lists, `dataclasses` to the runtime's class-registration machinery,
+   and the only three non-`mojo_` names (`int_read`/`int_write`/
+   `char_replace_impl`) are `fire_runtime.c` functions. The execution never
+   enters a `_std_` Mojo module object. The one dylib-INTERNAL reference to a
+   missing symbol is `_mojo_atol` (plain), called from `StringSpan.__int__`
+   (`string_span.mojo:928`) and `_cpython.mojo:288`'s version parsing — neither
+   reachable from the analyzer (it imports `re`, `dataclasses`, `itertools`,
+   `typing`, `collections.abc`, `lexer`, `parser`, none of which call into
+   those objects); that reference belongs to the lazy-undefined-refs lane.
+3. **The `StaticTuple` CAUGHT line: explained, with evidence (harmless).**
+   Reproduced by compiling `std/simd.mojo` fresh through the dylib's own job
+   (`_compile_module_job`, `use_cache=False`): exactly the two
+   `CAUGHT_IN_MAIN_LOOP: cannot materialize instantiation of generic
+   'StaticTuple': its bracket arguments` lines, and the module still compiles
+   (`error=None`, object produced) — a caught, non-fatal refusal from
+   `emit_calls.py`'s materialization guard. `std/simd.mojo` is the only stdlib
+   module that brackets `StaticTuple` with a parameter-dependent (non-
+   converging) argument (lines 2647, 2917). The line appears in an analyzer
+   build only when `std/simd.mojo` is recompiled inside `build_stdlib()` (a
+   CAS hit prints nothing) — the doc's measurement was such a build. The
+   analyzer's binary references no simd symbol, so the affected SIMD methods
+   are not on this input's path.
+4. **Re-measured the Done-when test at this HEAD: build exit 0, zero
+   `error:` lines; the binary still exits 1 with `Unhandled exception:` —
+   the part 1 blocker, unchanged by the work above.**
+
+## Remaining (the part 1 blocker)
+
+* `test_analyzer_build.py` cannot pass until part 1 (module-scope `globals()`
+  in the compiled path, claim `bug:COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part1`,
+  a separate worker's lane) lands: the analyzer imports `lexer`, whose
+  module-scope `globals()` table-building is what the binary dies on.
+
+## Exact next step (once part 1 is on master)
+
+1. Re-run `python3 test_analyzer_build.py` (wrapped in
+   `tools/memslot.py --gb 8`). It must print
+   `PASS  analyzer.py builds and matches CPython`.
+2. If the binary runs but diverges, follow the Plan step 2 (first differing
+   `cmp` line of stdout, work back to the producer) — nothing in this doc
+   predicts a divergence, and the reachability evidence above says the five
+   entry points will not be the cause.
+3. Close per the Plan step 4: `git rm` the original
+   `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md` and this part's
+   parent `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md`,
+   remove their rows from `bugs/hard/README.md`, delete
+   `docs/cases-generator-analyzer-plan.md`, then
+   `python3 tools/dangling_doc_refs.py --ratchet` in the same commit.
+
 ## Out of scope
 
 * The module-scope `globals()` lowering itself — part 1.
