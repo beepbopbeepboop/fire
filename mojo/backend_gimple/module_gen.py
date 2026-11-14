@@ -5006,6 +5006,21 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _clc = getattr(fn, 'col', 0) or 0
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}error: violated constraint")
+            # Part 2: a bracket parameter's TRAIT BOUND whose argument is
+            # neither provable nor provably false. `check_bounds`'s oracle
+            # (`check_conformance`) answers (True, []) for anything it cannot
+            # resolve, so without this the declaration compiles silently.
+            # AFTER the where-clause check: a provably-false requirement is the
+            # stronger finding and must be the one reported.
+            _diag = _elaborate_mod.check_signature_param_bound_evidence(
+                struct_module_src or module_src or '', tmpl, targs,
+                _elaborate_mod._fn_type_param_bounds(fn))
+            if _diag:
+                _cfn = getattr(gen, '_current_filename', '') or ''
+                _cln = getattr(fn, 'line', 0) or 0
+                _clc = getattr(fn, 'col', 0) or 0
+                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                raise RuntimeError(f"{_cat}{_diag}")
         except RuntimeError:
             raise
         except Exception as e:

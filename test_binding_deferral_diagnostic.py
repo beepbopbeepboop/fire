@@ -207,4 +207,5 @@ if __name__ == '__main__':
     test_satisfied_generic_binding_compiles()
     test_failed_binding_reports_only_the_failing_error_no_deferred_noise()
     test_signature_failed_binding_reports_violated_constraint()
+    test_signature_unproven_binding_reports_lacking_evidence()
     print('ok')

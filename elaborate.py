@@ -1700,6 +1700,153 @@ def check_bounds(module_src: str, template_src: str, targs: dict):
         pass
 
 
+def _struct_conformance_conditions(struct_src, name):
+    """{trait: condition-or-None} from a struct's `(...)` base list.
+
+    `Copyable where conforms_to(T, Copyable), Movable` -> {'Copyable':
+    'conforms_to(T, Copyable)', 'Movable': None}. This is TEXT-level on
+    purpose: the parser's `StructDef.bases` is `['Copyable', 'Movable']` — it
+    keeps the trait and drops the condition, and the condition is exactly what
+    separates a provable bound from an unprovable one. Returns None when the
+    struct cannot be read at all."""
+    tmpl = extract_struct_source(struct_src, name)
+    if not tmpl:
+        return None
+    m = mm.head_match(tmpl)
+    if not m:
+        return None
+    i = tmpl.find('(', m.end() - 1)
+    if i < 0:
+        return {}
+    depth = 0
+    inner = ''
+    for j in range(i, len(tmpl)):
+        if tmpl[j] == '(':
+            depth += 1
+        elif tmpl[j] == ')':
+            depth -= 1
+            if depth == 0:
+                inner = tmpl[i + 1:j]
+                break
+    out = {}
+    for part in split_top_level_commas(inner):
+        part = part.strip()
+        if not part:
+            continue
+        if ' where ' in part:
+            # NOT `trait, cond = part.split(...)`: the selfhost compiles this
+            # very file with its own parser, which has no assignment
+            # tuple-unpacking (it reads `trait, cond =` as a declaration head
+            # and stops at the comma).
+            _pair = part.split(' where ', 1)
+            out[_pair[0].strip()] = _pair[1].strip()
+        else:
+            out[part] = None
+    return out
+
+
+def _bound_trait_evidence(struct_src, arg, trait, fn_bounds, seen):
+    """'proven' | 'false' | 'unproven' for the requirement `arg: trait`.
+
+    `fn_bounds` is the enclosing signature's own type-parameter bounds
+    (`{U: 'Movable & Deinitable'}`). Only two shapes can be shown UNPROVEN,
+    and both are ones we can name:
+
+      * the bound argument is a bare signature type parameter that does not
+        carry the trait;
+      * it is a generic instantiation whose conformance to the trait is
+        declared CONDITIONALLY (`Copyable where conforms_to(T, Copyable)`),
+        and reducing that condition through the supplied arguments lands on a
+        requirement the signature does not imply.
+
+    Everything unreadable answers 'proven', so this cannot invent a violation
+    — it can only refuse a declaration it can prove is unsupported.
+
+    Two readings that must NOT be confused with 'unproven':
+
+      * `AnyType` is the universal bound — every type conforms to it, so it is
+        always 'proven' (`OwnedPointer[T: AnyType]` instantiated with a `T` that
+        carries only `Movable` is fine).
+      * a bound we could not READ is not a bound that is ABSENT.
+        `_fn_type_param_bounds` reports `None` both for a parameter declared
+        with no bound and for one whose annotation the reader never captured
+        (a multi-line bracket head, as in
+        `def create_raising_task[\\n    type: Movable, origins: OriginSet\\n]`).
+        Only a bound list we actually READ and that lacks the trait is evidence
+        of unprovability."""
+    if not arg or arg in seen:
+        return 'proven'
+    if trait == 'AnyType':
+        return 'proven'
+    if re.fullmatch(r'[A-Za-z_]\w*', arg):
+        # Only a name that IS one of the signature's type parameters can be
+        # judged from `fn_bounds`; any other bare name is a concrete type
+        # (`Int`, `str`) whose conformance we cannot read here, so accept.
+        fb = fn_bounds or {}
+        if arg not in fb:
+            return 'proven'
+        b = fb[arg]
+        if b is None:
+            return 'proven'
+        traits = [t.strip() for t in b.split('&') if t.strip()]
+        return 'proven' if trait in traits else 'unproven'
+    m = re.fullmatch(r'([A-Za-z_]\w*)\s*\[(.*)\]', arg, re.S)
+    if not m:
+        return 'proven'
+    gname = m.group(1)
+    gargs = m.group(2)
+    g_tmpl = extract_struct_source(struct_src, gname)
+    if not g_tmpl:
+        return 'proven'
+    conds = _struct_conformance_conditions(struct_src, gname)
+    if conds is None or trait not in conds:
+        return 'proven'
+    cond = conds[trait]
+    if cond is None:
+        return 'proven'
+    gtargs = bind_type_args(g_tmpl, split_top_level_commas(gargs))
+    if not gtargs:
+        return 'proven'
+    for cm in re.finditer(
+            r'conforms_to\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)', cond):
+        xp = cm.group(1)
+        tr2 = cm.group(2)
+        sub = (gtargs.get(xp) or xp).strip()
+        v = _bound_trait_evidence(struct_src, sub, tr2, fn_bounds, seen + (arg,))
+        if v != 'proven':
+            return v
+    return 'proven'
+
+
+def check_signature_param_bound_evidence(struct_src, tmpl, targs, fn_bounds):
+    """Declaration-time evidence check for a signature parameter annotation.
+
+    `check_bounds` asks `check_conformance` whether each bound argument
+    conforms, and that oracle answers `(True, [])` for anything it cannot
+    resolve — so a requirement that is neither provable nor provably false is
+    silently accepted and the declaration compiles. This asks the sharper
+    question the diagnostic names: for each bracket parameter's trait bound, is
+    the bound argument PROVABLE, DISPROVABLE, or UNPROVEN? Returns a
+    diagnostic string, or None to accept.
+
+    Call this AFTER `check_where_clauses`: a provably-false requirement is the
+    stronger finding and must be the one reported."""
+    bounds = parse_bounds(tmpl)
+    if not bounds:
+        return None
+    for pname, bound in bounds.items():
+        if not bound or pname not in targs:
+            continue
+        arg = targs[pname].strip()
+        for trait in [b.strip() for b in bound.split('&') if b.strip()]:
+            verdict = _bound_trait_evidence(struct_src, arg, trait, fn_bounds, ())
+            if verdict == 'unproven':
+                return 'error: invalid bindings in signature: lacking evidence'
+            if verdict == 'false':
+                return 'error: invalid bindings in signature: violated constraint'
+    return None
+
+
 def extract_struct_source(module_src: str, name: str):
     """Pull the source text of a `struct name[...]: ...` block, by indentation."""
     lines = module_src.splitlines(keepends=True)
