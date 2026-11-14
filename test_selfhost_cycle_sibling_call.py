@@ -25,9 +25,19 @@ FunctionDef (the same `_local_sibling_module_exports` /
 module-qualified branch already performs, shared through one helper).
 
 The probe writes two mutually-importing `mojo/middle/*` modules plus a root
-into a directory under `$TMPDIR`, compiles the root with
-`compile_to_gimple(..., do_imports=True)`, and compares the built binary's
-stdout against CPython's for the same three files.
+under this checkout (`build/`, git-ignored — NOT `$TMPDIR`), compiles the root
+with `compile_to_gimple(..., do_imports=True)`, and compares the built
+binary's stdout against CPython's for the same three files.
+
+The fixture MUST live inside a checkout: `_is_selfhost_sibling_alias` gates
+the self-host branch on the compiled file sitting under a tree that holds
+`fire_compiler.py`. A `$TMPDIR` outside the tree takes the GENERIC
+module-qualified branch instead, which already registered the member before
+this fix — measured on master with the fixture outside the tree: zero stubs
+and a correct binary, so the test would be green over the unfixed bug. That
+location-dependence is the same class of flake `test_link_mode.py`'s
+`test_bare_submodule_import_call_inside_source_tree` exists to pin, and
+`_is_selfhost_source_file`'s docstring records.
 
 Run: python3 test_selfhost_cycle_sibling_call.py
 """
@@ -140,15 +150,21 @@ def _build_and_run(ci: str, td: str) -> str:
 
 def test_selfhost_cycle_sibling_call():
     import gimple_codegen
-    td = tempfile.mkdtemp(prefix='selfhost_cycle_sibling_',
-                          dir=os.environ.get('TMPDIR') or None)
+    # Inside the checkout, deliberately: `_is_selfhost_sibling_alias` only
+    # sends this call shape through the SELF-HOST sibling branch (the one
+    # this bug is in) when the compiled file sits under a tree holding
+    # `fire_compiler.py`. See the module docstring.
+    root = os.path.join(HERE, 'build', 'test_selfhost_cycle_sibling_call')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='probe_', dir=root)
     try:
-        root = _write_tree(td)
-        expected = _cpython_stdout(td, root)
+        assert os.path.isfile(os.path.join(HERE, 'fire_compiler.py'))
+        root_file = _write_tree(td)
+        expected = _cpython_stdout(td, root_file)
         assert expected == '4\n1\n8\n', expected
-        with open(root) as f:
+        with open(root_file) as f:
             ci = gimple_codegen.compile_to_gimple(
-                f.read(), do_imports=True, filename=root)
+                f.read(), do_imports=True, filename=root_file)
         # No call site may fall back to the weak "unavailable" stub: that
         # stub is what lets the whole-closure dump link and produce a wrong
         # `.ci` (the parent doc's CLOSURE_INCOMPLETE).

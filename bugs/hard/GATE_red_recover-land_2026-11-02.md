@@ -98,7 +98,11 @@ Split into five parts, all under `bugs/`:
   the 17 private/table names above. **Landed 2026-11-13** (doc deleted): the
   self-host sibling branch of `_lower_method_call` now registers the member
   through the same shared helper the generic branch uses; pinned by
-  `test_selfhost_cycle_sibling_call.py`.
+  `test_selfhost_cycle_sibling_call.py`, whose fixture lives under `build/`
+  inside the checkout on purpose — `_is_selfhost_sibling_alias` only takes the
+  self-host branch for a file under a tree holding `fire_compiler.py`, and the
+  same fixture in a `$TMPDIR` outside one takes the (already-working) generic
+  branch, so it was green on the unfixed tree there (measured).
 - part 2 — a function-body `from X import Y as Z` binds `Z` for a class
   (`MojoParser`).
 - part 3 — a container-annotated parameter is not "provably Int" in the
