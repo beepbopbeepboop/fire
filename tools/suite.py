@@ -4193,6 +4193,10 @@ test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
+test('trait-comptime-member-conformance-diagnostic',
+     [PY, 'test_trait_comptime_member_conformance_diagnostic.py'], mem='tiny',
+     desc='trait comptime member type/where requirements at declaration '
+          '(trait conformance part 5)')
 test('tuple-enumerate-var-refinement', [PY, 'test_tuple_enumerate_var_refinement.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'], mem='tiny',
@@ -4925,6 +4929,13 @@ BUCKETS = {
     'smoke': ['preflight', 'suite-self-test', 'memslot'],
     'ab': ['ab-clean', 'ab-aside', 'ab-bside', 'ab-compare'],
 }
+
+# The trait-conformance part 5 regression runs with the other cheap
+# declaration-time diagnostics on every gate. It is added here rather than
+# inside the `check` literal because that literal is a single ~4 KB line every
+# parallel branch rewrites, so an edit there is a guaranteed merge conflict
+# for the one entry it adds.
+BUCKETS['check'].append('trait-comptime-member-conformance-diagnostic')
 
 # A name that is both a bucket and a test would make `suite.py <name>` mean
 # whichever one won the lookup, silently. There is no good reason to want one,
