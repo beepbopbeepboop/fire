@@ -9259,6 +9259,31 @@ def gen_module_impl(self, stmts: list):
                     exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
             else:
                 exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
+            # Mojoc-backed package/submodule: if source exports are absent,
+            # try the precompiled package artifact's records.
+            if not exports:
+                try:
+                    _mjr = getattr(self, '_mojoc_pkg_records', {}) or {}
+                    _mj_pkg = s.module.split('.', 1)[0].lstrip('.')
+                    _mj_alias = (getattr(self, '_mojoc_pkg_alias', {}) or {}).get(_mj_pkg)
+                    _mj_canon = _mj_alias if _mj_alias else _mj_pkg
+                    _mj_rec = _mjr.get(_mj_canon) or _mjr.get(_mj_pkg)
+                    if _mj_rec:
+                        exports = {}
+                        for _sn, _sr in (_mj_rec.get('structs') or {}).items():
+                            exports[_sn] = {'kind': 'struct', 'mojoc': _sr}
+                        for _fn, _fr in (_mj_rec.get('functions') or {}).items():
+                            _ret = (_fr or {}).get('ret')
+                            exports[_fn] = {
+                                'kind': 'function', 'mojoc': _fr,
+                                'return_type': _ret,
+                                'c_return_type': self._mojo_type(_ret) if _ret else 'int64_t',
+                                'parameters': [],
+                                'c_parameters': [],
+                                'signature': f"{self._mojo_type(_ret) if _ret else 'int64_t'} {_fn} (...)",
+                            }
+                except Exception:
+                    pass
             _sib_is_local_project = False
             if _sib_qualifier:
                 try:

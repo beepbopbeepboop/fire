@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Regression: render a synthetic signature from a precompiled record.
 
-DIAGNOSTICS_mojoc_imports-part2-part2: the imported-struct diagnostic prints
-the part-1 signature record as Mojo source text.  The tricky case is an
-implicit conversion default (`W: Wrapper = __init__(Int(4))`) whose
-`Wrapper.__init__` was never materialized into the artifact: the default must
-be printed as written and must not raise (MOCO-4270).
+The imported-struct diagnostic prints a precompiled mojoc signature record as
+Mojo source text.  The tricky case is an implicit conversion default
+(`W: Wrapper = __init__(Int(4))`) whose `Wrapper.__init__` was never
+materialized into the artifact: the default must be printed as written and
+must not raise (MOCO-4270).
 
 Pure record-in/text-out; no compilation, no fixture package.
 """

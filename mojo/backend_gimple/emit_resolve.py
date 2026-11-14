@@ -275,6 +275,14 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         # (flat `.py`/`.mojo` and the package `__init__`): a stale `.mojoc`
         # beside live sources must never shadow them.
         mojo_paths.append(gimple_ctypes.os.path.join(d, f"{module_name}.mojoc"))
+        # A dotted module `pkg.sub` may be served by the package-level
+        # precompiled artifact `pkg.mojoc` (the package was precompiled as a
+        # whole and its sources deleted), with no per-submodule artifact or
+        # source tree. Try the top-level package artifact after the direct
+        # submodule candidates so a real `pkg/sub` source still wins.
+        if '.' in module_name:
+            _top_pkg = module_name.split('.', 1)[0]
+            mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_top_pkg}.mojoc"))
     # A DOTTED module_name (e.g. `import pkg.helper as m`, module_name ==
     # "pkg.helper") names a package-relative path, not a literal
     # filename with dots in it — the loop above only ever tried the
@@ -519,7 +527,7 @@ def publish_a3_generators(gen, meta) -> None:
             gen._generator_home_api[_key] = _api
 
 
-def _load_mojoc_signatures(gen, path: str) -> None:
+def _load_mojoc_signatures(gen, path: str, module_name: str = None) -> None:
     """Register a precompiled `.mojoc` artifact's struct/trait records on
     `gen`.
 
@@ -529,16 +537,72 @@ def _load_mojoc_signatures(gen, path: str) -> None:
     instantiation must be checked against — `_ensure_generic_struct` reads
     `gen._mojoc_structs` for that. Records keep their artifact spelling so
     the one record reader (`mojo/middle/mojoc_artifact.py`) stays the only
-    reader of the format."""
+    reader of the format.
+
+    When the same underlying artifact is reached under two different package
+    names (dual mount), the alias is resolved before the artifact is read:
+    warn once, and record the alias so the first name stays canonical.
+    """
     try:
         from mojo.middle import mojoc_artifact
         art = mojoc_artifact.load_artifact(path)
     except Exception as e:
         gimple_ctypes._debug_note('mojoc artifact unreadable', e)
         return
+    # Dual-mount detection: the package name as requested/imported (the top
+    # component of module_name) may alias the artifact's own package identity
+    # or another name that resolves to the same artifact file.
+    _pkg = None
+    if module_name:
+        _pkg = module_name.split('.', 1)[0].lstrip('.')
+    _art_pkg = art.get('package') or os.path.splitext(os.path.basename(path))[0]
+    if not _pkg:
+        _pkg = _art_pkg
+    try:
+        _real = os.path.realpath(path)
+    except Exception:
+        _real = os.path.abspath(path)
+    _canon_map = getattr(gen, '_mojoc_pkg_canonical', None)
+    _alias_map = getattr(gen, '_mojoc_pkg_alias', None)
+    import sys as _sys
+    # The artifact's declared package name is the canonical identity when
+    # available; a different requested name is an alias (dual mount).
+    _preferred = _art_pkg or _pkg
+    if _canon_map is not None and _real in _canon_map:
+        _canon = _canon_map[_real]
+    elif _canon_map is not None:
+        _canon = _preferred
+        _canon_map[_real] = _canon
+    else:
+        _canon = _preferred
+    # Warn if accessed via an alias name (different from canonical).
+    if _pkg != _canon and _alias_map is not None and _pkg not in _alias_map:
+        _alias_map[_pkg] = _canon
+        print(
+            f"warning: '{_pkg}' and '{_canon}' name the same package; "
+            f"remove the duplicate import root or file that reaches it twice",
+            file=_sys.stderr)
+        print(
+            f"note: '{_canon}' is the name used in error messages and debug info",
+            file=_sys.stderr)
+    # Also, if the artifact's own name differs from how it was first
+    # registered under some other realpath-equivalent situation, ensure
+    # consistency (canonical is already set).
+    _canon_name = _canon if _canon_map is not None else _pkg
     for _n, _rec in (art.get('structs') or {}).items():
         if isinstance(_rec, dict):
             gen._mojoc_structs.setdefault(_n, _rec)
+    # Expose the artifact's full records for symbol lookup by mojoc-backed
+    # package imports (structs and functions).
+    _pkg_recs = getattr(gen, '_mojoc_pkg_records', None)
+    if _pkg_recs is not None:
+        _entry = _pkg_recs.setdefault(_canon_name, {'structs': {}, 'functions': {}})
+        for _k, _v in (art.get('structs') or {}).items():
+            _entry['structs'].setdefault(_k, _v)
+        for _k, _v in (art.get('functions') or {}).items():
+            _entry['functions'].setdefault(_k, _v)
+        if _pkg != _canon_name and _alias_map is not None:
+            _pkg_recs.setdefault(_pkg, _pkg_recs.get(_canon_name, _entry))
 
 
 def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
@@ -563,7 +627,22 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
             if isinstance(path, str) and path.endswith('.mojoc'):
                 # A precompiled signature artifact: read the signatures, no
                 # statements to inline (there is no code in the artifact).
-                _load_mojoc_signatures(gen, path)
+                _mojoc_base = os.path.splitext(os.path.basename(path))[0]
+                _mod_top = module_name.split('.', 1)[0].lstrip('.') if module_name else ''
+                _is_pkg_fallback = ('.' in (module_name or '')
+                                    and _mojoc_base == _mod_top
+                                    and _mojoc_base != module_name.lstrip('.'))
+                if _is_pkg_fallback:
+                    # Package-level mojoc used to serve a submodule import
+                    # (e.g. utils.a -> utils.mojoc). Only when the package
+                    # has no live sources; a real source package must win.
+                    _pkg_dir = os.path.join(os.path.dirname(path), _mod_top)
+                    if (os.path.isfile(os.path.join(_pkg_dir, '__init__.mojo'))
+                            or os.path.isfile(os.path.join(_pkg_dir, '__init__.py'))
+                            or os.path.isfile(os.path.join(os.path.dirname(path), _mod_top + '.mojo'))
+                            or os.path.isfile(os.path.join(os.path.dirname(path), _mod_top + '.py'))):
+                        continue
+                _load_mojoc_signatures(gen, path, module_name=module_name)
                 return (None, [])
             _abspath = gimple_ctypes.os.path.abspath(path)
             # `_ap_key`: a fresh `_as_str`-typed local for the two
