@@ -3,7 +3,7 @@
 CODEGEN_simd_and_array_values_erase_to_int64.
 
 Each `test_<prefix>_*` here is the Done-when test of an open part doc under
-bugs/mid/ and is RED until its part lands. This file is deliberately NOT a
+bugs/ and is RED until its part lands. This file is deliberately NOT a
 registered gate job: a red probe belongs to its bug doc's command, not to the
 green regression bucket. The landed parts' tests are in
 test_codegen_erased_container_values_pins.py.
@@ -70,7 +70,7 @@ def test_p1_alias_expands_in_annotations():
     assert 'mojo_list_get_double' in abody, abody
 
 
-# part 2 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part2.md):
+# part 2 (CODEGEN_simd_and_array_values_erase_to_int64, alias as constructor callee):
 # a module-level `alias` naming a constructible type is expanded when it is
 # the CALLEE of a constructor call (`F2(1.0)`, `A4(fill=0.0)`), not only in an
 # annotation.

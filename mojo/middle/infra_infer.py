@@ -63,6 +63,24 @@ def _resolve_type(gen, ann: str | None) -> str:
     # `auto` annotation resolves to the struct registered under `_kw_auto`.
     if isinstance(ann, str):
         ann = gen._c_kw_struct_renames.get(ann, ann)
+    # A module-local `alias NAME = <type>`: expand the name to the aliased
+    # type's annotation text before any other resolution, recursively with a
+    # seen-set so a cycle cannot hang codegen. Only module-local aliases are
+    # in scope (gen._type_aliases); unknown names fall through unchanged.
+    if isinstance(ann, str):
+        _ta = getattr(gen, '_type_aliases', None)
+        if _ta:
+            _ann_s = ann.strip()
+            _seen = set()
+            while _ann_s in _ta and _ann_s not in _seen:
+                _seen.add(_ann_s)
+                _expanded = _ta.get(_ann_s)
+                if _expanded is None:
+                    break
+                _ann_s = str(_expanded).strip()
+                if not _ann_s:
+                    break
+            ann = _ann_s
     if ann in gen.struct_field_types:
         return f"{ann} *"
     # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —

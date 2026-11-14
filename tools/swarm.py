@@ -652,7 +652,13 @@ def replan_unserved():
                         json.dump(it, f, indent=1)
                     log("replan %s: corrected its queued class %s -> easy" % (name, old))
                 continue
-            if name in C.load() or split_reason("%s/%s" % (cls, base)) or claim_held(base):
+            _prev = C.load().get(name)
+            # A live entry, or one with unlanded commits, is work in flight or work to land: leave it.
+            # A TERMINAL entry with no commits is a dead attempt (the replan died before filing anything);
+            # treating any entry as "already queued" parked the doc forever (2026-11-13).
+            if _prev is not None and (C.state_of(_prev) not in C.TERMINAL or C.ahead(_prev) > 0):
+                continue
+            if split_reason("%s/%s" % (cls, base)) or claim_held(base):
                 continue
             text = REPLAN_TASK % {"doc": "bugs/%s/%s.md" % (cls, base), "cls": cls,
                                   "slots": ", ".join(slots), "servable": ", ".join(servable)}
