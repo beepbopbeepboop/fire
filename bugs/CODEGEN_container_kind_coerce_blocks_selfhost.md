@@ -58,3 +58,27 @@ smallest of the three.
 `cannot coerce ... (incompatible container kinds)` line, and the selfhost /
 bootstrap chain in `bugs/hard/GATE_red_recover-land_2026-11-02.md` can be
 re-enabled.
+
+## Sites, re-measured 2026-11-14 (temporary instrumentation at the chokepoint)
+
+The three sites named above are not the whole set. Printing
+`gen._current_filename` / `gen.current_func_name` / the enclosing
+`gen._current_func_node` at `_sce_simple_emit`'s refusal gives, in one
+`--dump-full comptime.py` run:
+
+| file | `current_func_name` | enclosing node | value -> dest |
+|---|---|---|---|
+| gimple_codegen.py | `_merge_struct_inheritance_resolve` | `_selfhost_syms` (line 653) | `MojoDict *` -> `MojoList *` |
+| gimple_codegen.py | `_run_pipeline__walk_diag_fns` | `_relocate_module_instance_defs` (6285) | `MojoDict *` -> `MojoList *` |
+| monomorphize.py | `instantiate_build` | `compile_fn` (915) | `MojoSet *` -> `MojoList *` |
+| comptime.py | `_build_dylib_build` | — | `MojoSet *` -> `MojoList *` |
+
+Two notes for whoever fixes it. First, `gen._current_line` is `None` in the
+refusal, so the error message's `file:line` is line-less and the mangled
+`current_func_name` (`_merge_struct_inheritance_resolve`, `instantiate_build`,
+`_build_dylib_build`) does NOT appear in the source — those are derived names,
+so grep for them finds nothing. The enclosing top-level function is the
+source-visible handle. Second, all four are the SAME shape: a destination the
+inference said `MojoList *` and a value that is really a `MojoDict *`/`MojoSet *`,
+which is the `_infer_param_types`-vs-USES class
+`bugs/CODEGEN_param_container_kind_across_call_sites_refused.md` describes.

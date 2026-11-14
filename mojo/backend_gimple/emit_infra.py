@@ -8448,6 +8448,10 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # three may not (each has a `return "<literal>"` arm, where a `free` is
     # heap corruption rather than a leak).
     _owned_reprs: list = []
+    # `(word, repr)` pairs from `_repr_boxed_container`: its str arm returns
+    # the borrowed string value itself (must not be freed), every other arm
+    # returns a fresh buffer. Release only when the word is not a boxed str.
+    _owned_boxed_reprs: list = []
     for _pi, (atype, aval) in enumerate(parts):
         # A DYNAMIC tagged nested-generator-tuple element (see
         # _lower_IdentExpr's _tagged_dyn_src branch): the real kind is only
@@ -8494,6 +8498,20 @@ def _gen_print(gen, args: list, kwargs: list = None):
             resolved_parts.append(('char *', _res))
             continue
         if atype in ('int', 'int64_t'):
+            _arg_node = args[_pi] if _pi < len(args) else None
+            if (_arg_node is not None and isinstance(_arg_node, gimple_ctypes.IdentExpr)
+                    and _as_str(_arg_node.name) in mixed_value_locals(gen)):
+                # A name rebound between a container and a scalar: its word
+                # changes kind with each store, so repr by runtime kind (the
+                # same discrimination `_stringify` uses). The str arm of
+                # `_repr_boxed_container` borrows the value; every other arm
+                # allocates, so release conditionally after the print.
+                _word = aval
+                aval = _repr_boxed_container(gen, _word)
+                atype = 'char *'
+                _owned_boxed_reprs.append((_word, aval))
+                resolved_parts.append((atype, aval))
+                continue
             if aval in getattr(gen, '_boxed_container_vals', ()):
                 # A call to a function whose returns disagree on container
                 # kind: the result IS a container, but which one is a runtime
@@ -8832,6 +8850,19 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 gen._rt_void('free', [t])
         if i < len(parts) - 1:
             _emit_literal_print(' ', print_fn)
+    # `_repr_boxed_container` borrows a boxed str but allocates every other
+    # repr; free only the allocated arms (the runtime discriminator is the
+    # same one the helper used).
+    for _ob_i in range(len(_owned_boxed_reprs)):
+        _obw = _owned_boxed_reprs[_ob_i][0]
+        _obr = _owned_boxed_reprs[_ob_i][1]
+        _obis = gen._call_expr('int', 'mojo_boxed_is_str', [('int64_t', _obw)])
+        _ob_free = gen._new_bb()
+        _ob_done = gen._new_bb()
+        gen._cond_goto(_obis, _ob_done, _ob_free)
+        gen._emit_label(_ob_free)
+        gen._rt_void('free', [_obr])
+        gen._emit_label(_ob_done)
     # Index-walk, not a two-element for-target unpack: that boxes both slots
     # on the self-hosted path (`_lower_fnptr_call_value`'s own comment gives
     # the rule for the same shape).
