@@ -57,6 +57,12 @@ _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 # `isinstance(bound, MojoClass)` guard in `_apply_function_decorators`.
 _DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
 
+# id(MojoFunction) -> (filename, line) of its `def`, recorded by
+# execute_FunctionDef. Kept in a module table (not a field on MojoFunction)
+# because the self-hosted compiler hardcodes that class's field table. Read
+# only to render the `note: candidate not viable` lines of an overload failure.
+_FUNC_DEF_LOCS = {}
+
 
 def _unwrap_dataclass_field(value):
     """The default a declared field takes, given the value its initializer
@@ -816,6 +822,127 @@ def name_error_candidate(name, candidates, self_obj):
     return _suggestion_after_pool(d, name_n, not_normalized)
 
 
+def _callee_start(func):
+    """(line, col) of the leftmost token of a call's callee expression:
+    `a.b.f` starts at `a`, whereas a MemberExpr's own col is its last dot."""
+    while hasattr(func, 'obj') and hasattr(func, 'member'):
+        func = func.obj
+    return getattr(func, 'line', 0), getattr(func, 'col', 0)
+
+
+def overload_rejection(spec, args, kwargs):
+    """Why one overload candidate cannot take this call, in the modular
+    compiler's wording, or None when this resolver cannot name a reason it
+    has verified against `tools/mojo` (only the two shapes below have been).
+    `spec` is the (func, required, optional, kwonly, has_var_kwargs) tuple."""
+    required = spec[1]
+    optional = spec[2]
+    n = len(args)
+    if n > len(required) + len(optional):
+        return 'unexpected argument'
+    for name in required[n:]:
+        if name not in kwargs:
+            return f"missing required argument: '{name}'"
+    return None
+
+
+def overload_diagnostic_record(oset, call, args, kwargs, filename):
+    """The structured modular diagnostic for a call no overload accepts:
+
+        error: no matching function in call to 'f'
+        note: candidate not viable: <reason>      (one per candidate, with
+                                                   the candidate's `def` line)
+
+    Returns a dict for `mojo_diagnostic`, or None when any candidate's reason
+    or location is not known, or the reasons differ in kind (the caret
+    position for a mixed set has not been measured): the caller then keeps
+    the plain one-line error rather than print a guess. Caret placement,
+    measured against `tools/mojo build`: all reasons "missing required
+    argument" -> caret on the `(`, `~` under the callee; all "unexpected
+    argument" -> caret on the callee's first character."""
+    reasons = []
+    for spec in oset.candidates:
+        reason = overload_rejection(spec, args, kwargs)
+        loc = _FUNC_DEF_LOCS.get(id(spec[0]))
+        if reason is None or loc is None:
+            return None
+        reasons.append((reason, loc))
+    if not reasons:
+        return None
+    missing = reasons[0][0].startswith('missing required argument')
+    for r in reasons:
+        if r[0].startswith('missing required argument') != missing:
+            return None
+    cl, cc = _callee_start(call.func)
+    if cl != call.line or cc < 1 or call.col < cc:
+        return None
+    notes = []
+    for r in reasons:
+        notes.append({'file': r[1][0], 'line': r[1][1], 'name': oset.name,
+                      'message': 'candidate not viable: ' + r[0]})
+    return {'file': filename, 'line': call.line,
+            'caret': call.col if missing else cc,
+            'tilde_from': cc if missing else 0,
+            'message': f"no matching function in call to '{oset.name}'",
+            'notes': notes}
+
+
+def _record_source_line(rec_file, line, filename, source):
+    """The text of `line` in `rec_file`: `source` when it is the file being
+    run, else read from disk; None when unavailable."""
+    if rec_file == filename and source is not None:
+        lines = source.splitlines()
+    else:
+        try:
+            with open(rec_file, encoding='utf-8') as fh:
+                lines = fh.read().splitlines()
+        except (OSError, TypeError, ValueError):
+            return None
+    if 1 <= line <= len(lines):
+        return lines[line - 1]
+    return None
+
+
+def _render_record_text(rec, filename, source):
+    """Text rendering of an overload_diagnostic_record, in `mojo build`'s
+    shape: `file:line:col: error: msg`, the source line, then a marker line
+    (`~` from tilde_from up to the caret, `^` at the caret column)."""
+    out = []
+    items = [('error', rec['file'], rec['line'], rec['caret'],
+              rec['tilde_from'], rec['message'], None)]
+    for n in rec['notes']:
+        items.append(('note', n['file'], n['line'], 0, 0, n['message'], n['name']))
+    for kind, f, line, caret, tilde_from, message, name in items:
+        text = _record_source_line(f, line, filename, source)
+        if name is not None and text is not None:
+            m = re.search(r'\b(?:def|fn)\s+(' + re.escape(name) + r')\b', text)
+            caret = m.start(1) + 1 if m else 0
+        if caret < 1:
+            caret = 1
+        if name is not None and f != rec['file'] and source is not None:
+            # A candidate declared in another file is introduced by the
+            # importing statement: `Imported from <this file>:<line>:`.
+            base = os.path.basename(f)
+            mod = os.path.basename(os.path.dirname(f)) if base == '__init__.mojo' \
+                else os.path.splitext(base)[0]
+            pat = re.compile(r'^\s*(?:import\s+' + re.escape(mod) + r'\b|from\s+'
+                             + re.escape(mod) + r'\b)')
+            for i, src_line in enumerate(source.splitlines()):
+                if pat.match(src_line):
+                    out.append(f"Imported from {rec['file']}:{i + 1}:")
+                    break
+        out.append(f"{f}:{line}:{caret}: {kind}: {message}")
+        if text is not None:
+            out.append(text)
+            pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:caret - 1])
+            if tilde_from:
+                marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
+                out.append(marks + '~' * (caret - tilde_from) + '^')
+            else:
+                out.append(pad + '^')
+    return '\n'.join(out)
+
+
 def mojo_diagnostic(exc, filename, source, fmt='text'):
     """The modular-format rendering of an unknown-declaration error, or None
     when `exc` carries no Mojo source location (an error raised from a
@@ -839,6 +966,9 @@ def mojo_diagnostic(exc, filename, source, fmt='text'):
     `location` and `ranges`, 1-based line/column in `fixIts` (the suggestion
     replaces the identifier). The driver's closing `failed to parse` record
     is part of that stream, so it is emitted here too."""
+    rec = getattr(exc, 'mojo_record', None)
+    if rec is not None and fmt != 'json' and filename:
+        return _render_record_text(rec, filename, source)
     loc = getattr(exc, 'mojo_loc', None)
     name = getattr(exc, 'name', None)
     if loc is None or not isinstance(name, str) or not filename or source is None:
@@ -5483,6 +5613,7 @@ class Interpreter:
                              is_async=getattr(node, 'is_async', False), interpreter=self,
                              comptime_param_defaults=_cpd)
         spec = self._classify_params(node)
+        _FUNC_DEF_LOCS[id(func)] = (self.filename, getattr(node, 'line', 0))
         bound = self._register_function(self.scope.vars, node.name, func, spec)
         # The rebinding a decorator IS: the decorated value replaces the
         # function in the module scope under its own name. Written through
@@ -8163,7 +8294,12 @@ class Interpreter:
             try:
                 return self.invoke(func, *args, **kwargs)
             except _NoOverloadMatch as e:
-                raise TypeError(f"{self._loc(expr)}{e}")
+                err = TypeError(f"{self._loc(expr)}{e}")
+                if not str(e).startswith('AMBIGUOUS'):
+                    rec = overload_diagnostic_record(func, expr, args, kwargs, self.filename)
+                    if rec is not None:
+                        setattr(err, 'mojo_record', rec)
+                raise err
         return self.invoke(func, *args, **kwargs)
 
     def invoke(self, func, *args, **kwargs):

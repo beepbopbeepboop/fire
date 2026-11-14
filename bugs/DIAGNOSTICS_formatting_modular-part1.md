@@ -128,3 +128,31 @@ piece that touches them. Step 1 changes decorator handling for every file, so it
 compile check described in CLAUDE.md before it is committed.
 
 **Not landed this round.** No code change. This round's output is the measurement and the plan above.
+
+### 2026-11-14: group B landed (overload failure), step 1 already done
+
+Re-measured first: plan step 1 (decorator acceptance) was already in the tree
+(`implicit` is in `_COMPILE_TIME_DECORATORS`; `import diags_package` runs).
+
+Landed (`myinterpreter.py`, test `test_overload_diagnostic.py`, 4 cases):
+- A call no overload accepts now prints the modular block instead of a one-line
+  runtime TypeError: `error: no matching function in call to 'f'` with the
+  call-site snippet, then one `note: candidate not viable: <reason>` per
+  candidate with that candidate's `def` line and caret, and `Imported from
+  <file>:<line>:` before a candidate declared in another file. Byte-identical to
+  `tools/mojo build` for: zero-arg call over three overloads, too-many-args
+  (caret on the callee), and candidates in an imported package. Block B of this
+  test's CHECK lines is satisfied when the package source is still on disk.
+- Mechanism: `overload_rejection`, `overload_diagnostic_record`,
+  `_render_record_text`, hooked into `mojo_diagnostic` through an exception's
+  `mojo_record`; `_FUNC_DEF_LOCS` records each def's file/line.
+- Only the two reason kinds measured against the real compiler are rendered
+  (missing required argument; unexpected argument), and only when every
+  candidate has the same kind. Anything else keeps the old one-line error
+  rather than a guessed block.
+
+Still missing: groups A, C, D, E, F, G, H, I, J, K, L from the table above;
+JSON output for the overload record; synthetic-signature rendering for a
+source-less (precompiled) package, so the "source deleted" RUN line is still
+unmet; mixed-reason overload sets; method overload sets (their defs are not
+recorded in `_FUNC_DEF_LOCS`). This doc stays open for those.
