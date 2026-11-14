@@ -2245,15 +2245,15 @@ def _select_val(gen, ctype: str, cond_ctype: str, cond_val: str, then_val, else_
     bb_then = gen._new_bb()
     bb_else = gen._new_bb()
     bb_merge = gen._new_bb()
-    gen._emit(f"  if ({cond}) goto {bb_then}; else goto {bb_else};")
+    gen._cond_goto(f"{cond}", bb_then, bb_else)
     gen._emit_label(bb_then)
     tv = then_val() if callable(then_val) else then_val
     gen._safe_coerce_emit(ctype, ctype, tv, result)
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_else)
     ev = else_val() if callable(else_val) else else_val
     gen._safe_coerce_emit(ctype, ctype, ev, result)
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return result
 
@@ -2404,6 +2404,28 @@ def _cast_into(gen, dst: str, ctype: str, val: str) -> None:
     """`dst = (ctype) val;` into an existing temp, which must be declared
     `ctype`."""
     gen._emit('  ' + _as_str(dst) + ' = (' + _as_str(ctype) + ')' + _as_str(val) + ';')
+
+
+def _goto(gen, label: str) -> None:
+    """`goto label;` -- THE way to emit an unconditional jump."""
+    gen._emit('  goto ' + _as_str(label) + ';')
+
+
+def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
+    """`if (cond) goto then_label; else goto else_label;` -- THE way to emit a
+    conditional jump.  `cond` is a `_Bool` temp (or a bare comparison)."""
+    gen._emit('  if (' + _as_str(cond) + ') goto ' + _as_str(then_label)
+              + '; else goto ' + _as_str(else_label) + ';')
+
+
+def _ret(gen, val: str) -> None:
+    """`return val;` -- THE way to return a value from the function."""
+    gen._emit('  return ' + _as_str(val) + ';')
+
+
+def _ret_void(gen) -> None:
+    """`return;` -- THE way to return from a void function."""
+    gen._emit(gimple_codegen._RETURN)
 
 
 def _void_call(gen, fname: str, arg_pairs: list) -> tuple:
@@ -3986,10 +4008,10 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
-    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     if start_val is not None:
         disp_idx = gen._new_val('int64_t', f"{idx64} + {start_val}")
@@ -4046,12 +4068,12 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
                 else:
                     gen._safe_coerce_emit('int64_t', _vt, _iv, _vc)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._emit(f"  goto {bb_post};")
+    gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
     gen._emit(f"  {idx64} = {st};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     # The comprehension is over: every name it bound is the enclosing
     # function's own binding again (see `ginf._restore_binding`).
@@ -4066,19 +4088,19 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
-    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str_cp', [f"mojo_str_data({_iv})", idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._emit(f"  goto {bb_post};")
+    gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
     gen._emit(f"  {idx64} = {st};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
@@ -4109,10 +4131,10 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
-    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     # `mojo_char_at_str`, for _gen_for_cstr's reason in full: gimple rejects a
     # `char` argument ("invalid argument to gimple call"), so the slice stood
@@ -4127,12 +4149,12 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     # `_gen_for_cstr` says the same).
     gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str', [_iv, idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._emit(f"  goto {bb_post};")
+    gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
     gen._emit(f"  {idx64} = {st};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
@@ -4158,7 +4180,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             # empty `char *` "" pointer is non-null and would wrongly pass.
             cv = gen._ensure_bool_cond(_ct, cv)
             bb_next = gen._new_bb()
-            gen._emit(f"  if ({cv}) goto {bb_next}; else goto {bb_skip};")
+            gen._cond_goto(f"{cv}", bb_next, bb_skip)
             gen._emit_label(bb_next)
         gen._emit_label(bb_append)
 

@@ -178,13 +178,13 @@ def remaining(gen, rec):
     gen._emit(f"  {over} = {left} < {zero};")
     out = gen._new_temp('int64_t')
     bb_neg = gen._new_bb(); bb_ok = gen._new_bb(); bb_merge = gen._new_bb()
-    gen._emit(f"  if ({over}) goto {bb_neg}; else goto {bb_ok};")
+    gen._cond_goto(over, bb_neg, bb_ok)
     gen._emit_label(bb_neg)
     gen._emit(f"  {out} = {zero};")
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_ok)
     gen._emit(f"  {out} = {left};")
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return out
 

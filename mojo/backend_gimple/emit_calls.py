@@ -413,14 +413,14 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     resumed = gen._new_val('_Bool', f"{base}_resume ({av})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
-    gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._cond_goto(resumed, bb_ok, bb_exhausted)
     gen._emit_label(bb_exhausted)
     gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
     _stop_value_attach(gen, av, base)
     gen._rt_void('mojo_raise', [])
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_ok)
     result = gen._new_val(vct, f"{base}_value ({av})")
     if api.get('boxed_container'):
@@ -428,7 +428,7 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     if api.get('mixed_slots') and vct == 'int64_t':
         gen._boxed_vals.add(result)       # a tagged word: rendered by kind
         gen._tagged_word_vals.add(result)
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -493,17 +493,17 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
         resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
-    gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._cond_goto(resumed, bb_ok, bb_exhausted)
     gen._emit_label(bb_exhausted)
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
     _stop_value_attach(gen, av, api['base'])
     gen._rt_void('mojo_raise', [])
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_ok)
     result = gen._new_val(vct, f"{api['base']}_value ({av})")
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -548,7 +548,7 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
         f"__mojo_gen_throw ({handle}, {gen._exc_type_id(exc_name)}, {msg}, 0)")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
-    gen._emit(f"  if ({thrown}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._cond_goto(thrown, bb_ok, bb_exhausted)
     gen._emit_label(bb_exhausted)
     # The body propagated something (or ended): re-raise it HERE, on the
     # consumer's own frame, exactly as _lower_generator_next does. The
@@ -560,10 +560,10 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
     _stop_value_attach(gen, av, api['base'])
     gen._rt_void('mojo_raise', [])
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_ok)
     result = gen._new_val(vct, f"{api['base']}_value ({av})")
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -592,7 +592,7 @@ def _lower_generator_close(gen, node, av: str, api: dict):
     zero_word = gen._new_val('int64_t', '0')
     ignored = gen._new_val('_Bool', f"{closed_word} != {zero_word}")
     bb_ok = gen._new_bb(); bb_ignored = gen._new_bb()
-    gen._emit(f"  if ({ignored}) goto {bb_ignored}; else goto {bb_ok};")
+    gen._cond_goto(ignored, bb_ignored, bb_ok)
     gen._emit_label(bb_ignored)
     # Real Python: "RuntimeError: generator ignored GeneratorExit" when a
     # close()d generator yields again instead of unwinding.
@@ -1147,11 +1147,11 @@ def _lower_siter_collect_list(gen, it_v: str) -> tuple[str, str] | None:
     gen._emit(f"  {sj} = setjmp (_mojo_exc_stack[{top2}]);")
     ct = gen._new_temp('_Bool')
     gen._emit(f"  {ct} = {sj} != 0;")
-    gen._emit(f"  if ({ct}) goto {bb_exc}; else goto {bb_loop};")
+    gen._cond_goto(ct, bb_exc, bb_loop)
     gen._emit_label(bb_loop)
     e = gen._new_val('int64_t', f"_SIterBytes___next__ ({it_v})")
     gen._rt_void('mojo_list_append_int', [l, e])
-    gen._emit(f"  goto {bb_loop};")
+    gen._goto(bb_loop)
     gen._emit_label(bb_exc)
     gen._rt_void('mojo_exc_pop', [])
     return 'MojoList *', l
@@ -4094,13 +4094,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 resumed = gen._new_val('_Bool', f"{base}_resume ({av})")
                 result = gen._new_temp(vct)
                 bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
-                gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+                gen._cond_goto(resumed, bb_ok, bb_exhausted)
                 gen._emit_label(bb_ok)
                 ok_val = gen._new_val(vct, f"{base}_value ({av})")
                 if api.get('boxed_container'):
                     gen._boxed_container_vals.add(ok_val)
                 gen._safe_coerce_emit(vct, vct, ok_val, result)
-                gen._emit(f"  goto {bb_merge};")
+                gen._goto(bb_merge)
                 gen._emit_label(bb_exhausted)
                 # `default` is only evaluated on the exhausted branch —
                 # real Python semantics (a non-trivial default expr must
@@ -4114,7 +4114,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 else:
                     dt, dv = gen.lower_expr(node.args[1])
                     gen._safe_coerce_emit(dt, vct, dv, result)
-                gen._emit(f"  goto {bb_merge};")
+                gen._goto(bb_merge)
                 gen._emit_label(bb_merge)
                 if api.get('boxed_container'):
                     gen._boxed_container_vals.add(result)
@@ -5024,11 +5024,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _res = gen._new_temp('MojoDict *')
             _isdc = gen._call_expr('int', '_mojo_dispatch_is_dataclass', [('void *', vp)])
             _bb_y = gen._new_bb(); _bb_n = gen._new_bb(); _bb_e = gen._new_bb()
-            gen._emit(f'  if ({_isdc}) goto {_bb_y}; else goto {_bb_n};')
+            gen._cond_goto(_isdc, _bb_y, _bb_n)
             gen._emit_label(_bb_y)
             _d = gen._call_expr('MojoDict *', '_mojo_dispatch_asdict', [('void *', vp)])
             gen._emit(f'  {_res} = {_d};')
-            gen._emit(f'  goto {_bb_e};')
+            gen._goto(_bb_e)
             gen._emit_label(_bb_n)
             _dt, _dv = gen.lower_expr(node.args[2])
             if _dt == 'MojoDict *':
@@ -5037,7 +5037,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _dvw = gen._to_int64(_dt, _dv)
                 _dvp = gen._cast('void *', _dvw)
                 gen._cast_into(f"{_res}", 'MojoDict *', _dvp)
-            gen._emit(f'  goto {_bb_e};')
+            gen._goto(_bb_e)
             gen._emit_label(_bb_e)
             return 'MojoDict *', _res
         if (isinstance(node.args[1], gimple_ctypes.StringLiteral)
@@ -6013,13 +6013,13 @@ def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
     n = gen._new_val('int64_t', rec['full'])
     bb_ok = gen._new_bb(); bb_miss = gen._new_bb(); bb_merge = gen._new_bb()
     cond = gen._new_val('_Bool', f"{cur} < {n}")
-    gen._emit(f"  if ({cond}) goto {bb_ok}; else goto {bb_miss};")
+    gen._cond_goto(cond, bb_ok, bb_miss)
     gen._emit_label(bb_ok)
     _rvct, ok = itc.read_at(gen, rec, cur)
     gen._safe_coerce_emit(_rvct, vct, ok, result)
     nxt = gen._inc_val(cur)
     gen._emit(f"  {cur} = {nxt};")
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_miss)
     if len(args) == 2:
         # `default` only evaluated on the exhausted branch (real Python
@@ -6029,7 +6029,7 @@ def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
     else:
         gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id('StopIteration')}"])
         gen._rt_void('mojo_raise', [])
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
 
@@ -6068,7 +6068,7 @@ def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     have = gen._new_val('_Bool', f"{n_t} > {zero}")
     result = gen._new_temp(elem)
     bb_have = gen._new_bb(); bb_empty = gen._new_bb(); bb_done = gen._new_bb()
-    gen._emit(f"  if ({have}) goto {bb_have}; else goto {bb_empty};")
+    gen._cond_goto(have, bb_have, bb_empty)
 
     gen._emit_label(bb_have)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -6081,7 +6081,7 @@ def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     else:
         first = gen._rt_call('int64_t', 'mojo_list_get_int', [lv, zero])
         gen._safe_coerce_emit('int64_t', elem, first, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
 
     gen._emit_label(bb_empty)
     if len(node.args) == 2:
@@ -6097,7 +6097,7 @@ def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[s
         # needs `result` definitely-assigned on every incoming edge for
         # GIMPLE's own SSA construction.
         gen._safe_coerce_emit('int64_t', elem, zero, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
     gen._emit_label(bb_done)
     return elem, result
 
@@ -6164,7 +6164,7 @@ def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, 
     zero = gen._new_val('int64_t', "(int64_t)0")
     have = gen._new_val('_Bool', f"{n_t} > {zero}")
     bb_have = gen._new_bb(); bb_empty = gen._new_bb(); bb_done = gen._new_bb()
-    gen._emit(f"  if ({have}) goto {bb_have}; else goto {bb_empty};")
+    gen._cond_goto(have, bb_have, bb_empty)
     gen._emit_label(bb_have)
     if suf == 'str':
         first = gen._rt_call('char *', 'mojo_list_get_str', [f"{src}", zero])
@@ -6173,7 +6173,7 @@ def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, 
     else:
         first = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{src}", zero])
     gen._safe_coerce_emit(suf, elem, first, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
     gen._emit_label(bb_empty)
     if len(node.args) == 2:
         dt, dv = gen.lower_expr(node.args[1])
@@ -6186,7 +6186,7 @@ def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, 
         # own SSA construction -- same reason _lower_next_over_comprehension
         # keeps its dead store.
         gen._safe_coerce_emit('int64_t', elem, zero, result)
-    gen._emit(f"  goto {bb_done};")
+    gen._goto(bb_done)
     gen._emit_label(bb_done)
     return elem, result
 
@@ -6516,10 +6516,10 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
     klen = gen._rt_call('int64_t', 'mojo_list_len', [it_val])
     kidx = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
-    gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(kcond, bb_body, bb_after)
     gen._emit_label(bb_body)
     _read64 = gen._rt_call('int64_t', 'mojo_list_get_int', [it_val, kidx])
     if _kelem_t == 'double':
@@ -6546,7 +6546,7 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
             _t = gen._new_val('_Bool', f'({kret_v}) == 0')
         else:
             _t = gen._new_val('_Bool', f'({kret_v}) != 0')
-        gen._emit(f"  if ({_t}) goto {bb_yes}; else goto {bb_no};")
+        gen._cond_goto(_t, bb_yes, bb_no)
         gen._emit_label(bb_yes)
         if _kelem_t == 'double':
             gen._void_call('mojo_list_append_double',
@@ -6568,7 +6568,7 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
     kone = gen._new_val('int64_t', '(int64_t)1')
     knew = gen._new_val('int64_t', f'{kidx} + {kone}')
     gen._emit(f"  {kidx} = {knew};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     return res
 
@@ -6693,10 +6693,10 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
     klen = gen._rt_call('int64_t', 'mojo_list_len', [av])
     kidx = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
-    gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(kcond, bb_body, bb_after)
     gen._emit_label(bb_body)
     _read64 = gen._rt_call('int64_t', 'mojo_list_get_int', [av, kidx])
     if _kelem_t == 'double':
@@ -6748,7 +6748,7 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
     kone = gen._new_val('int64_t', '(int64_t)1')
     knew = gen._new_val('int64_t', f'{kidx} + {kone}')
     gen._emit(f"  {kidx} = {knew};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     return keys
 
@@ -7106,10 +7106,10 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     pos = gen._new_val('int64_t', '(int64_t)0')
     idx = gen._new_val('int64_t', start)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond = gen._new_val('_Bool', f'{pos} < {len64}')
-    gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond, bb_body, bb_after)
     gen._emit_label(bb_body)
     pair = gen._new_temp('MojoList *')
     gen._rt_into(pair, 'mojo_list_new', [])
@@ -7154,7 +7154,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     else:
         nidx = gen._new_val('int64_t', f'{pos} + {start}')
         gen._emit(f"  {idx} = {nidx};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     gen._nested_elem_types[res] = ['int64_t', elem or 'int64_t']
     # Also record the plain element type: the assignment sites propagate
@@ -7849,18 +7849,15 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                     # this arm broke the py-conversion paths under the
                     # sweep's -fgimple gate.
                     _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
-                    gen._emit(
-                        f'  if ({_pc1}) goto {_bb_bad}; else goto {_bb_c2};')
+                    gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                     gen._emit_label(_bb_c2)
                     _z32 = gen._new_val('int64_t', '1LL << 32')
                     _pc2 = gen._new_val('_Bool', f'{_b64v} >= {_z32}')
-                    gen._emit(
-                        f'  if ({_pc2}) goto {_bb_c3}; else goto {_bb_good};')
+                    gen._cond_goto(_pc2, _bb_c3, _bb_good)
                     gen._emit_label(_bb_c3)
                     _z48 = gen._new_val('int64_t', '1LL << 48')
                     _pc3 = gen._new_val('_Bool', f'{_b64v} < {_z48}')
-                    gen._emit(
-                        f'  if ({_pc3}) goto {_bb_bad}; else goto {_bb_good};')
+                    gen._cond_goto(_pc3, _bb_bad, _bb_good)
                     gen._emit_label(_bb_bad)
                     gen._emit_call('void', '', 'mojo_raise_type_error',
                                    [('char *', gen._intern_string(
@@ -7886,13 +7883,11 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                 # Measured 2026-10-21 part 4 integration: this arm broke
                 # the py-conversion paths under the sweep's -fgimple gate.
                 _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
-                gen._emit(
-                    f'  if ({_pc1}) goto {_bb_bad}; else goto {_bb_c2};')
+                gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                 gen._emit_label(_bb_c2)
                 _z32 = gen._new_val('int64_t', '1LL << 32')
                 _pc2 = gen._new_val('_Bool', f'{_b64v} >= {_z32}')
-                gen._emit(
-                    f'  if ({_pc2}) goto {_bb_bad}; else goto {_bb_good};')
+                gen._cond_goto(_pc2, _bb_bad, _bb_good)
                 gen._emit_label(_bb_bad)
                 gen._emit_call('void', '', 'mojo_raise_type_error',
                                [('char *', gen._intern_string(
@@ -9331,7 +9326,7 @@ def _emit_asyncio_run_drive(gen, base: str, vct: str, arg_pairs: list) -> tuple[
     pending_t = gen._rt_call('int', 'mojo_exc_pending_get', [])
     bb_pending = gen._new_bb()
     bb_ok = gen._new_bb()
-    gen._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
+    gen._cond_goto(pending_t, bb_pending, bb_ok)
     gen._emit_label(bb_pending)
     gen._rt_void('mojo_exc_pending_set', ['0'])
     gen._emit(f"  {base}_destroy ({handle});")
@@ -9907,7 +9902,7 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
         # Result slot declared once, assigned in both branches (GIMPLE:
         # no phi nodes / no ternaries across divergent types).
         _slot = gen._new_temp(_ptype if _ptype != 'void *' else 'int64_t')
-        gen._emit(f"  if ({_inrange}) goto {_bb_in}; else goto {_bb_out};")
+        gen._cond_goto(_inrange, f"{_bb_in}", f"{_bb_out}")
         gen._emit_label(_bb_in)
         if _ptype == 'char *':
             gen._rt_into(_slot, 'mojo_list_get_str', [_lst_v, _idx64])
@@ -9918,7 +9913,7 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
             gen._emit(f"  {_slot} = "
                        + (f"({_ptype}){_raw};" if _ptype != 'int64_t'
                           else f"{_raw};"))
-        gen._emit(f"  goto {_bb_merge};")
+        gen._goto(f"{_bb_merge}")
         gen._emit_label(_bb_out)
         _dv = None
         if _dflts and 0 <= _pos - _first_dflt < len(_dflts):
@@ -9936,7 +9931,7 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
             gen._emit(f"  {_slot} = "
                        + (f"({_ptype}){_dval};" if _ptype != 'int64_t'
                           else f"(int64_t){_dval};"))
-        gen._emit(f"  goto {_bb_merge};")
+        gen._goto(f"{_bb_merge}")
         gen._emit_label(_bb_merge)
         _expanded.append((_ptype, _slot))
     return _expanded
@@ -11968,18 +11963,18 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             bb_hit = gen._new_bb()
             bb_miss = gen._new_bb()
             bb_done = gen._new_bb()
-            gen._emit(f"  if ({has} != 0) goto {bb_hit}; else goto {bb_miss};")
+            gen._cond_goto(f"{has} != 0", bb_hit, bb_miss)
             gen._emit_label(bb_hit)
             hv = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                                 [('MojoDict *', dp), (kt, kv)])
             gen._emit(f"  {res} = {hv};")
             _mark_unknown_dict_value(gen, dp, res, kv, 'str')
-            gen._emit(f"  goto {bb_done};")
+            gen._goto(bb_done)
             gen._emit_label(bb_miss)
             miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
             mv = gen._call_expr('int64_t', miss_mangled, [(ot, ov), (kt, kv)])
             gen._emit(f"  {res} = {mv};")
-            gen._emit(f"  goto {bb_done};")
+            gen._goto(bb_done)
             gen._emit_label(bb_done)
             return 'int64_t', res
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
@@ -12536,11 +12531,11 @@ def _emit_slice_step_zero_check(gen, step_v: str) -> str:
     _z0 = gen._new_val('int64_t', '0')
     _stepzero = gen._new_val('_Bool', f'{_stepv} == {_z0}')
     _lb = gen._new_bb(); _lo = gen._new_bb()
-    gen._emit(f'  if ({_stepzero}) goto {_lb}; else goto {_lo};')
+    gen._cond_goto(_stepzero, _lb, _lo)
     gen._emit_label(_lb)
     gen._emit_call('void', '', 'mojo_raise_value_error',
                    [('char *', gen._intern_string('slice step cannot be zero'))])
-    gen._emit(f'  goto {_lo};')
+    gen._goto(_lo)
     gen._emit_label(_lo)
     return _stepv
 

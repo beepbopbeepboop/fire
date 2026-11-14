@@ -5878,6 +5878,14 @@ class GimpleGen:
         return grsl._cast(self, ctype, val)
     def _cast_into(self, dst: str, ctype: str, val: str) -> None:
         grsl._cast_into(self, dst, ctype, val)
+    def _goto(self, label: str) -> None:
+        grsl._goto(self, label)
+    def _cond_goto(self, cond: str, then_label: str, else_label: str) -> None:
+        grsl._cond_goto(self, cond, then_label, else_label)
+    def _ret(self, val: str) -> None:
+        grsl._ret(self, val)
+    def _ret_void(self) -> None:
+        grsl._ret_void(self)
     def _emit_label(self, label: str, freq_hint: str=''):
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:

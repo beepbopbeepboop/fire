@@ -1478,15 +1478,15 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
     bb_then = gen._new_bb()
     bb_else = gen._new_bb()
     bb_merge = gen._new_bb()
-    gen._emit(f"  if ({cv}) goto {bb_then}; else goto {bb_else};")
+    gen._cond_goto(f"{cv}", bb_then, bb_else)
     gen._emit_label(bb_then)
     tt, tv = gen.lower_expr(node.then_val)
     gen._safe_coerce_emit(tt, res_type, tv, result)
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_else)
     et, ev = gen.lower_expr(node.else_val)
     gen._safe_coerce_emit(et, res_type, ev, result)
-    gen._emit(f"  goto {bb_merge};")
+    gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     # A ternary over two operands this codegen already KNOWS are integers
     # produces an integer — the same no-inference argument as every other
@@ -2701,13 +2701,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _hit = gen._new_val('_Bool', f'{_missed} == 0')
             t = gen._new_temp('int64_t')
             _bb_h = gen._new_bb(); _bb_m = gen._new_bb(); _bb_e = gen._new_bb()
-            gen._emit(f"  if ({_hit}) goto {_bb_h}; else goto {_bb_m};")
+            gen._cond_goto(_hit, _bb_h, _bb_m)
             gen._emit_label(_bb_h)
             gen._emit(f"  {t} = {_r};")
-            gen._emit(f"  goto {_bb_e};")
+            gen._goto(_bb_e)
             gen._emit_label(_bb_m)
             gen._emit(f"  {t} = {ov};")
-            gen._emit(f"  goto {_bb_e};")
+            gen._goto(_bb_e)
             gen._emit_label(_bb_e)
             gen._dyn_word_vals.add(t)
             return 'int64_t', t
@@ -3548,10 +3548,10 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         bb_merge = gen._new_bb()
         if node.op == 'and':
             # Left truthy -> right decides; left falsy -> short-circuit on left.
-            gen._emit(f"  if ({cond}) goto {bb_eval_right}; else goto {bb_short};")
+            gen._cond_goto(f"{cond}", bb_eval_right, bb_short)
         else:
             # Left truthy -> short-circuit on left; left falsy -> right decides.
-            gen._emit(f"  if ({cond}) goto {bb_short}; else goto {bb_eval_right};")
+            gen._cond_goto(f"{cond}", bb_short, bb_eval_right)
         gen._emit_label(bb_short)
         if _bool_merge:
             # The short-circuit branch's truth value is a compile-time
@@ -3560,7 +3560,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             gen._cast_into(result, '_Bool', f"{'0' if node.op == 'and' else '1'}")
         else:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
-        gen._emit(f"  goto {bb_merge};")
+        gen._goto(bb_merge)
         gen._emit_label(bb_eval_right)
         # `isinstance(x, T) and x.field ...`: the right operand only runs
         # when the left (the isinstance test) was true, so narrow `x` to
@@ -3591,7 +3591,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                 and (gen._is_dyn_word(node.left, lval)
                      or gen._is_dyn_word(node.right, rval))):
             gen._dyn_word_vals.add(result)
-        gen._emit(f"  goto {bb_merge};")
+        gen._goto(bb_merge)
         gen._emit_label(bb_merge)
         return res_type, result
 
@@ -5663,7 +5663,7 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
             # Last link: truthy -> the whole chain held, every earlier
             # goto already confirmed -> result True.
             true_bb = gen._new_bb()
-            gen._emit(f"  if ({cond}) goto {true_bb}; else goto {false_bb};")
+            gen._cond_goto(f"{cond}", true_bb, false_bb)
             gen._emit_label(true_bb)
             # GIMPLE strictness: a bare integer_cst assigned straight
             # into a `_Bool` lvalue ("non-trivial conversion in
@@ -5674,15 +5674,15 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
             # surrounding function is large enough to hit the strict
             # low-level GIMPLE path — a minimal repro compiled "fine").
             gen._emit(f"  {result} = (_Bool)1;")
-            gen._emit(f"  goto {merge_bb};")
+            gen._goto(merge_bb)
         else:
             next_bb = gen._new_bb()
-            gen._emit(f"  if ({cond}) goto {next_bb}; else goto {false_bb};")
+            gen._cond_goto(f"{cond}", next_bb, false_bb)
             gen._emit_label(next_bb)
         left_node, lt, lv = right_node, rt, rv
     gen._emit_label(false_bb)
     gen._emit(f"  {result} = (_Bool)0;")
-    gen._emit(f"  goto {merge_bb};")
+    gen._goto(merge_bb)
     gen._emit_label(merge_bb)
     return '_Bool', result
 

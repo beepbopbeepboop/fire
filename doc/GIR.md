@@ -160,6 +160,12 @@ that is meant to be behaviour-preserving:
   `gimple-lint` is in the LANDING gate (`tools/gates.json`), so a branch that
   adds a text-spelled runtime call or cast, or a call-argument finding, does
   not land.
+- **Stage 2a, control flow (landed 2026-11-13).** `gen._goto(l)`,
+  `gen._cond_goto(c, a, b)`, `gen._ret(v)`, `gen._ret_void()` are the only
+  spellings of a jump or a return (364 sites rewritten, 1 left:
+  `TEXT_CF_BASELINE`). They still emit text that `_emit_through` and
+  `_emit_raw` pattern-match; stage 3 moves that matching INTO these four
+  functions and deletes it from the emitter.
 - **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
   `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
   `label`. Each returns a typed value and appends an `Instr`.
