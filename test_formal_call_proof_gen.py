@@ -11175,5 +11175,129 @@ class TestSvcWriteAssumedDylibTotal(unittest.TestCase):
         self.assertIn("dynamic-svc", out)
 
 
+class TestExtendOptionCensus(unittest.TestCase):
+    """Word-by-word census of the extended-register ADD/SUB/SUBS class.
+
+    Pins the machine-checked disposition (arm64 instruction-coverage extend
+    option census, part 1): 64-bit UXTX (imm3 0-4) is modelled (rows 86-88);
+    every other extend option and every 32-bit spelling is refused and named,
+    never mis-read.  A change in disposition fails loudly with the decoded
+    option field.
+    """
+
+    _OP_META = {
+        "add":  (86, "ADD extended"),
+        "sub":  (87, "SUB extended"),
+        "subs": (88, "SUBS/CMP extended"),
+    }
+    # (option name, option field bits 15-13, source register width)
+    _OPTIONS = (
+        ("uxtb", 0, "w"),
+        ("uxth", 1, "w"),
+        ("uxtw", 2, "w"),
+        ("uxtx", 3, "x"),
+        ("sxtb", 4, "w"),
+        ("sxth", 5, "w"),
+        ("sxtw", 6, "w"),
+        ("sxtx", 7, "x"),
+    )
+
+    @staticmethod
+    def _import_gen():
+        import formal.arm64_proof_gen as G
+        return G
+
+    def _decode(self, word):
+        return {
+            "sf": (word >> 31) & 0x1,
+            "option": (word >> 13) & 0x7,
+            "imm3": (word >> 10) & 0x7,
+            "word": f"0x{word:08x}",
+        }
+
+    def _assert_modelled(self, G, form, expected_idx):
+        word = _assembler_word(form)
+        self.assertIsNotNone(word, f"clang refused modelled spelling: {form}")
+        dec = self._decode(word)
+        idx = G._step_branch_index(word)
+        self.assertEqual(idx, expected_idx,
+                         f"{form} {dec}: expected row {expected_idx}, got {idx}")
+        rhs = G._step_rhs(word, idx)
+        self.assertIsNotNone(rhs, f"{form} {dec}: _step_rhs returned None")
+
+    def _assert_refused(self, G, form, expected_name):
+        word = _assembler_word(form)
+        if word is None:
+            self.skipTest(f"clang refuses spelling (assembler refusal): {form}")
+        dec = self._decode(word)
+        idx = G._step_branch_index(word)
+        self.assertIsNone(idx,
+                          f"{form} {dec}: expected unclaimed, got row {idx}")
+        rhs = G._step_rhs(word, idx)
+        self.assertIsNone(rhs, f"{form} {dec}: _step_rhs unexpectedly non-None")
+        info = G._unmodelled_instruction(word)
+        self.assertIsNotNone(info, f"{form} {dec}: _unmodelled_instruction returned None")
+        name, _why = info
+        self.assertIn(
+            name, {"ADD extended", "SUB extended", "SUBS/CMP extended"},
+            f"{form} {dec}: unexpected name {name!r}")
+        self.assertEqual(name, expected_name,
+                         f"{form} {dec}: expected name {expected_name!r}, got {name!r}")
+
+    def test_all_options_all_ops_64bit(self):
+        """Every option 0-7 × add/sub/subs at 64-bit width is in the census."""
+        G = self._import_gen()
+        for op, (model_idx, _name) in self._OP_META.items():
+            for opt_name, _opt_val, srcw in self._OPTIONS:
+                form = f"{op} x0, x1, {srcw}2, {opt_name}"
+                if opt_name == "uxtx":
+                    self._assert_modelled(G, form, model_idx)
+                else:
+                    self._assert_refused(G, form, _name)
+
+    def test_uxtx_imm3_0_to_4_modelled(self):
+        """64-bit UXTX imm3 0-4 → rows 86/87/88 with non-None _step_rhs."""
+        G = self._import_gen()
+        for op, (model_idx, _name) in self._OP_META.items():
+            for imm3 in range(5):
+                suffix = f" #{imm3}" if imm3 else ""
+                form = f"{op} x0, x1, x2, uxtx{suffix}"
+                self._assert_modelled(G, form, model_idx)
+
+    def test_32bit_uxtx_spellings_refused(self):
+        """The three 32-bit uxtx spellings (sf=0) are refused and named."""
+        G = self._import_gen()
+        for op, (_model_idx, _name) in self._OP_META.items():
+            form = f"{op} w0, w1, w2, uxtx"
+            self._assert_refused(G, form, _name)
+
+    def test_one_imm3_gt0_non_uxtx_per_op_refused(self):
+        """One imm3>0 non-UXTX spelling per op is refused (not dropped)."""
+        G = self._import_gen()
+        # use uxtw with #1 as a representative imm3>0 non-UXTX spelling
+        for op, (_model_idx, _name) in self._OP_META.items():
+            form = f"{op} x0, x1, w2, uxtw #1"
+            self._assert_refused(G, form, _name)
+
+    def test_handcrafted_uxtx_imm3_7_claimed_caveat(self):
+        """Hand-crafted 0x8b227c20 (option=011, imm3=7) is claimed by row 86.
+
+        Labelled as the unallocated-encoding caveat: the model pins sf and the
+        option field but not imm3<=4, so this word is claimed and _step_rhs
+        answers with shift 7.
+        """
+        G = self._import_gen()
+        word = 0x8b227c20
+        dec = self._decode(word)
+        self.assertEqual(dec["option"], 3, f"expected UXTX option=011: {dec}")
+        self.assertEqual(dec["imm3"], 7, f"expected imm3=7: {dec}")
+        idx = G._step_branch_index(word)
+        self.assertEqual(idx, 86,
+                         f"hand-crafted UXTX imm3=7 {dec}: expected row 86, got {idx}")
+        rhs = G._step_rhs(word, idx)
+        self.assertIsNotNone(rhs,
+                             f"hand-crafted UXTX imm3=7 {dec}: _step_rhs returned None")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

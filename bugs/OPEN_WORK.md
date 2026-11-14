@@ -43,7 +43,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/FORMAL_arm64_instruction_coverage-part1.md` | **unclaimed** | The extend-option census of the extended-register class is a runnable test, not a docstring (part 1) |
 | `bugs/FORMAL_arm64_instruction_coverage-part2.md` | **unclaimed** | The extended-register refusal names the option the word carries, not "the other extend options" (part 2) |
 | `bugs/FORMAL_arm64_instruction_coverage-part3.md` | **unclaimed** | Pin that the emitter emits no non-UXTX extended-register word (part 3) |
 | `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` | **unclaimed** | `svc` exit handling is not structurally complete |
