@@ -1445,7 +1445,7 @@ def main():
 
 
 def _regression_with_tabled_open_in_generator():
-    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2: a `with open(...)`
+    # The tables.py `read_table` `with open(...)` refusal: a `with open(...)`
     # (and a call through a parameter whose default is builtin open) in a plain
     # compiled generator body (cpp C++20 coroutine path) must evaluate the
     # manager, bind the alias, run the body, and close on the normal path.
