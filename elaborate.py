@@ -561,6 +561,41 @@ def _extract_trait_def(module_src: str, trait_name: str):
     return None
 
 
+def _struct_effective_methods(sd, struct_map, seen=None):
+    """(own methods by name, method names supplied by base structs).
+
+    The declaration-time pre-pass runs before `_merge_struct_inheritance`, so
+    `sd.methods` holds only the struct's own methods. A required method or a
+    trait default may be supplied by a base struct instead; those are returned
+    separately because a base's signatures may mention the base's own type
+    parameters and cannot be compared textually without instantiating them, so
+    the caller treats a base method by NAME as satisfied (unknown stays
+    accepted)."""
+    own = {}
+    for m in (getattr(sd, 'methods', None) or []):
+        sig = _method_sig(m)
+        own.setdefault(sig[0], []).append((sig, m))
+    inherited = set()
+    if not struct_map:
+        return own, inherited
+    seen = set(seen or ())
+    if id(sd) in seen:
+        return own, inherited
+    seen.add(id(sd))
+    base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+    if not base_constraints:
+        base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
+    for bname, _wtext in base_constraints:
+        base_name, _args = _split_base_type_args(_as_str(bname))
+        base = struct_map.get(base_name)
+        if base is None or base is sd:
+            continue
+        bown, binherited = _struct_effective_methods(base, struct_map, seen)
+        inherited.update(bown)
+        inherited.update(binherited)
+    return own, inherited
+
+
 def type_methods(module_src: str, type_name: str):
     """The method signatures a concrete `struct type_name` defines, as a list
     of (name, [param_types], ret_type). None if the type is not a struct here."""
@@ -603,9 +638,11 @@ def _find_struct_def(module_src: str, type_name: str):
     except Exception:
         return None, {}
     base, targs_list = _split_base_type_args(type_name)
+    structs = {s.name: s for s in stmts if isinstance(s, StructDef)}
     for s in stmts:
         if isinstance(s, StructDef) and s.name == base:
-            return s, {'base': base, 'targs_list': targs_list}
+            return s, {'base': base, 'targs_list': targs_list,
+                       'structs': structs}
     return None, {}
 
 
@@ -745,41 +782,21 @@ def _constraint_implied_for_evidence(method_where: str, assumption: str, module_
 
 
 def _is_default_trait_method(fn: FunctionDef) -> bool:
+    """A trait method is a default when it has a real body.
+
+    A body consisting only of `...`/`pass` (any number of them) is the
+    abstract/required spelling; anything else implements the method."""
     body = getattr(fn, 'body', None) or []
     if not body:
         return False
-    # A single `...` or `pass` is abstract/required, not a default.
-    if len(body) == 1:
-        s = body[0]
+    for s in body:
         if isinstance(s, PassStmt):
-            return False
-        if isinstance(s, ExprStmt):
-            v = getattr(s, 'value', None)
-            if isinstance(v, EllipsisLiteral):
-                return False
-    return True
-
-
-def _struct_type_param_names(module_src: str, sd: StructDef):
-    try:
-        tmpl = extract_struct_source(module_src, sd.name) or ''
-        names = type_param_names(tmpl) if tmpl else []
-        if names:
-            return list(names)
-    except Exception:
-        pass
-    names = []
-    for attr in ('type_param_names', 'bracket_params'):
-        vals = getattr(sd, attr, None) or []
-        if isinstance(vals, list):
-            for v in vals:
-                if isinstance(v, (tuple, list)) and v:
-                    n = _as_str(v[0])
-                else:
-                    n = _as_str(v)
-                if n and n not in names:
-                    names.append(n)
-    return names
+            continue
+        if isinstance(s, ExprStmt) and isinstance(getattr(s, 'value', None),
+                                                  EllipsisLiteral):
+            continue
+        return True
+    return False
 
 
 def _collect_type_apps_in_text(text: str):
@@ -822,17 +839,17 @@ def _collect_type_apps_in_text(text: str):
         i += 1
 
 
-def _validate_inherited_default(method, sd, struct_tparams, bindings, trait_base):
+def _validate_inherited_default(method, struct_name, struct_tparams, bindings):
     """Return (ok, bad_instantiation_name_or_None).
 
-    A default trait method inherited by `sd` must be formable for the struct.
+    A default trait method inherited by the struct must be formable for it.
     If its signature applies the conforming struct with a non-full parameter
     list, the struct is non-conforming and the bad application name is the one
     the diagnostic reports."""
     # Substitute Self / Self.member / struct params into signature texts.
     subs = dict(bindings)
-    subs.setdefault('Self', _as_str(sd.name))
-    sname = _as_str(sd.name)
+    subs.setdefault('Self', _as_str(struct_name))
+    sname = _as_str(struct_name)
     texts = []
     try:
         texts.append(_ann_to_str(getattr(method, 'return_type', None)))
@@ -860,13 +877,88 @@ def _validate_inherited_default(method, sd, struct_tparams, bindings, trait_base
     return True, None
 
 
+def _trait_method_requirements(trait_def, struct_name, methods_by_name,
+                               struct_tparams, bindings, module_src,
+                               assumption, check_override_evidence=True,
+                               check_required_evidence=True):
+    """Yield one failure per unmet requirement of `trait_def`.
+
+    `methods_by_name` maps a method name to `[(signature, FunctionDef)]` for
+    the conforming struct's own methods. Each failure is
+    `(kind, method_name, detail)` with kind one of:
+
+    - `'missing'`: no method of that name at all;
+    - `'mismatch'`: methods of that name exist but none has the required
+      signature (detail is `(param_types, return_type)`);
+    - `'evidence'`: the implementation's `where` clause is not implied by the
+      conformance assumption;
+    - `'default'`: the inherited default cannot be formed for this struct
+      (detail is the offending instantiation name, or None).
+
+    A struct's own method of the same name always wins over a trait default.
+    This is the single requirement-checking definition shared by the
+    instantiation-time (`check_conformance`) and declaration-time
+    (`check_conformance_declarations`) entry points.
+    """
+    for tm in (getattr(trait_def, 'methods', None) or []):
+        tname, ptypes, ret = _method_sig(tm)
+        cands = methods_by_name.get(tname) or []
+        if _is_default_trait_method(tm):
+            if cands:
+                if check_override_evidence:
+                    impl = None
+                    for csig, m in cands:
+                        if csig == (tname, ptypes, ret):
+                            impl = m
+                            break
+                    if impl is not None:
+                        mw = getattr(impl, 'where_clause', None)
+                        if mw is not None:
+                            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
+                            asn = assumption if assumption is not None else ''
+                            if not _constraint_implied_for_evidence(
+                                    mw_text, asn, module_src, bindings):
+                                yield ('evidence', tname, None)
+                                return
+                continue
+            # Inherited default: must be formable/substitutable for this struct.
+            ok_def, bad_inst = _validate_inherited_default(
+                tm, struct_name, struct_tparams, bindings)
+            if not ok_def:
+                yield ('default', tname, bad_inst)
+                return
+            continue
+
+        # Required (non-default) method.
+        impl = None
+        for csig, m in cands:
+            if csig == (tname, ptypes, ret):
+                impl = m
+                break
+        if impl is None:
+            if not cands:
+                yield ('missing', tname, None)
+            else:
+                yield ('mismatch', tname, (ptypes, ret))
+            continue
+        if not check_required_evidence:
+            continue
+        mw = getattr(impl, 'where_clause', None)
+        if mw is not None:
+            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
+            asn = assumption if assumption is not None else ''
+            if not _constraint_implied_for_evidence(
+                    mw_text, asn, module_src, bindings):
+                yield ('evidence', tname, None)
+                return
+
+
 def check_conformance(module_src: str, type_name: str, trait_name: str):
     """Does concrete `type_name` satisfy `trait_name`? Returns (ok, missing)."""
     trait_base, trait_args = _split_base_type_args(trait_name)
     trait_def = _extract_trait_def(module_src, trait_base)
     if trait_def is None:
         return True, []
-    required = [_method_sig(m) for m in trait_def.methods]
     sd, info = _find_struct_def(module_src, type_name)
     if sd is None:
         return True, []
@@ -919,62 +1011,29 @@ def check_conformance(module_src: str, type_name: str, trait_name: str):
         else:
             assumption = None
 
-    by_name = {}
-    for m in (getattr(sd, 'methods', None) or []):
-        sig = _method_sig(m)
-        by_name.setdefault(sig[0], []).append((sig, m))
+    by_name, base_method_names = _struct_effective_methods(
+        sd, info.get('structs') or {})
     missing = []
-    s_tparams = _struct_type_param_names(module_src, sd)
-    for tm in trait_def.methods:
-        tname, ptypes, ret = _method_sig(tm)
-        cands = by_name.get(tname) or []
-        if _is_default_trait_method(tm):
-            # A struct's own method of the same name wins over the default.
-            if cands:
-                # If an exact-signature override exists, preserve its evidence check.
-                impl = None
-                for csig, m in cands:
-                    if csig == (tname, ptypes, ret):
-                        impl = m
-                        break
-                if impl is not None:
-                    mw = getattr(impl, 'where_clause', None)
-                    if mw is not None:
-                        mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
-                        asn = assumption if assumption is not None else ''
-                        if not _constraint_implied_for_evidence(mw_text, asn, module_src, bindings):
-                            return False, [f"does not implement all requirements for '{trait_base}'"]
-                continue
-            # Inherited default: must be formable/substitutable for this struct.
-            ok_def, bad_inst = _validate_inherited_default(tm, sd, s_tparams, bindings, trait_base)
-            if not ok_def:
-                if bad_inst:
-                    return False, [f"'{bad_inst}' does not implement all requirements for '{trait_base}'"]
-                return False, [f"does not implement all requirements for '{trait_base}'"]
+    s_tparams = _sd_bracket_param_names(sd)
+    for kind, tname, detail in _trait_method_requirements(
+            trait_def, _as_str(getattr(sd, 'name', '')), by_name, s_tparams,
+            bindings, module_src, assumption):
+        if tname in base_method_names:
+            # A base struct supplies the method; its signature may mention the
+            # base's own type parameters, so it cannot be compared here.
             continue
-
-        # Required (non-default) method.
-        impl = None
-        if cands:
-            for csig, m in cands:
-                if csig == (tname, ptypes, ret):
-                    impl = m
-                    break
-
-        # Required (non-default) method.
-        if impl is None:
-            if cands is None or not cands:
-                missing.append(f"missing method '{tname}'")
-            else:
-                want = f"({', '.join(ptypes)}) -> {ret}"
-                missing.append(f"method '{tname}' signature mismatch (want {want})")
-            continue
-        mw = getattr(impl, 'where_clause', None)
-        if mw is not None:
-            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
-            asn = assumption if assumption is not None else ''
-            if not _constraint_implied_for_evidence(mw_text, asn, module_src, bindings):
-                return False, [f"does not implement all requirements for '{trait_base}'"]
+        if kind == 'default':
+            if detail:
+                return False, [f"'{detail}' does not implement all requirements for '{trait_base}'"]
+            return False, [f"does not implement all requirements for '{trait_base}'"]
+        if kind == 'evidence':
+            return False, [f"does not implement all requirements for '{trait_base}'"]
+        if kind == 'mismatch':
+            ptypes, ret = detail
+            want = f"({', '.join(ptypes)}) -> {ret}"
+            missing.append(f"method '{tname}' signature mismatch (want {want})")
+        else:
+            missing.append(f"missing method '{tname}'")
     return (not missing), missing
 
 
@@ -1323,6 +1382,10 @@ def _check_decl_trait_methods(struct_defs, trait_defs):
     for td in (trait_defs or []):
         if isinstance(td, TraitDef):
             trait_map[_as_str(getattr(td, 'name', ''))] = td
+    struct_map = {}
+    for sd in (struct_defs or []):
+        if isinstance(sd, StructDef):
+            struct_map[_as_str(getattr(sd, 'name', ''))] = sd
     errors = []
     for sd in (struct_defs or []):
         if not isinstance(sd, StructDef):
@@ -1333,11 +1396,7 @@ def _check_decl_trait_methods(struct_defs, trait_defs):
             base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
         s_tparams = _sd_bracket_param_names(sd)
         bindings = _sd_decl_bindings(sd)
-        bindings.setdefault('Self', _as_str(sd.name))
-        by_name = {}
-        for m in (getattr(sd, 'methods', None) or []):
-            sig = _method_sig(m)
-            by_name.setdefault(sig[0], []).append((sig, m))
+        by_name, base_method_names = _struct_effective_methods(sd, struct_map)
         for bname, wtext in base_constraints:
             bname_s = _as_str(bname)
             wtext_s = _as_str(wtext) if wtext is not None else ''
@@ -1349,6 +1408,7 @@ def _check_decl_trait_methods(struct_defs, trait_defs):
                 continue
             # bind trait type params if any
             tbindings = dict(bindings)
+            tbindings.setdefault('Self', _as_str(sd.name))
             try:
                 tparams = [p[0] for p in (getattr(td, 'params', None) or []) if isinstance(p, (list, tuple)) and p]
                 for i, tp in enumerate(tparams):
@@ -1356,36 +1416,21 @@ def _check_decl_trait_methods(struct_defs, trait_defs):
                         tbindings.setdefault(tp, trait_args[i])
             except Exception:
                 pass
-            for tm in (getattr(td, 'methods', None) or []):
-                tname, ptypes, ret = _method_sig(tm)
-                cands = by_name.get(tname) or []
-                if _is_default_trait_method(tm):
-                    # A struct's own method of the same name wins over the default.
-                    if cands:
-                        continue
-                    ok_def, bad_inst = _validate_inherited_default(tm, sd, s_tparams, tbindings, trait_base)
-                    if not ok_def:
-                        if bad_inst:
-                            errors.append((sline,
-                                f"'{bad_inst}' does not implement all requirements for '{trait_base}'"))
-                        else:
-                            errors.append((sline,
-                                f"'{_as_str(sd.name)}' does not implement all requirements for '{trait_base}'"))
-                        break
+            for kind, tname, detail in _trait_method_requirements(
+                    td, _as_str(sd.name), by_name, s_tparams, tbindings,
+                    module_src=None, assumption='',
+                    check_override_evidence=False,
+                    check_required_evidence=False):
+                if tname in base_method_names:
+                    # Supplied (possibly after substitution) by a base struct.
                     continue
-                # Required (non-default): must be supplied by the struct.
-                impl = None
-                for csig, m in cands:
-                    if csig == (tname, ptypes, ret):
-                        impl = m
-                        break
-                if impl is None:
+                if kind == 'default' and detail:
+                    errors.append((sline,
+                        f"'{detail}' does not implement all requirements for '{trait_base}'"))
+                else:
                     errors.append((sline,
                         f"'{_as_str(sd.name)}' does not implement all requirements for '{trait_base}'"))
-                    break
-            if errors and errors[-1][0] == sline:
-                # stop at first error for this struct/base context to be simple
-                pass
+                break
     return errors
 
 

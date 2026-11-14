@@ -12,14 +12,14 @@ from gimple_codegen import compile_to_gimple
 
 
 def _compile(src):
-    d = tempfile.mkdtemp(prefix='def_trait_conf_')
-    p = os.path.join(d, 't.mojo')
-    with open(p, 'w') as fh:
-        fh.write(src)
-    try:
-        compile_to_gimple(src, do_imports=False, filename=p)
-    except Exception as e:
-        return f'{type(e).__name__}: {e}'
+    with tempfile.TemporaryDirectory(prefix='def_trait_conf_') as d:
+        p = os.path.join(d, 't.mojo')
+        with open(p, 'w') as fh:
+            fh.write(src)
+        try:
+            compile_to_gimple(src, do_imports=False, filename=p)
+        except Exception as e:
+            return f'{type(e).__name__}: {e}'
     return None
 
 
@@ -140,6 +140,32 @@ def main():
 
 def test_positive_override_default():
     _assert_ok(POS_OVERRIDE)
+
+
+# Positive: a required trait method supplied by a non-trait base struct
+# satisfies the trait. The declaration-time pre-pass runs before
+# `_merge_struct_inheritance`, so it must resolve base-struct methods itself
+# rather than report the struct as non-conforming.
+POS_BASE_METHOD = r'''
+trait T:
+    def f(self) -> Int: ...
+
+struct A:
+    def __init__(out self):
+        pass
+    def f(self) -> Int:
+        return 1
+
+struct B(A, T):
+    pass
+
+def main():
+    pass
+'''
+
+
+def test_positive_required_method_inherited_from_base_struct():
+    _assert_ok(POS_BASE_METHOD)
 
 
 if __name__ == '__main__':
