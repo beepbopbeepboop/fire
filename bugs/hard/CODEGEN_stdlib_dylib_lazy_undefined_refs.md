@@ -30,7 +30,12 @@ The names, grouped by what the DEFINITION is actually called (the group is the c
   `..._alloc_dealloc_9f63a2`, `_std_time___init___sleep`, `_std_os___init___listdir_9f63a2`,
   `_std_pwd___init___getpwnam_d719e0`/`getpwuid_9f63a2`, `_std_random___init___seed`; the definitions
   live in `std/memory/memory.mojo`, `std/time/time.mojo`, `std/os/os.mojo`, `std/pwd/_macos.mojo`, …, so
-  their symbols are `std_<module>_...`.
+  their symbols are `std_<module>_...`. **The qualifier half is fixed** (`_reexported_defining_qualifier`):
+  references now spell `std_time_time_sleep`, `std_pwd_pwd_getpwnam_d719e0`, etc. This does NOT define a
+  symbol that has no emitted definition: `unsafe_memset_zero` is generic/uninstantiated in
+  `std/memory/memory.mojo`'s standalone compile, so its reference now names
+  `std_memory_memory_unsafe_memset_zero` and stays undefined — that is this doc's
+  "Function not emitted at all" class, not the qualifier group.
 - **Bare dunder where the definition is overloaded**: `_std_collections_array_Array___getitem__`,
   `_std_collections_deque_Deque___getitem__`, `_std_collections_list_List___getitem__`,
   `_std_collections_string_string_span_StringSpan___{eq,gt,le,lt}__`,
