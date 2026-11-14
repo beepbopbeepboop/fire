@@ -1,4 +1,4 @@
-SPLIT: FORMAL_arm64_instruction_coverage-part1, FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
+SPLIT: FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
 # FORMAL: the extended-register class is claimed by the step table but the generator has no right-hand side for it; the coverage census this doc is is missing
 
 **Status: OPEN.** Measured 2026-11-12 on the merge of the
@@ -40,14 +40,14 @@ rests on is only half true (below).
   `arm64_step` decodes the extended-register class" -- at least for that
   form. The census must be redone per entry; the blanket statement cannot
   stand.
-- `TestRegister31.test_the_generator_keeps_its_own_spelling_and_why` fails:
-  the generator's `_step_rhs` CMP-register arm spells Rn as `arm64_reg 31 s`
-  (which is 0) where the model's arm spells `arm64_reg_or_sp 31 s` (which is
-  `s.sp`), and the shift spelling differs too (`arm64_reg 16 s` vs
-  `arm64_reg 16 s <<< UInt64.ofNat 0`). For `cmp sp, x16` the generated
-  step-RESULT lemma therefore states a step `arm64_step` does not compute;
-  the file still looks right in Python and Lean is the only reader that
-  would refuse it.
+- Part 1's spelling half is RESOLVED (2026-11-13): `_step_rhs` already
+  spells the extended-register SP CMP (`0xeb3063ff`, branch 88) as
+  `arm64_reg_or_sp 31 s`, while the shifted-register CMP (`0xeb1003ff`,
+  branch 6) correctly keeps `arm64_reg 31 s` (that class has no SP encoding).
+  The test was red because its pin still contained the pre-`imm6` shift
+  text; it now pins both words and the generated step-RESULT lemma, which
+  states the model's `arm64_step` result. Its doc is deleted; the remaining
+  rows here are the 86-88 reachability/census and the 70-79 class.
 - The gap is DORMANT in current emitter output: the image of
   `def plain(a, b): return a + b` (arm64) carries ZERO words of the class in
   its executable region (measured over `_exec_code_limit`), so the gate job
@@ -60,8 +60,6 @@ rests on is only half true (below).
 
 - `TestRegister31.test_every_row_is_reachable` (forms: `add x0, sp, x16`,
   `sub x0, sp, x16`, `cmp sp, x16`) -- red on master, red here.
-- `TestRegister31.test_the_generator_keeps_its_own_spelling_and_why` -- red
-  on master, red here (the spelling mismatch above).
 - `TestStepOkDerivesFromStepResult.test_the_derivation_is_total_over_the_step_table`
   (entries 70-79) and `...test_the_step_result_of_every_covered_word_is_still_emitted`
   (entries 70-79) -- un-masked 2026-11-12 by the svc fix (before it, the
@@ -84,14 +82,10 @@ against), and the generator's spelling is the model's spelling arm for arm.
    `arm64_reg_or_sp` read and the shift spelling); (b) not modelled -> drop
    the table entry so `_step_branch_index` stops claiming the word, so the
    refusal NAMES it as unmodelled instead of the generic sentence.
-2. Fix the `_step_rhs` CMP-register spelling to the model's (this is a
-   wrong statement in every generated proof that contains `cmp sp, x16`;
-   Lean is the only reader that would catch it, so keep
-   `test_the_generator_keeps_its_own_spelling_and_why` as the pin).
-3. Reconcile the `arm64_reg_or_sp` docstring in `lib/ProofLib.lean` with the
+2. Reconcile the `arm64_reg_or_sp` docstring in `lib/ProofLib.lean` with the
    census (it says the class is unmodelled; the extended-register CMP form
    is).
-4. Re-run `TestRegister31` and `TestStepOkDerivesFromStepResult`; both
+3. Re-run `TestRegister31` and `TestStepOkDerivesFromStepResult`; both
    classes green before the next formal sweep.
 
 Related: `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` (the svc fix that
