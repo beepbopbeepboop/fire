@@ -1,4 +1,6 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part1, CODEGEN_stdlib_dylib_lazy_undefined_refs-part2, CODEGEN_stdlib_dylib_lazy_undefined_refs-part3
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part2, CODEGEN_stdlib_dylib_lazy_undefined_refs-part3
+(part1 landed: a re-exported free function's reference now carries the DEFINING
+module's qualifier — `_reexported_defining_qualifier`; re-measure the count.)
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
