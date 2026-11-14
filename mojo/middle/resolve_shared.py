@@ -217,43 +217,6 @@ def _module_attr_call_return_type(gen, node):
     return None
 
 
-# String methods that answer a `bool` whatever their arguments are.
-_STR_PREDICATE_METHODS: dict[str, bool] = {
-    'startswith': True, 'endswith': True, 'isdigit': True, 'isalpha': True,
-    'isalnum': True, 'isspace': True, 'isupper': True, 'islower': True,
-    'isidentifier': True, 'isnumeric': True, 'isdecimal': True,
-}
-
-
-def _and_or_operand_type(gen, node) -> str:
-    """The C type the RIGHT operand of an `and` / `or` will lower to, asked
-    before it is lowered: `_quick_type`, except that two call shapes whose
-    result is certainly a `bool` say `_Bool`.
-
-        args and hasattr(args[-1], 'op')
-        lines and lines[-1].endswith(':')
-
-    `_quick_type` calls both an unknown word. The `and` / `or` lowering then
-    kept the LEFT operand's pointer type for the result and stored the bool
-    into it -- `(MojoList *)1` when the test was true, and the next truth
-    test ran `mojo_list_len` on that address. With `_Bool` here the lowering
-    takes its bool-merge path. Both the lowering (`_lower_BinaryOp`) and
-    `_quick_type`'s own `and` / `or` rule ask this, so they agree."""
-    qt: str = _as_str(gen._quick_type(node))
-    if qt == '_Bool':
-        return qt
-    if isinstance(node, gimple_ctypes.CallExpr):
-        fn = node.func
-        if (isinstance(fn, gimple_ctypes.IdentExpr) and _as_str(fn.name) == 'hasattr'
-                and not gen._locally_binds_name('hasattr')):
-            return '_Bool'
-        if (isinstance(fn, gimple_ctypes.MemberExpr)
-                and _as_str(fn.member) in _STR_PREDICATE_METHODS
-                and _as_str(gen._quick_type(fn.obj)) == 'char *'):
-            return '_Bool'
-    return qt
-
-
 def _quick_type(gen, node) -> str:
     """Estimate C type of an expression without emitting code."""
     if isinstance(node, gimple_ctypes.IntLiteral):    return 'int64_t'
@@ -420,7 +383,7 @@ def _quick_type(gen, node) -> str:
         # 'cas')) dereferenced it as a pointer — a real crash at address 0x1.
         if node.op in ('and', 'or'):
             lt = gen._quick_type(node.left)
-            rt = _and_or_operand_type(gen, node.right)
+            rt = gen._quick_type(node.right)
             # A string and a word of unknown kind: the value may be either,
             # so it is the word -- the lowering (`_lower_BinaryOp`'s and/or
             # arm) types the result the same way, and the two must agree.
@@ -467,27 +430,6 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.IdentExpr):
         fname: str
         fname = node.func.name
-        # `getattr(x, 'field', default)` on a receiver of a known struct type
-        # and a field that struct declares: the field's own C type (a CONTAINER
-        # field is a container whatever the default is). Without this the
-        # estimate was the unknown word, so `a or getattr(x, 'dict_field', None)`
-        # fixed the merged type from `a` alone and then refused the cast when
-        # the right operand lowered to a different container kind.
-        if (fname == 'getattr' and len(node.args) in (2, 3)
-                and isinstance(node.args[0], gimple_ctypes.IdentExpr)
-                and isinstance(node.args[1], gimple_ctypes.StringLiteral)
-                and not gen._locally_binds_name('getattr')):
-            _gt = gen.var_types.get(node.args[0].name)
-            # `isinstance(st, FunctionDef)` narrows `st` for the guarded body
-            # (a loop variable's own type is the boxed word).
-            _nrw = gen._narrowed_exprs.get(f'i:{node.args[0].name}')
-            if _nrw is not None:
-                _gt = _as_str(_nrw[0])
-            if isinstance(_gt, str) and _gt.endswith(' *'):
-                _gf = (gen.struct_field_types.get(_gt[:-2].strip()) or {}).get(
-                    node.args[1].value)
-                if isinstance(_gf, str) and _gf in gimple_ctypes._CONTAINER_KIND_TYPES:
-                    return _gf
         # Builtins whose VALUE is a real container. Every one of these
         # materialises a MojoList*/MojoSet*/MojoDict* at runtime, which is
         # what makes a module-level `z = sorted(...)` / `enumerate(...)` /
@@ -668,26 +610,6 @@ def _quick_type(gen, node) -> str:
             _sot = gen.var_types.get(node.func.obj.name, '')
         if not (_sot and _sot.endswith(' *')):
             _sot = gen._quick_type(node.func.obj)
-        if (not (isinstance(_sot, str) and _sot.endswith(' *'))
-                and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                and node.func.obj.name in ('self', 'cls')):
-            # `cls.<method>(...)` / `self.<method>(...)` in a method body:
-            # `cls`/`self` are the erased int64_t receiver in `var_types`,
-            # so the generic receiver resolution above cannot see the
-            # struct. Resolve against the method's own struct instead —
-            # the same mangled-symbol lookup the typed-receiver branch
-            # below does. Without this, a method whose only `return` is
-            # `return cls._other(...)` inferred int64_t (the fallback),
-            # and a call site that treats the result as the container the
-            # callee really builds then emitted an uncast int64_t call
-            # into a `MojoList *` slot ("invalid conversion in gimple
-            # call"). Real: Tools/c-analyzer's `ColumnSpec._normalize`
-            # (`return cls._parse(...)`) feeding `*values, _ = ...`.
-            _cstruct = getattr(gen, '_current_struct_name', None)
-            if _cstruct:
-                _crt = gen.func_return_types.get(f"{_cstruct}_{node.func.member}")
-                if _crt:
-                    return _crt
         if isinstance(_sot, str) and _sot.endswith(' *'):
             _ssn = gimple_exprtypes._struct_name_of(_sot)
             if _ssn in gen.struct_field_types:
@@ -2316,66 +2238,6 @@ def _subst_idents(gen, expr, mapping: dict):
         return gimple_ctypes.dataclasses.replace(expr, **changes) if changes else expr
     return expr
 
-def _comptime_bound_text(gen, name: str):
-    """The textual value of a comptime-bound NAME, or None when `name` is not
-    bound to a value this renderer can spell.
-
-    A bracket argument can be an ordinary identifier bound by an earlier
-    `comptime name = value` (`comptime dtype = DType.float32` then
-    `compare[dtype](...)`). `_type_expr_to_ann` used to return the identifier
-    itself in that case, so the callee was instantiated with its OWN parameter
-    name as the argument: `compare[dtype]` became
-    `compare_5_dtype_5_dtype_7_verbose_4_True` for BOTH the Float32 and
-    Float64 call sites. The two distinct instantiations then collided on one C
-    symbol with two different return types (gcc: "conflicting types"), which
-    is the stdlib-syntax red `test/math/test_tanh.mojo` names. The value is
-    folded here so it substitutes into the callee text exactly like the
-    literal branch does.
-
-    Strings are deliberately NOT folded: a string constant would need quoting
-    this renderer does not do, and a string-valued comptime is also recorded
-    in `_comptime_str_names` (a type alias stored as text is not distinguished
-    from a string value there, so leaving strings alone keeps the pre-existing
-    behaviour for both). A DType value is rendered in its canonical
-    `DType.<name>` spelling, which every dtype reader in the compiler accepts
-    (`comptime._dtype_spelling_name`, `types._dtype_token_ctype`,
-    `infra_infer._resolve_type`)."""
-    vals = getattr(gen, '_comptime_vals', None)
-    if not vals or name not in vals:
-        return None
-    # A bracket PARAMETER of the enclosing function/struct is not a bound
-    # value, even when a same-named comptime constant is also in the table
-    # (`comptime N = 4` at module scope, and `def f[N: Int]`): the parameter
-    # must stay the parameter so the call is reproduced by the OUTER
-    # monomorphization, not specialized to the constant of the moment.
-    _fn = getattr(gen, '_current_func_node', None)
-    if _fn is not None and name in (getattr(_fn, 'comptime_params', None) or ()):
-        return None
-    if name in (getattr(gen, '_current_struct_type_params', None) or ()):
-        return None
-    v = vals.get(name)
-    # `('DType', 'float32')`, or the tuple's REPR string, which module-level
-    # bindings store. A bare `('.', x)` is NOT folded: comptime.py's
-    # `_is_dtype_value` records it as an enum variant in general and a dtype
-    # only relative to the other operand, so rendering it as `DType.x` here
-    # would be a guess.
-    if isinstance(v, tuple) and len(v) == 2 and v[0] in ('DType', 'dtype'):
-        return f'DType.{v[1]}'
-    if isinstance(v, str):
-        m = gimple_ctypes.re.match(
-            r"^\(\s*'(?:DType|dtype)'\s*,\s*'([^']*)'\s*\)$", v.strip())
-        if m:
-            return f'DType.{m.group(1)}'
-        return None
-    if isinstance(v, bool):
-        return 'True' if v else 'False'
-    if isinstance(v, int):
-        return str(v)
-    if isinstance(v, float):
-        return _float_type_arg_text(v) or None
-    return None
-
-
 def _type_expr_to_ann(gen, node) -> str:
     """Reconstruct a type-annotation string from a type expression node, so
     parametric types in external_call/MLIR positions resolve via _mojo_type.
@@ -2392,15 +2254,9 @@ def _type_expr_to_ann(gen, node) -> str:
     node-to-string step, which previously returned '' for every literal
     (IntLiteral/BoolLiteral/negative-int UnaryOp), making
     _is_concrete_type_arg reject it and silently falling back to the
-    placeholder-0 codegen instead of ever binding/invoking the callee.
-
-    An identifier bound by `comptime name = value` resolves to that value
-    (`_comptime_bound_text`), not to its own name — the same defect one level
-    further out, and the reason two dtype specializations of one generic used
-    to share one mangled symbol."""
+    placeholder-0 codegen instead of ever binding/invoking the callee."""
     if isinstance(node, gimple_ctypes.IdentExpr):
-        _bound = _comptime_bound_text(gen, node.name)
-        return _bound if _bound is not None else node.name
+        return node.name
     if isinstance(node, gimple_ctypes.SubscriptExpr):
         base = gen._type_expr_to_ann(node.obj)
         idx = node.index

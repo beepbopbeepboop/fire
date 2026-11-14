@@ -66,8 +66,16 @@ def _cm_as_str(x) -> str:
 from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.loops_shared import _single_loop_target_name
-from mojo.middle.exprtypes import module_qualifier
+try:
+    from mojo.middle.exprtypes import module_qualifier
+except Exception:
+    try:
+        from mojo.middle.module_shared import module_qualifier
+    except Exception:
+        def module_qualifier(q):  # type: ignore
+            if not q:
+                return ''
+            return q.replace('.', '_')
 # `module_qualifier` is a module-level name here (the import above binds it), so
 # `coro.module_qualifier` already exists as an attribute. It used to be attached
 # again through `sys.modules[__name__]`, which the compiled compiler has no
@@ -687,23 +695,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 # drifted.
                 if k is None:
                     k = _callee_return_kind(val, env)
-            # `x = <str>.split(...)` / `.rsplit(...)` / `.splitlines()` binds a
-            # LIST OF STRINGS by Python's own typing (`_LIST_RETURNING_METHODS`,
-            # the list-returning twin of `_STR_RETURNING_METHODS`). `_yield_kind`
-            # has no list answer for a str-method call, so the local stayed
-            # untyped and a later `for item in x:` could not type `item` — a
-            # tuple yield of it then defaulted its slot to int64_t, a pointer
-            # word the consumer cannot use as a string. Recorded here rather
-            # than in `_yield_kind` so a direct `yield x.split()` keeps its
-            # existing value-kind answer. Real: c_common/strutil.py's
-            # `parse_entries` (`subentries = entry.strip().replace(',', ' ').
-            # split()`, then `for item in subentries: yield item, None`), whose
-            # slots c_common/tables.py's `parse_table` unpacks.
-            if (k is None and isinstance(val, N.CallExpr)
-                    and isinstance(val.func, N.MemberExpr)
-                    and val.func.member in gimple_ctypes._LIST_RETURNING_METHODS):
-                _rk = _yield_kind(val.func.obj, env)
-                k = ('list', 'w' if _rk == 'w' else 'p')
             # `var b = bytes([...])` / `bytearray(...)` / `memoryview(...)`:
             # a byte container, so its element kind is 'i' BY DEFINITION --
             # not an inference, so it is safe to record even though the
@@ -1232,215 +1223,6 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
     if kinds is None:
         return None
     return [k == 'tuple' for k in kinds]
-
-
-def _yield_nodes_of(fn: N.FunctionDef) -> list:
-    """Every `YieldExpr`/`YieldFromExpr` lexically inside `fn`, not inside a
-    nested `def`/`lambda`/comprehension — a yield there belongs to a different
-    scope, exactly the nesting rule `fire_compiler._scan_yield_bearing` uses for
-    `is_generator`. Own stack-based walk (the shared `_walk` cannot express "skip
-    this subtree, keep the rest").
-
-    An EAGER list, not a generator: this module is in the self-host closure and
-    the compiler's own generators must be ones the A3 pass (this very module)
-    claims, and a module that holds one it cannot lower is refused whole
-    (`test_selfhost.py::closure_coroutines_are_lowerable`; the same fix as
-    `_walk_lists`)."""
-    found = []
-    stack = list(getattr(fn, 'body', None) or [])
-    while stack:
-        cur = stack.pop()
-        if isinstance(cur, (N.FunctionDef, N.LambdaExpr, N.Comprehension)):
-            # A different scope: whatever yields live there do not belong to
-            # `fn`. (A comprehension nested in `fn` containing a yield is a
-            # SyntaxError in real Python anyway; either way it is not
-            # `fn`'s yield.)
-            continue
-        if isinstance(cur, (N.YieldExpr, N.YieldFromExpr)):
-            found.append(cur)
-            continue
-        d = getattr(cur, '__dict__', None)
-        if not d:
-            continue
-        for v in d.values():
-            if isinstance(v, list):
-                stack.extend(x for x in v if hasattr(x, '__dict__'))
-            elif hasattr(v, '__dict__'):
-                stack.append(v)
-    return found
-
-
-def _yields_provably_nontuple(fn: N.FunctionDef) -> bool:
-    """True iff every `yield` DIRECTLY in `fn` yields a provably NON-tuple
-    value and there is no `yield from` at all.
-
-    The one generator fact the pipeline's own multi-slot refusal needs
-    before codegen (and therefore `_generator_value_kind` /
-    `tuple_slot_ctypes`) exists to answer it. This is deliberately a NARROW
-    and conservative predicate, never an approximation of the full
-    tuple-shape analysis: anything this does not prove non-tuple — a tuple
-    literal anywhere, any `yield from` — returns False and the caller defers
-    to codegen's own, better-informed refusal. A `True` here is the exact
-    condition under which codegen's `tuple_slot_ctypes` is None for every
-    binding of this function (the value slot cannot be tuple-shaped because
-    no yield is tuple-shaped), so a caller can refuse on it without ever
-    refusing a program codegen would have accepted."""
-    saw_yield = False
-    for n in _yield_nodes_of(fn):
-        if isinstance(n, N.YieldFromExpr):
-            return False
-        saw_yield = True
-        if isinstance(n.value, N.TupleExpr):
-            return False
-    return saw_yield
-
-
-def multi_slot_comprehension_refusal(target: str, callee: str) -> RuntimeError:
-    """The RuntimeError `_compr_generator_loop` raises for a multi-slot
-    comprehension target over a generator whose yield arity is not a tuple,
-    built in ONE place so the pipeline pre-pass
-    (`refuse_multi_slot_target_over_nontuple_generator`) and the codegen
-    raise the IDENTICAL diagnostic — which of the two noticed first must not
-    change the message a program receives (a stage lowering happening to
-    preempt another is not a reason for a user to see two different errors
-    for one program)."""
-    return RuntimeError(
-        "cannot compile a multi-slot comprehension target over a "
-        f"generator whose yield arity is not a tuple (`{target} "
-        f"for {target} in {callee}(...)`): the generator "
-        "yields one value per resume, and unpacking that value needs a "
-        "runtime iterator protocol this scalar generator model does "
-        "not have")
-
-
-def multi_slot_for_refusal(target: str, callee: str) -> RuntimeError:
-    """The `for`-statement twin of `multi_slot_comprehension_refusal`, and
-    built in one place for the same reason: `_gen_for_generator_iter` raises
-    it in codegen and the pipeline pre-pass
-    (`refuse_multi_slot_target_over_nontuple_generator`) raises it earlier,
-    before a body reading an undeclared name can preempt it with
-    `unknown_decl_check`'s own, less specific message."""
-    return RuntimeError(
-        "cannot compile a multi-slot `for` target over a generator "
-        f"whose yield arity is not a tuple (`for {target} in "
-        f"{callee}(...)`): the generator yields one value per resume, and "
-        "unpacking that value needs a runtime iterator protocol this scalar "
-        "generator model does not have")
-
-
-def _nontuple_generator_callee(defs_by_name: dict, target, iterable,
-                               shadowed=frozenset()):
-    """The bare callee name when `iterable` calls a module-level generator of
-    THIS module and `target` is a real multi-slot tuple target over it — the
-    shape whose lowering this scalar generator model does not have, and which
-    both consumers (`Comprehension` and `ForStmt`) refuse by name. None when
-    the shape is not provable, so the caller defers to codegen's own refusal.
-
-    The three provisos are what make a refusal here safe rather than an
-    approximation of codegen's `tuple_slot_ctypes`:
-
-      * the callee's name is not `shadowed` — bound by an enclosing FUNCTION
-        scope (`_scope_bound_names`), so the call does not necessarily reach
-        a module-level def at all (a nested `def`, a parameter, a local). A
-        superset set is the safe direction: a name wrongly counted as
-        shadowed only loses the refusal and leaves it to codegen;
-      * the target is a REAL multi-slot tuple target (the `(a,)` / `a,`
-        1-tuple spelling binds ONE name and is not it);
-      * every candidate under the callee's name is a generator whose yields
-        are all provably non-tuple (`_yields_provably_nontuple`). An imported
-        generator, a method, a `yield from` chain, or one tuple-shaped yield
-        anywhere defers to codegen — the same behavior as before this pass
-        existed."""
-    if not isinstance(target, str):
-        return None
-    stripped = target.strip()
-    if not for_target_is_tuple(stripped):
-        return None
-    if _single_loop_target_name(stripped) is not None:
-        # The `(a,)` / `a,` 1-tuple spelling binds ONE name.
-        return None
-    if not (isinstance(iterable, N.CallExpr)
-            and isinstance(iterable.func, N.IdentExpr)):
-        return None
-    if iterable.func.name in shadowed:
-        return None
-    candidates = [c for c in defs_by_name.get(iterable.func.name, ())
-                  if getattr(c, 'is_generator', False)
-                  and not getattr(c, 'is_async', False)]
-    if candidates and all(_yields_provably_nontuple(c) for c in candidates):
-        return iterable.func.name
-    return None
-
-
-def _scoped_nodes(node, shadowed: frozenset, out: list) -> list:
-    """`(node, shadowed_names)` for `node` and every AST descendant, one SCOPE
-    at a time. A `FunctionDef`'s body is walked with the names ITS scope binds
-    (`_scope_bound_names`) added to `shadowed`, so a call through a name the
-    enclosing function rebinds — a nested `def` of the same name, a parameter,
-    a local — is never read as a call of the module-level def of that name.
-
-    An eager list, not a generator, for the self-host reason
-    `_yield_nodes_of` records (this module is in the compiler's own closure
-    and must be lowerable by its own A3 pass)."""
-    own = (frozenset(_scope_bound_names(node))
-           if isinstance(node, N.FunctionDef) else frozenset())
-    inner = shadowed | own
-    for n in _walk(node, stop_at_defs=True):
-        if n is not node and isinstance(n, N.FunctionDef):
-            _scoped_nodes(n, inner, out)
-            continue
-        out.append((n, inner))
-    return out
-
-
-def refuse_multi_slot_target_over_nontuple_generator(stmts: list) -> None:
-    """Refuse, BEFORE the unknown-declaration pass can report a derived
-    symptom, the multi-slot generator shapes codegen refuses by name: a
-    comprehension clause target or a `for` statement target that unpacks over
-    a generator of THIS module whose every yield is provably one non-tuple
-    value per resume.
-
-    `unknown_decl_check.check_module` runs earlier in the pipeline than the
-    codegen that owns these refusals, so an expression reading an undeclared
-    name — `print([x for a, b in g()])`, or `for a, b in g(): print(x)` —
-    used to reach that pass first and die with its own, less specific `use of
-    unknown declaration 'x'`, never reaching the arity refusal the shape
-    deserves. This pass answers the arity question at the stage where it can
-    still answer it, and only for shapes `_nontuple_generator_callee` can
-    prove.
-
-    A comprehension raises the shared `multi_slot_comprehension_refusal`, a
-    `for` statement the shared `multi_slot_for_refusal`; returns None when
-    nothing matches. `async for` is skipped: it is lowered through
-    `cpp_async`, not `_gen_for_generator_iter`, so this pass has no proven
-    refusal to share with it."""
-    defs_by_name: dict = {}
-    for st in stmts or []:
-        if isinstance(st, N.FunctionDef):
-            defs_by_name.setdefault(str(st.name), []).append(st)
-    if not defs_by_name:
-        return
-    nodes: list = []
-    root_shadowed: frozenset = frozenset()
-    for st in stmts or []:
-        _scoped_nodes(st, root_shadowed, nodes)
-    for node, shadowed in nodes:
-        if isinstance(node, N.Comprehension):
-            for clause in getattr(node, 'generators', None) or []:
-                target = getattr(clause, 'target', None)
-                callee = _nontuple_generator_callee(
-                    defs_by_name, target, getattr(clause, 'iterable', None),
-                    shadowed)
-                if callee is not None:
-                    raise multi_slot_comprehension_refusal(target, callee)
-        elif (isinstance(node, N.ForStmt)
-              and not getattr(node, 'is_async', False)):
-            target = node.target
-            callee = _nontuple_generator_callee(
-                defs_by_name, target, getattr(node, 'iterable', None),
-                shadowed)
-            if callee is not None:
-                raise multi_slot_for_refusal(target, callee)
 
 
 def _conflicting_names_in(expr, env: dict | None) -> list:
@@ -2394,20 +2176,8 @@ def _compute_pointer_evidence(stmts: list) -> None:
                             changed = True
     # Carried on the node as well: the table is per lower() call, and an imported
     # module's functions are inferred after the importing module's lower() has run.
-    # `_ptr_evidence` is the DURABLE copy of this pass's own answer: a nested
-    # module compile (the importing module's own `_compile_imported_module`
-    # recursion) calls `lower()` too, and its `_compute_pointer_evidence`
-    # clears/refills these bare-name tables -- so a reader that runs AFTER
-    # that recursion (the cpp C++20-coroutine path typing a generator
-    # parameter, `cpp_async._gen_cpp_generator_unit`) saw the LAST module's
-    # evidence, not this one's. Real: `c_common/tables.py` imported by a
-    # consumer, `read_table`'s `infile` was typed `char *` (from string call
-    # sites) instead of the word `isinstance(infile, str)` needs, and the
-    # imported module's generated .cpp failed to compile (the failure
-    # surfaced only as undefined `_mojogen_*` symbols at link).
     for nm, fd in fds.items():
         fd._ptr_forwarded = frozenset(_PTR_FORWARDED.get(nm, ()))
-        fd._ptr_evidence = frozenset(_PTR_EVIDENCE.get(nm, ()))
 
 
 def _index_generator_defs(stmts: list) -> None:
@@ -3076,21 +2846,12 @@ def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str, struct_def=None) 
     return None
 
 
-# The most argument slots (a method's receiver included) the runtime's
-# `__mojo_gen_new_<n>` constructors cover (runtime/fire_coro_gen.c). A generator
-# with more used to lower fine and then reference `__mojo_gen_new_9`, which does
-# not exist, at LINK (the compiler's own `_trait_method_requirements`).
-MAX_GEN_SLOTS = 12
-
-
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
         return False, 'comptime params'
-    if len(getattr(fn, 'params', None) or []) > MAX_GEN_SLOTS:
-        return False, f'too many parameters (the runtime constructs at most {MAX_GEN_SLOTS} slots)'
     _decos = getattr(fn, 'decorators', None) or []
     # `@contextlib.contextmanager` (dotted or bare) is the ONE decorator a
     # generator may carry without changing what this backend has to emit, so
@@ -8850,17 +8611,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
             ct = 'double'          # unannotated param, kind from call sites
         _real_ct.append(ct)
     c_params = _lead + _real_ct
-    # Source parameter names, one per `c_params` slot in the same order (a
-    # kind-method receiver placeholder first, then the real parameters). Read
-    # by `cpp_core._cpp_generator_call_slot_pairs` to bind a delegated call's
-    # keyword arguments to their slots BY NAME — appending them positionally
-    # mis-slots `f(n - step, bump=bump, step=step)` as soon as the keywords
-    # are not written in declaration order.
-    _lead_pnames = []
-    if _lead:
-        _lead_pnames.append(_cm_as_str(fn.params[0][0]))
-    for _pmn, _pma in real_params:
-        _lead_pnames.append(_cm_as_str(_pmn))
     meta.append({
         'name': _cm_as_str(fn.name),
         'struct': struct_name,
@@ -8871,7 +8621,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'base': base,
         'body_name': body_name,
         'params': c_params,
-        'param_names': _lead_pnames,
         'star_slot': _star_slot(real_params, len(_lead)),
         'kwargs_slot': _kwargs_slot(real_params, len(_lead)),
         'nargs': len(real_params),
@@ -9299,11 +9048,6 @@ def register(gen, meta: list) -> None:
         api = {
             'base': m['base'],
             'value_ctype': m['value_ctype'],
-            # Source parameter names, one per `params` slot (see
-            # `_lower_one`'s meta key). Consumed by the cpp coroutine body
-            # emitter's shared argument-to-slot binder so a delegated call's
-            # keywords land in their own slots.
-            'param_names': m.get('param_names') or [],
             # a TAGGED-word generator: the consumer binds the value as a boxed
             # word (`gen._boxed_vals`, rendered by `mojo_repr_boxed`)
             'mixed_slots': m.get('value_kind') == 'w',

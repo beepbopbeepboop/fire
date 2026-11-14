@@ -28,7 +28,6 @@ import ast_rewriter
 import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
-import mojo.middle.simd_width as _simd_width
 
 def _debug_note(where: str, detail: object='') -> None:
     """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
@@ -1315,45 +1314,6 @@ _SIMD_FLOAT_DTYPE_CTYPE = {
 }
 
 
-def _dtype_token_ctype(tok):
-    """Scalar C type for a dtype TOKEN, or None when it is not a float dtype.
-
-    One resolver for every spelling a dtype can reach these lookups in: a
-    `('DType', 'float32')` TUPLE, the REPR of that tuple as a string
-    (`gen._comptime_vals` stores `comptime dt = DType.float32` as
-    `"('DType', 'float32')"`), a `DType.float32` / `dtype.float32` / leading-dot
-    spelling, or a bare `float32` / `Float32` / `f32` / `f64`.  Reads the one
-    table `_SIMD_FLOAT_DTYPE_CTYPE`, so the annotation resolver
-    (`infra_infer._resolve_type`) and the constructor lowerer
-    (`emit_calls`' `SIMD`/`Scalar` arm) cannot drift apart.
-    """
-    if tok is None:
-        return None
-    if isinstance(tok, (list, tuple)) and len(tok) == 2:
-        if tok[0] in ('.', 'DType', 'dtype'):
-            tok = tok[1]
-        else:
-            return None
-    s = str(tok).strip()
-    if not s:
-        return None
-    if s.startswith('DType.'):
-        s = s[len('DType.'):]
-    elif s.startswith('dtype.'):
-        s = s[len('dtype.'):]
-    if s.startswith('.'):
-        s = s[1:]
-    m = re.match(r"^\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)$", s)
-    if m and m.group(1) in ('.', 'DType', 'dtype'):
-        s = m.group(2)
-    sl = s.lower()
-    if sl == 'f32':
-        sl = 'float32'
-    elif sl == 'f64':
-        sl = 'float64'
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl)
-
-
 def _simd_float_dtype_ctype(inner: str) -> str | None:
     """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
     `<dtype>` when it is a float dtype spelling, else None (integer or
@@ -1397,14 +1357,20 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray', 'Array', 'FixedSizeArray'):
-            # `List[T]`/`list[T]`, `InlineArray[T, N]`, `Array[T, N]` and
-            # `FixedSizeArray[T, N]` — Mojo's fixed-size arrays — are LISTs
-            # at this representation level: one `MojoList *` with an element
-            # type, no separate fixed-size struct. `FixedSizeArray` used to be
-            # missing here, so its annotation erased to `int64_t` and a
-            # parameter declared `int64_t a` (then cast to `MojoList *` at
-            # the call).
+        if base in ('List', 'list', 'InlineArray', 'Array'):
+            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
+            # representation level, exactly like `List[T]`: one `MojoList *`
+            # with an element type, no separate fixed-size struct. It was
+            # missing here, so the annotation erased to `int64_t` and every
+            # use lost its static container type. The visible damage was a
+            # `for x in xs:` over an `Array[Int, N]`, where an untyped
+            # iterable emits the runtime dict-or-list dispatch and the DICT
+            # arm declares the loop variable `char *` (it is a key); the
+            # later `var val = <a double>` in the same function then assigned
+            # a double to that `char *` — "cannot convert to a pointer type"
+            # in the stdlib's test_math.mojo. Also in
+            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
+            # be an ordinary imported struct.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1445,17 +1411,6 @@ def _mojo_type(ann: str | type | None) -> str:
             # of the dtype. Integer and unresolvable dtypes fall through to
             # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
             # `infra_infer._resolve_type`, not here.
-            #
-            # The lane count is validated here as well as at the constructor
-            # (`emit_calls._lower_call`): an ANNOTATION is the other spelling
-            # that builds a `SIMD[dtype, width]` type, so `var x:
-            # SIMD[DType.float32, 3]` must be rejected even when no
-            # constructor call is lowered. A symbolic width is not decided.
-            _parts = _split_top_level_commas(inner)
-            if len(_parts) >= 2:
-                _w = _simd_width.concrete_width(_parts[1])
-                if _w is not None:
-                    _simd_width.reject_invalid_width(_w, _parts[0])
             dt = _simd_float_dtype_ctype(inner)
             if dt is not None:
                 return dt
@@ -1816,7 +1771,7 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     nxt = gen._new_temp('uint64_t')
-    gen._binop_into(nxt, f"{cur}", '|', f"{1 << bit[1]}ULL")
+    gen._emit(f"  {nxt} = {cur} | {1 << bit[1]}ULL;")
     gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
 
 
@@ -1833,13 +1788,13 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     got = gen._new_temp('uint64_t')
-    gen._binop_into(got, f"{cur}", '&', f"{1 << bit[1]}ULL")
+    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
     msg = f"'{class_name}' object has no attribute '{member}'"
     # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
     # own basic block (the same goto shape `_lower_IfExpr` uses).
     bb_raise = gen._new_bb()
     bb_ok = gen._new_bb()
-    gen._cond_goto(f"{got} == 0ULL", bb_raise, bb_ok)
+    gen._emit(f"  if ({got} == 0ULL) goto {bb_raise}; else goto {bb_ok};")
     gen._emit_label(bb_raise)
     gen._emit_call('void', '', 'mojo_raise_attribute_error',
                    [('char *', gen._intern_string(msg))])
@@ -2752,55 +2707,6 @@ def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
     return f'std::function<{_c_type_to_cpp(_as_str(ret))}({ps})>'
 
 
-def c_client_callable_ctype(ct):
-    """Map a C++-only callable value type to the C runtime word type.
-
-    A callable is boxed as an `int64_t` word in the C runtime
-    (`mojo_dyn_call((int64_t)(intptr_t)(callee), ...)`); `std::function<...>`
-    is only expressible in cpp coroutine units, where the callable is
-    actually invoked through C++ syntax. Imported-function signatures and
-    arg temporaries emitted into a C translation unit (the link-mode client,
-    extern prototypes) must therefore spell the slot as `int64_t`. Idempotent
-    and safe for any non-callable ctype."""
-    if isinstance(ct, str) and ct.startswith('std::function<'):
-        return 'int64_t'
-    return ct
-
-
-def c_client_sanitize_signature_text(sig: str) -> str:
-    """Replace `std::function<...>` parameter/return types in a C signature
-    string with the runtime's boxed word type (`int64_t`).
-
-    Used at the C-emission boundary for extern/prototype text that may have
-    been derived from a cpp-typed callable slot. A simple non-nested scan is
-    sufficient for the `std::function<R(P...)>` shapes this compiler emits.
-    """
-    if not isinstance(sig, str) or 'std::function<' not in sig:
-        return sig
-    out = []
-    i = 0
-    needle = 'std::function<'
-    n = len(sig)
-    while i < n:
-        j = sig.find(needle, i)
-        if j < 0:
-            out.append(sig[i:])
-            break
-        out.append(sig[i:j])
-        # consume balanced <...> of std::function (no nested templates in our shapes)
-        k = j + len(needle)
-        depth = 1
-        while k < n and depth > 0:
-            if sig[k] == '<':
-                depth += 1
-            elif sig[k] == '>':
-                depth -= 1
-            k += 1
-        out.append('int64_t')
-        i = k
-    return ''.join(out)
-
-
 _CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')
 _CPP_CALLABLE_CTYPE_1ARG = callable_ctype(['int64_t'], 'int64_t')
 # The `*args` / `**kwargs` family. C++ cannot subscript a native variadic
@@ -2832,7 +2738,7 @@ _FOREIGN_CALLABLES = {
     'glob.iglob': _CPP_CALLABLE_CTYPE,
     # Builtin open: modeled as a file-handle-producing callable for
     # callable-valued parameters and context-manager lowering in compiled
-    # generator bodies (the tables.py `read_table` `with open(...)` fix).
+    # generator bodies (see COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2).
     'open': _CPP_CALLABLE_CTYPE,
 }
 _FOREIGN_CALLABLE_ITER_ELEM = {

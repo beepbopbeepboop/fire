@@ -1,16 +1,11 @@
 {
   "default_slot": "qwen-local",
-  "mode": "drain",
-  "mode_note": "build: high-volume campaign - light gate (--stdlib), no batch cap, land everything fast. drain: work the backlog down - finishing and gate-repair work starts first, the full landing gate, batches of 8. `control.py mode build|drain` flips it; everything that used to guess the campaign reads this.",
   "slots": [
     {
       "name": "openrouter-free",
       "model": "openrouter/openrouter/free",
       "count": 1,
       "kind": "opencode",
-      "instructions": [
-        "Do not use git config to change configuration data for git."
-      ],
       "recover_hours": 24,
       "class": "easy",
       "replenish": {

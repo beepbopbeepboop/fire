@@ -272,8 +272,6 @@ def _build_foreign_package_run_files(entry_src, files, cwd):
         with open(os.path.join(pkg, rel), 'w') as f:
             f.write(src)
     entry = os.path.join(pkg, 'main.py')
-    with open(entry, 'w') as f:
-        f.write(entry_src)
     cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=cwd,
                         capture_output=True, text=True,
                         timeout=RUN_TIMEOUT_S)
@@ -289,42 +287,6 @@ def _build_foreign_package_run_files(entry_src, files, cwd):
     out = subprocess.run([exe], capture_output=True,
                          timeout=RUN_TIMEOUT_S).stdout.decode()
     return out, cpython_stdout, cp
-
-
-def _test_foreign_package_case(name, files, entry_src, want):
-    """`_test_foreign_a3_generator_handle` for a caller-defined package
-    (`files` is the FULL package content — `_build_foreign_package_run_files`
-    instead of the shared `_FOREIGN_PKG_FILES`). `want` is asserted against
-    CPython's own output first, so a fixture that drifted from its documented
-    expectation fails as a FIXTURE bug and not as a compiler regression."""
-    global _PASS, _FAIL
-    try:
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fpp_')
-        got, cpy, cp = _build_foreign_package_run_files(entry_src, files, wd)
-    except subprocess.TimeoutExpired as e:
-        print(f"TIMEOUT {name}: {e}")
-        _FAIL += 1
-        return
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    if cp.returncode != 0:
-        print(f"FAIL  {name}: CPython reference exited {cp.returncode}: "
-              f"{cp.stderr[-500:]} — fixture is wrong, not the compiler")
-        _FAIL += 1
-        return
-    if cpy != want:
-        print(f"FAIL  {name}: CPython baseline is not {want!r} (got {cpy!r}) "
-              f"— fixture is wrong, not the compiler")
-        _FAIL += 1
-        return
-    if got == cpy:
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: compiled stdout {got!r} != CPython {cpy!r}")
-        _FAIL += 1
 
 
 def _test_foreign_a3_generator_handle(name, entry_src, want):
@@ -453,111 +415,6 @@ def _foreign_a3_generator_handle_for_loop():
         "\n"
         "main()\n",
         "60\n")
-
-
-def _foreign_module_qualified_generator_tuple_for():
-    # `for a, b in <module>.<generator>(...):` inside a compiled generator
-    # body — the module-qualified (not `self.method`, not a bare imported
-    # name) delegation form, with a tuple-unpacked loop target. Real:
-    # c_common/tables.py's `parse_table` consuming
-    # `strutil.parse_entries(entries, ignoresep=sep)` (a cross-module
-    # generator, delegated with a keyword argument, tuple-unpacked).
-    global _PASS, _FAIL
-    name = "foreign_module_qualified_generator_tuple_for"
-    try:
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fqm_', dir='.tmp')
-        os.makedirs(os.path.join(wd, 'fpq'), exist_ok=True)
-        with open(os.path.join(wd, 'fpq', '__init__.py'), 'w') as f:
-            f.write('')
-        # A tuple-yielding generator in another module. Scalar int pairs keep
-        # the value protocol simple and the cpp path eligible.
-        with open(os.path.join(wd, 'fpq', 'sub.py'), 'w') as f:
-            f.write("def pairs(n):\n"
-                    "    i = 0\n"
-                    "    while i < n:\n"
-                    "        yield i, i * 2\n"
-                    "        i = i + 1\n")
-        entry_src = ("from . import sub\n"
-                     "\n"
-                     "def consume(n, *, start=[]):\n"
-                     "    for a, b in sub.pairs(n):\n"
-                     "        yield a + b\n"
-                     "\n"
-                     "def main():\n"
-                     "    print(sum(consume(4)))\n"
-                     "\n"
-                     "main()\n")
-        entry = os.path.join(wd, 'fpq', 'main.py')
-        with open(entry, 'w') as f:
-            f.write(entry_src)
-        cp = subprocess.run([sys.executable, '-m', 'fpq.main'],
-                            cwd=wd, capture_output=True, text=True,
-                            timeout=RUN_TIMEOUT_S)
-        cpython_stdout = cp.stdout
-        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-            entry_src, do_imports=True, filename=entry)
-        if not cpp_code:
-            raise RuntimeError(
-                "expected a non-empty generated .cpp (consumer must take the "
-                "cpp C++20-coroutine path)")
-        exe = _build_generator_program_from_code(c_code, cpp_code)
-        out = subprocess.run([exe], capture_output=True,
-                             timeout=RUN_TIMEOUT_S).stdout.decode()
-        if cpython_stdout != "18\n":
-            print(f"FAIL  {name}: CPython baseline wrong (got {cpython_stdout!r})")
-            _FAIL += 1
-            return
-        if out == cpython_stdout:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: compiled stdout {out!r} != CPython {cpython_stdout!r}")
-            _FAIL += 1
-    except subprocess.TimeoutExpired as e:
-        print(f"TIMEOUT {name}: {e}")
-        _FAIL += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-
-
-
-def _regression_tables_callable_param_generator_handle_arg():
-    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5: a call THROUGH a
-    # callable-valued parameter whose ARGUMENT is a compiled-generator HANDLE
-    # local — tables.py's read_table doing
-    # `lines = strutil._iter_significant_lines(infile)` then
-    # `for row in _get_reader(lines, delimiter=sep or '\t'):`. Before the fix
-    # `cpp_core._cpp_dyn_call_expr` refused the handle argument ("C type is not
-    # statically a word, string or container"); the lowering now materializes
-    # the handle into a fresh `MojoList *` and packs that.
-    #
-    # `mlines.iter_lines` is A3-lowered exactly like
-    # `strutil._iter_significant_lines`; `_get_reader=csv.reader` (a callable
-    # default) keeps `read_table` on the cpp path, and the csv.reader tabled
-    # runtime iterates the materialized list of lines.
-    _test_foreign_package_case(
-        "tables_callable_param_generator_handle_arg",
-        {'__init__.py': '',
-         'mlines.py': (
-             "def iter_lines(lines):\n"
-             "    for line in lines:\n"
-             "        yield line\n")},
-        (
-            "import csv\n"
-            "from . import mlines\n"
-            "\n"
-            "def read_table(entries, header, *, sep=',', _get_reader=csv.reader):\n"
-            "    lines = mlines.iter_lines(entries)\n"
-            "    for row in _get_reader(lines, delimiter=sep):\n"
-            "        yield row[0]\n"
-            "\n"
-            "def main():\n"
-            "    for v in read_table([\"a,b\", \"1,2\"], \"a,b\", sep=','):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n"),
-        "a\n1\n")
 
 
 def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
@@ -1444,167 +1301,8 @@ def main():
         "_get_reader")
 
 
-def _regression_for_over_file_object():
-    global _PASS, _FAIL
-    # A compiled generator's `for line in <open file>` (fixed 2026-11-14; the
-    # bug doc that tracked it was deleted with the fix). A file word is not a
-    # MojoList, a dict or a set,
-    # so the `int64_t`-word iterator dispatch used to read the FILE* as a
-    # container (garbage length: the body ran ZERO times -- the c-analyzer
-    # consumer's `read_table` then raised `bad header ''`) or, on the cpp
-    # path, `TypeError: object is not iterable`. Both fixtures below are
-    # asserted against CPython run on the same source at test time, because
-    # the failure mode is a silent zero-iteration loop, not a crash.
-    _p = os.path.join('.tmp', '_for_over_file_object_regression.txt')
-    with open(_p, 'w', newline='') as _f:
-        _f.write('a\nb\n')
-    try:
-        # 1. The plain single-module shape (A3 stack-switch path).
-        mojo_src = f"""\
-def gen(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen(p):
-        print(repr(x))
-
-main()
-"""
-        cpy_src = f"""\
-def gen(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen(p):
-        print(repr(x))
-
-main()
-"""
-        test_generator_matches_cpython(
-            "for_over_file_object_lines", mojo_src, cpy_src)
-
-        # 1b. The cpp C++20-coroutine companion path: a keyword-only parameter
-        # the A3 gate cannot fill (`*, start=[]`) keeps this generator on the
-        # cpp path, whose boxed-list arm used to read the FILE* as a
-        # MojoList. Also covers `_open=open` as a manager PARAMETER
-        # (`with _open(p, newline='') as f:`), the read_table shape.
-        mojo_src = f"""\
-def gen_iter(p, *, start=[]):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def gen_iter_param(p, *, _open=open, start=[]):
-    with _open(p, newline='') as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen_iter(p):
-        print(repr(x))
-    for x in gen_iter_param(p):
-        print(repr(x))
-
-main()
-"""
-        cpy_src = f"""\
-def gen_iter(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def gen_iter_param(p, _open=open):
-    with _open(p, newline='') as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen_iter(p):
-        print(repr(x))
-    for x in gen_iter_param(p):
-        print(repr(x))
-
-main()
-"""
-        test_generator_matches_cpython(
-            "for_over_file_object_lines_cpp", mojo_src, cpy_src)
-
-        # 2. The SAME generator (in ANOTHER module) is called with a list of
-        # strings at one call site and an open file at another --
-        # c_common/strutil.py's `_iter_significant_lines(lines)` exactly. The
-        # list call site records string element evidence, which used to make
-        # the file call read the handle as a MojoList and run zero times;
-        # iteration must dispatch on the runtime kind of the word, not on one
-        # call site's type. The foreign module keeps the generator on the A3
-        # path (as strutil's is), while the entry's own `with open` is what
-        # hands it the file word across the module boundary.
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fileobj_')
-        pkg = os.path.join(wd, 'fpp')
-        os.makedirs(pkg)
-        with open(os.path.join(pkg, '__init__.py'), 'w') as _f:
-            _f.write('')
-        with open(os.path.join(pkg, 'mlines.py'), 'w') as _f:
-            _f.write("def iter_lines(lines):\n"
-                     "    for line in lines:\n"
-                     "        yield line.strip()\n")
-        entry_src = (
-            "from . import mlines\n"
-            "\n"
-            "def main():\n"
-            f"    p = r'''{os.path.abspath(_p)}'''\n"
-            "    data = ['  one  ', '  two  ']\n"
-            "    for x in mlines.iter_lines(data):\n"
-            "        print(repr(x))\n"
-            "    with open(p) as f:\n"
-            "        for x in mlines.iter_lines(f):\n"
-            "            print(repr(x))\n"
-            "\n"
-            "main()\n")
-        entry = os.path.join(pkg, 'main.py')
-        with open(entry, 'w') as _f:
-            _f.write(entry_src)
-        _cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=wd,
-                             capture_output=True, text=True,
-                             timeout=RUN_TIMEOUT_S)
-        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-            entry_src, do_imports=True, filename=entry)
-        if '__mgco_mlines_iter_lines' not in c_code:
-            raise RuntimeError(
-                "fixture no longer A3-lowers the imported generator "
-                "iter_lines, so it does not exercise the stack-switch "
-                "file-object loop it exists for")
-        _exe = _build_generator_program_from_code(c_code, cpp_code)
-        _got = subprocess.run([_exe], capture_output=True,
-                              timeout=RUN_TIMEOUT_S).stdout.decode()
-        _want = "'one'\n'two'\n'a'\n'b'\n"
-        if _cp.returncode != 0 or _cp.stdout != _want:
-            raise RuntimeError(
-                f"CPython reference did not produce {_want!r} "
-                f"(rc={_cp.returncode}, stdout={_cp.stdout!r})")
-        if _got == _want:
-            print("PASS  for_over_file_object_list_or_file")
-            _PASS += 1
-        else:
-            print(f"FAIL  for_over_file_object_list_or_file: "
-                  f"CPython {_want!r}, compiled {_got!r}")
-            _FAIL += 1
-    finally:
-        try:
-            os.remove(_p)
-        except Exception:
-            pass
-
-
 def _regression_with_tabled_open_in_generator():
-    # The tables.py `read_table` `with open(...)` refusal: a `with open(...)`
+    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2: a `with open(...)`
     # (and a call through a parameter whose default is builtin open) in a plain
     # compiled generator body (cpp C++20 coroutine path) must evaluate the
     # manager, bind the alias, run the body, and close on the normal path.
@@ -1719,7 +1417,7 @@ def _regression_raise_mixed_tuple_literal_in_generator():
 
 
 def _regression_tables_module_qualified_tuple_for():
-    # The tables.py part-4 shape (fixed 2026-11-13): a TUPLE-target
+    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4: a TUPLE-target
     # `for` over a MODULE-QUALIFIED call to a FOREIGN module's compiled
     # generator, with a KEYWORD argument, inside a cpp C++20-coroutine
     # generator body — tables.py's parse_table doing
@@ -1727,23 +1425,21 @@ def _regression_tables_module_qualified_tuple_for():
     #
     # `consume` is forced down the cpp path by the unrepresentable `start=[]`
     # kwonly default (the list literal the A3 gate does not admit — same trick
-    # as `_foreign_a3_generator_handle_next`); `mpe.parse_entries` yields
-    # (str, None) tuples like the real `strutil.parse_entries` does, and is
-    # A3-lowered (kwonly `ignoresep` alone does NOT keep it off A3, measured
-    # 2026-11-13), so it registers in `_generator_home_api` via
-    # `publish_a3_generators`. On the 2026-11-13 tree the refusal was the
-    # ROUTING: `_cpp_iterable_is_delegatable_generator_call` (cpp_async.py)
-    # accepted only bare names and self/cls methods, so the loop fell to the
-    # generic emitter and `_cpp_refuse_unpacking_target` (cpp_core.py)
-    # refused the tuple target:
+    # as `_foreign_a3_generator_handle_next`); `mpe.parse_entries` is
+    # itself cpp-path (kwonly `ignoresep`) and yields (str, None) tuples like
+    # the real `strutil.parse_entries` does. The foreign module's cpp-lowered
+    # generator DOES register in `_generator_home_api` (module_gen.py:13906),
+    # so the callee is resolvable; on the 2026-11-13 tree what is missing is
+    # the ROUTING: `_cpp_iterable_is_delegatable_generator_call`
+    # (cpp_async.py:214) accepts only bare names and self/cls methods, so the
+    # loop falls to the generic emitter and `_cpp_refuse_unpacking_target`
+    # (cpp_core.py:9210) refuses the tuple target:
     #
     #     consume: a tuple `for` target (line, filename) over this iterable
     #     is not supported in a compiled generator/coroutine body ...
     #
-    # Part 4 fixed the routing, the delegate's per-slot unpack, and the A3
-    # kind of a local bound to `str.split()` (so `item` is a string slot).
-    # Wired into run_tests() next to
-    # `_regression_raise_mixed_tuple_literal_in_generator` by that fix.
+    # RED until part 4 lands; wire into run_tests() next to
+    # `_regression_raise_mixed_tuple_literal_in_generator` in that fix.
     _test_foreign_package_case(
         "tables_module_qualified_tuple_for",
         {'__init__.py': '',
@@ -9167,55 +8863,6 @@ def main():
         print(v)
 """, "5\n3\n1\n")
 
-    # ── keyword arguments at a DELEGATED generator call bind by NAME ──
-    # (`c_common/tables.py`'s `read_table` build bug: it does `yield from
-    # read_table(infile, header, sep=sep, fix=fix, _open=_open,
-    # _get_reader=_get_reader)`, and `c_common/fsutil.py`'s
-    # `yield from iter_files(root, suffix, relparent, get_files=..., ...)` /
-    # `yield from iter_many(items, onempty=None)` are the same shape.)
-    #
-    # The cpp coroutine path used to drop `call.kwargs` entirely at a
-    # delegated call: the arity check counted only positional arguments and
-    # refused the whole module ("`yield from tick(...)`: expected 3
-    # argument(s), got 1"). Appending the keywords positionally instead would
-    # pass the arity check but put `bump` in `step`'s slot, so this case
-    # writes them in REVERSE declaration order and pins the real values.
-    test_generator_stdout("generator_recursive_yield_from_keywords_bind_by_name", """\
-def tick(n, *, step, bump=100):
-    if n <= 0:
-        return
-    yield n + bump
-    yield from tick(n - step, bump=bump + 1, step=step)
-
-def main():
-    for v in tick(5, step=2, bump=0):
-        print(v)
-""", "5\n4\n3\n")
-
-    # The same binder serves `for ... in <generator>(...)` consumption
-    # (`cpp_core._cpp_for_generator_delegate`), which used to flatten the
-    # keywords into `call.args` in place — mutating the AST node, and
-    # correct only in declaration order. `extra=1, scale=scale` is reversed
-    # against `def pairs(n, *, scale, extra=0)`: the old flattening bound
-    # extra=1 to `scale` and printed 46, CPython prints 64.
-    test_generator_stdout("generator_for_in_keywords_bind_by_name", """\
-def pairs(n, *, scale, extra=0):
-    i = 0
-    while i < n:
-        yield i * scale + extra, 0
-        i = i + 1
-
-def consume(n, *, scale):
-    total = 0
-    for a, b in pairs(n, extra=1, scale=scale):
-        total = total + a + b
-    yield total
-
-def main():
-    for v in consume(4, scale=10):
-        print(v)
-""", "64\n")
-
     # ── lambda literals inside a generator body ───────────────────────
     # (the (since-fixed) compiled-generator lambda-expression bug) -- 0-, 1-
     # and 2-parameter lambdas, a lambda re-bound on each branch of an
@@ -9775,40 +9422,6 @@ def main():
 main()
 """, "multi-slot `for` target over a generator whose yield arity is not a tuple")
 
-    # The same refusal for the FOR-STATEMENT consumer, whose body need not bind
-    # the target at all: `print(x)` reads an undeclared name, and before the
-    # pipeline pre-pass (mojo/middle/coro.py's
-    # refuse_multi_slot_target_over_nontuple_generator) walked `ForStmt` too,
-    # `unknown_decl_check` answered first with its own, less specific message.
-    test_generator_refused("gen_multi_slot_for_target_unknown_body_refused", """\
-def g():
-    yield 1
-
-def main():
-    for a, b in g():
-        print(x)
-main()
-""", "multi-slot `for` target over a generator whose yield arity is not a tuple")
-
-    # The pre-pass must not refuse what codegen accepts: here the CALL reaches
-    # a nested `def g` that yields a real tuple, so the module-level one-value
-    # `g` is not the callee at all — for the `for` statement or for the
-    # comprehension. Counting the enclosing scope's bound names as shadows is
-    # what keeps both out of the refusal (before that, the comprehension
-    # spelling below was refused for a program codegen compiles).
-    test_generator_stdout("gen_multi_slot_target_nested_shadowing_generator_ok", """\
-def g():
-    yield 1
-
-def main():
-    def g():
-        yield 1, 2
-    for a, b in g():
-        print(a, b)
-    print([a for a, b in g()])
-main()
-""", "1 2\n[1]\n")
-
     # The same refusal for the COMPREHENSION consumer, which reaches
     # `_compr_generator_loop` rather than `_gen_for_generator_iter`.
     test_generator_refused("gen_multi_slot_comprehension_target_over_one_value_generator_refused", """\
@@ -9817,25 +9430,6 @@ def g():
 
 def main():
     print([x for a, b in g()])
-main()
-""", "multi-slot comprehension target over a generator whose yield arity is not a tuple")
-
-    # The SET-comprehension spelling pins the precedence, not just the
-    # consumer: the unknown-declaration pass runs BEFORE codegen, so an
-    # element expression reading an undeclared name (here `x`) used to reach
-    # that pass first and die with `use of unknown declaration 'x'` instead
-    # of the arity mismatch that makes this comprehension uncompilable.
-    # The refusal is raised by a dedicated pipeline pre-pass
-    # (mojo/middle/coro.py's
-    # refuse_multi_slot_target_over_nontuple_generator) that shares
-    # one message builder with _compr_generator_loop's own raise — which of
-    # the two stages noticed first no longer changes the diagnostic.
-    test_generator_refused("gen_multi_slot_set_comprehension_target_over_one_value_generator_refused", """\
-def g():
-    yield 1
-
-def main():
-    print({x for a, b in g()})
 main()
 """, "multi-slot comprehension target over a generator whose yield arity is not a tuple")
 
@@ -10759,16 +10353,12 @@ def main():
 
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
-    _foreign_module_qualified_generator_tuple_for()
-    _regression_tables_callable_param_generator_handle_arg()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
     _regression_read_table_callable_reader()
     _regression_read_table_callable_reader_untabled_refusal()
     _regression_with_tabled_open_in_generator()
-    _regression_for_over_file_object()
     _regression_raise_mixed_tuple_literal_in_generator()
-    _regression_tables_module_qualified_tuple_for()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

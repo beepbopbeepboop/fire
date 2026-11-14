@@ -63,24 +63,6 @@ def _resolve_type(gen, ann: str | None) -> str:
     # `auto` annotation resolves to the struct registered under `_kw_auto`.
     if isinstance(ann, str):
         ann = gen._c_kw_struct_renames.get(ann, ann)
-    # A module-local `alias NAME = <type>`: expand the name to the aliased
-    # type's annotation text before any other resolution, recursively with a
-    # seen-set so a cycle cannot hang codegen. Only module-local aliases are
-    # in scope (gen._type_aliases); unknown names fall through unchanged.
-    if isinstance(ann, str):
-        _ta = getattr(gen, '_type_aliases', None)
-        if _ta:
-            _ann_s = ann.strip()
-            _seen = set()
-            while _ann_s in _ta and _ann_s not in _seen:
-                _seen.add(_ann_s)
-                _expanded = _ta.get(_ann_s)
-                if _expanded is None:
-                    break
-                _ann_s = str(_expanded).strip()
-                if not _ann_s:
-                    break
-            ann = _ann_s
     if ann in gen.struct_field_types:
         return f"{ann} *"
     # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —
@@ -128,16 +110,36 @@ def _resolve_type(gen, ann: str | None) -> str:
         if base in ('Scalar', 'SIMD'):
             _parts = gimple_ctypes._split_top_level_commas(rest.rstrip(']').strip())
             _dtok = _parts[0].strip() if _parts else ''
-            # Any width: a `SIMD[<float dtype>, N]` value has the dtype's SCALAR
-            # C type in this codegen, so N does not change the answer. Width 1
-            # used to be the only case resolved, which left `SIMD[dt, 2]` on
-            # the int64_t fallback.
-            if _dtok:
+            _is_width1 = (base == 'Scalar' or (len(_parts) >= 2 and _parts[1].strip() == '1'))
+            if _is_width1 and _dtok:
                 def _dtype_ctype(tok):
-                    # The ONE resolver: every spelling (tuple, tuple-REPR,
-                    # DType./dtype./leading-dot, bare, f32/f64) and the one
-                    # table live in types._dtype_token_ctype.
-                    return gimple_ctypes._dtype_token_ctype(tok)
+                    if tok is None:
+                        return None
+                    if isinstance(tok, tuple) and len(tok) == 2:
+                        if tok[0] in ('.', 'DType', 'dtype'):
+                            tok = tok[1]
+                        else:
+                            tok = None
+                    s = str(tok).strip() if tok is not None else ''
+                    if not s:
+                        return None
+                    if s.startswith('DType.'):
+                        s = s[len('DType.'):]
+                    if s.startswith('dtype.'):
+                        s = s[len('dtype.'):]
+                    if s.startswith('.'):
+                        s = s[1:]
+                    # ONE dtype-spelling table (types._SIMD_FLOAT_DTYPE_CTYPE),
+                    # the same one `emit_calls._float_dtype_arg_ctype` reads, so
+                    # the resolver and the call lowerer cannot drift apart. Its
+                    # keys are the normalized spelling (`float32`, `Float32`,
+                    # `DType.float32`); `f32`/`f64` are the remaining aliases.
+                    sl = s.lower()
+                    if sl == 'f32':
+                        sl = 'float32'
+                    elif sl == 'f64':
+                        sl = 'float64'
+                    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(sl)
 
                 def _resolve_dtype_token(tok):
                     _ct = _dtype_ctype(tok)
@@ -1579,26 +1581,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                                 _all_present = False
                                 break
                         if _all_present:
-                            # The compiler preloads ITS OWN AST-node layouts
-                            # (`TryStmt`, `WithStmt`, ...) into
-                            # struct_field_types for every compile, so a field
-                            # name as generic as `handlers` or `body` can
-                            # match one of them when the struct is really the
-                            # program's own (or an opaque stdlib object).
-                            # Real: c_common/logging.py's `logger.handlers`
-                            # typed `logger` as `TryStmt *`, and the emitted
-                            # `TryStmt_setLevel/addHandler` calls had no
-                            # definition in the build. Such a name is only
-                            # evidence when the module being compiled defines
-                            # that very struct (the self-host case, where the
-                            # AST nodes ARE the program).
-                            _sn_s = _as_str(sname)
-                            _sn_cls = getattr(gimple_ctypes, _sn_s, None)
-                            if (isinstance(_sn_cls, type)
-                                    and gimple_ctypes.dataclasses.is_dataclass(_sn_cls)
-                                    and _sn_s not in getattr(gen, '_local_struct_names', ())):
-                                continue
-                            matches.append(_sn_s)
+                            matches.append(_as_str(sname))
                 if len(matches) == 1:
                     inferred[pname] = f"{matches[0]} *"
             # A dict-only method call with no better signal: the param is a
@@ -2453,25 +2436,15 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
     conflicting: set = set()
 
     def note(n):
-        if isinstance(n, gimple_ctypes.AssignStmt):
-            if not isinstance(n.target, gimple_ctypes.IdentExpr):
-                return
-            name = _as_str(n.target.name)
-            _val = n.value
-        elif isinstance(n, gimple_ctypes.VarDecl):
-            # `var v = ...` is a VarDecl, not an AssignStmt -- same binding
-            # shape (one name, one value), same hazard: a float SIMD
-            # constructor's local erased to int64_t across the return.
-            name = _as_str(getattr(n, 'name', '') or '')
-            if not name:
-                return
-            _val = n.value
-        else:
+        if not isinstance(n, gimple_ctypes.AssignStmt):
             return
+        if not isinstance(n.target, gimple_ctypes.IdentExpr):
+            return
+        name = _as_str(n.target.name)
         if name in conflicting:
             return
         cand = None
-        if isinstance(_val, gimple_ctypes.StringLiteral):
+        if isinstance(n.value, gimple_ctypes.StringLiteral):
             # A string/bytes literal is the SAME hazard a container literal
             # is, not the "genuine scalar" this function's own docstring
             # excludes: it is a real POINTER, so a caller-side int64_t
@@ -2480,8 +2453,8 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if getattr(_val, 'is_bytes', False) else 'char *'
-        elif isinstance(_val, gimple_ctypes.FloatLiteral):
+            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
+        elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
             # "not included, they are what the int64_t default is for" — and
@@ -2505,8 +2478,8 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # conservative answer for a name rebound to two kinds.
             cand = 'double'
         else:
-            t = (_container_literal_ctype(_val)
-                 or _builtin_container_ctor_ctype(_val))
+            t = (_container_literal_ctype(n.value)
+                 or _builtin_container_ctor_ctype(n.value))
             if t:
                 cand = t
             else:
@@ -2533,7 +2506,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                 # result.md. `_quick_type` is the SAME estimator that call
                 # site uses, so the two agree by construction rather than by
                 # a second hand-written rule.
-                _v = _val
+                _v = n.value
                 if isinstance(_v, gimple_ctypes.CallExpr):
                     _vt = gen._quick_type(_v)
                     if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
@@ -2573,27 +2546,6 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                             _nv = gen._generator_value_ctype_for_next(_nargs[0])
                         if _nv:
                             cand = _nv
-                    elif (isinstance(_v.func, gimple_ctypes.SubscriptExpr)
-                          and isinstance(_v.func.obj, gimple_ctypes.IdentExpr)
-                          and _as_str(_v.func.obj.name) in ('SIMD', 'Scalar')):
-                        # A float `SIMD[dtype, N](...)` / `Scalar[dtype](...)`
-                        # constructor is scalar-erased to its dtype's C type,
-                        # and the body already declares `float v;` for it -- so
-                        # a `return v` must infer `float`, not the int64_t
-                        # default (the caller would read the float's bit
-                        # pattern as an integer). Same resolver the constructor
-                        # arm and `_resolve_type` use.
-                        _idx = getattr(_v.func, 'index', None)
-                        _els = getattr(_idx, 'elements', None)
-                        if _els is None:
-                            _els = [_idx]
-                        if _els and _els[0] is not None:
-                            _dt = ''
-                            if hasattr(gen, '_type_expr_to_ann'):
-                                _dt = gen._type_expr_to_ann(_els[0])
-                            _sct = gimple_ctypes._dtype_token_ctype(str(_dt))
-                            if _sct in ('float', 'double', '__fp16'):
-                                cand = _sct
                 if cand is None and not isinstance(_v, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
                     # A STRING-valued expression bound to a local: `a = str(n)`,
                     # `a = d + "x"`, `a = d.strip()`, `a = os.path.join(d, f)`.
@@ -3146,60 +3098,9 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
             elem[v] = 'MojoList *'
             nested[v] = gen._infer_list_elem_type(lit.elements[0].elements)
 
-    def _note_ctor_elem(v, val):
-        """`v = List[T]()` / `Set[T]()` / `Array[T, N]()` -> element type of `v`.
-
-        The cross-call element contract is fed from this pre-pass, but it only
-        replayed LITERALS and `.append(...)`: a container built by a TYPED
-        CONSTRUCTOR carried no element type, so a caller of a function
-        returning `List[Float32]` read `a[0]` with `mojo_list_get_int` and
-        printed the double's bit pattern. One shape, and the element type comes
-        from the same helper the VarDecl/AssignStmt paths use.
-        """
-        if not isinstance(val, CallExpr):
-            return
-        f = val.func
-        _els = None
-        if isinstance(f, SubscriptExpr) and isinstance(f.obj, IdentExpr):
-            if _as_str(f.obj.name) not in ('List', 'list', 'Set', 'set',
-                                           'Array', 'FixedSizeArray'):
-                return
-            _idx = getattr(f, 'index', None)
-            _els = getattr(_idx, 'elements', None)
-            if _els is None and _idx is not None:
-                _els = [_idx]
-        elif isinstance(f, IdentExpr):
-            if _as_str(f.name) not in ('List', 'list', 'Set', 'set'):
-                return
-        else:
-            return
-        if not _els:
-            return
-        _ann = gen._type_expr_to_ann(_els[0]) if hasattr(gen, '_type_expr_to_ann') else ''
-        if not _ann:
-            return
-        try:
-            from mojo.middle.stmts_shared import _annotation_container_elem_type
-        except Exception:
-            return
-        _base = (_as_str(f.obj.name) if isinstance(f, SubscriptExpr)
-                 else _as_str(f.name))
-        _ct = _annotation_container_elem_type(
-            gen, '%s[%s]' % (_base, _ann),
-            'MojoList *' if _base in ('List', 'list', 'Array', 'FixedSizeArray')
-            else 'MojoSet *')
-        if _ct:
-            elem[_as_str(v)] = _ct
-
     def walk(stmts):
         for n in stmts:
-            if isinstance(n, VarDecl):
-                # `var l = List[Float32]()` -- a VarDecl, not an AssignStmt;
-                # same one-name/one-value binding shape.
-                _note_ctor_elem(getattr(n, 'name', ''), getattr(n, 'value', None))
-                continue
-            if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
-                _note_ctor_elem(n.target.name, n.value)
+            if isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
                 v, val = n.target.name, n.value
                 if isinstance(val, gimple_ctypes.ListExpr):
                     note_list_literal(v, val)

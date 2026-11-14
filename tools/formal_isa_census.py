@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which emitted instruction forms are actually CHECKED, on both backends.
 
-the arm64 instruction-coverage survey is a survey with a number in it, and
+`bugs/mid/FORMAL_arm64_instruction_coverage.md` is a survey with a number in it, and
 the number answers one question: *what can this backend not emit?* This tool
 answers the other four, for every instruction form the code generators CAN emit:
 
@@ -579,29 +579,6 @@ HARNESS_LIMITS = {
 #: the test checks, which is what makes a fixed gap delete its entry rather
 #: than leave a stale "known problem" behind.
 BACKLOG = {
-    # ── arm64: the scalar-double FP class has a model and an `as` check, but
-    # no fuzz draw. Tracked by bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md.
-    # The model side landed with aca4f2bbf; the fuzz coverage did not.
-    "encode_fadd_dd_dn_dm": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                             "no fuzz draw for the scalar-double add"),
-    "encode_fsub_dd_dn_dm": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                             "no fuzz draw for the scalar-double subtract"),
-    "encode_fmul_dd_dn_dm": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                             "no fuzz draw for the scalar-double multiply"),
-    "encode_fdiv_dd_dn_dm": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                             "no fuzz draw for the scalar-double divide"),
-    "encode_fneg_dd_dn": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                          "no fuzz draw for the scalar-double negate"),
-    "encode_fcmp_dn_dm": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                          "no fuzz draw for the scalar-double compare"),
-    "encode_fmov_gpr_to_v": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                             "no fuzz draw for the GPR->V move"),
-    "encode_fmov_v_to_gpr": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                             "no fuzz draw for the V->GPR move"),
-    "encode_scvtf_dn_xn": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                           "no fuzz draw for the int->double conversion"),
-    "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_scalar_double_fp_fuzz_cases.md",
-                            "no fuzz draw for the double->int conversion"),
     # ── arm64: emitted, and `arm64_step` has no arm for it ────────────────
     #
     # `encode_smulh_xd_xn_xm` WAS here until 2026-10-05 and is not any more:

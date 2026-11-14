@@ -39,7 +39,6 @@ backends resolve the name in their generic identifier path for that reason.
 
 
 import sys
-import platform
 
 import fire_compiler as _fc
 
@@ -603,113 +602,6 @@ def conforms_to(struct_name, trait_name, bases_map):
     return trait_name in _conforms_to_bases(struct_name, bases_map)
 
 
-_STDLIB_TRAIT_INDEX = None
-
-
-def _stdlib_trait_index():
-    """`{trait name: (qualified name, [base, ...])}` for every trait the stdlib
-    declares, read from the stdlib sources once per process.
-
-    A name declared by more than one stdlib file maps to None: the bare name
-    does not then identify one trait, so nothing may be concluded from it.
-    The qualified name is the defining file's path under the stdlib root with
-    `/` read as `::` and the `.mojo` suffix dropped, which is the spelling the
-    real compiler prints (`std/format/__init__.mojo` -> `std::format::__init__`).
-    """
-    global _STDLIB_TRAIT_INDEX
-    if _STDLIB_TRAIT_INDEX is not None:
-        return _STDLIB_TRAIT_INDEX
-    import os
-    import re
-    from module_loader import STDLIB_PATH
-    index = {}
-    header = re.compile(r'^trait\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:\(([^)]*)\))?\s*:',
-                        re.MULTILINE)
-    root = os.path.join(STDLIB_PATH, 'std')
-    for dirpath, _dirs, files in os.walk(root):
-        for fn in files:
-            if not fn.endswith('.mojo'):
-                continue
-            path = os.path.join(dirpath, fn)
-            try:
-                with open(path, encoding='utf-8', errors='replace') as f:
-                    text = f.read()
-            except OSError:
-                continue
-            rel = os.path.relpath(path, STDLIB_PATH)[:-len('.mojo')]
-            qual = rel.replace(os.sep, '::')
-            for m in header.finditer(text):
-                name = m.group(1)
-                bases = []
-                for part in (m.group(2) or '').split(','):
-                    part = part.split('[')[0].split('.')[-1].strip()
-                    if part and re.match(r'^[A-Za-z_]\w*$', part):
-                        bases.append(part)
-                if name in index:
-                    index[name] = None
-                else:
-                    index[name] = (qual + '::' + name, bases)
-    _STDLIB_TRAIT_INDEX = index
-    return index
-
-
-def conforms_to_closed(struct_name, trait_name, bases_map, module_name):
-    """Whether STRUCT_NAME conforms to TRAIT_NAME, deciding every case the
-    closed world allows: returns `(verdict, trait_qualified_name)` where
-    verdict is True, False, or None (undecidable).
-
-    `conforms_to` answers None for any trait the module's own declarations
-    do not mention, so a struct that never declared a stdlib trait (`Writable`
-    on a struct whose bases are `(ImplicitlyCopyable)`) was accepted as
-    conforming. Here the struct's transitive bases are walked through the
-    module's declarations and then the stdlib's trait declarations. The answer
-    is False only when every base reached is itself known, so the walk is
-    complete; a single base it cannot resolve (an unknown name, or a bare name
-    the stdlib declares twice) makes the verdict None.
-
-    `Copyable` and `Movable` are derived by the language and keep
-    `conforms_to`'s True answer.
-    """
-    if not isinstance(struct_name, str) or not isinstance(trait_name, str) or not bases_map:
-        return None, None
-    if struct_name not in bases_map:
-        return None, None
-    if trait_name in bases_map:
-        trait_q = f'{module_name}::{trait_name}' if module_name else trait_name
-    else:
-        index = _stdlib_trait_index()
-        entry = index.get(trait_name)
-        trait_q = entry[0] if entry else trait_name
-    if trait_name in _AUTO_DERIVED_TRAITS:
-        return True, trait_q
-    index = _stdlib_trait_index()
-    seen = set()
-    todo = [struct_name]
-    complete = True
-    while todo:
-        name = todo.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        if name in bases_map:
-            bases = [b if isinstance(b, str) else _conforms_to_name(b)
-                     for b in (bases_map.get(name) or [])]
-        elif name in index and index[name] is not None:
-            bases = index[name][1]
-        else:
-            complete = False
-            continue
-        for b in bases:
-            if not b:
-                continue
-            if b == trait_name:
-                return True, trait_q
-            todo.append(b)
-    if not complete:
-        return None, trait_q
-    return False, trait_q
-
-
 def _fold_conforms_to_call(node, conforms_to_pred):
     if conforms_to_pred is None:
         return None
@@ -772,72 +664,6 @@ def _eval_interpolated_string(node, bindings: dict, platform=None, conforms_to_p
         return ''.join(out)
     except Exception:
         return None
-
-
-
-_HOST_IS_MACOS = (sys.platform == 'darwin')
-_HOST_IS_LINUX = sys.platform.startswith('linux')
-_HOST_MACHINE = (platform.machine() or '').lower() if 'platform' in globals() and platform is not None else __import__('platform').machine().lower()
-_HOST_IS_X86 = _HOST_MACHINE in ('x86_64', 'amd64', 'x86')
-_HOST_IS_ARM = _HOST_MACHINE in ('arm64', 'aarch64', 'armv8')
-_HOST_IS_32BIT = sys.maxsize <= 2**32
-
-
-def _eval_compilation_target_pred(node):
-    """Fold a zero-arg `CompilationTarget.<predicate>()` to a host bool/int,
-    or None. Only predicates that are compile-time constants for THIS host
-    build fold; anything else stays unknown so a runtime branch is kept."""
-    if not (isinstance(node, CallExpr) and isinstance(node.func, MemberExpr)
-            and not node.args and not node.kwargs):
-        return None
-    obj = node.func.obj
-    # `CompilationTarget.is_macos()` (name) or `sys.CompilationTarget...` not
-    # needed here; the stdlib spells it as a bare name.
-    if not (isinstance(obj, IdentExpr) and obj.name == 'CompilationTarget'):
-        return None
-    m = node.func.member
-    # OS
-    if m == 'is_macos':
-        return _HOST_IS_MACOS
-    if m == 'is_linux':
-        return _HOST_IS_LINUX
-    # Arch
-    if m == 'is_x86':
-        return _HOST_IS_X86
-    if m == 'is_x86_64' or m == 'is_amd64':
-        return _HOST_IS_X86 and not _HOST_IS_32BIT
-    if m == 'is_arm':
-        return _HOST_IS_ARM
-    if m == 'is_aarch64':
-        return _HOST_IS_ARM and not _HOST_IS_32BIT
-    if m in ('is_apple_silicon', 'is_apple_m'):
-        return _HOST_IS_MACOS and _HOST_IS_ARM
-    # ISA features (host)
-    if m == 'has_neon':
-        return _HOST_IS_ARM
-    if m in ('has_neon_int8_dotprod', 'has_neon_int8_matmul'):
-        # Conservative on generic ARM; Apple Silicon has these but detecting
-        # portably is non-trivial. Leave unknown rather than guess wrong?
-        # has_neon is the common gate used in path.mojo; keep others unknown.
-        return None
-    if m == 'has_sse4':
-        return _HOST_IS_X86
-    if m == 'has_avx':
-        # Not guaranteed on all x86_64 hosts; fold false only when clearly
-        # not x86. On x86 keep unknown unless we know - safer to not fold
-        # than fold wrong. But for macOS arm64 host this is false.
-        return False if not _HOST_IS_X86 else None
-    if m in ('has_avx2', 'has_avx512f', 'has_fma', 'has_vnni', 'has_intel_amx'):
-        return False if not _HOST_IS_X86 else None
-    if m == 'is_32bit':
-        return _HOST_IS_32BIT
-    if m == 'is_64bit':
-        return not _HOST_IS_32BIT
-    if m == 'is_little_endian':
-        return sys.byteorder == 'little'
-    if m == 'is_big_endian':
-        return sys.byteorder == 'big'
-    return None
 
 
 def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None):
@@ -1204,17 +1030,6 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
                 return sys.byteorder
             except AttributeError:
                 return None
-    # `CompilationTarget.<predicate>()` is a compile-time constant for the
-    # host this compiler is building for, the same way `sys.platform` is: a
-    # `comptime if CompilationTarget.is_macos(): ... elif
-    # CompilationTarget.has_neon(): ...` chain must keep only the branch the
-    # host can take, because every other branch names target-specific
-    # definitions that do not exist on this host and cannot be linked. See
-    # CODEGEN_stdlib_dylib_lazy_undefined_refs-part4: the fold was missing,
-    # so the lowering emitted a call (and an extern) into every arm.
-    _ctv = _eval_compilation_target_pred(node)
-    if _ctv is not None:
-        return _ctv
     return None
 
 
@@ -1294,9 +1109,6 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
         if isinstance(_sv, (int, bool)) and not isinstance(_sv, str):
             return int(_sv)
         return None
-    _ctv = _eval_compilation_target_pred(node)
-    if _ctv is not None:
-        return int(_ctv)
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
         argvals = [eval_const_int(a, bindings, call_hook, conforms_to_pred) for a in node.args]
@@ -1397,9 +1209,6 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
         # exposes no byteorder, the fold declines, and a shape-only "yes"
         # would then read as CONST_FALSE and drop the live branch.
         return eval_const(node, bindings) is not None
-    # CompilationTarget host predicates fold to constants for this host.
-    if _eval_compilation_target_pred(node) is not None:
-        return True
     # String/ord/len/scalar constructors and other 1-arg ident calls eval_const folds.
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and len(node.args) == 1 and not node.kwargs

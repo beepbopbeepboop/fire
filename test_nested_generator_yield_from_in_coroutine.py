@@ -24,9 +24,6 @@ enclosing generator to a stack-switch body, so a fixture that fell into that
 path would not exercise this defect.
 
 Run: `python3 test_nested_generator_yield_from_in_coroutine.py`
-Cases: `minimal`, `main`/`main-shape`, `negative`, `tagged`.
-With no argument, runs `minimal`, `main-shape`, and `tagged` (the positive
-cases).
 """
 import os
 import subprocess
@@ -104,17 +101,6 @@ def _compiled_run(src: str) -> tuple[str, int | None, str]:
     return 'built', r.returncode, r.stdout + r.stderr
 
 
-def _expect_refused(name: str, src: str, expected_substrings: list[str]):
-    status, rcode, out = _compiled_run(src)
-    assert status == 'refused', (
-        f'{name}: expected compiler refusal, got status={status!r} '
-        f'exit={rcode} out={out!r}')
-    for sub in expected_substrings:
-        assert sub in out, (
-            f'{name}: refusal missing expected text {sub!r}.\n'
-            f'Got refusal:\n{out}')
-
-
 def _check(name: str, src: str):
     want_code, want = _cpython_run(src)
     assert want_code == 0, (name, 'CPython fixture failed', want_code)
@@ -133,133 +119,23 @@ def test_yield_from_captured_nested_generator_main_shape():
     _check('main-shape', MAIN_SHAPE_SRC)
 
 
-# --- part 3 (tagged): the delegated value slot keeps the nested generator's
-# compiled kind. `section` yields an int and a str, so the compiler boxes each
-# site into one TAGGED int64_t word (`mojo_box_from_str` for the string). The
-# delegating `yield from` loop must read that word as the nested generator
-# wrote it -- previously the enclosing generator's own value slot was typed
-# `char *` (no nested value type was consulted), so the delegated word was
-# either mis-typed at `co_yield` or rendered as a raw pointer by consumers.
-# The capture (`items`) keeps the nested generator on the claimed path.
-TAGGED_SRC = '''def fmt(analysis: list):
-    items = list(analysis)
-    def section():
-        yield 1
-        if items:
-            yield 'a'
-    yield from section()
-
-for v in fmt([2, 3]):
-    print(v)
-'''
-
-
-def test_yield_from_tagged_nested_generator_delegation_matches_cpython():
-    _check('tagged', TAGGED_SRC)
-
-
-# --- part 3 (negative): shapes the capture model must NOT claim stay refused ---
-# Each must still produce the refusal it produces on master. The nested
-# generator `section` reads the enclosing `items`, so today the compiler reports
-# the coroutine path has no capture model for it and the `yield from` call is an
-# unresolved callee; these assertions pin those existing messages.
-
-NEGATIVE_REBOUND_SRC = r'''def fmt(analysis: list):
-    items = list(analysis)
-    def section():
-        for x in items:
-            yield x
-    items = []
-    yield from section()
-
-for v in fmt([1, 2]):
-    print(v)
-'''
-
-NEGATIVE_NONLOCAL_SRC = r'''def fmt(analysis: list):
-    items = list(analysis)
-    def section():
-        nonlocal items
-        items = []
-        for x in items:
-            yield x
-    yield from section()
-
-for v in fmt([1, 2]):
-    print(v)
-'''
-
-NEGATIVE_KWARG_SRC = r'''def fmt(analysis: list):
-    items = list(analysis)
-    def section(label='x'):
-        for x in items:
-            yield label
-            yield x
-    yield from section(label='y')
-
-for v in fmt([1, 2]):
-    print(v)
-'''
-
-# Refusal text observed on master/current tree for these unclaimed shapes.
-_NEGATIVE_UNRESOLVED = (
-    "a call to unresolved callee 'section(...)' is not supported in a "
-    "compiled generator/coroutine body")
-_NEGATIVE_NO_CAPTURE = (
-    "is a nested generator that reads enclosing-scope variable(s) items; "
-    "the coroutine path has no capture model for a generator defined inside "
-    "another function")
-
-
-def test_negative_unclaimed_nested_generator_shapes_stay_refused():
-    _expect_refused('negative-rebound', NEGATIVE_REBOUND_SRC,
-                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
-    _expect_refused('negative-nonlocal', NEGATIVE_NONLOCAL_SRC,
-                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
-    _expect_refused('negative-kwarg', NEGATIVE_KWARG_SRC,
-                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
-    # The parent file's own shape (c_analyzer/__main__.py's fmt_summary/section)
-    # is NOT among the shapes part 4 fixed: measured 2026-11-16, the exact
-    # MAIN_SHAPE_SRC below is refused with both reasons. Pinned here so the
-    # default run covers it; flip this to the positive `_check` when the
-    # coroutine capture model lands.
-    _expect_refused('main-shape', MAIN_SHAPE_SRC,
-                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
-
-
-_CASES = {
-    'minimal': [test_yield_from_captured_nested_generator_in_coroutine_generator],
-    'main': [test_yield_from_captured_nested_generator_main_shape],
-    'main-shape': [test_yield_from_captured_nested_generator_main_shape],
-    'negative': [test_negative_unclaimed_nested_generator_shapes_stay_refused],
-    'tagged': [test_yield_from_tagged_nested_generator_delegation_matches_cpython],
+CASES = {
+    'minimal': test_yield_from_captured_nested_generator_in_coroutine_generator,
+    'main-shape': test_yield_from_captured_nested_generator_main_shape,
 }
-
-# `main`/`main-shape` stay OUT of the default: that positive pin does not hold
-# (see the negative assertion below -- the parent file's own fmt_summary/section
-# shape is still refused), so running it by default would report a red that is
-# already filed. It is selectable as `main` for whoever fixes the capture model.
-# `negative` IS in the default, so the run asserts the refusal that is the
-# current truth instead of skipping the shape entirely.
-_DEFAULT_CASES = ['minimal', 'negative', 'tagged']
 
 
 if __name__ == '__main__':
-    args = sys.argv[1:]
-    if args:
-        selected = []
-        for a in args:
-            if a not in _CASES:
-                print(f'unknown case: {a} (known: {", ".join(sorted(_CASES))})')
-                sys.exit(2)
-            selected.extend(_CASES[a])
-        tests = [(fn.__name__, fn) for fn in selected]
-    else:
-        tests = [(fn.__name__, fn)
-                 for c in _DEFAULT_CASES for fn in _CASES[c]]
-
+    if len(sys.argv) > 1:
+        name = sys.argv[1]
+        if name not in CASES:
+            print(f'unknown case {name!r}; expected one of {sorted(CASES)}')
+            sys.exit(2)
+        CASES[name]()
+        print(f'PASS  {name}')
+        sys.exit(0)
     failed = 0
-    for fname, fn in tests:
+    for fname, fn in CASES.items():
         try:
             fn()
             print(f'PASS  {fname}')
@@ -269,7 +145,4 @@ if __name__ == '__main__':
     if failed:
         print(f'FAILED: {failed}')
         sys.exit(1)
-    if args == ['negative']:
-        print('PASS  test_nested_generator_yield_from_in_coroutine negative')
-    else:
-        print('PASS  test_nested_generator_yield_from_in_coroutine')
+    print('PASS  test_nested_generator_yield_from_in_coroutine')

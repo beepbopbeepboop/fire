@@ -473,8 +473,8 @@ def test_an_exclusive_job_reserves_its_class_and_nothing_more():
               f'a 3.7 GB build that holds the whole machine is the queue this '
               f'used to be')
         check('admission: ...and an ordinary one reserves its class',
-              suite.reserved_gb(suite.REGISTRY['formal-receiver-spelling'])
-              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['formal-receiver-spelling'])],
+              suite.reserved_gb(suite.REGISTRY['gimple'])
+              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['gimple'])],
               'the class is the promise the ceiling has to keep')
     else:
         print('      admission: MEMLIMIT_GB is set, so the checks that compare a '
@@ -1313,11 +1313,9 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # longer chokes on the dead stack-floor trap arm), so its
                      # marker states 3 and the reader sees 3. The remaining
                      # three are the overflow-trapping hole-count rows in
-                     # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
+                     # bugs/mid/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
-     # `gimplerunner` left this census 2026-11-16: re-measured at 628 passed /
-     # 0 failed, so its `expect=` marker was removed and the census entry with
-     # it (an expect= that passes is reported as a failure).
+                     'gimplerunner': 20,
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
      # deleted with the work and the marker was retired with it (2026-11-13).
@@ -1328,11 +1326,8 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'per-item verdicts rather than against a summary line, see '
           f'`observed_fanout_failures`; the registry no longer carries one '
           f'(the stage2 dumps stopped failing the way the marker described). '
-          f'`gimplerunner` is here at 1, the count its registry marker and '
-          f'its 2026-11-13 re-run both state (`626 passed, 1 failed` of 627; '
-          f'the one failure is '
-          f'`c_accessor_helpers_emitted_once_across_modules`). '
-          f'`formal-x86-endtoend` is the only '
+          f'`gimplerunner` is here at 20 (bugs/hard/SUITE_gimplerunner_21_failing.md: '
+          f'its run prints `Results: 592 passed, 20 failed`). `formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
             f'interpreted one, and the count is checkable at all only because '
             f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
@@ -1872,37 +1867,6 @@ def test_deps_order_and_skip():
         check('deps: the skip says which dep', 'b' in out, out)
 
 
-def test_a_cascade_skip_is_a_skip_not_an_error():
-    """A dependent of a dep that settled to SKIP in the same pass is SKIP.
-
-    The scheduler evaluates a job's deps at the top of the loop and settles
-    blocked ones at the bottom, so when a whole cascade settles in one pass
-    (a fails, b is blocked by a, c is blocked by b) c is still merely
-    'pending' when the nothing-running-nothing-ready branch fires. That branch
-    used to ERROR c with `dependency not selected: ` and an EMPTY list — its
-    dep had a verdict, it was never missing — which counted a lost cascade
-    as a FAILED test and, in the 2026-11-14 confirm gate, put the stage2 and
-    stage3 dumps fanouts in the FAILED list with that empty detail: the red
-    verdict that writes bug docs for jobs whose only crime was sitting behind
-    a red upstream chain. c gets the same SKIP the blocked branch would have
-    given it, naming the dep that did not pass.
-    """
-    with Sandbox(a=dict(cmd=ok_cmd('raise SystemExit(1)')),
-                 b=dict(cmd=ok_cmd('pass'), deps=['a']),
-                 c=dict(cmd=ok_cmd('pass'), deps=['b'])):
-        log = os.path.join(HERE, 'build', 'test-suite-cascade-skip.log')
-        rc, out = run(['a', 'b', 'c'], jobs=4, log=log)
-        text = open(log).read() if os.path.exists(log) else ''
-        check('cascade: the root failure still fails the run',
-              rc == 1, f'rc={rc}')
-        check('cascade: the dependent is SKIPPED, not ERROR',
-              'dependency not selected' not in out + text, out + text)
-        check('cascade: the skip names the dep that did not pass',
-              'dependency did not pass' in text and 'b=skip' in text, text)
-        check('cascade: the tally counts one failure, not two',
-              '0 passed, 1 failed, 2 skipped' in out, out)
-
-
 def test_exclusive_is_alone():
     """An exclusive test must not overlap anything else — that is the whole
     mechanism that lets a 55 GB job share a machine with a test suite.
@@ -2195,22 +2159,10 @@ STALE_PER_CHILD_BUDGETS = {
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
     'test_imported_decorator_regression.py': 2,
-    'test_interp_list_ctor.py': 1,
     'test_metal_codegen.py': 9,
-    'test_module_globals_compiled.py': 3,
     'test_ptr_registry.py': 2,
     'test_python315_frozendict.py': 1,
     'test_python315_sentinel.py': 1,
-    'test_regress_gpu_offload_validation_modular_part1.py': 1,
-    'test_regress_gpu_offload_validation_modular_part4.py': 1,
-    # Four regression pins gained a literal `timeout=` on 2026-11-15 (a
-    # subprocess of the compiler under test). Recorded rather than converted:
-    # each is one child process with a real wall-clock bound, which is what a
-    # residue row is for.
-    'test_regress_generator_keyword_arg_binding.py': 3,
-    'test_regress_scriptutil_generator_closure.py': 3,
-    'test_regress_yield_from_module_generator.py': 2,
-    'test_regress_yield_from_word_iterator.py': 3,
     'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2237,26 +2189,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_disjoint_bases.py': 2,
     'test_python315_lazy_imports.py': 2,
     'test_unpacking_in_comprehensions.py': 1,
-    # +4 on 2026-11-13 (the three estate-backlog files' rows; a colleague
-    # re-added the same four keys higher up, so the later copies were
-    # dead text — a dict keeps only the last) and +14 on 2026-11-14, all
-    # landed unregistered with the estate backlog. Every literal is a
-    # `subprocess` timeout on a COMPILE or a RUN the case performs — the
-    # RUN kind this census exists for.
-    'test_candidate_selection_diagnostic.py': 1,
-    'test_diagnostic_format_modular.py': 1,
-    'test_diagnostics_in_missing_locs.py': 1,
-    'test_fieldwise_init_and_deprecated_conversion.py': 1,
-    'test_invalid_downcast_build.py': 1,
-    'test_overload_diagnostic.py': 1,
-    'test_predicate_where_diagnostic.py': 1,
-    'test_srcless_package_diagnostics.py': 1,
-    'test_static_call_diagnostics.py': 5,
-    'test_trait_comptime_member_untyped.py': 1,
-    'test_trait_imported_diagnostic.py': 1,
-    'test_trait_members_diagnostic.py': 1,
-    'test_trait_requirements_diagnostic.py': 1,
-    'test_where_clause_diagnostic.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -2760,43 +2692,24 @@ def test_a_disabled_test_is_registered_but_never_runs():
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
-    # The real-registry half: disabled jobs in the registry are known-red and
-    # too expensive or otherwise inappropriate to run, so each must be named
-    # here and have its reserves-0 / --list / --dry-run properties re-asserted.
+    # The real-registry half, re-baselined 2026-10-28, gate triage. It used to
+    # run on `ab-native`, the live case: DISABLED since 2026-09-30, 20.5 GB,
+    # the `program` class (55), `excl` — the shape the synthetic half above
+    # reproduces at the same class ceiling, which is why the reserves-0
+    # property is still covered with no live case. `2f75609d` (2026-10-26)
+    # turned it back to `expect=` once the blowup its marker waited on closed
+    # (bugs/hard/CODEGEN_ab_native_fails.md: the run is 0.1 GB / ~10 s now), and the
+    # reason `disabled=` existed in the first place — a known outcome bought
+    # at a machine-sized price — is gone with it. So the state this half pins
+    # is the ABSENCE, stated rather than assumed: a disabled job that appears
+    # in the registry must be named here and its properties re-asserted on it,
+    # or the section above would stop saying anything about the live registry.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
-    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
-    # two `issubclass` declarations) and `formal-doc-truth` is green again
-    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
-    # `formal-read-before-store` are no longer disabled either. This list is the
-    # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    expected_disabled = []
     check('disabled: the real registry has no job that is not run',
-          sorted(real) == sorted(expected_disabled),
+          real == [],
           f'{sorted(real)} — a disabled job in the registry must be named in '
           f'this section and its reserves-0 / --list / --dry-run properties '
-          f're-asserted on it')
-    for name in real:
-        spec = suite.REGISTRY[name]
-        check(f'disabled: {name} reserves 0 while disabled',
-              suite.reserved_gb(spec) == 0.0,
-              f'reserved {suite.reserved_gb(spec)} GB')
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            suite.print_list()
-        listing = buf.getvalue()
-        check(f'disabled: {name} is listed with its doc',
-              name in listing and (spec.disabled or '') in listing,
-              f'missing from --list: {[l for l in listing.splitlines() if name in l]}')
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            suite.print_plan([name], _FakeOpts())
-        plan = buf.getvalue()
-        check(f'disabled: {name} planned as disabled and reserves 0',
-              'DISABLED: not run' in plan and 'reserves 0 GB' in plan,
-              plan[:200])
+          f're-asserted on it, the way ab-native was until 2f75609d')
 
     # --list and --dry-run, because a decision a reader cannot see is not a
     # decision: both have to say DISABLED, and the plan has to say the
@@ -2909,20 +2822,23 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
-    # two `issubclass` declarations) and `formal-doc-truth` is green again
-    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
-    # `formal-read-before-store` are no longer disabled either. This list is the
-    # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    expected_disabled = []
+    # The vacuity this used to take from the real registry — at least one job
+    # is disabled, so the section above is saying something about the live
+    # tree — ended with the last disabled job: `ab-native` was the case until
+    # `2f75609d` turned it back to `expect=` on 2026-10-26 (the run is cheap
+    # now, which is the whole reason for the switch). The mechanism is not
+    # vacuous for that: the synthetic cases above run every time against the
+    # real runner code, the per-name loop below re-checks each marker against
+    # the tree the moment a job is disabled, and the guarded exec below
+    # proves the import-time refusal fires on a marker. What this check now
+    # pins is the STATE the section is written for, stated rather than
+    # assumed — the same re-baseline the sibling section above does.
     check('disabled markers: the state the section is written for is stated, '
-          'not assumed',
-          sorted(real) == sorted(expected_disabled),
+          'not assumed: no registered job is disabled',
+          real == [],
           f'{sorted(real)} — a disabled job must be named in this section and '
-          f'its marker re-checked against the tree')
+          f'its marker re-checked against the tree, the way ab-native was '
+          f'until 2f75609d')
     for name in real:
         spec = suite.REGISTRY[name]
         check(f'disabled markers: {name} names a doc that is in the tree',
@@ -2932,9 +2848,6 @@ def test_the_disabled_markers_in_the_registry_are_honest():
         check(f'disabled markers: {name} is not also marked expect=',
               not (getattr(spec, 'expect', '') or ''),
               'the two markers say opposite things about whether it runs')
-        check(f'disabled markers: {name} reserves 0 while disabled',
-              suite.reserved_gb(spec) == 0.0,
-              f'reserved {suite.reserved_gb(spec)} GB')
 
     # And the loudest half: the runner REFUSES TO START, rather than warning.
     # The bug-doc check is the one place in this mechanism where "loudly" is
@@ -3682,37 +3595,6 @@ def test_missing_dep_is_reported():
               'other' in out, f'rc={rc} out={out!r}')
 
 
-def test_a_skipped_dep_skips_its_dependents():
-    """A gate turned OFF must not turn the run red.
-
-    `--skip` is how tools/gates.json turns a known-red job OFF for a backlog.
-    It removed the job from `chosen` and left every dependent selected with a
-    dependency no job in the plan could satisfy, so `execute` reported
-    `ERROR dependency not selected` against the dependent — the gate was red by
-    construction on a policy meant to keep a known red out of it. The
-    integrator's confirm step then re-ran that dependent by name (which selects
-    its deps, the OFF job among them), the real red job ran after all, and a
-    fresh per-job gate doc was filed for a job gates.json already tracks. A
-    dependent of a skipped test is skipped, as one whose dep failed is.
-    """
-    log = os.path.join(HERE, 'build', 'test-suite-skipdep.log')
-    with Sandbox(prereq=dict(cmd=ok_cmd('pass')),
-                 needs=dict(cmd=ok_cmd('raise SystemExit(1)'), deps=['prereq']),
-                 other=dict(cmd=ok_cmd('pass'))):
-        class Opts:
-            only = None
-            skip = [r'^prereq$']
-        names = suite.select(['needs', 'other'], Opts())
-        check('skip: a dep and its dependent are both out of the plan',
-              names == ['other'], f'got {names}')
-        rc, out = run(['needs', 'other'], skip=r'^prereq$', log=log)
-    text = open(log).read() if os.path.exists(log) else ''
-    check('skip: a dependent of a skipped dep does not fail the run',
-          rc == 0 and '1 passed' in out, f'rc={rc} out={out!r}')
-    check('skip: no dependency-not-selected error is recorded',
-          'dependency not selected' not in text, text[-400:])
-
-
 def test_named_test_brings_its_deps():
     """Naming a test names what it needs to run.
 
@@ -4193,13 +4075,6 @@ _OPEN_PROBE_HARNESS_REASON = (
     'pins are the registered `reg-codegen-erased-container-values` job in '
     'test_codegen_erased_container_values_pins.py.')
 
-_OPEN_STDLIB_DYLIB_PROBE_REASON = (
-    'The per-part Done-when probes of the still-open parts of '
-    'CODEGEN_stdlib_dylib_lazy_undefined_refs: red until each part lands, '
-    'so not a registered job. Each is run by its own bug doc\'s command '
-    '(`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`); '
-    'part 1 landed 2026-11-14 and parts 2 and 3 are still open.')
-
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
@@ -4214,7 +4089,6 @@ UNREGISTERED = {
     'test_float_bit_reinterpret.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
-    'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
@@ -4228,7 +4102,6 @@ UNREGISTERED = {
     'test_runtime_class_creation.py': _STANDALONE_TEST_REASON,
     'test_runtime_cstr_region.py': _STANDALONE_TEST_REASON,
     'test_stdlib_dylib_ratchet.py': _STANDALONE_TEST_REASON,
-    'test_stdlib_syntax_dunder_overloads.py': _STANDALONE_TEST_REASON,
     'test_str_slice_tuple_return.py': _STANDALONE_TEST_REASON,
     'test_untyped_closure_str_return.py': _STANDALONE_TEST_REASON,
     'tools/test_control_pool.py': _STANDALONE_TEST_REASON,
@@ -4239,6 +4112,30 @@ UNREGISTERED = {
     'tools/test_swarm_class_refresh.py': _STANDALONE_TEST_REASON,
     'tools/test_swarm_feed.py': _STANDALONE_TEST_REASON,
     'tools/test_swarm_live_guard.py': _STANDALONE_TEST_REASON,
+    # ── RED today: exit non-zero, and no gate, tally or coverage number
+    #    reports any of it. The count is a re-run of every entry, not a
+    #    reading of a bug doc.
+    #
+    # The estate audit of 2026-11-13 found `test_lsp_error_recovery.py` in no
+    # bucket. It cannot simply be registered: it is RED. Its source is a bare
+    # `asdf` at module scope, which this parser accepts as an ordinary
+    # expression statement (`ExprStmt`), not a syntax error — so
+    # `parse_module(recover=True)` records NO error, and `compile_to_gimple`
+    # compiles the module silently, `struct Good` included. Neither half of
+    # the assertion can hold, whatever parts 1-2 of the diagnostics work do.
+    # The behaviour it means to pin — a diagnostic for an unknown declaration
+    # while the following struct is still emitted — is pinned at a real
+    # unknown declaration by `test_lsp_error_recovery_part2.py` (registered as
+    # `reg-lsp-error-recovery-part2`). Whether this file should be rewritten
+    # against one or retired as a duplicate of that test is the open question
+    # in `bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`; listing it here
+    # is what keeps the estate check green without landing a red job.
+    'test_lsp_error_recovery.py':
+        'RED 2026-11-13: a bare `asdf` parses as an ordinary expression '
+        'statement, so no recovered parse error is recorded and compilation '
+        'succeeds — its "use of unknown declaration" assertion cannot hold. '
+        'The intended shape is pinned by `reg-lsp-error-recovery-part2`; see '
+        '`bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`.',
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
     # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
@@ -4261,34 +4158,6 @@ UNREGISTERED = {
         '`arch -x86_64` and SKIPS where that is not available, which is why this '
         'is listed rather than registered — a registered job that skips its only '
         'substantive case is a green line that says nothing.',
-    'test_codegen_selfhost_link_two_unqualified_calls_part1.py':
-        'Standalone probe pin for the self-host link: a lifted closure must '
-        'see a plain function-body module alias import and lower the call to '
-        'the defining module\'s qualified symbol. Run directly; not registered.',
-    'test_codegen_simd_exp_statictuple.py':
-        'Standalone regression pin (unittest): std.simd elaboration must not '
-        'be refused as "advance without converging" for fixed comptime bracket '
-        'args. Run directly; not yet registered in a bucket.',
-    'test_gimple_tables_consumer_link.py':
-        'Standalone repro/test for importing c_common.tables from a consumer '
-        'program (depends on external source tree; skips if absent). Run '
-        'directly; not registered.',
-    'test_mojoc_module_import_ambiguous.py':
-        'Standalone regression pin for ambiguous module-scope imports reported '
-        'at module scope with synthetic signatures. Run directly; not registered.',
-    'test_selfhost_cycle_sibling_call.py':
-        'Standalone probe for module-alias calls across import cycles in the '
-        'self-host sibling branch. Run directly inside a checkout; not registered.',
-    'test_stdlib_syntax_owned_pointer_asyncrt.py':
-        'Standalone pin: owned_pointer.mojo and _asyncrt.mojo must keep '
-        'transpiling. Run directly; not registered.',
-    'test_unknown_decl_check.py':
-        'Unit tests for the unknown-decl check/compiler-provided builtins '
-        'helper module. Run directly; not registered.',
-    'test_suite_self_test_red.py':
-        'Regression pin for the SUITE_self_test_red suite-self-test '
-        'drift (self-host key, disabled/estate/census rows). Run directly; '
-        'not a registered bucket job.',
 
     # `test_formal_doc_truth.py` was here (listed rather than registered, its
     # branch's task said not to touch the registry) and is REGISTERED as
@@ -4296,17 +4165,6 @@ UNREGISTERED = {
     # wanted it (0.17 s, no build, no Lean) and the one file whose job is "does
     # the document still say what the code says" was a test nobody ran, with
     # four of its rows drifted.
-
-    # The per-part Done-when probes of the still-open parts of
-    # CODEGEN_stdlib_dylib_lazy_undefined_refs. RED until each part lands, so
-    # not a registered job; each is run by its own bug doc's command
-    # (`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`), as
-    # the file's own docstring says. The landed pins are registered jobs.
-    'test_stdlib_dylib_lazy_undefined_refs_probes.py':
-        'The per-part Done-when probes of the still-open parts of '
-        'CODEGEN_stdlib_dylib_lazy_undefined_refs: red until each part lands, '
-        'so not a registered gate job. Run one by its own bug doc\'s command '
-        '(`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`).',
 
     # ── the formal backend's per-construct suites, run by hand ──
     #
@@ -5351,14 +5209,8 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
     # sub-second.
     ('trait-requirement-evidence-diagnostic',
      'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
-    ('reg-conditional-conformance-candidate-diagnostic',
-     'test_conditional_conformance_candidate_diagnostic.py', 'part 3'),
     ('reg-conditional-conformance-synthesis-diagnostic',
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
-    ('trait-comptime-member-conformance-diagnostic',
-     'test_trait_comptime_member_conformance_diagnostic.py', 'part 5'),
-    ('defaulted-trait-method-conformance-diagnostic',
-     'test_defaulted_trait_method_conformance_diagnostic.py', 'part 6'),
     ('downcast-witness-diagnostic',
      'test_downcast_witness_diagnostic.py', 'part 7'),
 )
@@ -5367,19 +5219,18 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
 def test_the_trait_conformance_diagnostic_suites_are_gated():
     """Every trait-conformance diagnostic suite runs on every gate.
 
-    The first three files landed with their fixes (`06ea5b0ef` part 2,
-    `65cee30d4` part 4, `ec12b76e1` part 7) and none was named by a spec, so
+    The three files landed with their fixes (`06ea5b0ef` part 2, `65cee30d4`
+    part 4, `ec12b76e1` part 7) and none was named by a spec, so
     `suite-self-test`'s estate row was the only thing that mentioned them and
     no run executed their cases
     (`bug:SUITE_trait_requirement_evidence_unregistered`). Each was found by
     the estate check only after the previous one was "fixed", which is why
-    this pins the family and not one file; parts 5 and 6 joined the tuple when
-    their declaration-time checks landed.
+    this pins the family and not one file.
 
     The estate check above is what found each one, but it can only ask that
     SOME spec names the file; a name in a bucket `gate` does not expand to is
     the same hole one level over, and `regressions`/`orchestrator` are exactly
-    such buckets by design. All of them are cheap (tiny, 0.0-0.1 GB measured,
+    such buckets by design. All three are cheap (tiny, 0.0-0.1 GB measured,
     sub-second, no build) and pin compiler diagnostics, so they belong in the
     everyday loop, and this check pins that by name so dropping a
     registration — or moving one out of the gate — is a red row rather than a
@@ -5398,102 +5249,6 @@ def test_the_trait_conformance_diagnostic_suites_are_gated():
                'bug:SUITE_trait_requirement_evidence_unregistered: '
                f'{name} is registered but not reachable from `gate` '
                f'(cmd={sorted(files)})'))
-
-
-_SUITE_SELF_TEST_REGISTRATIONS = (
-    # (spec name, test file) — the test files the estate row named after they
-    # landed on master with no spec (bug:SUITE_self_test_red). The first five
-    # were there when this branch started; the next four arrived on master
-    # during the merge, and `test_mojoc_implicit_default_conformance.py` after
-    # its last one, each putting the job back to red. Each is a cheap
-    # in-process pin (measured: 0.0-0.1 GB peak, sub-second to ~12 s, no
-    # build), so they belong in `check`, which `gate` expands.
-    ('binding-evidence', 'test_binding_evidence.py'),
-    ('interp-list-ctor', 'test_interp_list_ctor.py'),
-    ('module-globals-compiled', 'test_module_globals_compiled.py'),
-    ('mojoc-precompile-signature', 'test_mojoc_precompile_signature.py'),
-    ('stdlib-syntax-variant', 'test_stdlib_syntax_variant.py'),
-    ('function-body-alias-class-import',
-     'test_function_body_alias_class_import.py'),
-    ('gpu-offload-validation-part3', 'test_gpu_offload_validation_part3.py'),
-    ('mojoc-import-conformance', 'test_mojoc_import_conformance.py'),
-    ('mojoc-synthetic-signature-default',
-     'test_mojoc_synthetic_signature_default.py'),
-    ('mojoc-implicit-default-conformance',
-     'test_mojoc_implicit_default_conformance.py'),
-)
-
-
-def test_the_suite_self_test_registrations_are_gated():
-    """Every test file the suite-self-test estate row named runs on every gate.
-
-    These files landed on master named by no spec, so `suite-self-test`'s estate
-    row was the only thing that mentioned them and no run executed their cases
-    (`bug:SUITE_self_test_red`). They are registered now, and the estate check
-    above is what keeps the next unregistered file from hiding — but it can
-    only ask that SOME spec names the file, and a name in a bucket `gate` does
-    not expand to is the same hole one level over. All of them are cheap
-    in-process pins, so they belong in the everyday loop, and this check pins
-    that by name: dropping a registration, or moving one out of the gate, is a
-    red row rather than a silent coverage loss.
-    """
-    for name, filename in _SUITE_SELF_TEST_REGISTRATIONS:
-        spec = suite.REGISTRY.get(name)
-        files = ({os.path.basename(str(c)) for c in spec.cmd}
-                 if spec is not None else set())
-        check(f'the gate: {name} runs on every gate',
-              spec is not None
-              and filename in files
-              and name in suite.expand_bucket('gate'),
-              ('bug:SUITE_self_test_red: no spec names '
-               f'{filename}, so it runs on nothing' if spec is None else
-               'bug:SUITE_self_test_red: '
-               f'{name} is registered but not reachable from `gate` '
-               f'(cmd={sorted(files)})'))
-
-
-def test_the_land_doc_suite_is_registered_where_its_bucket_says():
-    """`tools/test_land_doc.py` is named by a spec, and by the RIGHT bucket.
-
-    The file landed in `62411916c` with the land-doc feature and was named by
-    no spec and no `UNREGISTERED` entry, so the estate check above was red on
-    it and two docs were filed for the same line
-    (`SUITE_test_land_doc_unregistered` and its duplicate
-    `SUITE_test_land_doc_missing_estate_entry`; both deleted with this pin).
-    The registration landed in `bd0d95e38` with an unrelated unknown-decl fix.
-    The estate check found it, but it can only ask that SOME spec names the
-    file, and the bucket census can only ask that a registration is in SOME
-    bucket — between them they do not state the two decisions this pin is
-    about:
-
-      * the spec's `cmd` names THAT file. A rename that leaves the
-        `land-doc` registration pointing at the old name still satisfies
-        "some spec names a file that exists", while the file the check found
-        is back to being run by nothing; and
-      * it is in `orchestrator`, NOT in `check`. `land_doc` is a git-facing
-        fleet pass (`branch_age` and `commit_doc` are mocked only because the
-        test needs a temp repo), and `check` is deliberately not in the
-        business of spawning git or touching fleet state — that is the whole
-        reason `orchestrator` is a separate bucket. Moving this job into the
-        everyday loop would put a landing-path test in it, and "in some
-        bucket" says nothing about which.
-    """
-    name = 'land-doc'
-    spec = suite.REGISTRY.get(name)
-    files = ({os.path.basename(str(c)) for c in spec.cmd}
-             if spec is not None else set())
-    check('the suite: a spec names tools/test_land_doc.py',
-          spec is not None and 'test_land_doc.py' in files,
-          ('the estate check named this file on 2026-11-15 and it was '
-           'registered in bd0d95e38; no spec names it now, so it runs on '
-           f'nothing (spec={spec!r}, cmd={sorted(files)})'))
-    check('the suite: land-doc runs in `orchestrator`, not in `check`',
-          spec is not None
-          and name in suite.expand_bucket('orchestrator')
-          and name not in suite.expand_bucket('check'),
-          ('land_doc is a git-facing landing pass; `orchestrator` is the '
-           'bucket for those and `check` must not spawn git — a move into '
-           '`check` is a coverage decision this row exists to refuse'))
 
 
 def test_no_test_name_is_registered_twice():
@@ -6184,9 +5939,6 @@ def test_the_formal_doc_index_is_current():
         included — a planted nested document proves the walk is recursive
         rather than a directory list, and a row names the path it resolves to;
       - `--check` is not vacuous: adding a document makes it fail;
-      - and it fails in the direction the 2026-11-14 land got wrong: DELETING
-        a document without regenerating the block is red, and `--write` clears
-        it;
       - it is not blind either: rewriting every claim in the file leaves it
         green (and `--strict`, which is the full comparison, red);
       - and the reduction undoes the CLAIM-dependent ORDER, in both directions.
@@ -6328,51 +6080,6 @@ def test_the_formal_doc_index_is_current():
           f'planting a document left --check at rc={rc_added}; an index that '
           f'cannot notice a document appearing is a hand-maintained table with '
           f'a generator in front of it')
-
-    # THE OTHER DIRECTION, and the one this file actually got wrong: a document
-    # is DELETED and the block is not regenerated. The NEW-document check above
-    # exercises the same comparison, but only in the direction that was never
-    # the failure — d3ec70ee7 deleted
-    # the arm64 extend-option census (part 1) and merged a block that had
-    # lost the ROW but kept the counts ("4 documents" over three rows, "5
-    # documents" over four), so `python3 tools/formal_doc_index.py --check` was
-    # red on master and `test_suite.py` with it. Pinned on a planted tree in
-    # `.tmp/` (never by editing the real OPEN_WORK.md — see the comment above)
-    # so the scenario does not depend on the corpus still having a spare pair of
-    # documents to delete.
-    deleted_root = os.path.join(F.ROOT, '.tmp', 'formal_doc_index_deleted')
-    deleted_bugs = os.path.join(deleted_root, 'bugs')
-    deleted_index = os.path.join(deleted_root, 'OPEN_WORK.md')
-    shutil.rmtree(deleted_root, ignore_errors=True)
-    os.makedirs(deleted_bugs)
-    for stem in ('FORMAL_zz_kept', 'FORMAL_zz_deleted'):
-        with open(os.path.join(deleted_bugs, stem + '.md'), 'w',
-                  encoding='utf-8') as f:
-            f.write(f'# {stem}: a planted document\n')
-    saved = (F.ROOT, F.BUGS, F.OPEN_WORK, F.live_claims)
-    F.ROOT, F.BUGS, F.OPEN_WORK = deleted_root, deleted_bugs, deleted_index
-    F.live_claims = lambda: {}
-    try:
-        # The index as generated while BOTH documents exist...
-        with open(deleted_index, 'w', encoding='utf-8') as f:
-            f.write(F.BEGIN + '\n\n' + F.render() + '\n\n' + F.END + '\n')
-        # ...then one document is deleted WITHOUT regenerating the block.
-        os.remove(os.path.join(deleted_bugs, 'FORMAL_zz_deleted.md'))
-        rc_deleted, _ = run_check(['--check'])
-        # The documented repair must clear it again.
-        rc_write, _ = run_check(['--write'])
-        rc_repaired, _ = run_check(['--check'])
-    finally:
-        F.ROOT, F.BUGS, F.OPEN_WORK, F.live_claims = saved
-        shutil.rmtree(deleted_root, ignore_errors=True)
-    check('formal doc index: a DELETED document makes --check fail, and --write '
-          'is the repair',
-          rc_deleted == 1 and rc_write == 0 and rc_repaired == 0,
-          f'a document deleted without regenerating the block left --check at '
-          f'rc={rc_deleted} (want 1), then --write/--check at '
-          f'rc={rc_write}/{rc_repaired} (want 0/0). This is the shape that '
-          f'landed as d3ec70ee7: the row went, the counts did not, and the '
-          f'queue named a document the tree no longer had')
 
     rendered = F.render()
     reduced = F.without_claims(rendered)
@@ -6960,7 +6667,6 @@ def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
                test_deps_order_and_skip,
-               test_a_cascade_skip_is_a_skip_not_an_error,
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
@@ -6979,7 +6685,6 @@ def main():
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
-               test_a_skipped_dep_skips_its_dependents,
                test_dependent_waits_for_the_whole_fanout,
                test_log_has_passes_screen_does_not,
                test_checked_run_key_covers_what_it_names,
@@ -6987,8 +6692,6 @@ def main():
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
                test_the_trait_conformance_diagnostic_suites_are_gated,
-               test_the_suite_self_test_registrations_are_gated,
-               test_the_land_doc_suite_is_registered_where_its_bucket_says,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,

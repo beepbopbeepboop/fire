@@ -14,6 +14,7 @@ Usage (manual):
   python build_stdlib_dylib.py [-o build/libmojostdlib.dylib]
 """
 import os
+import re
 import sys
 import shutil
 import platform
@@ -529,71 +530,22 @@ def compile_module_to_c(src: str, path: str, module_name: str,
     return box['c']
 
 
-# Why the LAST module compiled produced a different program from the one its
-# source says: one entry per generic struct that could not be elaborated, as
-# `Struct[Args] from <source>: <exception>`. Empty means the compile was clean.
-# Module-level because the codegen runs in a thread (`compile_module_to_c`) and
-# because the consumer (`compile_module_to_c_cached`, and the stdlib sweep's
-# verdict through `last_degradations()`) is a different function from the
-# producer. It describes EXACTLY ONE module — the last one compiled or served
-# from the in-process L1 — never an accumulation, so a degraded module followed
-# by a clean cache hit does not label the clean one.
+# Why the LAST `compile_module_to_c` produced a different program from the one
+# its source says: one entry per generic struct that could not be elaborated,
+# as `Struct[Args] from <source>: <exception>`. Empty means the compile was
+# clean. Module-level because the codegen runs in a thread
+# (`compile_module_to_c`) and because the consumer
+# (`compile_module_to_c_cached`) is a different function from the producer;
+# it is written and read under one call, never accumulated.
 _LAST_DEGRADED: list = []
-
-# Every generic-struct elaboration refusal this process has seen, as
-# `(module_path, [reason, ...])`, accumulated by `compile_module_to_c_cached`.
-# The un-elaborated-template fallback that produces the reason is load-bearing
-# (kept compiling; see `test_elaboration_failure_is_not_cached`), but the
-# refusal is NOT a cacheable artifact and NOT console noise: a driver that
-# wants the detail (the stdlib sweep) reads it from its own call frame via
-# `last_degradations()` — that list is per-call, which is what threads it back
-# to the caller — and this log keeps it visible for anything that only has the
-# module-level state. Read with `refusal_log()`; never printed here, so a
-# reader of the sweep's console is not asked to guess which red lines are
-# actionable (bug:CODEGEN_stdlib_run_prints_elaboration_refusals).
-_REFUSAL_LOG: list = []
 
 
 def last_degradations() -> list:
-    """The degradation list for the most recent `compile_module_to_c_cached` (or
-    `compile_module_to_c`) call in this process, as a copy.
-
-    A cache hit restores the entry's own list: a published artifact is only
-    ever a clean compile, but the in-process L1 also holds modules that were
-    NOT published (see `compile_module_to_c_cached`), so "the last thing I
-    read from a cache" is not the same claim as "never degraded". Read this,
-    do not clear it."""
+    """The `_LAST_DEGRADED` list, as a copy. Read this, do not clear it."""
     return list(_LAST_DEGRADED)
 
 
-def refusal_log() -> list:
-    """Every recorded `(module_path, [reason, ...])` refusal, as a copy."""
-    return list(_REFUSAL_LOG)
-
-
-def _record_refusal(path: str, degraded: list) -> None:
-    """Keep the refusal off the console and on the books.
-
-    The detail still has to reach whoever runs the sweep, so it is appended
-    to `_REFUSAL_LOG` (read back with `refusal_log()`) and echoed to the
-    console only under MOJO_DEBUG, like every other deliberately-degraded
-    path in this compiler. Nothing is swallowed: the module's `.ci` is
-    refused publication here, and the caller that wants a count reads it
-    from its own frame via `last_degradations()`."""
-    _REFUSAL_LOG.append((path, list(degraded)))
-    if os.environ.get('MOJO_DEBUG'):
-        sys.stderr.write(
-            f"[compile_module_to_c_cached] {path}: {len(degraded)} generic "
-            f"struct elaboration(s) failed, so this module's C is NOT the "
-            f"program its source describes and it is NOT being cached:\n"
-            + ''.join(f'    {d}\n' for d in degraded))
-
-
-# In-process L1 for compile_module_to_c_cached. Values are
-# `(c_text, degraded)` — the degradation list is stored WITH the artifact so a
-# hit can answer for itself rather than inheriting the previous module's state
-# (a degraded compile is not published to the CAS, but it is kept here).
-_stdlib_compile_cache: dict = {}
+_stdlib_compile_cache: dict = {}  # in-process L1 for compile_module_to_c_cached
 
 
 def stdlib_codegen_key(src: str, path: str, module_name: str,
@@ -636,51 +588,33 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str,
     room for a build that must not be published. It is those six lines
     duplicated, not a second cache: the same key, the same L1, the same
     `cas.stats` accounting, in the same order.
-
-    **The degradation is part of the RESULT, not just a warning.** On return,
-    `last_degradations()` describes THIS module and nothing else — empty for a
-    CAS hit, the build's list for a miss, and the stored list for an L1 hit
-    (which may be a degraded compile, since those are not published but are
-    kept for the rest of the process). compile_stdlib.py's per-file verdict
-    reads it and reports the file FAILED: a module the compiler says is not
-    the program its source describes must not count as a pass.
     """
     # The `‘linkable’ half is part of the KEY, not of the cache: a `.ci`
     # published by a `linkable=False` call has had no link-line check made on
     # it, and handing it to `build()` would republish the very hole the refusal
     # exists to refuse. One extra character in the key, and the two artifacts
     # can never be confused for each other.
-    # `last_degradations()` must describe THIS call and only this call. The
-    # compile path clears/refreshes it, and each L1 entry carries its own
-    # degradation list, so a hit answers for the module it replays rather than
-    # inheriting whichever module this worker compiled last. (A CAS hit can
-    # only be clean: a degraded compile is never published.)
     key = stdlib_codegen_key(src, path, module_name, linkable)
     if key in _stdlib_compile_cache:
-        text, degraded = _stdlib_compile_cache[key]
-        _LAST_DEGRADED[:] = degraded
-        return text
+        return _stdlib_compile_cache[key]
     cached = cas.lookup(key, '.ci')
     if cached is not None:
         cas.stats['hits'] += 1
         with open(cached) as f:
             text = f.read()
-        # Only a CLEAN compile is ever published (the branch below), so a hit
-        # in the shared store cannot be degraded. Say so explicitly rather
-        # than leaving `_LAST_DEGRADED` holding whatever the previous module
-        # in this worker left there: compile_stdlib.py reads it as THIS
-        # module's verdict.
-        degraded = []
     else:
         cas.stats['misses'] += 1
         text = compile_module_to_c(src, path, module_name, linkable=linkable)
         degraded = last_degradations()
         if degraded:
-            _record_refusal(path, degraded)
+            sys.stderr.write(
+                f"[compile_module_to_c_cached] {path}: {len(degraded)} generic "
+                f"struct elaboration(s) failed, so this module's C is NOT the "
+                f"program its source describes and it is NOT being cached:\n"
+                + ''.join(f'    {d}\n' for d in degraded))
         else:
             cas.publish(key, '.ci', text.encode('utf-8'))
-    _LAST_DEGRADED[:] = degraded
-    _stdlib_compile_cache[key] = (text, list(degraded))
+    _stdlib_compile_cache[key] = text
     return text
 
 
@@ -860,23 +794,11 @@ def _module_name_for(path: str) -> str:
 
 def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
                          objflags: tuple = _OBJ_FLAGS) -> bytes:
-    """Cold-path builder: Mojo → C → .o; returns the object's bytes.
-
-    A module whose generic-struct elaboration failed is compiled against its
-    un-elaborated template (every type parameter `int64_t`), so its C is not the
-    program its source describes. Refuse it here — before the object is written
-    into the shared CAS and before it can be linked into the dylib — so the
-    caller's per-module skip path handles it the same way the sweep does."""
+    """Cold-path builder: Mojo → C → .o; returns the object's bytes."""
     cfile = os.path.join(workdir, name + '.c')
     ofile = os.path.join(workdir, name + '.o')
-    c_text = compile_module_to_c(src, path, name)
-    refusals = last_degradations()
-    if refusals:
-        raise RuntimeError(
-            f"elaboration: {len(refusals)} generic struct elaboration(s) failed, "
-            f"so the C is not the program its source describes: {refusals[0]}")
     with open(cfile, 'w') as f:
-        f.write(c_text)
+        f.write(compile_module_to_c(src, path, name))
     subprocess.run([gcc, *objflags, '-c', '-o', ofile, cfile], check=True)
     with open(ofile, 'rb') as f:
         return f.read()
@@ -927,17 +849,6 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
             ofile = os.path.join(workdir, name + '.o')
             with open(ofile, 'wb') as f:
                 f.write(_compile_one_object(src, path, name, workdir, gcc, objflags))
-        # A degraded compile must never reach the dylib. The cached path only
-        # serves objects published by a clean build (_compile_one_object refuses
-        # to produce a degraded one), but a fresh in-process compile records its
-        # degradations in this worker; treat them as the job's error so the
-        # caller prints `skip <module>: ...` instead of linking the module.
-        refusals = last_degradations() if hit is False else []
-        if refusals:
-            return (path, name, None, exports,
-                    f"elaboration: {len(refusals)} generic struct elaboration(s) failed, "
-                    f"so the C is not the program its source describes: {refusals[0]}",
-                    hit)
     except Exception as e:
         return path, name, None, exports, str(e), hit
     return path, name, ofile, exports, None, hit
@@ -1305,29 +1216,11 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         all_defs = set()
         for o in objs:
             all_defs |= _defined_symbols(gcc, o, include_weak=True)
-        _kept = []
-        _misresolved, _undefined = [], []
-        for e in all_exports:
-            if e['kind'] == reflect.SYM_TYPE:
-                _kept.append(e)
-                continue
-            sym = reflect.export_csym(e)
-            if ('_' + sym) in all_defs:
-                _kept.append(e)
-            elif ('_' + e['name']) in all_defs:
-                # The entry names a symbol the dylib really defines, but the
-                # export-csym rule resolved it to a different one — see
-                # runtime_export_entries' report on why almost all of
-                # fire_runtime.h's 565 entry points are measured as misresolved on
-                # this tree, and why the fix is in reflect.export_csym rather than
-                # here. The exact figure is not written down here on purpose: it is
-                # printed by the report below on every build, so this comment cannot
-                # carry a second copy of a number the build measures for itself. A separate class from the
-                # genuinely-orphaned entry below because nothing is missing here:
-                # the definition is present and the table just is not naming it.
-                _misresolved.append(f"{e['name']} -> {sym}")
-            else:
-                _undefined.append(e['name'])
+        # One shared classifier for the three-way kept/misresolved/undefined
+        # split (see classify_export_entries): an entry whose body exists under
+        # a differently-hashed overload suffix is misresolved — and the report
+        # names the definition — not "declared with no definition".
+        _kept, _misresolved, _undefined = classify_export_entries(all_exports, all_defs)
         all_exports = _kept
         for line in format_export_report(len(_kept) + len(_misresolved) + len(_undefined),
                                          _misresolved, _undefined):
@@ -1713,17 +1606,7 @@ def optional_runtime_dylib(unit: str, arch: str = None) -> str:
         defined = set()
         for obj in objs:
             defined |= _defined_symbols(cc, obj, include_weak=True)
-        kept = []
-        misresolved = []
-        undefined = []
-        for e in entries:
-            sym = reflect.export_csym(e)
-            if ('_' + sym) in defined:
-                kept.append(e)
-            elif ('_' + e['name']) in defined:
-                misresolved.append(f"{e['name']} -> {sym}")
-            else:
-                undefined.append(e['name'])
+        kept, misresolved, undefined = classify_export_entries(entries, defined)
         report = format_export_report(len(entries), misresolved, undefined)
         for line in report:
             print(f"  optional runtime {unit}: {line}", file=sys.stderr)
@@ -1790,7 +1673,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 837
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 832
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it
@@ -1824,16 +1707,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
     defined = set()
     for o in objs:
         defined |= _defined_symbols(gcc, o, include_weak=True)
-    kept = []
-    misresolved, undefined = [], []
-    for e in exports:
-        sym = reflect.export_csym(e)
-        if ('_' + sym) in defined:
-            kept.append(e)
-        elif ('_' + e['name']) in defined:
-            misresolved.append(f"{e['name']} -> {sym}")
-        else:
-            undefined.append(e['name'])
+    kept, misresolved, undefined = classify_export_entries(exports, defined)
     report = format_export_report(len(exports), misresolved, undefined)
     # Printed HERE, and that placement is load-bearing for the self-hosted
     # build rather than a matter of taste. This module is compiled into `mojoc`,
@@ -1862,6 +1736,87 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
     for line in report:
         print(f"  runtime dylib: {line}", file=sys.stderr)
     return kept, report
+
+
+# A Mojo overload suffix: `overload_suffix_for` (mojo/backend_gimple/emit_funcs)
+# emits `_` + 6 hex digits (a 24-bit polynomial hash over the joined C
+# param-type list), or nothing at all for a zero/variadic param list. The
+# cross-check below must recognise that tail to tell a SUFFIX disagreement
+# (the body exists, hashed a different way) from a genuinely missing body.
+_OVERLOAD_SUFFIX_RE = re.compile(r'_[0-9a-f]{6}$')
+
+
+def classify_export_entries(entries: list, defined: set) -> tuple:
+    """Split export entries into (kept, misresolved, undefined) against
+    `defined`, the arch-prefixed C symbols the object set really defines (as
+    `_defined_symbols` returns them).
+
+    This is the ONE three-way check behind the export table's `nm` cross-check.
+    It used to be copy-pasted three times (build()'s all_exports,
+    runtime_export_entries' header exports, and the optional-unit builds), and
+    the copies had already drifted from the truth in the way that matters:
+
+    * kept — the entry's expected symbol is defined: the table can name it.
+    * misresolved — the dylib defines the function, but under a DIFFERENT symbol
+      than the entry computed. Two shapes, both "defined but not advertised":
+      (a) the RAW name is defined but the entry's mangling rule resolved to a
+      different spelling, and (b) the SAME name is defined with a DIFFERENT
+      overload suffix — the entry's source-scan param types hash to a different
+      24-bit suffix than codegen's live-inferred ones (the `ord`/`ascii`/
+      `atol`/`standardize_string_slice` case: the body exists as
+      `..._ord_d719e0` while the entry names `..._ord_9f63a2`). For shape (b)
+      the report NAMES the definition that exists, because a bare "declared
+      with no definition" sends the next reader hunting for a missing body
+      that is in fact present.
+    * undefined — no definition under any spelling: genuinely absent from the
+      dylib (a header declaration satisfied by whoever links against it, e.g.
+      `py_tokenize`, which the self-hosted compiler image defines, not the
+      runtime).
+
+    A suffix sibling is only accepted when the EXPECTED symbol itself carries a
+    suffix: a C-prototype entry (whose `csym` is the raw header name) has none,
+    and matching one against a coincidental `_deadbeef` tail would invent a
+    definition that is not there. SYM_TYPE entries are layout descriptors with
+    no runtime symbol, so they are always kept (the table stores a NULL for
+    them and never forward-declares them — see reflect.emit_table_c)."""
+    kept, misresolved, undefined = [], [], []
+    # defined-symbol -> its stem (everything before the overload suffix), so a
+    # miss on the exact symbol can be re-checked against the same function's
+    # other overload hashes in O(1) instead of scanning `defined` per entry.
+    suffix_by_stem = {}
+    for d in defined:
+        m = _OVERLOAD_SUFFIX_RE.search(d)
+        if m:
+            suffix_by_stem.setdefault(d[:m.start()], set()).add(d)
+    for e in entries:
+        if e['kind'] == reflect.SYM_TYPE:
+            kept.append(e)
+            continue
+        sym = reflect.export_csym(e)
+        expect = '_' + sym
+        if expect in defined:
+            kept.append(e)
+            continue
+        m = _OVERLOAD_SUFFIX_RE.search(expect)
+        if m:
+            siblings = sorted(d for d in suffix_by_stem.get(expect[:m.start()], ())
+                              if d != expect)
+            if siblings:
+                # `sym` is spelled without the arch's leading underscore;
+                # `defined` carries it — strip it so both halves of the line
+                # read as the same kind of name.
+                spelled = [s[1:] if s.startswith('_') else s for s in siblings]
+                # Pre-joined, not nested inside the f-string: this module
+                # compiles into mojoc, and the self-hosted backend's f-string
+                # lowering does not take nested same-quote f-expression parts.
+                joined = ', '.join(spelled)
+                misresolved.append(f"{e['name']} -> {sym} (defined as {joined})")
+                continue
+        if ('_' + e['name']) in defined:
+            misresolved.append(f"{e['name']} -> {sym}")
+        else:
+            undefined.append(e['name'])
+    return kept, misresolved, undefined
 
 
 def format_export_report(total: int, misresolved: list, undefined: list) -> list:

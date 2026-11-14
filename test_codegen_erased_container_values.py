@@ -3,20 +3,16 @@
 CODEGEN_simd_and_array_values_erase_to_int64.
 
 Each `test_<prefix>_*` here is the Done-when test of an open part doc under
-bugs/ and is RED until its part lands. This file is deliberately NOT a
+bugs/mid/ and is RED until its part lands. This file is deliberately NOT a
 registered gate job: a red probe belongs to its bug doc's command, not to the
 green regression bucket. The landed parts' tests are in
 test_codegen_erased_container_values_pins.py.
 
-Open parts (2026-11-15 replan):
-
-    python3 test_codegen_erased_container_values.py ctor_dtype_spelling
-    python3 test_codegen_erased_container_values.py list_elem_across_return
-    python3 test_codegen_erased_container_values.py simd_value_across_return
-
-`p1_alias`, `p2_alias_ctor` and `p3_comptime` below are landed (their docs were
-deleted with their fixes) and stay green here until they are moved into the
-registered pins file. A bare run executes every probe in this file.
+Run one probe:  python3 test_codegen_erased_container_values.py p1_alias
+                python3 test_codegen_erased_container_values.py p2_alias_ctor
+                python3 test_codegen_erased_container_values.py p3_comptime
+                python3 test_codegen_erased_container_values.py p4_container_param
+A bare run executes every open probe and is red until they all land.
 """
 
 import re
@@ -25,7 +21,7 @@ import sys
 from test_codegen_erased_container_values_pins import _compile, _defn
 
 
-# part 1 (landed; doc deleted):
+# part 1 (bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
 # a module-level `alias` of a type is expanded wherever an annotation is
 # resolved -- a parameter, a return, an explicitly annotated local, and a
 # container's element type.
@@ -75,7 +71,7 @@ def test_p1_alias_expands_in_annotations():
     assert 'mojo_list_get_double' in abody, abody
 
 
-# part 2 (CODEGEN_simd_and_array_values_erase_to_int64, alias as constructor callee):
+# part 2 (bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part2.md):
 # a module-level `alias` naming a constructible type is expanded when it is
 # the CALLEE of a constructor call (`F2(1.0)`, `A4(fill=0.0)`), not only in an
 # annotation.
@@ -112,7 +108,7 @@ def test_p2_alias_ctor_expands_callee():
     assert 'mojo_list_get_double' in abody, abody
 
 
-# part 3 (landed 2026-11-14, a0f321f1c):
+# part 3 (bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
 # a `comptime` name bound to a float DType resolves in a module-scope
 # signature, in a function-scope annotated local, and in the dtype argument
 # of a SIMD constructor.
@@ -159,131 +155,51 @@ def test_p3_comptime_dtype_resolves_in_all_type_positions():
     assert dsig.startswith('double ') and dsig.endswith('(double x)'), dbody
 
 
-# part 1 of the 2026-11-15 replan (doc: bugs/
-# CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
-# a float SIMD/Scalar constructor whose dtype is written with the SCALAR TYPE
-# NAME (`SIMD[Float32, 4]`, `Scalar[Float32]`) keeps that scalar C type, the
-# same way the `DType.float32` / `.float32` / `float32` spellings already do.
-CTOR_DTYPE_SPELLING_SRC = (
-    'def f32():\n'
-    '    var v = SIMD[Float32, 4](1.5)\n'
-    '    return v\n'
+# part 4 (bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part4.md):
+# a container parameter's annotation is the static truth about its contents.
+# `Array[T, N]` and `FixedSizeArray[T, N]` parameters must be the same tracked
+# `MojoList *` a constructor produces, so `a[i]` and `Span(a)` inside the
+# callee see T rather than an `int64_t`/`char` element.
+P4_CONTAINER_PARAM_SRC = (
+    'def take(a: Array[Float32, 4]):\n'
+    '    return a[0]\n'
     '\n'
-    'def f64():\n'
-    '    var w = SIMD[Float64, 2](2.5)\n'
-    '    return w\n'
+    'def span_take(a: Array[Float32, 4]):\n'
+    '    var s = Span(a)\n'
+    '    return s[0]\n'
     '\n'
-    'def sc():\n'
-    '    var x = Scalar[Float32](0.5)\n'
-    '    return x\n'
+    'def take_fixed(a: FixedSizeArray[Float32, 4]):\n'
+    '    return a[0]\n'
     '\n'
-    'def i32():\n'
-    '    var i = SIMD[Int32, 4](1)\n'
-    '    return i\n'
+    'def take_int(a: Array[Int, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def take_fixed_int(a: FixedSizeArray[Int, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def f():\n'
+    '    var a = Array[Float32, 4](fill=0.0)\n'
+    '    return take(a)\n'
 )
 
 
-def test_ctor_dtype_spelling_simd_scalar_name_keeps_float_ctype():
-    c = _compile(CTOR_DTYPE_SPELLING_SRC, 'ctor_dtype_spelling')
-    assert 'indirect call via SubscriptExpr' not in c, c
-    for fn, decl in (('f32', 'float v;'), ('f64', 'double w;'),
-                     ('sc', 'float x;')):
-        body = _defn(c, 'ctor_dtype_spelling_' + fn)
-        assert decl in body, (fn, body)
-        assert 'int64_t ' + decl.split()[1] not in body, (fn, body)
-    # An integer dtype keeps today's int64_t lowering: the fix widens the
-    # dtype SPELLINGS the constructor arm recognizes, it does not turn every
-    # SIMD value into a float.
-    ibody = _defn(c, 'ctor_dtype_spelling_i32')
-    assert 'int64_t i;' in ibody, ibody
-
-
-# part 2 of the 2026-11-15 replan (doc: bugs/
-# CODEGEN_simd_and_array_values_erase_to_int64-part2.md):
-# a `List[T]()` constructor's bracket element type is assigned evidence
-# (exactly as a list LITERAL's elements are), so a function returning that
-# list hands its element kind to the caller across the call boundary.
-LIST_ELEM_RETURN_SRC = (
-    'def mk_f32() -> List[Float32]:\n'
-    '    var l = List[Float32]()\n'
-    '    l.append(1.5)\n'
-    '    return l\n'
-    '\n'
-    'def f32():\n'
-    '    var a = mk_f32()\n'
-    '    return a[0]\n'
-    '\n'
-    'def mk_int() -> List[Int]:\n'
-    '    var l = List[Int]()\n'
-    '    l.append(2)\n'
-    '    return l\n'
-    '\n'
-    'def i():\n'
-    '    var a = mk_int()\n'
-    '    return a[0]\n'
-    '\n'
-    'def mk_str() -> List[String]:\n'
-    '    var l = List[String]()\n'
-    '    l.append("x")\n'
-    '    return l\n'
-    '\n'
-    'def s():\n'
-    '    var a = mk_str()\n'
-    '    return a[0]\n'
-)
-
-
-def test_list_elem_across_return_keeps_element_type():
-    c = _compile(LIST_ELEM_RETURN_SRC, 'list_elem_return')
-    fbody = _defn(c, 'list_elem_return_f32')
-    assert 'mojo_list_get_int' not in fbody, fbody
-    assert 'mojo_list_get_double' in fbody, fbody
-    # The two kinds that work today must not move.
-    ibody = _defn(c, 'list_elem_return_i')
-    assert 'mojo_list_get_int' in ibody, ibody
-    assert 'mojo_list_get_double' not in ibody, ibody
-    sbody = _defn(c, 'list_elem_return_s')
-    assert 'mojo_list_get_str' in sbody, sbody
-
-
-# part 3 of the 2026-11-15 replan (doc: bugs/
-# CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
-# an unannotated function whose return value is a local bound to a float SIMD
-# constructor keeps the float's scalar C type (a SIMD value is scalar-erased,
-# so `float` IS the value's type). The body's local is already float; only the
-# inferred SIGNATURE erases it to int64_t today.
-SIMD_VALUE_RETURN_SRC = (
-    'def mk32():\n'
-    '    var v = SIMD[DType.float32, 4](1.5)\n'
-    '    return v\n'
-    '\n'
-    'def mk64():\n'
-    '    var w = SIMD[DType.float64, 2](2.5)\n'
-    '    return w\n'
-    '\n'
-    'def mi():\n'
-    '    var i = SIMD[DType.int32, 4](1)\n'
-    '    return i\n'
-    '\n'
-    'def use():\n'
-    '    var a = mk32()\n'
-    '    return a\n'
-)
-
-
-def test_simd_value_across_return_keeps_float_ctype():
-    c = _compile(SIMD_VALUE_RETURN_SRC, 'simd_value_return')
-    b32 = _defn(c, 'simd_value_return_mk32')
-    assert b32.splitlines()[1].strip().startswith('float '), b32
-    b64 = _defn(c, 'simd_value_return_mk64')
-    assert b64.splitlines()[1].strip().startswith('double '), b64
-    # The caller's local inherits the same answer.
-    ubody = _defn(c, 'simd_value_return_use')
-    assert 'float a;' in ubody, ubody
-    assert 'int64_t a;' not in ubody, ubody
-    # An integer SIMD value keeps the int64_t word.
-    ibody = _defn(c, 'simd_value_return_mi')
-    assert ibody.splitlines()[1].strip().startswith('int64_t '), ibody
+def test_p4_container_param_keeps_element_type():
+    c = _compile(P4_CONTAINER_PARAM_SRC, 'p4_container_param')
+    for fn in ('p4_container_param_take', 'p4_container_param_take_fixed'):
+        body = _defn(c, fn)
+        assert '(MojoList * a)' in body, body
+        assert 'mojo_list_get_int' not in body, body
+        assert 'mojo_list_get_double' in body, body
+    sbody = _defn(c, 'p4_container_param_span_take')
+    assert '_mojo_at_char' not in sbody, sbody
+    assert '_mojo_at_double' in sbody, sbody
+    # An integer element keeps its own typed read.
+    for fn in ('p4_container_param_take_int',
+               'p4_container_param_take_fixed_int'):
+        body = _defn(c, fn)
+        assert '(MojoList * a)' in body, body
+        assert 'mojo_list_get_int' in body, body
+        assert 'mojo_list_get_double' not in body, body
 
 
 if __name__ == '__main__':
