@@ -6,7 +6,7 @@ The OFF entry in `tools/gates.json` matching
 
     ^(async-void-return|bootstrap-stage1-transitive|coro|coro-detached-async|coro-future-await|doc-refs|doc-refs-stale-verdicts|formal-sweep-truth|formal-sys|gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$
 
-previously named `bugs/mid/GATE_red_recover_land_2026-11-02.md`, which was deleted
+previously named the deleted `bugs/mid/GATE_red_recover_land_2026-11-02` doc, which was removed
 in `d44f44787` ("Fixed root cause (coro.module_qualifier missing as module
 attribute)") while the OFF entry was left pointing at the deleted path. That
 left 23 gated jobs skipped with no owning doc.
@@ -18,7 +18,7 @@ coverage such as `selfhost`, `mojoc`, `linkmode`, `bootstrap-stage1-transitive`)
 is outside a light worker's budget. Treat every job in the pattern as still part
 of the backlog until individually verified green and removed from the entry.
 
-## Original context (carried over from `GATE_red_recover_land_2026-11-02.md`)
+## Original context (carried over from the deleted `GATE_red_recover_land_2026-11-02` doc)
 
 The `recover-land` round (branch `work/recover-land`, base `8b69d5a8b`) gated RED
 on 2026-11-02 with 23 jobs failing. Known observations from that report:

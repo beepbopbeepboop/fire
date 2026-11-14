@@ -32,12 +32,9 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
-    'bugs/GPU_offload_validation_modular-part2.md': 1,
-    'bugs/GPU_offload_validation_modular-part3.md': 1,
+    'bugs/SUITE_silentnoop-part1-part2.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
-    'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 5,
-    'bugs/hard/DIAGNOSTICS_mojoc_imports.md': 2,
     'build_stdlib_dylib.py': 1,
     'consolidate_string_pool.py': 1,
     'doc/ABI.md': 7,
@@ -133,6 +130,7 @@ BASELINE = {
     'test_formal_x86_64_parity.py': 3,
     'test_getattr_default_miss_reg.py': 1,
     'test_gimple.py': 8,
+    'test_gpu_offload_validation_part3.py': 1,
     'test_imported_decorator_regression.py': 1,
     'test_nonlocal.py': 1,
     'test_path_word_runtime.py': 1,
