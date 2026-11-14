@@ -1,6 +1,6 @@
 """A coroutine's loop over an int-element list parameter reads the loop
 variable as an int, not as the `char *` the runtime dict-or-list dispatch
-declares first. See bugs/CODEGEN_coro_list_param_int_element_loop_target_is_char_pointer.md.
+declares first (the bug doc was deleted with its fix).
 
 The parameter crosses the stack-switch ABI as a boxed int64_t handle, so the
 ordinary `for` lowering emits the dict/list dispatch; both arms bind one
@@ -106,3 +106,26 @@ def test_async_star_args_loop_target_is_not_dispatched():
     assert 'char * x;' not in body, 'loop target declared as char * (dict arm won)'
     assert 'mojo_is_registered_dict' not in body, 'dict-or-list dispatch was emitted'
     assert 'int64_t x;' in body, 'loop target not declared as int64_t'
+
+
+def test_async_star_args_total_prints_six():
+    # The end-to-end half of the structural check above: build the real C,
+    # link the runtime, run it, and read the awaited value. Reuses the
+    # stack-switch build harness of test_coro_future_await.py.
+    import test_coro_future_await as harness
+    src = ('import asyncio\n'
+           '\n'
+           'async def total(*xs) -> Int:\n'
+           '    var t = 0\n'
+           '    for x in xs:\n'
+           '        t += x\n'
+           '    return t\n'
+           '\n'
+           'async def main_co() -> Int:\n'
+           '    var r = await total(1, 2, 3)\n'
+           '    return r\n'
+           '\n'
+           'def main():\n'
+           '    print(asyncio.run(main_co()))\n')
+    out = harness._build_and_run(src, require=('total',))
+    assert out == '6\n', repr(out)

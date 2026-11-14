@@ -65,8 +65,7 @@ quietly degenerating into emitting a theorem nobody checks.
 The honest limit of the instrument is stated in the emitted theorem's own
 docstring: it is a range, not all inputs.  The unbounded claim needs an
 induction over the program's loop structure, which is a different proof for each
-example and is not attempted here — see
-`bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
+example.
 """
 import os
 import re
@@ -344,14 +343,15 @@ class AllInputs:
     through.  A `"closed"` row also carries the model BODY it is written for
     (`body`, compared exactly) and the tactic block that closes it (`proof`);
     the two are one row because the proof is only a proof of that body.
+    Optionally `hyp` names a hypothesis binder(s) to add to the statement.
     """
 
     __slots__ = ("word", "nat", "kind", "op", "succ", "lemma", "body",
-                 "proof")
+                 "proof", "hyp")
 
     def __init__(self, word: str, nat: str, kind: str, op: str = "",
                  succ: str = "", lemma: str = "", body: str = "",
-                 proof: str = ""):
+                 proof: str = "", hyp: str = ""):
         self.word = word
         self.nat = nat
         self.kind = kind
@@ -360,6 +360,7 @@ class AllInputs:
         self.lemma = lemma
         self.body = body
         self.proof = proof
+        self.hyp = hyp
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return f"AllInputs({self.word!r}, {self.nat!r}, {self.kind!r})"
@@ -368,7 +369,7 @@ class AllInputs:
 #: The word readings the all-inputs emitter can prove, keyed by the name the
 #: annotation writes.  A row exists only where the induction has been written
 #: and checked; every other `@refines(…)` spec gets the finite-range theorem and
-#: no more.  See `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
+#: no more.
 #:
 #: `lemma=` is the BARE `u64_ofNat_mul`, and used to be `Specs.u64_ofNat_mul`:
 #: `lib/Specs.lean` restated the theorem so the name would be in scope without
@@ -391,6 +392,9 @@ ALL_INPUTS = {
     "Specs.factorial64": AllInputs(
         word="Specs.factorial64", nat="Specs.factorial", kind="recursive",
         op="*", succ="Specs.factorial_succ", lemma="u64_ofNat_mul"),
+    "Specs.sumThrough64": AllInputs(
+        word="Specs.sumThrough64", nat="Specs.sumThrough", kind="recursive",
+        op="+", succ="Specs.sumThrough_succ", lemma="u64_ofNat_add"),
     # ── the STRAIGHT-LINE shapes ────────────────────────────────────────────
     #
     # A straight-line program's model is one closed word expression, so the
@@ -434,6 +438,85 @@ ALL_INPUTS = {
                "  simp [mojo, {go}, {word}, {nat}, hw]\n"
                "· have hw : w ≠ 0 := fun e => h (by simpa [e])\n"
                "  simp [mojo, {go}, {word}, {nat}, hw, h]")),
+    "Specs.abs64": AllInputs(
+        word="Specs.abs64", nat="Specs.absInt", kind="closed",
+        body=("(if ((n ^^^ (0x8000000000000000 : UInt64)) > ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then n else ((UInt64.ofNat 0) - n))"),
+        proof=("have key : (if ((w ^^^ (0x8000000000000000 : UInt64)) > ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then w else ((UInt64.ofNat 0) - w)) = {word} w := by\n"
+               "  have h0 : UInt64.ofNat 0 = 0 := rfl\n"
+               "  rw [h0]\n"
+               "  unfold {word} Specs.asInt\n"
+               "  have hw := w.toNat_lt\n"
+               "  have hsb : Specs.signBit = 2 ^ 63 := rfl\n"
+               "  have hwl : Specs.wordLimit = 2 ^ 64 := rfl\n"
+               "  rw [hsb, hwl]\n"
+               "  by_cases hs : (2 ^ 63 : Nat) ≤ w.toNat\n"
+               "  · have hc : ¬ ((w ^^^ (0x8000000000000000 : UInt64)) > (0 ^^^ (0x8000000000000000 : UInt64))) := by\n"
+               "      have : (0x8000000000000000 : UInt64) ≤ w := by\n"
+               "        rw [UInt64.le_iff_toNat_le]; simpa using hs\n"
+               "      revert this; bv_decide\n"
+               "    rw [if_neg hc]\n"
+               "    have e : (if ((2 ^ 63 : Nat) : Int) ≤ (w.toNat : Int) then (w.toNat : Int) - ((2 ^ 64 : Nat) : Int) else (w.toNat : Int)) = (w.toNat : Int) - ((2 ^ 64 : Nat) : Int) := if_pos (by omega)\n"
+               "    rw [e, Specs.absInt_of_neg (by omega)]\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    have hsz : UInt64.size = 2 ^ 64 := rfl\n"
+               "    simp [hsz]\n"
+               "    omega\n"
+               "  · have e : (if ((2 ^ 63 : Nat) : Int) ≤ (w.toNat : Int) then (w.toNat : Int) - ((2 ^ 64 : Nat) : Int) else (w.toNat : Int)) = (w.toNat : Int) := if_neg (by omega)\n"
+               "    rw [e, Specs.absInt_of_nonneg (by omega)]\n"
+               "    by_cases hz : w = 0\n"
+               "    · subst hz; decide\n"
+               "    · have hc : ((w ^^^ (0x8000000000000000 : UInt64)) > (0 ^^^ (0x8000000000000000 : UInt64))) := by\n"
+               "        have : w < (0x8000000000000000 : UInt64) := by\n"
+               "          rw [UInt64.lt_iff_toNat_lt]; simpa using (by omega : w.toNat < 2 ^ 63)\n"
+               "        revert hz this; bv_decide\n"
+               "      rw [if_pos hc]\n"
+               "      apply UInt64.toNat_inj.mp\n"
+               "      simp\n"
+               "simpa [mojo, {go}] using key")),
+    "Specs.stepConst64": AllInputs(
+        word="Specs.stepConst64", nat="Specs.stepConst", kind="closed",
+        body=("(if ((n ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then (UInt64.ofNat 0) else ((UInt64.ofNat 100000) + n))"),
+        hyp="hneg : w.toNat < Specs.signBit",
+        proof=("have hlt : w.toNat < 2 ^ 63 := hneg\n"
+               "have hlt' : w < (0x8000000000000000 : UInt64) := by\n"
+               "  rw [UInt64.lt_iff_toNat_lt]; simpa using hlt\n"
+               "have key : (if ((w ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then (UInt64.ofNat 0) else ((UInt64.ofNat 100000) + w)) = {word} w := by\n"
+               "  unfold {word} {nat}\n"
+               "  by_cases h : w.toNat = 0\n"
+               "  · have hw : w = 0 := UInt64.toNat_inj.mp (by simpa using h)\n"
+               "    subst hw\n"
+               "    decide\n"
+               "  · have hw0 : w ≠ 0 := fun e => h (by simp [e])\n"
+               "    have hc : ¬ ((w ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) := by\n"
+               "      have h0 : UInt64.ofNat 0 = 0 := rfl\n"
+               "      rw [h0]\n"
+               "      revert hw0 hlt'\n"
+               "      bv_decide\n"
+               "    rw [if_neg hc, if_neg h]\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    simp [UInt64.toNat_add]\n"
+               "simpa [mojo, {go}] using key")),
+    "Specs.shiftMix64": AllInputs(
+        word="Specs.shiftMix64", nat="Specs.shiftMix", kind="closed",
+        body="((n <<< (UInt64.ofNat 3)) + (asr64 n (UInt64.ofNat 2)))",
+        hyp="hneg : w.toNat < Specs.signBit",
+        proof=("have hlt : w.toNat < 2 ^ 63 := hneg\n"
+               "have htop : (w >>> 63) ≠ 1 := by\n"
+               "  intro h\n"
+               "  have := congrArg UInt64.toNat h\n"
+               "  rw [UInt64.toNat_shiftRight] at this\n"
+               "  simp at this\n"
+               "  omega\n"
+               "have hasr : asr64 w (UInt64.ofNat 2) = w >>> (UInt64.ofNat 2) := by\n"
+               "  unfold asr64\n"
+               "  simp [htop]\n"
+               "have key : ((w <<< (UInt64.ofNat 3)) + (asr64 w (UInt64.ofNat 2))) = {word} w := by\n"
+               "  rw [hasr]\n"
+               "  unfold {word} {nat}\n"
+               "  apply UInt64.toNat_inj.mp\n"
+               "  simp [UInt64.toNat_add, UInt64.toNat_shiftLeft, UInt64.toNat_shiftRight, "
+               "Nat.shiftLeft_eq, Nat.shiftRight_eq_div_pow]\n"
+               "simpa [mojo, {go}] using key")),
 }
 
 
@@ -533,6 +616,13 @@ def all_inputs_section(func_name: str, ref: Refines, go_defs: str) -> str:
             return ""
         proof = "\n".join("  " + line for line in row.proof.format(
             go=go, word=row.word, nat=row.nat).splitlines())
+        if getattr(row, "hyp", ""):
+            return (
+                head
+                + f"theorem main_refines_all_inputs (w : UInt64)\n"
+                + f"    ({row.hyp}) :\n"
+                + f"    mojo w = {row.word} w := by\n"
+                + proof + "\n")
         return (
             head
             + f"theorem main_refines_all_inputs (w : UInt64) :\n"
@@ -677,7 +767,7 @@ def header_imports(needs_specs: bool) -> str:
     before this existed — an import nothing uses is an import every one of them
     pays to resolve.
     """
-    block = "import ProofLib\nimport work\nimport Refine\n"
+    block = "import ProofLib\nimport ProofLibSteps\nimport work\nimport Refine\n"
     if needs_specs:
         block += "import Specs\n"
     return block

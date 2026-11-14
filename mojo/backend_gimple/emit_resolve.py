@@ -45,6 +45,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
+import mojo.middle.rt_call as rt_call
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
@@ -58,7 +59,7 @@ from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
     _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
+    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _module_attr_call_return_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
 from mojo.middle.calls_shared import user_dunder_repr_call
@@ -201,6 +202,11 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 _base_dir, _flat, f"__init__.py"))
             rel_mojo_paths.append(gimple_ctypes.os.path.join(
                 _base_dir, _flat, f"__init__.mojo"))
+            # A precompiled signature artifact stands in for a package whose
+            # sources are gone (`fire.py precompile <pkg> -o <pkg>.mojoc`),
+            # so it is tried only after every real source spelling.
+            rel_mojo_paths.append(gimple_ctypes.os.path.join(
+                _base_dir, f"{_flat}.mojoc"))
         return rel_mojo_paths
     # Explicit `sys.path.insert(...)` directories win outright — the user
     # said "look here first" (see _record_sys_path_inserts) — then the
@@ -264,6 +270,11 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 # import worked interpreted.
                 mojo_paths.append(gimple_ctypes.os.path.join(
                     d, module_name, f"__init__{ext}"))
+        # Precompiled signature artifact for a package whose sources are
+        # gone. LAST in this directory, after every real source spelling
+        # (flat `.py`/`.mojo` and the package `__init__`): a stale `.mojoc`
+        # beside live sources must never shadow them.
+        mojo_paths.append(gimple_ctypes.os.path.join(d, f"{module_name}.mojoc"))
     # A DOTTED module_name (e.g. `import pkg.helper as m`, module_name ==
     # "pkg.helper") names a package-relative path, not a literal
     # filename with dots in it — the loop above only ever tried the
@@ -346,7 +357,63 @@ def _submodule_source_path(gen, module_name: str) -> str | None:
     return None
 
 
-def _register_closure_struct_inits(gen, stmts) -> None:
+def _module_missing(gen, module_name: str) -> bool:
+    """True when `module_name` is neither importable as a real Python module
+    nor resolvable to a source file on the compiler's search path. A missing
+    module is a compile-time error (modular: `error: unable to locate module
+    'X'`), not something to silently skipped."""
+    _mn = (module_name or '').lstrip('.')
+    if not _mn:
+        return False
+    import importlib.util as _ilu
+    try:
+        if _ilu.find_spec(_mn) is not None:
+            return False
+    except Exception:
+        pass
+    # A sibling/source module on the compiler's search path (the same
+    # resolution `_compile_imported_module` uses).
+    try:
+        if gen._submodule_source_path(_mn):
+            return False
+    except Exception:
+        pass
+    # A dotted name may be a symbol inside its parent package, not a module;
+    # only the leaf is missing when the parent resolves.
+    try:
+        import imports as _imp
+        if _imp.resolve(_mn).source:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _raise_missing_module(gen, module_name: str, loc=None):
+    """Raise the missing-module diagnostic for `module_name` at `loc`
+    ("line:col"), unless it is a real Python module (runtime-provided).
+
+    The diagnostic names the FIRST missing component of the dotted path:
+    `import a.b.c` where `a` resolves but `c` does not reports `c`; a
+    wrong-case root (`from TEST_BINARY_PACKAGE.inner1 import x`) reports
+    `TEST_BINARY_PACKAGE`.
+    """
+    _mn = (module_name or '').lstrip('.')
+    if not _module_missing(gen, _mn):
+        return
+    _leaf = _mn
+    _parts = _mn.split('.')
+    for _i in range(1, len(_parts) + 1):
+        if _module_missing(gen, '.'.join(_parts[:_i])):
+            _leaf = _parts[_i - 1]
+            break
+    _fn = getattr(gen, '_current_filename', '') or ''
+    _ln = (loc or '0').split(':')[0]
+    _at = f'{_fn}:{_ln}: ' if _fn else (f'{_ln}: ' if _ln != '0' else '')
+    raise RuntimeError(f"{_at}error: unable to locate module '{_leaf}'")
+
+
+def _register_closure_struct_inits(gen, stmts: list) -> None:
     """Populate `gen._struct_has_init` / `_struct_init_params` /
     `_struct_init_defaults` / `_struct_method_names` for every top-level
     StructDef in `stmts` that defines an `__init__`. Called for each module
@@ -407,7 +474,7 @@ def publish_a3_generators(gen, meta) -> None:
     (kwonly params → "kwonly params (v0)"), so `read_table` compiles
     through the cpp path and could not resolve the foreign handle,
     refusing the whole module with `a call to unresolved callee
-    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+    'next(...)'`. See bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
     Must be called at the A3 registration site, not from gen_module: by the
     time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
@@ -452,11 +519,39 @@ def publish_a3_generators(gen, meta) -> None:
             gen._generator_home_api[_key] = _api
 
 
-def _compile_imported_module(gen, module_name: str) -> tuple:
+def _load_mojoc_signatures(gen, path: str) -> None:
+    """Register a precompiled `.mojoc` artifact's struct/trait records on
+    `gen`.
+
+    A `.mojoc` file stands in for a package whose sources are gone. It has no
+    AST to inline (it is a stored signature, not code), so the import itself
+    contributes no statements; what it does contribute is the signature an
+    instantiation must be checked against — `_ensure_generic_struct` reads
+    `gen._mojoc_structs` for that. Records keep their artifact spelling so
+    the one record reader (`mojo/middle/mojoc_artifact.py`) stays the only
+    reader of the format."""
+    try:
+        from mojo.middle import mojoc_artifact
+        art = mojoc_artifact.load_artifact(path)
+    except Exception as e:
+        gimple_ctypes._debug_note('mojoc artifact unreadable', e)
+        return
+    for _n, _rec in (art.get('structs') or {}).items():
+        if isinstance(_rec, dict):
+            gen._mojoc_structs.setdefault(_n, _rec)
+
+
+def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
 
     Returns (code: str, stmts: list) where stmts are parsed statements from the module.
+
+    `loc` is the "line:col" of the import statement that pulled this module
+    in, used to point a missing-module diagnostic at the import site. It is
+    None for a module the compiler itself synthesized (a `from X import Y`
+    joined candidate, a link-inline module): those are not import sites and
+    must not raise a missing-module error.
     """
     # If this module already failed in this root compile, skip re-compile
     # (rollback-recompile path is the root cause of the quadratic walk).
@@ -465,6 +560,11 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
     mojo_paths = gen._module_candidate_paths(module_name)
     for path in mojo_paths:
         if gimple_ctypes.os.path.exists(path):
+            if isinstance(path, str) and path.endswith('.mojoc'):
+                # A precompiled signature artifact: read the signatures, no
+                # statements to inline (there is no code in the artifact).
+                _load_mojoc_signatures(gen, path)
+                return (None, [])
             _abspath = gimple_ctypes.os.path.abspath(path)
             # `_ap_key`: a fresh `_as_str`-typed local for the two
             # `_compiling_file_paths` set ops. `_abspath` derives from the
@@ -876,10 +976,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._c_helpers_needed = gen._c_helpers_needed
                 temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
-                # share: incrementally-maintained flat mirror of
-                # _module_stmts' union (see the `_walk_ast` re-scan bug,
-                # Phase 1) — same sharing
-                # pattern as _module_stmts itself, just above.
                 temp_gen._all_transitive_stmts_ordered = gen._all_transitive_stmts_ordered
                 temp_gen._all_transitive_stmts_ids = gen._all_transitive_stmts_ids
                 # share: Phase 2 per-statement field-access-scan caches
@@ -1022,6 +1118,13 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # _imported_generator_bindings deliberately stays
                 # per-instance: each module's import bindings are its own.
                 temp_gen._generator_home_api = gen._generator_home_api
+                # share: a generator held in a module global (`_coro = _coro()`)
+                # is recorded by its DEFINING module's store and read by an
+                # importer through the accessor; both tables are keyed by
+                # (defining module, name) so sharing them cannot cross-wire two
+                # modules' same-named globals. See `ginf.global_generator_key`.
+                temp_gen._global_generator_api = gen._global_generator_api
+                temp_gen._global_generator_api_poisoned = gen._global_generator_api_poisoned
                 # share: link mode's own link-line accumulators
                 # (dylibs/objects the final `fire.py build` link step
                 # needs — see compile_linked's own docstring) must be
@@ -1104,6 +1207,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # generator slots; the module's own statements are appended
                 # for ITS imports, so a generator reached through a chain of
                 # imports sees every call site compiled before it.
+                gimple_codegen.gimple_gen_coro._PY_SRC[0] = str(_abspath).endswith('.py')
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
                     stmts, gen._closure_call_stmts, module_name)
                 temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
@@ -1186,7 +1290,31 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                         gen._link_needs_cxx_box[0] = True
 
                 # Store parsed stmts for this module so parent gens can access them
+                # (importers read imported modules' signatures from it; without
+                # it every cross-module call got an int64_t prototype).
                 gen._module_stmts[module_name] = stmts
+                # Pre-register functions from self-host sibling modules before
+                # lowering dependent call sites (fixes cycles between siblings).
+                try:
+                    from fire_compiler import FunctionDef
+                    _SH_PREFIXES = ('mojo.', 'gimple_', 'ast_rewriter', 'mlir', 'regex_compile',
+                                    'module_loader', 'ownership_destruct', 'fire_compiler',
+                                    'determinism_trace', 'imports', 'elaborate', 'monomorphize',
+                                    'comptime', 'cas', 'build_stdlib_dylib', 'driver')
+                    _is_sh = False
+                    for _pref in _SH_PREFIXES:
+                        if module_name.startswith(_pref):
+                            _is_sh = True
+                            break
+                    if _is_sh and hasattr(gen, '_imported_func_home'):
+                        for _ms in (stmts or []):
+                            if isinstance(_ms, FunctionDef):
+                                try:
+                                    gen._imported_func_home.setdefault(_ms.name, module_name)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
                 # Incrementally extend the flat, pre-deduped mirror (see
                 # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once
@@ -1198,7 +1326,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     if _tsid not in gen._all_transitive_stmts_ids:
                         gen._all_transitive_stmts_ids.add(_tsid)
                         gen._all_transitive_stmts_ordered.append(_ts)
-
                 # Return both code and parsed statements
                 return (code, stmts)
             except Exception as e:
@@ -1323,6 +1450,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 continue
 
     # Module not found (e.g. stdlib module like sys, os)
+    #
+    # A module that is a real Python module is provided by the runtime
+    # (myinterpreter's importlib path) and is NOT an error. A module that is
+    # neither on the search path nor importable as Python is a genuine
+    # missing module: modular rejects it at compile time
+    # (`error: unable to locate module 'X'`), and so do we (2026-11-09,
+    # bugs/hard/DIAGNOSTICS_missing_validation_modular.md). `loc` is None for
+    # a compiler-synthesized name (a `from X import Y` joined candidate, a
+    # link-inline module), which is not an import site and must not raise.
+    if isinstance(loc, str) and ':' in loc:
+        _raise_missing_module(gen, module_name, loc)
     return (None, [])
 
 
@@ -1455,7 +1593,7 @@ def _bare_import_bindings(stmt) -> list:
     return out
 
 
-def _module_marker_attribute_reads(stmts) -> dict:
+def _module_marker_attribute_reads(stmts: list) -> dict:
     """`{identifier: [attribute, ...]}` for every `ident.attr` anywhere in
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
@@ -1551,7 +1689,7 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
             _classify_unresolved_export(gen, _m, _m, _mod, _path, _text)
 
 
-def _register_link_imports(gen, stmts) -> list:
+def _register_link_imports(gen, stmts: list) -> list:
     """Link mode (MODULE_CACHE_DESIGN.md): `import` is the seam. For each
     imported symbol, resolve its signature from the module's dylib
     `__mojo_reflect` ABI (imports.import_exports → read_reflection), register
@@ -1607,6 +1745,12 @@ def _register_link_imports(gen, stmts) -> list:
         # does this resolution correctly (walking up from the current
         # file, same as _find_imported_struct/_resolve_test_relative_module).
         _sib_path = gen._parsed_import(module)[0]
+        # A precompiled `.mojoc` signature artifact: no bodies to link and no
+        # source-level exports to scan, but the stored struct/trait records
+        # are what an instantiation must be conformance-checked against.
+        if isinstance(_sib_path, str) and _sib_path.endswith('.mojoc'):
+            _load_mojoc_signatures(gen, _sib_path)
+            return {}, False, _sib_path
         # Guard BEFORE calling load_module, not just try/except around it:
         # this codegen's compiled try/except does not reliably catch a
         # raised exception, so a sibling `.py` compiler module (not under
@@ -1630,9 +1774,15 @@ def _register_link_imports(gen, stmts) -> list:
     # `mojo/middle/module_shared.py::_collect_import_modules`'s docstring).
     _marker_reads = _module_marker_attribute_reads(stmts)
 
-    def scan(stmt_list):
+    def scan(stmt_list: list):
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.ImportStmt):
+                # A missing module is a compile-time error, in link mode too
+                # (modular: `error: unable to locate module 'X'`). Checked
+                # here, before the dylib/source resolution below silently
+                # skips an unresolvable name.
+                _raise_missing_module(gen, stmt.module,
+                                      f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}")
                 # `import M` needs TWO things registered here, and they are
                 # the only two arms of this ladder that ever matched a bare
                 # import — see the unreachable `elif isinstance(stmt,
@@ -1676,6 +1826,8 @@ def _register_link_imports(gen, stmts) -> list:
                     if _src2 and gen._submodule_source_path(_im_m):
                         gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FromImportStmt):
+                _raise_missing_module(gen, stmt.module,
+                                      f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}")
                 exports, from_reflection, source = _exports(stmt.module)
                 for _fip11 in (getattr(stmt, 'name_alias_strs', None) or []):
                     name = gimple_ctypes._fi_name(_fip11)
@@ -1786,6 +1938,7 @@ def _register_link_imports(gen, stmts) -> list:
                         # available: on-demand elaboration for a generic /
                         # overloaded `def`, whole-module inlining for
                         # anything else. See `_classify_unresolved_export`.
+                        _found = False
                         if source:
                             try:
                                 msrc = open(source).read()
@@ -1817,6 +1970,14 @@ def _register_link_imports(gen, stmts) -> list:
                                                 _sibling, _smsrc):
                                             _found = True
                                             break
+                        # Link mode: no dylib for a local module. Inline the
+                        # module so its definitions (including global accessors)
+                        # land in this TU. This is the route that `_link_inline_modules`
+                        # already uses for functions and structs — it compiles the
+                        # sibling module into this translation unit so its globals
+                        # and their accessors are available on the link line.
+                        if not _found and not from_reflection and source and source.endswith('.mojo'):
+                            gen._link_inline_modules.add(stmt.module)
                         continue
                     if sym in seen:
                         continue
@@ -2092,13 +2253,53 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
             # `__GIMPLE`-tagged struct method — see test_gimple.py's
             # "toplevel_comptime_const_visible_everywhere".
             mag = gen._new_temp(ctype)
-            gen._emit(f'  {mag} = ({ctype}){rhs[1:]};')
+            gen._cast_into(mag, ctype, f"{rhs[1:]}")
             gen._emit(f'  {t} = -{mag};')
         else:
-            gen._emit(f'  {t} = ({ctype}){rhs};')
+            gen._cast_into(t, ctype, rhs)
     else:
-        gen._emit(f'  {t} = {rhs};')
+        gen._copy(t, rhs)
     return t
+
+
+def _select_val(gen, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
+    """Branch-based `cond ? then : else`, producing a fresh temp of `ctype`.
+
+    A `?:` expression is not a legal GIMPLE r-value when either arm is a
+    call, and a parenthesized conditional is not a legal operand at all —
+    gcc `-fgimple` rejects `t = (c ? call (x) : lit)` with "expected
+    expression before '(' token" and `t = c ? call (x) : lit` with
+    "invalid operands in ternary operation" (both measured with
+    gcc-mp-15). So a select whose arms are not already plain variable
+    operands must be emitted as the same three-block shape
+    `_lower_TernaryExpr` uses: `if (cond) goto bb_then; else goto
+    bb_else;`, one arm per block, result merged after.
+
+    `then_val`/`else_val` are either GIMPLE values of `ctype` (strings) or
+    zero-argument callables called INSIDE their branch to produce one. The
+    callable form is what keeps a side effect (a user `__str__`/`__repr__`
+    call, say) lazy: `gen._call_expr` emits immediately, so a value passed
+    in ahead of time would already have run unconditionally — the branch
+    would guard nothing. A value that is already computed is selected
+    either way; a call is only emitted in its own block.
+    """
+    ctype = _as_str(ctype)
+    result = gen._new_temp(ctype)
+    cond = gen._ensure_bool_cond(cond_ctype, cond_val)
+    bb_then = gen._new_bb()
+    bb_else = gen._new_bb()
+    bb_merge = gen._new_bb()
+    gen._cond_goto(f"{cond}", bb_then, bb_else)
+    gen._emit_label(bb_then)
+    tv = then_val() if callable(then_val) else then_val
+    gen._safe_coerce_emit(ctype, ctype, tv, result)
+    gen._goto(bb_merge)
+    gen._emit_label(bb_else)
+    ev = else_val() if callable(else_val) else else_val
+    gen._safe_coerce_emit(ctype, ctype, ev, result)
+    gen._goto(bb_merge)
+    gen._emit_label(bb_merge)
+    return result
 
 
 def _inc_val(gen, base: str) -> str:
@@ -2153,16 +2354,16 @@ def _bool_not(gen, ctype: str, val: str) -> str:
     GIMPLE accepts.
     """
     if ctype.endswith(' *') or ctype == 'void *':
-        iv = gen._new_val('int64_t', f'(int64_t){val}')
+        iv = gen._cast('int64_t', val)
         zt = 'int64_t'
     elif ctype == '_Bool':
-        iv = gen._new_val('int', f'(int){val}')
+        iv = gen._cast('int', val)
         zt = 'int'
     elif ctype in ('int', 'int64_t'):
         iv = val
         zt = ctype
     else:
-        iv = gen._new_val('int64_t', f'(int64_t){val}')
+        iv = gen._cast('int64_t', val)
         zt = 'int64_t'
     # `0LL` for the 64-bit zero (a C-style cast is not a legal gimple
     # OPERAND — see _inc_val), `(int)0` for the int one, which does need the
@@ -2195,6 +2396,106 @@ def _bool_and(gen, left: str, right: str) -> str:
     return t
 
 
+def _rt_args(gen, fname: str, args: list) -> str:
+    """Spell the argument list of a call to runtime function `fname`.
+
+    `args` are VALUES (temp or variable names, or literal text), not
+    `(ctype, value)` pairs: a call site states what it passes and never what
+    type it believes it has.  The types come from the declarations
+    (`gen.var_types`) and from the runtime headers (`rt_sigs.RT_SIGS`), and
+    `_repr_fix_args` emits a conversion statement for any scalar argument
+    whose declared representation is not the parameter's -- the same last
+    step `_emit_call` takes, so a runtime call is converted the same way
+    whichever of the two spells it."""
+    fixed: list = ginf._repr_fix_args(gen, fname, args)
+    parts: list[str] = []
+    for a in fixed:
+        parts.append(_as_str(a))
+    return ', '.join(parts)
+
+
+def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
+    """`t = fname (args);` for a runtime function; returns the new temp.
+
+    THE way to call a runtime function for its value.  Do not spell the call
+    as text inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
+    return gen._new_val(ret_type, fname + ' (' + _rt_args(gen, fname, args) + ')')
+
+
+def _rt_into(gen, dst: str, fname: str, args: list) -> None:
+    """`dst = fname (args);` for a runtime function, into an existing temp."""
+    gen._emit('  ' + _as_str(dst) + ' = ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+
+
+def _rt_void(gen, fname: str, args: list) -> None:
+    """`fname (args);` for a runtime function called for its effect."""
+    gen._emit('  ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+
+
+def _cast(gen, ctype: str, val: str) -> str:
+    """`t = (ctype) val;` in a new temp of type `ctype`; returns the temp.
+
+    THE way to convert a value's C representation.  The temp's type and the
+    written cast are one argument, so they cannot disagree (GCC ignores the
+    written type and converts to the LEFT side's type; a cast written as text
+    could say one type and declare another).  Do not spell a cast as text
+    inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
+    ctype = _as_str(ctype)
+    return gen._new_val(ctype, '(' + ctype + ')' + _as_str(val))
+
+
+def _cast_into(gen, dst: str, ctype: str, val: str) -> None:
+    """`dst = (ctype) val;` into an existing temp, which must be declared
+    `ctype`."""
+    gen._emit('  ' + _as_str(dst) + ' = (' + _as_str(ctype) + ')' + _as_str(val) + ';')
+
+
+def _copy(gen, dst: str, src: str) -> None:
+    """`dst = src;` -- THE way to assign one value to another.
+
+    `dst` is a temp, a local, or an lvalue (`p->f`, `_root_globals.x`); `src`
+    is a temp, a local, or literal text.
+
+    When both are declared variables whose types differ in representation
+    (`int` vs `int64_t`, a pointer vs the `int64_t` it travels as), the
+    conversion is written out: `dst = (T) src;`.  A caller does not have to
+    know the two types to get a statement GCC's verifier accepts."""
+    dst = _as_str(dst)
+    src = _as_str(src)
+    dt = gen.var_types.get(dst)
+    st = gen.var_types.get(src)
+    if dt is not None and st is not None:
+        dts: str = _as_str(dt)
+        if rt_call.copy_needs_cast(dts, _as_str(st)):
+            gen._emit('  ' + dst + ' = (' + dts + ')' + src + ';')
+            return
+    gen._emit('  ' + dst + ' = ' + src + ';')
+
+
+def _goto(gen, label: str) -> None:
+    """`goto label;` -- THE way to emit an unconditional jump."""
+    label = _as_str(label)
+    ginf._emit_cf(gen, 'goto', '  goto ' + label + ';', label, len(gen._emit_frames) - 1)
+
+
+def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
+    """`if (cond) goto then_label; else goto else_label;` -- THE way to emit a
+    conditional jump.  `cond` is a `_Bool` temp (or a bare comparison)."""
+    gen._emit('  if (' + _as_str(cond) + ') goto ' + _as_str(then_label)
+              + '; else goto ' + _as_str(else_label) + ';')
+
+
+def _ret(gen, val: str) -> None:
+    """`return val;` -- THE way to return a value from the function."""
+    val = _as_str(val)
+    ginf._emit_cf(gen, 'ret', '  return ' + val + ';', val, len(gen._emit_frames) - 1)
+
+
+def _ret_void(gen) -> None:
+    """`return;` -- THE way to return from a void function."""
+    ginf._emit_cf(gen, 'retv', gimple_codegen._RETURN, '', len(gen._emit_frames) - 1)
+
+
 def _void_call(gen, fname: str, arg_pairs: list) -> tuple:
     """Emit a void call, return ('int', zero_temp)."""
     gen._emit_call('void', '', fname, arg_pairs)
@@ -2215,15 +2516,15 @@ def _strided_data_ptr(gen, pt: str, pv: str) -> str:
     sn = gimple_exprtypes._struct_name_of(pt)
     if sn and 'address' in (gen.struct_field_types.get(sn) or {}):
         addr = gen._new_val('int64_t', f"{pv}->address")
-        vp = gen._new_val('void *', f"(void *){addr}")
-        return gen._new_val('int64_t *', f"(int64_t *){vp}")
+        vp = gen._cast('void *', addr)
+        return gen._cast('int64_t *', vp)
     if pt == 'int64_t *':
         return gen._ensure_local(pt, pv)
     if pt.endswith(' *'):
-        return gen._new_val('int64_t *', f"(int64_t *){gen._ensure_local(pt, pv)}")
+        return gen._cast('int64_t *', gen._ensure_local(pt, pv))
     loc = gen._ensure_local('int64_t', pv)
-    vp = gen._new_val('void *', f"(void *){loc}")
-    return gen._new_val('int64_t *', f"(int64_t *){vp}")
+    vp = gen._cast('void *', loc)
+    return gen._cast('int64_t *', vp)
 
 
 def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
@@ -2242,6 +2543,20 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
         src = 'int64_t'
     if not dst:
         dst = 'int64_t'
+
+    # A BOXED word stored into a pointer-typed slot. `mojo_list_get_boxed` hands
+    # back a box (a heap cell, kind 'l'/'p'/...) for every slot kind but a plain
+    # int, and the tuple-unpack reader tags the word as such (`_boxed_vals`).
+    # Cast straight to `MojoList *` it is the BOX, not the list the slot holds:
+    # `out, nested, maps = hoist(out)` then read `out`'s length out of the box
+    # header and crashed the self-hosted compiler (and, in a plain program,
+    # dropped elements silently). `mojo_box_word` returns the slot's own word
+    # for every box that has one and the input unchanged for a non-box.
+    if (src == 'int64_t' and dst.endswith(' *') and not dst.startswith('void')
+            and val in getattr(gen, '_boxed_vals', ())):
+        _uw = gen._new_temp('int64_t')
+        gen._rt_into(_uw, 'mojo_box_word', [f"{val}"])
+        val = _uw
 
     # A dot-accessed struct member (e.g. a non-pointer module-globals
     # instance's own field, `_typing_globals.some_field`) needs the exact
@@ -2295,7 +2610,7 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     if needs_temp:
         t = gen._new_temp(dst)
         _sce_simple_emit(gen, t, val, src, dst)
-        gen._emit(f'  {lhs} = {t};')
+        gen._copy(lhs, t)
     else:
         _sce_simple_emit(gen, lhs, val, src, dst)
 
@@ -2316,6 +2631,9 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
         loc = f'{filename}:{line}' if line else filename
+        _fn = getattr(gen, 'current_func_name', None)
+        if _fn:
+            loc = f'{loc} in function `{_fn}`'
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')
@@ -2338,56 +2656,56 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             _lp = v
         else:
             _lv = gen._ensure_local(s, v)
-            _lp = gen._new_val('MojoList *', f'(MojoList *){_lv}')
+            _lp = gen._cast('MojoList *', _lv)
         for _fn in sorted(_tf, key=lambda _f: int(_f[1:])):
             _i = int(_fn[1:])
             _fc = _tf[_fn]
-            _idx = gen._new_val('int64_t', f'(int64_t){_i}')
+            _idx = gen._cast('int64_t', f"{_i}")
             if _fc in ('double', 'float'):
-                _rv = gen._new_val('double', f'mojo_list_get_double ({_lp}, {_idx})')
+                _rv = gen._rt_call('double', 'mojo_list_get_double', [f"{_lp}", _idx])
                 if _fc == 'float':
-                    _rv = gen._new_val('float', f'(float){_rv}')
+                    _rv = gen._cast('float', _rv)
             elif _fc == 'char *':
-                _rv = gen._new_val('char *', f'mojo_list_get_str ({_lp}, {_idx})')
+                _rv = gen._rt_call('char *', 'mojo_list_get_str', [f"{_lp}", _idx])
             elif _fc.endswith(' *'):
-                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
-                _rv = gen._new_val(_fc, f'({_fc}){_rv}')
+                _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
+                _rv = gen._cast(_fc, _rv)
             else:
-                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
+                _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
                 if _fc != 'int64_t':
-                    _rv = gen._new_val(_fc, f'({_fc}){_rv}')
+                    _rv = gen._cast(_fc, _rv)
             gen._emit(f'  {dest}.{_fn} = {_rv};')
         return
     if True:
         literal = v.lstrip('-').isdigit()
         if literal and s in gimple_ctypes._SCALAR_INT_TYPES and d in gimple_ctypes._SCALAR_INT_TYPES:
             if d == 'uint8_t':
-                gen._emit(f'  {dest} = mojo_uint8_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_uint8_from_int64', [f"{v}LL"])
             elif d == 'uint16_t':
-                gen._emit(f'  {dest} = mojo_uint16_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_uint16_from_int64', [f"{v}LL"])
             elif d == 'uint32_t':
-                gen._emit(f'  {dest} = mojo_uint32_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_uint32_from_int64', [f"{v}LL"])
             elif d == 'uint64_t':
                 gen._emit(f'  {dest} = {v}ULL;')
             elif d == 'int8_t':
-                gen._emit(f'  {dest} = mojo_int8_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_int8_from_int64', [f"{v}LL"])
             elif d == 'int16_t':
-                gen._emit(f'  {dest} = mojo_int16_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_int16_from_int64', [f"{v}LL"])
             elif d == 'int32_t':
-                gen._emit(f'  {dest} = mojo_int32_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
             elif d == 'int64_t':
                 gen._emit(f'  {dest} = {v}LL;')
             elif d == '_Bool':
-                gen._emit(f'  {dest} = (_Bool){v};')
+                gen._cast_into(dest, '_Bool', f"{v}")
             else:
-                gen._emit(f'  {dest} = {v};')
+                gen._copy(dest, f"{v}")
             return
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
         if s == d:
             if d == 'int64_t' and v.lstrip('-').isdigit():
-                gen._emit(f'  {dest} = (int64_t){v};')
+                gen._cast_into(dest, 'int64_t', f"{v}")
             elif d == '_Bool' and v.lstrip('-').isdigit():
-                gen._emit(f'  {dest} = (_Bool){v};')
+                gen._cast_into(dest, '_Bool', f"{v}")
             else:
                 # Same C type, but the value's *declared* type may still be
                 # wider than this same-typed slot (an int64_t ABI param
@@ -2395,21 +2713,21 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 # implicit conversion, so cast explicitly.
                 declared = gen._declared_int_ctype(v)
                 if declared is not None and declared != s and s in gimple_ctypes._SCALAR_INT_TYPES:
-                    gen._emit(f'  {dest} = ({s}){v};')
+                    gen._cast_into(dest, s, f"{v}")
                 else:
-                    gen._emit(f'  {dest} = {v};')
+                    gen._copy(dest, f"{v}")
         elif s.endswith(' *') and d in ('int', 'int64_t'):
             # Load global into local before casting (GIMPLE restriction)
             v = gen._ensure_local(s, v)
             # GIMPLE: non-void pointer → int64_t requires void * intermediate
             if s != 'void *':
-                vp = gen._new_val('void *', f'(void *){v}')
+                vp = gen._cast('void *', f"{v}")
                 v = vp
-            ip = gen._new_val('int64_t', f'(int64_t){v}')
+            ip = gen._cast('int64_t', f"{v}")
             if d == 'int64_t':
-                gen._emit(f'  {dest} = {ip};')
+                gen._copy(dest, f"{ip}")
             else:
-                gen._emit(f'  {dest} = (int){ip};')
+                gen._cast_into(dest, 'int', ip)
         elif d == 'char *' and s == 'char':
             # A Python str of length 1 (a bare `char` in this codegen)
             # coerced into a `char *` STRING slot — e.g. the `char`
@@ -2430,7 +2748,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # non-empty `prev`).
             v = gen._ensure_local(s, v)
             sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', v)])
-            gen._emit(f'  {dest} = {sv};')
+            gen._copy(dest, sv)
         elif d.endswith(' *') and s in ('int', 'int64_t', 'char'):
             # 'char' here too: a narrower-than-pointer scalar (e.g. a
             # single dereferenced byte from an unresolved generic
@@ -2438,13 +2756,49 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # same -Wint-to-pointer-cast size mismatch as 'int' — widen
             # through int64_t first, same as the other narrow sources.
             v = gen._ensure_local(s, v)
-            ip = gen._new_val('int64_t', f'(int64_t){v}')
-            gen._emit(f'  {dest} = ({d}){ip};')
+            ip = gen._cast('int64_t', f"{v}")
+            gen._cast_into(dest, d, ip)
+        elif d.endswith(' *') and s in ('double', 'float'):
+            # A FLOAT returned from a function whose inferred return type is a
+            # pointer. `comptime.py`'s `eval_const` is the live case: it
+            # genuinely returns bool/int/float/str/tuple, so its return-type
+            # join lands on `char *` (the string branches), and the
+            # `return node.value` for a FloatLiteral (added by 13b16397d) then
+            # emitted a bare `(char *)<double>` — not valid C at all, gcc:
+            # "cannot convert to a pointer type", which took down
+            # `make mojoc`, `make stage2/mojo` and `test_selfhost.py`'s build.
+            # The int→pointer spellings above are accepted by gcc with a
+            # warning; a float→pointer is rejected outright, which is why only
+            # this source kind needed a branch. Same two-step as everywhere
+            # else in this file, and the same truncate-to-int word
+            # `_to_int64('double', ...)` hands every other float consumer.
+            v = gen._ensure_local(s, v)
+            ip = gen._cast('int64_t', f"{v}")
+            gen._cast_into(dest, d, ip)
+        elif d in ('double', 'float') and s.endswith(' *'):
+            # The mirror of the branch above, and the same C rule: a pointer
+            # converts only to an INTEGER type. `(double)<ptr>` is rejected
+            # outright ("pointer value used where a floating-point was
+            # expected"); it needs the same two-step through the int64_t word
+            # that every other pointer-to-number conversion here uses (see the
+            # `s.endswith(' *') and d in ('int', 'int64_t')` branch above,
+            # including the void * intermediate GIMPLE requires).
+            #
+            # Found through `Array[Float32, buf_len](fill={})` in
+            # test/algorithm/test_vectorize.mojo: the Array fill-unroll
+            # coerces the `{}` fill value (a MojoDict *) to the element type,
+            # and b0910af72 made that arm actually fire for a comptime width,
+            # exposing this cast as gcc errors on every appended element.
+            v = gen._ensure_local(s, v)
+            if s != 'void *':
+                v = gen._cast('void *', f"{v}")
+            ip = gen._cast('int64_t', f"{v}")
+            gen._cast_into(dest, d, ip)
         else:
             # GIMPLE: a cast operand must be a local, never a global decl
             # (e.g. a _slit_ string literal). Load it first.
             v = gen._ensure_local(s, v)
-            gen._emit(f'  {dest} = ({d}){v};')
+            gen._cast_into(dest, d, f"{v}")
 
 
 def _param_safe_name(gen, bare: str) -> str:
@@ -2586,7 +2940,14 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if rat == '_Bool' or (enode is not None and rat in ('int', 'int64_t')
                           and gimple_exprtypes.is_python_bool_expr(gen, enode)):
         return gen._call_expr('char *', 'mojo_repr_bool',
-                              [('int', gen._new_val('int', f'(int){rav}'))])
+                              [('int', gen._cast('int', rav))])
+    # A WORD whose kind only the runtime knows (a regex group, a match, a
+    # DirEntry name): its repr is spelled by the kind the runtime reads off it.
+    if rat in ('int', 'int64_t') and (
+            rav in gen._dyn_word_vals
+            or (isinstance(enode, gimple_ctypes.IdentExpr)
+                and _as_str(enode.name) in gen._dyn_word_locals)):
+        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     # A BOXED CONTAINER — a module-global list/dict/set read back as an
     # `int64_t`, or a call result whose static type is the box but whose real
     # value, per `_get_actual_type`, is a container. `_stringify_value` (the
@@ -2598,7 +2959,27 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         _real = gen._get_actual_type(rat, rav)
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             rat = _real
-            rav = gen._new_val(_real, f'({_real}){rav}')
+            rav = gen._cast(_real, rav)
+    # A `d[k]` read whose value type was unknown at compile time: the slot's
+    # runtime kind (None/True/1.5/...) is recoverable from (dict,key).
+    _dsr = getattr(gen, '_dict_slot_reads', {})
+    _dsr_hit = _dsr.get(rav)
+    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
+        _dsr_hit = _dsr.get(_as_str(enode.name))
+    if rat in ('int', 'int64_t') and _dsr_hit is not None:
+        _dv, _kv, _kk = _dsr_hit
+        if _kk == 'str':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot',
+                                  [('MojoDict *', _dv), ('char *', _kv)])
+        if _kk == 'bytes':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
+                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
+        if _kk == 'none':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
+                                  [('MojoDict *', _dv)])
+    # A call result may be a boxed dict-slot value carrying its runtime kind.
+    if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
+        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2652,12 +3033,17 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         # `repr(ast)` on a parsed AST list: every node printed as a
         # meaningless `<object at 0x...>` instead of its real fields,
         # since only mojo_repr_obj (no field-metadata table) existed.
-        vp = gen._new_val('void *', f'(void *){rav_local}')
+        vp = gen._cast('void *', rav_local)
         return gen._call_expr('char *', '_mojo_dispatch_repr', [('void *', vp)])
     if rat in ('double', 'float'):
-        rav_d = rav if rat == 'double' else gen._new_val('double', f'(double){rav}')
+        rav_d = rav if rat == 'double' else gen._cast('double', rav)
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
-    rav64 = rav if rat == 'int64_t' else gen._new_val('int64_t', f'(int64_t){rav}')
+    rav64 = rav if rat == 'int64_t' else gen._cast('int64_t', rav)
+    # A word of unknown kind (boxed dict-slot value, tagged word, string
+    # pointer held in int64_t, or plain integer): render via the runtime's
+    # generic repr discriminator. For a plain integer it is the same decimal.
+    if rat in ('int', 'int64_t'):
+        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav64)])
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 
@@ -2738,7 +3124,7 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
             args = list(width_ints)
             args.append(nv)
             return gen._sprintf_n(full_spec[:-1] + 'c', args)
-        cv = gen._new_val('char', f'(char){nv}')
+        cv = gen._cast('char', nv)
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
     if conv in 'diouxX':
         nv = gen._to_int64(et, ev)
@@ -2752,7 +3138,7 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
         args.append(nv)
         return gen._sprintf_n(c_spec, args)
     if conv in 'fFeEgG':
-        dv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
+        dv = ev if et == 'double' else gen._cast('double', ev)
         args = list(width_ints)
         args.append(dv)
         return gen._sprintf_n(full_spec, args)
@@ -2767,7 +3153,7 @@ def _cast_for_list(gen, elem_type: str, val: str, suf: str) -> str:
     if suf == 'double':
         if elem_type == 'double':
             return val
-        t = gen._new_val('double', f"(double){val}")
+        t = gen._cast('double', val)
         return t
     # str: a genuine single character (real C `char`/`int`/`int64_t` holding
     # a small ASCII code, e.g. from string indexing via mojo_str_char_at)
@@ -2791,13 +3177,13 @@ def _cast_for_list(gen, elem_type: str, val: str, suf: str) -> str:
     # truncated it, appending the low byte of the pointer as a 1-char
     # string instead of the boxed string it points to.
     if suf == 'str' and (elem_type == 'char' or actual == 'char'):
-        cval = val if elem_type == 'char' else gen._new_val('char', f"(char){val}")
+        cval = val if elem_type == 'char' else gen._cast('char', val)
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cval)])
     # str: cast int-cast strings (boxed pointers stored as int64_t) to char*
     if suf == 'str' and elem_type in ('int', 'int64_t'):
         cp = gen._new_temp('char *')
-        ip = gen._new_val('int64_t', f"(int64_t){val}")
-        gen._emit(f"  {cp} = (char *){ip};")
+        ip = gen._cast('int64_t', val)
+        gen._cast_into(cp, 'char *', ip)
         return cp
     return val  # already char*
 
@@ -2858,6 +3244,27 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     types — slice 2). Returns (ctype, val) if elaborated, else None."""
     explicit = isinstance(node.func, gimple_ctypes.SubscriptExpr)
     g = node.func.obj.name if explicit else node.func.name
+    # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside
+    # `self_recursion`) cannot be monomorphized: the arg is not a concrete
+    # literal, so no instantiation exists, and the call would reach the
+    # generated C as a declared-never-defined extern (a dangling symbol).
+    # Refuse with a clear diagnostic instead. The bracketed form is decided on
+    # its arguments (`self_recursive_uninstantiable`), not on the name alone.
+    if explicit:
+        _rec = ggc.self_recursive_uninstantiable(gen, node.func)
+        if _rec is not None:
+            raise RuntimeError(
+                f'cannot compile module: self recursive call to {_rec!r} will '
+                f'cause an infinite loop')
+    else:
+        # A bare call has no bracket to inspect, so the name test stands: the
+        # enclosing function is either the bare base or its mangled instance
+        # (`self_recursion_1_i_1_3`).
+        _cfn = getattr(gen, 'current_func_name', None)
+        if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
+            raise RuntimeError(
+                f'cannot compile module: self recursive call to {g!r} will '
+                f'cause an infinite loop')
     source = gen._imported_generics.get(g)
     if not source:
         return None
@@ -2884,7 +3291,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         el = elaborate.Elaborator()
         # A generic being elaborated here MAY contain a nested async/
@@ -3082,7 +3489,20 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
         # elaboration failures elsewhere, e.g. a generic this
         # elaborator just can't handle yet).
         raise
-    except Exception:
+    except Exception as _elab_e:
+        # A `ConformanceError` from `check_bounds` is a real diagnostic
+        # (`where` clause / trait bound violated by the call's type args),
+        # not a transient elaboration failure — it must surface, not fall
+        # through to the silent stub path (modular:
+        # `error: invalid call to '<fn>': violated constraint`).
+        if 'Conformance' in type(_elab_e).__name__:
+            _cfn = getattr(gen, '_current_filename', '') or ''
+            _cln = getattr(node, 'line', 0) or 0
+            _clc = getattr(node, 'col', 0) or 0
+            _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+            raise RuntimeError(
+                f"{_cat}error: invalid call to '{g}': violated constraint\n"
+                f"note: {type(_elab_e).__name__}: {_elab_e}")
         gimple_ctypes._debug_note('generic call elaboration failed')
         info = None
     if not info:
@@ -3251,6 +3671,26 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     _known = _intu.get((base_name, tuple(type_args)))
     if _known:
         return _known
+    # A struct whose signature came from a precompiled `.mojoc` artifact has
+    # no source template to elaborate, but its stored bracket-parameter bound
+    # is still a constraint the instantiation must satisfy. Check it here,
+    # where a source-defined struct's own bound check would have run, and
+    # refuse with the ordinary diagnostic rather than fall through to the
+    # plain-constructor path (which is what made the modular
+    # `import_mojoc_conformance_error` import succeed silently).
+    _mojoc = getattr(gen, '_mojoc_structs', None) or {}
+    _mojoc_rec = _mojoc.get(base_name)
+    if _mojoc_rec is not None:
+        if _mojoc_rec.get('kind') == 'struct':
+            import mojo.middle.mojoc_conformance as _mojoc_conf
+            _diag = _mojoc_conf.conformance_diagnostic(
+                _mojoc_rec, [str(t) for t in type_args],
+                getattr(gen, '_source_text', '') or '', _mojoc)
+            if _diag:
+                raise RuntimeError(_diag)
+        # No template to monomorphize: the artifact carries a signature, not
+        # a body. Conforming instantiations fall through unchanged.
+        return None
     source = gen._imported_generic_structs.get(base_name)
     if not source:
         return None
@@ -3267,7 +3707,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     if not all(gimple_exprtypes._is_concrete_type_arg(ta) for ta in type_args):
         return None
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
     except Exception as e:
@@ -3302,6 +3742,31 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # `monomorphize.instantiate` now carries into the exception. Without
         # that, the failure had to be inferred from a gcc error three stages
         # downstream.
+        #
+        # EXCEPTION: a compile-time diagnostic produced while compiling the
+        # instantiated body (provably-false `comptime assert` / `constrained`)
+        # is a real user diagnostic, not an elaboration-capability failure.
+        # Swallowing it accepts invalid instantiations silently
+        # (comptime validation diagnostics). Re-raise those so
+        # the diagnostic surfaces at the instantiation site.
+        _emsg = str(e)
+        if isinstance(e, RuntimeError) and (
+                'constraint failed' in _emsg
+                or 'comptime assertion failed' in _emsg
+                or ('function instantiation failed' in _emsg
+                    and 'struct alignment must be a positive power of 2' in _emsg)
+                or ('function instantiation failed' in _emsg
+                    and 'use of unknown declaration' in _emsg
+                    and '@align' in _emsg)):
+            raise
+        # A `where` clause of the struct that is provably false for these type
+        # args is a real diagnostic (modular: `error: violated constraint`),
+        # not an elaboration-capability failure. Only this subclass surfaces:
+        # the bound check's other ConformanceErrors are the false positives the
+        # fall-through above exists for.
+        import elaborate as _elab_mod
+        if isinstance(e, _elab_mod.WhereConformanceError):
+            raise _elab_mod.where_violation_error('instantiation', base_name, e)
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")
@@ -3328,14 +3793,28 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             return None
         source = gen._imported_generic_structs.get(g)
         try:
-            module_src = open(source).read()
+            module_src = gen._generic_source_text(source)
             import elaborate
             info = elaborate.Elaborator().elaborate_generic_struct_inferred(
                 module_src, g, [ct for ct, _ in
                                 ([gen.lower_expr(a) for a in node.args]
                                  + [gen.lower_expr(k) for _, k in
                                     (getattr(node, 'kwargs', None) or [])])])
-        except Exception:
+        except Exception as e:
+            # A compile-time diagnostic (provably-false comptime assert /
+            # constrained) from compiling the instantiated body is a real user
+            # diagnostic — re-raise it instead of silently accepting an invalid
+            # instantiation (comptime validation diagnostics).
+            _emsg = str(e)
+            if isinstance(e, RuntimeError) and (
+                    'constraint failed' in _emsg
+                    or 'comptime assertion failed' in _emsg
+                    or ('function instantiation failed' in _emsg
+                        and 'struct alignment must be a positive power of 2' in _emsg)
+                    or ('function instantiation failed' in _emsg
+                        and 'use of unknown declaration' in _emsg
+                        and '@align' in _emsg)):
+                raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None
         name = _register_generic_struct(gen, g, info) if info else None
@@ -3613,37 +4092,37 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     idx_c = gen._cname(idx_var)
     val_c = gen._cname(val_var)
 
-    len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
+    len64 = gen._rt_call('int64_t', 'mojo_list_len', [it_val])
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
-    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     if start_val is not None:
         disp_idx = gen._new_val('int64_t', f"{idx64} + {start_val}")
-        gen._emit(f"  {idx_c} = {disp_idx};")
+        gen._copy(f"{idx_c}", disp_idx)
     else:
-        gen._emit(f"  {idx_c} = {idx64};")
+        gen._copy(f"{idx_c}", idx64)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     # An element whose kind nothing recorded is a word of unknown kind (see
     # `_dyn_word_locals`), exactly as in the `for` statement's enumerate.
     if (not elem or elem == 'int64_t') and gen.var_types.get(val_var) == 'int64_t':
         gen._dyn_word_locals.add(_as_str(val_var))
     if suf == 'double':
-        gen._emit(f"  {val_c} = mojo_list_get_double ({it_val}, {idx64});")
+        gen._rt_into(val_c, 'mojo_list_get_double', [it_val, idx64])
     elif suf == 'str':
-        temp_str = gen._new_val('char *', f"mojo_list_get_str ({it_val}, {idx64})")
+        temp_str = gen._rt_call('char *', 'mojo_list_get_str', [it_val, idx64])
         target_type = gen._type_of(val_var)
         if target_type == 'char *':
-            gen._emit(f"  {val_c} = {temp_str};")
+            gen._copy(f"{val_c}", temp_str)
         else:
-            int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
-            gen._emit(f"  {val_c} = {int_ptr};")
+            int_ptr = gen._cast('int64_t', temp_str)
+            gen._copy(f"{val_c}", f"{int_ptr}")
     else:
-        raw64 = gen._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
+        raw64 = gen._rt_call('int64_t', 'mojo_list_get_int', [it_val, idx64])
         target_type = gen._type_of(val_var)
         if target_type and target_type != 'int64_t':
             gen._safe_coerce_emit('int64_t', target_type, raw64, val_c)
@@ -3652,7 +4131,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     if val_names is not None:
         # Unpack the nested tuple slot bound above into its own names, with
         # the accessor matching the inner tuple's recorded slot type.
-        _pair_ptr = gen._new_val('MojoList *', f"(MojoList *){val_c}")
+        _pair_ptr = gen._cast('MojoList *', f"{val_c}")
         _pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
         _pair_suf = gimple_ctypes.TypeLattice.list_suffix(_pair_elem)
         for _vi in range(len(val_names)):
@@ -3663,55 +4142,55 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
             _vc = gen._cname(_vn)
             _vt = gen.var_types.get(_vn, _pair_elem)
             if _pair_suf == 'str':
-                _sv = gen._new_val('char *', f"mojo_list_get_str ({_pair_ptr}, {_vi})")
+                _sv = gen._rt_call('char *', 'mojo_list_get_str', [_pair_ptr, f"{_vi}"])
                 if _vt == 'char *':
-                    gen._emit(f"  {_vc} = {_sv};")
+                    gen._copy(f"{_vc}", _sv)
                 else:
-                    _bv = gen._new_val('int64_t', f"(int64_t){_sv}")
-                    gen._emit(f"  {_vc} = {_bv};")
+                    _bv = gen._cast('int64_t', _sv)
+                    gen._copy(f"{_vc}", f"{_bv}")
                     gen._actual_types[_vn] = 'char *'
             else:
-                _iv = gen._new_val('int64_t', f"mojo_list_get_int ({_pair_ptr}, {_vi})")
+                _iv = gen._rt_call('int64_t', 'mojo_list_get_int', [_pair_ptr, f"{_vi}"])
                 if _vt == 'int64_t':
-                    gen._emit(f"  {_vc} = {_iv};")
+                    gen._copy(f"{_vc}", _iv)
                 else:
                     gen._safe_coerce_emit('int64_t', _vt, _iv, _vc)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._emit(f"  goto {bb_post};")
+    gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
-    gen._emit(f"  {idx64} = {st};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._copy(idx64, st)
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
     # The comprehension is over: every name it bound is the enclosing
-    # function's own binding again (see `ginf._compr_restore_target`).
+    # function's own binding again (see `ginf._restore_binding`).
     for _gn in gi:
-        ginf._compr_restore_target(gen, _gn[0], _gn[1])
+        ginf._restore_binding(gen, _gn[0], _gn[1])
 
 
 def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char')
-    len64 = gen._new_val('int64_t', f'mojo_str_len ({_iv})')
+    len64 = gen._rt_call('int64_t', 'mojo_str_len', [_iv])
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
-    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({_iv}, {idx64});")
+    gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str_cp', [f"mojo_str_data({_iv})", idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._emit(f"  goto {bb_post};")
+    gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
-    gen._emit(f"  {idx64} = {st};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._copy(idx64, st)
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3736,14 +4215,14 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     # CODES, and `sorted(set("hello world"))` came back as
     # [32, 100, 101, ...] instead of [' ', 'd', 'e', ...].
     saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char *')
-    len64 = gen._new_val('int64_t', f'mojo_strlen ({_iv})')
+    len64 = gen._rt_call('int64_t', 'mojo_strlen', [_iv])
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f"  goto {bb_cond};")
+    gen._goto(bb_cond)
     gen._emit_label(bb_cond)
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
-    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+    gen._cond_goto(cond_t, bb_body, bb_after)
     gen._emit_label(bb_body)
     # `mojo_char_at_str`, for _gen_for_cstr's reason in full: gimple rejects a
     # `char` argument ("invalid argument to gimple call"), so the slice stood
@@ -3756,16 +4235,16 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     # runtime and never through `_mojo_at_char`, so requesting that one emits a
     # `static` definition with no call site (master's note beside
     # `_gen_for_cstr` says the same).
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str ({_iv}, {idx64});")
+    gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str', [_iv, idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
-    gen._emit(f"  goto {bb_post};")
+    gen._goto(bb_post)
     gen._emit_label(bb_post)
     one64 = gen._new_val('int64_t', "(int64_t)1")
     st = gen._new_val('int64_t', f"{idx64} + {one64}")
-    gen._emit(f"  {idx64} = {st};")
-    gen._emit(f"  goto {bb_cond};")
+    gen._copy(idx64, st)
+    gen._goto(bb_cond)
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
@@ -3789,7 +4268,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             # empty `char *` "" pointer is non-null and would wrongly pass.
             cv = gen._ensure_bool_cond(_ct, cv)
             bb_next = gen._new_bb()
-            gen._emit(f"  if ({cv}) goto {bb_next}; else goto {bb_skip};")
+            gen._cond_goto(f"{cv}", bb_next, bb_skip)
             gen._emit_label(bb_next)
         gen._emit_label(bb_append)
 
@@ -3828,8 +4307,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
         if _it.endswith(' *') and _it != 'MojoList *':
-            _iv = gen._new_val('MojoList *', f'(MojoList *){_iv_raw}')
-        gen._emit(f"  mojo_list_extend ({res}, {_iv});")
+            _iv = gen._cast('MojoList *', _iv_raw)
+        gen._rt_void('mojo_list_extend', [res, f"{_iv}"])
         # Carry the inner result's ELEMENT TYPE onto the outer one. The
         # single-clause path ends with `gen._elem_types[res] = et`, and
         # returning early here without the equivalent left the outer list's
@@ -3867,7 +4346,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
         if _it.endswith(' *') and _it != 'MojoSet *':
-            _iv = gen._new_val('MojoSet *', f'(MojoSet *){_iv_raw}')
+            _iv = gen._cast('MojoSet *', _iv_raw)
         gen._emit_call('void', '', 'mojo_set_update',
                        [('MojoSet *', res), ('MojoSet *', _iv)])
         # The element type, as the single-clause set arm records it: without it
@@ -3897,7 +4376,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
         if _it.endswith(' *') and _it != 'MojoDict *':
-            _iv = gen._new_val('MojoDict *', f'(MojoDict *){_iv_raw}')
+            _iv = gen._cast('MojoDict *', _iv_raw)
         gen._emit_call('void', '', 'mojo_dict_update',
                        [('MojoDict *', res), ('MojoDict *', _iv)])
         # The dict's VALUE type, keyed as the single-clause dict arm's
@@ -3929,6 +4408,28 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # single-TU `--dump myinterpreter.py`.
         _lr = gen.lower_expr(node.element)
         et = _as_str(_lr[0]); ev = _lr[1]
+        if et == 'int64_t' and ev in gen._boxed_vals:
+            # the element IS a tagged word taken straight off a tagged-word
+            # generator (`list(g())`, `[v for v in g()]`): append it under the
+            # kind it carries (a float box as a double, a bool as a bool, a
+            # string as a string) instead of truncating it through mojo_box_int,
+            # and let the list render itself from its own kinds row.
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', res), ('int64_t', ev)])
+            gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
+            gen._maybe_kinds_vals.add(res)
+            return
+        if et == 'int64_t' and (ev in getattr(gen, '_dyn_word_vals', ())
+                                or gen._is_dyn_word(None, ev)):
+            # A runtime-kinded word (e.g. re.Match.group() returns a str/bytes
+            # word whose kind is only known at run time, and the lowering marks
+            # it dyn_word). Appending it as an int and forcing int repr prints
+            # the raw pointer; append under the kind it carries instead.
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', res), ('int64_t', ev)])
+            gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
+            gen._maybe_kinds_vals.add(res)
+            return
         suf = gimple_ctypes.TypeLattice.list_suffix(et)
         ev_cast = gen._cast_for_list(et, ev, suf)
         # GIMPLE: load global string literals into temp before function call
@@ -4040,8 +4541,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
         # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
         # keyed by content, so the two spellings of one key disagreed. See
-        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
-        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
+        # CODEGEN_dict_comprehension_repr_is_separately_broken (tuple key
+        # hashed by address) and CODEGEN_tuple_dict_key_hashed_by_address for
         # spelling that was fixed the same way.
         #
         # `_emit_dict_pair_store` lowers both operands itself, so the values
@@ -4073,3 +4574,32 @@ def _eval_const_compare_op(gen, op: str, left, right):
     return None
 
 
+
+
+# ── The C++ side of the container-kind chokepoint ───────────────────────────
+# `_safe_coerce_emit` guards the GIMPLE C backend. The coroutine backend emits
+# C++ TEXT, where a container-kind cast is spelled in the emitted source and
+# there is no temp to route through it. These three helpers are the only place
+# that text is composed, so `test_no_new_container_casts.py` (which exempts this
+# file) still sees every other container-kind cast as a regression.
+
+def cpp_container_cast_prefix(kind: str, via_intptr: bool) -> str:
+    """`(MojoList *)(intptr_t)` or `(MojoList *)`: the cast a C++ coroutine
+    expression applies to the operand text that follows. `kind` is the bare
+    struct name (`MojoList`, `MojoDict`, `MojoSet`, `MojoBytes`)."""
+    if via_intptr:
+        return f"({kind} *)(intptr_t)"
+    return f"({kind} *)"
+
+
+def container_null(kind: str) -> str:
+    """The typed NULL of a container kind, `(MojoDict *)0`."""
+    return f"({kind} *)0"
+
+
+def cpp_word_container_operator(kind: str, via_intptr: bool) -> str:
+    """`operator MojoList *() const { return (MojoList *)w; }`, one conversion
+    of the pointer-sized WORD struct the coroutine backend returns for a call
+    whose C return type is not final yet."""
+    return (f"operator {kind} *() const {{ return "
+            f"{cpp_container_cast_prefix(kind, via_intptr)}w; }}")

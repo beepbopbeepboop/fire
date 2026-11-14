@@ -144,8 +144,7 @@ BOOL_TYPE_NAMES = frozenset({"Bool", "bool"})
 # family.  `Float16`/`Float32` and the `float8_*`/`float4_*`/`float6_*` dtypes
 # are therefore NOT here: they stay unclassified, which routes them into the
 # pre-existing refusal with a reason about their declared type rather than
-# producing an integer where a half-precision value should be.  See
-# `bugs/FORMAL_float_binary64_only.md`.
+# producing an integer where a half-precision value should be.
 #
 # Both spellings are here, for the reason `TYPE_NAMES` carries both `int` and
 # `Int` and `STRING_TYPE_NAMES` both `String` and `str`: they are one

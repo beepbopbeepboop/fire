@@ -37,6 +37,10 @@ extern void    mojo_exc_obj_set(void *);
 extern void   *mojo_exc_obj_get(void);
 extern void    mojo_exc_pending_set(int);
 extern int     mojo_exc_pending_get(void);
+extern int     mojo_coro_frame_base(void);
+extern int     mojo_coro_cleanup_base(void);
+extern void   *mojo_coro_slice_save(int frame_base, int cleanup_base);
+extern void    mojo_coro_slice_restore(void *snap);
 
 /* Deterministic exception-class tags -- must match GimpleGen._exc_type_id
    ((zlib.crc32(b"Name") & 0x7fffffff) or 1). Same hardcoding pattern as
@@ -87,6 +91,12 @@ struct MojoCoro {
     void         *exc_obj_save;
     int           exc_pending_save;
     jmp_buf       exc_slice[MOJO_CORO_EXC_SLICE_MAX];
+
+    /* frame/cleanup records the body holds while parked (fire_runtime.c) */
+    int           frame_base;
+    int           cleanup_base;
+    void         *slice;
+    int           ret_set;      /* the body called __mojo_coro_set_return (a valued `return`) */
 };
 
 /* The coroutine currently executing its body (NULL == a resumer context).
@@ -178,6 +188,8 @@ coro_run(MojoCoro *c, int64_t send_box)
 {
     c->send_box = send_box;
     c->exc_base = _mojo_exc_top;
+    c->frame_base = mojo_coro_frame_base();
+    c->cleanup_base = mojo_coro_cleanup_base();
     c->status   = MOJO_CORO_RUNNING;
     c->started  = 1;
 
@@ -244,6 +256,9 @@ __mojo_coro_throw(MojoCoro *c, int64_t exc_type, char *exc_msg,
     return 0;
 }
 
+void *__mojo_coro_slice_of(MojoCoro *c) { return c ? c->slice : NULL; }
+int   __mojo_coro_is_running(MojoCoro *c) { return c && c->status == MOJO_CORO_RUNNING; }
+
 int64_t
 __mojo_coro_yield(MojoCoro *c, int64_t val_box)
 {
@@ -261,6 +276,8 @@ __mojo_coro_yield(MojoCoro *c, int64_t val_box)
     c->exc_pending_save  = mojo_exc_pending_get();
     _mojo_exc_top = c->exc_base;
 
+    c->slice = mojo_coro_slice_save(c->frame_base, c->cleanup_base);
+
     c->yield_box = val_box;
     c->status    = MOJO_CORO_SUSPENDED;
 
@@ -269,6 +286,8 @@ __mojo_coro_yield(MojoCoro *c, int64_t val_box)
 
     /* --- resumed: restore our exception state --- */
     c->status = MOJO_CORO_RUNNING;
+    mojo_coro_slice_restore(c->slice);
+    c->slice = NULL;
     if (c->exc_slice_n > 0)
         memcpy(&_mojo_exc_stack[c->exc_base + 1], c->exc_slice,
                (size_t)c->exc_slice_n * sizeof(jmp_buf));
@@ -322,11 +341,16 @@ void
 __mojo_coro_set_return(MojoCoro *c, int64_t box)
 {
     c->ret_box = box;
+    c->ret_set = 1;
 }
+
+int __mojo_coro_has_return(MojoCoro *c) { return c && c->ret_set; }
 
 static void
 coro_free(MojoCoro *c)
 {
+    free(c->slice);
+    c->slice = NULL;
     if (c->map_base) munmap(c->map_base, c->map_size);
     free(c);
 }

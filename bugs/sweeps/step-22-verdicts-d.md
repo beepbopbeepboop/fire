@@ -1,0 +1,14 @@
+# step-22 verdicts (chunk d)
+
+| # | file | verdict | message (first 100 chars) | reason / fix | commit |
+|---|------|---------|---------------------------|-------------|--------|
+| 34 | ../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo | T | the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_type.`!k | module-level `comptime Never = __mlir_type.`!kgen.never``: an MLIR type, not a value |  |
+| 35 | ../new-modular/Mojo/stdlib/std/format/repr.mojo | T | value.write_repr_to() is a method call on a value, and this backend lowers only add, append, clear,  | `value.write_repr_to(...)` is a method call on a generic value; the backend lowers a fixed set of methods and a trait-bound generic receiver has none |  |
+| 36 | ../new-modular/Mojo/stdlib/std/memory/alloc.mojo | T | ThinAllocation_1_T_1_T.write_to: `FormatStruct` is called, and it is imported from `std.format._util | `FormatStruct(writer, ...)` with `writer: Some[Writer]`: existential, never bound (16e Q2, B1); the alloc row moved from `dealloc` to here after 16d |  |
+| 37 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo | T | the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir | module-level `comptime AnyOrigin = __mlir_attr[...]`: an MLIR attribute template, no MLIR on this path |  |
+| 38 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo | C | getsize: `stat` is called, and it is imported from `..fstat`, so the call has to bind a symbol `..fs | `stat` is imported from `..fstat` (a relative parent-package import) and called; the message says the module does not export it. Whether `..fstat` declares `stat` is not shown by this message; needs relative-parent import resolution. Size S-M |  |
+| 39 | ../new-modular/Mojo/stdlib/std/random/_rng.mojo | C | _PhiloxWrapper.__init__: `PhiloxRandom` is called, and it is imported from `.philox`, so the call ha | `_rng.mojo:32` is `from .philox import Random as PhiloxRandom`: an ALIAS in the importer. The message is true (`.philox` has no `PhiloxRandom`) but offers 'an alias' only as one possibility when the source is exactly that; needs aliased relative-import resolution, and then the message should say the importer aliases it. Size S-M |  |
+| 40 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo | C | Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, not a su | `Span[StaticString, ImmStaticOrigin]`: `ImmStaticOrigin` is a bare comptime name from the builtin origin module that this image cannot resolve. Needs builtin origin aliases. Size M |  |
+| 41 | ../new-modular/Mojo/stdlib/std/utils/_serialize.mojo | T | _serialize_elements[serialize_fn, True] is a compile-time explicit-parameter list on a generic, not  | `_serialize_elements[serialize_fn, True]`: `serialize_fn` is a comptime FUNCTION-valued parameter; no runtime word |  |
+
+T=5 M=0 S=0 C=3

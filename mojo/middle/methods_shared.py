@@ -56,6 +56,24 @@ def _gmm_callexpr_node(x) -> CallExpr:
     (miss sentinel 1 -> `mojo_list_len(1)` SIGSEGV)."""
     return x
 
+# `os.path.realpath` is a chain of lstat calls and these two predicates ask it about the
+# same few paths (`_SELFHOST_DIR`, each compiler source file) tens of thousands of times
+# per `--dump-full` -- about 7% of the compile. A path's realpath does not change while the
+# compile runs. Annotated like the other module-level memo tables the compiled path uses.
+_REALPATH_MEMO: dict = {}
+
+
+def _cached_realpath(p: str) -> str:
+    # Typed on purpose: an unannotated helper's result unified with unrelated
+    # call sites in the self-hosted build (`invalid operands to binary +`).
+    _hit: str = _as_str(_REALPATH_MEMO.get(p, ''))
+    if _hit != '':
+        return _hit
+    _r: str = _as_str(os.path.realpath(p))
+    _REALPATH_MEMO[p] = _r
+    return _r
+
+
 def _is_selfhost_source_file(path: str) -> bool:
     """True when `path` is a source file OF this compiler — a root-level
     `*.py` beside `fire_compiler.py`, or one inside its own `mojo/` package
@@ -104,9 +122,9 @@ def _is_selfhost_source_file(path: str) -> bool:
     # comment's rule. Nothing in `mojo/middle/*` may reach `gimple_codegen` at
     # module level, because that edge IS the middle-tier import cycle.
     import gimple_codegen
-    _rp = os.path.realpath(os.path.abspath(path))
+    _rp = _cached_realpath(os.path.abspath(path))
     _sd = gimple_codegen._SELFHOST_DIR
-    _rsd = os.path.realpath(_sd)
+    _rsd = _cached_realpath(_sd)
     _dir = os.path.dirname(_rp)
     # `'/'`, not `os.sep`: `gimple_ctypes.os` is an opaque module marker on
     # the compiled backend and `.sep` raised `AttributeError: sep`
@@ -185,8 +203,8 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     # `_mojo_dispatch_setattr` on a bogus pointer. Re-derived locally rather
     # than imported cross-module (see _is_selfhost_source_file's own docstring
     # for the self-hosted resolution gap that forces the duplication).
-    _rcur = gimple_ctypes.os.path.realpath(cur_abs)
-    _rsd = gimple_ctypes.os.path.realpath(sd)
+    _rcur = _cached_realpath(cur_abs)
+    _rsd = _cached_realpath(sd)
     _in_shtree = (cur_abs == sd or cur_abs.startswith(sd + gimple_ctypes.os.sep)
                   or _rcur == _rsd or _rcur.startswith(_rsd + gimple_ctypes.os.sep))
     if not _in_shtree:
@@ -229,3 +247,91 @@ _SELFHOST_SIBLING_MODULE_PREFIXES = (
     'determinism_trace', 'imports', 'elaborate', 'monomorphize', 'comptime',
     'cas', 'build_stdlib_dylib', 'driver')
 
+
+
+def poly_dispatch_plan(self):
+    """The generated polymorphic-receiver dispatches for this module.
+
+    A constructor slot that received two or more different `<Struct> *`
+    (`self._poly_slot_cands`) stays `int64_t`, so a method called on it is a
+    call on a word of unknown type. Each method name at least two candidates
+    define gets one generated `static int64_t _mojo_poly_<m>_<S1>_<S2>(int64_t)`
+    that switches on the receiver's leading `__mojo_type_id` and calls the
+    candidate's own `<S>_<m>`. A tag that matches no candidate raises the same
+    AttributeError a missing dynamic attribute raises.
+
+    Scope of this first slice, chosen so nothing that compiles today is refused:
+    only methods that take NO arguments beyond `self` and return `int64_t` are
+    dispatched. Any other polymorphic method keeps the scalar no-op stub, which
+    is the behaviour before this function existed.
+
+    Candidates that disagree on the method's return type or on its arity have
+    no single dispatch call shape, so they are not dispatched at all: they are
+    recorded under `'refused'` with the compile error the call site raises. A
+    method that is merely not dispatchable yet (arguments, a non-`int64_t`
+    unanimous return) is left out of both, and keeps the stub it always had.
+
+    Returns {'slots': {slot key: {method: dispatch name}},
+             'dispatch': {dispatch name: (method, [struct, ...])},
+             'refused': {slot key: {method: error message}}}.
+    Cached on `self._poly_plan`, keyed by the candidate-slot count so a plan
+    asked for before the constructor pass has run is never served stale.
+    """
+    _cache_key = len(getattr(self, '_poly_slot_cands', None) or {})
+    _cached = getattr(self, '_poly_plan', None)
+    if _cached is not None and _cached[0] == _cache_key:
+        return _cached[1]
+    plan = {'slots': {}, 'dispatch': {}, 'refused': {}}
+    defs = getattr(self, '_poly_struct_defs', None) or {}
+    for skey, cands in (getattr(self, '_poly_slot_cands', None) or {}).items():
+        defining_by_method = {}
+        for S in cands:
+            sd = defs.get(S)
+            if sd is None:
+                continue
+            for md in (sd.methods or []):
+                m = _as_str(md.name)
+                if m.startswith('__'):
+                    continue
+                defining_by_method.setdefault(m, []).append(S)
+        for m, defining in defining_by_method.items():
+            if len(defining) < 2:
+                continue
+            shapes = {}
+            for S in defining:
+                md = None
+                for _x in (defs[S].methods or []):
+                    if _as_str(_x.name) == m:
+                        md = _x
+                        break
+                extra = [p for p in (md.params or []) if _as_str(p[0]) != 'self']
+                shapes[S] = (len(extra), self.func_return_types.get(f"{S}_{m}"))
+            arities = {a for a, _r in shapes.values()}
+            # A return type is only a disagreement once every candidate's is
+            # known: an unregistered one is "not yet inferred", not a conflict.
+            rets = {r for _a, r in shapes.values()}
+            ret_conflict = None not in rets and len(rets) > 1
+            if len(arities) > 1 or ret_conflict:
+                what = ("arity" if len(arities) > 1 else "return type")
+                detail = ", ".join(f"{S}.{m} {shapes[S][0]} extra arg(s) -> "
+                                   f"{shapes[S][1]}" for S in sorted(defining))
+                plan['refused'].setdefault(skey, {})[m] = (
+                    f"polymorphic receiver {skey}.{m}(): the structs "
+                    f"{sorted(defining)} that a constructor slot received disagree "
+                    f"on the {what} of `{m}` ({detail}); no single dispatch call "
+                    f"can serve them")
+                continue
+            eligible = True
+            for S in defining:
+                extra_n, ret = shapes[S]
+                if extra_n or ret != 'int64_t':
+                    eligible = False
+                    break
+            if not eligible:
+                continue
+            names = sorted(defining)
+            dname = f"_mojo_poly_{m}_" + "_".join(names)
+            plan['slots'].setdefault(skey, {})[m] = dname
+            plan['dispatch'][dname] = (m, names)
+    self._poly_plan = (_cache_key, plan)
+    return plan

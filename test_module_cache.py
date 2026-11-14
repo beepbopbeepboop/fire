@@ -1919,7 +1919,6 @@ def test_mangle_is_injective(wd):
     import closure the formal sweep could not resolve, which filed the file
     under `not-answerable/host-import` — a class the coverage denominator
     excludes — and `test_formal_dylib.py` was the same, for thirteen more
-    files. `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
     measures the row and why no `.mojo` module answers it (a generator of
     tuples is not one 64-bit word); both files are now spelled without it."""
     _alpha = ['A', 'B', '_', ' ', '.', '[', ']', ',', '1']
@@ -2096,6 +2095,9 @@ def test_in_tu_instantiation(wd):
                                   'list.mojo'),
         }
         struct_field_types: dict = {}
+
+        def _generic_source_text(self, path):
+            return open(path).read() if _os.path.exists(path) else ''
     check("intu#1: an iterator whose only overload is `__iter__` is carried "
           "(`_Empty`, `_Once`, `_RepeatIterator`)",
           all(EI._protocol_only_overloads(_G(), n)

@@ -15,7 +15,7 @@
         check-stdlib-jit check-ab-native check-native-dumpfull \
         check-formal check-formal-dylib check-formal-run check-formal-x86 \
         check-formal-x86-model check-formal-x86-endtoend check-formal-imports \
-        check-formal-sweep check-suite check-list check-plan \
+        check-formal-sweep check-orchestrator check-suite check-list check-plan \
         wholeprogram-help \
         clean clean-bootstrap stdlib bootstrap preflight suite-help \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 \
@@ -182,7 +182,7 @@ demo:
 suite-help:
 	@$(SUITE) --list
 
-# Kept because bugs/CODEGEN_bootstrap_resource_blowup.md points here for the
+# Kept because bugs/hard/CODEGEN_bootstrap_resource_blowup.md points here for the
 # memory-containment story. The numbers now live in one place — MEMCLASS in
 # tools/suite.py, printed by `make check-list` — instead of in a macro here
 # that only one target used.
@@ -248,6 +248,12 @@ check-list:
 # to know not to run two at once.
 check:
 	@$(SUITE) $(SUITE_J) check
+
+# The orchestrator's own tests (swarm/registry/reclass/landing). Not part of
+# `check`: they exercise git-facing fleet passes, and the everyday loop must
+# not spawn git or need a git binary at all.
+check-orchestrator:
+	@$(SUITE) $(SUITE_J) orchestrator
 
 gate:
 	@$(SUITE) $(SUITE_J) gate

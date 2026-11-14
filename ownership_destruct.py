@@ -1737,8 +1737,8 @@ def lambda_value_owned(fn_body, name: str) -> bool:
 
     A capturing lambda's value is a `MojoBoundMethod` wrapping a `malloc`'d
     environment: two allocations and a `_reg_bound_method` entry per creation,
-    ~74 B/iteration measured over 100k and 400k iterations
-    (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md). That object dies
+    ~74 B/iteration measured over 100k and 400k iterations in the
+    capturing-lambda env-leak probe. That object dies
     with the scope that made it only if the scope is its last holder, and
     "holder" here is narrow: the ONLY acceptable mention of `name` after its
     binding is as the CALLEE of a call (`f(x)`). Everything else can keep the
@@ -1764,6 +1764,24 @@ def lambda_value_owned(fn_body, name: str) -> bool:
     return _lambda_uses_ok(fn_body, name)
 
 
+def call_value_owned(fn_body, name: str) -> bool:
+    """True iff the callable local `name` that is bound to a CALL RESULT (a
+    callee proven to return a fresh closure, see `returns_fresh_closure`) may
+    be freed at scope exit TOGETHER with the closure the call returned — its
+    environment and the `{mut}` boxes it holds — i.e. `mojo_closure_free`.
+
+    This is the caller-side half of the escaping-closure ownership: the value
+    leaves the CALLEE, and the question "is the caller its last holder?" is the
+    same one `lambda_value_owned` asks of a local lambda, except the binding is
+    a call (`var f = make_counter(r)`) rather than a `lambda`. Everything else
+    is identical and fail-closed: the only acceptable mention of `name` after
+    its binding is as the CALLEE of a call (`f(x)`); `g = f`, `return f`,
+    `kept.append(f)`, a display, `f.attr`, `f[0]`, or a capture by another
+    `lambda`/`def` all keep the value alive (today's leak, never a wrong free).
+    """
+    return _lambda_uses_ok(fn_body, name, binding_is_lambda=False)
+
+
 def nested_def_env_owned(fn_body, name: str) -> bool:
     """True iff the environment `_alloc_<name>_env()` allocated for a nested
     `def name` may be freed when the enclosing function returns.
@@ -1772,9 +1790,9 @@ def nested_def_env_owned(fn_body, name: str) -> bool:
     and for the same reason: the environment dies with the scope that made it
     only if that scope is its last holder, and "holder" is narrow — the ONLY
     acceptable mention of `name` is as the CALLEE of a call. `return inner(1)
-    + inner(2)` (one env, two calls, the shape
-    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1 measured
-    at +16 B/iteration) qualifies; `g = inner`, `kept.append(inner)`,
+    + inner(2)` (one env, two calls, the shape of a nested `def` whose
+    environment is created and called without ever being bound to a local —
+    measured at +16 B/iteration) qualifies; `g = inner`, `kept.append(inner)`,
     `return inner`, `inner.attr` and a mention inside any nested
     `lambda`/`def` (whose own environment can outlive this scope) do not.
 
@@ -1847,28 +1865,33 @@ def _count_defs_named(node, name: str) -> int:
     return n
 
 
-def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:
+def _lambda_uses_ok(node, name: str, as_callee: bool = False,
+                    binding_is_lambda: bool = True) -> bool:
     if isinstance(node, (list, tuple)):
         for item in node:
-            if not _lambda_uses_ok(item, name, False):
+            if not _lambda_uses_ok(item, name, False, binding_is_lambda):
                 return False
         return True
     if not _is_node(node):
         return True
     if isinstance(node, N.VarDecl) and _as_str(node.name) == name:
-        return isinstance(node.value, N.LambdaExpr)
+        # The binding: a lambda local binds a `lambda`; a call-bound local binds
+        # a CALL RESULT (a callee proven to return a fresh closure). Anything
+        # else is a second value we do not own.
+        return (isinstance(node.value, N.LambdaExpr) if binding_is_lambda
+                else isinstance(node.value, N.CallExpr))
     if (isinstance(node, (N.AssignStmt, N.AugAssignStmt))
             and isinstance(node.target, N.IdentExpr)
             and _as_str(node.target.name) == name):
         return False        # a rebinding: a second value, independently owned
     if isinstance(node, N.CallExpr):
-        if not _lambda_uses_ok(node.func, name, True):
+        if not _lambda_uses_ok(node.func, name, True, binding_is_lambda):
             return False
         for a in node.args:
-            if not _lambda_uses_ok(a, name, False):
+            if not _lambda_uses_ok(a, name, False, binding_is_lambda):
                 return False
         for kw in (node.kwargs or []):
-            if not _lambda_uses_ok(kw[1], name, False):
+            if not _lambda_uses_ok(kw[1], name, False, binding_is_lambda):
                 return False
         return True
     if isinstance(node, N.IdentExpr):
@@ -1883,7 +1906,7 @@ def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:
         v = getattr(node, f.name)
         if v is None:
             continue
-        if not _lambda_uses_ok(v, name, False):
+        if not _lambda_uses_ok(v, name, False, binding_is_lambda):
             return False
     return True
 
@@ -1902,6 +1925,157 @@ def _mentions_name(node, name: str) -> bool:
         if _mentions_name(getattr(node, f.name), name):
             return True
     return False
+
+
+def _all_nested_scopes(node, out: list) -> None:
+    """Every nested `def`/`lambda` at any depth under `node`, in order."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _all_nested_scopes(item, out)
+        return
+    if not _is_node(node):
+        return
+    if isinstance(node, (N.FunctionDef, N.LambdaExpr)):
+        out.append(node)
+    for f in dataclasses.fields(node):
+        _all_nested_scopes(getattr(node, f.name), out)
+
+
+def _closure_box_names(clo_def) -> tuple:
+    """The names a nested `def` closes over BY REFERENCE (its `{mut}` heap
+    boxes): its `nonlocal` names plus any explicitly-named `mut` capture-list
+    entry. Returns `(names, complete)`; `complete` is False when a bare-
+    convention entry (`{mut}` with no name) makes the capture set unknowable,
+    in which case the caller must keep the conservative behaviour. A by-value
+    capture and a read of an enclosing name are not boxes."""
+    names = set()
+    complete = True
+    for n in _walk_names(clo_def.body):
+        if isinstance(n, N.NonlocalStmt):
+            for nm in (n.names or []):
+                names.add(_as_str(nm))
+    if getattr(clo_def, 'has_capture_list', False):
+        for entry in (getattr(clo_def, 'captures', None) or []):
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                complete = False
+                continue
+            cap_name, conv = entry[0], entry[1]
+            if cap_name is None:
+                # `{mut}` / `{var}` — capture whatever the body references; the
+                # names are inferred, so a `mut` one is an unknowable box set.
+                if _as_str(conv) == 'mut':
+                    complete = False
+                continue
+            if _as_str(conv) == 'mut':
+                names.add(_as_str(cap_name))
+    return names, complete
+
+
+def _walk_names(node):
+    """Yield every AST node under `node` (depth-first), for the box-name scan."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (list, tuple)):
+            stack.extend(n)
+            continue
+        if not _is_node(n):
+            continue
+        yield n
+        for f in dataclasses.fields(n):
+            stack.append(getattr(n, f.name))
+
+
+def returns_fresh_closure(fn) -> bool:
+    """True iff EVERY call to `fn` provably returns a brand-new CAPTURING
+    closure that nothing else can reference, so the CALLER may own the value —
+    and, with it, the environment and the `{mut}` boxes it holds — freeing all
+    of them at the caller's scope exit.
+
+    This is the escaping counterpart of `lambda_value_owned`/`nested_def_env_
+    owned`: those ask of a local whether it may be freed at ITS scope's exit,
+    and this asks of the value that LEAVES the function whether the caller
+    becomes its sole owner. Every condition closes fail-closed, because a wrong
+    answer is a use-after-free (the caller frees a box or environment another
+    holder still reads) while a missed answer is today's leak:
+      - `fn` is a plain function (not async/a generator/decorated) whose body
+        ends in a terminator and whose EVERY `return` hands back the same
+        local, by name — a bare return, a returned call or display, or two
+        returns of two different closures all refuse;
+      - that local is a capturing nested `def` declared in `fn`'s own body —
+        the value a `return <name>` of a non-capturing `def` hands out is a
+        bare function pointer, which `mojo_closure_free` would misread as a
+        bound method, so the `def` must close over at least one box;
+      - that `def` is the ONLY nested scope in `fn`'s body, so it is the sole
+        captor of every box it holds (a sibling closure — or a lambda, whose
+        capture set is not parsed into names — sharing a box would outlive the
+        free, and this cannot tell the two apart);
+      - none of the boxes the `def` closes over is named anywhere in `fn`'s
+        own body outside the `def`: a store, a second return, a pass-on or a
+        subscript would keep a box alive past the returned closure, so any
+        mention at all is refused rather than judged.
+    """
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False) \
+            or fn.decorators:
+        return False
+    if not fn.body or not _block_terminates(fn.body):
+        return False
+    rets = []
+    _collect_returns(fn.body, rets)
+    if not rets:
+        return False
+    names = set()
+    for r in rets:
+        v = r.value
+        if v is None or not isinstance(v, N.IdentExpr):
+            return False
+        names.add(_as_str(v.name))
+    if len(names) != 1:
+        return False
+    clo_name = names.pop()
+    clo_def = None
+    for st in fn.body:
+        if isinstance(st, N.FunctionDef) and _as_str(st.name) == clo_name:
+            if clo_def is not None:
+                return False   # two `def <name>` in the body: which escapes?
+            clo_def = st
+    if clo_def is None:
+        return False
+    box_names, complete = _closure_box_names(clo_def)
+    if not complete or not box_names:
+        return False
+    scopes = []
+    _all_nested_scopes(fn.body, scopes)
+    for s in scopes:
+        if s is not clo_def:
+            return False
+    for box in box_names:
+        if _box_leaves_body(fn.body, box, clo_def):
+            return False
+    return True
+
+
+def _box_leaves_body(fn_body, box: str, clo_def) -> bool:
+    """True iff `box` is named in `fn_body` anywhere other than inside the
+    returned `clo_def` — the only place it may be read or written. The
+    declaration (`var box = ...`) names it through a string field, not an
+    `IdentExpr`, so it does not count; any OTHER mention (a store, a pass, a
+    subscript, a second return) would hand the box out and keep it alive past
+    the returned closure."""
+    def check(node) -> bool:
+        if isinstance(node, (list, tuple)):
+            return any(check(item) for item in node)
+        if not _is_node(node):
+            return False
+        if node is clo_def:
+            return False        # the returned closure's body is its own territory
+        if isinstance(node, N.IdentExpr):
+            return _as_str(node.name) == box
+        for f in dataclasses.fields(node):
+            if check(getattr(node, f.name)):
+                return True
+        return False
+    return check(fn_body)
 
 
 def _key_view_source(it, name: str) -> str:
@@ -1972,7 +2146,7 @@ def _collect_key_views(node, name: str, keyvars: list) -> bool:
     return True
 
 
-def analyze_module(stmts):
+def analyze_module(stmts: list):
     """Returns {qualified_name: set(candidate_local_names)} for every
     function and struct method in a parsed module, where qualified_name
     is the bare function name or "Struct.method"."""

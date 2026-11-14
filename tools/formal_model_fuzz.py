@@ -272,6 +272,36 @@ def _rn(r):
     return "sp" if r == 31 else "x" + str(r)
 
 
+def gen_ext_sp(rng, free):
+    """The EXTENDED-register class (`option = 011`, UXTX): `add`/`sub`/`subs`.
+
+    The class exists in the model for its SP encoding, but the SP-BASED forms
+    cannot be compared differentially: the model's SP is the fixed stand-in
+    `MODEL_SP` and the hardware's is a real stack address, so `add x0, sp, x1`
+    differs by construction in any case that lets the result reach a compared
+    register (measured: 57 of 100 two-instruction `alu` cases "disagreed" with
+    SP as the base, none with a register base). So the base is a register here,
+    which exercises the same decode row and the same shift/flag arithmetic, and
+    the SP forms are pinned at the proof level (`arm64_step`'s UXTX arms read
+    `arm64_reg_or_sp`) rather than by this oracle. Spelt `uxtx #k` explicitly:
+    with registers only, `lsl #k` would assemble to the SHIFTED class.
+    """
+    d = _dst(rng, free)
+    n = rng.choice([r for r in free if r != 31])
+    m = _r(rng, free)
+    k = rng.randrange(0, 5)
+    op = rng.randrange(0, 3)
+    if op == 0:
+        return ("add x%d, x%d, x%d, uxtx #%d" % (d, n, m, k),
+                struct.pack("<I", 0x8b206000 | (m << 16) | (k << 10) | (n << 5) | d))
+    elif op == 1:
+        return ("sub x%d, x%d, x%d, uxtx #%d" % (d, n, m, k),
+                struct.pack("<I", 0xcb206000 | (m << 16) | (k << 10) | (n << 5) | d))
+    # subs with a real destination (Rd = 31 is the CMP spelling)
+    return ("subs x%d, x%d, x%d, uxtx #%d" % (d, n, m, k),
+            struct.pack("<I", 0xeb206000 | (m << 16) | (k << 10) | (n << 5) | d))
+
+
 def gen_alu(rng, free):
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     i = rng.randrange(0x1000)
@@ -353,6 +383,18 @@ def gen_flags(rng, free):
     if k == 2:
         return "subs x%d, x%d, x%d" % (d, n, m), A.encode_subs_xd_xn_xm(d, n, m)
     return "cmn x%d, x%d" % (n, m), A.encode_cmn_xn_xm(n, m)
+
+
+def gen_ccmp(rng, free):
+    n, m = _r(rng, free), _r(rng, free)
+    cond = rng.choice(CONDS)
+    nzcv = rng.randrange(16)
+    if rng.random() < 0.5:
+        imm5 = rng.randrange(32)
+        return ("ccmp x%d, #%d, #%d, %s" % (n, imm5, nzcv, cond),
+                A.encode_ccmp_xn_imm5(n, imm5, nzcv, cond))
+    return ("ccmp x%d, x%d, #%d, %s" % (n, m, nzcv, cond),
+            A.encode_ccmp_xn_xm(n, m, nzcv, cond))
 
 
 def gen_shifts(rng, free):
@@ -496,10 +538,23 @@ def gen_flagged_alu(rng, free):
 def gen_select(rng, free):
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     c = rng.choice(CONDS)
-    if rng.random() < 0.5:
+    k = rng.randrange(5)
+    if k == 0:
         return "csel x%d, x%d, x%d, %s" % (d, n, m, c), \
             A.encode_csel_xd_xm_cond(d, n, m, c)
-    return "cset x%d, %s" % (d, c), A.encode_cset_xd_cond(d, c)
+    if k == 1:
+        return "cset x%d, %s" % (d, c), A.encode_cset_xd_cond(d, c)
+    if k == 2:
+        return "csinc x%d, x%d, x%d, %s" % (d, n, m, c), \
+            A.encode_csinc_xd_xm_cond(d, n, m, c)
+    if k == 3:
+        return "csinv x%d, x%d, x%d, %s" % (d, n, m, c), \
+            A.encode_csinv_xd_xm_cond(d, n, m, c)
+    if k == 4:
+        return "csneg x%d, x%d, x%d, %s" % (d, n, m, c), \
+            A.encode_csneg_xd_xm_cond(d, n, m, c)
+    return "csel x%d, x%d, x%d, %s" % (d, n, m, c), \
+        A.encode_csel_xd_xm_cond(d, n, m, c)
 
 
 def gen_ext(rng, free):
@@ -595,16 +650,20 @@ def gen_memreg(rng, free):
     base = _base(rng)
     off = OFF_REG
     d = _dst(rng, free)
-    if rng.random() < 0.5:
+    r = rng.random()
+    if r < 1/3.0:
         return ("ldr x%d, [%s, x%d]" % (d, _rn(base), off),
                 A.encode_ldr_xt_xn_xm(d, base, off))
-    return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
-            A.encode_str_xt_xn_xm(d, base, off))
+    elif r < 2/3.0:
+        return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
+                A.encode_str_xt_xn_xm(d, base, off))
+    return ("strb w%d, [%s, x%d]" % (d, _rn(base), off),
+            A.encode_strb_wd_wn_xm(d, base, off))
 
 
 #: The mixes, and what each one is for. `MIXES` is a NAME → generators map
-#: rather than one generator list because a mix is also a row in
-#: `bugs/FORMAL_model_fuzz_ledger.md`, and a row that cannot be named cannot be
+#: rather than one generator list because a mix is also a row of the sweep
+#: ledger (`ledger_row` writes it), and a row that cannot be named cannot be
 #: written down.
 #:
 #: Two forms are deliberately NOT here, and both absences are recorded rather
@@ -640,8 +699,8 @@ def gen_memreg(rng, free):
 #:     lowering wants the form, and the byte-exact `ldp`/`stp` cases in
 #:     `test_arm64_encoders.py` are what would catch it if one landed wrong.
 MIXES = {
-    "alu": (gen_alu, gen_moves),
-    "flags": (gen_flags, gen_alu),
+    "alu": (gen_alu, gen_moves, gen_ext_sp),
+    "flags": (gen_flags, gen_alu, gen_ccmp),
     "shifts": (gen_shifts, gen_alu),
     "muldiv": (gen_muldiv, gen_alu),
     "select": (gen_select, gen_flags),
@@ -1102,6 +1161,9 @@ def stOf (c : Case) : Arm64State :=
     x20 := c.regs.getD 20 0, x21 := c.regs.getD 21 0, x22 := c.regs.getD 22 0, x23 := c.regs.getD 23 0
     x24 := c.regs.getD 24 0, x25 := c.regs.getD 25 0, x26 := c.regs.getD 26 0, x27 := c.regs.getD 27 0
     x28 := c.regs.getD 28 0, x29 := c.regs.getD 29 0, x30 := c.regs.getD 30 0
+    -- The FP file (`d0..d7`) exists since the model grew binary64 arms; the
+    -- integer fuzz leaves it zero, and the FP mixes (if any) set it themselves.
+    d0 := 0, d1 := 0, d2 := 0, d3 := 0, d4 := 0, d5 := 0, d6 := 0, d7 := 0
     sp := UInt64.ofNat MODEL_SP, pc := MODEL_PC, nzcv := c.nzcv, mem := memOf c.mem }
 
 def HEX : List Char := "0123456789abcdef".toList
@@ -1270,10 +1332,11 @@ def compare(hw, md):
 
 # ── sweeps ──────────────────────────────────────────────────────────────
 #
-# A mix is a name, a corpus and a ledger row. The ledger is in
-# `bugs/FORMAL_model_fuzz_ledger.md`: a tally is a fact about one run and stops
-# being true the moment an instruction stops being generated, so what a sweep
-# COVERED is written down beside what it found.
+# A mix is a name, a corpus and a ledger row. The ledger is the sequence of
+# rows `ledger_row` prints, recorded in the commit that makes each sweep: a
+# tally is a fact about one run and stops being true the moment an instruction
+# stops being generated, so what a sweep COVERED is written down beside what it
+# found.
 def build_cases(mix, count, seed, length=None):
     rng = random.Random("%s/%s" % (mix, seed))
     out = [gen_case(rng, mix, length) for _ in range(count)]
@@ -1451,6 +1514,25 @@ def report(tally, findings, cases, limit=12):
         print("  ... and %d more finding(s)" % (len(findings) - limit))
 
 
+#: The verdict columns of a sweep-ledger row, in the order the ledger writes
+#: them.
+LEDGER_VERDICTS = ("AGREE", "WRONG", "NOSTEP", "FAULT", "ENC-MISMATCH",
+                   "ENC-FAIL", "NO-REPORT", "NO-EVAL")
+
+
+def ledger_row(tally, n_cases, seed, mixes):
+    """One sweep-ledger row, from a run's tally.
+
+    The ledger's numbers were copied by hand from stdout and drifted (§2.1 was
+    re-measured and found stale), so the row is produced from the same tally
+    `report` prints. The date and the "what came of it" column are the
+    person's to fill in: they are not facts the tool can measure.
+    """
+    verdicts = "  ".join("%s %d" % (k, tally.get(k, 0)) for k in LEDGER_VERDICTS)
+    return "| %s | %s | %d | %s |" % (
+        ", ".join(mixes), seed, n_cases, verdicts)
+
+
 # ── minimisation ────────────────────────────────────────────────────────
 #
 # A 6-instruction disagreement is a finding; a 1-instruction disagreement is a
@@ -1522,6 +1604,9 @@ def main(argv):
     ap.add_argument("--keep", action="store_true", help="do not delete the artifacts")
     ap.add_argument("--lean-chunk", type=int, default=25, metavar="N",
                     help="cases per lean process (default 25; see run_model)")
+    ap.add_argument("--ledger-row", action="store_true",
+                    help="also print this run as one sweep-ledger row, "
+                         "for the commit that records the sweep")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     verbose_report = args.verbose
@@ -1532,6 +1617,8 @@ def main(argv):
         cases = all_cases(args.cases, args.seed, mixes, args.length)
         tally, findings = sweep(cases, work, args.verbose, args.lean_chunk)
         report(tally, findings, cases)
+        if args.ledger_row:
+            print(ledger_row(tally, len(cases), args.seed, mixes))
         if args.minimise and findings:
             print("minimising %d finding(s):" % min(args.minimise, len(findings)))
             for i, case, _diffs in findings[:args.minimise]:

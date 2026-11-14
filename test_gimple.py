@@ -18,7 +18,7 @@ from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 # This file's 51 per-child budgets were 60, 120, 300 and 30 seconds, spelled at
 # the call site, and every one of them is now a named constant — a quarter of the
-# residue `bugs/TEST_stale_per_child_timeout_literals.md` measured, and the file
+# residue `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED) measured, and the file
 # the doc names first. The classification is five shapes, and it was read off the
 # argv at each site rather than off the number:
 #
@@ -73,7 +73,12 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "ast_rewriter.py::Seq.__init__": "ditto",
     "ast_rewriter.py::Var.__init__": "ditto",
     "ast_rewriter.py::_rewrite_assign_stmt": "runs inside `rewrite`, on a tree no walk has seen",
-    "mojo/backend_gimple/elab_intu.py::_Work.__init__": "`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
+    "ast_rewriter.py::_desugar_one_enum": "runs in the rewrite pipeline (`desugar_enums`), before codegen walks the tree, and writes a freshly parsed StructDef the memo has not seen",
+    "ast_rewriter.py::_rewrite_enum_node": "runs in the rewrite pipeline (`desugar_enums`), before codegen walks the tree; any in-place rewrite is on a pre-walk tree",
+    "ast_rewriter.py::desugar_field_defaults": "runs inside `rewrite`/`desugar_enums` pipeline, before codegen walks the tree, on a pre-walk tree",
+    "gimple_codegen.py::_transform_enum_classes": "runs in the compile pipeline after `_walk_ast_reset()` on a freshly parsed/rewritten tree, and writes only `copy.copy`'d container nodes the memo has not seen",    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
+    "mojo/backend_gimple/cpp_core.py::rewrite": "writes `value` on `copy.copy` of the root yield (`nv`) and `setattr`s the fields of `copy.copy(s)` (`new_stmt`): both are fresh nodes the emitter consumes, and the original statement is left untouched",
+    "mojo/backend_gimple/elab_intu.py::_Work.__init__":"`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
     "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
     "mojo/backend_gimple/elab_intu.py::run": "ditto",
     "mojo/backend_gimple/emit_exprs.py::_lower_comprehension": "`Comprehension.target` is a str and `for_target_single_name` returns a str — a scalar write",
@@ -86,6 +91,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
+    "mojo/middle/coro.py::_ParamFlow.__init__": "the parameter-flow record's own class (`name` is its own attribute), not an AST node",
     "mojo/middle/coro.py::_append_box_arg": "appends to a call this same rewrite just built",
     "mojo/middle/coro.py::_apply_nested_async_capture": "`lower()` only, before `gen_module` walks anything",
     "mojo/middle/coro.py::_cap_rewrite_stmts": "ditto",
@@ -156,8 +162,8 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     it: the definition's header is at column 0 and a `{` body comes next,
     while a declaration ends in `;` and a call site is indented and ends in
     `;` too. Only the DEFINITION's header carries the `__GIMPLE` tag between
-    the return type and the name, so it is stripped before the type is
-    returned — otherwise the caller would read `Parser` for a `Parser *`.
+    the return type (`__GIMPLE Parser * f`), so it is stripped before the
+    type is returned — otherwise the caller would read `__GIMPLE Parser *`.
     The mangled name (`fire_compiler_Parser__parse_expr`) is matched on its
     tail, so this does not care whether the module qualified it.
     """
@@ -168,11 +174,37 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     for m in head_of.finditer(c_src):
         if not c_src[m.end():].lstrip().startswith('{'):
             continue
-        head = m.group(1)
-        if '/*' in head or head.rstrip().endswith('*'):
+        # The tag sits in front of the return type (`__GIMPLE MojoList * f`),
+        # so strip it BEFORE judging the head: a pointer return ends in `*`
+        # by its own spelling, and that is the case this must return.
+        head = re.sub(r'\b__GIMPLE\b', '', m.group(1)).strip()
+        if '/*' in head:
             continue
-        return re.sub(r'\b__GIMPLE\b', '', head).strip()
+        return head
     return ''
+
+
+def stdlib_unit_emits(mojo_src: str) -> str:
+    """The generated C for mojo_src through
+    build_stdlib_dylib.compile_module_to_c: the single-unit path
+    compile_one.py and the stdlib-syntax gate use, so a shape that only the
+    elaborated (imported-generic) path refuses is exercised here and not by
+    gimple_compiles. Raises on a refusal."""
+    import build_stdlib_dylib
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stdlib_unit_probe.mojo')
+    return build_stdlib_dylib.compile_module_to_c(mojo_src, path, 'stdlib_unit_probe')
+
+
+def stdlib_unit_compiles(mojo_src: str) -> tuple[bool, str]:
+    """Return (ok, error) through build_stdlib_dylib.compile_module_to_c: the
+    single-unit path compile_one.py and the stdlib-syntax gate use. It is not
+    the in-process path gimple_compiles takes, and the two refuse different
+    things (a bracketed generic called from main is only instantiated here)."""
+    try:
+        stdlib_unit_emits(mojo_src)
+        return True, ''
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
 
 
 def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
@@ -305,6 +337,35 @@ def test_c_shape(name: str, mojo_src: str, must_have: list, must_not_have: list)
         _PASS += 1
     else:
         print(f"FAIL  {name}: compiles={ok} missing={missing} unexpectedly_present={present}")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
+def test_tag_leads_every_definition(name: str, mojo_src: str, must_have: list):
+    """Every `__GIMPLE` tag in the generated C leads its declaration.
+
+    gcc -fgimple honours the tag only in declaration-specifier position
+    (`__GIMPLE static C * f (...)`). After the return type
+    (`static C * __GIMPLE f (...)`) it lands in the declarator and is
+    silently ignored, so a POINTER-returning body is compiled as ordinary C
+    and never GIMPLE-checked. `test_c_shape` pins each emitter's spelling;
+    this checks the whole generated output instead, so a new definition
+    emitter cannot reintroduce the old shape unnoticed. `must_have` names
+    the pointer-returning definitions that make the check non-vacuous.
+    """
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles(mojo_src)
+    missing = [m for m in must_have if m not in c_src]
+    stray = [ln.strip() for ln in c_src.splitlines()
+             if '__GIMPLE' in ln and not ln.startswith('__GIMPLE ')]
+    if ok and not missing and not stray:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} missing={missing} "
+              f"tag_not_leading_its_declaration={stray[:3]}")
         if not ok:
             for line in stderr.splitlines()[:8]:
                 print(f"      {line}")
@@ -1078,7 +1139,10 @@ def run_tests():
     # the shadow is the load-bearing substring — it is what proves the element
     # type reached the declaration, and `(int64_t)` on the `mojo_list_get_str`
     # line is the exact text the bug put there.
-    _run_isolated(lambda: test_c_shape("comprehension_target_shadowing_a_struct_local_gets_its_own", """\
+    def _test_comprehension_target_shadowing_a_struct_local_gets_its_own():
+        global _PASS, _FAIL
+        name = "comprehension_target_shadowing_a_struct_local_gets_its_own"
+        ok, c_src, stderr = gimple_compiles("""\
 class Token:
     def __init__(self, kind: String):
         self.kind = kind
@@ -1093,8 +1157,27 @@ def names() -> List:
         t = pick("loop")
         i = i + 1
     return [t for t in ["a", "b"]]
-""", must_have=["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"],
-       must_not_have=["(int64_t) _t", "t = (int64_t)"]), 'comprehension_target_shadowing_a_struct_local_gets_its_own')
+""")
+        must_have = ["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"]
+        missing = [m for m in must_have if m not in c_src]
+        import re as _re
+        bad_assign = _re.search(r'\bt\s*=\s*\(int64_t\)', c_src)
+        present = []
+        if "(int64_t) _t" in c_src:
+            present.append("(int64_t) _t")
+        if bad_assign:
+            present.append("t = (int64_t)")
+        if ok and not missing and not present:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiles={ok} missing={missing} unexpectedly_present={present}")
+            if not ok:
+                for line in stderr.splitlines()[:8]:
+                    print(f"      {line}")
+            _FAIL += 1
+    _run_isolated(_test_comprehension_target_shadowing_a_struct_local_gets_its_own,
+                  'comprehension_target_shadowing_a_struct_local_gets_its_own')
 
     # The same site with a `char *` local shadowed instead of a struct pointer.
     # Before the fix this one COMPILED and printed the two string ADDRESSES as
@@ -1139,6 +1222,92 @@ def f(n: Int) -> Int:
     var p = P(n)
     return p.x
 """, must_have=["_init_P (&_owned_storage"], must_not_have=["= _alloc_P ();"]), 'owned_struct_local_is_initialised_in_the_frame')
+
+    # The `_alloc_<Struct>` helper returns a POINTER, and the `__GIMPLE` tag
+    # has to sit in declaration-specifier position (`__GIMPLE static P * f`).
+    # After the return type (`static P * __GIMPLE f`) gcc does not honour the
+    # tag at all: the body is ordinary C, never GIMPLE-checked, for every
+    # pointer-returning tagged function. Pin both halves: the tag is in the
+    # honoured position, and the body still compiles under the strict GIMPLE
+    # grammar (`-x c`, the self-host build's path).
+    _alloc_src = """\
+struct P:
+    var x: Int
+
+    def __init__(out self, x: Int):
+        self.x = x
+
+def make(n: Int) -> Int:
+    var items = List[P]()
+    items.append(P(n))
+    return items[0].x
+
+def main():
+    print(make(3))
+"""
+    test_c_shape('alloc_helper_tag_in_declaration_specifier_position', _alloc_src,
+                 must_have=['__GIMPLE static P * _alloc_P (void)'],
+                 must_not_have=['static P * __GIMPLE _alloc_P'])
+    test_gimple_body('alloc_helper_body_compiles_as_gimple', _alloc_src)
+
+    # The same rule for a METHOD and a LIFTED CLOSURE: their definitions were
+    # `C * __GIMPLE f (...)` (emit_funcs `_gen_struct_method`, emit_loops
+    # `_gen_lifted_closure`), so a pointer-returning method's body was never
+    # GIMPLE-checked. Pin the honoured spelling for a pointer return (method
+    # `char *`) and a scalar return (closure `int64_t`).
+    test_c_shape('method_and_closure_tag_in_declaration_specifier_position', """\
+class Holder:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+        t = self.v
+        return t
+
+def make(n: Int) -> Int:
+    def inner() -> Int:
+        return n + 1
+    return inner()
+
+def main():
+    print(Holder("hello").get())
+    print(make(2))
+""", must_have=['__GIMPLE char * Holder_get (Holder * self)',
+                '__GIMPLE int64_t make_inner ('],
+         must_not_have=['char * __GIMPLE Holder_get', 'int64_t __GIMPLE make_inner'])
+
+    # The same rule as ONE whole-output invariant, over a program that emits
+    # every tagged shape at once: a struct alloc helper, a pointer-returning
+    # method, a scalar-returning method and a lifted closure. `test_c_shape`
+    # above pins the four spellings that exist today; this catches a fifth
+    # definition emitter that puts the tag in the declarator, where gcc
+    # silently stops GIMPLE-checking the body.
+    test_tag_leads_every_definition('every_gimple_tag_leads_its_declaration', """\
+struct P:
+    var x: Int
+
+    def __init__(out self, x: Int):
+        self.x = x
+
+class Holder:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+        t = self.v
+        return t
+
+def make(n: Int) -> Int:
+    var items = List[P]()
+    items.append(P(n))
+    def inner() -> Int:
+        return n + 1
+    return inner() + items[0].x
+
+def main():
+    print(Holder("hello").get())
+    print(make(2))
+""", must_have=['__GIMPLE static P * _alloc_P (void)',
+                '__GIMPLE char * Holder_get (Holder * self)',
+                '__GIMPLE int64_t make_inner ('])
 
     # An unannotated integer local is 64-bit storage, like Mojo's `Int` and Python's
     # int: it used to be a 32-bit `int` whenever every assignment was a small
@@ -1262,7 +1431,7 @@ def scan(s: String) -> Int:
 def main():
     print(scan("axbxc"))
     print(at("hello", 1))
-""", must_have=["mojo_char_at_str ("],
+""", must_have=["mojo_char_at_str"],
        must_not_have=["mojo_cstr_slice (", "_mojo_at_char"]), 'a_character_is_an_immortal_table_entry_not_a_slice')
 
     # The per-slot-kinds marker must not outlive its function; the reasoning
@@ -2621,6 +2790,13 @@ def set_elem(lst: List, i: Int, v: Int) -> Int:
     return 0
 """), 'walrus_list_subscript')
 
+    # 134b. walrus with subscript target on pointer/memory location (RefSubscript/RLValue)
+    _run_isolated(lambda: test("walrus_subscript_ptr_assign", """\
+def fill_and_read(p: UnsafePointer[Int]) -> Int:
+    (p[0] := 7)
+    return p[0]
+"""), 'walrus_subscript_ptr_assign')
+
     # ── comptime if ───────────────────────────────────────────────────────
 
     # 135. comptime if True — emits then branch only
@@ -2676,6 +2852,68 @@ def foo() -> Int:
         s = s + i
     return s
 """), 'comptime_for_range_start_stop')
+
+    # 140a. comptime for over a string literal list — the loop variable must
+    # be declared `char *`. This is the 2026-11-07 stdlib-syntax red: the
+    # unroller declared the variable `int64_t` BEFORE looking at the elements,
+    # then emitted `filename = "canada";` into it (benchmarks/collections/
+    # string/bench_atof.mojo, std/sys/info.mojo) — a hard gcc error under
+    # -fgimple. Before the fix the str assignment also died in the
+    # AttributeError of the missing `_emit_string_literal` method, so the
+    # red was latent until that method landed and woke the path. Assert the
+    # declaration AND that the generated C still compiles.
+    _run_isolated(lambda: test_c_shape(
+        "comptime_for_str_list_loop_var_is_char_star", """\
+def foo() -> Int:
+    var s: Int = 0
+    comptime for name in ["canada", "mesh"]:
+        s = s + 1
+    return s
+""", ['char * name'], ['int64_t name']),
+        'comptime_for_str_list_loop_var_is_char_star')
+
+    # 140b. The same red through the non-literal (comptime alias) branch:
+    # `comptime files = [...]; comptime for filename in files` — the exact
+    # shape of bench_atof.mojo's main(). The resolved iterable is still a
+    # list of str, so the variable must be `char *` there too.
+    _run_isolated(lambda: test_c_shape(
+        "comptime_for_str_alias_list_loop_var_is_char_star", """\
+comptime files = ["canada", "mesh"]
+
+def foo() -> Int:
+    var s: Int = 0
+    comptime for filename in files:
+        s = s + 1
+    return s
+""", ['char * filename'], ['int64_t filename']),
+        'comptime_for_str_alias_list_loop_var_is_char_star')
+
+    # 140c. The int path of the same declaration must stay untouched: an int
+    # literal list still declares `int64_t` (not `char *`) and still unrolls
+    # the body with the per-element assignments.
+    _run_isolated(lambda: test_c_shape(
+        "comptime_for_int_list_keeps_int64_t", """\
+def foo() -> Int:
+    var s: Int = 0
+    comptime for i in [1, 2, 3]:
+        s = s + i
+    return s
+""", ['int64_t i', 'i = 1LL', 'i = 3LL', 's + i'], ['char * i']),
+        'comptime_for_int_list_keeps_int64_t')
+
+    # 140d. comptime for over a string list (alias/resolved iterable) —
+    # regression (master): the unroller must declare the loop var as char*,
+    # not int64_t, when elements are strings (bench_atof.mojo, sys/info.mojo).
+    _run_isolated(lambda: test("comptime_for_string_list", """\
+comptime NAMES = ["ab", "cd", "ef"]
+
+def foo() -> Int:
+    var n: Int = 0
+    comptime for name in NAMES:
+        if name == "cd":
+            n = n + 1
+    return n
+"""), 'comptime_for_string_list')
 
     # ── precise: loop body frequency annotations ──────────────────────────
 
@@ -2805,6 +3043,58 @@ struct Span:
 def write_bytes(s: Span) -> Int:
     return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
 """), 'mlir_write_bytes_bottom')
+
+    # 153b. GATE regression (stdlib-syntax red on std/builtin/bool.mojo once the
+    #       GIMPLE tag was pinned; fixed in f4a7ee488): a `__mlir_op` binary
+    #       op over _Bool operands must report the OPERANDS' type, not a
+    #       blanket int64_t. Before the fix the result temp was declared
+    #       int64_t and assigned `_t1 & _t2` (both _Bool) — legal in an
+    #       unchecked body, but `gcc -fgimple -x c` (which is what actually
+    #       parses a `__GIMPLE` body, the path std/builtin/bool.mojo's
+    #       __and__/__or__/__xor__ hit once the tag's position was pinned)
+    #       rejects it as "type mismatch in binary expression". test_gimple_
+    #       body is the only harness that checks the __GIMPLE body.
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_and_xor", """\
+struct B:
+    var _mlir_value: Bool
+
+    def band(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.and`(self._mlir_value, rhs._mlir_value)
+
+    def bxor(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.xor`(self._mlir_value, rhs._mlir_value)
+"""), 'mlir_bool_simd_and_xor')
+
+    # 153c. The exact bool.mojo __invert__ shape: a pop.simd.xor whose second
+    #       operand is a __mlir_attr literal (lowered to a placeholder int),
+    #       so the two operands have DIFFERENT C types (_Bool and int). The
+    #       fix must materialize each to one joined type before the op, or a
+    #       checked body gets a mismatched-operand binary expression.
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_xor_attr_operand", """\
+struct B:
+    var _mlir_value: Bool
+
+    def binv(self) -> Bool:
+        return __mlir_op.`pop.simd.xor`(
+            self._mlir_value,
+            __mlir_attr.`#kgen.simd<true> : !kgen.scalar<bool>`,
+        )
+"""), 'mlir_bool_simd_xor_attr_operand')
+
+    # 153d. The third of std/builtin/bool.mojo's trio (__and__/__or__/__xor__):
+    #       pop.simd.or over two _Bool fields. The stdlib-syntax red once the
+    #       GIMPLE tag was pinned was fixed at the root in f4a7ee488; 153b/153c
+    #       pin and/xor and the mixed-type attr operand, and this pins the
+    #       missing `or` shape. It fails on the pre-fix lowering with gcc's
+    #       "type mismatch in binary expression" on `int64_t _t = _t1 | _t2;`
+    #       (both operands _Bool).
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_or", """\
+struct B:
+    var _mlir_value: Bool
+
+    def bor(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.or`(self._mlir_value, rhs._mlir_value)
+"""), 'mlir_bool_simd_or')
 
     # 154. libc-name mangling: `fn exit` becomes mojo_exit (no clash with libc exit),
     #      while external_call["exit"] keeps the raw libc symbol — exit from the library.
@@ -3516,19 +3806,21 @@ def f():
     # compile-only smoke test, and test_gimple_generator_runner.py for the
     # REAL behavioral (compile+link+run) coverage of this exact shape.
 
-    # Mixed yield-value types (int then float): passes the cheap
-    # _generator_quick_eligible pre-filter (no params/try/with/yield-from)
-    # but _gen_cpp_generator_unit's own _generator_yield_ctype check must
-    # still reject it (Milestone B requires one consistent scalar type
-    # across every `yield` in the body) and gen_module's pre-pass must fall
-    # back to the honest refusal cleanly — exercises the
-    # _UnsupportedGeneratorShape catch path itself, not just the cheap
-    # pre-filter.
-    _run_isolated(lambda: test_raises("generator_mixed_yield_types_honest_fallback", """\
+    # Mixed yield-value types (int then float). This used to be an honest
+    # refusal ("generator function"); it is now the TAGGED-word yield
+    # (mojo/middle/coro.py `_generator_value_kind`, commit 11eece66b): when
+    # the yield kinds are known and differ, the value slot is the boxed word,
+    # and a float yield is boxed by its static kind at the yield site
+    # (`mojo_box_from_double`). The refusal stays for every consumer that
+    # cannot read the box (`_tagged_consumers_ok`). This module's cases only
+    # pin that the shape COMPILES and boxes the float; that the for-loop
+    # consumer renders `1` / `1.5` correctly is run by
+    # test_gimple_generator_runner.py (generator_mixed_yield_kinds_int_double).
+    _run_isolated(lambda: test_c_shape("generator_mixed_yield_types_tagged_word", """\
 def f():
     yield 1
     yield 1.5
-""", "generator function"), 'generator_mixed_yield_types_honest_fallback')
+""", ["mojo_box_from_double"], []), 'generator_mixed_yield_types_tagged_word')
 
     # Mixed yield kinds whose EMITTED C++ can never share one promise type:
     # a tuple-yield site always co_yields a MojoList* pointer
@@ -4015,15 +4307,59 @@ def main():
     # where the char-at helper takes an int64_t index, a hard g++ error for
     # every such subscript. Real shape: libpython.py's
     # items_from_keys_and_values, `ep['me_key']` on a gdb.Value entry.
+    # The fixture has NO call site: with one, the call-site contract for the
+    # yielded parameter `d` (`_ambiguous_yielded_params`) is refused first, for
+    # the untypable dict argument, and the str-keyed refusal below never runs.
+    # That refusal is also honest, so it is not what this case pins; this case
+    # pins that the subscript body itself is refused, not emitted.
     with _force_cpp_coro():
         test_raises("generator_str_key_subscript_honest_refusal", """\
 def gen(d):
     yield d['k']
+        """, "Unsupported shape(s): gen: a str-keyed subscript")
+
+    # A str-keyed subscript on a local whose type is a USER STRUCT that defines
+    # `__getitem__` is the dunder protocol, not a mapping this model refuses:
+    # the coroutine emitter must call the struct's own `__getitem__` C method
+    # (the same dispatch the ordinary path makes). Real shape: libpython.py's
+    # `ep['me_key']`, where `ep` is a gdb.Value-shaped struct entry.
+    def test_generator_struct_getitem_dispatch_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+struct Value:
+    var _k: String
+    def __init__(out self, k: String):
+        self._k = k
+    def __getitem__(self, name: String) -> Int:
+        return 7
+
+def gen():
+    v = Value("a")
+    yield v["me_key"]
 
 def main():
-    for x in gen({}):
+    for x in gen():
         print(x)
-        """, "Unsupported shape(s): gen: a str-keyed subscript")
+"""
+        try:
+            with _force_cpp_coro():
+                _c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+                    src, do_imports=False, filename="gen_struct_getitem.py")
+        except Exception as e:
+            print(f"FAIL  generator_struct_getitem_dispatch_via_cpp_path: "
+                  f"raised {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        if "Value___getitem__(v, " not in cpp_code or "mojo_char_at_str" in cpp_code:
+            print("FAIL  generator_struct_getitem_dispatch_via_cpp_path: expected a "
+                  "direct `Value___getitem__(v, ...)` call, not a string-index read")
+            _FAIL += 1
+            return
+        print("PASS  generator_struct_getitem_dispatch_via_cpp_path")
+        _PASS += 1
+    _run_isolated(lambda: test_generator_struct_getitem_dispatch_via_cpp_path(),
+                  'test_generator_struct_getitem_dispatch_via_cpp_path')
 
     # A nested NON-capturing sync `def` referenced as a callee inside a
     # generator body IS compiled — as a standalone `static` C++ function
@@ -5662,7 +5998,7 @@ async def f():
 """), 'async_function_no_return_value_now_supported')
 
     # Two `return`s that don't agree on one consistent scalar type — the
-    # async counterpart of generator_mixed_yield_types_honest_fallback.
+    # async counterpart of the (since-superseded) mixed-yield refusal test.
     with _force_cpp_coro():
         test_raises("async_function_mixed_return_types_honest_fallback", """\
 async def f():
@@ -6992,10 +7328,11 @@ def root_cas_hash_call(parts) -> str:
         # prototype block is emitted ahead of the method bodies (it has to be
         # — `_mojo_getattr_Sub`'s bound-method arm takes the ADDRESS of this
         # symbol, and a declaration after its use is an implicit one). Only a
-        # definition's header carries the `__GIMPLE` tag between the return
-        # type and the name — the same distinction
-        # `selfhost_emitted_return_type` above matches on.
-        start = c_src.find("__GIMPLE Sub___eq__ (")
+        # definition's header carries the `__GIMPLE` tag in front of the
+        # return type (`__GIMPLE int64_t Sub___eq__ (...)`) — the same
+        # distinction `selfhost_emitted_return_type` above matches on.
+        _m = re.search(r'^__GIMPLE [^\n;]*\bSub___eq__ \(', c_src, re.M)
+        start = _m.start() if _m else -1
         if start < 0:
             print(f"FAIL  {name}: Sub___eq__ was never emitted (inheritance merge did not run)")
             _FAIL += 1
@@ -7561,7 +7898,8 @@ def main():
             # The DEFINITION, not the forward declaration: the declaration
             # is emitted from the same registry, but matching on it would
             # silently pass if only one of the two were ever fixed.
-            start = c.find('__GIMPLE Holder_get (')
+            _m = re.search(r'^__GIMPLE [^\n;]*\bHolder_get \(', c, re.M)
+            start = _m.start() if _m else -1
             if start < 0:
                 print(f"FAIL  {name}: {label} getter definition was never "
                       f"emitted")
@@ -7716,6 +8054,55 @@ def main():
         if 'value_kind=i' not in c:
             print(f"FAIL  {name}: mixed bool/int yields did not widen to the "
                   f"'i' kind")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_self_delegating_generator_kind_ignores_its_own_yield_from():
+        """A recursive generator's `yield from <itself>(...)` re-yields its
+        own values, so it must not count as a non-tuple yield beside its
+        direct tuple yields. Before this, a module-level recursive tuple
+        walk (the shape `_lift_capture_free_nested_scopes` produces from a
+        nested `_walk_lists` in mojo/middle/coro.py) resolved to
+        (None, 'mixed tuple / non-tuple yields (v0)'). Driven through the
+        real parser and `_resolve_gen_kind`, the same path the lowering uses."""
+        global _PASS, _FAIL
+        name = "self_delegating_generator_kind_ignores_its_own_yield_from"
+        import mojo.middle.coro as coro
+        from fire_compiler import py_tokenize, Parser
+
+        def kind_of(src, gen_name):
+            stmts = Parser(py_tokenize(src)).parse_module()
+            stmts = stmts.body if hasattr(stmts, 'body') else stmts
+            coro._register_generator_defs(stmts)
+            return coro._resolve_gen_kind(gen_name)
+
+        walk_tuple = """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                yield from walk(sub)
+"""
+        walk_int = """\
+def g(n: int):
+    if n > 0:
+        yield n
+        yield from g(n - 1)
+"""
+        got_tuple = kind_of(walk_tuple, 'walk')
+        got_int = kind_of(walk_int, 'g')
+        if got_tuple[0] != 'tuple':
+            print(f"FAIL  {name}: recursive tuple walk resolved to "
+                  f"{got_tuple!r}, expected ('tuple', '')")
+            _FAIL += 1
+            return
+        if got_int[0] != 'i':
+            print(f"FAIL  {name}: recursive int generator resolved to "
+                  f"{got_int!r}, expected kind 'i'")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -7904,26 +8291,100 @@ def main():
 
     def test_flagged_re_compile_is_not_lowered_as_the_bare_pattern():
         """`P = re.compile(p, re.MULTILINE)` is a different pattern than `p`
-        and the regex engine has no flag input, so a loop over `P.findall` /
-        `P.finditer` must stay refused (loudly) instead of scanning `p` with
-        the flags silently dropped -- which matched nothing for a `^` pattern
-        and made the compiled `_dep_sources_texts` find no dependencies."""
+        and the compile-time regex engine has no flag input, so `P.findall`
+        must NOT be scanned as the bare `p` with the flags silently dropped
+        -- which matched nothing for a `^` pattern and made the compiled
+        `_dep_sources_texts` find no dependencies. The call used to stay a
+        loud `mojo_unsupported_iter`; it now goes through the runtime `re`
+        (`mojo_re_compile(pat, flags)`), which honours the flag, so what is
+        pinned is the ANSWER: the built binary prints what CPython prints
+        (both lines match `^a`; the bare pattern would match only the first)."""
         global _PASS, _FAIL
         name = "flagged_re_compile_is_not_lowered_as_the_bare_pattern"
-        import gimple_codegen as _g
+        import subprocess as _sp, tempfile as _tf
         src = ("import re\n"
                "_R = re.compile(r'^(a)', re.MULTILINE)\n"
                "def main():\n"
                "    for m in _R.findall('a\\na'):\n"
                "        print(m)\n"
                "main()\n")
-        c = _g.compile_to_gimple(src)
-        if 'mojo_regex_search' in c or 'mojo_unsupported_iter' not in c:
-            print(f"FAIL  {name}")
+        with _tf.TemporaryDirectory() as d:
+            sp = os.path.join(d, 'flagged.py')
+            with open(sp, 'w') as fh:
+                fh.write(src)
+            want = _sp.run([sys.executable, sp], capture_output=True, text=True).stdout
+            exe = os.path.join(d, 'flagged')
+            b = _sp.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'), 'build',
+                         '-o', exe, sp], capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            got = (_sp.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S).stdout
+                   if b.returncode == 0 and os.path.exists(exe) else None)
+        if got != want or want != 'a\na\n':
+            print(f"FAIL  {name}: got {got!r}, want {want!r}")
             _FAIL += 1
         else:
             print(f"PASS  {name}")
             _PASS += 1
+
+    def test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list():
+        """`st.fs_x = gen._fresh_vals` (a `set` field read off an untyped
+        `gen`) was lowered as a `MojoList *` -- the boxed-field fallback took
+        "has a recorded element type" to mean "list" -- and refused with
+        `cannot coerce MojoList * to MojoSet *`, so the self-host closure
+        compiled emit_infra.py twice (the refused attempt, then source
+        inclusion)."""
+        global _PASS, _FAIL
+        name = "set_field_read_off_a_boxed_receiver_is_a_set_not_a_list"
+        import gimple_codegen as _g
+        src = ("class FS:\n"
+               "    def __init__(self):\n"
+               "        self.a: set = set()\n"
+               "\n"
+               "def save(gen):\n"
+               "    st = FS()\n"
+               "    st.a = gen._fresh_vals\n"
+               "    return st\n")
+        try:
+            _g.compile_to_gimple(src)
+            print(f"PASS  {name}")
+            _PASS += 1
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+
+    def test_recompiling_a_struct_does_not_multiply_its_method_overloads():
+        """A struct whose module is compiled again against the same gen (the import
+        fallback retries after a rollback) re-registered every method with a bare
+        `.append`, so `Repr.repr` became "2 overloads" and `repr = aRepr.repr`
+        refused as "referenced as a plain value". Registration is now idempotent
+        per overload id."""
+        global _PASS, _FAIL
+        name = "recompiling_a_struct_does_not_multiply_its_method_overloads"
+        import gimple_codegen as _g
+        src = ("class R:\n"
+               "    def m(self, x):\n"
+               "        return x\n"
+               "r = R()\n"
+               "f = r.m\n"
+               "def main():\n"
+               "    print(f(1))\n"
+               "main()\n")
+        gen = _g.GimpleGen(do_imports=False, module_name='t')
+        _g.compile_to_gimple(src)
+        # register the same struct twice on one gen, as a retried module does
+        from fire_compiler import Parser, py_tokenize
+        stmts = Parser(py_tokenize(src)).parse_module()
+        gen.gen_module(stmts)
+        try:
+            gen.gen_module(stmts)
+        except Exception:
+            pass
+        n = max([len(v) for k, v in gen._struct_method_signatures.items() if k.endswith('m')] or [0])
+        if n <= 1:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {n} candidates for R.m")
+            _FAIL += 1
 
     def test_bracket_mentions_matches_the_regex_it_replaced():
         """`elab_intu._bracket_mentions` is the run-time-regex-free form of
@@ -8324,11 +8785,28 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
-def mk_str():
-    return lambda: "hi"
+def mk_str(p: str):
+    def inner(x: str) -> str:
+        return p + x
+    return inner
 def use_str_factory():
-    print(mk_str()())
+    g = mk_str("<")
+    print(g(">"))
+    print(mk_str("[")("]"))
 use_str_factory()
+# Capturing nested def with float return (CODEGEN fix regression)
+def use_capturing_float():
+    n = 2
+    def inner(x: int) -> float:
+        return n + 0.5
+    h = inner
+    print(h(0))
+use_capturing_float()
+def mk_str_lambda():
+    return lambda: "hi"
+def use_str_lambda_factory():
+    print(mk_str_lambda()())
+use_str_lambda_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:
@@ -8554,6 +9032,267 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list():
+        """A parameter passed a LIST at one call site and a STR at another is
+        not a list parameter, whatever its body does with it.
+
+        The container-kind contract (`_param_container_types`) only ever saw
+        the container call sites, so a `str` argument beside a list one left
+        the contract unanimous at `MojoList *`: the str was cast to a list
+        header and `print` or the loop read it as one, which is SIGSEGV (exit
+        -11) on ordinary Python, and the program's stdout was cut short with
+        exit 0 from the test's point of view. Measured before the fix: both
+        shapes below died with -11 after their first line.
+
+        The fix records a non-container call site as a disagreeing observer
+        (`_param_noncontainer_obs`), so the slot takes the `int64_t` box the
+        scalar pass already chose for a mixed slot, and each call site boxes
+        its own argument.
+
+        The shape here is one whose BODY only prints the parameter. A body that
+        ITERATES it (`for x in xs`) keeps a usage-derived `MojoList *` from
+        `_infer_param_types`, which no call-site contract overrides, so it still
+        segfaults. That bug is fixed by the per-kind clone pass in commit
+        `51f9c69d6` (codegen: clone an iterated parameter per literal argument
+        kind, instead of refusing), which emits one definition per literal
+        kind and renames each call site to its argument's clone; the clone
+        pass is covered by
+        `test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind`.
+        """
+        global _PASS, _FAIL
+        name = "a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list"
+        src = '''\
+def show(x):
+    print(x)
+show([1, 2, 3])
+show("abc")
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind():
+        """A parameter the body ITERATES, passed a LIST at one call site and a
+        STR at another, must compile to one definition per argument kind, not
+        one `void each(MojoList *)` that reads the str as a list header.
+
+        `each([4, 5])` beside `each("de")` was SIGSEGV (exit -11) after the
+        list's output. `_gmi_specialize_literal_kind_clones` clones the
+        function per literal kind (`each_as_list`, `each_as_str`) and renames
+        each call site to its argument's clone, so every clone's parameter
+        takes the ordinary call-site evidence of one kind. The print-only
+        mix keeps its `int64_t` box and gets no clones (see
+        test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list).
+        """
+        global _PASS, _FAIL
+        name = "an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+each([4, 5])
+each("de")
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            c_src = gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)[0]
+            if ('void each_as_list_' not in c_src
+                    or 'void each_as_str_' not in c_src
+                    or 'void each (' in c_src):
+                print(f"FAIL  {name} [{mode}]: no per-kind definitions in C")
+                _FAIL += 1
+                return
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses():
+        """The per-kind clone pass takes only LITERAL arguments. A str passed
+        to an iterated parameter through a variable, beside a list literal,
+        is still the mixed case the clone pass does not cover, and must keep
+        the compile-time refusal rather than a binary that reads the str as a
+        list. The caller here is a function, where the binding is seen.
+        """
+        global _PASS, _FAIL
+        name = "a_mixed_iterated_parameter_with_a_str_variable_still_refuses"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+def main():
+    ys = "de"
+    each([4, 5])
+    each(ys)
+main()
+'''
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses():
+        """Module-level version of the mixed iterated parameter test. A str passed
+        to an iterated parameter through a module-level variable, beside a list
+        literal, must still be refused rather than compiled to a binary that
+        reads the str as a list (SIGSEGV). The module-level caller slips
+        through because `_inferred_var_types` has no binding for a module-level
+        name, so `_arg_scalar_type` (consulted by `_is_noncontainer_arg`) did
+        not see the `char *` answer for a module-level str variable.
+        """
+        global _PASS, _FAIL
+        name = "test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+ys = "de"
+each([4, 5])
+each(ys)
+'''
+
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation():
+        """`n, real_params = _setup(fn)` types the unpack target as the int64_t
+        box, which is the unknown fallback, not a scalar. When the callee
+        returns a container in that slot, the box must not count as a non-
+        container call site, so a direct list passed to the same parameter
+        elsewhere is not refused (coro.py's `_mark_coro_param_elem_kinds`).
+        """
+        global _PASS, _FAIL
+        name = "a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation"
+        src = '''\
+def _setup(fn, is_method):
+    real_params = fn.params[1:] if is_method else fn.params
+    return 1, real_params
+def walk(xs):
+    for x in xs:
+        print(x)
+def direct(fn, is_method):
+    real_params = fn.params[1:] if is_method else fn.params
+    walk(real_params)
+def via_tuple(fn, is_method):
+    n, real_params = _setup(fn, is_method)
+    walk(real_params)
+'''
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                print(f"FAIL  {name} [{mode}]: refused a list slot as a "
+                      f"str or number: {str(e)[:300]}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list():
+        """The counterpart: `s, n = pair()` where `pair` returns a str literal
+        in slot 0, passed to an iterated parameter beside a list literal, must
+        keep the mixed-container refusal. The tuple-slot exemption applies only
+        to a slot the callee proves is a container.
+        """
+        global _PASS, _FAIL
+        name = "a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list"
+        src = '''\
+def pair():
+    return "de", 1
+def each(xs):
+    for x in xs:
+        print(x)
+def main():
+    s, n = pair()
+    each(s)
+    each([4, 5])
+main()
+'''
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
         """`def ident(x): return x` called with a list of ints AND with a
         string, in one program, must give the string call site its own
@@ -8602,24 +9341,7 @@ main()
 
     def test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds():
         """Unpacking an opaque value that turns out to be a dict, from a METHOD
-        body, must pass gcc -fgimple.
-
-        `a, b = ident(self._d)` materializes the value through
-        _materialize_as_list's dict arm, which records the slot kind with
-        `mojo_list_set_kinds_uniform(result, 'p')`. That char argument was
-        emitted as `_new_val('char', "'p'")`, i.e. `_t9 = 'p';` into a `char`
-        temp. A character literal is an `int` in C, and GCC's -fgimple refuses
-        a bare int constant assigned to a char temp ("non-trivial conversion
-        in 'integer_cst'"). Only a method body is GIMPLE-tagged, so a plain
-        top-level `a, b = ident(d)` (the sibling test above) never reached it.
-        The fix is the explicit `(char)` cast every other char constant in
-        the emitters carries.
-
-        This pins the BUILD, not the printed keys: the unpacked slots are
-        still read as raw pointer words, which is a separate, pre-existing
-        defect (the same symptom `list_of_a_boxed_dict_materializes_keys_as_
-        strings` already fails on). Asserting the values here would make this
-        test red for a reason this fix does not touch.
+        body, must print the dict keys correctly.
         """
         global _PASS, _FAIL
         name = "tuple_unpack_of_a_boxed_dict_inside_a_method_builds"
@@ -8637,11 +9359,21 @@ def main():
     Box({"k": 1, "j": 2}).show()
 main()
 '''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
         for mode in ('single-TU', 'link-mode'):
             got = _compiled_stdout(src, mode)
             if isinstance(got, tuple):
                 print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                       f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
                 _FAIL += 1
                 return
         print(f"PASS  {name}")
@@ -8865,7 +9597,7 @@ main()
         The ADDRESS was never the wrong answer — CPython prints
         `<function step at 0x...>` — so the `%d` was the whole bug, and it is
         independent of the decorator-application defect (see
-        bugs/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
+        bugs/hard/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
         names it as separable). The decorator is a pass-through, not the
         scalar-returning `deco` the doc reduces from: a scalar decorator
         rebinds `step` to a non-callable, which the compiled path now refuses
@@ -9857,6 +10589,17 @@ print("%r" % p)
                     return
                 blobs.append(got)
             for key, entry in ginf._DEDUP_EXTERN_PARTS_CACHE.items():
+                # both components must be LISTS: the consumers iterate them
+                # with a `for`, and the compiled backend's lowering runs a
+                # set's body zero times (silently), so a set here is a wrong
+                # artifact even though `set(...)` comparisons below agree
+                if not isinstance(entry[0], list) \
+                        or not isinstance(entry[1], list):
+                    print(f"FAIL  {name} [trial {trial}]: published entry "
+                          f"is not two lists\n  text={key[:300]!r}\n"
+                          f"  actual={entry!r}")
+                    _FAIL += 1
+                    return
                 ref_entry = _ref_parse(key)
                 if set(ref_entry[0]) != set(entry[0]) \
                         or list(ref_entry[1]) != list(entry[1]):
@@ -10587,6 +11330,110 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_binding_index_memo_is_the_single_binder_census():
+        """`literal_bindings.binding_index` — the single binder census —
+        must cost ONE build per statement list per compile, not one per call.
+
+        The import-closure scan (coro's `_scan_callsite_param_kinds` ->
+        `_module_literal_env`, module_gen's call-site evidence) calls it once
+        per OTHER module in the closure, twice per pass, for EVERY module it
+        compiles. Without the memo that re-derives the whole tree's
+        per-node `bound_names` census once per module per level — the O(N^2)
+        that took the `do_imports=True` compile of a snippet importing
+        `build_config` (whose closure reaches the compiler's own modules)
+        past the sqliteruntime suite's timeout (bugs/MIDDLE_coro_import_
+        compile_hangs_on_large_modules, 60.26M `bound_names` calls measured
+        on that one compile). The fix memoizes the census per statement-list
+        identity in the walk memo's own lifecycle, and this pins all four
+        halves of that contract:
+
+          * a repeat call returns the SAME dict, straight from the memo;
+          * a repeat call re-runs the per-node `bound_names` census ZERO
+            times (the root-cause pin — a count, not a timing, so it cannot
+            be made to flake by a slow machine);
+          * a write inside the list invalidates the census through the
+            walk's own parent edges (`_walk_ast_invalidate`), and the
+            rebuild sees the new binder;
+          * the compile boundary (`_walk_ast_reset`) drops it.
+        """
+        global _PASS, _FAIL
+        name = "binding_index_memo_is_the_single_binder_census"
+        import mojo.middle.exprtypes as ET
+        import mojo.middle.literal_bindings as LB
+        from fire_compiler import py_tokenize, Parser, FunctionDef, AssignStmt, \
+            IdentExpr, StringLiteral
+        import ast_rewriter
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            src = ("s = 'r'\n"
+                   "def f(a):\n"
+                   "    b = 1\n"
+                   "    if a:\n"
+                   "        b = 2\n"
+                   "    return b\n"
+                   "def g(c):\n"
+                   "    for d in c:\n"
+                   "        print(d)\n")
+            stmts = ast_rewriter.rewrite(
+                Parser(py_tokenize(src)).parse_module()) or []
+            first = LB.binding_index(stmts)
+            if 's' not in first or 'b' not in first or 'f' not in first:
+                err = f'the census is missing binders: {sorted(first)}'
+            if not err:
+                again = LB.binding_index(stmts)
+                if again is not first:
+                    err = 'a repeat binding_index did not come from the memo'
+                # `getattr`: before the fix the memo did not exist, and the
+                # assertion above is the one that fails then; the entry shape
+                # is checked only where the memo is.
+                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(id(stmts))
+                if entry is None or entry[0] is not stmts:
+                    err = 'the memo entry does not hold the list it is keyed on'
+            if not err:
+                calls = [0]
+                orig = LB.bound_names
+                def counting(nd):
+                    calls[0] += 1
+                    return orig(nd)
+                LB.bound_names = counting
+                try:
+                    for _ in range(5):
+                        LB.binding_index(stmts)
+                finally:
+                    LB.bound_names = orig
+                if calls[0] != 0:
+                    err = (f'a memoized binding_index re-ran bound_names '
+                           f'{calls[0]} times (the per-level re-derivation)')
+            if not err:
+                fd = [s for s in stmts if isinstance(s, FunctionDef)][0]
+                late = AssignStmt(target=IdentExpr(name='late'),
+                                  value=StringLiteral(value='x'))
+                fd.body.append(late)
+                ET._walk_ast_invalidate(fd)
+                rebuilt = LB.binding_index(stmts)
+                if rebuilt is first:
+                    err = 'the mutated module still answered from the old census'
+                elif 'late' not in rebuilt:
+                    err = 'the rebuilt census missed the appended binder'
+                elif 'late' in first:
+                    err = 'the mutation leaked into the pre-mutation census'
+            if not err:
+                ET._walk_ast_reset()
+                if id(stmts) in ET._WALK_INDEX_MEMO:
+                    err = '_walk_ast_reset left the index memo behind'
+        except Exception as e:  # noqa: BLE001
+            err = f'{type(e).__name__}: {e}'
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_walk_ast_memo_never_answers_stale_over_real_compiles():
         """Every `_walk_ast` call, over real compiles, must return exactly
         what an uncached walk would — INCLUDING after a mutation.
@@ -10869,7 +11716,12 @@ print("%r" % p)
                     paths.append(_r)
                     continue
                 for _dp, _dn, _ns in os.walk(_r):
-                    _dn[:] = [d for d in _dn if d != "__pycache__"]
+                    # `mojo/ir` is the typed IR (doc/GIR.md). Its `Ex`/`Instr`
+                    # classes have fields named `name`/`op`/`body` like AST
+                    # nodes do, but they are not AST nodes and `_walk_ast`
+                    # never sees one, so there is no memo to invalidate.
+                    _dn[:] = [d for d in _dn if d != "__pycache__"
+                              and not (_dp == "mojo" and d == "ir")]
                     for _n2 in sorted(_ns):
                         if _n2.endswith(".py"):
                             paths.append(os.path.join(_dp, _n2))
@@ -10990,6 +11842,118 @@ print("%r" % p)
         print("PASS  %s (%d write sites in %d functions, each invalidating "
               "or classified)" % (name, n_sites, len(found)))
         _PASS += 1
+    def test_posthoc_class_attr_write_invalidates_the_walk_memo():
+        """`_declare_posthoc_class_attrs` appends a field to a StructDef in
+        place. The module list was already walked (so the memo holds its
+        answer), and the NEXT walk of that same list must see the new field,
+        not the memoised pre-write answer. Before the invalidation at the
+        append site, this walk returned the stale list and `extra` was
+        missing. This is the behavioural half of
+        `every_ast_mutation_site_invalidates_the_walk_memo`."""
+        global _PASS, _FAIL
+        name = "posthoc_class_attr_write_invalidates_the_walk_memo"
+        import mojo.middle.exprtypes as ET
+        import mojo.backend_gimple.module_gen as MG
+        from fire_compiler import py_tokenize, Parser, AssignStmt, IdentExpr
+        import ast_rewriter
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            src = ("class A:\n"
+                   "    def __init__(self):\n"
+                   "        self.x = 1\n"
+                   "def f():\n"
+                   "    A.extra = 7\n")
+            stmts = ast_rewriter.rewrite(
+                Parser(py_tokenize(src)).parse_module()) or []
+            before = ET._walk_ast(stmts)
+            MG._declare_posthoc_class_attrs(stmts)
+            after = ET._walk_ast(stmts)
+            declared = [n.target.name for n in after
+                        if isinstance(n, AssignStmt)
+                        and isinstance(n.target, IdentExpr)]
+            if 'extra' not in declared:
+                err = ('the walk after the write still answers from the memo: '
+                       'the declared `extra` field is missing')
+            elif after is before:
+                err = 'the memo entry for the module list was not dropped'
+        except Exception as e:  # noqa: BLE001
+            err = "%s: %s" % (type(e).__name__, e)
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_attribute_to_def_write_invalidates_the_walk_memo():
+        """`_attribute_to_def` stamps every prologue statement it is handed
+        with the line/col of the generator's `def`, and that stamp is an AST
+        write: the walk-memo entry of every statement it touches must be
+        dropped, like at every other write site in `mojo/`.
+
+        The prologue statements are freshly synthesized in the lowering
+        pipeline, but the helper is shared: the next statement it is handed
+        can be one the memo has already answered, and a write that leaves
+        the entry in place is exactly the stale-memo hazard the memo's
+        contract exists to close. The census
+        (`every_ast_mutation_site_invalidates_the_walk_memo`) polices the
+        contract for this site statically; this is the behavioural half —
+        before the `_walk_ast_invalidate` call, a statement the memo had
+        already answered kept answering with the pre-stamp entry after the
+        write."""
+        global _PASS, _FAIL
+        name = "attribute_to_def_write_invalidates_the_walk_memo"
+        import mojo.middle.exprtypes as ET
+        import mojo.middle.coro as CO
+        from fire_compiler import py_tokenize, Parser, FunctionDef, VarDecl
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            stmts = (Parser(py_tokenize(
+                "def g(a):\n    yield a\nvar p = 1\n")).parse_module() or [])
+            fn = [s for s in stmts if isinstance(s, FunctionDef)][0]
+            stmt = [s for s in stmts if isinstance(s, VarDecl)][0]
+            # The generator def lives on its own line in the source, apart
+            # from the prologue statement, so the stamp moves both fields.
+            fn.line, fn.col = 42, 7
+            first = ET._walk_ast(stmt)
+            if ET._walk_ast(stmt) is not first:
+                err = 'nothing was memoized, so this proved nothing'
+            elif any(isinstance(v, int) and not isinstance(v, bool)
+                     and v == fn.line for v in first):
+                err = ('the test precondition is wrong: the def line is '
+                       'already in the pre-stamp walk')
+            else:
+                CO._attribute_to_def([stmt], fn)
+                after = ET._walk_ast(stmt)
+                scalars = [v for v in after
+                           if isinstance(v, int) and not isinstance(v, bool)]
+                if (stmt.line, stmt.col) != (fn.line, fn.col):
+                    err = 'the stamp did not reach the statement'
+                elif after is first:
+                    err = ('the memo entry for the statement survived the '
+                           'write: the walk after the stamp still answered '
+                           'from the pre-stamp memo')
+                elif fn.line not in scalars:
+                    err = ('the walk after the stamp still answers from the '
+                           'memo: the generator def line %d is missing from '
+                           'it' % fn.line)
+        except Exception as e:  # noqa: BLE001
+            err = f'{type(e).__name__}: {e}'
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -11003,7 +11967,7 @@ print("%r" % p)
         writes it, and it is what refused Lib/zipfile/__init__.py,
         Lib/shutil.py, Lib/tempfile.py and four Lib/importlib/resources/
         modules from the readers.py closure (see
-        bugs/COMPILE_FAIL_importlib_resources_readers.md). Its own
+        bugs/mid/COMPILE_FAIL_importlib_resources_readers.md). Its own
         docstring already said "only literal formats answer"; the code did
         not.
 
@@ -13227,8 +14191,11 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_dataclass_cache_is_transparent(), 'test_walk_ast_dataclass_cache_is_transparent (line 12668)')
     _run_isolated(lambda: test_no_walk_ast_caller_mutates_what_it_is_handed(), 'test_no_walk_ast_caller_mutates_what_it_is_handed (line 12669)')
     _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
+    _run_isolated(lambda: test_binding_index_memo_is_the_single_binder_census(), 'test_binding_index_memo_is_the_single_binder_census (line 12670)')
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
+    _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
+    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo (line 11864)')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
@@ -13257,6 +14224,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_generator_bool_tuple_slot_is_bool(), 'test_generator_bool_tuple_slot_is_bool (line 12697)')
     _run_isolated(lambda: test_generator_int_yield_slot_stays_int64(), 'test_generator_int_yield_slot_stays_int64 (line 12698)')
     _run_isolated(lambda: test_generator_mixed_bool_and_int_yields_widen_to_int(), 'test_generator_mixed_bool_and_int_yields_widen_to_int (line 12699)')
+    _run_isolated(lambda: test_self_delegating_generator_kind_ignores_its_own_yield_from(), 'test_self_delegating_generator_kind_ignores_its_own_yield_from')
     _run_isolated(lambda: test_user_defined_dunder_repr_is_called(), 'test_user_defined_dunder_repr_is_called (line 12700)')
     _run_isolated(lambda: test_user_defined_dunder_repr_value(), 'test_user_defined_dunder_repr_value (line 12701)')
     _run_isolated(lambda: test_aliased_and_reexported_imports_resolve_to_the_defining_module(), 'test_aliased_and_reexported_imports_resolve_to_the_defining_module (line 12702)')
@@ -13270,6 +14238,8 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_no_compiler_module_defines_a_function_twice(), 'test_no_compiler_module_defines_a_function_twice (line 12710)')
     _run_isolated(lambda: test_import_line_modules_matches_the_regex_it_replaced(), 'test_import_line_modules_matches_the_regex_it_replaced (line 12711)')
     _run_isolated(lambda: test_flagged_re_compile_is_not_lowered_as_the_bare_pattern(), 'test_flagged_re_compile_is_not_lowered_as_the_bare_pattern (line 12712)')
+    _run_isolated(lambda: test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list(), 'test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list')
+    _run_isolated(lambda: test_recompiling_a_struct_does_not_multiply_its_method_overloads(), 'test_recompiling_a_struct_does_not_multiply_its_method_overloads')
     _run_isolated(lambda: test_bracket_mentions_matches_the_regex_it_replaced(), 'test_bracket_mentions_matches_the_regex_it_replaced (line 12713)')
     _run_isolated(lambda: test_func_state_snapshot_covers_reset_func(), 'test_func_state_snapshot_covers_reset_func (line 12714)')
     _run_isolated(lambda: test_every_funcptr_initializer_has_a_definition(), 'test_every_funcptr_initializer_has_a_definition (line 12715)')
@@ -13281,6 +14251,12 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_list_of_a_boxed_dict_materializes_keys_as_strings(), 'test_list_of_a_boxed_dict_materializes_keys_as_strings (line 12720a)')
     _run_isolated(lambda: test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds(), 'test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds (line 12720b)')
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
+    _run_isolated(lambda: test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list(), 'test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list')
+    _run_isolated(lambda: test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind(), 'test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind')
+    _run_isolated(lambda: test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses(), 'test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses')
+    _run_isolated(lambda: test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses(), 'test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses')
+    _run_isolated(lambda: test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation(), 'test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation')
+    _run_isolated(lambda: test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list(), 'test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
@@ -13362,7 +14338,7 @@ def main():
     print(step(7))
 """), 'nested_decorator_factory_still_compiles')
     # A decorated `def` NESTED in a function body is rebound like a top-level
-    # one (bugs/COMPILE_FAIL_decorator_application_dropped.md): before this,
+    # one (bugs/hard/COMPILE_FAIL_decorator_application_dropped.md): before this,
     # `step(n)` silently called the undecorated body and printed 8, not 16.
     # A module-level decorator and a factory are both in scope from inside.
     _run_isolated(lambda: test("nested_decorator_is_applied_at_runtime", """\
@@ -13419,6 +14395,41 @@ if True:
 
 print(step(7))
 """, "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
+
+    # Same-module wraps using a class-based partial (functools.wraps style)
+    # must compile and apply correctly; the decorator rebinding/refusal must
+    # not block a callable returned by a class constructor.
+    _run_isolated(lambda: test("same_module_wraps_with_class_partial_applies_decorator", """\
+class partial:
+    def __init__(self, func, *args, **kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+    def __call__(self, *args, **kwargs):
+        new_args = self.args + args
+        new_kwargs = dict(self.kwargs)
+        new_kwargs.update(kwargs)
+        return self.func(*new_args, **new_kwargs)
+
+def update_wrapper(wrapper, wrapped):
+    wrapper.__wrapped__ = wrapped
+    return wrapper
+
+def wraps(wrapped):
+    return partial(update_wrapper, wrapped)
+
+def f(x):
+    return x + 1
+
+@wraps(f)
+def wrapper(x):
+    return f(x) * 2
+
+def main():
+    print(wrapper(5))
+
+main()
+"""), 'same_module_wraps_with_class_partial_applies_decorator')
 
 
     # `len()` of a value the codegen could not type, where that value is a
@@ -13478,6 +14489,630 @@ main()
       "int64_t info;"],
        ["int info;", "int64_t _t = info;"]), 'len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy')
 
+
+    # Struct subscript store with __setitem__
+    _run_isolated(lambda: test_gimple_body("struct_subscript_store_with_setitem", """\
+struct S:
+    var x: Int
+    def __init__(out self):
+        self.x = 0
+    def __setitem__(mut self, i: Int, v: Int):
+        self.x = v
+
+def f() -> Int:
+    var s = S()
+    s[0] = 5
+    return s.x
+"""), 'struct_subscript_store_with_setitem')
+
+    # Struct subscript store with backing field
+    _run_isolated(lambda: test_gimple_body("struct_subscript_store_with_backing_field", """\
+struct S:
+    var data: List[Int]
+    def __init__(out self):
+        self.data = List[Int]()
+        self.data.append(0)
+
+def f() -> Int:
+    var s = S()
+    s[0] = 5
+    return s.data[0]
+"""), 'struct_subscript_store_with_backing_field')
+
+    def test_regex_tables_are_referenced_by_address_in_a_gimple_body():
+        """A regex table is emitted as an ARRAY; binding it to a pointer temp
+        must spell `&table[0]`, never rely on array-to-pointer decay.
+
+        `_t62 = _re17_prog;` is accepted in an ordinary C function, where gcc's
+        C frontend performs the decay for us — and is a hard error in a
+        `__GIMPLE`-tagged body, which gcc reads as raw GIMPLE (struct methods
+        and lifted closures; `fire.py build` compiles the whole-closure `.ci`
+        with `-x c`): "non-trivial conversion in 'var_decl'", RHS
+        `const struct ReNode[55]` against a `const struct ReNode *` var_decl.
+        That is what broke the self-host `fire.o` step at
+        `Parser._merge_string_literals` and `elaborate_overload_call`, both of
+        which call `re.sub`.
+
+        Asserts the emitted reference for all four tables (prog, ranges,
+        classinfo, names — the last is `for m in PAT.finditer(...)`; note the
+        loop is at module scope here because `finditer` in a `__GIMPLE` body
+        has its own separate gimple-legality gaps), then compiles the `.ci` as
+        C (`-x c`, the build's flags) and RUNS it against CPython so a fix
+        cannot pass by changing which value is read."""
+        global _PASS, _FAIL
+        name = "regex_tables_are_referenced_by_address_in_a_gimple_body"
+        src = r'''
+import re
+
+PAT = re.compile(r"(?P<k>[a-z]+)([0-9]+)")
+SEP = re.compile(r",\s*")
+
+def norm(s):
+    return re.sub(r"[0-9]+", "N", s)
+
+def count_matches(s):
+    n = 0
+    for m in PAT.finditer(s):
+        n = n + 1
+    return n
+
+class S:
+    def sub(self, s):
+        return re.sub(r"[0-9]+", "N", s)
+
+    def parts(self, s):
+        return SEP.split(s)
+
+def main():
+    print(norm("a1b22"))
+    print(count_matches("ab12 cd34"))
+    print(S().sub("c3d4"))
+    print(S().parts("a, b,c"))
+
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        missing = [suffix for suffix in ('prog', 'ranges', 'classinfo', 'names')
+                   if not re.search(rf'= &_re\d+_{suffix}\[0\];', c_src)]
+        bare = re.findall(r'= _re\d+_(?:prog|ranges|classinfo|names);', c_src)
+        # The method body must be a __GIMPLE one, or this test would be
+        # asserting the ordinary-C case gcc already tolerates.
+        if not ok or missing or bare or '__GIMPLE char * S_sub' not in c_src:
+            print(f"FAIL  {name}: ok={ok} missing-address-refs={missing} "
+                  f"bare-decays={bare}")
+            if not ok:
+                for line in stderr.splitlines()[:12]:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'regex_tables.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'regex_tables.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'regex_tables.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_re_sub_with_inline_lambda():
+        """A re.sub() whose second argument is an INLINE lambda must be
+        dispatched down the callback path (mojo_regex_sub_fn with the lambda's
+        function pointer), never down the replacement-string path (mojo_regex_sub_str).
+
+        Before the fix, `_re_sub_repl_is_callback` only answered True for an
+        IdentExpr (a closure or a bare top-level def name), so a LambdaExpr was
+        classified as a plain replacement string and its (garbage) address was
+        passed to mojo_regex_sub_str as the replacement value — the compiled
+        program printed the lambda's machine code instead of the replacement
+        (bugs/CODEGEN_re_sub_inline_lambda_used_as_replacement_string).
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_inline_lambda"
+        src = r'''
+import re
+
+def main():
+    print(re.sub(r"[0-9]+", lambda _m: "N", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            # The callback path means the generated call carries the
+            # mojo_regex_sub_fn shape (callback + env), not mojo_regex_sub_str.
+            if 'mojo_regex_sub_fn' not in c_src:
+                print(f"FAIL  {name}: re.sub with a lambda did not emit the callback call")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- generated C ---")
+        for i, line in enumerate(c_src.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(lambda: test_regex_tables_are_referenced_by_address_in_a_gimple_body(),
+                  'test_regex_tables_are_referenced_by_address_in_a_gimple_body')
+    _run_isolated(lambda: test_re_sub_with_inline_lambda(),
+                  'test_re_sub_with_inline_lambda')
+
+    def test_re_sub_with_capturing_lambda():
+        """A re.sub() whose second argument is a CAPTURING lambda (one that
+        reads an enclosing local) must be dispatched down the callback path,
+        with the callback and its env unpacked from the lambda's
+        MojoBoundMethod (fn, self) and passed to mojo_regex_sub_fn. Before the
+        fix, `_re_sub_repl_is_callback` answered False for any capturing lambda,
+        so the lambda's value went to mojo_regex_sub_str as a replacement
+        string; a later fix refused it outright, which made `module_gen.py`
+        (its `@@CSYM:` resolution) uncompilable. That is the shape tested here.
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_capturing_lambda"
+        src = r'''
+import re
+
+def main():
+    k = "N"
+    print(re.sub(r"[0-9]+", lambda _m: k, "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            if ('mojo_regex_sub_fn' not in c_src
+                    or 'mojo_bound_method_fn' not in c_src
+                    or 'mojo_bound_method_self' not in c_src):
+                print(f"FAIL  {name}: capturing lambda was not unpacked into (fn, env) for the callback")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(lambda: test_re_sub_with_capturing_lambda(),
+                  'test_re_sub_with_capturing_lambda')
+
+    def test_regex_scan_in_a_method_body_compiles_and_matches_cpython():
+        """`for m in PAT.finditer(s)` inside a struct method — a `__GIMPLE`
+        body, which gcc reads as raw GIMPLE under `-x c` (the build's flags) —
+        must compile and count matches like CPython.
+
+        Two defects, both in emit_loops.py's regex scan lowering:
+        (1) it sized its group-offset arrays with `(int64_t)(sizeof(int64_t)
+        * n)`, and `sizeof` is not a GIMPLE operand ("expected expression
+        before '(' token"); (2) it used the address-taken out-param
+        `mend` directly as a comparison and `?:` operand, which raw GIMPLE
+        rejects ("invalid operands in binary operation"). The module-scope
+        variant of this loop (the test above) never reached either line,
+        because a module-level `def` is ordinary C.
+
+        Compiles the `.ci` as C and RUNS it against CPython so a fix cannot
+        pass by changing which count is produced."""
+        global _PASS, _FAIL
+        name = "regex_scan_in_a_method_body_compiles_and_matches_cpython"
+        src = r'''
+import re
+
+PAT = re.compile(r"(?P<k>[a-z]+)([0-9]+)")
+
+class S:
+    def count(self, s):
+        n = 0
+        for m in PAT.finditer(s):
+            n = n + 1
+        return n
+
+    def count_three_groups(self, s):
+        n = 0
+        for m in PAT3.finditer(s):
+            n = n + 1
+        return n
+
+PAT3 = re.compile(r"([a-z])(-)?([0-9])?")
+
+def main():
+    print(S().count("ab12 cd34 x 9"))
+    print(S().count("nothing here!"))
+    print(S().count_three_groups("a-1 b c-2"))
+
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if not ok:
+            print(f"FAIL  {name}: gimple body refused by gcc -x c:")
+            for line in stderr.splitlines()[:12]:
+                print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'regex_method_scan.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'regex_method_scan.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'regex_method_scan.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_regex_scan_in_a_method_body_compiles_and_matches_cpython(),
+                  'test_regex_scan_in_a_method_body_compiles_and_matches_cpython')
+
+    def test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body():
+        """`re.sub(pat, top_level_def, src)` must pass the callback as the
+        bare `void *` value it already is, never with a C-style `(void *)`
+        cast emitted INSIDE the `__GIMPLE` body.
+
+        A bare top-level `def` lowers to the file-scope
+        `static void * _funcptr_<fn>` (calls_shared._callable_value_symbol),
+        so the old fallback in `_lower_re_sub_callback` emitted
+        `_t6 = (void *)_funcptr_repl_9f63a2;` — and a cast whose operand is a
+        GLOBAL DECL is not a legal raw-GIMPLE operand, so gcc rejected the
+        whole `.ci` with "invalid operand in unary operation". gcc only
+        enforces that under `-x c` (this test's `gimple_body_compiles`, the
+        same parse `fire.py build` uses); a `.c` suffix lowers from C and
+        tolerates it, which is why every pre-existing re.sub test stayed
+        green.
+
+        Both lowering arms are covered because they share
+        `_lower_re_sub_callback`: a literal pattern folds into the codegen's
+        own regex engine (`mojo_regex_sub_fn`), while a pattern PARAMETER
+        falls back to the POSIX backend (`mojo_re_sub_fn`). The program is
+        then compiled and RUN with CPython's own stdout as the expectation,
+        so the callback has to be actually invoked and produce the right
+        string, not merely parse.
+        """
+        global _PASS, _FAIL
+        name = "named_callback_re_sub_compiles_and_runs_in_a_gimple_body"
+        src = r'''
+import re
+
+def repl(mm):
+    return "N"
+
+class S:
+    def sub(self, s):
+        return re.sub(r"[0-9]+", repl, s)
+
+    def sub_dynamic(self, pat, s):
+        return re.sub(pat, repl, s)
+
+def main():
+    print(S().sub("a1b22"))
+    print(S().sub_dynamic(r"[a-z]+", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        # The exact spelling this pins: no cast of the `_funcptr_` static.
+        casted = re.findall(r'= \(void \*\)_funcptr_', c_src)
+        if not ok or casted or '__GIMPLE char * S_sub' not in c_src:
+            print(f"FAIL  {name}: ok={ok} cast-funcptr-elems={casted}")
+            if not ok:
+                for line in stderr.splitlines()[:12]:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'named_cb_re_sub.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'named_cb_re_sub.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'named_cb_re_sub.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body(),
+                  'test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body')
+
+    # gate-stdlib-syntax: a FLOAT scalar's bit accessors answer an integer.
+    #
+    # This is the minimum shape of the eight-file `stdlib-syntax` red the two
+    # held `SIMD[X, 1] -> X` landings produced.
+    # Once a width-1 SIMD value is typed float/double, `val.to_bits()` and
+    # `x._to_bits_signed()` reach the generic scalar-method stub, which hands
+    # the receiver's type straight back; a bitwise expression on that result
+    # is then `float & float`, which gcc rejects. It is live in
+    # std/utils/numerics.mojo's isnan/isinf (their comptime-dead float8 arms
+    # are emitted, not pruned) and in std/math/math.mojo's frexp, reached from
+    # test_ldexp/test_math. The stdlib's own signatures say these accessors
+    # return an integer. This case fails on a resolver-only landing with
+    # "invalid operands to binary & (have 'float' and 'float')" and passes here.
+    _run_isolated(lambda: test("gate_stdlib_syntax_float_bit_accessors", """\
+def f(val: SIMD[Float32, 1]) -> Bool:
+    return (val.to_bits() & 0x7F).eq(0x7C)
+
+def g(x: SIMD[Float64, 1]) -> Bool:
+    var b = x._to_bits_signed()
+    return (b & 0x7FF).eq(0)
+"""), 'gate_stdlib_syntax_float_bit_accessors')
+
+    # A float bit REINTERPRETATION, not a zero: `bitcast[Float32, 1](bits)` and
+    # `SIMD[Float64, 1](from_bits=bits)` both lower through _emit_bits_to_float
+    # to the runtime's bit-pattern helpers. Before, the bitcast fell into the
+    # catch-all and produced `(int64_t)0`, a silently wrong answer.
+    test_c_shape("bitcast_and_from_bits_reinterpret_bits",
+                 """\
+def f(bits: Int64) -> Float32:
+    return bitcast[Float32, 1](bits)
+
+def g(bits: Int64) -> Float64:
+    return SIMD[Float64, 1](from_bits=bits)
+""",
+                 must_have=["mojo_float_from_bits (", "mojo_double_from_bits ("],
+                 must_not_have=["/* indirect call via"])
+
+    # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
+    #
+    # The Array fill-unroll coerces its fill value to the element type, and a
+    # `{}` fill lowers to a `MojoDict *`. C lets a pointer convert only to an
+    # INTEGER type, so the generic `(double)<ptr>` cast the coercion used to
+    # emit is rejected outright -- gcc: "pointer value used where a
+    # floating-point was expected". Real: test/algorithm/test_vectorize.mojo's
+    # `Array[Float32, buf_len](fill={})` (twice), which only became reachable
+    # when b0910af72 made the width arm fire for a comptime width; the red
+    # that produced is `stdlib-syntax`. The fix is the same int-word
+    # conversion every other pointer->number coercion in emit_resolve.py uses.
+    #
+    # The append count is asserted, not just "gcc accepted it": a dead width
+    # arm would also compile, and that is the regression (b0910af72) this
+    # would otherwise stop watching.
+    def _test_array_float_fill_from_a_container():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_array_float_fill_pointer_coercion"
+        ok, c_src, stderr = gimple_compiles("""\
+def f() -> Float64:
+    comptime n = 23
+    var a = Array[Float32, n](fill={})
+    return Float64(a[0])
+""")
+        appends = c_src.count('mojo_list_append_double')
+        if ok and appends == 23:
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}: ok={ok} appends={appends} (want 23)")
+        for line in stderr.splitlines()[:8]:
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(_test_array_float_fill_from_a_container,
+                  'gate_stdlib_syntax_array_float_fill_pointer_coercion')
+
+    # gate-stdlib-syntax (2026-11-13): the elaborated-instantiation refusal
+    # must ask whether a bracket argument PROGRESSES (`i + 1`, the unbounded
+    # instantiation b3e501b60 closed), not whether it is a concrete TYPE.
+    # `llvm_intrinsic["llvm.probe.name", T]` is an imported builtin call
+    # whose first argument is a fixed string value and whose second is a
+    # type: the old "not a concrete type" test read the string's rendering
+    # as '' and refused, taking std/math/math.mojo (frexp, reached from
+    # test_ldexp/test_math) and the other stdlib-syntax files red. The shipped
+    # lowering is the documented module-boundary stub. The case compiles in
+    # single-unit mode, the path compile_one.py uses.
+    def _test_imported_intrinsic_string_arg_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_imported_intrinsic_string_arg"
+        ok, err = stdlib_unit_compiles("""\
+from std.sys.intrinsics import llvm_intrinsic
+
+def wrap[T: DType](x: SIMD[T, 1]) -> SIMD[T, 1]:
+    return llvm_intrinsic["llvm.probe.name", SIMD[T, 1], has_side_effect=False](x)
+
+def main():
+    print(wrap[DType.float32](SIMD[DType.float32, 1](2.0)))
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_imported_intrinsic_string_arg_in_instance,
+                  'gate_stdlib_syntax_imported_intrinsic_string_arg')
+
+    # gate-stdlib-syntax (2026-11-13): the same refusal on the two shapes
+    # that are compile-time VALUES, not type names, through real stdlib
+    # generics: `sqrt(x)`/`sin(x)` (an intrinsic-name string argument) and
+    # `erf(x)` (`polynomial_evaluate[[1.0, ...]]`, a comptime LIST). Both
+    # are imported generics, so this is the elaborated path the sweep uses.
+    # Before the progressing-argument predicate, `sqrt` refused with
+    # `_llvm_unary_fn` and `erf` with `polynomial_evaluate`: the old test
+    # was "not a concrete type", which neither a string nor a list is.
+    def _test_imported_generic_bracket_args():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_imported_generic_bracket_args"
+        ok, err = stdlib_unit_compiles("""\
+from std.math import sqrt, erf, sin
+
+def probe(x: Float32) -> Float32:
+    return sqrt(x) + erf(x) + sin(x)
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_imported_generic_bracket_args,
+                  'gate_stdlib_syntax_imported_generic_bracket_args')
+
+    # gate-stdlib-syntax (2026-11-13): a `comptime if` over the stdlib's
+    # zero-arg GPU target queries in a generic body (std/math/math.mojo's
+    # rsqrt/recip/exp2/log shape, reached from test_math). On a CPU build
+    # the queries are False, so the GPU arms are comptime-dead and must be
+    # pruned, not emitted as a runtime if/elif over an imported query. The
+    # assertion is on the generated C because a build that emitted the arms
+    # also succeeds on the single-unit path; the calls are what the fold
+    # removes, and the dead arm carries a progressing bracket call
+    # (`f[Int64](1 + 2)`) that the elaborated path refuses if it is reached.
+    def _test_comptime_dead_gpu_arm_pruned_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_comptime_gpu_arm_pruned"
+        try:
+            c_src = stdlib_unit_emits("""\
+from std.sys.info import is_nvidia_gpu, is_amd_gpu
+
+def f[T: AnyType](x: Int64) -> Int64:
+    comptime if is_nvidia_gpu():
+        return 0
+    elif is_amd_gpu():
+        return f[Int64](1 + 2)
+    return x
+
+def main():
+    print(f[Float32](1))
+""")
+        except Exception as e:
+            print(f"FAIL  {name}: {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        nvidia = c_src.count('std_sys_info_is_nvidia_gpu ()')
+        amd = c_src.count('std_sys_info_is_amd_gpu ()')
+        if nvidia == 0 and amd == 0:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: emitted the dead arms "
+                  f"(nvidia={nvidia}, amd={amd}; want 0 each)")
+            _FAIL += 1
+
+    _run_isolated(_test_comptime_dead_gpu_arm_pruned_in_instance,
+                  'gate_stdlib_syntax_comptime_gpu_arm_pruned')
+
+    # gate-stdlib-syntax (class 2): a bare `List(...)` is the container
+    # constructor with its element type inferred from the argument, so every
+    # form must be a `MojoList *`. It used to reach `_lower_opaque_ctor`'s
+    # uppercase rule (there is no bracket argument for the generic-container
+    # arm to match), which returns an `int64_t`: `var a = List([1, 2])` then
+    # made `a * 3` integer multiplication and the compiled program SEGFAULTED
+    # where the interpreter answers. The length/fill form is the shape
+    # `test/builtin/test_sort_issue_1018.mojo` and `test/builtin/test_simd.mojo`
+    # build once their `dtype`/`name` bracket arguments are elaborated, and its
+    # length is a runtime value, so it is a synthetic `[fill for _ in
+    # range(length)]` rather than a static unroll.
+    def _test_bare_list_constructor_keeps_its_container_type():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_bare_list_constructor"
+        src = '''\
+def main():
+    var a = List([1, 2])
+    print(len(a))
+    print(a[0], a[1])
+    var n = 4
+    var b = List(length=n, fill=7)
+    print(len(b), b[0], b[3])
+    var c = List()
+    print(len(c))
+    var d = List(a)
+    print(len(d), d[1])
+    var e = List(1, 2, 3)
+    print(len(e), e[2])
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if not ok:
+            print(f"FAIL  {name}: gcc -fgimple -x c failed")
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            c_file = os.path.join(td, 'bare_list.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'bare_list.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc link failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        want = '2\n1 2\n4 7 7\n0\n2 2\n3 3\n'
+        if run.returncode != 0 or run.stdout != want:
+            print(f"FAIL  {name}: printed {run.stdout!r} "
+                  f"(exit {run.returncode}), want {want!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(_test_bare_list_constructor_keeps_its_container_type,
+                  'gate_stdlib_syntax_bare_list_constructor')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
