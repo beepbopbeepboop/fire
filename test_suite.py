@@ -5233,6 +5233,47 @@ def test_the_trait_conformance_diagnostic_suites_are_gated():
                f'(cmd={sorted(files)})'))
 
 
+_SUITE_SELF_TEST_REGISTRATIONS = (
+    # (spec name, test file) — the five test files the estate row named after
+    # they landed on master with no spec (bug:SUITE_self_test_red). Each is a
+    # cheap in-process pin (measured: 0.03-0.07 GB peak, 0.1-12 s, no build),
+    # so they belong in `check`, which `gate` expands.
+    ('binding-evidence', 'test_binding_evidence.py'),
+    ('interp-list-ctor', 'test_interp_list_ctor.py'),
+    ('module-globals-compiled', 'test_module_globals_compiled.py'),
+    ('mojoc-precompile-signature', 'test_mojoc_precompile_signature.py'),
+    ('stdlib-syntax-variant', 'test_stdlib_syntax_variant.py'),
+)
+
+
+def test_the_suite_self_test_registrations_are_gated():
+    """Every test file the suite-self-test estate row named runs on every gate.
+
+    Five files landed on master named by no spec, so `suite-self-test`'s estate
+    row was the only thing that mentioned them and no run executed their cases
+    (`bug:SUITE_self_test_red`). They are registered now, and the estate check
+    above is what keeps the next unregistered file from hiding — but it can
+    only ask that SOME spec names the file, and a name in a bucket `gate` does
+    not expand to is the same hole one level over. All five are cheap
+    in-process pins, so they belong in the everyday loop, and this check pins
+    that by name: dropping a registration, or moving one out of the gate, is a
+    red row rather than a silent coverage loss.
+    """
+    for name, filename in _SUITE_SELF_TEST_REGISTRATIONS:
+        spec = suite.REGISTRY.get(name)
+        files = ({os.path.basename(str(c)) for c in spec.cmd}
+                 if spec is not None else set())
+        check(f'the gate: {name} runs on every gate',
+              spec is not None
+              and filename in files
+              and name in suite.expand_bucket('gate'),
+              ('bug:SUITE_self_test_red: no spec names '
+               f'{filename}, so it runs on nothing' if spec is None else
+               'bug:SUITE_self_test_red: '
+               f'{name} is registered but not reachable from `gate` '
+               f'(cmd={sorted(files)})'))
+
+
 def test_no_test_name_is_registered_twice():
     """A second `test('name', …)` overwrites the first, and nothing says so.
 
@@ -6674,6 +6715,7 @@ def main():
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
                test_the_trait_conformance_diagnostic_suites_are_gated,
+               test_the_suite_self_test_registrations_are_gated,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
