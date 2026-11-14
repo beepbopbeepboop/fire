@@ -17,7 +17,7 @@ The first entry's doc no longer exists on disk (`git log` shows it deleted in
 `d44f44787`), so that entry can never be discharged by the "remove this report
 in the same commit" rule. It matches 23 jobs, including `bootstrap-stage1-transitive`,
 `mojoc`, `gimple`, `linkmode` and `selfhost`. That orphan is filed separately
-as `bugs/GATE_off_entry_doc_missing.md`; this part must not depend on it being
+as `bugs/mid/GATE_off_entry_doc_missing.md`; this part must not depend on it being
 fixed first, but it must not leave `bootstrap-stage1-transitive` matched by it
 either — narrow that entry (drop the bootstrap name) or delete the entry as
 part of the same commit, and say which in the commit message.

@@ -143,7 +143,7 @@ survivor is part 5's inventory.
 Also recorded: `mojoc` is no longer in this doc's OFF entry. It, and
 `bootstrap-stage1-transitive`, are still matched by the 23-job `recover-land`
 entry whose doc was deleted — filed as
-`bugs/GATE_off_entry_doc_missing.md`, because that entry can never be
+`bugs/mid/GATE_off_entry_doc_missing.md`, because that entry can never be
 discharged as written and part 5 cannot turn stage1-transitive on without
 narrowing it.
 
