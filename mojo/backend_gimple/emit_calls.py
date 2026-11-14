@@ -2154,6 +2154,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and re.match(r'^__mojo_tuple_box_\d+$', _as_str(node.func.name))):
         return _lower_tuple_box_call(gen, node)
+    # Module-scope `globals()`: the compiled namespace is the module's own
+    # globals struct and its earlier bindings are statically known, so answer
+    # it here instead of letting it reach the unknown-builtin weak stub (which
+    # printed `globals: unavailable in compiled mode` and returned NULL — the
+    # Tools/cases_generator/lexer.py analyzer bug). See
+    # `emit_infra.lower_module_globals_read` for the precise bound.
+    if ginf.is_module_globals_call(gen, node):
+        return ginf.lower_module_globals_read(gen, node)
     _c = _try_lower_constrained(gen, node)
     if _c is not None:
         return _c

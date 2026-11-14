@@ -37,7 +37,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 # re-export is invisible to the self-hosted call lowering while this module is
 # inside the compiler's own import cycle, and the call became a weak
 # "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_single_name, target_slots, _as_list
+from fire_compiler import for_target_is_tuple, for_target_single_name, for_target_names, target_slots, _as_list
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -883,6 +883,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # real Python function's body (current_func_name is ALSO non-empty there,
     # e.g. '_cas_toplevel', so current_func_name alone can't tell them apart).
     gen._in_toplevel_gen: bool          = False
+    # Module-level names bound by the top-level statements emitted SO FAR in
+    # `_gen_toplevel` (append-ordered, module scope only). A `globals()` call
+    # at module scope is lowered against this list — see
+    # `lower_module_globals_read` / `note_toplevel_bindings`.
+    gen._toplevel_bound_globals: list = []
 
 
 # ── Per-function state snapshot ─────────────────────────────────────────────
@@ -997,6 +1002,7 @@ class FuncState:
         self.fs_func_declared_globals: set = set()
         self.fs_func_declared_nonlocals: set = set()
         self.fs_in_toplevel_gen: bool = False
+        self.fs_toplevel_bound_globals: list = []
         self.fs_cstr_key_src: dict = {}
         self.fs_kw_key_src: dict = {}
         self.fs_int_word_vals: set = set()
@@ -1108,6 +1114,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_func_declared_globals = gen._func_declared_globals
     st.fs_func_declared_nonlocals = gen._func_declared_nonlocals
     st.fs_in_toplevel_gen = gen._in_toplevel_gen
+    st.fs_toplevel_bound_globals = gen._toplevel_bound_globals
     st.fs_cstr_key_src = gen._cstr_key_src
     for _k in gen._cstr_key_src:
         st.fs_cstr_key_src_items[_k] = gen._cstr_key_src[_k]
@@ -1230,6 +1237,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._func_declared_globals = st.fs_func_declared_globals
     gen._func_declared_nonlocals = st.fs_func_declared_nonlocals
     gen._in_toplevel_gen = st.fs_in_toplevel_gen
+    gen._toplevel_bound_globals = st.fs_toplevel_bound_globals
     gen._cstr_key_src = st.fs_cstr_key_src
     gen._cstr_key_src.clear()
     for _k in st.fs_cstr_key_src_items:
@@ -7342,6 +7350,274 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _suffix,
                    [('MojoDict *', dict_val), (key_ctype, key_val),
                     ('int64_t', vv64)])
+
+
+# ── module-scope `globals()` ────────────────────────────────────────────────
+#
+# `globals()` at module scope is the one name-table query the compiled path
+# can answer statically: the module's globals ARE its `_<mod>_globals` struct,
+# and the names bound before a given top-level statement are readable from the
+# statement list. So a `globals()` call there lowers to a snapshot dict of
+# those names (`operators = {.. for op, pat in globals().items() ..}` in
+# Tools/cases_generator/lexer.py), and a direct `globals()[k] = v` store lowers
+# to a runtime dispatch over the same names that writes the real struct fields
+# (`for op in operators: globals()[op] = op`). Before this both were the
+# generic unknown-builtin weak stub, which printed `globals: unavailable in
+# compiled mode` and returned NULL: the analyzer binary ran with an empty
+# operator table and died on every input.
+#
+# Deliberately NOT here (and refused by the write dispatch's else arm rather
+# than guessed at):
+#   * a `globals()` call inside a real function body — it keeps the existing
+#     stub, because its "names bound so far" is a property of run time, not of
+#     any statement list;
+#   * creating a NEW module global through `globals()[k] = v` (a name with no
+#     compiled struct field). That is arbitrary runtime name binding, a
+#     different and much larger project;
+#   * `del globals()[k]`, `globals().update(..)` and a snapshot dict kept in a
+#     local and mutated later (the snapshot is not a live view).
+# Functions, classes and imports are separate symbol kinds here (they have no
+# globals-struct field), so the snapshot carries the module's value bindings,
+# not every entry of CPython's module dict.
+#
+# One table, two readers: `lower_module_globals_read` and
+# `lower_module_globals_setitem` both take their key set from
+# `module_globals_bound_names`, so the dict a program iterates and the names a
+# write can land on cannot disagree.
+
+
+def is_module_globals_call(gen, node) -> bool:
+    """True for a bare zero-argument `globals()` call at module top level.
+
+    `_locally_binds_name` keeps a user function/variable that happens to be
+    called `globals` on the ordinary path (real Python would shadow the
+    builtin the same way). `_in_toplevel_gen` is the existing "generating a
+    module's own `_toplevel` body" flag, so a call from a real function keeps
+    its previous lowering.
+    """
+    return (isinstance(node, CallExpr)
+            and isinstance(node.func, IdentExpr)
+            and _as_str(node.func.name) == 'globals'
+            and not node.args
+            and not getattr(node, 'kwargs', None)
+            and not gen._locally_binds_name('globals')
+            and getattr(gen, '_in_toplevel_gen', False))
+
+
+def _mg_bind_names(target) -> list:
+    """LEAF names a module-level target binds.
+
+    `fire_compiler.for_target_names` owns the target representation (nested
+    tuple/list patterns, the `'(a,)'` 1-tuple spelling, the starred leaf), so
+    this is the same walk every other bound-name consumer uses rather than a
+    fourth copy of it. The star is dropped because `*rest` binds `rest`.
+    """
+    out = []
+    for _n in for_target_names(target):
+        out.append(_n[1:].strip() if _n.startswith('*') else _n)
+    return out
+
+
+def _mg_collect_stmt_bindings(stmt, out: list) -> None:
+    """Append the module-level names `stmt` binds to `out` (append-ordered,
+    no duplicates).
+
+    This is a MODULE-scope walk, and that is why it is not
+    `boundnames._lbn_walk`: a comprehension's `for` target is a local of the
+    comprehension (Python 3), and a `def`/`class` body's names are its own, so
+    descending into either would invent names CPython's module dict does not
+    contain at that point. Statement-level `for`/`if`/`try`/`with` bodies ARE
+    module scope, so those recurse. A name in a branch that did not execute is
+    included: the key set is the compile-time one, which is the honest bound
+    this part can offer (and the doc's decision).
+    """
+    if isinstance(stmt, AssignStmt):
+        names = _mg_bind_names(stmt.target)
+    elif isinstance(stmt, MultiAssignStmt):
+        names = []
+        for _t in stmt.targets:
+            names.extend(_mg_bind_names(_t))
+    elif isinstance(stmt, AugAssignStmt):
+        names = _mg_bind_names(stmt.target)
+    elif isinstance(stmt, VarDecl):
+        names = [_as_str(stmt.name)]
+    elif isinstance(stmt, ForStmt):
+        names = _mg_bind_names(stmt.target)
+        _mg_collect_stmts_bindings(stmt.body, out)
+        _mg_collect_stmts_bindings(stmt.else_body, out)
+    elif isinstance(stmt, ComptimeForStmt):
+        names = _mg_bind_names(stmt.target)
+        _mg_collect_stmts_bindings(stmt.body, out)
+    elif isinstance(stmt, WhileStmt):
+        names = []
+        _mg_collect_stmts_bindings(stmt.body, out)
+        _mg_collect_stmts_bindings(stmt.else_body, out)
+    elif isinstance(stmt, IfStmt):
+        names = []
+        _mg_collect_stmts_bindings(stmt.then_body, out)
+        for _c, _b in (stmt.elifs or []):
+            _mg_collect_stmts_bindings(_b, out)
+        _mg_collect_stmts_bindings(stmt.else_body, out)
+    elif isinstance(stmt, ComptimeIfStmt):
+        names = []
+        _mg_collect_stmts_bindings(stmt.then_body, out)
+        for _c, _b in (stmt.elifs or []):
+            _mg_collect_stmts_bindings(_b, out)
+        _mg_collect_stmts_bindings(stmt.else_body, out)
+    elif isinstance(stmt, TryStmt):
+        names = []
+        _mg_collect_stmts_bindings(stmt.body, out)
+        for _h in (stmt.handlers or []):
+            _hn = _as_str(_h.name)
+            if _hn and _hn not in out:
+                out.append(_hn)
+            _mg_collect_stmts_bindings(_h.body, out)
+        _mg_collect_stmts_bindings(stmt.else_body, out)
+        _mg_collect_stmts_bindings(stmt.finally_body, out)
+    elif isinstance(stmt, WithStmt):
+        names = []
+        for _it in (stmt.items or []):
+            _al = _it.alias
+            if _al is None:
+                continue
+            _an = _as_str(_al.name) if isinstance(_al, IdentExpr) else _as_str(_al)
+            if _an and _an not in out:
+                out.append(_an)
+        _mg_collect_stmts_bindings(stmt.body, out)
+    elif isinstance(stmt, MatchStmt):
+        names = []
+        for _mc in (stmt.cases or []):
+            _mg_collect_stmts_bindings(_mc.body, out)
+    elif isinstance(stmt, DelStmt):
+        # `del name` removes the entry from CPython's module dict, so a later
+        # `globals()` must not show it. Subscript/member deletions
+        # (`del d[k]`) bind nothing.
+        for _t in (stmt.targets or []):
+            if isinstance(_t, IdentExpr):
+                _dn = _as_str(_t.name)
+                if _dn in out:
+                    out.remove(_dn)
+        names = []
+    else:
+        names = []
+    for _n in names:
+        if _n and _n not in out:
+            out.append(_n)
+
+
+def _mg_collect_stmts_bindings(stmts, out: list) -> None:
+    for _s in stmts or []:
+        _mg_collect_stmt_bindings(_s, out)
+
+
+def note_toplevel_bindings(gen, stmt) -> None:
+    """Record what a finished top-level statement bound.
+
+    `_gen_toplevel` calls this after lowering each statement, so during the
+    NEXT statement's `globals()` the list is exactly "names bound earlier in
+    the module" — the runtime order for straight-line module code.
+    """
+    bound = getattr(gen, '_toplevel_bound_globals', None)
+    if bound is None:
+        bound = []
+        gen._toplevel_bound_globals = bound
+    _mg_collect_stmt_bindings(stmt, bound)
+
+
+def module_globals_bound_names(gen) -> list:
+    """The module-value names a module-scope `globals()` may expose here.
+
+    Filtered to names this compile concluded a type for as one of THIS
+    module's own globals (`_own_global_var_types`, the "it's ours" test
+    `bare_global_read_plan` uses) and that have a globals-struct field. An
+    import/`def`/`class` name has no field and is not a value binding of the
+    compiled namespace.
+    """
+    own = getattr(gen, '_own_global_var_types', None) or {}
+    gv = getattr(gen, '_global_var_types', None) or {}
+    out = []
+    for _n in getattr(gen, '_toplevel_bound_globals', None) or []:
+        if _n in own and _n in gv and _n not in out:
+            out.append(_n)
+    return out
+
+
+def lower_module_globals_read(gen, node=None) -> tuple[str, str]:
+    """`globals()` at module scope -> a fresh `MojoDict *` snapshot.
+
+    Each value is read through the SAME bare-name read path a normal
+    module-level `print(NAME)` uses, so the dict's slot kind (str / int /
+    float / struct) agrees with the field's real C type by construction
+    instead of by a second type table.
+    """
+    _d = gen._call_expr('MojoDict *', 'mojo_dict_new', [])
+    for _name in module_globals_bound_names(gen):
+        _ct, _v = gen.lower_expr(IdentExpr(_as_str(_name)))
+        _k = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(_name)))
+        emit_dict_int_value_store(gen, _d, 'char *', _k, _ct, _v, None)
+    return 'MojoDict *', _d
+
+
+def _mg_write_compatible(field_t: str, val_t: str) -> bool:
+    """Can `val_t` be stored into a `field_t` field without a lie?
+
+    Same type, or two numeric types (the one coercion this codegen performs
+    everywhere). Anything else — notably a `char *` value for an `int` field —
+    is skipped, and a runtime key that names it reaches the honest refusal
+    rather than emitting a `-Wint-conversion` hard error or a wrong value.
+    """
+    field_t = _as_str(field_t)
+    val_t = _as_str(val_t)
+    if field_t == val_t:
+        return True
+    _ints = gimple_ctypes._SCALAR_INT_TYPES
+    _floats = gimple_ctypes._SCALAR_FLOAT_TYPES
+    return ((field_t in _ints and val_t in _ints)
+            or (field_t in _floats and val_t in _floats))
+
+
+def lower_module_globals_setitem(gen, node) -> None:
+    """`globals()[key] = value` at module scope -> a field dispatch.
+
+    `key` is a run-time string (the lexer's loop variable is one of the keys
+    of the dict a previous `globals()` returned), so the compile-time answer
+    is a chain of comparisons: a match writes that name's real globals-struct
+    field, and no match is a new module variable, which this part refuses
+    loudly instead of dropping the store. Names whose field cannot hold this
+    value kind are omitted from the chain for the same reason (`_mg_write_
+    compatible`), so they too reach the refusal.
+    """
+    _kt, _kv = gen.lower_expr(node.target.index)
+    _kc, _key = gen._char_to_cstr(_kt, _kv, True, True)
+    _vt, _v = gen.lower_expr(node.value)
+    # Compute every comparison UP FRONT: `_new_val` emits its temp's
+    # declaration where it is called, so calling it between the `if` and the
+    # `else if` would put `_tN = mojo_cstr_cmp (..)` inside the emitted chain
+    # and C would see `else` with no preceding `if`.
+    _arms = []
+    for _name in module_globals_bound_names(gen):
+        _ft = gen._global_dst_ctype(_name)
+        if not _mg_write_compatible(_ft, _vt):
+            continue
+        _lit = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(_name)))
+        _cmp = gen._new_val('int', f'mojo_cstr_cmp ({_key}, {_lit})')
+        _cond = gen._new_val('_Bool', f'{_cmp} == 0')
+        _arms.append((_name, _ft, _cond))
+    for _i, (_name, _ft, _cond) in enumerate(_arms):
+        _kw = 'if' if _i == 0 else 'else if'
+        gen._emit(f'  {_kw} ({_cond}) {{')
+        gen._safe_coerce_emit(_vt, _ft, _v, _write_dest(gen, _name))
+        gen._emit('  }')
+    if not _arms:
+        gen._emit('  mojo_raise_not_implemented ((char *)'
+                  '"globals()[name] = value: this compiled module has no '
+                  'assignable global field for that name");')
+    else:
+        gen._emit('  else {')
+        gen._emit('    mojo_raise_not_implemented ((char *)'
+                  '"globals()[name] = value: creating a new module global '
+                  'at run time is not supported by the compiled path");')
+        gen._emit('  }')
 
 
 def _repr_boxed_container(gen, value: str):
