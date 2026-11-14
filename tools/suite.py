@@ -2002,8 +2002,15 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
 # (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
 # so a case that starts or stops failing makes this marker disagree and the gate says so.
+#
+# 2026-11-13: re-measured at 626 passed / 1 failed (627 cases). Every case the
+# doc's inventory names now passes; the one failure is
+# `c_accessor_helpers_emitted_once_across_modules` (two modules each emit their
+# own sizeof/fnaddr accessor for a same-shaped lambda environment, where the
+# test wants one shared across the closure). Marker updated to 1.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
-     expect='20 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md (wrong output, RSS over limit, compile refusals)',
+     expect='1 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md '
+            '(c_accessor_helpers_emitted_once_across_modules: duplicate sizeof/fnaddr accessors)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],

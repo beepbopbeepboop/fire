@@ -6373,9 +6373,27 @@ def _definitive_binding_type(gen, name) -> str | None:
                     pann_s = _as_str(pann).strip()
                     if pann_s in tparams or pann_s == 'AnyType' or pann_s == '':
                         return None
-                    # Concrete scalar annotation (Int/Bool/Float64 etc.)
-                    # -> provably scalar.
-                    return 'Int'
+                    # A CONCRETE SCALAR annotation -> provably scalar. This
+                    # used to `return 'Int'` for EVERY other annotation, which
+                    # read `frozenset` — and every other container or opaque
+                    # spelling — as a proven Int and refused the whole module:
+                    # `if cap_name in mut_capture_names` at
+                    # mojo/backend_gimple/cpp_async.py:2652 aborted the selfhost,
+                    # `--dump-full fire.py` and the bootstrap gate jobs with
+                    # "'Int' does not implement the '__contains__' method".
+                    # `_SCALAR_ANNOTATION_FAMILY` (emit_stmts) is the one
+                    # definition of which annotations are scalar value types;
+                    # `_TYPE_MAP` covers the remaining plain scalar spellings.
+                    try:
+                        from mojo.backend_gimple.emit_stmts import _annotation_scalar_family
+                        fam = _annotation_scalar_family(pann_s)
+                    except Exception:
+                        fam = None
+                    if fam is not None:
+                        return {'int': 'Int', 'float': 'Float64', 'bool': 'Bool'}[fam]
+                    if gimple_ctypes.is_scalar_annotation(pann_s):
+                        return 'Int'
+                    return None
         # No function node context: a module-level binding cannot be a
         # container-proven Int either (it may be a boxed word).
         return None
