@@ -1,4 +1,4 @@
-SPLIT: GATE_red_recover-land_2026-11-02-part1, GATE_red_recover-land_2026-11-02-part2, GATE_red_recover-land_2026-11-02-part3, GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
+SPLIT: GATE_red_recover-land_2026-11-02-part1, GATE_red_recover-land_2026-11-02-part2, (part3 fixed: container-annotated parameter membership diagnostic), GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
 
 # GATE red: 4 landing-gate job(s) red on `recover-land` (gate red)
 

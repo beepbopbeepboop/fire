@@ -6364,9 +6364,34 @@ def _definitive_binding_type(gen, name) -> str | None:
                     pann_s = _as_str(pann).strip()
                     if pann_s in tparams or pann_s == 'AnyType' or pann_s == '':
                         return None
-                    # Concrete scalar annotation (Int/Bool/Float64 etc.)
-                    # -> provably scalar.
-                    return 'Int'
+                    # Concrete annotation: answer from the C type the
+                    # annotation resolves to (not from "not a type param"),
+                    # so a container/boxed annotation like `frozenset | None`
+                    # that lowers to an int64_t word is not claimed as Int.
+                    try:
+                        resolved = gen._resolve_type(pann_s)
+                    except Exception:
+                        resolved = gimple_ctypes._mojo_type(pann_s)
+                    if resolved == '_Bool':
+                        return 'Bool'
+                    if resolved == 'double':
+                        return 'Float64'
+                    if resolved in ('int', 'int64_t'):
+                        # Scalar-int C type is a proof only for a scalar
+                        # integer annotation (Int/int/...), not for a boxed
+                        # container that happens to erase to int64_t.
+                        _base = pann_s
+                        if ' | ' in _base:
+                            parts = [p.strip() for p in _base.split(' | ')]
+                            non_none = [p for p in parts if p != 'None']
+                            if non_none:
+                                _base = non_none[0]
+                        _base = _base.split('[', 1)[0].strip()
+                        if _base == 'int' or (getattr(gimple_ctypes, '_TYPE_MAP', {}).get(_base) in ('int', 'int64_t')
+                                              and _base not in ('list', 'dict', 'set', 'tuple', 'str', 'bytes')):
+                            return 'Int'
+                    # Container/pointer/erased annotation -> runtime dispatch.
+                    return None
         # No function node context: a module-level binding cannot be a
         # container-proven Int either (it may be a boxed word).
         return None
