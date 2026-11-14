@@ -140,7 +140,7 @@ BASELINE = {
     'test_silent_noop_iter.py': 1,
     'test_string_literal_lexing.py': 2,
     'test_struct_formal.py': 1,
-    'test_suite.py': 13,
+    'test_suite.py': 14,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/dangling_doc_refs.py': 1,
     'tools/dataclass_reflection_sites.py': 2,

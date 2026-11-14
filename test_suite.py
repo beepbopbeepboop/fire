@@ -2723,7 +2723,11 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # too expensive or otherwise inappropriate to run, so each must be named
     # here and have its reserves-0 / --list / --dry-run properties re-asserted.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
-    expected_disabled = ['cli-usage-text', 'formal-read-before-store', 'gimple', 'metalgpu']
+    # Measured 2026-11-14: `cli-usage-text` and `formal-read-before-store`
+    # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
+    # are. This list is the census the check compares the registry
+    # against, so it tracks the tree rather than freezing it.
+    expected_disabled = ['formal-doc-truth', 'gimple', 'metalgpu', 'rthdrscan']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2860,7 +2864,11 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    expected_disabled = ['cli-usage-text', 'formal-read-before-store', 'gimple', 'metalgpu']
+    # Measured 2026-11-14: `cli-usage-text` and `formal-read-before-store`
+    # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
+    # are. This list is the census the check compares the registry
+    # against, so it tracks the tree rather than freezing it.
+    expected_disabled = ['formal-doc-truth', 'gimple', 'metalgpu', 'rthdrscan']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
@@ -4105,6 +4113,13 @@ _OPEN_PROBE_HARNESS_REASON = (
     'pins are the registered `reg-codegen-erased-container-values` job in '
     'test_codegen_erased_container_values_pins.py.')
 
+_OPEN_STDLIB_DYLIB_PROBE_REASON = (
+    'The per-part Done-when probes of the still-open parts of '
+    'CODEGEN_stdlib_dylib_lazy_undefined_refs: red until each part lands, '
+    'so not a registered job. Each is run by its own bug doc\'s command '
+    '(`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`); '
+    'part 1 landed 2026-11-14 and parts 2 and 3 are still open.')
+
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
@@ -4172,9 +4187,6 @@ UNREGISTERED = {
         'Standalone regression pin (unittest): std.simd elaboration must not '
         'be refused as "advance without converging" for fixed comptime bracket '
         'args. Run directly; not yet registered in a bucket.',
-    'test_codegen_yield_from_walk_ast_memo.py':
-        'Standalone probe: _cpp_yield_from rewrites must invalidate the walk '
-        'memo for the enclosing CallExpr. Run directly; not registered.',
     'test_gimple_tables_consumer_link.py':
         'Standalone repro/test for importing c_common.tables from a consumer '
         'program (depends on external source tree; skips if absent). Run '
