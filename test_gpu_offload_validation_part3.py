@@ -1,7 +1,7 @@
 import pathlib
 import unittest
 
-DOC = pathlib.Path(__file__).resolve().parent / "bugs/mid/GPU_offload_validation_modular-part3.md"
+DOC = pathlib.Path(__file__).resolve().parent / "bugs/GPU_offload_validation_modular-part3.md"
 
 
 class TestGPUOffloadValidationPart3(unittest.TestCase):
