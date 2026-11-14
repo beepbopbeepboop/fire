@@ -1,6 +1,6 @@
 # SUITE_silentnoop-part1-part2: Classify silentnoop failure and record cases
 
-**Parent:** SUITE_silentnoop-part1 (concluded; its doc was removed on master)  
+**Parent:** bugs/hard/SUITE_silentnoop-part1.md  
 **Depends on:** bugs/SUITE_silentnoop-part1-part1.md  
 **Class:** easy
 
@@ -12,7 +12,7 @@ and record the exact failing cases or errors so follow-up fix work
 
 ## Acceptance
 
-- A findings record in this doc contains:
+- A committed file `bugs/SUITE_silentnoop-part1-findings.md` contains:
   - a `## Classification` section stating whether the failure is a timeout, a
     build error, or specific compiled-case divergence from the CPython
     reference (or a combination, if evidenced), with brief justification citing

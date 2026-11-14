@@ -29,14 +29,6 @@ sources are deleted. `NotMarked` does not implement `marked`, so the import
 must fail with
 
     error: 'Container' parameter 'T' has 'Marked' type, but value has type 'AnyStruct[NotMarked]'
-    note: 'Container' declared here
-    struct Container[T: Marked, H: Helper = default_helper]  # note - synthetic signature
-
-The last two lines are the part-3 half of the diagnostic: the note points at
-the imported declaration, and its detail line is the artifact record rendered
-by `mojo/middle/mojoc_signature.py` — the one renderer for a stored signature,
-so the message formatter here and the renderer there do not disagree about how
-a precompiled declaration is spelled.
 """
 
 
@@ -122,15 +114,7 @@ def conformance_diagnostic(struct_record, type_args, consumer_src, records,
         # Modular prints the offending type argument as a type value
         # (`AnyStruct[NotMarked]`), and its FileCheck line is the acceptance
         # for this import case, so the one formatter spells it the same way.
-        # The note names the struct and shows the declaration the artifact
-        # stored, rendered by the one signature renderer (part 2's
-        # `mojoc_signature.render_signature`), whose `# note - synthetic
-        # signature` marker says the line is reconstructed rather than the
-        # declaration's original text.
-        from mojo.middle.mojoc_signature import render_signature
         return (f"{location}error: '{struct_name}' parameter "
                 f"'{param.get('name', '')}' has '{bound}' type, but value has "
-                f"type 'AnyStruct[{arg}]'\n"
-                f"note: '{struct_name}' declared here\n"
-                f"{render_signature(struct_record)}")
+                f"type 'AnyStruct[{arg}]'")
     return None

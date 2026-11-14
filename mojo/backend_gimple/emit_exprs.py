@@ -711,23 +711,15 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         'Optional', 'Variant', 'Tuple',
         'InlineArray', 'InlineList', 'StaticTuple',
     })
-    # A class imported under a new bare name inside a function body
-    # (`from M import Class as A`): the alias's identity is the DEFINING
-    # name, recorded by the same shared writer (`_note_struct_import_alias`)
-    # the module-scope path uses. The bare no-signature import registration
-    # no longer emits for such an alias, so the only thing standing between
-    # `A` used as a value and the class-value lowering below is this map.
-    _class_as_value = (getattr(gen, '_struct_import_aliases', None)
-                       or {}).get(name, name)
-    if _class_as_value in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
+    if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
         # `mojo_type_add_base`; CODEGEN_enum_runtime_class_creation stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
-        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(_class_as_value)}LL;  /* class {_class_as_value} as value */')
+        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
         return 'int64_t', t
-    if (_class_as_value in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
+    if (name in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
         # int64_t, not int: this placeholder commonly flows into a (void *)
         # cast (e.g. boxed for mojo_obj_getattr on `UInt64.MAX`-style class
         # refs) — a 4-byte int there is a real -Wint-to-pointer-cast size
@@ -2055,15 +2047,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if _canon == 'sys' and node.member == 'argv':
             # Return the argv list wired from C main(argc, argv)
             t = gen._new_temp('MojoList *')
-            gen._rt_into(t, 'mojo_get_argv', [])
-            gen._emit('  /* sys.argv from C */')
+            gen._emit(f"  {t} = mojo_get_argv();  /* sys.argv from C */")
             # Track element type so subscript uses mojo_list_get_str
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
         if _canon == 'sys' and node.member == 'path':
             t = gen._new_temp('MojoList *')
-            gen._rt_into(t, 'mojo_list_new', [])
-            gen._emit('  /* sys.path stub */')
+            gen._emit(f"  {t} = mojo_list_new ();  /* sys.path stub */")
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
         if _canon == 'sys' and node.member == 'platform':
@@ -3301,8 +3291,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if op == '->':
             # GIMPLE: declare separate temp to avoid inline cast in rvalue
             field_tmp = gen._new_temp('int64_t')
-            gen._cast_into(field_tmp, 'int64_t',
-                           f"{ov}{op}{gimple_ctypes._safe_field(node.member)}")
+            gen._emit(f"  {field_tmp} = (int64_t){ov}{op}{gimple_ctypes._safe_field(node.member)};")
             t = field_tmp
         else:
             t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
@@ -4356,7 +4345,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                                        [('char', f"'{_code}'"),
                                         ('int64_t', _lv64),
                                         ('int64_t', _rv64)])
-                t = gen._cast('_Bool', f"{_tcmp}")
+                t = gen._new_val('_Bool', f'(int){_tcmp}')
                 return '_Bool', t
             _oc = {'+': '+', '-': '-', '*': '*', '%': '%'}[op]
             t = gen._call_expr('int64_t', 'mojo_pyobject_arith',
@@ -6375,27 +6364,9 @@ def _definitive_binding_type(gen, name) -> str | None:
                     pann_s = _as_str(pann).strip()
                     if pann_s in tparams or pann_s == 'AnyType' or pann_s == '':
                         return None
-                    # A CONCRETE SCALAR annotation -> provably scalar. This
-                    # used to `return 'Int'` for EVERY other annotation, which
-                    # read `frozenset` — and every other container or opaque
-                    # spelling — as a proven Int and refused the whole module:
-                    # `if cap_name in mut_capture_names` at
-                    # mojo/backend_gimple/cpp_async.py:2652 aborted the selfhost,
-                    # `--dump-full fire.py` and the bootstrap gate jobs with
-                    # "'Int' does not implement the '__contains__' method".
-                    # `_SCALAR_ANNOTATION_FAMILY` (emit_stmts) is the one
-                    # definition of which annotations are scalar value types;
-                    # `_TYPE_MAP` covers the remaining plain scalar spellings.
-                    try:
-                        from mojo.backend_gimple.emit_stmts import _annotation_scalar_family
-                        fam = _annotation_scalar_family(pann_s)
-                    except Exception:
-                        fam = None
-                    if fam is not None:
-                        return {'int': 'Int', 'float': 'Float64', 'bool': 'Bool'}[fam]
-                    if gimple_ctypes.is_scalar_annotation(pann_s):
-                        return 'Int'
-                    return None
+                    # Concrete scalar annotation (Int/Bool/Float64 etc.)
+                    # -> provably scalar.
+                    return 'Int'
         # No function node context: a module-level binding cannot be a
         # container-proven Int either (it may be a boxed word).
         return None
@@ -7839,7 +7810,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # the store tells the runtime the key's SPELLING — an integer, so
         # the slot's repr prints the key unquoted.
         _orig = kv
-        kv = gen._rt_call('char *', 'mojo_int_str_transient', [f"{_orig}"])
+        kv = gen._new_val('char *', f"mojo_int_str_transient({_orig})")
         gen._cstr_key_src[kv] = _orig
         kt = 'char *'
     elif kt == 'MojoBytes *':
