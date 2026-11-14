@@ -2332,6 +2332,8 @@ MojoList *mojo_py_tokenize(char *source);
 
 /* Builtin file I/O - defined in runtime */
 int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
+/* open() with optional mode/newline; newline==NULL means "not provided". */
+int64_t mojo_open_file_ex(char *path, char *mode, char *newline);
 
 /* Wrappers for C library functions that take pointer-to-pointer args.
    Generated GIMPLE code passes int64_t/void* opaque values; these wrappers

@@ -19695,6 +19695,7 @@ def gen_module_impl(self, stmts: list):
             '#include <coroutine>',
             '#include <cstdint>',
             '#include <cstdio>',
+            '#include <string.h>',
             '#include <cmath>',
             '#include <exception>',
             '#include <functional>',

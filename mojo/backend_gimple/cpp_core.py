@@ -1543,8 +1543,10 @@ def _cpp_expr_static_ctype(gen, e):
     """Best-effort static C type of an expression in a coroutine body —
     the small intersection of shapes this emitter types reliably:
     declared locals/params, string literals, subscript/slice results
-    (always char * here), and char*-method calls on char*-typed receivers
-    (strip family/lower/upper/replace). Returns None for anything else.
+    (always char * here), char*-method calls on char*-typed receivers
+    (strip family/lower/upper/replace), and an `and`/`or` whose two
+    operands have one common ctype (the operator yields an operand).
+    Returns None for anything else.
     Consumed by `not`-truthiness lowering (a char* operand must test
     emptyness, not pointer-nullness); deliberately conservative so a
     wrong 'char *' guess can never corrupt non-string lowering."""
@@ -1553,6 +1555,16 @@ def _cpp_expr_static_ctype(gen, e):
                 if gen._cpp_declared is not None else None)
     if isinstance(e, gimple_ctypes.StringLiteral):
         return 'char *'
+    if isinstance(e, gimple_ctypes.BinaryOp) and e.op in ('and', 'or'):
+        # `a or b` / `a and b` yields one of its OPERANDS, so when both
+        # operands have the SAME static ctype the result has that ctype too
+        # (`sep or '\t'` is char * when `sep` is a char* parameter). Mixed
+        # or unknown operand types stay None — conservative, since the
+        # callers use this to choose packing/truthiness lowerings and must
+        # never guess a conversion the expression does not have.
+        _lt = _cpp_expr_static_ctype(gen, e.left)
+        _rt = _cpp_expr_static_ctype(gen, e.right)
+        return _lt if _lt is not None and _lt == _rt else None
     if isinstance(e, (gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
         # A subscript on a DECLARED `MojoList *`/`MojoDict *` local is NOT
         # a string: `_cpp_expr`'s own SubscriptExpr branch reads those
@@ -1828,6 +1840,16 @@ def _cpp_assign_cast_type(gen, val):
         return None
     if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
         return 'char *'                      # a string literal
+    # A leading C cast of one of the model's pointer types names the
+    # expression's real type: `(char *)mojo_str_join(...)` is still a
+    # char* value, and `(MojoList *)(...)` is still a list. Without this,
+    # an assignment that needs the word/pointer reinterpretation test
+    # below saw no type at all and emitted a raw C++ conversion the
+    # compiler rejects (a `.join(...)` char* result stored into an
+    # untyped `int64_t` parameter, real: tables.py's `read_table`).
+    _m = re.match(r'\((char|MojoList|MojoDict|MojoSet) \*\)', val)
+    if _m:
+        return f"{_m.group(1)} *"
     _m = re.match(r'\[&\]\(\) -> ([A-Za-z_ ]+\*?) \{', val)
     if _m:
         _t = _m.group(1).strip()
@@ -1872,6 +1894,63 @@ def _cpp_note_dynamic_word_args(gen, struct_name, member, call_args) -> None:
                 _pnames[_i + _off])
 
 
+def _cpp_materialize_generator_handle_arg(gen, expr):
+    """Materialize a compiled-generator HANDLE local as a fresh `MojoList *`
+    for a call through a callable-valued parameter (or a table-dispatched
+    dynamic call): `(list_name, stmt_text)` when `expr` is an `IdentExpr`
+    tracked in `_cpp_generator_var_api`, else None.
+
+    A handle is not statically a word/string/container, so packing it into
+    `mojo_dyn_call`'s argument list used to refuse the whole body. But a
+    callable such as `csv.reader` accepts any iterable of strings, so the
+    runtime value is perfectly usable — the emitter just has to produce a
+    concrete container first. Drive the handle to exhaustion over the same
+    `{base}_resume`/`{base}_value` protocol the `for x in <handle>` branch
+    and `next(<handle>)` use (see `_cpp_next_on_generator_expr`), appending
+    each value with the appendor its registered `value_ctype` names.
+
+    Exhaustion-vs-escaped-exception disambiguation is NOT applied here: a
+    real exception escaping the sub-generator SHOULD propagate out of this
+    consuming call, not be turned into StopIteration (which is what `next()`
+    wants). The handle is not destroyed — the same never-frees convention
+    every other generator-handle consumer in this emitter follows.
+
+    A DIRECT construction (`_get_reader(sub.gen(x))`) is deliberately not
+    materialized here; it has no tracked handle local, so the caller's named
+    refusal stays."""
+    if not isinstance(expr, gimple_ctypes.IdentExpr):
+        return None
+    api = getattr(gen, '_cpp_generator_var_api', {}).get(expr.name)
+    if api is None:
+        return None
+    base = api['base']
+    vct = gimple_exprtypes._c_to_cpp_scalar_type(
+        api.get('value_ctype') or 'int64_t')
+    handle = gen._cpp_kw_param_renames.get(expr.name, expr.name)
+    refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+    if refs is not None:
+        refs.setdefault(base, {
+            'value_ctype': api.get('value_ctype', 'int64_t'),
+            'params': list(api.get('params') or [])})
+    name = gen._cpp_fresh_name('_mgh')
+    if api.get('tagged'):
+        # The slot is one int64_t word the promise boxes per yield kind;
+        # append it with the kind it carries.
+        append = f"mojo_list_append_word({name}, {base}_value({handle})); "
+    elif vct == 'char *':
+        append = f"mojo_list_append_str({name}, {base}_value({handle})); "
+    elif vct == 'double':
+        append = f"mojo_list_append_double({name}, {base}_value({handle})); "
+    elif vct == 'bool':
+        append = (f"mojo_list_append_int({name}, "
+                  f"(int64_t)(({base}_value({handle})) != 0)); ")
+    else:
+        append = f"mojo_list_append_int({name}, (int64_t)({base}_value({handle}))); "
+    stmts = (f"MojoList *{name} = mojo_list_new(); "
+             f"while ({base}_resume({handle})) {{ {append}}} ")
+    return name, stmts
+
+
 def _cpp_dyn_call_expr(gen, e):
     """A call through a PARAMETER that holds a callable as a bare word
     (`onempty(items)`, `_walk(root)`, `get_files(root, suffix=suffix)`,
@@ -1887,7 +1966,8 @@ def _cpp_dyn_call_expr(gen, e):
     an UNSOLVED word, converted by a local type to whichever of int64_t /
     string / container pointer the consuming assignment or argument is
     declared as. int64_t-word, `char *`, container-pointer and `double`
-    arguments are admitted. A double travels as its bit pattern (like every
+    arguments are admitted; a compiled-generator HANDLE local is materialized
+    into a `MojoList *` first (see `_cpp_materialize_generator_handle_arg`). A double travels as its bit pattern (like every
     other word in the packed list/dict) and is TAGGED as a double - the
     positional list's per-slot kind (`mojo_list_append_double_kinded`),
     `mojo_dict_set_double` for a keyword - so a
@@ -1906,6 +1986,15 @@ def _cpp_dyn_call_expr(gen, e):
     for _fa in e.args:
         _op = _fa.operand if (isinstance(_fa, gimple_ctypes.UnaryOp)
                               and _fa.op in ('*', '**')) else _fa
+        _spread = isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op in ('*', '**')
+        _mat = (None if _spread
+                else _cpp_materialize_generator_handle_arg(gen, _op))
+        if _mat is not None:
+            _mat_name, _mat_stmts = _mat
+            parts.append(_mat_stmts)
+            parts.append(f"mojo_list_append_int(_a, "
+                         f"(int64_t)(intptr_t)({_mat_name})); ")
+            continue
         _fct = _cpp_receiver_ctype(gen, _op)
         if _fct is None:
             _fct = _cpp_expr_static_ctype(gen, _op)
@@ -1915,7 +2004,6 @@ def _cpp_dyn_call_expr(gen, e):
             _fct = 'int64_t'
         if _fct is None and isinstance(_op, gimple_ctypes.FloatLiteral):
             _fct = 'double'
-        _spread = isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op in ('*', '**')
         if _fct == 'double' and not _spread:
             parts.append(f"mojo_list_append_double_kinded(_a, (double)({gen._cpp_expr(_op)}), 'i'); ")
             continue
@@ -1936,6 +2024,13 @@ def _cpp_dyn_call_expr(gen, e):
         else:
             parts.append(f"mojo_list_append_int(_a, {_txt}); ")
     for _kn, _kv in (getattr(e, 'kwargs', None) or []):
+        _mat = _cpp_materialize_generator_handle_arg(gen, _kv)
+        if _mat is not None:
+            _mat_name, _mat_stmts = _mat
+            parts.append(_mat_stmts)
+            parts.append(f'mojo_dict_set_int(_k, (char *)"{_kn}", '
+                         f"(int64_t)(intptr_t)({_mat_name})); ")
+            continue
         _kct = _cpp_receiver_ctype(gen, _kv)
         if _kct is None:
             _kct = _cpp_expr_static_ctype(gen, _kv)
@@ -2036,6 +2131,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
     arg_exprs = []
+    arg_ctypes = []
     for _aa in call.args:
         if isinstance(_aa, (gimple_ctypes.TupleExpr,
                             gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
@@ -2043,7 +2139,13 @@ def _cpp_emit_generator_start_expr(gen, call, api):
                 "a tuple/dict/set literal as a compiled-generator call "
                 "argument is not supported in a coroutine body")
         arg_exprs.append(_cpp_call_arg_expr(gen, _aa))
+        _act = (_cpp_receiver_ctype(gen, _aa)
+                or _cpp_expr_static_ctype(gen, _aa))
+        arg_ctypes.append(_act)
     arg_exprs.extend(gen._cpp_expr(_kv) for _kn, _kv in (call.kwargs or []))
+    arg_ctypes.extend((_cpp_receiver_ctype(gen, _kv)
+                       or _cpp_expr_static_ctype(gen, _kv))
+                      for _kn, _kv in (call.kwargs or []))
     while len(arg_exprs) < len(sub_params):
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
@@ -2052,6 +2154,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
                 f"{len(sub_params)} argument(s), got {len(arg_exprs)} "
                 f"(no default at slot {len(arg_exprs)})")
         arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
+        arg_ctypes.append(None)
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"call to compiled generator '{api['base']}': expected "
@@ -2059,8 +2162,21 @@ def _cpp_emit_generator_start_expr(gen, call, api):
     cargs = []
     for _i, _ae in enumerate(arg_exprs):
         _pt = sub_params[_i]
+        _at = arg_ctypes[_i]
         if isinstance(_pt, str) and _pt.endswith(' *'):
             cargs.append(f"({_pt})({_ae})")
+        elif (isinstance(_pt, str) and _pt in ('int64_t', 'int', '_Bool', 'double')
+              and isinstance(_at, str) and _at.endswith(' *')):
+            # A pointer value into a scalar parameter: the callee's own C
+            # entry point declares a word (`_iter_significant_lines(infile)`
+            # has an int64_t `infile`), so reinterpret the pointer as the
+            # word every container/string is in this model. Without this the
+            # emitted C++ passed a `MojoList *`/`char *` straight into an
+            # `int64_t` parameter ("invalid conversion from 'MojoList*' to
+            # 'int64_t'"). Real: read_table's `lines =
+            # strutil._iter_significant_lines(infile)` when `infile` is a
+            # container-shaped local.
+            cargs.append(f"(int64_t)(intptr_t)({_ae})")
         else:
             cargs.append(_ae)
     base = api['base']
@@ -4195,6 +4311,33 @@ def _cpp_expr(gen, e) -> str:
                             'keys': 'mojo_dict_keys',
                             'values': 'mojo_dict_values'}[e.func.member]
                 return f"{_dict_fn}({_cpp_as('MojoDict *', gen._cpp_expr(e.func.obj))})"
+            # `<self>.<opaque-field>.write(data)` / `.read()` / `.close()`
+            # on a receiver whose resolved ctype is this model's opaque
+            # int64_t box — mirror the ORDINARY GIMPLE path's own
+            # file-handle dispatch (gimple_gen_methods.py's int64_t-
+            # receiver branch: int_read/int_write/stub close), which
+            # already made exactly this choice for non-generator methods
+            # (cwriter.py's CWriter.set_position compiles clean through
+            # it; header_guard's @contextlib.contextmanager companion is
+            # the generator-body sibling of the same shape). Both runtime
+            # helpers are declared via the wholesale <fire_runtime.h>
+            # every generated .cpp includes, so no new extern plumbing.
+            # Before this, the generic fallback below emitted raw C++
+            # member-call syntax on a plain int64_t field — a hard g++
+            # error ("request for member 'write' in 'self->CWriter::out',
+            # which is of non-class type 'int64_t'").
+            _fh_rc = _cpp_receiver_ctype(gen, e.func.obj)
+            if _fh_rc in ('int64_t', 'int') and e.func.member in ('write', 'read', 'close'):
+                _fh_obj = gen._cpp_expr(e.func.obj)
+                if e.func.member == 'write' and len(e.args) == 1:
+                    return (f"int_write((int64_t)({_fh_obj}), "
+                            f"(char *)({gen._cpp_expr(e.args[0])}))")
+                if e.func.member == 'read' and not e.args:
+                    return f"int_read((int64_t)({_fh_obj}))"
+                if e.func.member == 'close' and not e.args:
+                    gimple_ctypes._debug_note('stubbed operation',
+                                'generator-body .close() on opaque handle')
+                    return '0'
             # A member call on a DECLARED local whose ctype is a plain
             # scalar (`root_logger = logging.getLogger()` — the module-
             # call elision already typed `root_logger` int64_t and
@@ -4216,39 +4359,6 @@ def _cpp_expr(gen, e) -> str:
                             f'generator-body method call on opaque scalar '
                             f'local {e.func.obj.name}.{e.func.member}()')
                 return '0'
-            # `<self>.<opaque-field>.write(data)` / `.read()` / `.close()`
-            # on a receiver whose resolved ctype is this model's opaque
-            # int64_t box — mirror the ORDINARY GIMPLE path's own
-            # file-handle dispatch (gimple_gen_methods.py's int64_t-
-            # receiver branch: int_read/int_write/stub close), which
-            # already made exactly this choice for non-generator methods
-            # (cwriter.py's CWriter.set_position compiles clean through
-            # it; header_guard's @contextlib.contextmanager companion is
-            # the generator-body sibling of the same shape). Both runtime
-            # helpers are declared via the wholesale <fire_runtime.h>
-            # every generated .cpp includes, so no new extern plumbing.
-            # Before this, the generic fallback below emitted raw C++
-            # member-call syntax on a plain int64_t field — a hard g++
-            # error ("request for member 'write' in 'self->CWriter::out',
-            # which is of non-class type 'int64_t'"). Deliberately placed
-            # AFTER the typed-receiver cases above and keyed on
-            # `_cpp_receiver_ctype` (not the IdentExpr-local stub just
-            # above, which keeps its established stub-0 convention):
-            # every site that reaches this branch today was previously a
-            # hard compile failure, so no currently-green build's behavior
-            # can change.
-            _fh_rc = _cpp_receiver_ctype(gen, e.func.obj)
-            if _fh_rc in ('int64_t', 'int') and e.func.member in ('write', 'read', 'close'):
-                _fh_obj = gen._cpp_expr(e.func.obj)
-                if e.func.member == 'write' and len(e.args) == 1:
-                    return (f"int_write((int64_t)({_fh_obj}), "
-                            f"(char *)({gen._cpp_expr(e.args[0])}))")
-                if e.func.member == 'read' and not e.args:
-                    return f"int_read((int64_t)({_fh_obj}))"
-                if e.func.member == 'close' and not e.args:
-                    gimple_ctypes._debug_note('stubbed operation',
-                                'generator-body .close() on opaque handle')
-                    return '0'
             obj = gen._cpp_expr(e.func.obj)
             # `args_text`, not `args`: `args` is a LIST elsewhere in this
             # function, and the compiled compiler gives one name one declared
@@ -7134,8 +7244,21 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if _tup_is_split_call:
                         _cpp_mark_tagged_word(gen, el.name)
                     if _tup_is_list_val:
-                        lines.append(f"{indent}{el.name} = "
-                                     f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i});")
+                        # Read each slot with the accessor the TARGET's
+                        # declared type needs, not always the boxed-int
+                        # one: a string target (`header, sep =
+                        # _normalize_table_file_props(...)`, both strings)
+                        # must come back as `char *`. Reading the slot with
+                        # mojo_list_get_int and assigning it to a `char *`
+                        # target is an invalid C++ conversion.
+                        _el_decl = declared.get(el.name)
+                        if _el_decl == 'char *':
+                            _el_get = f"mojo_list_get_str({_cpp_as('MojoList *', _tup_val)}, {i})"
+                        elif _el_decl == 'double':
+                            _el_get = f"mojo_list_get_double({_cpp_as('MojoList *', _tup_val)}, {i})"
+                        else:
+                            _el_get = f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i})"
+                        lines.append(f"{indent}{el.name} = {_el_get};")
                     elif _tup_is_unresolved_call:
                         lines.append(f"{indent}{el.name} = 0;")
                     else:
@@ -8594,57 +8717,162 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     # --- synchronous with handling (existing behavior) ---
     _alias_decl_lines: list[str] = []
     _intrinsic = False
+    _open_manager = False
+    _open_path_expr = None
+    _open_mode_expr = None
+    _open_newline_expr = None
+    _open_alias_name = None
     for item in s.items:
         expr = item.expr
         gname = gen._cpp_with_guard_type_name(expr)
         _intrinsic = False
+        _open_manager = False
         if gname == 'tempfile.TemporaryDirectory':
             _intrinsic = True
         elif gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
-            if gen._cpp_emit_kind in ('async', 'async_gen'):
-                raise gimple_exprtypes._UnsupportedAsyncShape(
-                    "`with` inside an async function body is only "
-                    "supported for a recognized no-op guard type "
-                    f"({sorted(gen._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
-                    f"{type(expr).__name__}"
-                    + (f" ({gname!r})" if gname else ""))
-            else:
-                # Plain (non-async) generator: elide the `with` and
-                # just emit the body. The enter/exit aren't compiled
-                # but the body's statements still execute. An `as name:`
-                # alias IS still declared (as an opaque int64_t handle
-                # — zipapp.py's `with open(archive, mode) as f:` yields
-                # `f` later), so the body's references resolve; only the
-                # enter/exit calls themselves are dropped.
-                #
-                # EXCEPT when `as name` BINDS a value: the manager expression
-                # is never evaluated, so that name is declared and left
-                # UNINITIALISED -- Lib/os.py's `with scandir(top) as entries:`
-                # then iterates garbage and `walk` silently yields nothing.
-                # Binding a value that was never computed is a miscompile, so
-                # it is an honest refusal (the module falls back to the
-                # interpreter); an alias-less `with` still elides cleanly.
-                if item.alias is not None:
-                    raise gimple_exprtypes._UnsupportedGeneratorShape(
-                        "`with <context manager> as <name>:` over a manager "
-                        "this codegen does not model is not supported in a "
-                        "compiled generator body: the manager expression is "
-                        "never evaluated, so the bound name would be "
-                        "uninitialised")
-                gname = None
-                _al = item.alias
-                if _al is not None and isinstance(_al, str) and _al not in declared:
-                    declared[_al] = 'int64_t'
-                    _alias_decl_lines.append(f"{indent}int64_t {_al};")
-                elif _al is not None and isinstance(_al, gimple_ctypes.IdentExpr) and _al.name not in declared:
-                    declared[_al.name] = 'int64_t'
-                    _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
-                break
+            # Modeled `open(...)` / tabled-default-open parameter call used as
+            # a context manager in a plain compiled generator body.
+            if (gen._cpp_emit_kind not in ('async', 'async_gen')
+                    and item.alias is not None
+                    and isinstance(expr, gimple_ctypes.CallExpr)):
+                _is_open = False
+                if isinstance(expr.func, gimple_ctypes.IdentExpr):
+                    _fname = expr.func.name
+                    if _fname == 'open':
+                        _is_open = True
+                    else:
+                        # Recognize a parameter whose DEFAULT is builtin open.
+                        _fn_node = getattr(gen, '_cpp_current_fn_node', None) or getattr(gen, '_func_node', None)
+                        _dval = None
+                        if _fn_node is not None:
+                            _pd = getattr(_fn_node, 'param_defaults', None) or {}
+                            if isinstance(_pd, dict):
+                                _dval = _pd.get(_fname)
+                            elif isinstance(_pd, list):
+                                for _pp in _pd:
+                                    try:
+                                        if _pp[0] == _fname:
+                                            _dval = _pp[1]
+                                            break
+                                    except Exception:
+                                        pass
+                        if _dval is None:
+                            # Fallback: look up by current function name.
+                            _cur = (getattr(gen, 'current_func_name', None)
+                                    or getattr(gen, '_cpp_current_func_name', None))
+                            _all_pd = getattr(gen, '_func_param_defaults', None) or {}
+                            if isinstance(_all_pd, dict):
+                                _keys = []
+                                if _cur:
+                                    _keys = [_cur, f"{_cur}_start", _cur + '_body']
+                                else:
+                                    _keys = list(_all_pd.keys())
+                                for _k in _keys:
+                                    _pds = _all_pd.get(_k)
+                                    if isinstance(_pds, dict) and _fname in _pds:
+                                        _dval = _pds[_fname]
+                                        break
+                                    if isinstance(_pds, list):
+                                        for _pp in _pds:
+                                            try:
+                                                if _pp[0] == _fname:
+                                                    _dval = _pp[1]
+                                                    break
+                                            except Exception:
+                                                pass
+                                        if _dval is not None:
+                                            break
+                        if isinstance(_dval, gimple_ctypes.IdentExpr) and _dval.name == 'open':
+                            _is_open = True
+                if _is_open:
+                    # Extract path/mode/newline. Honor newline; refuse if
+                    # we cannot model the call shape rather than drop args.
+                    _kwargs = list(getattr(expr, 'kwargs', None) or [])
+                    _mode_kw = None
+                    _newline_kw = None
+                    _ok_shape = True
+                    for _kn, _kv in _kwargs:
+                        if _kn == 'mode':
+                            _mode_kw = _kv
+                        elif _kn == 'newline':
+                            _newline_kw = _kv
+                        else:
+                            _ok_shape = False
+                    _args = list(expr.args or [])
+                    if not _args or len(_args) > 2:
+                        _ok_shape = False
+                    _path_expr = _args[0] if _args else None
+                    _mode_expr = None
+                    if len(_args) >= 2:
+                        if _mode_kw is not None:
+                            _ok_shape = False
+                        else:
+                            _mode_expr = _args[1]
+                    elif _mode_kw is not None:
+                        _mode_expr = _mode_kw
+                    if _ok_shape and _path_expr is not None:
+                        _open_manager = True
+                        _open_path_expr = _path_expr
+                        _open_mode_expr = _mode_expr
+                        _open_newline_expr = _newline_kw
+                        _al = item.alias
+                        if isinstance(_al, gimple_ctypes.IdentExpr):
+                            _open_alias_name = _al.name
+                        else:
+                            _open_alias_name = _al
+            if not _open_manager:
+                if gen._cpp_emit_kind in ('async', 'async_gen'):
+                    raise gimple_exprtypes._UnsupportedAsyncShape(
+                        "`with` inside an async function body is only "
+                        "supported for a recognized no-op guard type "
+                        f"({sorted(gen._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
+                        f"{type(expr).__name__}"
+                        + (f" ({gname!r})" if gname else ""))
+                else:
+                    # Plain (non-async) generator: elide the `with` and
+                    # just emit the body. The enter/exit aren't compiled
+                    # but the body's statements still execute. An `as name:`
+                    # alias IS still declared (as an opaque int64_t handle
+                    # — zipapp.py's `with open(archive, mode) as f:` yields
+                    # `f` later), so the body's references resolve; only the
+                    # enter/exit calls themselves are dropped.
+                    #
+                    # EXCEPT when `as name` BINDS a value: the manager expression
+                    # is never evaluated, so that name is declared and left
+                    # UNINITIALISED -- Lib/os.py's `with scandir(top) as entries:`
+                    # then iterates garbage and `walk` silently yields nothing.
+                    # Binding a value that was never computed is a miscompile, so
+                    # it is an honest refusal (the module falls back to the
+                    # interpreter); an alias-less `with` still elides cleanly.
+                    if item.alias is not None:
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            "`with <context manager> as <name>:` over a manager "
+                            "this codegen does not model is not supported in a "
+                            "compiled generator body: the manager expression is "
+                            "never evaluated, so the bound name would be "
+                            "uninitialised")
+                    gname = None
+                    _al = item.alias
+                    if _al is not None and isinstance(_al, str) and _al not in declared:
+                        declared[_al] = 'int64_t'
+                        _alias_decl_lines.append(f"{indent}int64_t {_al};")
+                    elif _al is not None and isinstance(_al, gimple_ctypes.IdentExpr) and _al.name not in declared:
+                        declared[_al.name] = 'int64_t'
+                        _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
+                    break
         if _intrinsic and item.alias is not None:
             if isinstance(item.alias, str) and item.alias not in declared:
                 declared[item.alias] = 'const char *'
             elif isinstance(item.alias, gimple_ctypes.IdentExpr) and item.alias.name not in declared:
                 declared[item.alias.name] = 'const char *'
+        elif _open_manager and item.alias is not None:
+            if _open_alias_name and _open_alias_name not in declared:
+                declared[_open_alias_name] = 'int64_t'
+                _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
+                if gen._cpp_func_scope_decls is not None:
+                    gen._cpp_func_scope_decls.append(f"int64_t {_alias_cname};")
+                else:
+                    _alias_decl_lines.append(f"{indent}int64_t {_alias_cname};")
         elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 "`with ... as name:` is not supported for an async "
@@ -8655,7 +8883,7 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         elif item.alias is not None and isinstance(item.alias, gimple_ctypes.IdentExpr):
             declared[item.alias.name] = 'int64_t'
     # Intrinsic guard (Real RAII): cleanup survives await inside body.
-    if not _intrinsic and any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
+    if not _intrinsic and not _open_manager and any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "`await` inside a `with`-guarded body is not supported "
             "-- eliding the guard (this codegen's own no-op "
@@ -8666,6 +8894,8 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             "genuinely could run")
     lines: list[str] = list(_alias_decl_lines)
     guard_var = ''
+    body_indent = indent
+    open_scope = False
     if _intrinsic:
         target_alias_name = None
         for item in s.items:
@@ -8689,10 +8919,31 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 f"{indent}const char* {target_alias_name} = "
                 f"mojo_tempdir_guard_path(&{guard_var});")
         lines.extend(declare)
+    elif _open_manager and _open_alias_name is not None:
+        # Evaluate manager once and bind handle. Close on normal path.
+        _path_c = gen._cpp_expr(_open_path_expr)
+        if _open_mode_expr is not None:
+            _mode_c = gen._cpp_expr(_open_mode_expr)
+        else:
+            _mode_c = '"r"'
+        if _open_newline_expr is not None:
+            _nl_c = gen._cpp_expr(_open_newline_expr)
+        else:
+            _nl_c = '(char *)0'
+        _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
+        lines.append(f"{indent}{{")
+        body_indent = indent + '    '
+        open_scope = True
+        lines.append(
+            f"{body_indent}{_alias_cname} = (int64_t)mojo_open_file_ex((char *)({_path_c}), (char *)({_mode_c}), (char *)({_nl_c}));")
     for st in s.body:
-        lines.extend(gen._cpp_stmt(st, declared, indent))
+        lines.extend(gen._cpp_stmt(st, declared, body_indent))
     if _intrinsic and guard_var:
         lines.append(f"{indent}mojo_tempdir_guard_fini(&{guard_var});")
+    elif open_scope and _open_alias_name is not None:
+        _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
+        lines.append(f"{body_indent}mojo_close((void *)(intptr_t)({_alias_cname}));")
+        lines.append(f"{indent}}}")
     return lines
 
 

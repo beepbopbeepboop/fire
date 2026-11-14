@@ -259,6 +259,74 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
     return out, cpython_stdout
 
 
+def _build_foreign_package_run_files(entry_src, files, cwd):
+    """`_build_foreign_package_run` with the caller's OWN package content —
+    `files` is the full package (rel path -> source, including `__init__.py`
+    and the entry's `main.py`) instead of the shared `_FOREIGN_PKG_FILES`.
+    For cross-module fixtures whose sibling modules differ from the shared
+    package (the tables.py part-4/part-5 regressions below). Returns
+    (compiled_stdout, cpython_stdout, cpython_completed)."""
+    pkg = os.path.join(cwd, 'fpp')
+    os.makedirs(pkg, exist_ok=True)
+    for rel, src in files.items():
+        with open(os.path.join(pkg, rel), 'w') as f:
+            f.write(src)
+    entry = os.path.join(pkg, 'main.py')
+    with open(entry, 'w') as f:
+        f.write(entry_src)
+    cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=cwd,
+                        capture_output=True, text=True,
+                        timeout=RUN_TIMEOUT_S)
+    cpython_stdout = cp.stdout
+    c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+        entry_src, do_imports=True, filename=entry)
+    if not cpp_code:
+        raise RuntimeError(
+            "expected a non-empty generated .cpp — the entry's generator "
+            "should be cpp-path (the fixture's unrepresentable kwonly "
+            "default is what forces it down the cpp path)")
+    exe = _build_generator_program_from_code(c_code, cpp_code)
+    out = subprocess.run([exe], capture_output=True,
+                         timeout=RUN_TIMEOUT_S).stdout.decode()
+    return out, cpython_stdout, cp
+
+
+def _test_foreign_package_case(name, files, entry_src, want):
+    """`_test_foreign_a3_generator_handle` for a caller-defined package
+    (`files` is the FULL package content — `_build_foreign_package_run_files`
+    instead of the shared `_FOREIGN_PKG_FILES`). `want` is asserted against
+    CPython's own output first, so a fixture that drifted from its documented
+    expectation fails as a FIXTURE bug and not as a compiler regression."""
+    global _PASS, _FAIL
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_gen_fpp_')
+        got, cpy, cp = _build_foreign_package_run_files(entry_src, files, wd)
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _FAIL += 1
+        return
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return
+    if cp.returncode != 0:
+        print(f"FAIL  {name}: CPython reference exited {cp.returncode}: "
+              f"{cp.stderr[-500:]} — fixture is wrong, not the compiler")
+        _FAIL += 1
+        return
+    if cpy != want:
+        print(f"FAIL  {name}: CPython baseline is not {want!r} (got {cpy!r}) "
+              f"— fixture is wrong, not the compiler")
+        _FAIL += 1
+        return
+    if got == cpy:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiled stdout {got!r} != CPython {cpy!r}")
+        _FAIL += 1
+
+
 def _test_foreign_a3_generator_handle(name, entry_src, want):
     """Compile+run the package fixture and compare against CPython on the
     very same files. `want` is asserted against CPython's own output first,
@@ -416,6 +484,44 @@ def _foreign_module_qualified_generator_tuple_for():
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
 
+
+
+def _regression_tables_callable_param_generator_handle_arg():
+    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5: a call THROUGH a
+    # callable-valued parameter whose ARGUMENT is a compiled-generator HANDLE
+    # local — tables.py's read_table doing
+    # `lines = strutil._iter_significant_lines(infile)` then
+    # `for row in _get_reader(lines, delimiter=sep or '\t'):`. Before the fix
+    # `cpp_core._cpp_dyn_call_expr` refused the handle argument ("C type is not
+    # statically a word, string or container"); the lowering now materializes
+    # the handle into a fresh `MojoList *` and packs that.
+    #
+    # `mlines.iter_lines` is A3-lowered exactly like
+    # `strutil._iter_significant_lines`; `_get_reader=csv.reader` (a callable
+    # default) keeps `read_table` on the cpp path, and the csv.reader tabled
+    # runtime iterates the materialized list of lines.
+    _test_foreign_package_case(
+        "tables_callable_param_generator_handle_arg",
+        {'__init__.py': '',
+         'mlines.py': (
+             "def iter_lines(lines):\n"
+             "    for line in lines:\n"
+             "        yield line\n")},
+        (
+            "import csv\n"
+            "from . import mlines\n"
+            "\n"
+            "def read_table(entries, header, *, sep=',', _get_reader=csv.reader):\n"
+            "    lines = mlines.iter_lines(entries)\n"
+            "    for row in _get_reader(lines, delimiter=sep):\n"
+            "        yield row[0]\n"
+            "\n"
+            "def main():\n"
+            "    for v in read_table([\"a,b\", \"1,2\"], \"a,b\", sep=','):\n"
+            "        print(v)\n"
+            "\n"
+            "main()\n"),
+        "a\n1\n")
 
 
 def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
@@ -1301,6 +1407,85 @@ def main():
         src,
         "_get_reader")
 
+
+def _regression_with_tabled_open_in_generator():
+    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2: a `with open(...)`
+    # (and a call through a parameter whose default is builtin open) in a plain
+    # compiled generator body (cpp C++20 coroutine path) must evaluate the
+    # manager, bind the alias, run the body, and close on the normal path.
+    # `*, start=[]` forces the cpp coroutine path (rejects the A3 stack-switch
+    # pass).
+    _p = os.path.join('.tmp', '_part2_open_regression.txt')
+    with open(_p, 'w', newline='') as _f:
+        _f.write('hello\nworld\n')
+    try:
+        mojo_src = f"""\
+def gen_read(p, *, start=[]):
+    with open(p) as f:
+        yield f.read()
+
+def gen_read_param(p, *, _open=open, start=[]):
+    with _open(p, newline='') as f:
+        yield f.read()
+
+def main():
+    p = r'''{_p}'''
+    for x in gen_read(p):
+        print(repr(x))
+    for x in gen_read_param(p):
+        print(repr(x))
+
+main()
+"""
+        cpy_src = f"""\
+def gen_read(p):
+    with open(p) as f:
+        yield f.read()
+
+def gen_read_param(p, _open=open):
+    with _open(p, newline='') as f:
+        yield f.read()
+
+def main():
+    p = r'''{_p}'''
+    for x in gen_read(p):
+        print(repr(x))
+    for x in gen_read_param(p):
+        print(repr(x))
+
+main()
+"""
+        test_generator_matches_cpython(
+            "cpp_with_tabled_open_in_generator",
+            mojo_src,
+            cpy_src)
+    finally:
+        try:
+            os.remove(_p)
+        except Exception:
+            pass
+
+    # Untabled manager default must still be refused by name.
+    src = """\
+class CM:
+    pass
+
+def make_cm():
+    return CM()
+
+def g(*, _cm=make_cm, start=[]):
+    with _cm() as x:
+        yield 1
+
+def main():
+    for v in g():
+        print(v)
+main()
+"""
+    test_generator_refused(
+        "cpp_with_tabled_open_in_generator_untabled_refusal",
+        src,
+        "`with <context manager> as <name>:` over a manager")
 
 def _regression_raise_mixed_tuple_literal_in_generator():
     # A compiled generator (cpp coroutine path) raising with a mixed-scalar
@@ -10176,10 +10361,12 @@ def main():
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
     _foreign_module_qualified_generator_tuple_for()
+    _regression_tables_callable_param_generator_handle_arg()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
     _regression_read_table_callable_reader()
     _regression_read_table_callable_reader_untabled_refusal()
+    _regression_with_tabled_open_in_generator()
     _regression_raise_mixed_tuple_literal_in_generator()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()

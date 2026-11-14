@@ -523,6 +523,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         if _opa == 'object':
             gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
     gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
+    # Expose current function for lowering helpers (e.g. with-open default
+    # resolution in cpp_core._cpp_with_stmt).
+    gen._cpp_current_fn_node = fn
+    gen._cpp_current_func_name = fn.name
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
         fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
@@ -1148,8 +1152,38 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                     _dict_val_types[f"cls.{_aname}"] = _vt
         _field_elem_types = (gen._field_elem_types.get(struct_name, {})
                              if struct_name is not None else {})
+        # A TUPLE-target `for a, b in <call to a compiled generator>:`
+        # binds each name to the callee's own registered per-slot ctype.
+        # `_generator_yield_ctype`'s pre-pass overlays only a PLAIN target
+        # (`for x in <gen>()`), so `yield <name>` over a tuple slot used to
+        # stay unresolved and refuse the whole generator — real:
+        # tables.py's `parse_table` doing `for line, filename in
+        # strutil.parse_entries(...)` then `yield line`. Resolve the callee
+        # through the SAME cross-module resolver `_cpp_for_generator_delegate`
+        # uses, and seed a COPY of `declared` with the slot ctypes; the
+        # pre-pass itself copies `known` again, so the seeds survive.
+        _yield_declared = declared
+        for _yn in gimple_exprtypes._walk_own_body(fn.body):
+            if not (isinstance(_yn, gimple_ctypes.ForStmt)
+                    and isinstance(_yn.iterable, gimple_ctypes.CallExpr)
+                    and gimple_ctypes.for_target_is_tuple(_yn.target)):
+                continue
+            _ynames = for_target_names(_yn.target)
+            if len(_ynames) < 2:
+                continue
+            _capi = gcc_._cpp_resolve_generator_call_api(gen, _yn.iterable.func)
+            if _capi is None:
+                continue
+            _yslots = _capi.get('tuple_slot_ctypes')
+            if not _yslots:
+                continue
+            if _yield_declared is declared:
+                _yield_declared = dict(declared)
+            for _yi, _ynm in enumerate(_ynames):
+                if _yi < len(_yslots) and isinstance(_ynm, str):
+                    _yield_declared[_ynm] = _yslots[_yi]
         value_ctype = gimple_exprtypes._generator_yield_ctype(
-            fn, declared, gen._generator_api, self_fields,
+            fn, _yield_declared, gen._generator_api, self_fields,
             known_structs=_known_structs, dict_val_types=_dict_val_types,
             method_return_types=gen.func_return_types,
             fn_return_types=gcc_._cpp_trusted_fn_return_types(gen),
