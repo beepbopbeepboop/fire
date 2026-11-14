@@ -1,9 +1,37 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5 (part 4 fixed 2026-11-13; its doc was deleted)
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+
+## Status 2026-11-13 — part 4 (module-qualified tuple-target `for`) fixed; doc deleted
+
+Part 4 (`parse_table`'s `for line, filename in strutil.parse_entries(entries,
+ignoresep=sep):`) is fixed; its red regression
+`_regression_tables_module_qualified_tuple_for` now PASSes and is wired into
+`run_tests()`. What landed:
+
+- `cpp_async._cpp_iterable_is_delegatable_generator_call` accepts a
+  module-qualified `CallExpr` only when `cpp_core._cpp_resolve_generator_call_api`
+  resolves it through the whole-program `_generator_home_api` (an
+  unresolvable `<module>.<name>` keeps the old honest refusal);
+- `cpp_core._cpp_for_generator_delegate` drives the foreign generator over the
+  same `{base}_start/_resume/_value/_destroy` protocol and unpacks the tuple
+  target per slot from its registered `tuple_slot_ctypes`, registering the four
+  extern "C" symbols via `_cpp_xmod_generator_refs`; keyword arguments keep
+  their existing positional-last handling;
+- `coro._static_env` types a local bound to `str.split()/rsplit()/splitlines()`
+  as a list of strings, so `parse_entries`' `yield item, None` gets a `char *`
+  slot instead of a bare `int64_t` word (the fixture body then yields strings
+  consistently).
+
+Re-measured on this tree: the `.tmp/ca/` build's `MOJO_DEBUG=1` output no
+longer reports the `parse_table` tuple-`for` shape; the ONLY remaining refusal
+is part 5's `read_table` callable-parameter one. The part-4 regression's helper
+`_build_foreign_package_run_files` also had to write its entry source as
+`fpp/main.py` (it never did, so the CPython reference could not import the
+fixture; the compile refusal had masked that).
 
 ## Status 2026-11-13 — replan: the SPLIT line named nothing on disk; the build re-measured; the residual is split into part 4 and part 5
 
@@ -11,12 +39,12 @@ The SPLIT line above had read "parts 1, 2, 3 fixed and deleted" — it named no 
 
 - the 2026-11-12 pair is GONE: part 1 (mixed-scalar tuple at the raise-message position, f864d028d) and part 2 (`with` over a tabled open, a912f5987; regression `_regression_with_tabled_open_in_generator`) are fixed and their docs deleted;
 - two NEW named refusals remain (full text and sites in the part docs):
-  - `parse_table`: a tuple `for` target over a module-qualified call to a foreign module's compiled generator with a keyword argument (`strutil.parse_entries(entries, ignoresep=sep)`, tables.py:166) — filed `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4.md`;
-  - `read_table`: a call through the callable-valued parameter `_get_reader` whose argument is a generator-handle local (`_get_reader(lines, ...)`, tables.py:115) — filed `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5.md`;
-- `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md` (the end-to-end build) is updated to be the closer depending on parts 4+5; its Done when is the same build command;
-- red regressions for both shapes are committed in `test_gimple_generator_runner.py` (`_regression_tables_module_qualified_tuple_for`, `_regression_tables_callable_param_generator_handle_arg`), verified on this tree to fail with exactly the two refusals above; each is wired into `run_tests()` by the fix that turns it green.
+  - `parse_table`: a tuple `for` target over a module-qualified call to a foreign module's compiled generator with a keyword argument (`strutil.parse_entries(entries, ignoresep=sep)`, tables.py:166) — FIXED 2026-11-13; its part-4 doc was deleted with the fix (status entry above);
+  - `read_table`: a call through the callable-valued parameter `_get_reader` whose argument is a generator-handle local (`_get_reader(lines, ...)`, tables.py:115) — filed `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5.md`;
+- `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md` (the end-to-end build) is updated to be the closer depending on the still-open part 5 (part 4 landed 2026-11-13); its Done when is the same build command;
+- red regressions for both shapes are committed in `test_gimple_generator_runner.py` (`_regression_tables_module_qualified_tuple_for`, `_regression_tables_callable_param_generator_handle_arg`), verified on this tree to fail with exactly the two refusals above; each is wired into `run_tests()` by the fix that turns it green (part 4's is wired; part 5's is still red).
 
-The SPLIT line above now names the three live part docs (part 3, part 4, part 5), all on disk under `bugs/mid/`.
+The SPLIT line above now names the two live part docs (part 3 and part 5), both on disk under `bugs/` (not `bugs/mid/`: these parts live at the top level of the queue).
 
 ## Status 2026-11-13 — part 2 (open context manager in compiled generator body) fixed; doc deleted
 
@@ -35,8 +63,8 @@ The 2026-10-29/2026-10-30 entries below describe the callable-valued-parameter (
 
 - part 1 (fixed 2026-11-13): `parse_table` — mixed-scalar tuple literal at a raise-message argument position in a compiled generator body (`raise NotImplementedError((header, line))`, tables.py:176) now lowers to a `char *` repr message instead of refusing.
 - part 2 (fixed 2026-11-13): `read_table` — `` `with <context manager> as <name>:` over a manager this codegen does not model is not supported in a compiled generator body `` (`with _open(infile, newline='') as infile:`, tables.py:92, `_open=open` a default-valued callable parameter) now evaluates/binds modeled tabled-open managers and emits close on the normal path; untabled managers still refuse by name. Its bug doc was deleted.
-- part 3 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md`): end-to-end `tables.py` build (depends on parts 1 and 2; residual shapes, if any, are re-split there rather than grown into scope).
-- part 3 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md`): end-to-end `tables.py` build (depends on parts 1 and 2; residual shapes, if any, are re-split there rather than grown into scope).
+- part 3 (`bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md`): end-to-end `tables.py` build (depends on parts 1 and 2; residual shapes, if any, are re-split there rather than grown into scope).
+- part 3 (`bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md`): end-to-end `tables.py` build (depends on parts 1 and 2; residual shapes, if any, are re-split there rather than grown into scope).
 
 Measured 2026-11-12 on this tree: sources copied from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`; `python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py` still fails, and `MOJO_DEBUG=1` reports exactly the two shapes above for pass 1 and both retry passes (peak 0.2 GB, child exit 1). The doc-refs ratchet is why the SPLIT line no longer narrates the deleted parts; it now names the three live part docs only.
 

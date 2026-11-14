@@ -261,8 +261,10 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
 
 def _build_foreign_package_run_files(entry_src, files, cwd):
     """`_build_foreign_package_run` with the caller's OWN package content —
-    `files` is the full package (rel path -> source, including `__init__.py`
-    and the entry's `main.py`) instead of the shared `_FOREIGN_PKG_FILES`.
+    `files` is the package's SIBLING content (rel path -> source, e.g.
+    `__init__.py` and the helper module) instead of the shared
+    `_FOREIGN_PKG_FILES`; the entry source is written as `fpp/main.py`, the
+    same way `_build_foreign_package_run` writes its entry.
     For cross-module fixtures whose sibling modules differ from the shared
     package (the tables.py part-4/part-5 regressions below). Returns
     (compiled_stdout, cpython_stdout, cpython_completed)."""
@@ -272,6 +274,8 @@ def _build_foreign_package_run_files(entry_src, files, cwd):
         with open(os.path.join(pkg, rel), 'w') as f:
             f.write(src)
     entry = os.path.join(pkg, 'main.py')
+    with open(entry, 'w') as f:
+        f.write(entry_src)
     cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=cwd,
                         capture_output=True, text=True,
                         timeout=RUN_TIMEOUT_S)
@@ -1417,7 +1421,7 @@ def _regression_raise_mixed_tuple_literal_in_generator():
 
 
 def _regression_tables_module_qualified_tuple_for():
-    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4: a TUPLE-target
+    # The tables.py part-4 shape (fixed 2026-11-13): a TUPLE-target
     # `for` over a MODULE-QUALIFIED call to a FOREIGN module's compiled
     # generator, with a KEYWORD argument, inside a cpp C++20-coroutine
     # generator body — tables.py's parse_table doing
@@ -1425,21 +1429,23 @@ def _regression_tables_module_qualified_tuple_for():
     #
     # `consume` is forced down the cpp path by the unrepresentable `start=[]`
     # kwonly default (the list literal the A3 gate does not admit — same trick
-    # as `_foreign_a3_generator_handle_next`); `mpe.parse_entries` is
-    # itself cpp-path (kwonly `ignoresep`) and yields (str, None) tuples like
-    # the real `strutil.parse_entries` does. The foreign module's cpp-lowered
-    # generator DOES register in `_generator_home_api` (module_gen.py:13906),
-    # so the callee is resolvable; on the 2026-11-13 tree what is missing is
-    # the ROUTING: `_cpp_iterable_is_delegatable_generator_call`
-    # (cpp_async.py:214) accepts only bare names and self/cls methods, so the
-    # loop falls to the generic emitter and `_cpp_refuse_unpacking_target`
-    # (cpp_core.py:9210) refuses the tuple target:
+    # as `_foreign_a3_generator_handle_next`); `mpe.parse_entries` yields
+    # (str, None) tuples like the real `strutil.parse_entries` does, and is
+    # A3-lowered (kwonly `ignoresep` alone does NOT keep it off A3, measured
+    # 2026-11-13), so it registers in `_generator_home_api` via
+    # `publish_a3_generators`. On the 2026-11-13 tree the refusal was the
+    # ROUTING: `_cpp_iterable_is_delegatable_generator_call` (cpp_async.py)
+    # accepted only bare names and self/cls methods, so the loop fell to the
+    # generic emitter and `_cpp_refuse_unpacking_target` (cpp_core.py)
+    # refused the tuple target:
     #
     #     consume: a tuple `for` target (line, filename) over this iterable
     #     is not supported in a compiled generator/coroutine body ...
     #
-    # RED until part 4 lands; wire into run_tests() next to
-    # `_regression_raise_mixed_tuple_literal_in_generator` in that fix.
+    # Part 4 fixed the routing, the delegate's per-slot unpack, and the A3
+    # kind of a local bound to `str.split()` (so `item` is a string slot).
+    # Wired into run_tests() next to
+    # `_regression_raise_mixed_tuple_literal_in_generator` by that fix.
     _test_foreign_package_case(
         "tables_module_qualified_tuple_for",
         {'__init__.py': '',
@@ -10359,6 +10365,7 @@ def main():
     _regression_read_table_callable_reader_untabled_refusal()
     _regression_with_tabled_open_in_generator()
     _regression_raise_mixed_tuple_literal_in_generator()
+    _regression_tables_module_qualified_tuple_for()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 
