@@ -55,7 +55,9 @@ continues at `pc + 4`), `work_step_svc` / `_exit` / `_write`, the svc step's rig
 `_step_ok` lemma for an svc word, and the termination obligation's comment and pin. The dylib test is PASS=23 FAIL=6,
 the marker's count. Helper `_svc_static_x16` is on the archive (21b4a98cb), not yet called.
 
-STILL OPEN: only part 1's census (its branch is done, awaiting integration).
+STILL OPEN: nothing in the five parts -- all have landed, including part 1's
+census of every emitted `svc`'s x16 and x0 use.  What remains for the parent
+is its own final verify-and-delete, not a part.
 The dynamic-`svc` named hypothesis (design item 4) and the
 `svc_write_assumed` slot are landed across parts 2-5 (2026-11-14): a dynamic
 write `svc` is admitted under a caller-supplied hypothesis by the run and halt
