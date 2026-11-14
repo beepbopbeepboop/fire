@@ -63,6 +63,18 @@ _DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
 # only to render the `note: candidate not viable` lines of an overload failure.
 _FUNC_DEF_LOCS = {}
 
+# id(MojoFunction) -> its FunctionDef, for the ones declaring a `where` clause;
+# checked at call time by check_where_clause. `_CALL_SITE[0]` is the CallExpr
+# being invoked, set by eval_CallExpr just before the call so a violation can
+# name its call site (the callee only sees evaluated arguments).
+_FUNC_WHERE = {}
+_CALL_SITE = [None]
+
+
+class _ConstraintViolation(RuntimeError):
+    """A call whose `where` clause evaluated to False for its bound
+    comptime parameters. May carry a `mojo_record` (see mojo_diagnostic)."""
+
 
 def _unwrap_dataclass_field(value):
     """The default a declared field takes, given the value its initializer
@@ -822,10 +834,91 @@ def name_error_candidate(name, candidates, self_obj):
     return _suggestion_after_pool(d, name_n, not_normalized)
 
 
+def _expr_start(e):
+    """(line, col) of the leftmost token of an expression."""
+    while hasattr(e, 'left'):
+        e = e.left
+    return getattr(e, 'line', 0), getattr(e, 'col', 0)
+
+
+def _constraint_text(e):
+    """The modular compiler's spelling of a constraint expression
+    (`(n > Int(0))`), or None for a shape not verified against it."""
+    if hasattr(e, 'left') and hasattr(e, 'right') and hasattr(e, 'op'):
+        l = _constraint_text(e.left)
+        r = _constraint_text(e.right)
+        if l is None or r is None:
+            return None
+        return f"({l} {e.op} {r})"
+    if hasattr(e, 'name') and not hasattr(e, 'args'):
+        return e.name
+    if hasattr(e, 'value') and hasattr(e, 'raw') and isinstance(e.value, int):
+        return f"Int({e.value})"
+    return None
+
+
+def check_where_clause(interp, func, node, scope):
+    """Raise _ConstraintViolation when `node`'s `where` clause evaluates to
+    False for the comptime parameters now bound in `scope`. A clause this
+    interpreter cannot evaluate (an unbound parameter, a message tuple, an
+    expression that raises) is not a proven violation and is left alone."""
+    clause = node.where_clause
+    conds = clause if isinstance(clause, list) else [clause]
+    for p in node.comptime_params:
+        if p not in scope.vars or scope.vars[p] is None:
+            return
+    for cond in conds:
+        if hasattr(cond, 'elements'):
+            continue
+        old = interp.scope
+        interp.scope = scope
+        try:
+            ok = interp.eval_expr(cond)
+        except Exception:
+            ok = True
+        finally:
+            interp.scope = old
+        if ok is not False:
+            continue
+        msg = f"invalid call to '{node.name}': violated constraint"
+        site = _CALL_SITE[0]
+        text = _constraint_text(cond)
+        loc = _FUNC_DEF_LOCS.get(id(func))
+        if site is None or text is None or loc is None or not hasattr(site, 'func'):
+            raise _ConstraintViolation(msg)
+        cl, cc = _callee_start(site.func)
+        if cl != site.line or cc < 1:
+            raise _ConstraintViolation(msg)
+        wl, wc = _expr_start(cond)
+        # Caret placement, measured against `tools/mojo build`: a plain name
+        # puts the caret on its first character; a member callee (`pk.f[0]()`)
+        # puts it on the last `.` with `~` under everything before it.
+        callee = site.func
+        while hasattr(callee, 'index') and hasattr(callee, 'obj'):
+            callee = callee.obj
+        caret = cc
+        tilde_from = 0
+        after = 0
+        if hasattr(callee, 'member') and getattr(callee, 'col', 0) > cc:
+            caret = callee.col
+            tilde_from = cc
+            after = len(callee.member)
+        err = _ConstraintViolation(msg)
+        setattr(err, 'mojo_record', {
+            'file': interp.filename, 'line': site.line, 'caret': caret,
+            'tilde_from': tilde_from, 'after': after, 'message': msg,
+            'notes': [
+                {'file': loc[0], 'line': wl, 'col': wc, 'name': None,
+                 'message': f"constraint declared here evaluated to False, expected '{text}'"},
+                {'file': loc[0], 'line': loc[1], 'name': node.name,
+                 'message': 'function declared here'}]})
+        raise err
+
+
 def _callee_start(func):
     """(line, col) of the leftmost token of a call's callee expression:
     `a.b.f` starts at `a`, whereas a MemberExpr's own col is its last dot."""
-    while hasattr(func, 'obj') and hasattr(func, 'member'):
+    while hasattr(func, 'obj') and (hasattr(func, 'member') or hasattr(func, 'index')):
         func = func.obj
     return getattr(func, 'line', 0), getattr(func, 'col', 0)
 
@@ -911,7 +1004,7 @@ def _render_record_text(rec, filename, source):
     items = [('error', rec['file'], rec['line'], rec['caret'],
               rec['tilde_from'], rec['message'], None)]
     for n in rec['notes']:
-        items.append(('note', n['file'], n['line'], 0, 0, n['message'], n['name']))
+        items.append(('note', n['file'], n['line'], n.get('col', 0), 0, n['message'], n['name']))
     for kind, f, line, caret, tilde_from, message, name in items:
         text = _record_source_line(f, line, filename, source)
         if name is not None and text is not None:
@@ -919,7 +1012,7 @@ def _render_record_text(rec, filename, source):
             caret = m.start(1) + 1 if m else 0
         if caret < 1:
             caret = 1
-        if name is not None and f != rec['file'] and source is not None:
+        if f != rec['file'] and source is not None:
             # A candidate declared in another file is introduced by the
             # importing statement: `Imported from <this file>:<line>:`.
             base = os.path.basename(f)
@@ -937,7 +1030,8 @@ def _render_record_text(rec, filename, source):
             pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:caret - 1])
             if tilde_from:
                 marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
-                out.append(marks + '~' * (caret - tilde_from) + '^')
+                out.append(marks + '~' * (caret - tilde_from) + '^'
+                           + '~' * rec.get('after', 0))
             else:
                 out.append(pad + '^')
     return '\n'.join(out)
@@ -1548,6 +1642,10 @@ class MojoFunction:
                     _found = True
                 if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
+
+        _wnode = _FUNC_WHERE.get(id(self))
+        if _wnode is not None:
+            check_where_clause(interpreter, self, _wnode, func_scope)
 
         # Bind parameters to arguments.
         #
@@ -5614,6 +5712,8 @@ class Interpreter:
                              comptime_param_defaults=_cpd)
         spec = self._classify_params(node)
         _FUNC_DEF_LOCS[id(func)] = (self.filename, getattr(node, 'line', 0))
+        if getattr(node, 'where_clause', None) is not None:
+            _FUNC_WHERE[id(func)] = node
         bound = self._register_function(self.scope.vars, node.name, func, spec)
         # The rebinding a decorator IS: the decorated value replaces the
         # function in the module scope under its own name. Written through
@@ -8290,6 +8390,7 @@ class Interpreter:
         if getattr(expr, 'kwargs', None):
             kwargs = {k: self.eval_expr(v) for k, v in expr.kwargs}
 
+        _CALL_SITE[0] = expr
         if isinstance(func, MojoOverloadSet):
             try:
                 return self.invoke(func, *args, **kwargs)

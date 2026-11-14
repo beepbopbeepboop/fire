@@ -156,3 +156,27 @@ JSON output for the overload record; synthetic-signature rendering for a
 source-less (precompiled) package, so the "source deleted" RUN line is still
 unmet; mixed-reason overload sets; method overload sets (their defs are not
 recorded in `_FUNC_DEF_LOCS`). This doc stays open for those.
+
+### 2026-11-14 (later): group A landed (violated `where` clause), source-bearing
+
+`def f[n: Int]() where n > 0` called as `f[0]()` is now rejected in the modular
+shape (`error: invalid call to 'f': violated constraint`, `note: constraint
+declared here evaluated to False, expected '(n > Int(0))'`, `note: function
+declared here`), byte-identical to `tools/mojo build` for a same-file function
+and for a package member (`pk.fc[0]()`, caret on the `.` with `~` either side,
+`Imported from` lines). Test: `test_where_clause_diagnostic.py` (3 cases).
+
+Mechanism (`myinterpreter.py`): `execute_FunctionDef` records functions with a
+`where_clause` in `_FUNC_WHERE`; `MojoFunction._invoke` calls
+`check_where_clause` once the comptime parameters are bound; a clause that
+evaluates to exactly `False` raises `_ConstraintViolation` carrying a
+`mojo_record` rendered by `_render_record_text`. `eval_CallExpr` publishes the
+call site in `_CALL_SITE`. A clause the interpreter cannot decide (unbound
+parameter, message tuple, evaluation error) is left alone, never reported.
+
+Still missing for group A / this doc: the `$0`-style pretty-print the test's
+precompiled form expects (needs the source-less path, plan step 6); `where`
+clauses on struct declarations and `comptime _ = pkg.constraint_fn[0, 1]`
+(group G); constraint expressions beyond identifiers, int literals and binary
+operators; the compiled path's own (already existing) ConformanceError output
+is a different format and is not unified with this one. Groups C-F, H-L remain.
