@@ -10623,9 +10623,6 @@ class TestTheModelFuzzLedgerRowIsFromTheTally(unittest.TestCase):
                                          f"CSET==CSINC identity failed for {cond}")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 class TestDecWhileSignedModelRegression(unittest.TestCase):
     """The dec-while loop model assumes a non-negative counter.
 
@@ -10694,3 +10691,94 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
         self.assertEqual(r.returncode, 0,
                          "emitted _go block does not typecheck:\n"
                          + r.stdout + r.stderr)
+
+
+class TestSvcWriteAssumedHaltCertificate(unittest.TestCase):
+    """Part 3: a halt certificate admits a dynamic write `svc` under
+    `svc_write_assumed`."""
+
+    BASE = 0x1000
+    EXIT_PC = 0x2000
+
+    def _words(self):
+        # <base>       svc                 # dynamic x16 (no preceding movz)
+        # base + 4     movz x0, #0         # rewrites write's byte count
+        # base + 8     movz x16, #1
+        # base + 12    svc                 # static exit
+        return {
+            self.BASE: 0xd4000001,
+            self.BASE + 4: 0xd2800000,   # movz x0, #0
+            self.BASE + 8: 0xd2800030,   # movz x16, #1
+            self.BASE + 12: 0xd4000001,
+        }
+
+    def _pcs(self):
+        return [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
+
+    def test_no_assumption_still_returns_none(self):
+        import formal.arm64_proof_gen as G
+        r = G._gen_halt_cert("f", self._words(), self.BASE, "b0",
+                             self._pcs(), self.EXIT_PC)
+        self.assertIsNone(r)
+
+    def test_with_assumption_emits_binder_and_discharge(self):
+        import formal.arm64_proof_gen as G
+        r = G._gen_halt_cert("f", self._words(), self.BASE, "b0",
+                             self._pcs(), self.EXIT_PC,
+                             svc_assumed={self.BASE: "svc_write_assumed"})
+        self.assertIsNotNone(r, "expected halt cert when assumption supplied")
+        defs, thm, n = r
+        self.assertEqual(thm, "f_b0_halts")
+        self.assertIn("svc_write_assumed", defs)
+        # binder in theorem header
+        self.assertRegex(defs, r"theorem\s+f_b0_halts\b[\s\S]*svc_write_assumed")
+        # dynamic write's hx comes from that binder at pre-svc state
+        self.assertRegex(
+            defs,
+            r"have hx_svc_1\s*:\s*¬\s*arm64_reg\s+16\s*\([^)]+\)\s*=\s*1\s*:=\s*svc_write_assumed",
+        )
+        # write steps through arm64_go_exit_step_jump_at
+        self.assertIn("arm64_go_exit_step_jump_at", defs)
+        # final static exit still steps to none
+        self.assertRegex(defs, r"hstep_x_\d+[\s\S]*arm64_step[\s\S]*=\s*none")
+
+    def test_static_exit_only_no_binder(self):
+        import formal.arm64_proof_gen as G
+        words = {
+            self.BASE: 0xd2800030,      # movz x16,#1
+            self.BASE + 4: 0xd4000001,   # svc
+        }
+        pcs = [self.BASE, self.BASE + 4]
+        r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
+                             svc_assumed={self.BASE: "svc_write_assumed"})
+        self.assertIsNotNone(r)
+        defs, thm, n = r
+        self.assertNotIn("svc_write_assumed", defs)
+
+    def test_final_dynamic_svc_refused_even_with_assumption(self):
+        import formal.arm64_proof_gen as G
+        words = {
+            self.BASE: 0xd4000001,       # dynamic and final
+        }
+        pcs = [self.BASE]
+        r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
+                             svc_assumed={self.BASE: "svc_write_assumed"})
+        self.assertIsNone(r)
+
+    def test_earlier_dynamic_write_reads_x0_before_rewrite_refused(self):
+        import formal.arm64_proof_gen as G
+        # dynamic write svc, fall-through reads x0 before rewriting it
+        words = {
+            self.BASE: 0xd4000001,       # dynamic write
+            self.BASE + 4: 0x8b000020,   # add x1,x0,x0 (reads x0)
+            self.BASE + 8: 0xd2800030,   # movz x16,#1
+            self.BASE + 12: 0xd4000001,  # exit
+        }
+        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
+        r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
+                             svc_assumed={self.BASE: "svc_write_assumed"})
+        self.assertIsNone(r)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
