@@ -540,6 +540,19 @@ def compile_module_to_c(src: str, path: str, module_name: str,
 # by a clean cache hit does not label the clean one.
 _LAST_DEGRADED: list = []
 
+# Every generic-struct elaboration refusal this process has seen, as
+# `(module_path, [reason, ...])`, accumulated by `compile_module_to_c_cached`.
+# The un-elaborated-template fallback that produces the reason is load-bearing
+# (kept compiling; see `test_elaboration_failure_is_not_cached`), but the
+# refusal is NOT a cacheable artifact and NOT console noise: a driver that
+# wants the detail (the stdlib sweep) reads it from its own call frame via
+# `last_degradations()` — that list is per-call, which is what threads it back
+# to the caller — and this log keeps it visible for anything that only has the
+# module-level state. Read with `refusal_log()`; never printed here, so a
+# reader of the sweep's console is not asked to guess which red lines are
+# actionable (bug:CODEGEN_stdlib_run_prints_elaboration_refusals).
+_REFUSAL_LOG: list = []
+
 
 def last_degradations() -> list:
     """The degradation list for the most recent `compile_module_to_c_cached` (or
@@ -551,6 +564,29 @@ def last_degradations() -> list:
     read from a cache" is not the same claim as "never degraded". Read this,
     do not clear it."""
     return list(_LAST_DEGRADED)
+
+
+def refusal_log() -> list:
+    """Every recorded `(module_path, [reason, ...])` refusal, as a copy."""
+    return list(_REFUSAL_LOG)
+
+
+def _record_refusal(path: str, degraded: list) -> None:
+    """Keep the refusal off the console and on the books.
+
+    The detail still has to reach whoever runs the sweep, so it is appended
+    to `_REFUSAL_LOG` (read back with `refusal_log()`) and echoed to the
+    console only under MOJO_DEBUG, like every other deliberately-degraded
+    path in this compiler. Nothing is swallowed: the module's `.ci` is
+    refused publication here, and the caller that wants a count reads it
+    from its own frame via `last_degradations()`."""
+    _REFUSAL_LOG.append((path, list(degraded)))
+    if os.environ.get('MOJO_DEBUG'):
+        sys.stderr.write(
+            f"[compile_module_to_c_cached] {path}: {len(degraded)} generic "
+            f"struct elaboration(s) failed, so this module's C is NOT the "
+            f"program its source describes and it is NOT being cached:\n"
+            + ''.join(f'    {d}\n' for d in degraded))
 
 
 # In-process L1 for compile_module_to_c_cached. Values are
@@ -614,6 +650,11 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str,
     # it, and handing it to `build()` would republish the very hole the refusal
     # exists to refuse. One extra character in the key, and the two artifacts
     # can never be confused for each other.
+    # `last_degradations()` must describe THIS call and only this call. The
+    # compile path clears/refreshes it, and each L1 entry carries its own
+    # degradation list, so a hit answers for the module it replays rather than
+    # inheriting whichever module this worker compiled last. (A CAS hit can
+    # only be clean: a degraded compile is never published.)
     key = stdlib_codegen_key(src, path, module_name, linkable)
     if key in _stdlib_compile_cache:
         text, degraded = _stdlib_compile_cache[key]
@@ -635,11 +676,7 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str,
         text = compile_module_to_c(src, path, module_name, linkable=linkable)
         degraded = last_degradations()
         if degraded:
-            sys.stderr.write(
-                f"[compile_module_to_c_cached] {path}: {len(degraded)} generic "
-                f"struct elaboration(s) failed, so this module's C is NOT the "
-                f"program its source describes and it is NOT being cached:\n"
-                + ''.join(f'    {d}\n' for d in degraded))
+            _record_refusal(path, degraded)
         else:
             cas.publish(key, '.ci', text.encode('utf-8'))
     _LAST_DEGRADED[:] = degraded

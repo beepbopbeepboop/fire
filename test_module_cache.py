@@ -611,13 +611,16 @@ def test_elaboration_failure_is_a_failed_verdict(wd):
     open(path, 'w').write("fn el_verdict_probe():\n    pass\n")
     compile_stdlib.compile_module_to_c_cached = _degraded
     try:
-        ok, msg, _cg, _gcc = compile_stdlib.transpile_file(path)
+        ok, msg, _cg, _gcc, refusals = compile_stdlib.transpile_file(path)
         check("verdict: a module built through a failed elaboration is NOT a pass",
               not ok, "transpile_file counted a degraded module as PASSED")
         check("verdict: ... and the FAILED reason names the degradation",
               bool(msg) and 'elaboration' in msg
               and 'advance without converging' in msg,
               f"msg = {msg!r}")
+        check("verdict: ... and its refusal reaches the sweep's count/log channel",
+              any('advance without converging' in r for r in refusals),
+              f"refusals = {refusals[:1]}")
     finally:
         compile_stdlib.compile_module_to_c_cached = real
         bsd._LAST_DEGRADED[:] = []
@@ -807,6 +810,101 @@ def test_elaboration_trait_conformance(wd):
     # Unknown/unbounded bounds never block (additive, best-effort).
     nb = el.elaborate_generic_call("fn id[T](x: T) -> T:\n    return x\n", 'id', ['Bad'])
     check("slice6: unbounded type parameter is not blocked", bool(nb))
+
+
+# ── a refusal is never console noise: detail to the log, a count to the screen ─
+def test_elaboration_refusal_is_not_console_noise(wd):
+    """Output-side contract of the elaboration refusal (the bug the simd
+    refusal doc's sibling describes): a module that compiles through the
+    load-bearing un-elaborated-template fallback must not print its refusal
+    to the console. The console is where a reader of the sweep looks first,
+    and refusal text next to a PASSED line reads as a failure nobody can act
+    on. The detail belongs to the run's log (module name + reason, kept
+    here in `refusal_log()` / `last_degradations()` for the driver to
+    write), and the console keeps a count — which `compile_stdlib.
+    transpile_file` carries back as its fifth return element, alongside the
+    FAILED verdict the same refusal produces.
+
+    bug:CODEGEN_stdlib_run_prints_elaboration_refusals."""
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+    import compile_stdlib
+
+    mod = ("struct Box[T]:\n    var value: T\n"
+           "fn unbox(self) -> T:\n        return self.value\n")
+    bl = os.path.join(RUNTIME, 'el_boxrefuse.mojo')
+    open(bl, 'w').write(mod)
+    client = ("from el_boxrefuse import Box\n"
+              "fn main():\n    var b = Box[Int64](42)\n"
+              "    var y = b.unbox()\n    print(y)\n")
+    path = os.path.join(wd, 'el_boxrefuse_client.mojo')
+    open(path, 'w').write(client)
+    csrc = open(path).read()
+    real_instantiate = mm.instantiate
+    reason = 'forced: the instantiation could not be built'
+
+    def _boom(*a, **k):
+        raise RuntimeError(reason)
+
+    try:
+        mm.instantiate = _boom
+        bsd._stdlib_compile_cache.clear()
+        try:
+            buf_out, buf_err = io.StringIO(), io.StringIO()
+            with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                bsd.compile_module_to_c_cached(csrc, path, 'el_boxrefuse_client')
+            console = buf_out.getvalue() + buf_err.getvalue()
+            check("refusal: the refusal text does not reach the console",
+                  'NOT being cached' not in console
+                  and 'compile_module_to_c_cached' not in console
+                  and 'CAUGHT_IN_MAIN_LOOP' not in console,
+                  repr(console[:200]))
+            check("refusal: the refusal is recorded with module path and reason",
+                  any(p == path and any(reason in r for r in rs)
+                      for p, rs in bsd.refusal_log()),
+                  f"refusal_log() = {bsd.refusal_log()[:1]}")
+            check("refusal: last_degradations() still reports it, for the count",
+                  any(reason in d for d in bsd.last_degradations()),
+                  f"last_degradations() = {bsd.last_degradations()[:2]}")
+            # A replay must answer for ITSELF: never inherit the previous
+            # module's refusals, never lose its own. The first compile above
+            # filled the L1 entry (it refused to publish to the CAS), so this
+            # call is an L1 hit — and it still reports its own refusal, which
+            # is what keeps the verdict below FAILED rather than turning a
+            # cached degraded module green.
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                bsd.compile_module_to_c_cached(csrc, path, 'el_boxrefuse_client')
+            check("refusal: an L1 replay still reports its own refusal",
+                  any(reason in d for d in bsd.last_degradations()),
+                  f"last_degradations() = {bsd.last_degradations()[:2]}")
+            # ... and a following CLEAN compile does not inherit it.
+            clean = os.path.join(wd, 'el_boxrefuse_clean.mojo')
+            open(clean, 'w').write("fn el_boxrefuse_clean():\n    pass\n")
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    bsd.compile_module_to_c_cached(open(clean).read(), clean,
+                                                   'el_boxrefuse_clean')
+                check("refusal: a following clean compile does not inherit it",
+                      bsd.last_degradations() == [],
+                      f"last_degradations() = {bsd.last_degradations()[:2]}")
+            finally:
+                os.remove(clean)
+            # And the channel the sweep's console count line is built on. The
+            # same call takes the verdict, so the degraded module is FAILED and
+            # its reason still reaches the count/log channel.
+            ok, _msg, _cg, _gcc, refusals = compile_stdlib.transpile_file(path)
+            check("refusal: the sweep's per-module channel carries the refusal",
+                  any(reason in r for r in refusals),
+                  f"transpile_file -> ok={ok}, msg={_msg}, refusals={refusals[:1]}")
+            check("refusal: ... and the sweep counts that module FAILED",
+                  not ok and 'elaboration' in (_msg or ''),
+                  f"transpile_file -> ok={ok}, msg={_msg}")
+        finally:
+            bsd._stdlib_compile_cache.clear()
+            os.remove(path)
+    finally:
+        mm.instantiate = real_instantiate
+        os.remove(bl)
 
 
 # ── Reflected concrete struct type import (the real-stdlib distribution path) ─
@@ -2320,6 +2418,7 @@ def main():
         test_elaboration_generic_struct(wd)
         test_elaboration_failure_is_not_cached(wd)
         test_elaboration_failure_is_a_failed_verdict(wd)
+        test_elaboration_refusal_is_not_console_noise(wd)
         test_instantiation_nested_gcc_is_retried(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
