@@ -237,3 +237,81 @@ running anything and stops, so the main-body diagnostics (which the real
 compiler prints first, by source position) never appear. Closing that needs the
 static pass to also check calls (where clauses, overloads) rather than the
 interpreter discovering them at run time.
+
+### 2026-11-14 (evening): static call checks; real test output now matches for A, B, H, I, J, L
+
+`static_module_diagnostics` now also reports, with the declaration errors and in
+source order, calls its own text proves wrong (`_static_call_records`): an
+overload failure for a same-module or imported-package function, and a
+bracketed `f[1, 2]()` whose `where` clause is provably False. Callees that a
+local binding could shadow, decorated candidates and `*`/`**` calls are skipped.
+Also measured and fixed: for "unexpected argument" with every candidate running
+out at the same argument, the caret is on that argument and the callee's name is
+underlined (`    ~    ^`). Tests: `test_static_call_diagnostics.py` (3 cases).
+
+Running the real `diagnostics_in_missing_locs.mojo` (package source present)
+now prints, in the real compiler's order and with the same messages/notes:
+A (47), B (56), H (103), I (113), J (123), L (156, 167, 178). Missing from the
+real list: C (63, `no matching function in initialization`), E (78) and F (88)
+(`lacking evidence to prove correctness`), D (65, deprecated implicit conversion, is
+not even in the real source-bearing output above) and K (137, candidate
+selection; the real compiler names the struct `'UnprovableWithValidCandidate[T]'`).
+
+Group G landed (`comptime x = pkg.f[0, 1]`, a binding that instantiates f
+without a call): `violated constraint` with no callee in the message, caret on the
+callee (the `.` of a member callee, no `~` run); byte-identical to `tools/mojo
+build`; covered by `test_static_call_diagnostics.py`. Known difference: the real
+compiler reports a second `comptime _ = ...` of the same name only once.
+
+### 2026-11-14 (night): caret rule corrected; measurements for E/F (not yet implemented)
+
+Correction: a callee's NAME is underlined in full (`^~~~~~~~`), for a violated
+`where` clause and for the "unexpected argument" caret fallback. The earlier
+byte-identical checks used one-character names, which hid it; fixed in
+`where_violation_record` / `overload_diagnostic_record`, covered by the
+long-name cases of `test_static_call_diagnostics.py`. (`comptime x = f[0, 1]`
+stays a bare caret.)
+
+Ground truth for groups E/F (source-bearing, `tools/mojo build -I`), for the
+next step. A where-clause that CALLS a function:
+`def my_unprovable[x: Int]() where pk.unfoldable_predicate(x)` called as
+`_ = my_unprovable[0]()`, `unfoldable_predicate` NOT `@always_inline("builtin")`:
+
+    e.mojo:13:9: error: invalid call to 'my_unprovable': lacking evidence to prove correctness
+        _ = my_unprovable[0]()
+            ^~~~~~~~~~~~~            (whole callee incl. `[0]`)
+    e.mojo:4:5: note: cannot prove constraint for candidate      (caret: the def's name)
+    e.mojo:4:35: note: constraint declared here needs evidence for 'unfoldable_predicate(Int(0))'
+    Imported from e.mojo:1:                                       (when the predicate is in a package)
+    pk/__init__.mojo:6:5: note: cannot evaluate call to non-builtin function declared here
+    e.mojo:13:9: note: provide evidence for the constraint here to aid in candidate selection
+        _ = my_unprovable[0]()
+            ^                         (caret only)
+
+and a `@always_inline("builtin")` predicate is evaluated: `my_foldable[0]()`
+with `where pk.foldable_predicate(x)` gives `violated constraint` with
+`constraint declared here evaluated to False, expected 'foldable_predicate(x)'`
+(the predicate keeps its unqualified name; the source-less form prints `$0`).
+For a package member callee (`_ = pk.unprovable[0]()`) the error marker is
+`~~^~~~~~~~~~~` and the last note's caret sits on the `.`. Needs: foldability
+by decorator, evaluation of a builtin predicate's body, a three-valued result.
+
+### 2026-11-14 (night, later): groups E and F landed (predicate in a where clause)
+
+`where p(x)` with provable integer arguments: a non-`@always_inline("builtin")`
+predicate gives `lacking evidence to prove correctness` with the four notes; a
+builtin one is evaluated from its `return <comparison>` body and reported as
+`violated constraint` (`expected 'p(x)'`). Byte-identical to `tools/mojo build
+-I`, same-module and package callees (`_predicate_call_record`,
+`test_predicate_where_diagnostic.py`).
+
+With the package source present, the real `diagnostics_in_missing_locs.mojo`
+now matches the real compiler except two blocks: C (line 63, `no matching
+function in initialization` for `PosOnlyStruct[1, c=9]()`: the notes are the
+struct's SYNTHESIZED `__init__` overloads, `def __init__(out self, *, deinit
+move: Self)    # note - generated function` etc.) and K (line 137, ambiguous
+candidate selection with `conforms_to(T, ...)`: needs `Trait where cond` bases
+and provable/unprovable/valid candidate classification against `T: Movable`).
+Full ground truth for both is in `tools/mojo build -I` output on that file.
+The source-less run (the test's real shape: precompile, delete the source) is
+still unmet: there is no `precompile` here.
