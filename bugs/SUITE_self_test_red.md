@@ -23,16 +23,16 @@ Result on the merged tree (`b51a76057`): `381 passed, 6 failed`.
    not extended, so the self-host fingerprint is not covering a module it must.
 
 2. **disabled: the real registry has no job that is not run.**
-   `['cli-usage-text', 'formal-read-before-store', 'gimple', 'metalgpu']` are
-   registered with `disabled=` (their docs are the gate-triage docs
-   `bugs/gate-cli-usage-text.md`, `bugs/gate-metalgpu.md`,
-   `bugs/gate-gimple.md` and the read-before-store doc), but `test_suite.py`'s
-   `disabled` section still asserts the registry has NO disabled job at all.
-   Each one has to be named there and its reserves-0 / `--list` / `--dry-run`
-   properties re-asserted, the way `ab-native` was until `2f75609d`.
+   `['gimple', 'metalgpu']` are registered with `disabled=` (their docs are the
+   gate-triage docs `bugs/gate-metalgpu.md` and `bugs/gate-gimple.md`;
+   `cli-usage-text` and `formal-read-before-store` have since been fixed and
+   their docs deleted), but `test_suite.py`'s `disabled` section still asserts
+   the registry has NO disabled job at all. Each one has to be named there and
+   its reserves-0 / `--list` / `--dry-run` properties re-asserted, the way
+   `ab-native` was until `2f75609d`.
 
 3. **disabled markers: the state the section is written for is stated, not
-   assumed.** The sibling of row 2, same four names: the section says "no
+   assumed.** The sibling of row 2, same two names: the section says "no
    registered job is disabled" and that sentence is now false.
 
 4. **the estate: every test file is run by something, or says why not.**
