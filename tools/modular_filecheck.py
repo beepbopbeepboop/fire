@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+"""Run modular test files (by name, found under the modular checkout's test/)
+through `fire.py build` and their own FileCheck lines, one verdict per file:
+
+    python3 tools/modular_filecheck.py tuple_first_of_error.mojo where_message.mojo
+
+Only RUN lines of the shape `[not] <tool> [flags] %s [2>&1] | FileCheck
+[--check-prefix=X]` are supported (the tool being %mojo, %mojo-build,
+%parse-mojo-isolated, mojo build/run or kgen); split-input-file and
+-verify-diagnostics tests are reported UNSUPPORTED. A test whose expected output
+is an MLIR dump rather than a diagnostic cannot pass by construction."""
 import os, re, subprocess, sys, shutil, tempfile, glob
 ROOT='/Users/mrs/net/chatgpt/claude/modular/mojo/test'
 FIRE='/Users/mrs/net/chatgpt/claude/mojo-reference/fire.py'
