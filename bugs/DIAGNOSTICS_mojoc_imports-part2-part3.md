@@ -1,14 +1,9 @@
-# DIAGNOSTICS mojoc imports, part 2 — part 3: conformance error against an imported struct with an implicit default
+# DIAGNOSTICS mojoc imports, part 2 — remaining: conformance error against an imported struct with an implicit default
 
-Part 3 of 3 of `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`. Depends on
-the precompiled signature artifact/reader (part 1, landed) and
-`mojo/middle/mojoc_signature.py` (synthetic signature printer, landed).
+Remaining easy part of `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md` (parts covering precompiled signature artifacts and synthetic signature rendering have landed). Depends on the precompiled signature artifact/reader and `mojo/middle/mojoc_signature.py` (synthetic signature printer).
 
-## Class
-mid. It wires an existing conformance check to the imported signature and
-emits the three-line diagnostic. The check itself exists for source structs
-(`elaborate.py::check_conformance`, `fire_compiler.py` conformance paths), so
-this is plumbing plus one new case, not a new checker.
+## Goal
+Wire the existing conformance check to the imported signature for this case and emit the expected three-line diagnostic. The check itself exists for source structs (`elaborate.py::check_conformance`, `fire_compiler.py` conformance paths), so this is plumbing plus one new case, not a new checker.
 
 ## Current state
 
@@ -25,10 +20,8 @@ conform to `Marked`. In this repo the check for a bracket parameter against an
 imported struct's trait does not see the imported record, so nothing is
 reported (or the importer fails differently; measure this first, see below).
 
-## Goal
-
 When a call or instantiation names an imported struct, run the same
-trait-conformance check the source path runs against the part-1 record, and on
+trait-conformance check the source path runs against the precompiled/imported record, and on
 failure emit:
 
 1. `error: '<Struct>' parameter '<P>' has '<Trait>' type, but value has type '<Actual>'`
