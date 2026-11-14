@@ -1,4 +1,4 @@
-SPLIT: (no live parts — parts 1, 2, 3, 4 and 5 are fixed and their docs deleted; end-to-end tables.py build succeeds)
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
