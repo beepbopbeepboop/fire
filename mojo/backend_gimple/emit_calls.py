@@ -2776,9 +2776,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _lc = _lower_siter_collect_list(gen, _av0)
                 if _lc is not None:
                     return _lc
+    # A `.mojoc` struct record carries no template, but a `Struct[Args](...)`
+    # naming one still has a bracket bound to check — route it through the
+    # same arm so `_ensure_generic_struct` can refuse a non-conforming type
+    # argument with the ordinary conformance diagnostic.
+    _mojoc_structs = getattr(gen, '_mojoc_structs', None) or {}
     if (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-            and node.func.obj.name in gen._imported_generic_structs) or \
-           (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generic_structs):
+            and (node.func.obj.name in gen._imported_generic_structs
+                 or node.func.obj.name in _mojoc_structs)) or \
+           (isinstance(node.func, gimple_ctypes.IdentExpr) and (
+                node.func.name in gen._imported_generic_structs
+                or node.func.name in _mojoc_structs)):
         # The BARE-name form (`ThinAllocation(unsafe_owned_ptr=x)`) is the
         # common spelling in the stdlib — Mojo writes the constructor's types
         # in the parameters, so the bracket arguments are usually omitted

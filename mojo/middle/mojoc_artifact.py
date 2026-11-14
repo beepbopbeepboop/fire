@@ -1,9 +1,11 @@
 """Precompiled .mojoc signature artifacts.
 
-One JSON artifact per package carrying top-level struct/function signatures
-(bracket params, runtime params, and default source text) so an importer can
-read them when the package sources are absent. Part 1 stores/reads records;
-printing diagnostics is part 2/3.
+One JSON artifact per package carrying top-level struct/function/trait
+signatures (bracket params, runtime params, default source text, and a
+trait's required methods) so an importer can read them when the package
+sources are absent. Part 1 stores/reads records; conformance checking of an
+imported record lives in `mojo/middle/mojoc_conformance.py`, and rendering a
+record as signature text is part 2/3.
 """
 
 import json
@@ -88,10 +90,29 @@ def _function_record(fn):
     }
 
 
-def _parse_file(path):
+def _read_and_parse(path):
     with open(path) as f:
         src = f.read()
-    return fire_compiler.Parser(fire_compiler.py_tokenize(src)).with_filename(path).parse_module()
+    mod = fire_compiler.Parser(fire_compiler.py_tokenize(src)).with_filename(path).parse_module()
+    return src, mod
+
+
+def _trait_record(name, source):
+    """A trait record with the requirement signatures a bound check needs.
+
+    The method list is `elaborate.extract_trait`'s — the same extraction the
+    source path's conformance checker uses — so a record and a live module
+    answer the requirement question identically."""
+    import elaborate
+    methods = elaborate.extract_trait(source, name) or []
+    return {
+        "kind": "trait",
+        "name": name,
+        "bracket_params": [],
+        "runtime_params": [],
+        "methods": [{"name": n, "params": list(p or []), "ret": r}
+                    for (n, p, r) in methods],
+    }
 
 
 def extract_package_signatures(pkg_dir):
@@ -107,7 +128,7 @@ def extract_package_signatures(pkg_dir):
             continue
         path = os.path.join(pkg_dir, fn)
         try:
-            mod = _parse_file(path)
+            src, mod = _read_and_parse(path)
         except Exception:
             continue
         for s in mod:
@@ -116,13 +137,10 @@ def extract_package_signatures(pkg_dir):
             elif isinstance(s, fire_compiler.FunctionDef):
                 funcs[s.name] = _function_record(s)
             elif isinstance(s, fire_compiler.TraitDef):
-                # Traits can appear as type bounds; store minimal record.
-                structs.setdefault(s.name, {
-                    "kind": "trait",
-                    "name": s.name,
-                    "bracket_params": [],
-                    "runtime_params": [],
-                })
+                # Traits appear as bracket-parameter bounds; their required
+                # method signatures are what an import-time conformance check
+                # must compare against, so record them with the trait.
+                structs.setdefault(s.name, _trait_record(s.name, src))
     return {"structs": structs, "functions": funcs}
 
 
