@@ -1,4 +1,4 @@
-SPLIT: part 1 (precompiled signature artifact) landed; remaining: bugs/DIAGNOSTICS_mojoc_imports-part2-part2.md, bugs/DIAGNOSTICS_mojoc_imports-part2-part3.md
+SPLIT: part 1 (precompiled signature artifact) landed; part 2 (synthetic signature rendering) landed; remaining: bugs/DIAGNOSTICS_mojoc_imports-part2-part3.md
 
 # DIAGNOSTICS mojoc imports, part 2: implicit default param on precompiled import
 
@@ -32,4 +32,4 @@ precompiled module.
 
 ## Status
 
-- **Open.** Part 2 of 3 split from `bugs/hard/DIAGNOSTICS_mojoc_imports.md`.
+- **Open.** Part 3 of 3 remains; parts 1 and 2 landed.

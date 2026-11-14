@@ -2,7 +2,7 @@
 
 Part 3 of 3 of `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`. Depends on
 the precompiled signature artifact/reader (part 1, landed) and
-`DIAGNOSTICS_mojoc_imports-part2-part2.md` (synthetic signature printer).
+`mojo/middle/mojoc_signature.py` (synthetic signature printer, landed).
 
 ## Class
 mid. It wires an existing conformance check to the imported signature and
@@ -64,5 +64,5 @@ Command: `python3 test_mojoc_implicit_default_conformance.py`
 
 ## Status
 
-- **Open.** Blocked on parts 1 and 2. The measurement step above has not been
+- **Open.** Parts 1 and 2 landed; part 3 remains. The measurement step above has not been
   run yet.
