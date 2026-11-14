@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
 # Only iceman, as tools/pool.json has it: mid and easy, never hard.
-ICEMAN_ONLY = {"slots": [{"name": "iceman", "model": "opencode-go/iceman-contributor-free", "count": 20,
+ICEMAN_ONLY = {"mode": "build", "slots": [{"name": "iceman", "model": "opencode-go/iceman-contributor-free", "count": 20,
                           "class": "mid", "also": ["easy"]}]}
 
 
@@ -136,7 +136,7 @@ class RefillPersistsItsDecisions(unittest.TestCase):
         self.assertEqual(self.spawned, [], "iceman has no hard slot: the hard doc must not start")
 
     def test_hard_slot_starts_it_from_master(self):
-        pool = {"slots": ICEMAN_ONLY["slots"] + [{"name": "opus", "model": "claude-opus-5-5", "count": 1,
+        pool = {"mode": "build", "slots": ICEMAN_ONLY["slots"] + [{"name": "opus", "model": "claude-opus-5-5", "count": 1,
                                                   "class": "hard"}]}
         with mock.patch.object(C, "load_pool", return_value=pool):
             self._refill()
