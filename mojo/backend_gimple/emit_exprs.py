@@ -2055,13 +2055,15 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if _canon == 'sys' and node.member == 'argv':
             # Return the argv list wired from C main(argc, argv)
             t = gen._new_temp('MojoList *')
-            gen._emit(f"  {t} = mojo_get_argv();  /* sys.argv from C */")
+            gen._rt_into(t, 'mojo_get_argv', [])
+            gen._emit('  /* sys.argv from C */')
             # Track element type so subscript uses mojo_list_get_str
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
         if _canon == 'sys' and node.member == 'path':
             t = gen._new_temp('MojoList *')
-            gen._emit(f"  {t} = mojo_list_new ();  /* sys.path stub */")
+            gen._rt_into(t, 'mojo_list_new', [])
+            gen._emit('  /* sys.path stub */')
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
         if _canon == 'sys' and node.member == 'platform':
@@ -3299,7 +3301,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if op == '->':
             # GIMPLE: declare separate temp to avoid inline cast in rvalue
             field_tmp = gen._new_temp('int64_t')
-            gen._emit(f"  {field_tmp} = (int64_t){ov}{op}{gimple_ctypes._safe_field(node.member)};")
+            gen._cast_into(field_tmp, 'int64_t',
+                           f"{ov}{op}{gimple_ctypes._safe_field(node.member)}")
             t = field_tmp
         else:
             t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
@@ -4353,7 +4356,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                                        [('char', f"'{_code}'"),
                                         ('int64_t', _lv64),
                                         ('int64_t', _rv64)])
-                t = gen._new_val('_Bool', f'(int){_tcmp}')
+                t = gen._cast('_Bool', f"{_tcmp}")
                 return '_Bool', t
             _oc = {'+': '+', '-': '-', '*': '*', '%': '%'}[op]
             t = gen._call_expr('int64_t', 'mojo_pyobject_arith',
@@ -7843,7 +7846,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # the store tells the runtime the key's SPELLING — an integer, so
         # the slot's repr prints the key unquoted.
         _orig = kv
-        kv = gen._new_val('char *', f"mojo_int_str_transient({_orig})")
+        kv = gen._rt_call('char *', 'mojo_int_str_transient', [f"{_orig}"])
         gen._cstr_key_src[kv] = _orig
         kt = 'char *'
     elif kt == 'MojoBytes *':
