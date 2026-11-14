@@ -3246,6 +3246,15 @@ class GimpleGen:
         # case is reported instead of the instantiation silently falling
         # through to the un-elaborated template.
         self._mojoc_structs: dict = {}
+        # Dual-mount / alias resolution for precompiled packages: one
+        # artifact file reached under two different package names is the same
+        # package. realpath(artifact) -> canonical package name, and
+        # alias package name -> canonical package name.
+        self._mojoc_pkg_canonical: dict = {}
+        self._mojoc_pkg_alias: dict = {}
+        # Loaded mojoc package records (canonical/alias package name ->
+        # {'structs': {...}, 'functions': {...}}) for symbol lookup.
+        self._mojoc_pkg_records: dict = {}
         # Why an imported generic struct could NOT be elaborated for a
         # construction, one entry per occurrence. The codegen falls back to
         # the un-elaborated template (see

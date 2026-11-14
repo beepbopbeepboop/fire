@@ -1,7 +1,7 @@
 """Render a precompiled signature record as Mojo source text.
 
 The record shape is the JSON mapping produced and read by
-`mojo/middle/mojoc_artifact.py` (DIAGNOSTICS_mojoc_imports-part2 part 1):
+`mojo/middle/mojoc_artifact.py` (precompiled mojoc signature records):
 `kind`/`name`/`bracket_params`/`runtime_params`, each parameter being
 `{"name", "type", "default"}` with `default` holding the source text (or
 None).  This module is the single renderer for those records; the imported-
