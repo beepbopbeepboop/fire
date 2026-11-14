@@ -262,3 +262,36 @@ without a call): `violated constraint` with no callee in the message, caret on t
 callee (the `.` of a member callee, no `~` run); byte-identical to `tools/mojo
 build`; covered by `test_static_call_diagnostics.py`. Known difference: the real
 compiler reports a second `comptime _ = ...` of the same name only once.
+
+### 2026-11-14 (night): caret rule corrected; measurements for E/F (not yet implemented)
+
+Correction: a callee's NAME is underlined in full (`^~~~~~~~`), for a violated
+`where` clause and for the "unexpected argument" caret fallback. The earlier
+byte-identical checks used one-character names, which hid it; fixed in
+`where_violation_record` / `overload_diagnostic_record`, covered by the
+long-name cases of `test_static_call_diagnostics.py`. (`comptime x = f[0, 1]`
+stays a bare caret.)
+
+Ground truth for groups E/F (source-bearing, `tools/mojo build -I`), for the
+next step. A where-clause that CALLS a function:
+`def my_unprovable[x: Int]() where pk.unfoldable_predicate(x)` called as
+`_ = my_unprovable[0]()`, `unfoldable_predicate` NOT `@always_inline("builtin")`:
+
+    e.mojo:13:9: error: invalid call to 'my_unprovable': lacking evidence to prove correctness
+        _ = my_unprovable[0]()
+            ^~~~~~~~~~~~~            (whole callee incl. `[0]`)
+    e.mojo:4:5: note: cannot prove constraint for candidate      (caret: the def's name)
+    e.mojo:4:35: note: constraint declared here needs evidence for 'unfoldable_predicate(Int(0))'
+    Imported from e.mojo:1:                                       (when the predicate is in a package)
+    pk/__init__.mojo:6:5: note: cannot evaluate call to non-builtin function declared here
+    e.mojo:13:9: note: provide evidence for the constraint here to aid in candidate selection
+        _ = my_unprovable[0]()
+            ^                         (caret only)
+
+and a `@always_inline("builtin")` predicate is evaluated: `my_foldable[0]()`
+with `where pk.foldable_predicate(x)` gives `violated constraint` with
+`constraint declared here evaluated to False, expected 'foldable_predicate(x)'`
+(the predicate keeps its unqualified name; the source-less form prints `$0`).
+For a package member callee (`_ = pk.unprovable[0]()`) the error marker is
+`~~^~~~~~~~~~~` and the last note's caret sits on the `.`. Needs: foldability
+by decorator, evaluation of a builtin predicate's body, a three-valued result.
