@@ -716,8 +716,22 @@ def _gen_stmt_FromImportStmt(gen, node):
         # consults, and `Alias(...)` inside the function built the generic
         # opaque-constructor fallback. Same shared writer, so the two
         # scopes cannot disagree about what the alias names.
+        #
+        # When the writer confirms the aliased name IS a class, stop here:
+        # the module-scope twin deliberately never puts a class binding in
+        # `imported_symbols` ("a function I can emit an extern for"), and
+        # falling through to the bare no-signature tail below did exactly
+        # that — the extern pass emitted a weak `int64_t Alias (...)`
+        # "unavailable in compiled mode" stub and every value read of the
+        # alias bound to it (`g = Alias` printed `<function Alias at ...>`).
+        # The alias's identity lives in `_struct_import_aliases`, which the
+        # constructor dispatch and the IdentExpr class-value lowering both
+        # consult. First-writer-wins is preserved by the shared writer.
+        _is_class_alias = None
         if not getattr(node, 'wildcard', False):
-            gen._note_struct_import_alias(node.module, symbol_name, name)
+            _is_class_alias = gen._note_struct_import_alias(node.module, symbol_name, name)
+        if _is_class_alias is not None:
+            continue
         # Use known signature if available. Default to 'int64_t' (NOT
         # 'int') for unknown symbols — this must match the fallback
         # return type every other unknown-callee path in this file
