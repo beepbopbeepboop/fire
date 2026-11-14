@@ -31,7 +31,8 @@ now the stdlib run can be green while the compiled path is wrong for a file.
 
 Make the per-module result carry the elaboration-failure condition, and count such a module as
 FAILED (unexpected unless it is listed in `EXPECTED_FAILURES` with a reason). Then the
-`CODEGEN_simd_exp_staticTuple_refusal.md` case shows as FAILED until that bug is fixed.
+SIMD exp StaticTuple `advance without converging` refusal case would have shown as FAILED until
+that bug was fixed (it is fixed 2026-11-14).
 
 ## Acceptance
 
