@@ -14,7 +14,7 @@ from compile_stdlib import get_stdlib_path, transpile_file
 class TestStdlibSyntaxVariant(unittest.TestCase):
     def test_variant_transpiles(self):
         path = get_stdlib_path() / "std" / "utils" / "variant.mojo"
-        ok, msg, _cg, _gcc = transpile_file(str(path))
+        ok, msg, _cg, _gcc, _ref = transpile_file(str(path))
         self.assertTrue(ok, f"std/utils/variant.mojo failed to transpile: {msg}")
 
 

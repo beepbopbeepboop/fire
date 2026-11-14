@@ -42,6 +42,17 @@ output should carry only what the reader must act on.
 3. Confirm the module-level verdict change from the second doc is in the same change, so a silent
    console cannot hide a FAILED module.
 
+## Done when
+
+`test_module_cache.py::test_elaboration_refusal_is_not_console_noise` passes:
+a forced generic-struct elaboration refusal produces no `CAUGHT_IN_MAIN_LOOP`
+or "NOT being cached" text on the console, while the refusal is still on the
+books with module path and reason (`refusal_log()` / `last_degradations()`),
+and `compile_stdlib.transpile_file` carries it back to the driver that prints
+the one-line console count. The stdlib sweep itself stays quiet on the console
+for a refusal and shows `Refusals: N ...` with the detail in
+`build/stdlib-refusals.log` (`--verbose` echoes it).
+
 ## Acceptance
 
 - A stdlib run that has no real failures prints no `CAUGHT_IN_MAIN_LOOP` or "NOT being cached" text

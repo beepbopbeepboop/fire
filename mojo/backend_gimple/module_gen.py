@@ -16559,11 +16559,20 @@ def gen_module_impl(self, stmts: list):
 
         except Exception as _me_err:
             try:
-                import sys
-                print("CAUGHT_IN_MAIN_LOOP:", str(_me_err)[:80], file=sys.stderr)
                 if not hasattr(self, '_lsp_recovery_errors'):
                     self._lsp_recovery_errors = []
                 self._lsp_recovery_errors.append(_me_err)
+                # The refusal itself is not lost: it is recorded here and
+                # re-raised by `gen_module` for LSP/front-end error recovery,
+                # so the caller already sees the compile as refused. The old
+                # unconditional `CAUGHT_IN_MAIN_LOOP` print to stderr only
+                # put the refusal on the console next to the run's PASSED
+                # line, where it read as a failure nobody could act on
+                # (bug:CODEGEN_stdlib_run_prints_elaboration_refusals).
+                # Like every other deliberately-swallowed error in this
+                # module, the detail is diagnosable under MOJO_DEBUG and
+                # otherwise off the console.
+                _debug_note('main-loop statement refused', _me_err)
             except Exception:
                 pass
             continue
