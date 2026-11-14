@@ -18,10 +18,12 @@ while printing it as written is exactly what the diagnostic must show
 
 SYNTHETIC_MARKER = "# note - synthetic signature"
 
+# Modular prints every free function as `def` in a diagnostic note, whatever
+# keyword the source spelled it with (`def helper(x: Int) -> Int`).
 _KIND_KEYWORDS = {
     "struct": "struct",
     "trait": "trait",
-    "function": "fn",
+    "function": "def",
 }
 
 
@@ -57,7 +59,13 @@ def render_signature(record, synthetic=True):
     runtime = record.get("runtime_params") or []
     if runtime:
         text += "(" + ", ".join(_param_text(p) for p in runtime) + ")"
+    elif kind == "function":
+        text += "()"
+
+    ret = (record.get("ret") or "").strip()
+    if ret:
+        text += " -> " + ret
 
     if synthetic:
-        text += "  " + SYNTHETIC_MARKER
+        text += "    " + SYNTHETIC_MARKER
     return text
