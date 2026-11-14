@@ -2352,6 +2352,42 @@ def _bool_and(gen, left: str, right: str) -> str:
     return t
 
 
+def _rt_args(gen, fname: str, args: list) -> str:
+    """Spell the argument list of a call to runtime function `fname`.
+
+    `args` are VALUES (temp or variable names, or literal text), not
+    `(ctype, value)` pairs: a call site states what it passes and never what
+    type it believes it has.  The types come from the declarations
+    (`gen.var_types`) and from the runtime headers (`rt_sigs.RT_SIGS`), and
+    `_repr_fix_args` emits a conversion statement for any scalar argument
+    whose declared representation is not the parameter's -- the same last
+    step `_emit_call` takes, so a runtime call is converted the same way
+    whichever of the two spells it."""
+    fixed: list = ginf._repr_fix_args(gen, fname, args)
+    parts: list[str] = []
+    for a in fixed:
+        parts.append(_as_str(a))
+    return ', '.join(parts)
+
+
+def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
+    """`t = fname (args);` for a runtime function; returns the new temp.
+
+    THE way to call a runtime function for its value.  Do not spell the call
+    as text inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
+    return gen._new_val(ret_type, fname + ' (' + _rt_args(gen, fname, args) + ')')
+
+
+def _rt_into(gen, dst: str, fname: str, args: list) -> None:
+    """`dst = fname (args);` for a runtime function, into an existing temp."""
+    gen._emit('  ' + _as_str(dst) + ' = ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+
+
+def _rt_void(gen, fname: str, args: list) -> None:
+    """`fname (args);` for a runtime function called for its effect."""
+    gen._emit('  ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+
+
 def _void_call(gen, fname: str, arg_pairs: list) -> tuple:
     """Emit a void call, return ('int', zero_temp)."""
     gen._emit_call('void', '', fname, arg_pairs)
@@ -2411,7 +2447,7 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     if (src == 'int64_t' and dst.endswith(' *') and not dst.startswith('void')
             and val in getattr(gen, '_boxed_vals', ())):
         _uw = gen._new_temp('int64_t')
-        gen._emit(f"  {_uw} = mojo_box_word ({val});")
+        gen._rt_into(_uw, 'mojo_box_word', [f"{val}"])
         val = _uw
 
     # A dot-accessed struct member (e.g. a non-pointer module-globals
@@ -2518,16 +2554,16 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             _fc = _tf[_fn]
             _idx = gen._new_val('int64_t', f'(int64_t){_i}')
             if _fc in ('double', 'float'):
-                _rv = gen._new_val('double', f'mojo_list_get_double ({_lp}, {_idx})')
+                _rv = gen._rt_call('double', 'mojo_list_get_double', [f"{_lp}", _idx])
                 if _fc == 'float':
                     _rv = gen._new_val('float', f'(float){_rv}')
             elif _fc == 'char *':
-                _rv = gen._new_val('char *', f'mojo_list_get_str ({_lp}, {_idx})')
+                _rv = gen._rt_call('char *', 'mojo_list_get_str', [f"{_lp}", _idx])
             elif _fc.endswith(' *'):
-                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
+                _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
                 _rv = gen._new_val(_fc, f'({_fc}){_rv}')
             else:
-                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
+                _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
                 if _fc != 'int64_t':
                     _rv = gen._new_val(_fc, f'({_fc}){_rv}')
             gen._emit(f'  {dest}.{_fn} = {_rv};')
@@ -2536,19 +2572,19 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         literal = v.lstrip('-').isdigit()
         if literal and s in gimple_ctypes._SCALAR_INT_TYPES and d in gimple_ctypes._SCALAR_INT_TYPES:
             if d == 'uint8_t':
-                gen._emit(f'  {dest} = mojo_uint8_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_uint8_from_int64', [f"{v}LL"])
             elif d == 'uint16_t':
-                gen._emit(f'  {dest} = mojo_uint16_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_uint16_from_int64', [f"{v}LL"])
             elif d == 'uint32_t':
-                gen._emit(f'  {dest} = mojo_uint32_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_uint32_from_int64', [f"{v}LL"])
             elif d == 'uint64_t':
                 gen._emit(f'  {dest} = {v}ULL;')
             elif d == 'int8_t':
-                gen._emit(f'  {dest} = mojo_int8_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_int8_from_int64', [f"{v}LL"])
             elif d == 'int16_t':
-                gen._emit(f'  {dest} = mojo_int16_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_int16_from_int64', [f"{v}LL"])
             elif d == 'int32_t':
-                gen._emit(f'  {dest} = mojo_int32_from_int64 ({v}LL);')
+                gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
             elif d == 'int64_t':
                 gen._emit(f'  {dest} = {v}LL;')
             elif d == '_Bool':
@@ -3928,7 +3964,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     idx_c = gen._cname(idx_var)
     val_c = gen._cname(val_var)
 
-    len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
+    len64 = gen._rt_call('int64_t', 'mojo_list_len', [it_val])
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3948,9 +3984,9 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     if (not elem or elem == 'int64_t') and gen.var_types.get(val_var) == 'int64_t':
         gen._dyn_word_locals.add(_as_str(val_var))
     if suf == 'double':
-        gen._emit(f"  {val_c} = mojo_list_get_double ({it_val}, {idx64});")
+        gen._rt_into(val_c, 'mojo_list_get_double', [it_val, idx64])
     elif suf == 'str':
-        temp_str = gen._new_val('char *', f"mojo_list_get_str ({it_val}, {idx64})")
+        temp_str = gen._rt_call('char *', 'mojo_list_get_str', [it_val, idx64])
         target_type = gen._type_of(val_var)
         if target_type == 'char *':
             gen._emit(f"  {val_c} = {temp_str};")
@@ -3958,7 +3994,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
             int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
             gen._emit(f"  {val_c} = {int_ptr};")
     else:
-        raw64 = gen._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
+        raw64 = gen._rt_call('int64_t', 'mojo_list_get_int', [it_val, idx64])
         target_type = gen._type_of(val_var)
         if target_type and target_type != 'int64_t':
             gen._safe_coerce_emit('int64_t', target_type, raw64, val_c)
@@ -3978,7 +4014,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
             _vc = gen._cname(_vn)
             _vt = gen.var_types.get(_vn, _pair_elem)
             if _pair_suf == 'str':
-                _sv = gen._new_val('char *', f"mojo_list_get_str ({_pair_ptr}, {_vi})")
+                _sv = gen._rt_call('char *', 'mojo_list_get_str', [_pair_ptr, f"{_vi}"])
                 if _vt == 'char *':
                     gen._emit(f"  {_vc} = {_sv};")
                 else:
@@ -3986,7 +4022,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
                     gen._emit(f"  {_vc} = {_bv};")
                     gen._actual_types[_vn] = 'char *'
             else:
-                _iv = gen._new_val('int64_t', f"mojo_list_get_int ({_pair_ptr}, {_vi})")
+                _iv = gen._rt_call('int64_t', 'mojo_list_get_int', [_pair_ptr, f"{_vi}"])
                 if _vt == 'int64_t':
                     gen._emit(f"  {_vc} = {_iv};")
                 else:
@@ -4008,7 +4044,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
 def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char')
-    len64 = gen._new_val('int64_t', f'mojo_str_len ({_iv})')
+    len64 = gen._rt_call('int64_t', 'mojo_str_len', [_iv])
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -4017,7 +4053,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str_cp (mojo_str_data({_iv}), {idx64});")
+    gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str_cp', [f"mojo_str_data({_iv})", idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -4051,7 +4087,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     # CODES, and `sorted(set("hello world"))` came back as
     # [32, 100, 101, ...] instead of [' ', 'd', 'e', ...].
     saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char *')
-    len64 = gen._new_val('int64_t', f'mojo_strlen ({_iv})')
+    len64 = gen._rt_call('int64_t', 'mojo_strlen', [_iv])
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -4071,7 +4107,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     # runtime and never through `_mojo_at_char`, so requesting that one emits a
     # `static` definition with no call site (master's note beside
     # `_gen_for_cstr` says the same).
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str ({_iv}, {idx64});")
+    gen._rt_into(gen._cname(gen0.target), 'mojo_char_at_str', [_iv, idx64])
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -4144,7 +4180,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _iv = _iv_raw
         if _it.endswith(' *') and _it != 'MojoList *':
             _iv = gen._new_val('MojoList *', f'(MojoList *){_iv_raw}')
-        gen._emit(f"  mojo_list_extend ({res}, {_iv});")
+        gen._rt_void('mojo_list_extend', [res, f"{_iv}"])
         # Carry the inner result's ELEMENT TYPE onto the outer one. The
         # single-clause path ends with `gen._elem_types[res] = et`, and
         # returning early here without the equivalent left the outer list's

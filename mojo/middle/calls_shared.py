@@ -438,8 +438,8 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
             return ('void *', gen._new_val('void *', f'(void *){_rt_fn}'))
         _slit = gen._new_val('char *',
                              gen._intern_string(gimple_ctypes._c_escape(_nm)))
-        gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
-        return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
+        gen._rt_void('mojo_set_unavailable_callable_name', [_slit])
+        return ('void *', gen._rt_call('void *', 'mojo_unavailable_callable_ptr', []))
     return _null_default_pair(param_ctype)
 
 # `module.attr` callables the runtime implements, as function VALUES (the
@@ -602,7 +602,7 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
     and later read it back as one), doubles through mojo_dict_set_double.
     Everything else — ints, pointers — goes through mojo_dict_set_int, which _emit_call coerces,
     matching how `d[k] = v` already lowers a subscript store."""
-    d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
+    d = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
     _val_ty = ''
     _kwp = kwarg_pairs if kwarg_pairs else {}
     for kname in _kwp:

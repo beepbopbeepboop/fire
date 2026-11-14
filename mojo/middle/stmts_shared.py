@@ -332,7 +332,7 @@ def _assign_target(gen, tgt, et, ev):
         # `strdup` as a "type".
         if et == 'int64_t' and ev in getattr(gen, '_boxed_vals', ()):
             _un = gen._new_temp('int64_t')
-            gen._emit(f"  {_un} = mojo_unbox_plain ({ev});")
+            gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
             if ev in gen._dyn_word_vals:
                 gen._dyn_word_vals.add(_un)
             gen._boxed_vals.add(_un)

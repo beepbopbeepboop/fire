@@ -8829,7 +8829,12 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     in _unpack_opargs(original_code):`). `target` is either a plain str
     (single loop variable) or a list of names (a tuple target — see
     `_cpp_for_stmt`'s own "(a, b, ...)" string convention, already
-    unwrapped by the caller).
+    unwrapped by the caller). The callee is a bare same-module generator
+    name, a `self`/`cls` generator method, or a MODULE-QUALIFIED
+    `<module>.<gen>` resolved by `_cpp_resolve_generator_call_api` — all
+    three drive the same four-symbol ABI, so a foreign module's compiled
+    generator (cf. c_common/tables.py's `parse_table` consuming
+    `strutil.parse_entries(...)`) needs no separate drive loop.
 
     `index_var`/`index_start_expr`: optional support for `_cpp_for_stmt`'s
     NESTED-tuple-target `enumerate()` case (`for i, (y, m, d) in
@@ -8903,47 +8908,67 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # in this scalar body model, never through an arbitrary struct-typed
     # local — see the `isinstance(call.func.obj, IdentExpr) and ...
     # 'self'` guard below), never a separately-evaluated expression.
+    _module_qualified_api = None
     if isinstance(call.func, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         if not (isinstance(call.func.obj, gimple_ctypes.IdentExpr)
                 and call.func.obj.name in ('self', 'cls') and _self_struct):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "`for ... in <expr>.<method>(...)` is only supported "
-                "when <expr> is literally `self` (or `cls`) inside a generator "
-                "method on the same struct")
-        _mname = call.func.member
-        if call.func.obj.name == 'self' and _mname == '_iter_member_':
-            for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
-                if ((_self_struct, _cand) in getattr(gen, '_generator_method_api', {})
-                        and (_self_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
-                    _mname = _cand
-                    call.func.member = _cand
-                    break
-        sub_name = f"{_self_struct}.{_mname}"
-        api = gen._generator_method_api.get((_self_struct, _mname))
-        if (api is None or (_self_struct, _mname)
-                not in gen._supported_generator_methods):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`for ... in {call.func.obj.name}.{call.func.member}(...)` does not "
-                "consume a generator method this compile has itself "
-                "already translated via the C++20-coroutine path "
-                "(either it's not a generator this codegen supports, or "
-                "it's defined LATER among this struct's methods — the "
-                "consumed generator method must be defined earlier)")
-        _rcv_api = api.get('receiver')
-        if _rcv_api not in ('cls', 'self'):
-            receiver_exprs = []   # a @staticmethod generator takes no receiver slot
-        elif _rcv_api == 'cls':
-            if call.func.obj.name == 'self' and _self_struct:
-                receiver_exprs = [_self_struct]
-            elif call.func.obj.name == 'cls':
-                receiver_exprs = ['cls']
-            else:
-                receiver_exprs = [_rcv_api]
-        elif _rcv_api == 'self':
-            receiver_exprs = ['self'] if call.func.obj.name == 'self' else [call.func.obj.name]
+            # `<module>.<gen>(...)`: a FOREIGN module's compiled generator,
+            # resolved through the whole-program registry by the same
+            # `_cpp_resolve_generator_call_api` the expression-site paths
+            # use (`_cpp_emit_generator_start_expr`, `next(<handle>)`). The
+            # four-symbol `{base}_start/_resume/_value/_destroy` ABI is
+            # identical for a foreign unit (the extern "C" preamble for it
+            # is registered below via `_cpp_xmod_generator_refs`), so the
+            # drive loop below needs no separate implementation. Keep the
+            # honest refusal for an unresolvable `<module>.<name>`.
+            _module_qualified_api = _cpp_resolve_generator_call_api(
+                gen, call.func)
+            if _module_qualified_api is None:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    "`for ... in <expr>.<method>(...)` is only supported "
+                    "when <expr> is literally `self` (or `cls`) inside a generator "
+                    "method on the same struct, or when <expr> is a module name "
+                    "whose `<module>.<gen>` is a compiled generator this "
+                    "whole-program compile has already translated")
+        if _module_qualified_api is not None:
+            api = _module_qualified_api
+            sub_name = f"{call.func.obj.name}.{call.func.member}"
+            receiver_exprs = []
         else:
-            receiver_exprs = [call.func.obj.name]
+            _mname = call.func.member
+            if call.func.obj.name == 'self' and _mname == '_iter_member_':
+                for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
+                    if ((_self_struct, _cand) in getattr(gen, '_generator_method_api', {})
+                            and (_self_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
+                        _mname = _cand
+                        call.func.member = _cand
+                        break
+            sub_name = f"{_self_struct}.{_mname}"
+            api = gen._generator_method_api.get((_self_struct, _mname))
+            if (api is None or (_self_struct, _mname)
+                    not in gen._supported_generator_methods):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"`for ... in {call.func.obj.name}.{call.func.member}(...)` does not "
+                    "consume a generator method this compile has itself "
+                    "already translated via the C++20-coroutine path "
+                    "(either it's not a generator this codegen supports, or "
+                    "it's defined LATER among this struct's methods — the "
+                    "consumed generator method must be defined earlier)")
+            _rcv_api = api.get('receiver')
+            if _rcv_api not in ('cls', 'self'):
+                receiver_exprs = []   # a @staticmethod generator takes no receiver slot
+            elif _rcv_api == 'cls':
+                if call.func.obj.name == 'self' and _self_struct:
+                    receiver_exprs = [_self_struct]
+                elif call.func.obj.name == 'cls':
+                    receiver_exprs = ['cls']
+                else:
+                    receiver_exprs = [_rcv_api]
+            elif _rcv_api == 'self':
+                receiver_exprs = ['self'] if call.func.obj.name == 'self' else [call.func.obj.name]
+            else:
+                receiver_exprs = [call.func.obj.name]
     else:
         sub_name = call.func.name
         # Self-recursion: `for <target> in <this-same-function>(...):`

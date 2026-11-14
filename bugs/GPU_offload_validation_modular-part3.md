@@ -1,6 +1,7 @@
 # GPU offload validation modular - part 3: device-passable closure argument validation
 
-Parent: `bugs/hard/GPU_offload_validation_modular.md` (SPLIT). Depends on triage in `bugs/mid/GPU_offload_validation_modular-part1.md`.
+Parent: `bugs/hard/GPU_offload_validation_modular.md` (SPLIT). The part-1
+triage matrix is the `## Triage (part 1)` section of the parent doc.
 
 ## Scope
 

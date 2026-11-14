@@ -1357,20 +1357,14 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray', 'Array'):
-            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
-            # representation level, exactly like `List[T]`: one `MojoList *`
-            # with an element type, no separate fixed-size struct. It was
-            # missing here, so the annotation erased to `int64_t` and every
-            # use lost its static container type. The visible damage was a
-            # `for x in xs:` over an `Array[Int, N]`, where an untyped
-            # iterable emits the runtime dict-or-list dispatch and the DICT
-            # arm declares the loop variable `char *` (it is a key); the
-            # later `var val = <a double>` in the same function then assigned
-            # a double to that `char *` — "cannot convert to a pointer type"
-            # in the stdlib's test_math.mojo. Also in
-            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
-            # be an ordinary imported struct.
+        if base in ('List', 'list', 'InlineArray', 'Array', 'FixedSizeArray'):
+            # `List[T]`/`list[T]`, `InlineArray[T, N]`, `Array[T, N]` and
+            # `FixedSizeArray[T, N]` — Mojo's fixed-size arrays — are LISTs
+            # at this representation level: one `MojoList *` with an element
+            # type, no separate fixed-size struct. `FixedSizeArray` used to be
+            # missing here, so its annotation erased to `int64_t` and a
+            # parameter declared `int64_t a` (then cast to `MojoList *` at
+            # the call) — see `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'

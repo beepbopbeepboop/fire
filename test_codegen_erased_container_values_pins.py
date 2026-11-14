@@ -6,7 +6,7 @@ doc is deleted and the assertion is now a standing pin. This is the registered
 `reg-codegen-erased-container-values` job, so it must stay green.
 
 The per-part Done-when probes of the still-open parts (p1_alias, p2_alias_ctor,
-p3_comptime, p4_container_param) live in
+p3_comptime) live in
 test_codegen_erased_container_values.py and run by their bug docs' commands; a
 probe moves here, in the same commit that lands its part.
 
@@ -99,6 +99,32 @@ SIMD_INT_SIG_SRC = (
     'def gi(x: SIMD[DType.int32, 2]) -> SIMD[DType.int32, 2]:\n'
     '    return x\n'
 )
+# part4: an Array/FixedSizeArray parameter keeps the element type its
+# annotation declares. The parameter is a tracked `MojoList *` and `a[0]`
+# reads the element's own kind, so a Float32 element reads `double` (the
+# constructor arm stores Float32 elements as double) and an Int element
+# still reads `int64_t`.
+P4_CONTAINER_PARAM_SRC = (
+    'def take(a: Array[Float32, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def span_take(a: Array[Float32, 4]):\n'
+    '    var s = Span(a)\n'
+    '    return s[0]\n'
+    '\n'
+    'def take_fixed(a: FixedSizeArray[Float32, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def take_int(a: Array[Int, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def take_fixed_int(a: FixedSizeArray[Int, 4]):\n'
+    '    return a[0]\n'
+    '\n'
+    'def f():\n'
+    '    var a = Array[Float32, 4](fill=0.0)\n'
+    '    return take(a)\n'
+)
 
 
 # part1: Array[T, N](...) is a real container with a tracked element type.
@@ -179,6 +205,25 @@ def test_part4_float_simd_survives_call_and_return():
     body = _body(_compile(SIMD_ARG_SRC, 'simd_arg'), 'simd_arg_f')
     assert 'indirect call via SubscriptExpr' not in body, body
     assert 'int64_t r;' not in body, body
+
+
+def test_part4_container_param_keeps_element_type():
+    c = _compile(P4_CONTAINER_PARAM_SRC, 'p4_container_param')
+    for fn in ('p4_container_param_take', 'p4_container_param_take_fixed'):
+        body = _defn(c, fn)
+        assert '(MojoList * a)' in body, body
+        assert 'mojo_list_get_int' not in body, body
+        assert 'mojo_list_get_double' in body, body
+    sbody = _defn(c, 'p4_container_param_span_take')
+    assert '_mojo_at_char' not in sbody, sbody
+    assert '_mojo_at_double' in sbody, sbody
+    # An integer element keeps its own typed read.
+    for fn in ('p4_container_param_take_int',
+               'p4_container_param_take_fixed_int'):
+        body = _defn(c, fn)
+        assert '(MojoList * a)' in body, body
+        assert 'mojo_list_get_int' in body, body
+        assert 'mojo_list_get_double' not in body, body
 
 
 # part4-part1 (replan of part4, see bugs/mid/CODEGEN_simd_and_array_values_

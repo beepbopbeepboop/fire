@@ -2,7 +2,7 @@
 
 Parent: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (SPLIT). This part fixes ONE named residual shape measured 2026-11-13; it does NOT add a new subsystem.
 
-Sister: `COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4.md` (the `parse_table` tuple-`for`-over-a-module-qualified-generator shape). `COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md` is the end-to-end closer that depends on both.
+Sister: the `parse_table` tuple-`for`-over-a-module-qualified-generator shape (fixed 2026-11-13; its part-4 doc was deleted with the fix). `COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md` is the end-to-end closer that now depends only on this part.
 
 ## Measured shape (2026-11-13, this tree)
 

@@ -67,7 +67,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
                 _as_str(v) in getattr(gen, '_maybe_kinds_vals', ()) or
                 _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
         if _mkv:
-            _ev = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
+            _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
             gen._boxed_vals.add(_ev)
             gen._dyn_word_vals.add(_ev)
             return 'int64_t', _ev
@@ -84,14 +84,13 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         _sk = gen._struct_slot_kinds.get(v)
         if _sk is not None and 0 <= idx < len(_sk):
             if _sk[idx] == 'double':
-                return 'double', gen._new_val(
-                    'double', f"mojo_list_get_double ({lp}, {idx64})")
+                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if _sk[idx] == 'bytes':
                 # A bytes slot is a `MojoBytes *` stored in the raw int64_t
                 # slot (see fire_runtime.h's MojoList comment), so the read
                 # goes back through the coercion chokepoint rather than an
                 # ad-hoc pointer cast — DESIGN.html R2/R3.
-                _bp = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+                _bp = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
                 return 'MojoBytes *', gen._coerce_to_type(
                     'int64_t', 'MojoBytes *', _bp)
             if _sk[idx] == 'str':
@@ -101,10 +100,8 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
                 # `struct.unpack` format cannot — including one that reached
                 # this value through a `return`
                 # (`gen._return_value_slot_kinds`).
-                return 'char *', gen._new_val(
-                    'char *', f"mojo_list_get_str ({lp}, {idx64})")
-            return 'int64_t', gen._new_val(
-                'int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
         # Per-slot types recorded for this exact value, when it has them:
         # a heterogeneous tuple literal, or a multi-value return's tuple
         # re-keyed onto the call result (see gen._return_slot_types). Each
@@ -116,22 +113,22 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         if _pst is not None and 0 <= idx < len(_pst):
             _pc = _pst[idx]
             if _pc == 'double':
-                return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
+                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if _pc == 'char *':
-                return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
             if _pc in ('int64_t', 'int', '_Bool', 'double', 'char', '', 'unknown'):
-                return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+                return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             # Any other slot type is a boxed pointer: read the raw slot and
             # put it back through the coercion chokepoint rather than an
             # ad-hoc cast (same rule as the bytes slot above).
-            _pr = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _pr = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             return _pc, gen._coerce_to_type('int64_t', _pc, _pr)
         if suf == 'str':
-            return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+            return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
         if suf == 'double':
-            return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
+            return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
         if elem in ('int64_t', 'int', '_Bool'):
-            _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             # `_elem_of`'s int64_t is also its "nothing recorded" default: a
             # value with no element record at all is a word whose kind only
             # the runtime knows (see `_dyn_word_vals`).
@@ -146,10 +143,10 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # (`a = ()_t5;` — not even valid C; repro:
         # std/test/builtin/test_int.mojo's `a, b = divmod(...)`).
         if not elem or elem == 'unknown':
-            _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             gen._dyn_word_vals.add(_ev)
             return 'int64_t', _ev
-        raw = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+        raw = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
         return elem, gen._new_val(elem, f"({elem}){raw}")
     # Non-container / untracked: despite this function's name, its real
     # callers include plain multi-assign unpacking (`a, b = x`) over ANY
@@ -162,17 +159,17 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     _mkv = (lp in getattr(gen, '_maybe_kinds_vals', ()) or
             _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
     if _mkv:
-        _ev = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
+        _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
         gen._boxed_vals.add(_ev)
         gen._dyn_word_vals.add(_ev)
         return 'int64_t', _ev
     elem = gen._elem_of(lp)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     if suf == 'str':
-        return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+        return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
     if suf == 'double':
-        return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
-    _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+        return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
+    _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
     if lp not in gen._elem_types:
         gen._dyn_word_vals.add(_ev)
     return 'int64_t', _ev
@@ -285,7 +282,7 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
         gen._elem_types[_nm] = slot_elem
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
-    gen._emit(f"  {_lst} = mojo_list_new ();")
+    gen._rt_into(_lst, 'mojo_list_new', [])
     gen._emit(f"  {_dst} = {_lst};")
     _i = gen._new_val('int64_t', _as_str(start))
     _cond = gen._new_bb(); _body = gen._new_bb(); _after = gen._new_bb()
@@ -295,13 +292,13 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     gen._emit(f"  if ({_c}) goto {_body}; else goto {_after};")
     gen._emit_label(_body)
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
-        _rd = gen._new_val('char *', f"mojo_list_get_str ({_lp}, {_i})")
+        _rd = gen._rt_call('char *', 'mojo_list_get_str', [_lp, _i])
         gen._void_call('mojo_list_append_str', [('MojoList *', _dst), ('char *', _rd)])
     elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
-        _rd = gen._new_val('double', f"mojo_list_get_double ({_lp}, {_i})")
+        _rd = gen._rt_call('double', 'mojo_list_get_double', [_lp, _i])
         gen._void_call('mojo_list_append_double', [('MojoList *', _dst), ('double', _rd)])
     else:
-        _rd = gen._new_val('int64_t', f"mojo_list_get_int ({_lp}, {_i})")
+        _rd = gen._rt_call('int64_t', 'mojo_list_get_int', [_lp, _i])
         gen._void_call('mojo_list_append_int', [('MojoList *', _dst), ('int64_t', _rd)])
     _one = gen._new_val('int64_t', "1LL")
     _nxt = gen._new_val('int64_t', f"{_i} + {_one}")
@@ -332,7 +329,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
         gen._elem_types[_nm] = slot_elem
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
-    gen._emit(f"  {_lst} = mojo_list_new ();")
+    gen._rt_into(_lst, 'mojo_list_new', [])
     gen._emit(f"  {_dst} = {_lst};")
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         gen._void_call('mojo_list_append_str',
@@ -407,7 +404,7 @@ def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None
     gen._elem_types[_nm] = 'char *'
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
-    gen._emit(f"  {_lst} = mojo_list_new ();")
+    gen._rt_into(_lst, 'mojo_list_new', [])
     gen._emit(f"  {_dst} = {_lst};")
     _src = gen._new_val('char *', f"(char *){_as_str(cstr)}")
     _i = gen._new_val('int64_t', _as_str(start))
@@ -420,8 +417,7 @@ def _emit_starred_slot_from_cstr(gen, name: str, cstr: str, start, stop) -> None
     _one = gen._new_val('int64_t', "1LL")
     _next = gen._new_val('int64_t', f"{_i} + {_one}")
     _stop = gen._new_val('int64_t', f"{_next}")
-    _chr = gen._new_val('char *', f"mojo_cstr_slice ({_as_str(_src)}, {_i}, "
-                                  f"{_as_str(_stop)})")
+    _chr = gen._rt_call('char *', 'mojo_cstr_slice', [_as_str(_src), _i, _as_str(_stop)])
     gen._void_call('mojo_list_append_str',
                    [('MojoList *', _dst), ('char *', _as_str(_chr))])
     gen._emit(f"  {_i} = {_next};")

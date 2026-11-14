@@ -695,6 +695,23 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 # drifted.
                 if k is None:
                     k = _callee_return_kind(val, env)
+            # `x = <str>.split(...)` / `.rsplit(...)` / `.splitlines()` binds a
+            # LIST OF STRINGS by Python's own typing (`_LIST_RETURNING_METHODS`,
+            # the list-returning twin of `_STR_RETURNING_METHODS`). `_yield_kind`
+            # has no list answer for a str-method call, so the local stayed
+            # untyped and a later `for item in x:` could not type `item` — a
+            # tuple yield of it then defaulted its slot to int64_t, a pointer
+            # word the consumer cannot use as a string. Recorded here rather
+            # than in `_yield_kind` so a direct `yield x.split()` keeps its
+            # existing value-kind answer. Real: c_common/strutil.py's
+            # `parse_entries` (`subentries = entry.strip().replace(',', ' ').
+            # split()`, then `for item in subentries: yield item, None`), whose
+            # slots c_common/tables.py's `parse_table` unpacks.
+            if (k is None and isinstance(val, N.CallExpr)
+                    and isinstance(val.func, N.MemberExpr)
+                    and val.func.member in gimple_ctypes._LIST_RETURNING_METHODS):
+                _rk = _yield_kind(val.func.obj, env)
+                k = ('list', 'w' if _rk == 'w' else 'p')
             # `var b = bytes([...])` / `bytearray(...)` / `memoryview(...)`:
             # a byte container, so its element kind is 'i' BY DEFINITION --
             # not an inference, so it is safe to record even though the

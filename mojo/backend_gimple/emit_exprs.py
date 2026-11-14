@@ -320,8 +320,7 @@ def _lower_StringLiteral(gen, node):
         # `b''` literal reached inside a real function body (zipfile
         # `_Extra.strip`'s `b''.join(...)`).
         sload = gen._new_val('char *', sname)
-        temp = gen._new_val('MojoBytes *',
-                            f'mojo_bytes_new_lit ({sload}, {len(val)})')
+        temp = gen._rt_call('MojoBytes *', 'mojo_bytes_new_lit', [sload, f"{len(val)}"])
         return 'MojoBytes *', temp
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
@@ -1708,19 +1707,15 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         _pv_raw = gen._cname(node.obj.name)
         _pair = gen._coerce_to_type('int64_t', 'MojoList *', _pv_raw)
         if node.member == 'key' and node.obj.name in gen._dict_item_int_key_vars:
-            return 'int64_t', gen._new_val(
-                'int64_t', f"mojo_list_get_int ({_pair}, 0)")
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [_pair, '0'])
         if node.member == 'key':
-            return 'char *', gen._new_val(
-                'char *', f"mojo_list_get_str ({_pair}, 0)")
+            return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [_pair, '0'])
         _suf = gimple_ctypes.TypeLattice.list_suffix(_pv_type)
         if _suf == 'str':
-            return 'char *', gen._new_val(
-                'char *', f"mojo_list_get_str ({_pair}, 1)")
+            return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [_pair, '1'])
         if _suf == 'double':
-            return 'double', gen._new_val(
-                'double', f"mojo_list_get_double ({_pair}, 1)")
-        _raw = gen._new_val('int64_t', f"mojo_list_get_int ({_pair}, 1)")
+            return 'double', gen._rt_call('double', 'mojo_list_get_double', [_pair, '1'])
+        _raw = gen._rt_call('int64_t', 'mojo_list_get_int', [_pair, '1'])
         if _pv_type in ('int64_t', 'int', ''):
             return 'int64_t', _raw
         # A struct-pointer / other non-scalar value type: keep the real
@@ -2156,7 +2151,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # all four existing rewrites. Codegen sees the post-rewrite tree,
         # so this case is unambiguous by construction.
         if _canon == 'os' and node.member == 'environ':
-            t = gen._new_val('MojoDict *', 'mojo_environ_dict ()')
+            t = gen._rt_call('MojoDict *', 'mojo_environ_dict', [])
             gen._dict_val_types[t] = 'char *'
             return gimple_ctypes._module_attr_ctype(_canon, node.member), t
 
@@ -4017,8 +4012,11 @@ def _lower_container_eq(gen, op: str, lkind: str | None, lnode, lt: str, lv: str
     _opv = _as_str(gen._new_val('int64_t', str(int(_ORD_CMP_OPS[op]))))
     _args.append(('int64_t', _opv))
     _c = _as_str(gen._call_expr('int', _fn, _args))
-    _fc = _as_str(gen._new_temp('int'))
-    gen._emit(f"  {_fc} = mojo_cmp_fold ({_c}, {_opv});")
+    # Through `_call_expr`, not spelled as text: `mojo_cmp_fold (int, int)`
+    # takes the operator as a C `int` and `_opv` is an `int64_t` temp, and
+    # only the call chokepoint converts an argument (doc/GIR.md).
+    _fc = _as_str(gen._call_expr('int', 'mojo_cmp_fold',
+                                 [('int', _c), ('int64_t', _opv)]))
     _t = gen._new_temp('_Bool')
     gen._emit(f"  {_t} = {_fc} != 0;")
     return '_Bool', _t
@@ -4217,13 +4215,13 @@ def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
     if _tag_r:
         rv = _none_arith_guard(gen, op, rv, 'int', 0)
     # Integer comparison answer
-    _ilv = gen._new_val('int64_t', f"mojo_box_int ({lv})") if _tag_l else gen._new_val('int64_t', lv)
-    _irv = gen._new_val('int64_t', f"mojo_box_int ({rv})") if _tag_r else gen._new_val('int64_t', rv)
+    _ilv = gen._rt_call('int64_t', 'mojo_box_int', [f"{lv}"]) if _tag_l else gen._new_val('int64_t', lv)
+    _irv = gen._rt_call('int64_t', 'mojo_box_int', [f"{rv}"]) if _tag_r else gen._new_val('int64_t', rv)
     _ires = gen._new_temp('_Bool')
     gen._emit(f"  {_ires} = {_ilv} {op} {_irv};")
     # Double comparison answer
-    _dlv = gen._new_val('double', f"mojo_box_double ({lv})") if _tag_l else gen._new_val('double', f"(double)({lv})")
-    _drv = gen._new_val('double', f"mojo_box_double ({rv})") if _tag_r else gen._new_val('double', f"(double)({rv})")
+    _dlv = gen._rt_call('double', 'mojo_box_double', [f"{lv}"]) if _tag_l else gen._new_val('double', f"(double)({lv})")
+    _drv = gen._rt_call('double', 'mojo_box_double', [f"{rv}"]) if _tag_r else gen._new_val('double', f"(double)({rv})")
     _dres = gen._new_temp('_Bool')
     gen._emit(f"  {_dres} = {_dlv} {op} {_drv};")
     # Select by box kind
@@ -4426,28 +4424,28 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     elif lv in getattr(gen, '_boxed_vals', ()):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or rt not in ('double', 'float')):
-            lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
+            lv = gen._rt_call('int64_t', 'mojo_box_word', [f"{lv}"])
             lt = 'int64_t'
             gen._dyn_word_vals.add(lv)
         elif lv in _tagged and rt not in ('double', 'float'):
-            lv = gen._new_val('int64_t', f"mojo_box_int ({lv})")
+            lv = gen._rt_call('int64_t', 'mojo_box_int', [f"{lv}"])
             lt = 'int64_t'
         else:
-            lv = gen._new_val('double', f"mojo_box_double ({lv})")
+            lv = gen._rt_call('double', 'mojo_box_double', [f"{lv}"])
             lt = 'double'
     if rv in getattr(gen, '_boxed_vals', ()) and lt == 'char *' and op == '+':
         gen._dyn_word_vals.add(rv)
     elif rv in getattr(gen, '_boxed_vals', ()):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or lt not in ('double', 'float')):
-            rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
+            rv = gen._rt_call('int64_t', 'mojo_box_word', [f"{rv}"])
             rt = 'int64_t'
             gen._dyn_word_vals.add(rv)
         elif rv in _tagged and lt not in ('double', 'float'):
-            rv = gen._new_val('int64_t', f"mojo_box_int ({rv})")
+            rv = gen._rt_call('int64_t', 'mojo_box_int', [f"{rv}"])
             rt = 'int64_t'
         else:
-            rv = gen._new_val('double', f"mojo_box_double ({rv})")
+            rv = gen._rt_call('double', 'mojo_box_double', [f"{rv}"])
             rt = 'double'
 
     # A list local may be boxed as int64_t (the slice pre-pass hint is the
@@ -4465,7 +4463,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # is exactly the pointer the concat read.
         _free_l = lt == 'MojoList *' and lv != rv and gen._is_fresh_container_operand(left_node, lv)
         _free_r = rt == 'MojoList *' and lv != rv and gen._is_fresh_container_operand(right_node, rv)
-        t = gen._new_val('MojoList *', f"mojo_list_concat ({lcast}, {rcast})")
+        t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lcast}", f"{rcast}"])
         if lcast in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lcast]
         if _free_l:
@@ -4481,7 +4479,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # is dead once it returns. Decide freshness BEFORE the call is emitted.
         _free_l = lv != rv and gen._is_fresh_container_operand(left_node, lv)
         _free_r = lv != rv and gen._is_fresh_container_operand(right_node, rv)
-        t = gen._new_val('MojoList *', f"mojo_list_concat ({lv}, {rv})")
+        t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rv}"])
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
         if _free_l:
@@ -4505,7 +4503,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rcast = rv
         if rt != 'MojoList *':
             rcast = gen._coerce_to_type(rt, 'MojoList *', rv)
-        t = gen._new_val('MojoList *', f"mojo_list_concat ({lv}, {rcast})")
+        t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rcast}"])
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
         return 'MojoList *', t
@@ -4521,14 +4519,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # mojo_str_join (A5-BUG.md section 1's bootstrap failure).
     if op == '+' and rt == 'MojoList *' and lt in ('int', 'int64_t', 'void *'):
         lcast = gen._coerce_to_type(lt, 'MojoList *', lv)
-        t = gen._new_val('MojoList *', f"mojo_list_concat ({lcast}, {rv})")
+        t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lcast}", f"{rv}"])
         if rv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[rv]
         return 'MojoList *', t
 
     # MojoStr + MojoStr → mojo_str_concat
     if op == '+' and lt == 'MojoStr *' and rt == 'MojoStr *':
-        t = gen._new_val('MojoStr *', f"mojo_str_concat ({lv}, {rv})")
+        t = gen._rt_call('MojoStr *', 'mojo_str_concat', [f"{lv}", f"{rv}"])
         return 'MojoStr *', t
 
     # char * + char * → mojo_str_cat (including int64_t holding char* via actual_types)
@@ -4699,7 +4697,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._new_temp('char *')
         lv_local = gen._ensure_local(lt, lv)
         rv64 = gen._to_int64(rt, rv)
-        gen._emit(f"  {t} = mojo_cstr_repeat ({lv_local}, {rv64});")
+        gen._rt_into(t, 'mojo_cstr_repeat', [lv_local, f"{rv64}"])
         return 'char *', t
 
     # int * char * → string repetition (flipped order)
@@ -4707,7 +4705,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._new_temp('char *')
         rv_local = gen._ensure_local(rt, rv)
         lv64 = gen._to_int64(lt, lv)
-        gen._emit(f"  {t} = mojo_cstr_repeat ({rv_local}, {lv64});")
+        gen._rt_into(t, 'mojo_cstr_repeat', [rv_local, f"{lv64}"])
         return 'char *', t
 
     # bare `char` * int → string repetition, e.g. `c * 3` where c is a
@@ -4728,7 +4726,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._new_temp('char *')
         rv64 = gen._to_int64(rt, rv)
-        gen._emit(f"  {t} = mojo_cstr_repeat ({sv}, {rv64});")
+        gen._rt_into(t, 'mojo_cstr_repeat', [sv, f"{rv64}"])
         return 'char *', t
 
     # int * bare `char` → string repetition (flipped order)
@@ -4736,7 +4734,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
         t = gen._new_temp('char *')
         lv64 = gen._to_int64(lt, lv)
-        gen._emit(f"  {t} = mojo_cstr_repeat ({sv}, {lv64});")
+        gen._rt_into(t, 'mojo_cstr_repeat', [sv, f"{lv64}"])
         return 'char *', t
 
     # MojoList * * int → list repetition (e.g., [0] * n)
@@ -4798,9 +4796,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             if ct == 'MojoBytes *':
                 return cv
             if ct == 'char *':
-                return gen._new_val('MojoBytes *', f"mojo_bytes_from_cstr ({cv})")
+                return gen._rt_call('MojoBytes *', 'mojo_bytes_from_cstr', [cv])
             if ct == 'MojoMemoryView *':
-                return gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({cv})")
+                return gen._rt_call('MojoBytes *', 'mojo_memoryview_tobytes', [cv])
             return gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(ct, cv))
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_concat',
@@ -4808,7 +4806,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
 
     # MojoStr == / != → mojo_str_eq
     if op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
-        eq_t = gen._new_val('int', f"mojo_str_eq ({lv}, {rv})")
+        eq_t = gen._rt_call('int', 'mojo_str_eq', [f"{lv}", f"{rv}"])
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
@@ -4816,7 +4814,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
 
     # MojoBytes == / != → mojo_bytes_eq (bytewise; never conflated with str)
     if op in ('==', '!=') and lt == 'MojoBytes *' and rt == 'MojoBytes *':
-        eq_t = gen._new_val('int', f"mojo_bytes_eq ({lv}, {rv})")
+        eq_t = gen._rt_call('int', 'mojo_bytes_eq', [f"{lv}", f"{rv}"])
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
@@ -4833,7 +4831,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             and (lt in ('char *', 'int64_t') or rt in ('char *', 'int64_t')):
         bt, bv, wt, wv = (lt, lv, rt, rv) if lt == 'MojoBytes *' else (rt, rv, lt, lv)
         _w = _as_str(gen._to_int64(wt, wv))
-        eq_t = gen._new_val('int', f"mojo_bytes_word_eq ({_w}, {_as_str(bv)})")
+        eq_t = gen._rt_call('int', 'mojo_bytes_word_eq', [_w, _as_str(bv)])
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
@@ -4875,10 +4873,10 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         mv, other = (lv, rv) if lt == 'MojoMemoryView *' else (rv, lv)
         ot_other = rt if lt == 'MojoMemoryView *' else lt
         if ot_other == 'MojoMemoryView *':
-            other = gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({other})")
+            other = gen._rt_call('MojoBytes *', 'mojo_memoryview_tobytes', [f"{other}"])
         elif ot_other != 'MojoBytes *':
             other = gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(ot_other, other))
-        eq_t = gen._new_val('int', f"mojo_memoryview_eq ({mv}, {other})")
+        eq_t = gen._rt_call('int', 'mojo_memoryview_eq', [f"{mv}", f"{other}"])
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
@@ -5306,7 +5304,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
     # Fallback: catch list concatenation that wasn't handled above
     if op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
-        t = gen._new_val('MojoList *', f"mojo_list_concat ({lv}, {rv})")
+        t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rv}"])
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
         return 'MojoList *', t
@@ -5794,7 +5792,7 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
         # load the `_slit_` global into a local first (GIMPLE strict mode
         # -- see _lower_StringLiteral's bytes branch for the same fix)
         sload = gen._new_val('char *', sname)
-        return gen._new_val('MojoBytes *', f'mojo_bytes_new_lit ({sload}, {len(text)})')
+        return gen._rt_call('MojoBytes *', 'mojo_bytes_new_lit', [sload, f"{len(text)}"])
 
     if _percent_operands_needed(parts) != len(rhs_exprs):
         for e in rhs_exprs:
@@ -5853,9 +5851,8 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
                 part_val = ev
             else:
                 cstr = gen._format_percent_spec(full_spec, conv, et, ev, _enode)
-                part_val = gen._new_val('MojoBytes *', f'mojo_bytes_from_cstr ({cstr})')
-        acc_val = part_val if acc_val is None else gen._new_val(
-            'MojoBytes *', f'mojo_bytes_concat ({acc_val}, {part_val})')
+                part_val = gen._rt_call('MojoBytes *', 'mojo_bytes_from_cstr', [f"{cstr}"])
+        acc_val = part_val if acc_val is None else gen._rt_call('MojoBytes *', 'mojo_bytes_concat', [f"{acc_val}", f"{part_val}"])
     if acc_val is None:
         acc_val = _lit_bytes('')
     return 'MojoBytes *', acc_val
@@ -5897,8 +5894,7 @@ def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
     # there is still one implementation of "what a dict looks like". A NULL
     # is tolerated by the callee (it degrades to copying the spec through),
     # so a caller in a TU with no reflection block is not made worse by this.
-    t = gen._new_val('char *',
-                     f"mojo_str_format_dict ({lvs}, {rvs}, _mojo_repr_dict)")
+    t = gen._rt_call('char *', 'mojo_str_format_dict', [f"{lvs}", f"{rvs}", '_mojo_repr_dict'])
     return 'char *', t
 
 
@@ -6043,8 +6039,7 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
             et, ev = gen.lower_expr(_enode)
             arg_i += 1
             part_val = gen._format_percent_spec(full_spec, conv, et, ev, _enode, width_ints)
-        acc_val = part_val if acc_val is None else gen._new_val(
-            'char *', f'mojo_str_cat ({acc_val}, {part_val})')
+        acc_val = part_val if acc_val is None else gen._rt_call('char *', 'mojo_str_cat', [f"{acc_val}", f"{part_val}"])
     if acc_val is None:
         acc_val = gen._new_val('char *', gen._intern_string(''))
     return 'char *', acc_val
@@ -6108,7 +6103,7 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     if rt.endswith(' *') and rt not in ('void *', 'char *'):
         ti = gen._new_val('int64_t', f"(int64_t){rv}")
         rv = ti
-    t = gen._new_val('int64_t', f"__mojo_floordiv ({lv}, {rv})")
+    t = gen._rt_call('int64_t', '__mojo_floordiv', [f"{lv}", f"{rv}"])
     # `//` on two known integers is another integer, exactly as in the
     # arithmetic tail — but this lowering is dispatched from `_lower_binary`
     # BEFORE that tail, so it needs its own producer or `d[6000000000 // 2]`
@@ -6144,7 +6139,12 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         return 'int64_t', t
     if lt in gimple_ctypes._FLOAT_TYPES or rt in gimple_ctypes._FLOAT_TYPES:
         td = gimple_ctypes.TypeLattice.join(lt, rt)
-        t = gen._new_val(td, f"pow ({lv}, {rv})")
+        # Through `_call_expr`, not spelled as text: with one float operand
+        # and one integer operand (`2.0 ** n`) the integer has to be converted
+        # to `double` by its own statement. Spelled as `pow (2.0, n)` in a
+        # `__GIMPLE` function it was passed in an integer register and `pow`
+        # read its second argument from a float register nobody had set.
+        t = gen._call_expr(td, 'pow', [(lt, lv), (rt, rv)])
         return td, t
     # Coerce struct pointers to int64_t before converting to double
     # (casting struct * to double directly is invalid in GIMPLE)
@@ -6160,7 +6160,7 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     t2 = gen._new_temp('double')
     gen._emit(f"  {t1} = (double) {lv_for_double};")
     gen._emit(f"  {t2} = (double) {rv_for_double};")
-    t3 = gen._new_val('double', f"pow ({t1}, {t2})")
+    t3 = gen._rt_call('double', 'pow', [t1, t2])
     t4 = gen._new_val('int', f"(int) {t3}")
     # Integer `**` produces an integer: the `(int)` cast above makes that
     # true for every input, so this needs no inference about the operands
@@ -6504,7 +6504,7 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
     # identifier, field or call result names a container somebody else owns);
     # a tuple literal lowers to a fresh heap list on every path.
     if isinstance(right_node, gimple_ctypes.TupleExpr) and rt == 'MojoList *':
-        gen._emit(f"  mojo_list_free ({rv});")
+        gen._rt_void('mojo_list_free', [rv])
     elif (isinstance(right_node, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr,
                                   gimple_ctypes.DictExpr))
             and rt in ('MojoList *', 'MojoSet *', 'MojoDict *')
@@ -6725,7 +6725,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         elif xt in ('int', 'int64_t', 'char', 'uint8_t', '_Bool'):
             xv64 = gen._to_int64(xt, xv)
             l1 = gen._call_expr('MojoList *', 'mojo_list_new', [])
-            gen._emit(f"  mojo_list_append_int ({l1}, {xv64});")
+            gen._rt_void('mojo_list_append_int', [l1, xv64])
             needle = gen._call_expr('MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', l1)])
         else:
             needle = gen._coerce_to_type(xt, 'MojoBytes *', xv)
@@ -7970,7 +7970,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     _inner_ct = _homogeneous_literal_inner_elem(gen, node.elements)
     if _inner_ct:
         gen._nested_elem_types[t] = _inner_ct
-    gen._emit(f"  {t} = mojo_list_new ();")
+    gen._rt_into(t, 'mojo_list_new', [])
     # Explicit loop, NOT `[(el, *gen.lower_expr(el)) for el in ...]`: the
     # 2-tuple return of `lower_expr` unpacked into a comprehension target
     # boxes `et`/`ev` on the self-hosted path, so `_tuple_slot_types[t]`
@@ -8102,7 +8102,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # so marking first made every tuple literal raise out of its own
     # construction. The mark is a statement about the FINISHED value, which
     # is exactly what placing it last says.
-    gen._emit(f"  mojo_mark_as_tuple ({t});")
+    gen._rt_void('mojo_mark_as_tuple', [t])
     # Record the per-slot kinds on the VALUE (runtime's mojo_list_set_kinds)
     # so every consumer that has to learn what a slot holds AT RUNTIME can:
     # `_eq_elem_code` returns MOJO_EQ_UNKNOWN for such a value (the list-wide
