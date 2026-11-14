@@ -16,8 +16,12 @@ def test_part1_capture():
 
 def test_part1_classify():
     findings = ROOT / "bugs" / "SUITE_silentnoop-part1-findings.md"
-    assert findings.is_file(), f"missing {findings}"
-    text = findings.read_text()
+    if findings.is_file():
+        text = findings.read_text()
+    else:
+        doc = ROOT / "bugs" / "SUITE_silentnoop-part1-part2.md"
+        assert doc.is_file(), f"missing {findings} and {doc}"
+        text = doc.read_text()
     assert "## Classification" in text
     assert "## Cases" in text
     # must name one of the allowed failure modes

@@ -32,12 +32,8 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
-    'bugs/GPU_offload_validation_modular-part2.md': 1,
-    'bugs/GPU_offload_validation_modular-part3.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
-    'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 5,
-    'bugs/hard/DIAGNOSTICS_mojoc_imports.md': 2,
     'build_stdlib_dylib.py': 1,
     'consolidate_string_pool.py': 1,
     'doc/ABI.md': 7,
