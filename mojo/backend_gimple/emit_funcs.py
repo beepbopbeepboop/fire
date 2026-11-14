@@ -3969,7 +3969,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         lines.append(f"#if USE_PYTHON")
         lines.append(f"  Py_Finalize ();")
         lines.append(f"#endif")
-        lines.append(f"  return result;")
+        # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
+        lines.append(f"  return (int)result;")
         lines.append(f"}}")
 
     gen._pop_import_scope()

@@ -794,6 +794,7 @@ MEASURED_PEAK_GB = {
     'preflight':                              (0.06, 'measured'),  # 0.6 s, 3 procs
     'no-new-casts':                           (0.10, 'measured'),  # 0.7 s
     'rthdrscan':                              (0.11, 'measured'),  # 0.7 s
+    'gimple-lint':                            (0.50, 'measured'),  # 10 s; four --dump children, the largest (myinterpreter.py) 0.5 GB
     'doc-refs':                               (0.15, 'measured'),  # 1.4 s
     'returned-frame-layout':                  (0.09, 'measured'),  # 0.8 s
     'formal-typed-flag':                      (0.08, 'measured'),  # 0.8 s
@@ -1877,6 +1878,21 @@ test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
 test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
      mem='tiny', extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
      desc='grow-only allowlist on ad-hoc container casts (text scan)')
+# The typed-IR checker over real emitted code (doc/GIR.md). GCC verifies only
+# `__GIMPLE`-tagged functions and never a call's arguments, and a mismatched
+# argument is passed unconverted (an `int` for an `int64_t` parameter arrives
+# with garbage upper bits; measured with gcc-mp-15 on arm64). So this is the
+# only job that type-checks every statement the backend emits. Its BASELINE
+# counts may only shrink.
+test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
+     extra=GIMPLE_SOURCES + sorted(
+         os.path.relpath(p, REPO)
+         for p in glob.glob(os.path.join(REPO, 'mojo', 'ir', '*.py'))) + [
+         'test_gimple_lint.py', 'tools/gimple_lint.py', 'runtime/fire_runtime.h',
+         'fire_compiler.py', 'myinterpreter.py', 'module_loader.py', 'cas.py',
+         'ast_rewriter.py', 'fire.py', 'hello.mojo', 'class_jit.mojo',
+         'test_struct.mojo', 'array_ops_jit.mojo'],
+     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)')
 # The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
 # hard-coded one. Registered by the integrator: the test landed with help-rename
 # but in no bucket, which turned `suite-self-test`'s estate check red.
@@ -4413,7 +4429,7 @@ BUCKETS = {
     'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
 
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
