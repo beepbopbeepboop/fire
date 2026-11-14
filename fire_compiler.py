@@ -9881,11 +9881,18 @@ class Parser:
                 # `trait` is ambiguous the same way `fn`/`struct`/`enum` are:
                 # real Python has no `trait` keyword, so a local named `trait`
                 # is a legal identifier (`trait = ...`, `trait.foo(...)`,
-                # `trait(...)`). Only commit to the trait declaration parse when
-                # the shape that follows could actually BE one: `trait`
-                # immediately followed by a name-like token and then `[` (generic
-                # params), `(` (bases), or `:` (straight into the body). If it
-                # is clearly used as an ordinary identifier, fall through to
+                # `trait(...)`). Without this carve-out the compiler's own
+                # Python sources cannot use `trait` as a variable name at all —
+                # mojo/middle/mojoc_conformance.py's
+                # `trait = (records or {}).get(...)` was refused with
+                # "Expected NAME got ASSIGN('=')", which aborted every
+                # whole-program compile of the self-host.
+                #
+                # Only commit to the trait declaration parse when the shape
+                # that follows could actually BE one: `trait` immediately
+                # followed by a name-like token and then `[` (generic params),
+                # `(` (bases), or `:` (straight into the body). If it is clearly
+                # used as an ordinary identifier, fall through to
                 # expression/assignment parsing. Otherwise (e.g. a malformed or
                 # incomplete declaration like bare `trait` on its own line) keep
                 # routing to `_parse_trait` so parse errors/recovery behave as
