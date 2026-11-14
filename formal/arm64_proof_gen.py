@@ -6650,13 +6650,22 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
 
 def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                   exit_pc: int = 0, code_name: str = None,
-                  sr_name: str = None):
+                  sr_name: str = None, svc_assumed: dict = None):
     """Emit wrapper defs + a runs-certificate for a straight-line run.
 
     `code_name` / `sr_name` name the SHARED code and step-lemma families when
     the run belongs to a function other than the one they were emitted for --
     which is the by-reference receiver case, where one image's step lemmas are
     used by every method's contract.
+
+    `svc_assumed` maps the pc of a write `svc` whose x16 is not statically
+    known to the NAME of the hypothesis that stands in for it: a binder
+    `(NAME : ¬ arm64_reg 16 ({S}_qS{k} st) = 1)` on every emitted theorem
+    whose proof uses that site's `hx{k}`.  The hypothesis is assumed, never
+    proved here and never invented: a dynamic write `svc` with no entry in
+    this map is still refused.  With no map (the default) the behaviour is
+    exactly the pre-assumption one, so every existing caller is unchanged
+    until the universal walk supplies the assumption.
 
     A run is a maximal straight-line sequence of instructions (no branches in
     the middle); it may end in a RET.  Returns (defs_text, cert_name,
@@ -6692,9 +6701,11 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # discharged from the reg-16 chain and not assumed about an arbitrary
     # state), and the fall-through rewrites x0 before anything reads the
     # byte count the model does not model.  An exit `svc` has no successor
-    # to certify, and a dynamic one has no provenance at all, so both are
-    # still refused.
+    # to certify and is still refused.  A dynamic write has no chain, so it
+    # is admitted only by the caller's named `svc_assumed` hypothesis; with
+    # none supplied it is refused exactly as before.
     svc_write = {}
+    svc_dynamic = {}
     for k, pc in enumerate(run_pcs):
         if not _is_svc(words.get(pc, 0)):
             continue
@@ -6705,7 +6716,17 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             x16 = (prev >> 5) & 0xffff
         else:
             x16 = None
-        if x16 is None or x16 == 1:
+        if x16 is None:
+            # No `movz x16` in this run to chain from.  The write form is
+            # still sound when the caller supplies the named hypothesis the
+            # step lemma needs (`¬ arm64_reg 16 s = 1`) AND the fall-through
+            # rewrites x0 before reading it; otherwise this is a refusal.
+            binder = (svc_assumed or {}).get(pc)
+            if not binder or not _x0_reassigned_after_write(words, pc):
+                return None
+            svc_dynamic[pc] = binder
+            continue
+        if x16 == 1:
             return None
         if not _x0_reassigned_after_write(words, pc):
             return None
@@ -6760,9 +6781,23 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                         + _pc_proof(k))
     step_facts = []
     hx_facts = []
+    # A dynamic write `svc` is admitted by the caller's named hypothesis, so
+    # every theorem whose proof applies that site's step lemma carries the
+    # hypothesis as a binder.  Its type is fixed HERE, at the run's own
+    # pre-svc state (`{S}_qS{k} st`), so the same name can be passed to the
+    # self/mid/runs theorems without re-stating the state.
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
         if _is_svc(words[pc]):
+            if pc in svc_dynamic:
+                hx_facts.append(
+                    f"  have hx{k} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1 := "
+                    f"{svc_dynamic[pc]}")
+                step_facts.append(
+                    f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
+                    f"= some ({S}_qT{k} st) :=\n"
+                    f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k}) (hx{k})")
+                continue
             # The step lemma is `work_step_svc_write`, under its `hx`
             # hypothesis.  Discharge that from the run's OWN reg-16 chain:
             # the preceding `movz` is in this run (the admission above
@@ -6791,6 +6826,20 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                               f"{code_name} = some ({S}_qT{k} st) :=\n"
                               f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
 
+    # Binder group for a theorem whose proof uses the first `upto` steps'
+    # `hx` facts.  A dynamic site's name is the caller's; its type is the
+    # write form's own side condition at that site's pre-state, so the
+    # hypothesis is ASSUMED (never proved here) and every theorem that
+    # applies the site's step lemma must carry it.
+    def _svc_binders(upto):
+        return [f"({svc_dynamic[pc]} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1)"
+                for k, pc in enumerate(run_pcs[:upto])
+                if pc in svc_dynamic]
+
+    def _svc_binder_args(upto):
+        return [svc_dynamic[pc] for k, pc in enumerate(run_pcs[:upto])
+                if pc in svc_dynamic]
+
     # The `hseq` side condition of `runs_cons_seq` is discharged two ways, and
     # the split is not stylistic.  For the block's FIRST instruction the source
     # state is `S_qS0 st`, which is `st` (`def S_qS0 := st`), so the condition
@@ -6810,7 +6859,10 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # first-step `sp` one).
     # self_k theorems: arm64_runs code k st = some (qS_k st) for 1 <= k <= m-1
     for k in range(1, m):
-        A(f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
+        head = f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]})"
+        for b in _svc_binders(k):
+            head += f"\n    {b}"
+        A(head + " :")
         A(f"    arm64_runs {code_name} {k} st = some ({S}_qS{k} st) := by")
         A("\n".join(pc_facts[:k + 1]))
         A("\n".join(hx_facts[:k]))
@@ -6825,7 +6877,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                 A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
-            A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
+            self_args = " ".join([f"{S}_self{k - 1} st hpc"]
+                                 + _svc_binder_args(k - 1))
+            A(f"  rw [runs_append {code_name} {k - 1} 1 st, {self_args}]")
             A(f"  simp only []")
             if pc_writes[k - 1]:
                 A(f"  rw [runs_cons_jump ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
@@ -6853,10 +6907,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         # RET-ending run: the jump side-condition (RET pc != current pc) is a
         # value-flow hypothesis the caller must supply.  `hjump` is stated on
         # the pre-RET state's x30 (the return address).
-        A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
-        A(f"    (hjump : ({S}_qS{m - 1} st).x30.toNat ≠ {run_pcs[-1]}) :")
+        head = (f"theorem {S}_runs (st : Arm64State) "
+                f"(hpc : st.pc = {run_pcs[0]})")
+        head += (f"\n    (hjump : ({S}_qS{m - 1} st).x30.toNat "
+                 f"≠ {run_pcs[-1]})")
     else:
-        A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
+        head = (f"theorem {S}_runs (st : Arm64State) "
+                f"(hpc : st.pc = {run_pcs[0]})")
+    for b in _svc_binders(m):
+        head += f"\n    {b}"
+    A(head + " :")
     A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
     A("\n".join(pc_facts))
     A("\n".join(hx_facts))
@@ -6877,7 +6937,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
     else:
-        A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
+        self_args = " ".join([f"{S}_self{m - 1} st hpc"]
+                             + _svc_binder_args(m - 1))
+        A(f"  rw [runs_append {code_name} {m - 1} 1 st, {self_args}]")
         A(f"  simp only []")
         if last_moves_pc:
             A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
@@ -6904,8 +6966,12 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # `∀ p ∈ [p₀, …], p ≠ exit` leaf-by-leaf, so the cost scales with block
     # length instead of failing.  `work_mid_hk` turns it into the per-case fact.
     pcs_lit = ", ".join(str(pc) for pc in run_pcs)
-    A(f"theorem {S}_mid (exit : Nat) (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
-    A(f"    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit) :")
+    mid_head = (f"theorem {S}_mid (exit : Nat) (st : Arm64State) "
+                f"(hpc : st.pc = {run_pcs[0]})")
+    mid_head += f"\n    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit)"
+    for b in _svc_binders(m):
+        mid_head += f"\n    {b}"
+    A(mid_head + " :")
     A(f"    ∀ u < {m}, ∀ su, arm64_runs {code_name} u st = some su → su.pc ≠ exit := by")
     A("  intro u hu su hsu")
     cases = " ∨ ".join(f"u = {k}" for k in range(m))
@@ -6921,7 +6987,9 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A("    exact hk")
         else:
             A(f"    have hself : arm64_runs {code_name} {k} st = some ({S}_qS{k} st) :=")
-            A(f"      {S}_self{k} st hpc")
+            self_args = " ".join([f"{S}_self{k} st hpc"]
+                                 + _svc_binder_args(k))
+            A(f"      {self_args}")
             A(f"    have heq : some ({S}_qS{k} st) = some su := hself.symm.trans hsu")
             A("    injection heq with hq")
             A("    subst hq")
