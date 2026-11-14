@@ -323,6 +323,42 @@ def count_text_any_calls() -> tuple:
     return n, where
 
 
+# Arithmetic, bit operations and comparisons still spelled as text
+# (`gen._new_val('int64_t', f"{a} + {b}")`).  `gen._binop(ctype, a, '+', b)`,
+# `gen._cmp(a, '<', b)` and `gen._binop_into(dst, a, '+', b)` convert an
+# operand of the wrong scalar type; text does not.  May only shrink.
+TEXT_BINOP_BASELINE = 16
+
+
+def count_text_binops() -> tuple:
+    import ast
+    import glob
+    import re
+    pat = re.compile(r'^(?: *[^=(]+ = )?\S+ (==|!=|<=|>=|<<|>>|<|>|\+|-|\*|/|%|&|\||\^|\{\}) \S+;?$')
+    n = 0
+    where: list[str] = []
+    files = (sorted(glob.glob(os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_*.py')))
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'middle', '*.py'))))
+    for path in files:
+        with open(path, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('_emit', '_new_val') and node.args):
+                continue
+            arg = node.args[-1]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                text = arg.value
+            elif isinstance(arg, ast.JoinedStr):
+                text = ''.join(v.value if isinstance(v, ast.Constant) else '{}' for v in arg.values)
+            else:
+                continue
+            if pat.match(text):
+                n += 1
+                where.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}: {text.strip()}")
+    return n, where
+
+
 # Casts still spelled as TEXT.  `gen._cast(ctype, v)` / `gen._cast_into(dst,
 # ctype, v)` state the type once, so the temp's declaration and the written
 # cast cannot disagree.  May only shrink.
@@ -458,6 +494,17 @@ def test_text_calls() -> None:
                      f"fixed! lower TEXT_ANY_CALL_BASELINE to {n} in test_gimple_lint.py")
     else:
         check(True, f"{n} calls of any callee spelled as text (baseline {TEXT_ANY_CALL_BASELINE})")
+    n, where = count_text_binops()
+    if n > TEXT_BINOP_BASELINE:
+        for w in where:
+            print("        " + w)
+        check(False, f"{n} binary operations are spelled as text, baseline {TEXT_BINOP_BASELINE} -- "
+                     f"use gen._binop / gen._cmp / gen._binop_into")
+    elif n < TEXT_BINOP_BASELINE:
+        check(False, f"{n} binary operations are spelled as text, baseline {TEXT_BINOP_BASELINE} -- "
+                     f"fixed! lower TEXT_BINOP_BASELINE to {n} in test_gimple_lint.py")
+    else:
+        check(True, f"{n} binary operations spelled as text (baseline {TEXT_BINOP_BASELINE})")
 
 
 def dump_corpus(out_dir: str) -> list[str]:

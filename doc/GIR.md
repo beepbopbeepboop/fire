@@ -182,6 +182,13 @@ that is meant to be behaviour-preserving:
   only spelling of `dst = src;` (183 sites). It reads both variables'
   declared types and writes the conversion out when their representations
   differ, so a caller cannot emit a "non-trivial conversion" copy.
+- **Stage 2a, binary operations (landed 2026-11-14).**
+  `gen._binop(ctype, a, '+', b)`, `gen._cmp(a, '<', b)` (a `_Bool`) and
+  `gen._binop_into(dst, a, op, b)` are the spelling of arithmetic, a bit
+  operation or a comparison (219 sites). A variable operand whose declared
+  scalar type differs from what GIMPLE requires is converted by its own cast:
+  to the result type for arithmetic, to the wider operand for a comparison.
+  `TEXT_BINOP_BASELINE` (16) may only shrink.
 - **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
   `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
   `label`. Each returns a typed value and appends an `Instr`.
