@@ -5907,6 +5907,12 @@ class GimpleGen:
         grsl._cast_into(self, dst, ctype, val)
     def _copy(self, dst: str, src: str) -> None:
         grsl._copy(self, dst, src)
+    def _binop(self, ctype: str, a: str, op: str, b: str) -> str:
+        return grsl._binop(self, ctype, a, op, b)
+    def _cmp(self, a: str, op: str, b: str) -> str:
+        return grsl._cmp(self, a, op, b)
+    def _binop_into(self, dst: str, a: str, op: str, b: str) -> None:
+        grsl._binop_into(self, dst, a, op, b)
     def _goto(self, label: str) -> None:
         grsl._goto(self, label)
     def _cond_goto(self, cond: str, then_label: str, else_label: str) -> None:
