@@ -1148,7 +1148,8 @@ _STATIC_SCOPES = {}
 def _scope_from_stmts(stmts, filename):
     """Names a module can call: its own top-level functions, modules it
     imports (`import m [as q]` -> q.f), and `from m import f [as g]`."""
-    sc = {'local': _top_level_functions(stmts), 'mods': {}, 'froms': {}}
+    sc = {'local': _top_level_functions(stmts), 'mods': {}, 'froms': {},
+          'structs': {st.name: st for st in stmts if isinstance(st, N.StructDef)}}
     for st in stmts:
         if isinstance(st, N.ImportStmt):
             path = _static_module_file(st.module, filename)
@@ -1165,7 +1166,7 @@ def _scope_from_stmts(stmts, filename):
 def _scope_of_file(path):
     key = os.path.abspath(path)
     if key not in _STATIC_SCOPES:
-        _STATIC_SCOPES[key] = {'local': {}, 'mods': {}, 'froms': {}}
+        _STATIC_SCOPES[key] = {'local': {}, 'mods': {}, 'froms': {}, 'structs': {}}
         try:
             with open(path, encoding='utf-8') as fh:
                 text = fh.read()
@@ -1219,6 +1220,106 @@ def _static_cmp(cond, env):
     return (a > b if cond.op == '>' else a < b if cond.op == '<' else
             a >= b if cond.op == '>=' else a <= b if cond.op == '<=' else
             a == b if cond.op == '==' else a != b)
+
+
+def _resolve_struct(callee, sc, filename, bound):
+    """(StructDef, declaring file) a plain `S` or `pkg.S` callee names."""
+    if isinstance(callee, N.IdentExpr):
+        if callee.name in bound or callee.name in sc['local']:
+            return None, None
+        if callee.name in sc['structs']:
+            return sc['structs'][callee.name], filename
+    elif (isinstance(callee, N.MemberExpr) and isinstance(callee.obj, N.IdentExpr)
+            and callee.obj.name in sc['mods'] and callee.obj.name not in bound):
+        path = sc['mods'][callee.obj.name]
+        st = _scope_of_file(path)['structs'].get(callee.member)
+        if st is not None:
+            return st, path
+    return None, None
+
+
+def _bracket_arg_kinds(source, call_func):
+    """For `S[1, c=9]` (the SubscriptExpr `call_func`): the list of
+    (is_keyword, keyword_name). The parser drops the `c=` of a keyword
+    bracket argument, so this is read back from the source line."""
+    lines = source.splitlines() if source else []
+    sub = call_func
+    tail = sub.obj
+    if hasattr(tail, 'member'):
+        l, c = tail.line, tail.col + 1 + len(tail.member)
+    else:
+        l, c = tail.line, tail.col + len(tail.name)
+    if l < 1 or l > len(lines):
+        return None
+    text = lines[l - 1][c - 1:]
+    if not text.startswith('['):
+        return None
+    depth, i, cur, parts = 0, 0, '', []
+    for i, ch in enumerate(text):
+        if ch in '[(':
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch in '])':
+            depth -= 1
+            if depth == 0:
+                break
+        elif ch == ',' and depth == 1:
+            parts.append(cur)
+            cur = ''
+            continue
+        cur += ch
+    else:
+        return None
+    parts.append(cur)
+    out = []
+    for part in parts:
+        m = re.match(r'^\s*([A-Za-z_]\w*)\s*=(?!=)', part)
+        out.append((True, m.group(1)) if m else (False, None))
+    return out
+
+
+def _fieldwise_init_record(filename, source, n, sub, st, sfile):
+    """`S[...]()` of a field-less `@fieldwise_init` struct whose bracket
+    parameters are not all bound: `no matching function in initialization`,
+    with the two synthesized constructors as candidates (the move constructor,
+    which wants its `move` argument, and the default one, which cannot infer the
+    first unbound bracket parameter), then the struct. Zero-argument calls only
+    (measured against `tools/mojo build -I`)."""
+    if n.args or n.kwargs or st.decorators != ['fieldwise_init'] or st.methods and any(
+            not getattr(m, 'line', 0) == 0 for m in st.methods):
+        return None
+    bparams = list(getattr(st, 'bracket_param_info', []))
+    real_fields = [f for f in st.fields if f.name not in {b[0] for b in bparams}]
+    if real_fields or not bparams:
+        return None
+    kinds = _bracket_arg_kinds(source, sub)
+    if kinds is None:
+        return None
+    positional = [k for k in kinds if not k[0]]
+    given = {b[0] for b in bparams[:len(positional)]}
+    given |= {k[1] for k in kinds if k[0]}
+    unbound = [b[0] for b in bparams if b[0] not in given and b[2] is None]
+    if not unbound:
+        return None
+    cl, cc = _callee_start(sub)
+    if cl != n.line or cc < 1 or n.col <= cc:
+        return None
+    return {
+        'file': filename, 'line': n.line, 'caret': n.col, 'tilde_from': cc,
+        'after': 1, 'message': 'no matching function in initialization',
+        'notes': [
+            {'file': sfile, 'line': st.line + 1 if st.decorators else st.line, 'col': 1,
+             'name': None,
+             'text': 'def __init__(out self, *, deinit move: Self)    # note - generated function',
+             'message': "candidate not viable: missing required argument: 'move'"},
+            {'file': sfile, 'line': st.line + 1 if st.decorators else st.line, 'col': 1,
+             'name': None,
+             'text': 'def __init__(out self)    # note - generated function',
+             'message': f"candidate not viable: failed to infer parameter '{unbound[0]}' "
+                        f"of parent struct '{st.name}'"},
+            {'file': sfile, 'line': st.line, 'name': st.name,
+             'message': ' struct declared here'}]}
 
 
 def _predicate_call_record(filename, c, cfile, cond, env, site, bare):
@@ -1290,7 +1391,7 @@ def _scope_from_stmts_cached(path):
     return _scope_of_file(path)
 
 
-def _static_call_records(stmts, filename):
+def _static_call_records(stmts, filename, source=''):
     """Records for calls the module's own text proves wrong, so they are
     reported before anything runs and together with the declaration errors, in
     source order, as the modular compiler does:
@@ -1343,6 +1444,13 @@ def _static_call_records(stmts, filename):
             if isinstance(callee, N.SubscriptExpr):
                 sub = callee
                 callee = callee.obj
+            if sub is not None and not bare:
+                sdef, sfile = _resolve_struct(callee, sc, filename, bound)
+                if sdef is not None:
+                    rec = _fieldwise_init_record(filename, source, n, sub, sdef, sfile)
+                    if rec is not None:
+                        out.append(((n.line, rec['caret']), rec))
+                    continue
             cands, cfile = _resolve_callee(callee, sc, filename, bound)
             if not cands or any(c.decorators for c in cands):
                 continue
@@ -1391,10 +1499,71 @@ def _static_call_records(stmts, filename):
     return out
 
 
+def _static_conversion_records(stmts, filename, source):
+    """Warnings for `var x: T = 12` / `_: T = 12` where T is a struct of this
+    module or of an imported package whose `__init__(out self, value: Int)` is
+    `@implicit(deprecated=True)`: the integer literal is implicitly converted.
+    Literal initializers only (the shapes measured against `tools/mojo build`):
+
+        warning: deprecated implicit conversion from 'IntLiteral[12]' to 'T'
+        note: call 'T(...)' explicitly      (with the fix-it line `T(  )`)
+        note: implicit constructor for 'T' declared here"""
+    sc = _scope_from_stmts(stmts, filename)
+    out = []
+    lines = source.splitlines() if source else []
+    for top in stmts:
+        if not isinstance(top, N.FunctionDef):
+            continue
+        for n in _ast_nodes(top):
+            if not (isinstance(n, (N.AssignStmt, N.VarDecl))
+                    and isinstance(getattr(n, 'type_ann', None), str)
+                    and isinstance(getattr(n, 'value', None), N.IntLiteral)):
+                continue
+            ann = n.type_ann.strip()
+            if '.' in ann:
+                mod, _, nm = ann.rpartition('.')
+                if mod not in sc['mods']:
+                    continue
+                sdef = _scope_of_file(sc['mods'][mod])['structs'].get(nm)
+                sfile = sc['mods'][mod]
+            else:
+                nm = ann
+                sdef = sc['structs'].get(nm)
+                sfile = filename
+            if sdef is None:
+                continue
+            init = None
+            for m in sdef.methods:
+                if m.name == '__init__' and m.line and any(
+                        (isinstance(d, N.CallExpr) and isinstance(d.func, N.IdentExpr)
+                         and d.func.name == 'implicit') for d in m.decorators):
+                    init = m
+            if init is None or len(init.params) != 2:
+                continue
+            lit = n.value
+            if lit.line < 1 or lit.line > len(lines):
+                continue
+            raw = lit.raw if getattr(lit, 'raw', None) else str(lit.value)
+            pad = ' ' * (lit.col - 1)
+            out.append(((lit.line, lit.col), {
+                'kind': 'warning', 'file': filename, 'line': lit.line,
+                'caret': lit.col, 'tilde_from': 0, 'after': len(raw) - 1,
+                'message': f"deprecated implicit conversion from 'IntLiteral[{lit.value}]' to '{nm}'",
+                'notes': [
+                    {'file': filename, 'line': lit.line, 'col': lit.col, 'name': None,
+                     'after': len(raw) - 1, 'fixit': f"{nm}({' ' * (len(raw) - 2 if len(raw) >= 2 else 1)})",
+                     'message': f"call '{nm}(...)' explicitly"},
+                    {'file': sfile, 'line': init.line, 'name': '__init__',
+                     'message': f"implicit constructor for '{nm}' declared here"}]}))
+    return out
+
+
 def static_module_diagnostics(stmts, filename, source):
     """Diagnostics found by looking at the module's declarations alone, before
     anything runs -- the modular compiler reports these statically and reports
-    every one, in source order. Text form, or None when there are none.
+    every one, in source order. Returns (text, number of errors); text is None
+    when there is nothing to say. Warnings (a deprecated implicit conversion)
+    are in the text but do not count as errors, so the program still runs.
 
     For a struct that names traits (defined in this module or in a module
     found beside it) as bases, in the order the real compiler stops at
@@ -1506,11 +1675,13 @@ def static_module_diagnostics(stmts, filename, source):
             notes.append({'file': ent['file'], 'line': tr.line, 'name': tn,
                           'message': f"trait '{tn}' declared here"})
             record(st, f"'{st.name}' does not implement all requirements for '{tn}'", notes)
-    records.extend(_static_call_records(stmts, filename))
+    records.extend(_static_call_records(stmts, filename, source))
+    records.extend(_static_conversion_records(stmts, filename, source))
     if not records:
-        return None
+        return None, 0
     records.sort(key=lambda r: r[0])
-    return '\n'.join(_render_record_text(r[1], filename, source) for r in records)
+    errors = sum(1 for r in records if r[1].get('kind', 'error') == 'error')
+    return '\n'.join(_render_record_text(r[1], filename, source) for r in records), errors
 
 
 def _callee_start(func):
@@ -1625,14 +1796,36 @@ def _render_record_text(rec, filename, source):
     shape: `file:line:col: error: msg`, the source line, then a marker line
     (`~` from tilde_from up to the caret, `^` at the caret column)."""
     out = []
-    items = [('error', rec['file'], rec['line'], rec['caret'],
+    items = [(rec.get('kind', 'error'), rec['file'], rec['line'], rec['caret'],
               rec['tilde_from'], rec['message'], rec.get('name'))]
+    synthetic = {}
+    extras = {}
     for n in rec['notes']:
         items.append(('note', n['file'], n['line'], n.get('col', 0), 0, n['message'], n['name']))
-    for kind, f, line, caret, tilde_from, message, name in items:
+        if n.get('text') is not None:
+            synthetic[len(items) - 1] = n['text']
+        if n.get('after') or n.get('fixit'):
+            extras[len(items) - 1] = (n.get('after', 0), n.get('fixit'))
+    for idx, (kind, f, line, caret, tilde_from, message, name) in enumerate(items):
         text = _record_source_line(f, line, filename, source)
+        if idx in synthetic:
+            # A compiler-generated declaration has no source: the note shows a
+            # synthesized signature instead of the file's line.
+            text = synthetic[idx]
         if name is not None and text is not None:
-            m = re.search(r'\b(?:def|fn|struct|trait)\s+(' + re.escape(name) + r')\b', text)
+            pat = re.compile(r'\b(?:def|fn|struct|trait)\s+(' + re.escape(name) + r')\b')
+            m = pat.search(text)
+            if m is None:
+                # The recorded line is a DECORATOR line (`@fieldwise_init`):
+                # the declaration is on one of the next few lines.
+                for k in range(1, 6):
+                    t2 = _record_source_line(f, line + k, filename, source)
+                    if t2 is None:
+                        break
+                    m2 = pat.search(t2)
+                    if m2 is not None:
+                        line, text, m = line + k, t2, m2
+                        break
             caret = m.start(1) + 1 if m else 0
         if caret < 1:
             caret = 1
@@ -1652,7 +1845,7 @@ def _render_record_text(rec, filename, source):
         if text is not None:
             out.append(text)
             pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:caret - 1])
-            if tilde_from and kind == 'error' and rec.get('tilde_to'):
+            if tilde_from and idx == 0 and rec.get('tilde_to'):
                 marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
                 out.append(marks + '~' * (rec['tilde_to'] - tilde_from + 1)
                            + ' ' * (caret - rec['tilde_to'] - 1) + '^')
@@ -1661,7 +1854,10 @@ def _render_record_text(rec, filename, source):
                 out.append(marks + '~' * (caret - tilde_from) + '^'
                            + '~' * rec.get('after', 0))
             else:
-                out.append(pad + '^' + ('~' * rec.get('after', 0) if kind == 'error' else ''))
+                after = rec.get('after', 0) if idx == 0 else extras.get(idx, (0, None))[0]
+                out.append(pad + '^' + '~' * after)
+                if idx in extras and extras[idx][1]:
+                    out.append(pad + extras[idx][1])
     return '\n'.join(out)
 
 

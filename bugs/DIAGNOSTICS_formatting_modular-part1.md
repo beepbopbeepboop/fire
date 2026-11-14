@@ -315,3 +315,23 @@ and provable/unprovable/valid candidate classification against `T: Movable`).
 Full ground truth for both is in `tools/mojo build -I` output on that file.
 The source-less run (the test's real shape: precompile, delete the source) is
 still unmet: there is no `precompile` here.
+
+### 2026-11-14 (night, later still): groups C and D landed; only K differs
+
+C: `S[1, c=9]()` of a field-less `@fieldwise_init` struct with an unbound bracket
+parameter -> `no matching function in initialization`, the candidates being the
+two synthesized constructors (move: `missing required argument: 'move'`;
+default: `failed to infer parameter 'b' of parent struct 'S'`), shown as
+generated signatures (`# note - generated function`), then ` struct declared
+here` (two spaces, as the real compiler prints it). The parser drops the `c=` of
+a keyword bracket argument, so keyword/positional kinds are read back from the
+source line. D: `_: T = 12` through an `@implicit(deprecated=True)` constructor
+is a WARNING with a `T(  )` fix-it line (inner spaces `len-2`, one space for a
+one-character literal) and does not stop the program; the static pass now
+returns (text, number of errors) so a warning-only module still runs. Also fixed:
+a decorated declaration (`@fieldwise_init struct S`) is located on its own line,
+not the decorator's. Tests: `test_fieldwise_init_and_deprecated_conversion.py`.
+
+With the package source present, the whole real `diagnostics_in_missing_locs.mojo`
+now matches the real compiler except group K (line 137, the ambiguous
+`conforms_to` candidate selection). The source-less (precompile) run is unmet.

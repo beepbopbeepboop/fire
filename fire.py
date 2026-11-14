@@ -812,9 +812,10 @@ def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format=
             interpreter = Interpreter(filename=filename, argv=argv)
             # Declaration-level errors the modular compiler reports before
             # anything runs (all of them, in source order).
-            static_diag = static_module_diagnostics(stmts, filename, src_code)
+            static_diag, static_errors = static_module_diagnostics(stmts, filename, src_code)
             if static_diag is not None:
                 print(static_diag, file=sys.stderr)
+            if static_errors:
                 exit_code.append(1)
                 return
             for stmt in stmts:
