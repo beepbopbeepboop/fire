@@ -894,6 +894,8 @@ def where_violation_record(filename, node, loc, cond, site, bare=False):
         if not bare:
             tilde_from = cc
             after = len(callee.member)
+    elif hasattr(callee, 'name') and not bare:
+        after = len(callee.name) - 1     # `^~~~` over the whole name
     return msg, {
         'file': filename, 'line': site.line, 'caret': caret,
         'tilde_from': tilde_from, 'after': after, 'message': msg,
@@ -1443,6 +1445,11 @@ def overload_diagnostic_record(oset, call, args, kwargs, filename):
            'message': f"no matching function in call to '{oset.name}'",
            'notes': notes}
     if not missing:
+        tail0 = call.func
+        while hasattr(tail0, 'index') and hasattr(tail0, 'obj'):
+            tail0 = tail0.obj
+        if hasattr(tail0, 'name'):
+            rec['after'] = len(tail0.name) - 1
         # "unexpected argument": when every candidate runs out of parameters at
         # the SAME argument, the caret is on that argument and the callee's name
         # is underlined; otherwise it is on the callee's first character.
@@ -1522,7 +1529,7 @@ def _render_record_text(rec, filename, source):
                 out.append(marks + '~' * (caret - tilde_from) + '^'
                            + '~' * rec.get('after', 0))
             else:
-                out.append(pad + '^')
+                out.append(pad + '^' + ('~' * rec.get('after', 0) if kind == 'error' else ''))
     return '\n'.join(out)
 
 

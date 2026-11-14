@@ -110,6 +110,21 @@ def test_violated_where_clause_in_a_comptime_binding():
         assert p.returncode == 1 and err == BIND_WANT, err
 
 
+LONG_NAMES = {'r': ('def lf[n: Int]() where n > 0:\n    pass\n\n\ndef lg[n: Int]() -> Int where n > 0:\n    return 1\n\n\ndef main():\n    lf[0]()\n    _ = lg[0]()\n    var v = lg[0]()\n', "F:10:5: error: invalid call to 'lf': violated constraint\n    lf[0]()\n    ^~\nF:1:24: note: constraint declared here evaluated to False, expected '(n > Int(0))'\ndef lf[n: Int]() where n > 0:\n                       ^\nF:1:5: note: function declared here\ndef lf[n: Int]() where n > 0:\n    ^\nF:11:9: error: invalid call to 'lg': violated constraint\n    _ = lg[0]()\n        ^~\nF:5:31: note: constraint declared here evaluated to False, expected '(n > Int(0))'\ndef lg[n: Int]() -> Int where n > 0:\n                              ^\nF:5:5: note: function declared here\ndef lg[n: Int]() -> Int where n > 0:\n    ^\nF:12:13: error: invalid call to 'lg': violated constraint\n    var v = lg[0]()\n            ^~\nF:5:31: note: constraint declared here evaluated to False, expected '(n > Int(0))'\ndef lg[n: Int]() -> Int where n > 0:\n                              ^\nF:5:5: note: function declared here\ndef lg[n: Int]() -> Int where n > 0:\n    ^\n"), 'u': ('def longname(n: Int):\n    pass\n\n\ndef longname(n: Float64, m: Float64):\n    pass\n\n\ndef main():\n    longname(1, 2, 3)\n', "F:10:5: error: no matching function in call to 'longname'\n    longname(1, 2, 3)\n    ^~~~~~~~\nF:1:5: note: candidate not viable: unexpected argument\ndef longname(n: Int):\n    ^\nF:5:5: note: candidate not viable: unexpected argument\ndef longname(n: Float64, m: Float64):\n    ^\n")}
+
+
+def test_the_caret_underlines_the_whole_callee_name():
+    # The one-character names above hide it: a callee's name is underlined
+    # `^~~~` whatever the reason (violated constraint, unexpected argument).
+    for key, (src, want) in LONG_NAMES.items():
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, key + '.mojo')
+            open(f, 'w').write(src)
+            p = subprocess.run([sys.executable, FIRE, 'run', f],
+                               capture_output=True, text=True, timeout=300)
+            assert p.returncode == 1 and p.stderr.replace(f, 'F') == want, (key, p.stderr)
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_'):
