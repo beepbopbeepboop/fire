@@ -1,6 +1,7 @@
 """Regression: SIMD __pow__/exp elaboration must not be refused as
 "advance without converging" due to misclassified fixed comptime bracket
-args like `2 * Int(Self.length)` (bug:CODEGEN_simd_exp_staticTuple_refusal).
+args like `2 * Int(Self.length)` (fixed 2026-11-14: only simple stepping
+operands count as a progressing bracket argument).
 """
 
 import io
