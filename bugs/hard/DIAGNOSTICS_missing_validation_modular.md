@@ -228,3 +228,38 @@ See build/checkfail_candidates.json (61 error-like cases).
   same-name import, qualified-member leak. `build/checkfail_candidates.json`
   not present in this worktree; re-run `tools/collect_checkfail.py` against
   the modular suite to refresh/prioritize.
+
+## Status (2026-11-14): measured against the real FileCheck lines
+
+`tools/modular_filecheck.py <test>.mojo...` (new) runs a modular test through
+`fire.py build` and its own FileCheck lines. Rollup siblings first: the four
+formatting files `diagnostics_in_missing_locs.mojo`,
+`diagnostics_in_missing_locs_imports.mojo`, `diagnostic_format.mojo` and
+`kgen_lsp_check_parse_error.mojo` now PASS (the static declaration pass in
+`myinterpreter.static_module_diagnostics`, run by `fire run`, `fire build` and the
+bare compile-and-run path; `--Werror` supported); `invalid_downcast_error.mojo`
+is part 5.
+
+Category A, measured (`rc` = our exit code):
+
+| file | verdict | note |
+|---|---|---|
+| comptime_assert_tstring.mojo | PASS | |
+| error_tolerance.mojo | PASS | |
+| defaulted_trait_method_bad_conformance.mojo | FAIL rc=1 | wrong/missing diagnostic text |
+| autoparam_dependency_errors.mojo | FAIL rc=1 | |
+| failed_binding_deferrals.mojo | FAIL rc=1 | |
+| mojo_import_case_sensitive_error.mojo | FAIL rc=1 | needs `-I` dir handling in the RUN line |
+| identifier_source_range.mojo | FAIL rc=1 | |
+| tuple_first_of_error.mojo, tuple_contains_type_mismatch_error.mojo | FAIL rc=0 | need stdlib `Tuple` element-type checking (a real type checker: `UInt8(1) in ints`) |
+| moco_4400_no_crash_on_bind_parameter.mojo, enum_exhaustive_errors.mojo, align_decorator_parametric_error.mojo, assert_failure_message.mojo | FAIL rc=0 | accepted silently |
+| comptime_assert.mojo, never_conforming_no_synthesis.mojo | TIMEOUT (>60 s cold) | not measured |
+| not_conformance.mojo, where_message.mojo, variadic_kwargs.mojo | FAIL | `%parse-mojo-isolated | FileCheck` on an MLIR dump, not a diagnostic: cannot pass by construction |
+| struct_conditional_trait_conformance_errors.mojo, import_*(split-input-file) | UNSUPPORTED by the harness | `-verify-diagnostics` / `-split-input-file` |
+
+Next, in order of how much of it the static pass already gives: the rc=1 ones
+(a diagnostic is produced but differs: capture `tools/mojo build` output next to
+ours and fix the delta, as was done for diagnostics_in_missing_locs), then the
+rc=0 ones that are declaration-level (`enum_exhaustive_errors`,
+`align_decorator_parametric_error`, `moco_4400`), leaving the type-checker ones
+(`tuple_*`) for last.
