@@ -4112,6 +4112,30 @@ UNREGISTERED = {
     'tools/test_swarm_class_refresh.py': _STANDALONE_TEST_REASON,
     'tools/test_swarm_feed.py': _STANDALONE_TEST_REASON,
     'tools/test_swarm_live_guard.py': _STANDALONE_TEST_REASON,
+    # ── RED today: exit non-zero, and no gate, tally or coverage number
+    #    reports any of it. The count is a re-run of every entry, not a
+    #    reading of a bug doc.
+    #
+    # The estate audit of 2026-11-13 found `test_lsp_error_recovery.py` in no
+    # bucket. It cannot simply be registered: it is RED. Its source is a bare
+    # `asdf` at module scope, which this parser accepts as an ordinary
+    # expression statement (`ExprStmt`), not a syntax error — so
+    # `parse_module(recover=True)` records NO error, and `compile_to_gimple`
+    # compiles the module silently, `struct Good` included. Neither half of
+    # the assertion can hold, whatever parts 1-2 of the diagnostics work do.
+    # The behaviour it means to pin — a diagnostic for an unknown declaration
+    # while the following struct is still emitted — is pinned at a real
+    # unknown declaration by `test_lsp_error_recovery_part2.py` (registered as
+    # `reg-lsp-error-recovery-part2`). Whether this file should be rewritten
+    # against one or retired as a duplicate of that test is the open question
+    # in `bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`; listing it here
+    # is what keeps the estate check green without landing a red job.
+    'test_lsp_error_recovery.py':
+        'RED 2026-11-13: a bare `asdf` parses as an ordinary expression '
+        'statement, so no recovered parse error is recorded and compilation '
+        'succeeds — its "use of unknown declaration" assertion cannot hold. '
+        'The intended shape is pinned by `reg-lsp-error-recovery-part2`; see '
+        '`bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`.',
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
     # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path

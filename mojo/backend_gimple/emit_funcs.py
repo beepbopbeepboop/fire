@@ -3401,7 +3401,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         _pbase = _pa.split('[', 1)[0].strip()
         if _pbase in ('Tuple', 'tuple') and '[' in _pa:
             gen._ensure_tuple_struct(_pa)
-        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span') or '[' not in _pa:
+        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span', 'Array', 'FixedSizeArray') or '[' not in _pa:
             continue
         _pin = gimple_ctypes._split_top_level_commas(
             _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
@@ -3428,7 +3428,12 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         # char* (the `_mojo_at_int64_t` / `*` errors in python.mojo's
         # Python.dict(tuples: Span[Tuple[...], _]) body, which only became
         # visible once that overload's signature was correct).
-        if _pbase == 'Span':
+        # `Array[T, N]` and `FixedSizeArray[T, N]` carry the count SECOND, so
+        # they take their element from the first bracket argument too — see
+        # `CODEGEN_simd_and_array_values_erase_to_int64-part4`. Without this
+        # their two-arg bracket fails the `len(_pin) != 1` gate below and the
+        # parameter's element type was never seeded.
+        if _pbase in ('Span', 'Array', 'FixedSizeArray'):
             if not _pin or not _pin[0].strip():
                 continue
             _pin = [_pin[0]]
@@ -3456,6 +3461,17 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
             _ec = _annotated_elem_ctype(gen, _eann)
+            if _ec == 'float':
+                # `Float32` elements of a container are stored as C `double`
+                # (the Array/FixedSizeArray constructor arm does the same:
+                # `MojoList`'s float elements are doubles — emit_calls.py
+                # `_elem_ct == 'float' -> 'double'`). Without this a
+                # param-seeded element stayed `float`, so `a[0]` read
+                # `mojo_list_get_float` and `Span(a)` read `_mojo_at_float`,
+                # while the same value built by a constructor read
+                # `mojo_list_get_double`/`_mojo_at_double` — see
+                # `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
+                _ec = 'double'
             if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)
 
@@ -3969,8 +3985,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         lines.append(f"#if USE_PYTHON")
         lines.append(f"  Py_Finalize ();")
         lines.append(f"#endif")
-        # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
-        lines.append(f"  return (int)result;")
+        lines.append(f"  return result;")
         lines.append(f"}}")
 
     gen._pop_import_scope()
@@ -3996,15 +4011,10 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
-    gen._toplevel_bound_globals = []
     gen._frame_enter_module()
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
-            # AFTER the statement is lowered: a `globals()` inside this
-            # statement must see only the names bound by earlier ones (see
-            # `emit_infra.lower_module_globals_read`).
-            ginf.note_toplevel_bindings(gen, stmt)
     finally:
         gen._in_toplevel_gen = False
     gen._frame_leave()

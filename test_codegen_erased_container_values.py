@@ -3,7 +3,7 @@
 CODEGEN_simd_and_array_values_erase_to_int64.
 
 Each `test_<prefix>_*` here is the Done-when test of an open part doc under
-bugs/ and is RED until its part lands. This file is deliberately NOT a
+bugs/mid/ and is RED until its part lands. This file is deliberately NOT a
 registered gate job: a red probe belongs to its bug doc's command, not to the
 green regression bucket. The landed parts' tests are in
 test_codegen_erased_container_values_pins.py.
@@ -11,7 +11,6 @@ test_codegen_erased_container_values_pins.py.
 Run one probe:  python3 test_codegen_erased_container_values.py p1_alias
                 python3 test_codegen_erased_container_values.py p2_alias_ctor
                 python3 test_codegen_erased_container_values.py p3_comptime
-                python3 test_codegen_erased_container_values.py p4_container_param
 A bare run executes every open probe and is red until they all land.
 """
 
@@ -71,7 +70,7 @@ def test_p1_alias_expands_in_annotations():
     assert 'mojo_list_get_double' in abody, abody
 
 
-# part 2 (CODEGEN_simd_and_array_values_erase_to_int64, alias as constructor callee):
+# part 2 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part2.md):
 # a module-level `alias` naming a constructible type is expanded when it is
 # the CALLEE of a constructor call (`F2(1.0)`, `A4(fill=0.0)`), not only in an
 # annotation.
@@ -153,53 +152,6 @@ def test_p3_comptime_dtype_resolves_in_all_type_positions():
     dbody = _defn(c, 'p3_comptime_id64')
     dsig = dbody.splitlines()[1].strip()
     assert dsig.startswith('double ') and dsig.endswith('(double x)'), dbody
-
-
-# part 4 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part4.md):
-# a container parameter's annotation is the static truth about its contents.
-# `Array[T, N]` and `FixedSizeArray[T, N]` parameters must be the same tracked
-# `MojoList *` a constructor produces, so `a[i]` and `Span(a)` inside the
-# callee see T rather than an `int64_t`/`char` element.
-P4_CONTAINER_PARAM_SRC = (
-    'def take(a: Array[Float32, 4]):\n'
-    '    return a[0]\n'
-    '\n'
-    'def span_take(a: Array[Float32, 4]):\n'
-    '    var s = Span(a)\n'
-    '    return s[0]\n'
-    '\n'
-    'def take_fixed(a: FixedSizeArray[Float32, 4]):\n'
-    '    return a[0]\n'
-    '\n'
-    'def take_int(a: Array[Int, 4]):\n'
-    '    return a[0]\n'
-    '\n'
-    'def take_fixed_int(a: FixedSizeArray[Int, 4]):\n'
-    '    return a[0]\n'
-    '\n'
-    'def f():\n'
-    '    var a = Array[Float32, 4](fill=0.0)\n'
-    '    return take(a)\n'
-)
-
-
-def test_p4_container_param_keeps_element_type():
-    c = _compile(P4_CONTAINER_PARAM_SRC, 'p4_container_param')
-    for fn in ('p4_container_param_take', 'p4_container_param_take_fixed'):
-        body = _defn(c, fn)
-        assert '(MojoList * a)' in body, body
-        assert 'mojo_list_get_int' not in body, body
-        assert 'mojo_list_get_double' in body, body
-    sbody = _defn(c, 'p4_container_param_span_take')
-    assert '_mojo_at_char' not in sbody, sbody
-    assert '_mojo_at_double' in sbody, sbody
-    # An integer element keeps its own typed read.
-    for fn in ('p4_container_param_take_int',
-               'p4_container_param_take_fixed_int'):
-        body = _defn(c, fn)
-        assert '(MojoList * a)' in body, body
-        assert 'mojo_list_get_int' in body, body
-        assert 'mojo_list_get_double' not in body, body
 
 
 if __name__ == '__main__':

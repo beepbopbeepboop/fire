@@ -3905,6 +3905,9 @@ def _materialize(work, key):
         # (modular: `error: invalid call to '<fn>': violated constraint`).
         try:
             elaborate.check_bounds(module_src, tmpl, targs)
+            if kind == 'struct':
+                elaborate._validate_generic_struct_align(
+                    module_src, tmpl, base, list(args), targs)
         except elaborate.WhereConformanceError as _we:
             # A struct's violated `where` is the same diagnostic whichever path
             # instantiates it (emit_resolve reports it the same way).

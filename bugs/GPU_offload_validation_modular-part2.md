@@ -1,7 +1,6 @@
 # GPU offload validation modular - part 2: compile_offload diagnostics
 
-Parent: `bugs/hard/GPU_offload_validation_modular.md` (SPLIT). The part-1
-triage matrix is the `## Triage (part 1)` section of the parent doc.
+Parent: `bugs/hard/GPU_offload_validation_modular.md` (SPLIT). Depends on triage in `bugs/mid/GPU_offload_validation_modular-part1.md`.
 
 ## Scope
 
