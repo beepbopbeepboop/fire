@@ -1,6 +1,6 @@
 # CODEGEN: the yield-from walk-memo pin is red after the generator keyword binder
 
-**Found:** 2026-11-14 by the `SUITE_silentnoop-part1-part2` worker while running
+**Found:** 2026-11-14 by the `SUITE_silentnoop` part 1 worker while running
 `python3 tools/dangling_doc_refs.py --ratchet` (the pin cited a deleted doc;
 that citation is now removed). The test itself was already red on master.
 
