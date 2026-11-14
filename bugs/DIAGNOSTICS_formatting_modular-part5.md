@@ -38,3 +38,36 @@ Next step (not done): find how `main`'s expression statement `invalid(Foo())` is
 Also outstanding: the output has no `file:line:col` location lines (the real compiler prints them), and `emit_stmts.py` carries a second copy of `_comptime_conforms_to_pred` that should be merged with the one in `emit_calls.py`.
 
 Verification for this change: `test_downcast_witness_diagnostic.py`, `test_align_decorator_parametric_diagnostic.py`, `test_conforms_to_condition_diagnostic.py`, `test_comptime_assert_diagnostic.py` pass. `compile_stdlib.py`: FAILED 0 (0 expected, 0 unexpected) before and after. `build_stdlib_dylib.py`: 249 modules, 0 skip lines, before and after.
+
+## Status (2026-11-14, later): root cause of the "never dispatched" call found and fixed
+
+Two defects, both measured with an in-process driver (`compile_to_gimple`,
+0.2 s) rather than a full build:
+
+1. `emit_stmts._gen_stmt_ExprStmt` lowers a bare statement call to a plain
+   function through its own fast path and never reached `_lower_call`'s
+   `_elaborate_generic_call` arm (`_lower_call` was only entered for the
+   argument `Foo()`). `invalid(Foo())` therefore became `invalid (_t1);`, an
+   extern against the weak "unavailable in compiled mode" stub. Fixed: a bare
+   call whose name is in `gen._imported_generics` (and not locally bound) is
+   routed through `_lower_call`.
+2. Even routed, `elaborate_generic_call_inferred` returned None: `x: T` was
+   bound only from `c_to_mojo(ctype)`, and a struct value's C type `Foo *` is
+   not in that table (it is equally a `Pointer[Foo]`, so guessing is wrong).
+   Fixed: `emit_resolve._constructed_struct_type` supplies the Mojo type when
+   the argument is syntactically a direct constructor call of a module struct,
+   threaded as `arg_mojo_types` through `elaborate_generic_call_inferred` ->
+   `infer_type_args` -> `_unify_param_ann`.
+
+Result: `compile_to_gimple` on the real test source now raises `error: function
+instantiation failed` / `note: struct 'invalid_downcast_error::Foo' does not
+have witness table for trait 'std::format::__init__::Writable'`. Test:
+`test_inferred_generic_statement_call.py` (4 cases: statement call
+instantiated, value/statement forms agree, rejected instantiation reported,
+local shadow left alone). Stdlib compile and dylib green (owner run).
+
+Remaining (this doc stays open): the `file:line:col` location lines and the
+instantiation-chain notes the real compiler prints; merging the second
+`_comptime_conforms_to_pred` in `emit_stmts.py` with the one in `emit_calls.py`;
+`_imported_overloads` calls in statement position take the same fast path and
+probably have the same defect (not measured).

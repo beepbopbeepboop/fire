@@ -3466,6 +3466,19 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
     return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
 
 
+def _constructed_struct_type(gen, arg, ctype):
+    """The Mojo type of a call argument that is a direct constructor call of a
+    concrete struct of this module (`Foo()` -> `Foo`), or None. The C type
+    `Foo *` alone cannot name it (it is equally a `Pointer[Foo]`), so type
+    inference for `x: T` is given the type only where the syntax proves it."""
+    if (isinstance(arg, gimple_ctypes.CallExpr)
+            and isinstance(arg.func, gimple_ctypes.IdentExpr)
+            and arg.func.name in gen.struct_field_types
+            and ctype == f'{arg.func.name} *'):
+        return arg.func.name
+    return None
+
+
 def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     """Elaborate a call to an imported generic into a concrete CAS-cached
     instantiation. Handles both the explicit form `Generic[TypeArgs](args)`
@@ -3710,7 +3723,9 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                             g, gen.current_func_name, _ann))
             info = el.elaborate_generic_call_inferred(
                 module_src, g, [ct for ct, _ in arg_pairs],
-                origin_module=elaborate.declaring_module_name(gen, module_src))
+                origin_module=elaborate.declaring_module_name(gen, module_src),
+                arg_mojo_types=[_constructed_struct_type(gen, a, ct)
+                                for a, (ct, _) in zip(node.args, arg_pairs)])
     except RuntimeError:
         # The nested-async-in-a-generic guard above raises RuntimeError
         # deliberately — an honest refusal, not a "try something else"

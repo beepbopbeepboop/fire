@@ -2813,7 +2813,7 @@ _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
 
 
-def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
+def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     """{type-param: concrete value} from unifying ONE parameter's declared type
     annotation against ONE argument's actual C type, or `{}` when the shape is
     not one we can prove.
@@ -2865,7 +2865,10 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     if ann.startswith('Self.'):
         ann = ann[5:]
     if ann in pnames:
-        bound = c_to_mojo(arg_ctype)
+        # `arg_mojo` is the argument's Mojo type when the CALLER can prove it
+        # from the call's own syntax (`Foo()` is a `Foo`), which its C type
+        # `Foo *` cannot say: a `Foo *` is equally a `Pointer[Foo]`.
+        bound = arg_mojo if arg_mojo else c_to_mojo(arg_ctype)
         return {} if bound is None else {ann: bound}
     # `Scalar[dtype]` and `SIMD[dtype, width]`. SIMD is erased to `int64_t`, so
     # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
@@ -3157,7 +3160,7 @@ def _fill_erased_params(template_src, params, binding) -> dict:
     return binding
 
 
-def infer_type_args(template_src: str, arg_ctypes):
+def infer_type_args(template_src: str, arg_ctypes, arg_mojo_types=None):
     """Infer a generic's type args from the C types of its call arguments. For
     each type parameter that appears in a parameter's type ANNOTATION, bind it
     to the Mojo type of the matching argument (`_unify_param_ann` says which
@@ -3177,7 +3180,8 @@ def infer_type_args(template_src: str, arg_ctypes):
     for i, (_pname, ann) in enumerate(fn.params):
         if i >= len(arg_ctypes):
             break
-        for k, v in _unify_param_ann(ann, params, arg_ctypes[i]).items():
+        _am = arg_mojo_types[i] if arg_mojo_types and i < len(arg_mojo_types) else None
+        for k, v in _unify_param_ann(ann, params, arg_ctypes[i], _am).items():
             binding.setdefault(k, v)
     binding = _fill_erased_params(template_src, params, binding)
     # A parameter no argument binds but the template DEFAULTS
@@ -3590,14 +3594,15 @@ class Elaborator:
                 'params': [_mojo_type(p) for p in ptypes]}
 
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes,
-                                        origin_module: str | None = None) -> dict:
+                                        origin_module: str | None = None,
+                                        arg_mojo_types=None) -> dict:
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
         tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
                                  arg_ctypes=arg_ctypes)
         if tmpl is None:
             return None
-        type_args = infer_type_args(tmpl, arg_ctypes)
+        type_args = infer_type_args(tmpl, arg_ctypes, arg_mojo_types)
         if type_args is None:
             return None
         try:

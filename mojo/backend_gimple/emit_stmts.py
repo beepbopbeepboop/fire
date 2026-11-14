@@ -5698,6 +5698,23 @@ def _gen_stmt_ExprStmt(gen, node):
         _constrained_res = ggc._try_lower_constrained(gen, node.value)
         if _constrained_res is not None:
             return
+        # A bare call to a GENERIC function with inferred parameters
+        # (`invalid(Foo())`, no bracket): the instantiation is decided by
+        # `_lower_call`'s `_elaborate_generic_call` arm, which this
+        # statement fast path never reaches. Without this the call fell to
+        # the generic call-building path below as a plain extern named
+        # after the template (`invalid (_t1);`), which links against a
+        # weak "unavailable in compiled mode" stub: the program built, ran,
+        # and silently skipped the call -- including a call whose
+        # instantiation the elaborator REJECTS (bugs/
+        # DIAGNOSTICS_formatting_modular-part5: invalid_downcast_error.mojo
+        # built clean instead of reporting the missing witness table).
+        # Locally-bound names are excluded: a parameter or local shadowing
+        # the template is an ordinary call.
+        if (node.value.func.name in gen._imported_generics
+                and not gen._locally_binds_name(node.value.func.name)):
+            gen._lower_call(node.value)
+            return
         # A bare, value-discarding call to an offloaded DEVICE function.
         # This handler has its own fast path for statement-position calls and
         # never reaches _lower_call, so without this the launch hook only
