@@ -439,10 +439,10 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
                 # branch and the submod.GLOBAL branch both emit).
                 raw_ptr = gen._new_val(_gv_decl, f'{_gv_field}')
-                vp = gen._new_val('void *', f'(void *){raw_ptr}')
-                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t){vp};")
+                vp = gen._cast('void *', raw_ptr)
+                gen._cast_into(f"{gen._cname(symbol_name)}", 'int64_t', vp)
             else:
-                gen._emit(f"  {gen._cname(symbol_name)} = {_gv_field};")
+                gen._copy(f"{gen._cname(symbol_name)}", _gv_field)
             continue
         # BUG-2026-021: resolve the name for real when the module is
         # resolvable — a function-scoped `from sibling import f` used to fall
@@ -790,13 +790,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_merge = gen._new_bb()
             bb_true = gen._new_bb()
             bb_false = bb_merge
-            gen._emit(f"  if ({cond_v_bool}) goto {bb_true}; else goto {bb_false};")
+            gen._cond_goto(f"{cond_v_bool}", bb_true, f"{bb_false}")
             gen._emit_label(bb_true)
             _bscope = ginf._open_block_scope(gen)
             for s in node.then_body:
                 gen.gen_stmt(s)
             ginf._close_block_scope(gen, _bscope)
-            gen._emit(f"  goto {bb_merge};")
+            gen._goto(bb_merge)
             gen._emit_label(bb_merge)
             if getattr(node, 'else_body', None):
                 for s in node.else_body:
@@ -828,7 +828,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             # Unknown at compile time: emit as runtime branch
             _, cv = gen.lower_expr(elif_cond)
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
-            gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
+            gen._cond_goto(cv, bb_t, bb_m)
             gen._emit_label(bb_t)
             gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
             try:
@@ -838,7 +838,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 gen._close_block_scope(_bscope)
             finally:
                 gen._comptime_runtime_depth -= 1
-            gen._emit(f"  goto {bb_m};")
+            gen._goto(bb_m)
             gen._emit_label(bb_m)
             return
         if node.else_body:
@@ -860,13 +860,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
         else:
             bb_false = bb_merge
         bb_true = gen._new_bb()
-        gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
+        gen._cond_goto(cond_v, bb_true, f"{bb_false}")
         gen._emit_label(bb_true)
         _bscope = gen._open_block_scope()
         for s in node.then_body:
             gen.gen_stmt(s)
         gen._close_block_scope(_bscope)
-        gen._emit(f"  goto {bb_merge};")
+        gen._goto(bb_merge)
         # elif chains
         for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
             gen._emit_label(bb_false)
@@ -877,20 +877,20 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 bb_false = gen._new_bb()
             else:
                 bb_false = bb_merge
-            gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
+            gen._cond_goto(f"{elif_cv}", bb_elif_true, f"{bb_false}")
             gen._emit_label(bb_elif_true)
             _bscope = gen._open_block_scope()
             for _elif_stmt in elif_body:
                 gen.gen_stmt(_elif_stmt)
             gen._close_block_scope(_bscope)
-            gen._emit(f"  goto {bb_merge};")
+            gen._goto(bb_merge)
         if has_else:
             gen._emit_label(bb_false)
             _bscope = gen._open_block_scope()
             for s in node.else_body:
                 gen.gen_stmt(s)
             gen._close_block_scope(_bscope)
-            gen._emit(f"  goto {bb_merge};")
+            gen._goto(bb_merge)
         gen._emit_label(bb_merge)
     finally:
         gen._comptime_runtime_depth -= 1
@@ -3034,6 +3034,22 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # to layer on the per-compile `_inline_module_qualifiers` remap,
         # which needs a `gen`.
         from mojo.middle.module_shared import module_qualifier
+        # An EMPTY module name means "no module" (the root compile's own
+        # `GimpleGen` is built without one), so it must sanitize to no
+        # qualifier. Without this guard the remap below answered for it:
+        # `_inline_module_qualifiers` is keyed by the SANITIZED module of
+        # every inlined file AND by `module.lstrip('.')...` for relative
+        # imports (`funcs_shared.py:1276`), so a `from . import x` writes
+        # the key `''` — and the last such writer in a whole-closure build
+        # was `mojo.middle`, making `_sanitize_qualifier('')` return
+        # `mojo_middle`. Every function the ROOT module defined then got a
+        # spurious `mojo_middle_` prefix while its importers' call sites
+        # (resolved through their own non-empty module) stayed bare:
+        # fire.py's `build_executable` was emitted as
+        # `mojo_middle_build_executable_d8f39a` against call sites emitting
+        # `build_executable_d8f39a` — undefined symbol at link.
+        if not q:
+            return ''
         key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
         return module_qualifier(resolved)
@@ -3385,7 +3401,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         _pbase = _pa.split('[', 1)[0].strip()
         if _pbase in ('Tuple', 'tuple') and '[' in _pa:
             gen._ensure_tuple_struct(_pa)
-        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span') or '[' not in _pa:
+        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span', 'Array', 'FixedSizeArray') or '[' not in _pa:
             continue
         _pin = gimple_ctypes._split_top_level_commas(
             _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
@@ -3412,7 +3428,12 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         # char* (the `_mojo_at_int64_t` / `*` errors in python.mojo's
         # Python.dict(tuples: Span[Tuple[...], _]) body, which only became
         # visible once that overload's signature was correct).
-        if _pbase == 'Span':
+        # `Array[T, N]` and `FixedSizeArray[T, N]` carry the count SECOND, so
+        # they take their element from the first bracket argument too — see
+        # `CODEGEN_simd_and_array_values_erase_to_int64-part4`. Without this
+        # their two-arg bracket fails the `len(_pin) != 1` gate below and the
+        # parameter's element type was never seeded.
+        if _pbase in ('Span', 'Array', 'FixedSizeArray'):
             if not _pin or not _pin[0].strip():
                 continue
             _pin = [_pin[0]]
@@ -3440,6 +3461,17 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
             _ec = _annotated_elem_ctype(gen, _eann)
+            if _ec == 'float':
+                # `Float32` elements of a container are stored as C `double`
+                # (the Array/FixedSizeArray constructor arm does the same:
+                # `MojoList`'s float elements are doubles — emit_calls.py
+                # `_elem_ct == 'float' -> 'double'`). Without this a
+                # param-seeded element stayed `float`, so `a[0]` read
+                # `mojo_list_get_float` and `Span(a)` read `_mojo_at_float`,
+                # while the same value built by a constructor read
+                # `mojo_list_get_double`/`_mojo_at_double` — see
+                # `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
+                _ec = 'double'
             if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)
 
@@ -3857,7 +3889,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         _n_body_lines = len(gen.body_lines)
         _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
         if not _last_body_line.strip().startswith('return'):
-            gen._emit('  return 0;')
+            gen._ret('0')
 
     # For main function in root module, rename to _gimple_main and create wrapper
     # For main function in library module, rename to _{module}_main to avoid collision
@@ -3953,7 +3985,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         lines.append(f"#if USE_PYTHON")
         lines.append(f"  Py_Finalize ();")
         lines.append(f"#endif")
-        lines.append(f"  return result;")
+        # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
+        lines.append(f"  return (int)result;")
         lines.append(f"}}")
 
     gen._pop_import_scope()
@@ -3979,10 +4012,15 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
+    gen._toplevel_bound_globals = []
     gen._frame_enter_module()
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
+            # AFTER the statement is lowered: a `globals()` inside this
+            # statement must see only the names bound by earlier ones (see
+            # `emit_infra.lower_module_globals_read`).
+            ginf.note_toplevel_bindings(gen, stmt)
     finally:
         gen._in_toplevel_gen = False
     gen._frame_leave()

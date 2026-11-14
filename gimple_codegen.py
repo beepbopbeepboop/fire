@@ -1855,6 +1855,11 @@ class GimpleGen:
         # here with a literal container gives _collect_self_assigns the real
         # C type AND guarantees the field is valid from construction.
         self._comptime_vals: dict = {}
+        # Module-level `alias NAME = <type>` declarations (annotation spelling
+        # of the target). Populated by the module pre-pass and expanded by
+        # `_resolve_type` and call lowering so an alias behaves like the type
+        # it names. Part 1/2 of CODEGEN_simd_and_array_values_erase_to_int64.
+        self._type_aliases: dict = {}
         # Nesting depth of runtime-degraded `comptime if` emission. When > 0,
         # branch bodies are being generated for a comptime-if whose conditions
         # could not be resolved statically (so all branches are emitted as a
@@ -5872,6 +5877,26 @@ class GimpleGen:
         return grsl._bool_and(self, left, right)
     def _void_call(self, fname: str, arg_pairs: list) -> tuple:
         return grsl._void_call(self, fname, arg_pairs)
+    def _rt_call(self, ret_type: str, fname: str, args: list) -> str:
+        return grsl._rt_call(self, ret_type, fname, args)
+    def _rt_into(self, dst: str, fname: str, args: list) -> None:
+        grsl._rt_into(self, dst, fname, args)
+    def _rt_void(self, fname: str, args: list) -> None:
+        grsl._rt_void(self, fname, args)
+    def _cast(self, ctype: str, val: str) -> str:
+        return grsl._cast(self, ctype, val)
+    def _cast_into(self, dst: str, ctype: str, val: str) -> None:
+        grsl._cast_into(self, dst, ctype, val)
+    def _copy(self, dst: str, src: str) -> None:
+        grsl._copy(self, dst, src)
+    def _goto(self, label: str) -> None:
+        grsl._goto(self, label)
+    def _cond_goto(self, cond: str, then_label: str, else_label: str) -> None:
+        grsl._cond_goto(self, cond, then_label, else_label)
+    def _ret(self, val: str) -> None:
+        grsl._ret(self, val)
+    def _ret_void(self) -> None:
+        grsl._ret_void(self)
     def _emit_label(self, label: str, freq_hint: str=''):
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:

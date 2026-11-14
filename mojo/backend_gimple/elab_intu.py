@@ -3905,9 +3905,6 @@ def _materialize(work, key):
         # (modular: `error: invalid call to '<fn>': violated constraint`).
         try:
             elaborate.check_bounds(module_src, tmpl, targs)
-            if kind == 'struct':
-                elaborate._validate_generic_struct_align(
-                    module_src, tmpl, base, list(args), targs)
         except elaborate.WhereConformanceError as _we:
             # A struct's violated `where` is the same diagnostic whichever path
             # instantiates it (emit_resolve reports it the same way).
@@ -3926,6 +3923,8 @@ def _materialize(work, key):
                 raise
         except Exception:
             pass
+        if kind == 'struct':
+            elaborate._validate_align_decorators_for_struct(module_src, tmpl, base, targs)
         # A VARIADIC binding (part 4: the chain/zip out-res wrapper's `*Ts`
         # consumes every inner) takes `monomorphize_source`'s dedicated
         # pass; its seed-only splice knowledge (each inner's element
