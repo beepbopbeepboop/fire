@@ -262,6 +262,7 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
 
 
 MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
+MERGE_FIX_IDLE = 2    # consecutive fixer rounds that committed nothing before they count as depth like any other
 
 
 def _cap_merge_fix(name, why, kind=None):
@@ -285,7 +286,14 @@ def enqueue_merge_fix(name, t, conflict_text):
     import argparse as _ap
     # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
     # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
-    if C.fixer_depth(name, t, "merge_depth") >= MERGE_FIX_DEPTH:
+    # A fixer that finished without committing anything did not try the merge (2026-11-13: the third fixer of
+    # bug-mid-codegen-simd-and-array found an old merge commit "already present", reported DONE, left the branch
+    # untouched and the next probe conflicted again). That round converged nothing, so it is not a level of the chain:
+    # the next fixer takes its depth, up to MERGE_FIX_IDLE times in a row, then it counts like any other round.
+    depth = C.fixer_depth(name, t, "merge_depth")
+    idle = t.get("merge_idle", 0)
+    forgive = depth > 0 and idle < MERGE_FIX_IDLE and C.ahead_since_base(t) == 0
+    if depth - forgive >= MERGE_FIX_DEPTH:
         _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name, kind="merge-fix depth")
         return
     if not C.doc_exists_for(t.get("claims") or []):
@@ -305,9 +313,11 @@ def enqueue_merge_fix(name, t, conflict_text):
             "Commit the merge. Finish with the REPORT block and a CONTROL-STATUS line."
             % (t["branch"], t["summary"][:150], ", ".join(files) or "see `git merge master`"))
     mname = C.free_task_name("fix-merge-" + name)
+    meta = C.depth_meta(t, "merge_depth", name)
+    meta["merge_depth"] -= forgive                  # an idle round is not a level
+    meta["merge_idle"] = idle + 1 if forgive else 0
     C.cmd_enqueue(_ap.Namespace(name=mname, claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"),
-                                meta=C.depth_meta(t, "merge_depth", name)))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"), meta=meta))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice

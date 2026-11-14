@@ -1,3 +1,5 @@
+SPLIT: GATE_red_recover-land_2026-11-02-part1, GATE_red_recover-land_2026-11-02-part2, (part3 fixed: container-annotated parameter membership diagnostic), GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
+
 # GATE red: 4 landing-gate job(s) red on `recover-land` (gate red)
 
 ## Status (2026-11-02, OPEN; jobs turned OFF to land the round)
@@ -86,4 +88,63 @@ nine stubs (`append`, `update`, `items`, `object`, `issubclass`, `MojoParser`, `
 `is_fstring_literal`, `_walk_lists`) need their own reading. Repro: `python3 fire.py --dump-full fire.py` in an empty
 directory, then `grep -c 'unavailable in compiled mode' fire.ci`. Fixing it is what lets
 `bootstrap-stage1-transitive`, then stage2/stage3, run; do that before re-enabling the gate entries.
+
+## Status 2026-11-13 (replan: five parts, and what re-measures red on this tree)
+
+Split into five parts, all under `bugs/`:
+
+- part 1 — a module-alias call to a sibling module's top-level function must
+  resolve when the caller is compiled first (the import-cycle case). This is
+  the 17 private/table names above.
+- part 2 — a function-body `from X import Y as Z` binds `Z` for a class
+  (`MojoParser`).
+- part 3 — a container-annotated parameter is not "provably Int" in the
+  membership diagnostic. This one is measured to break the closure TODAY, at
+  `mojo/middle/exprtypes.py`: `# ERROR: compiling imported module … 'Int' does
+  not implement the '__contains__' method`.
+- part 4 — `issubclass(...)` lowers instead of emitting a weak stub.
+- part 5 — re-enable the three bootstrap gate jobs once the closure is
+  stub-free, and delete this doc.
+
+Re-measured 2026-11-13, so a later round does not have to:
+
+1. **part 1 reproduces.** A 3-file probe (`mojo/middle/aa.py` and `bb.py`
+   importing each other, each calling the other's top-level function through
+   its alias, a root calling both) compiles with 2 weak stubs and the built
+   binary prints `3` then `b_use: unavailable in compiled mode0` where CPython
+   prints `3\n2\n`, exit 0. It is not the private-name check:
+   `_func_qualifier` already answers `mojo_middle_aa`, but `_func_csym` returns
+   the bare name because the MEMBER is not in `imported_symbols` — the exact
+   gap the *generic* module-qualified branch already fills
+   (`emit_methods.py:3721-3785`).
+2. **part 2 reproduces.** `def f(): from m import Thing as Alias; Alias(3)` (a
+   function-body class alias) emits a weak `Alias` stub; module-level aliases
+   and function aliases do not. `myinterpreter.py:5255` is the `MojoParser`
+   case. Class-as-value in general is a separate, pre-existing gap (measured:
+   `k = A; print(k); k(7)` prints `65` then `Bus error: 10`) and is NOT part 2.
+3. **part 3 reproduces**, minimally:
+   `def has(x, names: frozenset | None = None): return x in names` raises
+   `'Int' does not implement the '__contains__' method` in 0.1 GB / < 1 s.
+   `exprtypes.py:1126` (`_frt[:-2] in known_structs`) is the closure instance.
+4. **part 4 reproduces.** `issubclass(Derived, Base)` compiles to one weak
+   `issubclass` stub and prints the diagnostic three times instead of
+   `True\nFalse\nTrue`.
+
+The other seven names from the closure dump did **not** reproduce on their own
+on this tree, so they are not separate parts: `.append/.update/.items` on an
+unannotated receiver compile to runtime dispatch (0 stubs); `class A(object)`,
+`x is object`, `isinstance(x, object)` and `object` as a value all compile
+clean; a nested `_walk_lists` defined and called in one module resolves; and a
+module-level `from rootmod import helper` called across modules resolves. They
+are expected to be downstream of part 1 (or of the lifted-lambda placeholder
+filed in `bugs/hard/CODEGEN_selfhost_link_two_unqualified_calls.md`); any
+survivor is part 5's inventory.
+
+Also recorded: `mojoc` is no longer in this doc's OFF entry. It, and
+`bootstrap-stage1-transitive`, are still matched by the 23-job `recover-land`
+entry whose doc was deleted — filed as
+`bugs/mid/GATE_off_entry_doc_missing.md`, because that entry can never be
+discharged as written and part 5 cannot turn stage1-transitive on without
+narrowing it.
+
 

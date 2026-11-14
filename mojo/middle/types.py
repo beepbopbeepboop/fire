@@ -28,6 +28,7 @@ import ast_rewriter
 import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
+import mojo.middle.simd_width as _simd_width
 
 def _debug_note(where: str, detail: object='') -> None:
     """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
@@ -1357,20 +1358,14 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray', 'Array'):
-            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
-            # representation level, exactly like `List[T]`: one `MojoList *`
-            # with an element type, no separate fixed-size struct. It was
-            # missing here, so the annotation erased to `int64_t` and every
-            # use lost its static container type. The visible damage was a
-            # `for x in xs:` over an `Array[Int, N]`, where an untyped
-            # iterable emits the runtime dict-or-list dispatch and the DICT
-            # arm declares the loop variable `char *` (it is a key); the
-            # later `var val = <a double>` in the same function then assigned
-            # a double to that `char *` — "cannot convert to a pointer type"
-            # in the stdlib's test_math.mojo. Also in
-            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
-            # be an ordinary imported struct.
+        if base in ('List', 'list', 'InlineArray', 'Array', 'FixedSizeArray'):
+            # `List[T]`/`list[T]`, `InlineArray[T, N]`, `Array[T, N]` and
+            # `FixedSizeArray[T, N]` — Mojo's fixed-size arrays — are LISTs
+            # at this representation level: one `MojoList *` with an element
+            # type, no separate fixed-size struct. `FixedSizeArray` used to be
+            # missing here, so its annotation erased to `int64_t` and a
+            # parameter declared `int64_t a` (then cast to `MojoList *` at
+            # the call) — see `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1411,6 +1406,17 @@ def _mojo_type(ann: str | type | None) -> str:
             # of the dtype. Integer and unresolvable dtypes fall through to
             # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
             # `infra_infer._resolve_type`, not here.
+            #
+            # The lane count is validated here as well as at the constructor
+            # (`emit_calls._lower_call`): an ANNOTATION is the other spelling
+            # that builds a `SIMD[dtype, width]` type, so `var x:
+            # SIMD[DType.float32, 3]` must be rejected even when no
+            # constructor call is lowered. A symbolic width is not decided.
+            _parts = _split_top_level_commas(inner)
+            if len(_parts) >= 2:
+                _w = _simd_width.concrete_width(_parts[1])
+                if _w is not None:
+                    _simd_width.reject_invalid_width(_w, _parts[0])
             dt = _simd_float_dtype_ctype(inner)
             if dt is not None:
                 return dt
@@ -1794,7 +1800,7 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     # own basic block (the same goto shape `_lower_IfExpr` uses).
     bb_raise = gen._new_bb()
     bb_ok = gen._new_bb()
-    gen._emit(f"  if ({got} == 0ULL) goto {bb_raise}; else goto {bb_ok};")
+    gen._cond_goto(f"{got} == 0ULL", bb_raise, bb_ok)
     gen._emit_label(bb_raise)
     gen._emit_call('void', '', 'mojo_raise_attribute_error',
                    [('char *', gen._intern_string(msg))])

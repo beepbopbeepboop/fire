@@ -3236,6 +3236,15 @@ class GimpleGen:
         self._extra_search_paths: list = []
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
+        # Struct/trait records read from a `.mojoc` artifact, name -> record
+        # (see mojo/middle/mojoc_artifact.py). A precompiled import has no
+        # source path to register in `_imported_generic_structs`; the stored
+        # signature itself is what an instantiation is checked against
+        # (`emit_resolve._ensure_generic_struct`), so the structural
+        # conformance failure of the modular `import_mojoc_conformance_error`
+        # case is reported instead of the instantiation silently falling
+        # through to the un-elaborated template.
+        self._mojoc_structs: dict = {}
         # Why an imported generic struct could NOT be elaborated for a
         # construction, one entry per occurrence. The codegen falls back to
         # the un-elaborated template (see
@@ -5868,6 +5877,26 @@ class GimpleGen:
         return grsl._bool_and(self, left, right)
     def _void_call(self, fname: str, arg_pairs: list) -> tuple:
         return grsl._void_call(self, fname, arg_pairs)
+    def _rt_call(self, ret_type: str, fname: str, args: list) -> str:
+        return grsl._rt_call(self, ret_type, fname, args)
+    def _rt_into(self, dst: str, fname: str, args: list) -> None:
+        grsl._rt_into(self, dst, fname, args)
+    def _rt_void(self, fname: str, args: list) -> None:
+        grsl._rt_void(self, fname, args)
+    def _cast(self, ctype: str, val: str) -> str:
+        return grsl._cast(self, ctype, val)
+    def _cast_into(self, dst: str, ctype: str, val: str) -> None:
+        grsl._cast_into(self, dst, ctype, val)
+    def _copy(self, dst: str, src: str) -> None:
+        grsl._copy(self, dst, src)
+    def _goto(self, label: str) -> None:
+        grsl._goto(self, label)
+    def _cond_goto(self, cond: str, then_label: str, else_label: str) -> None:
+        grsl._cond_goto(self, cond, then_label, else_label)
+    def _ret(self, val: str) -> None:
+        grsl._ret(self, val)
+    def _ret_void(self) -> None:
+        grsl._ret_void(self)
     def _emit_label(self, label: str, freq_hint: str=''):
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:

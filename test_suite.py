@@ -1313,7 +1313,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # longer chokes on the dead stack-floor trap arm), so its
                      # marker states 3 and the reader sees 3. The remaining
                      # three are the overflow-trapping hole-count rows in
-                     # bugs/mid/FORMAL_svc_exit_handling_incomplete.md.
+                     # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
                      'gimplerunner': 20,
                      'x86-containers': 1,
@@ -5187,6 +5187,8 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
      'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
     ('reg-conditional-conformance-synthesis-diagnostic',
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
+    ('trait-comptime-member-conformance-diagnostic',
+     'test_trait_comptime_member_conformance_diagnostic.py', 'part 5'),
     ('downcast-witness-diagnostic',
      'test_downcast_witness_diagnostic.py', 'part 7'),
 )

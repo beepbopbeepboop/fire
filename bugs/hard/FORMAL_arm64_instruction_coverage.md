@@ -1,3 +1,4 @@
+SPLIT: FORMAL_arm64_instruction_coverage-part1, FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
 # FORMAL: the extended-register class is claimed by the step table but the generator has no right-hand side for it; the coverage census this doc is is missing
 
 **Status: OPEN.** Measured 2026-11-12 on the merge of the
@@ -10,7 +11,7 @@ master for part of it all along.
 This is the census the docstring of `arm64_reg_or_sp` in
 `lib/ProofLib.lean` (`~line 1850`) points at: "That is a coverage gap
 rather than a wrong answer (the generator refuses such a word rather than
-mis-reading it), and `bugs/mid/FORMAL_arm64_instruction_coverage.md` is where
+mis-reading it), and `bugs/hard/FORMAL_arm64_instruction_coverage.md` is where
 the census of it belongs." The file did not exist, and the statement it
 rests on is only half true (below).
 
@@ -93,5 +94,5 @@ against), and the generator's spelling is the model's spelling arm for arm.
 4. Re-run `TestRegister31` and `TestStepOkDerivesFromStepResult`; both
    classes green before the next formal sweep.
 
-Related: `bugs/mid/FORMAL_svc_exit_handling_incomplete.md` (the svc fix that
+Related: `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` (the svc fix that
 un-masked this; its remaining item is the dynamic `svc`, a different gap).
