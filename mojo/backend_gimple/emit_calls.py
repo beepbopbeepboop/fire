@@ -5031,6 +5031,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'int64_t', gen._cast('int64_t', f"{res}")
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
     if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
+    # `callable(x)` — does the word denote a function at run time? The runtime's
+    # `mojo_is_callable_word` answers from the function/bound-method/variadic-
+    # thunk registries and `dladdr` (a value whose address IS a symbol), which
+    # is the same helper the C++ generator body path uses. Without this arm the
+    # name fell through to a weak stub that PRINTED
+    # "callable: unavailable in compiled mode" to stdout and answered 0 — real:
+    # Tools/c-analyzer's `_normalize_fix_read` (`if callable(fix):`) put that
+    # line in a consumer's output between the program's real rows.
+    if (fname_raw == 'callable' and len(node.args) == 1
+            and not gen._locally_binds_name('callable')):
+        at, av = gen.lower_expr(node.args[0])
+        return 'int', gen._call_expr(
+            'int', 'mojo_is_callable_word', [('int64_t', gen._to_int64(at, av))])
     # `_locally_binds_name` gate: a module can define its OWN top-level
     # `any`/`all` (e.g. tokenize.py's `def any(*choices): return
     # group(*choices) + '*'`, called with exactly 1 arg at

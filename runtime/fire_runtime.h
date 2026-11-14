@@ -700,6 +700,12 @@ MojoList *mojo_exc_args(void *obj);
 
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
+/* Open-file words the runtime handed out (`mojo_open`/`mojo_open_file`/
+ * `mojo_open_file_ex`). Positive evidence only, so a `for` over an untyped
+ * word can tell a file from a list/dict/set. `mojo_file_lines` materializes
+ * its lines (NULL when the word is not a registered file). */
+int      mojo_is_registered_file(int64_t addr);
+MojoList *mojo_file_lines(int64_t v);
 int mojo_boxed_is_str(int64_t v);
 int mojo_is_str_box(int64_t v);
 int64_t mojo_str_box_word(int64_t v);
@@ -2343,6 +2349,8 @@ MojoList *mojo_py_tokenize(char *source);
 int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
 /* open() with optional mode/newline; newline==NULL means "not provided". */
 int64_t mojo_open_file_ex(char *path, char *mode, char *newline);
+/* The builtin `open` as a dynamic-call word (a `_f=open` parameter default). */
+int64_t mojo_open_default(int64_t path, int64_t mode, int64_t newline);
 
 /* Wrappers for C library functions that take pointer-to-pointer args.
    Generated GIMPLE code passes int64_t/void* opaque values; these wrappers
