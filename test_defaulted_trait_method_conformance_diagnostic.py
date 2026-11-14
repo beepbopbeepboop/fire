@@ -66,6 +66,38 @@ def test_negative_partially_applied_default():
     )
 
 
+# Negative: the same partial application in a default's PARAMETER type. The
+# inherited signature is unformable for the struct there too, so the struct
+# does not satisfy the trait; checking only the return type would miss it.
+NEG_PARAM = r'''
+trait Strategy:
+    comptime Value: AnyType
+    def value(self) -> Self.Value: ...
+    def merge[Dest: Copyable, mapFn: fn(Self.Value) -> Dest](
+            self, other: Map[mapFn]) -> Self:
+        return self
+
+struct Map[Strat: Strategy, Dest: Copyable, mapFn: fn(Strat.Value) -> Dest](Strategy):
+    comptime Value = Dest
+    def __init__(out self):
+        pass
+    def value(self) -> Self.Value:
+        var x: Self.Value
+        return x
+
+def main():
+    pass
+'''
+
+
+def test_negative_partially_applied_default_parameter():
+    _assert_err(
+        NEG_PARAM,
+        "does not implement all requirements for 'Strategy'",
+        "'Map[mapFn]'",
+    )
+
+
 # Positive: default returns Self.
 POS_SELF = r'''
 trait Strategy:

@@ -1340,41 +1340,12 @@ def check_conditional_rp_origin(stmts, struct_defs):
 
 
 def _sd_decl_bindings(sd):
-    bindings = {}
-    # comptime aliases / constants declared on the struct
-    try:
-        aliases = getattr(sd, 'comptime_aliases', None) or {}
-        for k, v in aliases.items():
-            try:
-                val = eval_const(v, bindings)
-            except Exception:
-                val = None
-            if isinstance(val, (bool, int, float, str)):
-                bindings[k] = val
-                bindings[f'Self.{k}'] = val
-        for fld in (getattr(sd, 'fields', None) or []):
-            if isinstance(fld, AssignStmt) and isinstance(getattr(fld, 'target', None), IdentExpr):
-                name = fld.target.name
-                try:
-                    val = eval_const(fld.value, bindings)
-                except Exception:
-                    val = None
-                if isinstance(val, (bool, int, float, str)):
-                    bindings.setdefault(name, val)
-                    bindings.setdefault(f'Self.{name}', val)
-            if isinstance(fld, ComptimeVarStmt):
-                name = getattr(fld, 'target', None)
-                if isinstance(name, str):
-                    try:
-                        val = eval_const(getattr(fld, 'value', None), bindings)
-                    except Exception:
-                        val = None
-                    if isinstance(val, (bool, int, float, str)):
-                        bindings.setdefault(name, val)
-                        bindings.setdefault(f'Self.{name}', val)
-    except Exception:
-        pass
-    return bindings
+    """The struct's comptime aliases/constants, with no instantiation args.
+
+    The declaration-time pre-pass has no module source or type arguments, so it
+    is `_struct_targ_bindings` with neither: one reader of the aliases and
+    comptime fields, not a second copy that can drift from it."""
+    return _struct_targ_bindings('', sd, [])
 
 
 def _check_decl_trait_methods(struct_defs, trait_defs):
