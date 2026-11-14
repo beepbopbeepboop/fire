@@ -16,7 +16,8 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from module_loader import STDLIB_PATH
 from build_config import find_gcc
-from build_stdlib_dylib import compile_module_to_c_cached, stdlib_codegen_key
+from build_stdlib_dylib import (compile_module_to_c_cached, last_degradations,
+                                stdlib_codegen_key)
 
 import cas
 
@@ -106,6 +107,21 @@ def discover_roots(base: Path) -> list:
 # FLOOR-GREEN-but-ladder-partial classification (the test_set precedent).
 
 EXPECTED_FAILURES = {
+    # std/simd.mojo — MEASURED 2026-11-14: its `SIMD[exp.dtype, self.length]`
+    # elaboration is refused ("its bracket arguments advance without
+    # converging"), so the module is lowered against the un-elaborated
+    # template. That refusal is a false positive with its own open codegen bug;
+    # the module's C parses, so the gcc syntax check alone would call it green.
+    # `transpile_file` now reads the degradation and reports the file FAILED,
+    # which is the honest verdict; it is listed here because the refusal is a
+    # tracked codegen bug, not a defect in this sweep. THIS ENTRY IS STALE THE
+    # MOMENT THE REFUSAL IS FIXED — the stale-entry check below will say so,
+    # and the fix that removes the refusal deletes this entry with it.
+    'std/simd.mojo':
+        "codegen refused to elaborate SIMD[exp.dtype, self.length] "
+        "('advance without converging'); the module's C is the "
+        "un-elaborated template. Separate open codegen bug.",
+
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(
     # <call>)`, and the `var t = create_task(<call>); ...; await t` shape
@@ -791,6 +807,11 @@ def transpile_file(mojo_file):
     so the parent can aggregate cas.stats across processes (the same pattern as
     build_stdlib_dylib._compile_module_job).
 
+    `success` is False for a module whose generic-struct elaboration failed even
+    when its C parses: the produced C is not the program its source describes,
+    so counting it as passed would report a green run over a wrong artifact
+    (see the model's own "NOT the program its source describes" message).
+
     `auto_gpu` defaults OFF here, which is `--no-gpu`. This sweep is a
     syntax/coverage instrument, not a GPU target, and automatic offload costs
     it real work for output it cannot check: `gen_module`'s synthesis pass
@@ -817,6 +838,23 @@ def transpile_file(mojo_file):
                                                linkable=False)
         except Exception as e:
             return False, f"codegen: {str(e)[:120]}", False, False
+
+        # A module built through a failed generic-struct elaboration is NOT
+        # the program its source describes: the struct was lowered against its
+        # un-elaborated template, so its type parameters are `int64_t` where
+        # the source says otherwise. It still parses, which is exactly why
+        # this verdict has to be taken HERE rather than left to gcc: without
+        # it the file counts as PASSED while the compiler itself says the C is
+        # wrong. `build_stdlib_dylib`'s message is for a human reading stderr;
+        # `last_degradations()` is the machine-readable same fact, for THIS
+        # module (a cache hit answers for itself, never for its predecessor).
+        degraded = last_degradations()
+        if degraded:
+            return (False,
+                    f"elaboration: {len(degraded)} generic struct "
+                    f"elaboration(s) failed, so the C is not the program its "
+                    f"source describes: {degraded[0]}",
+                    cg_was_hit, False)
 
         if not c_src.strip():
             return True, None, cg_was_hit, True  # empty file, no gcc step needed

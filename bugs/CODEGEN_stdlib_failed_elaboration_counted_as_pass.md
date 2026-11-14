@@ -38,3 +38,20 @@ FAILED (unexpected unless it is listed in `EXPECTED_FAILURES` with a reason). Th
 - A module with a failed elaboration is counted in `FAILED`, not `PASSED`.
 - Today's `std/simd.mojo` case appears as a FAILED line with its reason.
 - No change in the count of modules that genuinely compile.
+
+## Done when
+
+`python3 test_module_cache.py` (the `modcache` job) passes the checks added with
+the fix:
+
+- `verdict: a module built through a failed elaboration is NOT a pass`
+- `verdict: ... and the FAILED reason names the degradation`
+- `elaborate: ... so a cache hit answers for itself, not for the last degraded module`
+- `elaborate: ... a degraded L1 hit still reports DEGRADED`
+
+Before the fix the first one fails: `compile_stdlib.transpile_file` returns
+`(True, None, ...)` for a module whose C is the un-elaborated template. The
+`std/simd.mojo` case is listed in `EXPECTED_FAILURES` with the reason, because
+the refusal itself is the separate open bug
+`bugs/CODEGEN_simd_exp_staticTuple_refusal.md`; the sweep's summary then reads
+one expected, zero unexpected, and the module is no longer in `PASSED`.
