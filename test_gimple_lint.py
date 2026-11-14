@@ -218,6 +218,62 @@ def test_rt_sigs() -> None:
     check(not rt_call.arg_needs_repr_cast('int64_t', 'MojoList *'), 'erased values are not this rule\'s')
 
 
+# Runtime calls still spelled as TEXT inside gen._emit(...) / gen._new_val(...).
+# Such a call never reaches the argument conversion in `_emit_call` /
+# `_rt_call`.  May only shrink; the way to shrink it is
+#     gen._rt_call(ret_ctype, 'mojo_x', [a, b])   # value
+#     gen._rt_into(dst, 'mojo_x', [a, b])         # into an existing temp
+#     gen._rt_void('mojo_x', [a, b])              # effect only
+TEXT_CALL_BASELINE = 26
+
+
+def count_text_calls() -> tuple:
+    import ast
+    import glob
+    import re
+    from mojo.middle.rt_sigs import RT_SIGS
+    pat = re.compile(r'\b((?:mojo|string)_\w+) ?\(')
+    n = 0
+    where: list[str] = []
+    files = ([os.path.join(ROOT, 'gimple_codegen.py')]
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_*.py')))
+             + sorted(glob.glob(os.path.join(ROOT, 'mojo', 'middle', '*.py'))))
+    for path in files:
+        with open(path, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('_emit', '_new_val') and node.args):
+                continue
+            arg = node.args[-1]
+            text = ''
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                text = arg.value
+            elif isinstance(arg, ast.JoinedStr):
+                text = ''.join(v.value for v in arg.values
+                               if isinstance(v, ast.Constant) and isinstance(v.value, str))
+            hit = [m for m in pat.findall(text) if m in RT_SIGS]
+            if hit:
+                n += 1
+                where.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}: {hit[0]}")
+    return n, where
+
+
+def test_text_calls() -> None:
+    print("text calls: runtime calls spelled as text may only shrink")
+    n, where = count_text_calls()
+    if n > TEXT_CALL_BASELINE:
+        for w in where:
+            print("        " + w)
+        check(False, f"{n} runtime calls are spelled as text, baseline {TEXT_CALL_BASELINE} -- "
+                     f"use gen._rt_call / gen._rt_into / gen._rt_void")
+    elif n < TEXT_CALL_BASELINE:
+        check(False, f"{n} runtime calls are spelled as text, baseline {TEXT_CALL_BASELINE} -- "
+                     f"fixed! lower TEXT_CALL_BASELINE to {n} in test_gimple_lint.py")
+    else:
+        check(True, f"{n} runtime calls spelled as text (baseline {TEXT_CALL_BASELINE})")
+
+
 def dump_corpus(out_dir: str) -> list[str]:
     """Dump every CORPUS source to GIMPLE text; four at a time."""
     procs = []
@@ -283,6 +339,7 @@ def main() -> int:
     if 'unit' in which:
         test_unit()
         test_rt_sigs()
+        test_text_calls()
     if 'ratchet' in which:
         test_ratchet()
     print(f"\n{'FAILED' if _fails else 'passed'}: {_fails} failure(s)")

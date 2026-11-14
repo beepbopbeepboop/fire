@@ -1372,7 +1372,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 idx64 = gen._new_val('int64_t', f"(int64_t){i}")
                 sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
                 gen._assign_target(tgt, set_et, sev)
-            total = gen._new_val('int64_t', f"mojo_list_len ({lp})")
+            total = gen._rt_call('int64_t', 'mojo_list_len', [f"{lp}"])
             star_start = gen._new_val('int64_t', f"(int64_t){n_before}")
             # GIMPLE (-fgimple) requires both operands of a binary expr to
             # have the identical type, so each literal operand must go
@@ -1381,7 +1381,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # mismatch in binary expression"), not a warning.
             n_after64 = gen._new_val('int64_t', f"(int64_t){n_after}")
             star_stop = gen._new_val('int64_t', f"{total} - {n_after64}")
-            star_v = gen._new_val('MojoList *', f"mojo_list_slice ({lp}, {star_start}, {star_stop})")
+            star_v = gen._rt_call('MojoList *', 'mojo_list_slice', [f"{lp}", star_start, star_stop])
             if lp in getattr(gen, '_maybe_kinds_vals', ()):
                 gen._maybe_kinds_vals.add(star_v)
                 if lp in getattr(gen, '_struct_slot_kinds', {}):
@@ -1723,7 +1723,7 @@ def _gen_stmt_AssignStmt(gen, node):
             gen._dyn_word_locals.add(_as_str(tname))
         elif vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
             _bw = gen._new_temp('int64_t')
-            gen._emit(f'  {_bw} = mojo_box_word ({v});')
+            gen._rt_into(_bw, 'mojo_box_word', [f"{v}"])
             v = _bw
             gen._dyn_word_vals.add(v)
         # A word of unknown kind bound to a local makes the LOCAL one too
@@ -2554,7 +2554,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # `bytes` value is a TypeError real code never reaches).
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
             v64 = gen._to_int64(vtype, v)
-            gen._emit(f"  mojo_bytearray_setitem ({obj_v}, {idx64}, {v64});")
+            gen._rt_void('mojo_bytearray_setitem', [f"{obj_v}", idx64, v64])
         elif ot == 'MojoDict *':
             # Record the dict's value type so later reads recover it (esp.
             # pointer values: dict-of-dicts/lists/sets, or a plain struct
@@ -2884,12 +2884,12 @@ def _gen_stmt_AssignStmt(gen, node):
             if vtype == 'MojoBytes *':
                 _rhs_b = v
             elif vtype == 'MojoList *':
-                _rhs_b = gen._new_val('MojoBytes *', f"mojo_bytes_from_list ({v})")
+                _rhs_b = gen._rt_call('MojoBytes *', 'mojo_bytes_from_list', [f"{v}"])
             else:
                 _rhs_b = gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(vtype, v))
             if stgt.step is None:
                 start_v, stop_v = gen._lower_slice_bounds(stgt)
-                gen._emit(f"  mojo_bytearray_splice ({obj_v}, {start_v}, {stop_v}, {_rhs_b});")
+                gen._rt_void('mojo_bytearray_splice', [f"{obj_v}", f"{start_v}", f"{stop_v}", f"{_rhs_b}"])
                 return
         lp = obj_v if ot == 'MojoList *' else gen._coerce_to_type(
             'int64_t', 'MojoList *', gen._to_int64(ot, obj_v))
@@ -2906,7 +2906,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # negative-index / omitted-stop normalization) with slice READS
             # and `del x[a:b]`.
             start_v, stop_v = gen._lower_slice_bounds(stgt)
-            gen._emit(f"  mojo_list_splice ({lp}, {start_v}, {stop_v}, {rhs});")
+            gen._rt_void('mojo_list_splice', [f"{lp}", f"{start_v}", f"{stop_v}", rhs])
         else:
             # `x[a:b:k] = y` — an "extended slice" assignment: no size
             # change, each selected slot overwritten in order, and Python
@@ -2928,8 +2928,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 has_stop = '1'
             else:
                 stop64, has_stop = '0', '0'
-            gen._emit(f"  mojo_list_assign_step ({lp}, {has_start}, {start64}, "
-                      f"{has_stop}, {stop64}, {step64}, {rhs});")
+            gen._rt_void('mojo_list_assign_step', [f"{lp}", f"{has_start}", f"{start64}", f"{has_stop}", f"{stop64}", step64, rhs])
     elif isinstance(node.target, gimple_ctypes.CallExpr) and isinstance(node.target.func, gimple_ctypes.IdentExpr) \
             and node.target.func.name == '__get_address_as_uninit_lvalue' \
             and node.target.args:
@@ -4661,7 +4660,7 @@ def _gen_stmt_DelStmt(gen, node):
             # branch reasoning for the same ambiguity.
             lp = ov if ot == 'MojoList *' else gen._coerce_to_type(
                 'int64_t', 'MojoList *', gen._to_int64(ot, ov))
-            gen._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
+            gen._rt_void('mojo_list_del_slice', [f"{lp}", f"{start_v}", f"{stop_v}"])
             continue
         if not isinstance(target, gimple_ctypes.SubscriptExpr):
             gimple_ctypes._debug_note('DelStmt target not supported (only container[key]/[slice])',
@@ -4673,13 +4672,13 @@ def _gen_stmt_DelStmt(gen, node):
             start_v, stop_v = gen._lower_slice_bounds(target.index)
             lp = ov if ot == 'MojoList *' else gen._coerce_to_type(
                 'int64_t', 'MojoList *', gen._to_int64(ot, ov))
-            gen._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
+            gen._rt_void('mojo_list_del_slice', [f"{lp}", f"{start_v}", f"{stop_v}"])
             continue
         if ot == 'MojoBytes *':
             # `del ba[i]` — bytearray element removal.
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
-            gen._emit(f"  mojo_bytearray_delitem ({ov}, {idx64});")
+            gen._rt_void('mojo_bytearray_delitem', [ov, idx64])
             continue
         if ot == 'MojoDict *':
             key_type, key_val = gen.lower_expr(target.index)
@@ -5647,7 +5646,7 @@ def _emit_try_loop_exit_exc_pops(gen) -> None:
             _npops += 1
             _exited.append(_i)
     for _i in range(_npops):
-        gen._emit("  mojo_exc_pop ();")
+        gen._rt_void('mojo_exc_pop', [])
     # Innermost first: the regions are recorded outermost-first.
     _bodies = getattr(gen, '_try_finally_bodies', None) or []
     for _i in reversed(_exited):
@@ -6020,7 +6019,7 @@ def _gen_stmt_ExprStmt(gen, node):
             if _ex_t not in ('int', 'int64_t', '_Bool'):
                 _msg = gen._stringify_value(_ex_t, _ex_v)
                 gen._emit_call('void', '', 'mojo_print_stderr', [('char *', _msg)])
-                gen._emit("  exit (1);")
+                gen._rt_void('exit', ['1'])
                 return
 
         # Handle keyword arguments for regular function calls
@@ -6364,7 +6363,7 @@ def _gen_stmt_RaiseStmt(gen, node):
     # message, and object were already set when it was first raised (or
     # by the handler binding below), so just propagate.
     if node.value is None:
-        gen._emit("  mojo_raise ();")
+        gen._rt_void('mojo_raise', [])
         return
 
     # `raise ExcName(...)` / `raise ExcName` (constructor call or bare
@@ -6402,7 +6401,7 @@ def _gen_stmt_RaiseStmt(gen, node):
     # below) is still live in the runtime slot; leave it alone.
 
     if exc_name:
-        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id(exc_name)});")
+        gen._rt_void('mojo_exc_type_set', [f"{gen._exc_type_id(exc_name)}"])
     if exc_name == 'StopIteration' and isinstance(val, gimple_ctypes.CallExpr) and len(val.args) == 1:
         # `raise StopIteration(x)`: `ex.value` is x (set AFTER the type, which clears it).
         _sv_t, _sv_v = gen.lower_expr(val.args[0])
@@ -6429,8 +6428,8 @@ def _gen_stmt_RaiseStmt(gen, node):
             mv = gen._call_expr('char *', 'mojo_str_dup_registered', [('char *', mv)])
             # Build exception object with args list (root cause: args must travel with object)
             args_list = gen._new_temp('MojoList *')
-            gen._emit(f"  {args_list} = mojo_list_new ();")
-            gen._emit(f"  mojo_list_append_str ({args_list}, {mv});")
+            gen._rt_into(args_list, 'mojo_list_new', [])
+            gen._rt_void('mojo_list_append_str', [args_list, mv])
             # A STRING in both arms: `_exc_type_id` is an int and "0" is a str,
             # which the compiled compiler joins into one slot, so `str(type_tag)`
             # below read a number as text and crashed in `new_val`.
@@ -6443,10 +6442,10 @@ def _gen_stmt_RaiseStmt(gen, node):
             exc_text = gen._call_expr('char *', 'mojo_exc_text_new',
                                       [('int64_t', gen._new_val('int64_t', type_tag)), ('char *', mv),
                                        ('MojoList *', args_list)])
-            gen._emit(f"  mojo_exc_obj_set ({exc_text});")
-            gen._emit(f"  mojo_exc_msg_set ({exc_text});")
+            gen._rt_void('mojo_exc_obj_set', [exc_text])
+            gen._rt_void('mojo_exc_msg_set', [exc_text])
 
-    gen._emit("  mojo_raise ();")
+    gen._rt_void('mojo_raise', [])
 
 
 
@@ -6576,7 +6575,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         # Retrieve the exception object from the runtime.
         # Use a temp to avoid casting function call results in GIMPLE.
         temp_var = gen._new_temp('void *')
-        gen._emit(f"  {temp_var} = mojo_exc_obj_get ();")
+        gen._rt_into(temp_var, 'mojo_exc_obj_get', [])
         bound = gen._new_temp(exc_ctype)
         gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
         # The name is a heap box when a nested closure or a class declared in
@@ -6663,7 +6662,7 @@ def _gen_stmt_TryStmt(gen, node):
     # on an exception (doc/OWNERSHIP_MODEL.md's exception-handling option 2)
     # — must happen after the _mojo_exc_top bump above (it indexes the
     # checkpoint table by that level) and before setjmp.
-    gen._emit("  mojo_cleanup_checkpoint_save ();")
+    gen._rt_void('mojo_cleanup_checkpoint_save', [])
     # The cell pointers this region's handler restores (see the bb_exc block
     # below). Taken before setjmp, so the values survive the longjmp.
     _cell_snap = gmp._cattr_snapshot(gen)
@@ -6723,7 +6722,7 @@ def _gen_stmt_TryStmt(gen, node):
     # its finally twice — over-counting any counter the finally mutated,
     # and, in a `while` loop around the try, skipping loop iterations.)
     if not _had_terminal:
-        gen._emit("  mojo_exc_pop ();")
+        gen._rt_void('mojo_exc_pop', [])
         if bb_else:
             gen._emit(f"  goto {bb_else};")
         elif node.finally_body:
@@ -6772,7 +6771,7 @@ def _gen_stmt_TryStmt(gen, node):
         gen._last_was_terminal = False
 
     gen._emit_label(bb_exc)
-    gen._emit("  mojo_exc_pop ();")
+    gen._rt_void('mojo_exc_pop', [])
     # An exception that unwound out of a call may have left a nested execution's
     # cell in a function-scoped class's global (see emit_methods._cattr_restore_
     # begin). This function's own cells are restored here, before any handler
@@ -6830,7 +6829,7 @@ def _gen_stmt_TryStmt(gen, node):
         # propagate to the enclosing frame instead of guessing.
         exc_type_t = gen._new_temp('int64_t')
         gen._declare_var(exc_type_t, 'int64_t')
-        gen._emit(f"  {exc_type_t} = mojo_exc_type_get ();")
+        gen._rt_into(exc_type_t, 'mojo_exc_type_get', [])
 
         # Plain loop, not `{id(h): gen._new_bb() for h in handlers}` — a
         # dict comprehension with int keys (`id(h)`) and str VALUES: the
@@ -6924,7 +6923,7 @@ def _gen_stmt_TryStmt(gen, node):
         for s in node.finally_body:
             gen.gen_stmt(s)
         ginf._close_block_scope(gen, _bscope)
-    gen._emit("  mojo_raise ();")
+    gen._rt_void('mojo_raise', [])
 
     if bb_else:
         gen._emit_label(bb_else)
@@ -7319,7 +7318,7 @@ def _gen_stmt_WithStmt(gen, node):
             _ar_cell_snap = gmp._cattr_snapshot(gen)
             # Checkpoint the cleanup-thunk stack exactly like the try/
             # except idiom: on the longjmp the runtime unwinds to it.
-            gen._emit("  mojo_cleanup_checkpoint_save ();")
+            gen._rt_void('mojo_cleanup_checkpoint_save', [])
             gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
             gen._emit(f"  {cond_t} = {sj_ret} != 0;")
             gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
@@ -7332,7 +7331,7 @@ def _gen_stmt_WithStmt(gen, node):
                     # the block did NOT raise, so the expectation fails.
                     # (Pop first, so the stack is balanced if the driver
                     # no_raise call ever becomes a no-op.)
-                    gen._emit("  mojo_exc_pop ();")
+                    gen._rt_void('mojo_exc_pop', [])
                     gen._emit("  assert_raises_no_raise ();")
                 # break/continue lower to a bare `goto <loop label>;` and
                 # leave this protected region without raising — the block
@@ -7355,12 +7354,12 @@ def _gen_stmt_WithStmt(gen, node):
             ginf._close_block_scope(gen, _bscope)
 
             if not gen._last_was_terminal:
-                gen._emit("  mojo_exc_pop ();")
+                gen._rt_void('mojo_exc_pop', [])
                 gen._emit("  assert_raises_no_raise ();")
                 gen._emit(f"  goto {bb_after};")
 
             gen._emit_label(bb_exc)
-            gen._emit("  mojo_exc_pop ();")
+            gen._rt_void('mojo_exc_pop', [])
             gmp._cattr_restore_emit(gen, _ar_cell_snap)
             # The block raised, as required: swallow and continue. The
             # exception state (type tag / message) is left as-is — the
@@ -7432,7 +7431,7 @@ def _gen_stmt_WithStmt(gen, node):
         gen._emit(f"  _mojo_exc_top = {temp_inc};")
         gen._emit(f"  {temp_top2} = _mojo_exc_top;")
         # See _gen_stmt_TryStmt's identical checkpoint-save call for why.
-        gen._emit("  mojo_cleanup_checkpoint_save ();")
+        gen._rt_void('mojo_cleanup_checkpoint_save', [])
         # GIMPLE: pass array element directly to setjmp (decays to int*)
         gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
         gen._emit(f"  {cond_t} = {sj_ret} != 0;")
@@ -7495,22 +7494,22 @@ def _gen_stmt_WithStmt(gen, node):
         # codegen instead of `try`). It does NOT re-emit the teardown when the
         # interceptor already did it above (`_teardown_done`).
         if not gen._last_was_terminal:
-            gen._emit("  mojo_exc_pop ();")
+            gen._rt_void('mojo_exc_pop', [])
             _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
             gen._emit(f"  goto {bb_after};")
         elif not _teardown_done[0]:
-            gen._emit("  mojo_exc_pop ();")
+            gen._rt_void('mojo_exc_pop', [])
             _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
 
         gen._emit_label(bb_exc)
-        gen._emit("  mojo_exc_pop ();")
+        gen._rt_void('mojo_exc_pop', [])
         # The body's exception arrived by longjmp (mojo_raise), which does not set
         # the pending flag: it is in flight by definition here. Mark it, so the
         # re-raise check after the exits sees it. Only a generator context
         # manager that swallows the exception clears it, and that is the one
         # suppression the check exists to honour. Without the mark the exception
         # was dropped silently, and the enclosing `try` never ran its handler.
-        gen._emit("  mojo_exc_pending_set (1);")
+        gen._rt_void('mojo_exc_pending_set', ['1'])
         _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs, True)
         # A context manager may suppress the exception (e.g. a
         # @contextlib.contextmanager generator that catches and does not
@@ -7523,7 +7522,7 @@ def _gen_stmt_WithStmt(gen, node):
         _bb_supp = gen._new_bb()
         gen._emit(f"  if ({_has_pend}) goto {_bb_reraise}; else goto {_bb_supp};")
         gen._emit_label(_bb_reraise)
-        gen._emit("  mojo_raise ();")
+        gen._rt_void('mojo_raise', [])
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_after};")
         gen._emit_label(_bb_supp)

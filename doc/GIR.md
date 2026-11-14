@@ -1,6 +1,6 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0 and 1 landed 2026-11-13. This file is the plan and the rules. Read it
+Status: stages 0, 1 and 2a landed 2026-11-13. This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
 
 ## 1. What is wrong today (measured 2026-11-13)
@@ -145,12 +145,22 @@ that is meant to be behaviour-preserving:
   `BASELINE` in `test_gimple_lint.py` is empty and must stay empty.
   Not covered: a call spelled as TEXT (`gen._new_val(t, f"mojo_x ({v})")`)
   never reaches `_emit_call`. That is stage 2.
-- **Stage 2. The builder.** `mojo/ir/build.py`: `call(sig_name, args)`,
-  `cast(value, type)`, `copy`, `binop`, `cmp`, `load_field`, `store_field`,
-  `br`, `cond_br`, `ret`, `label`. Each returns a typed value and appends an
-  `Instr`. `gen._emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
-  Ratchet: the count of `gen._emit(f"` and of runtime calls spelled as text
-  inside `_new_val` (544 today) may only shrink.
+- **Stage 2a (landed 2026-11-13). Runtime calls take values, not text.**
+  `gen._rt_call(ret, 'mojo_x', [a, b])`, `gen._rt_into(dst, 'mojo_x', [a, b])`
+  and `gen._rt_void('mojo_x', [a, b])` (`emit_resolve.py`) are THE way to call
+  a runtime function. They take values, never `(ctype, value)` claims, and
+  run the same `_repr_fix_args` as `_emit_call`. A script rewrote 501 of the
+  527 text-spelled runtime calls; non-compiler programs in the corpus are
+  byte-identical before and after. `TEXT_CALL_BASELINE` in
+  `test_gimple_lint.py` (26) may only shrink; the remainder is
+  `bugs/CODEGEN_runtime_calls_spelled_as_text.md`.
+- **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
+  `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
+  `label`. Each returns a typed value and appends an `Instr`.
+  `_rt_call`/`_emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
+  Ratchet: the count of `gen._emit(f"` (about 900 after stage 2a) may only
+  shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them) are the next
+  mechanical batch: `gen._cast(T, x)`.
 - **Stage 3. Statements are `Instr`, not strings.** `gen.body_lines` becomes a
   list of `Instr`; the four function-assembly sites print it. `_emit_raw`'s
   text sniffing (`' = mojo_'`, `startswith('return ')`) and `EmitFrame`'s

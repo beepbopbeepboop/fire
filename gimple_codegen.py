@@ -5868,6 +5868,12 @@ class GimpleGen:
         return grsl._bool_and(self, left, right)
     def _void_call(self, fname: str, arg_pairs: list) -> tuple:
         return grsl._void_call(self, fname, arg_pairs)
+    def _rt_call(self, ret_type: str, fname: str, args: list) -> str:
+        return grsl._rt_call(self, ret_type, fname, args)
+    def _rt_into(self, dst: str, fname: str, args: list) -> None:
+        grsl._rt_into(self, dst, fname, args)
+    def _rt_void(self, fname: str, args: list) -> None:
+        grsl._rt_void(self, fname, args)
     def _emit_label(self, label: str, freq_hint: str=''):
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:
