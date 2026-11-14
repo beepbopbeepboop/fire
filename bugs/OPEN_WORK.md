@@ -49,7 +49,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/mid/FORMAL_arm64_instruction_coverage.md` | **unclaimed** | the extended-register class is claimed by the step table but the generator has no right-hand side for it; the coverage census this doc is is missing |
+| `bugs/hard/FORMAL_arm64_instruction_coverage.md` | **unclaimed** | the extended-register class is claimed by the step table but the generator has no right-hand side for it; the coverage census this doc is is missing |
 
 ---
 
