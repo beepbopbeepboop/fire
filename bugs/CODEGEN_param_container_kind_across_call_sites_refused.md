@@ -1,8 +1,9 @@
 # CODEGEN: a parameter whose call sites disagree on container kind, used as a container, is refused
 
-**Found:** 2026-11-13, from `bugs/hard/SUITE_silentnoop.md` via
-`bugs/mid/SUITE_silentnoop-part1.md` / `bugs/SUITE_silentnoop-part2.md` (whose
-Escalation says to file a deep defect rather than force a shallow fix).
+**Found:** 2026-11-13, from the `silentnoop` job of `make check`
+(`test_silent_noop_iter.py`, tracked by the `SUITE_silentnoop` bug), whose
+investigation part escalated a deep defect to its own doc rather than forcing
+a shallow fix.
 
 ## Symptom
 
