@@ -711,15 +711,23 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         'Optional', 'Variant', 'Tuple',
         'InlineArray', 'InlineList', 'StaticTuple',
     })
-    if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
+    # A class imported under a new bare name inside a function body
+    # (`from M import Class as A`): the alias's identity is the DEFINING
+    # name, recorded by the same shared writer (`_note_struct_import_alias`)
+    # the module-scope path uses. The bare no-signature import registration
+    # no longer emits for such an alias, so the only thing standing between
+    # `A` used as a value and the class-value lowering below is this map.
+    _class_as_value = (getattr(gen, '_struct_import_aliases', None)
+                       or {}).get(name, name)
+    if _class_as_value in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
         # `mojo_type_add_base`; CODEGEN_enum_runtime_class_creation stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
-        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
+        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(_class_as_value)}LL;  /* class {_class_as_value} as value */')
         return 'int64_t', t
-    if (name in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
+    if (_class_as_value in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
         # int64_t, not int: this placeholder commonly flows into a (void *)
         # cast (e.g. boxed for mojo_obj_getattr on `UInt64.MAX`-style class
         # refs) — a 4-byte int there is a real -Wint-to-pointer-cast size
