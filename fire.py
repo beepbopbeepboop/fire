@@ -178,6 +178,33 @@ def _extract_diagnostic_format(args: list):
     return fmt, rest
 
 
+def _extract_use_mlir_diagnostics(args: list, diagnostic_format: str):
+    """Pull --use-mlir-diagnostics[=true|false] out of an argument list. There
+    is no MLIR layer here, so the flag has no effect on text output, but the
+    modular front end rejects the JSON stream combined with it, and so do we:
+    `{"kind":"error","message":"--diagnostic-format=json is incompatible with
+    --use-mlir-diagnostics=true"}` on stdout/stderr, exit 1 (the spelling is
+    the one modular's test/mojo-parser/diagnostic_format.mojo checks)."""
+    rest = []
+    value = None
+    for a in args:
+        if a == '--use-mlir-diagnostics':
+            value = 'true'
+        elif a.startswith('--use-mlir-diagnostics='):
+            value = a.split('=', 1)[1]
+        else:
+            rest.append(a)
+    if value not in (None, 'true', 'false'):
+        print(f"error: invalid value '{value}' for --use-mlir-diagnostics "
+              "(expected true or false)", file=sys.stderr)
+        sys.exit(2)
+    if value == 'true' and diagnostic_format == 'json':
+        print('{"kind":"error","message":"--diagnostic-format=json is incompatible '
+              'with --use-mlir-diagnostics=true"}', file=sys.stderr)
+        sys.exit(1)
+    return rest
+
+
 def _extract_backend(args: list):
     """Pull --backend=<name> (or --backend <name>) out of an argument list.
 
@@ -1345,6 +1372,7 @@ def main():
     # and never reaches the executed program as an argument of its own.
     auto_gpu, rest = _extract_gpu_flags(rest)
     diagnostic_format, rest = _extract_diagnostic_format(rest)
+    rest = _extract_use_mlir_diagnostics(rest, diagnostic_format)
     if formal and not backend_explicit:
         # --formal alone means the arm64 formal backend, but an explicit
         # --backend wins: `build --formal --backend=x86_64` is how the x86-64
