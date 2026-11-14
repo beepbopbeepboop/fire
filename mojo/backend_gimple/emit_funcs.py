@@ -716,8 +716,22 @@ def _gen_stmt_FromImportStmt(gen, node):
         # consults, and `Alias(...)` inside the function built the generic
         # opaque-constructor fallback. Same shared writer, so the two
         # scopes cannot disagree about what the alias names.
+        #
+        # When the writer confirms the aliased name IS a class, stop here:
+        # the module-scope twin deliberately never puts a class binding in
+        # `imported_symbols` ("a function I can emit an extern for"), and
+        # falling through to the bare no-signature tail below did exactly
+        # that — the extern pass emitted a weak `int64_t Alias (...)`
+        # "unavailable in compiled mode" stub and every value read of the
+        # alias bound to it (`g = Alias` printed `<function Alias at ...>`).
+        # The alias's identity lives in `_struct_import_aliases`, which the
+        # constructor dispatch and the IdentExpr class-value lowering both
+        # consult. First-writer-wins is preserved by the shared writer.
+        _is_class_alias = None
         if not getattr(node, 'wildcard', False):
-            gen._note_struct_import_alias(node.module, symbol_name, name)
+            _is_class_alias = gen._note_struct_import_alias(node.module, symbol_name, name)
+        if _is_class_alias is not None:
+            continue
         # Use known signature if available. Default to 'int64_t' (NOT
         # 'int') for unknown symbols — this must match the fallback
         # return type every other unknown-callee path in this file
@@ -2721,31 +2735,6 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         home[bare_name] = gimple_codegen._AMBIGUOUS_FUNC_HOME
 
 
-def _find_decl_location(gen, module: str, name: str):
-    """Best-effort `(path, line, col)` of `name`'s top-level declaration in
-    `module`'s source, for an ambiguity note. None when the module or the
-    declaration cannot be located."""
-    import os as _os
-    try:
-        _p = gen._submodule_source_path(module)
-    except Exception:
-        _p = None
-    if not _p:
-        return None
-    try:
-        with open(_p, 'r') as _f:
-            _lines = _f.readlines()
-    except Exception:
-        return None
-    import re as _re
-    _pat = _re.compile(r'^\s*(?:def|fn|struct|trait|enum|alias|comptime|var|let)\s+'
-                       + _re.escape(name) + r'\b')
-    for _i, _ln in enumerate(_lines, 1):
-        if _pat.match(_ln):
-            return (_p, _i, 1)
-    return None
-
-
 def _push_import_scope(gen) -> dict:
     """Push a fresh lexical-scope import-binding map onto
     _import_scope_stack (see its docstring) and return it — used at the
@@ -2825,30 +2814,13 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     # pre-scan, so the diagnostic points at the SECOND import
                     # (the body pass runs after this map is already filled and
                     # would otherwise flag the first one).
-                    _iln = getattr(stmt, 'line', 0) or 0
-                    _ilc = getattr(stmt, 'col', 0) or 0
-                    _ifn = getattr(gen, '_current_filename', '') or ''
-                    _iat = f'{_ifn}:{_iln}:{_ilc}: ' if _ifn else f'{_iln}:{_ilc}: '
-                    # Notes naming where each module declares the name, as
-                    # modular does (`note: 'X' declared here` / `also declared
-                    # here`). Best-effort: resolve each module to a source
-                    # file and find the declaration line.
-                    _prev_mod = scope.get('__mod__' + _local_nm)
-                    _decls = []
-                    for _mod in (_prev_mod, stmt.module):
-                        if not _mod:
-                            continue
-                        _d = _find_decl_location(gen, _mod, _local_nm)
-                        if _d:
-                            _decls.append(_d)
-                    _note_txt = ''
-                    if len(_decls) == 2:
-                        _note_txt = (f"\n{_decls[0][0]}:{_decls[0][1]}:{_decls[0][2]}: "
-                                     f"note: '{_local_nm}' declared here")
-                        _note_txt += (f"\n{_decls[1][0]}:{_decls[1][1]}:{_decls[1][2]}: "
-                                      f"note: '{_local_nm}' also declared here")
-                    raise RuntimeError(
-                        f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
+                    # The message and its notes come from the one shared
+                    # formatter (mojo/middle/import_ambiguity.py), the same one
+                    # the module-scope check uses.
+                    from mojo.middle.import_ambiguity import ambiguous_import_error
+                    raise RuntimeError(ambiguous_import_error(
+                        gen, _local_nm, scope.get('__mod__' + _local_nm), stmt.module,
+                        getattr(stmt, 'line', 0) or 0))
                 scope[_local_nm] = q
                 scope['__mod__' + _local_nm] = stmt.module
                 _lex = getattr(gen, '_lexical_func_import_homes', None)

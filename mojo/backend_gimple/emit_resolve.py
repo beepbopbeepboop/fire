@@ -2419,11 +2419,18 @@ def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
 
     THE way to call a runtime function for its value.  Do not spell the call
     as text inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
-    return gen._new_val(ret_type, fname + ' (' + _rt_args(gen, fname, args) + ')')
+    rhs: str = fname + ' (' + _rt_args(gen, fname, args) + ')'
+    if _dtrace.enabled():
+        _dtrace.note(_dtrace.str_hash(_as_str(ret_type)) ^ _dtrace.str_hash(rhs))
+    t: str = gen._new_temp(ret_type)
+    ginf.note_call_result(gen, t, fname)
+    gen._emit('  ' + t + ' = ' + rhs + ';')
+    return t
 
 
 def _rt_into(gen, dst: str, fname: str, args: list) -> None:
     """`dst = fname (args);` for a runtime function, into an existing temp."""
+    ginf.note_call_result(gen, _as_str(dst).strip(), fname)
     gen._emit('  ' + _as_str(dst) + ' = ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
 
 
@@ -2466,15 +2473,19 @@ def _copy(gen, dst: str, src: str) -> None:
     st = gen.var_types.get(src)
     if dt is not None and st is not None:
         dts: str = _as_str(dt)
-        if rt_call.copy_needs_cast(dts, _as_str(st)):
+        sts: str = _as_str(st)
+        if rt_call.copy_needs_cast(dts, sts):
             gen._emit('  ' + dst + ' = (' + dts + ')' + src + ';')
             return
+        if dts == sts:
+            ginf.carry_value_info(gen, dst, src)
     gen._emit('  ' + dst + ' = ' + src + ';')
 
 
 def _goto(gen, label: str) -> None:
     """`goto label;` -- THE way to emit an unconditional jump."""
-    gen._emit('  goto ' + _as_str(label) + ';')
+    label = _as_str(label)
+    ginf._emit_cf(gen, 'goto', '  goto ' + label + ';', label, len(gen._emit_frames) - 1)
 
 
 def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
@@ -2486,12 +2497,13 @@ def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
 
 def _ret(gen, val: str) -> None:
     """`return val;` -- THE way to return a value from the function."""
-    gen._emit('  return ' + _as_str(val) + ';')
+    val = _as_str(val)
+    ginf._emit_cf(gen, 'ret', '  return ' + val + ';', val, len(gen._emit_frames) - 1)
 
 
 def _ret_void(gen) -> None:
     """`return;` -- THE way to return from a void function."""
-    gen._emit(gimple_codegen._RETURN)
+    ginf._emit_cf(gen, 'retv', gimple_codegen._RETURN, '', len(gen._emit_frames) - 1)
 
 
 def _void_call(gen, fname: str, arg_pairs: list) -> tuple:
@@ -3386,8 +3398,9 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 else:
                     new_type_args.append(ta)
             type_args = new_type_args
-            info = el.elaborate_generic_call(module_src, g, type_args,
-                                             arg_count=len(arg_pairs))
+            info = el.elaborate_generic_call(
+                module_src, g, type_args, arg_count=len(arg_pairs),
+                origin_module=elaborate.declaring_module_name(gen, module_src))
             if info:
                 gen._refine_generic_return_type(
                     info, module_src, g, type_args, len(node.args),
@@ -3477,7 +3490,8 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                         "definition-site body cannot be emitted".format(
                             g, gen.current_func_name, _ann))
             info = el.elaborate_generic_call_inferred(
-                module_src, g, [ct for ct, _ in arg_pairs])
+                module_src, g, [ct for ct, _ in arg_pairs],
+                origin_module=elaborate.declaring_module_name(gen, module_src))
     except RuntimeError:
         # The nested-async-in-a-generic guard above raises RuntimeError
         # deliberately — an honest refusal, not a "try something else"
@@ -3755,7 +3769,8 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
                     and 'struct alignment must be a positive power of 2' in _emsg)
                 or ('function instantiation failed' in _emsg
                     and 'use of unknown declaration' in _emsg
-                    and '@align' in _emsg)):
+                    and '@align' in _emsg)
+                or _is_downcast_witness(e)):
             raise
         # A `where` clause of the struct that is provably false for these type
         # args is a real diagnostic (modular: `error: violated constraint`),
@@ -3811,7 +3826,8 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
                         and 'struct alignment must be a positive power of 2' in _emsg)
                     or ('function instantiation failed' in _emsg
                         and 'use of unknown declaration' in _emsg
-                        and '@align' in _emsg)):
+                        and '@align' in _emsg)
+                    or _is_downcast_witness(e)):
                 raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None
@@ -3821,6 +3837,14 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
     if not name:
         return None
     return gen._lower_struct_constructor(name, node.args, node.kwargs)
+
+
+def _is_downcast_witness(e):
+    """The `rebind[downcast[T, Trait]]` witness diagnostic (see
+    elaborate.is_downcast_witness_diagnostic): re-raised at the instantiation
+    site, never swallowed as an elaboration-capability failure."""
+    import elaborate
+    return elaborate.is_downcast_witness_diagnostic(e)
 
 
 def _register_generic_struct(gen, base_name, info):

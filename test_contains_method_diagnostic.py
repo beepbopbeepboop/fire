@@ -127,6 +127,19 @@ def test_unannotated_call_result_is_not_provably_int():
                '    _ = x in g()\n')
 
 
+def test_container_typed_parameter_is_not_provably_int():
+    # A parameter annotated as a boxed container (frozenset/dict, possibly
+    # optional) lowers to int64_t at the ABI but is not a proven Int scalar,
+    # so membership must keep runtime dispatch. This is the annotation half
+    # of the same over-claim as the unannotated-call-result case above
+    # (mojo/middle/exprtypes.py: `x in known_structs` with
+    # `known_structs: frozenset | None`).
+    _expect_ok('def has(x, names: frozenset | None = None) -> bool:\n'
+               '    return x in names\n')
+    _expect_ok('def has(x, names: dict | None = None) -> bool:\n'
+               '    return x in names\n')
+
+
 def test_unannotated_method_call_result_is_not_provably_int():
     _expect_ok('class C:\n'
                '    def __init__(self):\n'
@@ -159,6 +172,7 @@ if __name__ == '__main__':
     test_erased_operand_binaryop_still_compiles()
     test_known_int_return_call_still_rejected()
     test_unannotated_call_result_is_not_provably_int()
+    test_container_typed_parameter_is_not_provably_int()
     test_unannotated_method_call_result_is_not_provably_int()
     test_unannotated_arithmetic_operand_is_not_provably_int()
     test_annotated_arithmetic_is_still_provably_int()

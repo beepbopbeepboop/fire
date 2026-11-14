@@ -1347,9 +1347,7 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
                 # mangled struct (the pyobj-list unbox's scale).
                 if not (_cont_t is not None and _cont_t.endswith(' *')):
                     if _cont_t == 'int64_t' and _ainf.get('sname_mangled'):
-                        _cont_v = gen._new_val(
-                            f"{_ainf['sname_mangled']} *",
-                            f"({_ainf['sname_mangled']} *){_cont_v}")
+                        _cont_v = gen._cast(f"{_ainf['sname_mangled']} *", f"{_cont_v}")
                         _cont_t = f"{_ainf['sname_mangled']} *"
                     else:
                         return None
@@ -1370,9 +1368,8 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
                     # (its `Self.<member>` return annotation erases); the
                     # word IS the pointer - the same type-accurate cast
                     # the single-container branch applies
-                    _inner_v = gen._new_val(
-                        f"{_ainf['inner_mangled']} *",
-                        f"({_ainf['inner_mangled']} *){_inner_v}")
+                    _inner_v = gen._cast(
+                        f"{_ainf['inner_mangled']} *", f"{_inner_v}")
             elif _ainf['moved']:
                 if not (_cont_t is not None and _cont_t.endswith(' *')):
                     return None
@@ -1447,9 +1444,7 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
         # seed's determined mangled struct (the pyobj-list unbox's scale).
         if not (cont_t is not None and cont_t.endswith(' *')):
             if cont_t == 'int64_t' and rec.get('sname_mangled'):
-                cont_v = gen._new_val(
-                    f"{rec['sname_mangled']} *",
-                    f"({rec['sname_mangled']} *){cont_v}")
+                cont_v = gen._cast(f"{rec['sname_mangled']} *", f"{cont_v}")
                 cont_t = f"{rec['sname_mangled']} *"
             else:
                 return None
@@ -1473,9 +1468,8 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
             # established convention - every materialized `__iter__` in the
             # iterator protocol answers a word), so the type-accurate cast
             # to the seed's determined inner mangle recovers it.
-            inner_v = gen._new_val(
-                f"{rec['inner_mangled']} *",
-                f"({rec['inner_mangled']} *){inner_v}")
+            inner_v = gen._cast(
+                f"{rec['inner_mangled']} *", f"{inner_v}")
             inner_t = f"{rec['inner_mangled']} *"
         else:
             return None
@@ -1860,6 +1854,19 @@ def _dtype_cast_ctype(e):
 def _comptime_conforms_to_pred(gen):
     try:
         import mojo.middle.comptime as _comptime_eval
+        bases = _comptime_conformance_map(gen)
+        if bases is None:
+            return None
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
+def _comptime_conformance_map(gen):
+    """The declared `{decl: [base, ...]}` map this generator knows, merged from
+    the struct bases, trait bases, the instantiation's extra bases and the
+    trait declarations read from the source text. None when it knows none."""
+    try:
         sb = getattr(gen, '_struct_bases', None) or {}
         tb = getattr(gen, '_trait_bases', None) or {}
         ex = getattr(gen, '_conformance_bases_extra', None) or {}
@@ -1902,7 +1909,7 @@ def _comptime_conforms_to_pred(gen):
         for k, v in (tbt or {}).items():
             if v or k not in bases:
                 bases[k] = v
-        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+        return bases
     except Exception:
         return None
 
@@ -2646,36 +2653,30 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                             # Only check when we can identify a concrete struct context.
                             # Accept if undecidable/generic-like.
                             if is_known_struct or (_src_t_res and _src_t_res[:1].isupper()):
-                                pred = _comptime_conforms_to_pred(gen)
-                                ok = None
-                                if pred is not None and _trait_t:
-                                    try:
-                                        ok = pred(_src_t_res, _trait_t)
-                                    except Exception:
-                                        ok = None
-                                else:
-                                    # try direct
+                                # Closed-world decision over the declared bases
+                                # (module declarations, then stdlib trait
+                                # declarations). ok None = undecidable: accept.
+                                modname = (getattr(gen, '_diag_module_name', None)
+                                           or getattr(gen, '_module_name', None) or '')
+                                if not modname:
+                                    fnm = getattr(gen, '_current_filename', '') or 't.mojo'
+                                    modname = os.path.splitext(os.path.basename(fnm))[0]
+                                ok, trait_qual = None, None
+                                if _trait_t:
                                     try:
                                         import mojo.middle.comptime as _ce
-                                        sb2 = getattr(gen, '_struct_bases', None) or {}
-                                        tb2 = getattr(gen, '_trait_bases', None) or {}
-                                        ex2 = getattr(gen, '_conformance_bases_extra', None) or {}
-                                        bases = dict(ex2); bases.update(sb2); bases.update(tb2)
-                                        ok = _ce.conforms_to(_src_t_res, _trait_t, bases)
+                                        ok, trait_qual = _ce.conforms_to_closed(
+                                            _src_t_res, _trait_t,
+                                            _comptime_conformance_map(gen) or {}, modname)
                                     except Exception:
-                                        ok = None
-                                # ok False => missing witness; ok True/None => accept (None = undecidable)
+                                        ok, trait_qual = None, None
                                 if ok is False:
-                                    modname = getattr(gen, '_module_name', None) or ''
-                                    if not modname:
-                                        fnm = getattr(gen, '_current_filename', '') or 't.mojo'
-                                        modname = os.path.splitext(os.path.basename(fnm))[0]
                                     struct_q = f"{modname}::{_src_t_res}" if modname else _src_t_res
-                                    trait_q = _trait_t or 'Trait'
-                                    line = getattr(node, 'line', None)
-                                    loc = f" (line {line})" if line else ''
+                                    trait_q = trait_qual or _trait_t or 'Trait'
+                                    # No location: `node.line` is a line of the
+                                    # instantiated copy, not of the user's file.
                                     raise RuntimeError(
-                                        f"function instantiation failed{loc}\n"
+                                        "error: function instantiation failed\n"
                                         f"note: struct '{struct_q}' does not have witness table for trait '{trait_q}'"
                                     )
             # Lower as identity: return the (single) argument.
@@ -6345,7 +6346,9 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
 
 def _lower_builtin_dir(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     for a in node.args: gen.lower_expr(a)
-    return 'MojoList *', gen._new_val('MojoList *', 'mojo_list_new ()  /* dir() stubbed */')
+    _dir_list = gen._rt_call('MojoList *', 'mojo_list_new', [])
+    gen._emit('  /* dir() stubbed */')
+    return 'MojoList *', _dir_list
 
 
 def _callable_return_elem_type(gen, fn_expr) -> str:
@@ -9579,7 +9582,7 @@ def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes
         elif _is_spread:
             _kw_spreads.append(_w)
         elif _t == 'double':
-            gen._emit(f"  mojo_list_append_double_kinded ({_a}, {_v}, 'i');")
+            gen._rt_void('mojo_list_append_double_kinded', [f"{_a}", f"{_v}", "'i'"])
         else:
             _w = _v if _t == 'int64_t' else gen._cast('int64_t', f"{_v}")
             gen._rt_void('mojo_list_append_int', [_a, f"{_w}"])
@@ -12082,8 +12085,9 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 if _sct == 'MojoBytes *':
                     return _list_slot_bytes(gen, ov, idx64)
                 if _sct == '_Bool':
-                    return '_Bool', gen._new_val(
-                        '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")
+                    return '_Bool', gen._cast(
+                        '_Bool',
+                        gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64]))
                 t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
                 if _sct and _sct.endswith(' *'):
                     gen._actual_types[t] = _sct

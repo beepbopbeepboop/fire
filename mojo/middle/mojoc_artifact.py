@@ -82,11 +82,13 @@ def _struct_record(sd):
 
 
 def _function_record(fn):
+    ret = fn.return_type if isinstance(fn.return_type, str) else None
     return {
         "kind": "function",
         "name": fn.name,
         "bracket_params": _function_bracket_params(fn),
         "runtime_params": _function_runtime_params(fn),
+        "ret": ret,
     }
 
 
@@ -115,6 +117,16 @@ def _trait_record(name, source):
     }
 
 
+def _located(rec, path, node):
+    """Stamp a record with where its declaration sat in the source: the file,
+    and the 1-based line and column (the parser's column is 0-based). The
+    diagnostics point their notes here once the source itself is deleted."""
+    rec["file"] = os.path.abspath(path)
+    rec["line"] = getattr(node, "line", 0) or 1
+    rec["col"] = (getattr(node, "col", 0) or 0) + 1
+    return rec
+
+
 def extract_package_signatures(pkg_dir):
     """Return {"structs": {name: record}, "functions": {name: record}} for a pkg."""
     structs = {}
@@ -133,14 +145,14 @@ def extract_package_signatures(pkg_dir):
             continue
         for s in mod:
             if isinstance(s, fire_compiler.StructDef):
-                structs[s.name] = _struct_record(s)
+                structs[s.name] = _located(_struct_record(s), path, s)
             elif isinstance(s, fire_compiler.FunctionDef):
-                funcs[s.name] = _function_record(s)
+                funcs[s.name] = _located(_function_record(s), path, s)
             elif isinstance(s, fire_compiler.TraitDef):
                 # Traits appear as bracket-parameter bounds; their required
                 # method signatures are what an import-time conformance check
                 # must compare against, so record them with the trait.
-                structs.setdefault(s.name, _trait_record(s.name, src))
+                structs.setdefault(s.name, _located(_trait_record(s.name, src), path, s))
     return {"structs": structs, "functions": funcs}
 
 

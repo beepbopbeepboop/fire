@@ -8628,6 +8628,17 @@ def _lower_one(fn: N.FunctionDef, meta: list,
             ct = 'double'          # unannotated param, kind from call sites
         _real_ct.append(ct)
     c_params = _lead + _real_ct
+    # Source parameter names, one per `c_params` slot in the same order (a
+    # kind-method receiver placeholder first, then the real parameters). Read
+    # by `cpp_core._cpp_generator_call_slot_pairs` to bind a delegated call's
+    # keyword arguments to their slots BY NAME — appending them positionally
+    # mis-slots `f(n - step, bump=bump, step=step)` as soon as the keywords
+    # are not written in declaration order.
+    _lead_pnames = []
+    if _lead:
+        _lead_pnames.append(_cm_as_str(fn.params[0][0]))
+    for _pmn, _pma in real_params:
+        _lead_pnames.append(_cm_as_str(_pmn))
     meta.append({
         'name': _cm_as_str(fn.name),
         'struct': struct_name,
@@ -8638,6 +8649,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'base': base,
         'body_name': body_name,
         'params': c_params,
+        'param_names': _lead_pnames,
         'star_slot': _star_slot(real_params, len(_lead)),
         'kwargs_slot': _kwargs_slot(real_params, len(_lead)),
         'nargs': len(real_params),
@@ -9065,6 +9077,11 @@ def register(gen, meta: list) -> None:
         api = {
             'base': m['base'],
             'value_ctype': m['value_ctype'],
+            # Source parameter names, one per `params` slot (see
+            # `_lower_one`'s meta key). Consumed by the cpp coroutine body
+            # emitter's shared argument-to-slot binder so a delegated call's
+            # keywords land in their own slots.
+            'param_names': m.get('param_names') or [],
             # a TAGGED-word generator: the consumer binds the value as a boxed
             # word (`gen._boxed_vals`, rendered by `mojo_repr_boxed`)
             'mixed_slots': m.get('value_kind') == 'w',

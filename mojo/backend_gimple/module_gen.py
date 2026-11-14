@@ -5006,6 +5006,21 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _clc = getattr(fn, 'col', 0) or 0
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}error: violated constraint")
+            # Part 2: a bracket parameter's TRAIT BOUND whose argument is
+            # neither provable nor provably false. `check_bounds`'s oracle
+            # (`check_conformance`) answers (True, []) for anything it cannot
+            # resolve, so without this the declaration compiles silently.
+            # AFTER the where-clause check: a provably-false requirement is the
+            # stronger finding and must be the one reported.
+            _diag = _elaborate_mod.check_signature_param_bound_evidence(
+                struct_module_src or module_src or '', tmpl, targs,
+                _elaborate_mod._fn_type_param_bounds(fn))
+            if _diag:
+                _cfn = getattr(gen, '_current_filename', '') or ''
+                _cln = getattr(fn, 'line', 0) or 0
+                _clc = getattr(fn, 'col', 0) or 0
+                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                raise RuntimeError(f"{_cat}{_diag}")
         except RuntimeError:
             raise
         except Exception as e:
@@ -5042,6 +5057,35 @@ def _check_signature_binding_violations(gen, stmts):
 
 
 
+def _cpp_generator_param_names(fn, receiver: str = '') -> list:
+    """Source parameter names, one per slot `_gen_cpp_generator_unit` returns
+    in its ctype list — the `param_names` key every registered compiled
+    generator's api carries (module_gen's registrations, cpp_async's
+    self-recursion snapshot, coro.py's stack-switch meta).
+
+    A generator method's receiver is its own leading slot (`self`/`cls`) and
+    is NOT part of `fn.params[1:]`; a `*args`/`**kwargs` parameter occupies
+    the slot its C representation occupies, under its bare name (the same
+    names `_gen_cpp_generator_unit` registers). Having this list align 1:1
+    with the ctype slots is what lets a delegated call bind keyword arguments
+    by NAME rather than guessing that they are written in declaration order
+    in the trailing slots."""
+    names = []
+    _params = list(getattr(fn, 'params', None) or [])
+    if receiver:
+        names.append(_as_str(receiver))
+        _params = _params[1:]
+    for _pn, _pt in _params:
+        _pns = _as_str(_pn)
+        if _pns.startswith('**'):
+            names.append(_pns[2:])
+        elif _pns.startswith('*'):
+            names.append(_pns[1:])
+        else:
+            names.append(_pns)
+    return names
+
+
 def gen_module_impl(self, stmts: list):
     self._stmts = stmts
     self._current_module_stmts = stmts
@@ -5068,6 +5112,11 @@ def gen_module_impl(self, stmts: list):
                 for _em, _ea in _s.extra:
                     _imported_names.add(_ea if _ea else _em.split('.')[-1])
     self._gmi_imported_names = _imported_names
+    # Two `from M import X` of one name from different modules is an error at
+    # module scope too (modular's import_ambiguous). Raised before anything is
+    # lowered, with every conflict in the file gathered into the one message.
+    import mojo.middle.import_ambiguity as _import_ambiguity
+    _import_ambiguity.check_module_from_imports(self, stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
     # A function called with a list at one site and a str at another, and
     # iterated in its body, gets one clone per argument kind before any
@@ -7474,13 +7523,16 @@ def gen_module_impl(self, stmts: list):
             _omo = _as_structdef_node(_omo)
             _own_method_ids[id(_omo)] = {
                 id(_as_funcdef_node(_m)) for _m in _omo.methods}
-    # Declaration-time conditional conformance checks (trait conformance parts 1, 4).
+    # Declaration-time conditional conformance checks (trait conformance parts 1, 3, 4).
     from elaborate import (check_conformance_declarations as _check_conf_decls,
                            check_conditional_rp_origin as _check_rp_origin,
-                           check_copy_move_synthesis as _check_copy_move_synth)
+                           check_copy_move_synthesis as _check_copy_move_synth,
+                           check_conditional_conformance_candidates as _check_conf_candidates)
     _all_struct_def_nodes = [s for s in all_struct_defs if isinstance(s, StructDef)]
     _all_trait_def_nodes = [s for s in all_struct_defs if isinstance(s, TraitDef)]
     _check_conf_decls(_all_struct_def_nodes, _all_trait_def_nodes)
+    _check_conf_candidates(_all_struct_def_nodes, _all_trait_def_nodes,
+                            module_src=getattr(self, '_source_text', '') or '')
     _all_stmts_for_rp = list(stmts)
     _all_stmts_for_rp.extend(getattr(self, '_stripped_generic_fns', []) or [])
     if self.do_imports or self.link_imports:
@@ -13927,6 +13979,14 @@ def gen_module_impl(self, stmts: list):
         self._supported_generators[s.name] = s
         self._generator_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+            # The SOURCE parameter names, one per `params` slot, in order.
+            # Every consumer that binds a call's keyword arguments to slots
+            # by name reads this (`cpp_core._cpp_generator_call_slot_pairs`);
+            # without it a keyword argument was appended positionally, so
+            # `f(n - step, bump=bump, step=step)` bound `bump` to `step`.
+            # Foreign modules see it because the home-registry value IS this
+            # very api dict (`_generator_home_api` below).
+            'param_names': _cpp_generator_param_names(s),
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
             'mixed_slots': self._cpp_last_mixed_slots,
             # Value-carrying `return` support (asyncio/futures.py's
@@ -14335,6 +14395,11 @@ def gen_module_impl(self, stmts: list):
             self._supported_generator_methods[key] = m
             self._generator_method_api[key] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                # Source parameter names, one per `params` slot (see
+                # `_register_free_generator`'s identical key): keyword
+                # arguments at a delegated call bind to their slot by name.
+                'param_names': _cpp_generator_param_names(
+                    m, _cpp_method_receiver_name(m)),
                 # Which SOURCE parameter, if any, is the receiver slot a
                 # caller must fill -- see mojo/middle/coro.py's identical
                 # key for why the registered `params` (bare ctype strings)

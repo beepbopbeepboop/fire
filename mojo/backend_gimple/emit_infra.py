@@ -2200,65 +2200,162 @@ def pop_emit_frame(gen) -> None:
     gen._emit_frames.pop()
 
 
-def _emit_through(gen, line: str, level: int) -> None:
-    """Emit `line` as seen by frame `level` and every frame outside it (the
-    innermost frame is the last one); level -1 is the plain emitter."""
+def _emit_cf(gen, kind: str, line: str, val: str, level: int) -> None:
+    """Emit one jump or return as seen by frame `level` and every frame
+    outside it (the innermost frame is the last one; level -1 is the plain
+    emitter).
+
+    `kind` is 'goto' (`val` is the label), 'ret' (`val` is the returned
+    value) or 'retv' (a `return;`); `line` is the statement's text.
+
+    This is the ONLY code that makes an exit from a protected region run that
+    region's teardown, and its only callers are `gen._goto`, `gen._ret` and
+    `gen._ret_void` (emit_resolve.py).  It is told what the statement IS.  It
+    used to be `_emit_through`, which every emitted line passed through and
+    which recognised a return by `stripped.startswith('return ')` and sliced
+    the value out with `stripped[7:]`."""
     if level < 0:
         _emit_raw(gen, line)
+        gen._last_was_terminal = True
         return
     fr = gen._emit_frames[level]
-    stripped = line.strip()
-    if fr.frame_kind == 'try':
-        if stripped.startswith('return ') or stripped == 'return;':
-            if stripped.startswith('return ') and stripped != 'return;':
-                # ONE variable carries the value of every early return in
-                # this region to the deferred `return` after `finally`. The
-                # value text itself used to be kept, so with two returns in
-                # the body only the LAST one's temp was returned and the
-                # other path returned an unassigned temp: `return True, out`
-                # before a later `return False, out` came back as garbage
-                # (the self-hosted compiler's `_infer_return_maybe_kinds`).
-                _rv = stripped[7:].rstrip(';').strip()
-                if not fr.has_return_value:
-                    _rt = gen.func_ret_type if gen.func_ret_type else 'int64_t'
-                    fr.return_value = gen._new_temp(_rt)
-                    fr.has_return_value = True
-                _emit_through(gen, f"  {fr.return_value} = {_rv};", level - 1)
-            else:
-                fr.return_value = ''
-                fr.has_return_value = False
-            fr.saw_return = True
-            # An early return leaves the try block's protected region just as
-            # much as falling off the end of it does: it must pop the
-            # exception stack (_mojo_exc_top) like the normal-exit path, or a
-            # whole compiler run creeps `_mojo_exc_top` past the end of
-            # `_mojo_exc_stack[MOJO_EXC_STACK_MAX]`.
-            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
-            if fr.bb_finally != '':
-                _emit_through(gen, f"  goto {fr.bb_finally};", level - 1)
-            else:
-                _emit_through(gen, line, level - 1)
-            gen._last_was_terminal = True
-            return
-        _emit_through(gen, line, level - 1)
+    if fr.frame_kind == 'try' and (kind == 'ret' or kind == 'retv'):
+        if kind == 'ret':
+            # ONE variable carries the value of every early return in
+            # this region to the deferred `return` after `finally`. The
+            # value text itself used to be kept, so with two returns in
+            # the body only the LAST one's temp was returned and the
+            # other path returned an unassigned temp: `return True, out`
+            # before a later `return False, out` came back as garbage
+            # (the self-hosted compiler's `_infer_return_maybe_kinds`).
+            if not fr.has_return_value:
+                _rt = gen.func_ret_type if gen.func_ret_type else 'int64_t'
+                fr.return_value = gen._new_temp(_rt)
+                fr.has_return_value = True
+            _emit_raw(gen, f"  {fr.return_value} = {val};")
+        else:
+            fr.return_value = ''
+            fr.has_return_value = False
+        fr.saw_return = True
+        # An early return leaves the try block's protected region just as
+        # much as falling off the end of it does: it must pop the
+        # exception stack (_mojo_exc_top) like the normal-exit path, or a
+        # whole compiler run creeps `_mojo_exc_top` past the end of
+        # `_mojo_exc_stack[MOJO_EXC_STACK_MAX]`.
+        _emit_raw(gen, "  mojo_exc_pop ();")
+        if fr.bb_finally != '':
+            _emit_cf(gen, 'goto', f"  goto {fr.bb_finally};", fr.bb_finally, level - 1)
+        else:
+            _emit_cf(gen, kind, line, val, level - 1)
+        gen._last_was_terminal = True
         return
-    if fr.frame_kind == 'with':
-        if len(gen.loop_stack) > 0 and (
-                stripped == f"goto {gen._loop_continue_bb()};"
-                or stripped == f"goto {gen._loop_break_bb()};"):
-            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
-            gen._with_emit_exits(fr.ctx_ts, fr.ctx_vs, fr.ctx_sns,
-                                 fr.gctx_bases, fr.gctx_vs)
-            fr.teardown_done = True
-            _emit_through(gen, line, level - 1)
-            return
-    _emit_through(gen, line, level - 1)
+    if (fr.frame_kind == 'with' and kind == 'goto' and len(gen.loop_stack) > 0
+            and (val == gen._loop_continue_bb() or val == gen._loop_break_bb())):
+        # a `break` / `continue` out of the `with` body: pop the stack and
+        # run the items' teardown first
+        _emit_raw(gen, "  mojo_exc_pop ();")
+        gen._with_emit_exits(fr.ctx_ts, fr.ctx_vs, fr.ctx_sns,
+                             fr.gctx_bases, fr.gctx_vs)
+        fr.teardown_done = True
+    _emit_cf(gen, kind, line, val, level - 1)
+
+
+def carry_value_info(gen, dst: str, src: str) -> None:
+    """`dst` now holds the same VALUE as `src` (a plain copy, same declared
+    type): everything this backend knows about the value is true of `dst`.
+
+    What it knows lives in tables keyed by the variable's NAME -- what a
+    list's elements are, what a dict's values are, the pointer type an
+    `int64_t` really carries, whether a word is a float box or a dynamic word,
+    which generator API a handle belongs to.  A copy used to carry none of
+    it unless the call site remembered to (two sites carried two of the
+    tables), and a value whose facts are lost is read back with the int
+    accessor: 15% of sampled backend fixes are that bug.
+
+    `gen._copy` calls this, so the facts travel with every copy.
+
+    Rules:
+    - It only FILLS: a fact already recorded for `dst` is left alone, so a
+      caller that knows better (a declared annotation, a narrowing) wins.
+    - OWNERSHIP does not travel (`_fresh_vals`, `_owned_*`).  Those say which
+      NAME is responsible for freeing, and two names for one fresh value is a
+      double free.
+    - A table added to the backend that describes a value belongs in this
+      list; that is the whole cost of adding one."""
+    if src == dst:
+        return
+    if src in gen._elem_types and dst not in gen._elem_types:
+        gen._elem_types[dst] = gen._elem_types[src]
+    if src in gen._nested_elem_types and dst not in gen._nested_elem_types:
+        gen._nested_elem_types[dst] = gen._nested_elem_types[src]
+    if src in gen._dict_val_types and dst not in gen._dict_val_types:
+        gen._dict_val_types[dst] = gen._dict_val_types[src]
+    if src in gen._dict_nested_val_types and dst not in gen._dict_nested_val_types:
+        gen._dict_nested_val_types[dst] = gen._dict_nested_val_types[src]
+    if src in gen._actual_types and dst not in gen._actual_types:
+        gen._actual_types[dst] = gen._actual_types[src]
+    if src in gen._tuple_slot_types and dst not in gen._tuple_slot_types:
+        gen._tuple_slot_types[dst] = gen._tuple_slot_types[src]
+    if src in gen._struct_slot_kinds and dst not in gen._struct_slot_kinds:
+        gen._struct_slot_kinds[dst] = gen._struct_slot_kinds[src]
+    if src in gen._struct_formats and dst not in gen._struct_formats:
+        gen._struct_formats[dst] = gen._struct_formats[src]
+    if src in gen._callable_ret_types and dst not in gen._callable_ret_types:
+        gen._callable_ret_types[dst] = gen._callable_ret_types[src]
+    if src in gen._bound_method_ret_types and dst not in gen._bound_method_ret_types:
+        gen._bound_method_ret_types[dst] = gen._bound_method_ret_types[src]
+    if src in gen._container_callable_ret and dst not in gen._container_callable_ret:
+        gen._container_callable_ret[dst] = gen._container_callable_ret[src]
+    if src in gen._func_value_names and dst not in gen._func_value_names:
+        gen._func_value_names[dst] = gen._func_value_names[src]
+    if src in gen._builtin_method_values and dst not in gen._builtin_method_values:
+        gen._builtin_method_values[dst] = gen._builtin_method_values[src]
+    if src in gen._generator_var_api and dst not in gen._generator_var_api:
+        gen._generator_var_api[dst] = gen._generator_var_api[src]
+    if src in gen._async_var_api and dst not in gen._async_var_api:
+        gen._async_var_api[dst] = gen._async_var_api[src]
+    if src in gen._taskgroup_var_api and dst not in gen._taskgroup_var_api:
+        gen._taskgroup_var_api[dst] = gen._taskgroup_var_api[src]
+    if src in gen._rtobj_kinds and dst not in gen._rtobj_kinds:
+        gen._rtobj_kinds[dst] = gen._rtobj_kinds[src]
+    if src in gen._dict_items_val_elems and dst not in gen._dict_items_val_elems:
+        gen._dict_items_val_elems[dst] = gen._dict_items_val_elems[src]
+
+
+def note_call_result(gen, dst: str, fname: str) -> None:
+    """`dst` is about to receive the result of a call to `fname`: record what
+    that says about who owns it.
+
+    A runtime function in `_FRESH_CONTAINER_RETURNS` / `_FRESH_STRING_RETURNS`
+    always returns a brand-new object, so a consumer that receives exactly
+    this value may free it once it has read it; one in `_OWNS_STR_ELEMS`
+    also owns the strings inside it.  Called by the three things that emit a
+    call with a result (`_rt_call`, `_rt_into`, `_emit_call`), which KNOW the
+    callee -- the emitter used to recover it from the line's text."""
+    if fname in _FRESH_CONTAINER_RETURNS or fname in _FRESH_STRING_RETURNS:
+        gen._fresh_vals.add(dst)
+        if fname in _OWNS_STR_ELEMS:
+            gen._owned_str_elem_vals.add(dst)
+
+
+def _goto_raw(gen, label: str) -> None:
+    """A jump that leaves NO protected region, whatever frames are open (a
+    loop's own back edge inside its own exception frame).  Everything else
+    uses `gen._goto`."""
+    _emit_raw(gen, f"  goto {label};")
+    gen._last_was_terminal = True
 
 
 def _emit(gen, line: str):
-    if len(gen._emit_frames) > 0:
-        _emit_through(gen, line, len(gen._emit_frames) - 1)
-        return
+    """Emit one statement that is not a jump or a return.  Those go through
+    `gen._goto` / `gen._cond_goto` / `gen._ret` / `gen._ret_void`, which is how
+    an exit from a `try` or `with` region gets its teardown; a jump spelled as
+    text here would silently skip it, so it is refused."""
+    _s = line.lstrip()
+    if _s.startswith('return ') or _s.startswith('return;') or _s.startswith('goto '):
+        raise RuntimeError(
+            "internal: a jump or return was emitted as text (" + _s.strip()
+            + "); use gen._goto / gen._ret / gen._ret_void")
     _emit_raw(gen, line)
 
 
@@ -2273,27 +2370,10 @@ def _emit_raw(gen, line: str):
     if _d and line.strip() and not line.lstrip().startswith('#'):
         gen.body_lines.append(_d)
     gen.body_lines.append(line)
-    # Track values produced by a runtime call that always returns a brand-new
-    # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives
-    # exactly such a value, from an operand node that can only have produced
-    # it, may free it once it has read it.
-    _fi = line.find(' = mojo_')
-    if _fi < 0:
-        _fi = line.find(' = string_')
-    if _fi > 0:
-        _rest = line[_fi + 3:]
-        _pi = _rest.find(' (')
-        if _pi > 0 and (_rest[:_pi] in _FRESH_CONTAINER_RETURNS
-                        or _rest[:_pi] in _FRESH_STRING_RETURNS):
-            gen._fresh_vals.add(line[:_fi].strip())
-            if _rest[:_pi] in _OWNS_STR_ELEMS:
-                gen._owned_str_elem_vals.add(line[:_fi].strip())
-    # Track whether this is a terminal statement (can't have code after it)
-    stripped = line.strip()
-    if stripped.startswith('return ') or stripped.startswith('goto ') or stripped == 'return;':
-        gen._last_was_terminal = True
-    else:
-        gen._last_was_terminal = False
+    # Not a terminal statement, as far as this function knows: the three
+    # that are (`goto`, `return v`, `return`) are emitted by `_emit_cf` /
+    # `_goto_raw`, which set the flag after this returns.
+    gen._last_was_terminal = False
 
 
 
@@ -3126,7 +3206,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             _sp = gen._new_temp('Span *')
             gen._emit(f'  {_sp} = _alloc_Span ();')
             gen._emit(f'  {_sp}->_data = {aval};')
-            gen._emit(f'  {_sp}->_len = mojo_strlen ({aval});')
+            gen._rt_into(f'{_sp}->_len', 'mojo_strlen', [f"{aval}"])
             coerced_args.append(_sp)
         elif ptype.endswith(' *') and atype == 'char *':
             # char* passed where other pointer type expected
@@ -3268,9 +3348,11 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             imported_ret = fn_ret
     if result_var and imported_ret and imported_ret != ret_type:
         call_tmp = gen._new_temp(imported_ret)
+        note_call_result(gen, _as_str(call_tmp), fname)
         gen._emit(f'  {call_tmp} = {fname} ({args_str});')
         gen._safe_coerce_emit(imported_ret, ret_type, call_tmp, result_var)
     elif result_var:
+        note_call_result(gen, _as_str(result_var).strip(), fname)
         gen._emit(f'  {result_var} = {fname} ({args_str});')
     else:
         gen._emit(f'  {fname} ({args_str});')
@@ -7659,14 +7741,14 @@ def lower_module_globals_setitem(gen, node) -> None:
         gen._safe_coerce_emit(_vt, _ft, _v, _write_dest(gen, _name))
         gen._emit('  }')
     if not _arms:
-        gen._emit('  mojo_raise_not_implemented ((char *)'
-                  '"globals()[name] = value: this compiled module has no '
-                  'assignable global field for that name");')
+        gen._rt_void('mojo_raise_not_implemented',
+                     ['"globals()[name] = value: this compiled module has no '
+                      'assignable global field for that name"'])
     else:
         gen._emit('  else {')
-        gen._emit('    mojo_raise_not_implemented ((char *)'
-                  '"globals()[name] = value: creating a new module global '
-                  'at run time is not supported by the compiled path");')
+        gen._rt_void('mojo_raise_not_implemented',
+                     ['"globals()[name] = value: creating a new module global '
+                      'at run time is not supported by the compiled path"'])
         gen._emit('  }')
 
 

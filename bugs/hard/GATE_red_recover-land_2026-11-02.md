@@ -1,4 +1,4 @@
-SPLIT: GATE_red_recover-land_2026-11-02-part2, GATE_red_recover-land_2026-11-02-part3, GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
+SPLIT: GATE_red_recover-land_2026-11-02-part2, (part3 fixed: container-annotated parameter membership diagnostic), GATE_red_recover-land_2026-11-02-part4, GATE_red_recover-land_2026-11-02-part5
 
 # GATE red: 4 landing-gate job(s) red on `recover-land` (gate red)
 
@@ -105,10 +105,10 @@ Split into five parts, all under `bugs/`:
   branch, so it was green on the unfixed tree there (measured).
 - part 2 — a function-body `from X import Y as Z` binds `Z` for a class
   (`MojoParser`).
-- part 3 — a container-annotated parameter is not "provably Int" in the
-  membership diagnostic. This one is measured to break the closure TODAY, at
-  `mojo/middle/exprtypes.py`: `# ERROR: compiling imported module … 'Int' does
-  not implement the '__contains__' method`.
+- part 3 — **fixed on master** (container-annotated parameter membership
+  diagnostic). It used to break the closure at `mojo/middle/exprtypes.py`:
+  `# ERROR: compiling imported module … 'Int' does not implement the
+  '__contains__' method`.
 - part 4 — `issubclass(...)` lowers instead of emitting a weak stub.
 - part 5 — re-enable the three bootstrap gate jobs once the closure is
   stub-free, and delete this doc.
@@ -130,10 +130,11 @@ Re-measured 2026-11-13, so a later round does not have to:
    and function aliases do not. `myinterpreter.py:5255` is the `MojoParser`
    case. Class-as-value in general is a separate, pre-existing gap (measured:
    `k = A; print(k); k(7)` prints `65` then `Bus error: 10`) and is NOT part 2.
-3. **part 3 reproduces**, minimally:
-   `def has(x, names: frozenset | None = None): return x in names` raises
-   `'Int' does not implement the '__contains__' method` in 0.1 GB / < 1 s.
-   `exprtypes.py:1126` (`_frt[:-2] in known_structs`) is the closure instance.
+3. **part 3 fixed on master** (container-annotated parameter membership
+   diagnostic). The minimal repro
+   `def has(x, names: frozenset | None = None): return x in names` and the
+   `exprtypes.py:1126` (`_frt[:-2] in known_structs`) closure instance no longer
+   fail this way on master.
 4. **part 4 reproduces.** `issubclass(Derived, Base)` compiles to one weak
    `issubclass` stub and prints the diagnostic three times instead of
    `True\nFalse\nTrue`.
@@ -145,7 +146,7 @@ unannotated receiver compile to runtime dispatch (0 stubs); `class A(object)`,
 clean; a nested `_walk_lists` defined and called in one module resolves; and a
 module-level `from rootmod import helper` called across modules resolves. They
 are expected to be downstream of part 1 (or of the lifted-lambda placeholder
-filed in `bugs/mid/CODEGEN_selfhost_link_two_unqualified_calls.md`); any
+filed in `bugs/hard/CODEGEN_selfhost_link_two_unqualified_calls.md`); any
 survivor is part 5's inventory.
 
 Also recorded: `mojoc` is no longer in this doc's OFF entry. It, and
