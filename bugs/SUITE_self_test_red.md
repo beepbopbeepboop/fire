@@ -11,9 +11,9 @@ Reproduce:
 
     python3 tools/memslot.py --gb 8 --label suite-selftest -- python3 test_suite.py
 
-Result on master (`b521a1729`) and on top of this branch: `372 passed,
-5 failed` (the branch adds one passing pin and one passing suite row, so the
-count is 2 higher than master's own run).
+Result on master (`b521a1729`, re-checked after `56066b33a`) and on top of
+this branch: `372 passed, 5 failed` (the branch adds one passing pin and one
+passing suite row, so the count is 2 higher than master's own run).
 
 ## Failing rows
 
