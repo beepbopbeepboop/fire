@@ -1,4 +1,4 @@
-SPLIT: FORMAL_svc_exit_handling_incomplete-part1, FORMAL_svc_exit_handling_incomplete-part2, FORMAL_svc_exit_handling_incomplete-part4, FORMAL_svc_exit_handling_incomplete-part5
+SPLIT: FORMAL_svc_exit_handling_incomplete-part2, FORMAL_svc_exit_handling_incomplete-part4, FORMAL_svc_exit_handling_incomplete-part5
 
 # FORMAL: `svc` exit handling is not structurally complete
 

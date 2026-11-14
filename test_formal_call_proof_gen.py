@@ -62,6 +62,7 @@ catching without a 27MB library build.
     python3 test_formal_call_proof_gen.py [-v]
 """
 import ast
+import glob
 import hashlib
 import os
 import re
@@ -7471,6 +7472,164 @@ class TestTheRefusalNamesTheSvcItRefuses(unittest.TestCase):
         msg = self._refusal([self.FILL, self.FILL])
         self.assertIn("with no `RET`", msg)
         self.assertIn("empty block runs certificate", msg)
+
+
+def _svc_census(words, base, code):
+    """One record per `svc` in `words`: its static x16 and, for a non-exit
+    `svc`, whether the fall-through rewrites x0 before anything reads it.
+
+    The readers are the proof generator's OWN (`_is_svc`, `_cfg_blocks`,
+    `_svc_static_x16`, `_x0_reassigned_after_write`), called rather than
+    copied: a private encoding table here would measure a corpus with the
+    wrong instrument and could agree with a generator that had drifted.  The
+    range is the executable region (`_exec_code_limit`), the same one the
+    generator's own scans use, so an interned string whose bytes decode as an
+    `svc` is not counted as an instruction.
+
+    A record is `{"pc": int, "x16": int | None, "x0_reassigned": bool | None}`,
+    where `x16 is None` means dynamic and `x0_reassigned` is None only for a
+    static exit (x16 == 1), which halts and so has no fall-through.
+    """
+    import formal.arm64_proof_gen as G
+    end = base + G._exec_code_limit(code)
+    blocks = G._cfg_blocks(words, base, end)
+    leaders = frozenset(b["start"] for b in blocks)
+    records = []
+    for pc in sorted(p for p in words if p < end and G._is_svc(words[p])):
+        x16 = G._svc_static_x16(words, pc, leaders)
+        records.append({
+            "pc": pc,
+            "x16": x16,
+            "x0_reassigned": (
+                None if x16 == 1
+                else G._x0_reassigned_after_write(words, pc)),
+        })
+    return records
+
+
+class TestSvcProvenanceCensus(unittest.TestCase):
+    """Every emitted `svc`'s x16, and every write's x0 use, measured.
+
+    Part 1 of `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` is "measure
+    before assuming": the proof walk now distinguishes an exit `svc` (x16 = 1,
+    a halt) from a write `svc` (x16 = 4, a fall-through whose x0 return value
+    the model does not model), and that distinction is only as good as the
+    emitter's own discipline.  Nothing measured that discipline, so a later
+    emitter change could turn a static site dynamic, or put a read of x0
+    between a write and its rewrite, without any test noticing.
+
+    This class is that measurement: a census over every arm64 image in
+    `formal/examples`, using the generator's readers.  The corpus is clean
+    today (439 svc: 220 exit, 219 write, 0 dynamic, 0 unrewritten write), and
+    the two assertions below are what makes a future violation a red test
+    naming the program, pc and word rather than a fact a reader must infer.
+
+    Two hand-built images prove the census can FAIL: one with an `svc` at the
+    entry and no preceding `movz x16` (dynamic), and one with a write `svc`
+    followed by `add x1, x0, x2` before any x0 rewrite.  A third image, with
+    the write followed by `movz x0, #0`, is the control that says the
+    unrewritten finding is about the read and not an instrument that always
+    answers "unrewritten".
+    """
+
+    BASE = 0x10000000
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+    MOVZ_X0_0 = 0xd2800000          # `movz x0, #0`
+    ADD_X1_X0_X2 = 0x8b020001      # `add x1, x0, x2`
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    def _census(self, ws):
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        words = {self.BASE + 4 * i: w for i, w in enumerate(ws)}
+        return _svc_census(words, self.BASE, code)
+
+    def test_the_corpus_has_no_dynamic_svc_and_no_unrewritten_write_x0(self):
+        import formal.build as fb
+        corpus = os.path.join(HERE, "formal", "examples")
+        sources = sorted(glob.glob(os.path.join(corpus, "*.mojo")))
+        self.assertTrue(sources, f"no examples under {corpus}")
+        total = exits = writes = dynamics = unrewritten = 0
+        bad = []
+        with tempfile.TemporaryDirectory(prefix="svc-census-") as tmp:
+            for src in sources:
+                name = os.path.splitext(os.path.basename(src))[0]
+                out = os.path.join(tmp, name + ".aout")
+                try:
+                    r = fb.compile_formal(src, arch="arm64", output=out,
+                                          prove=False, check=False)
+                except Exception as e:      # noqa: BLE001 -- report, do not skip
+                    self.fail(
+                        f"{name}: the arm64 image build refused, so its svcs "
+                        f"cannot be censused: {type(e).__name__}: {e}")
+                code = r["code"]
+                words = {r["info"]["base_addr"] + i:
+                         int.from_bytes(code[i:i + 4], "little")
+                         for i in range(0, len(code) - len(code) % 4, 4)}
+                records = _svc_census(words, r["info"]["base_addr"], code)
+                total += len(records)
+                for rec in records:
+                    word = words[rec["pc"]]
+                    if rec["x16"] is None:
+                        dynamics += 1
+                        bad.append(
+                            f"{name}: dynamic x16 at pc {rec['pc']:#x} "
+                            f"word {word:#010x}: no `movz x16` immediately "
+                            f"before it, or the svc is a block entry")
+                    elif rec["x16"] == 1:
+                        exits += 1
+                    else:
+                        writes += 1
+                        if not rec["x0_reassigned"]:
+                            unrewritten += 1
+                            bad.append(
+                                f"{name}: write svc (x16={rec['x16']}) at pc "
+                                f"{rec['pc']:#x} word {word:#010x}: the "
+                                f"fall-through reads x0 before rewriting the "
+                                f"byte count the model does not model")
+        print(f"svc census over {len(sources)} examples: {total} svc, "
+              f"{exits} exit, {writes} write, {dynamics} dynamic, "
+              f"{unrewritten} write-with-x0-read")
+        self.assertGreater(total, 0,
+                           "the census scanned no svc at all, so its two "
+                           "assertions are about nothing")
+        self.assertEqual(
+            bad, [],
+            "the emitted arm64 corpus violates the svc discipline the proof "
+            "walk relies on:\n  " + "\n  ".join(bad))
+
+    def test_a_dynamic_fixture_is_classified_dynamic(self):
+        # svc at the entry with no `movz x16` before it: x16 is unknown, and
+        # the entry is a block leader anyway, so no path fixes it.
+        records = self._census([self.SVC, self.MOVZ_X0_0, self.RET])
+        self.assertEqual(len(records), 1, records)
+        self.assertIsNone(
+            records[0]["x16"],
+            "an svc at the entry with no preceding movz was not classified "
+            "dynamic, so the census cannot see the case it exists to find")
+
+    def test_a_write_fixture_whose_x0_is_read_first_is_unrewritten(self):
+        records = self._census([self._movz_x16(4), self.SVC,
+                                self.ADD_X1_X0_X2, self.RET])
+        self.assertEqual(len(records), 1, records)
+        self.assertEqual(records[0]["x16"], 4, records)
+        self.assertFalse(
+            records[0]["x0_reassigned"],
+            "a write svc followed by `add x1, x0, x2` was reported as "
+            "rewriting x0 first, so the unrewritten-write finding is blind")
+
+    def test_a_write_fixture_whose_x0_is_rewritten_is_the_control(self):
+        records = self._census([self._movz_x16(4), self.SVC,
+                                self.MOVZ_X0_0, self.RET])
+        self.assertEqual(len(records), 1, records)
+        self.assertEqual(records[0]["x16"], 4, records)
+        self.assertTrue(
+            records[0]["x0_reassigned"],
+            "a write svc followed by `movz x0, #0` was reported as "
+            "unrewritten, so the failure above is not about the read")
 
 
 class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
