@@ -2105,6 +2105,32 @@ _PROGRESSING_BRACKET_OPS = frozenset(
     ('+', '-', '*', '/', '//', '%', '**', '<<', '>>', '&', '|', '^'))
 
 
+def _is_simple_progression_operand(e) -> bool:
+    """Whether `e` is the kind of operand a stepping recursion index is built
+    from: a name/literal and arithmetic over them. A CallExpr, SubscriptExpr,
+    attribute/type-expression access, or any other non-stepping shape inside
+    an arithmetic bracket argument means the value is a fixed comptime
+    computation (e.g. `2 * Int(Self.length)`), not an index that advances
+    across recursive instantiations (`i + 1`)."""
+    if isinstance(e, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                      gimple_ctypes.BoolLiteral, gimple_ctypes.IdentExpr,
+                      gimple_ctypes.DottedLiteral)):
+        return True
+    if isinstance(e, gimple_ctypes.BinaryOp):
+        if _as_str(e.op) not in _PROGRESSING_BRACKET_OPS:
+            return False
+        return (_is_simple_progression_operand(e.left)
+                and _is_simple_progression_operand(e.right))
+    if isinstance(e, gimple_ctypes.UnaryOp):
+        if _as_str(e.op) not in ('-', '+', '~'):
+            return False
+        if isinstance(e.operand, (gimple_ctypes.IntLiteral,
+                                  gimple_ctypes.FloatLiteral)):
+            return True  # a negative literal
+        return _is_simple_progression_operand(e.operand)
+    return False
+
+
 def _progressing_bracket_arg(e) -> bool:
     """Whether one bracket argument at an elaborated call site is the
     progressing RECURSION shape the refusal below exists to catch (`i + 1`),
@@ -2126,14 +2152,18 @@ def _progressing_bracket_arg(e) -> bool:
     if isinstance(e, gimple_ctypes.BinaryOp):
         if _as_str(e.op) not in _PROGRESSING_BRACKET_OPS:
             return False
-        return not _spells_a_string(e)
+        if _spells_a_string(e):
+            return False
+        return _is_simple_progression_operand(e)
     if isinstance(e, gimple_ctypes.UnaryOp):
         if _as_str(e.op) not in ('-', '+', '~'):
             return False
         if isinstance(e.operand, (gimple_ctypes.IntLiteral,
                                   gimple_ctypes.FloatLiteral)):
             return False  # a negative literal, not arithmetic over a parameter
-        return not _spells_a_string(e)
+        if _spells_a_string(e):
+            return False
+        return _is_simple_progression_operand(e)
     return False
 
 
