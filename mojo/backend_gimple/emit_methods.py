@@ -7081,8 +7081,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         'title': 'mojo_str_title', 'capitalize': 'mojo_str_capitalize',
     }
     if method in _CSTR_CASE_METHODS:
-        return 'char *', gen._new_val(
-            'char *', f"{_CSTR_CASE_METHODS[method]} ({cstr_ov})")
+        return 'char *', gen._rt_call('char *', _CSTR_CASE_METHODS[method], [f"{cstr_ov}"])
     if method in _CSTR_METHODS:
         # `str.rstrip(chars)` / `str.lstrip(chars)` with a chars argument:
         # the plain mojo_str_rstrip/lstrip only strip whitespace and IGNORE
@@ -7095,8 +7094,8 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             _a0t, _a0v = arg_pairs[0]
             if _a0t != 'char *' and _a0t != 'void *':
                 _a0v = gen._coerce_to_type(_a0t, 'char *', _a0v)
-            return 'char *', gen._new_val('char *', f"{fn} ({cstr_ov}, {_a0v})")
-        return 'char *', gen._new_val('char *', f"{_CSTR_METHODS[method]} ({cstr_ov})")
+            return 'char *', gen._rt_call('char *', fn, [f"{cstr_ov}", f"{_a0v}"])
+        return 'char *', gen._rt_call('char *', _CSTR_METHODS[method], [f"{cstr_ov}"])
     if method == 'join':
         if arg_vals:
             iter_val = arg_vals[0]
