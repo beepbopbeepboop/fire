@@ -863,6 +863,9 @@ def _constraint_text(e):
         if fn is None or any(p is None for p in parts):
             return None
         return f"{fn}({', '.join(parts)})"
+    if (hasattr(e, 'obj') and hasattr(e, 'member') and hasattr(e.obj, 'name')
+            and e.obj.name == 'Self'):
+        return e.member          # `Self.T` is spelled `T`
     if hasattr(e, 'name') and not hasattr(e, 'args'):
         return e.name
     if hasattr(e, 'value') and hasattr(e, 'raw') and isinstance(e.value, int):
@@ -1558,6 +1561,84 @@ def _static_conversion_records(stmts, filename, source):
     return out
 
 
+_TRAIT_PARENTS = {'ImplicitlyCopyable': ['Copyable'], 'Copyable': ['Movable']}
+
+
+def _trait_implied(names):
+    """`names` plus every trait they imply (ImplicitlyCopyable -> Copyable ->
+    Movable)."""
+    out = set()
+    stack = list(names)
+    while stack:
+        t = stack.pop()
+        if t in out:
+            continue
+        out.add(t)
+        stack.extend(_TRAIT_PARENTS.get(t, []))
+    return out
+
+
+def _candidate_selection_record(st, filename, order):
+    """A required trait method implemented by several `where conforms_to(Self.T,
+    X)` overloads, where exactly one is provably valid (from the bracket
+    parameter's bound and the trait base's own `where conforms_to(T, X)`) and
+    exactly one needs evidence that is not there: the real compiler cannot pick
+    the valid one until the other is disproved, so the struct does not
+    implement the trait (`ambiguous reference to 'm': lacking evidence to select
+    candidate`). Other candidate mixes are not measured and report nothing."""
+    evidence = set()
+    for (_n, ptype, _d) in getattr(st, 'bracket_param_info', []):
+        evidence |= _trait_implied([ptype])
+    for (_b, wtext) in getattr(st, 'base_constraints', []):
+        for mm in re.finditer(r'conforms_to\(\s*\w+\s*,\s*(\w+)\s*\)', wtext or ''):
+            evidence |= _trait_implied([mm.group(1)])
+    for ent in order:
+        for tm in ent['def'].methods:
+            if not _is_required_method(tm):
+                continue
+            cands = [m for m in st.methods if m.name == tm.name]
+            if len(cands) < 2:
+                continue
+            kinds = []
+            for m in cands:
+                w = m.where_clause
+                if not (isinstance(w, N.CallExpr) and isinstance(w.func, N.IdentExpr)
+                        and w.func.name == 'conforms_to' and len(w.args) == 2
+                        and isinstance(w.args[1], N.IdentExpr)):
+                    kinds = None
+                    break
+                kinds.append('valid' if w.args[1].name in evidence else 'unknown')
+            if kinds is None or kinds.count('valid') != 1 or kinds.count('unknown') != 1:
+                continue
+            notes = [{'file': ent['file'], 'line': tm.line, 'name': tm.name,
+                      'message': f"ambiguous reference to '{tm.name}': lacking evidence to select candidate"}]
+            for m, k in zip(cands, kinds):
+                if k == 'unknown':
+                    wl, wc = _expr_start(m.where_clause)
+                    notes.append({'file': filename, 'line': m.line, 'name': m.name,
+                                  'message': 'cannot prove constraint for candidate'})
+                    notes.append({'file': filename, 'line': wl, 'col': wc, 'name': None,
+                                  'message': "constraint declared here needs evidence for '"
+                                             + _constraint_text(m.where_clause) + "'"})
+                else:
+                    notes.append({'file': filename, 'line': m.line, 'name': m.name,
+                                  'message': 'candidate is valid but cannot be selected until '
+                                             'other candidates are disproved'})
+            notes.append({'file': filename, 'line': st.line, 'name': st.name,
+                          'message': 'provide evidence for or against the constraints here '
+                                     'to aid in candidate selection'})
+            notes.append({'file': ent['file'], 'line': tm.line, 'name': tm.name,
+                          'message': 'required by trait method here'})
+            notes.append({'file': ent['file'], 'line': ent['def'].line, 'name': ent['def'].name,
+                          'message': f"trait '{ent['def'].name}' declared here"})
+            shown = st.name
+            if getattr(st, 'bracket_param_info', None):
+                shown += '[' + ', '.join(b[0] for b in st.bracket_param_info) + ']'
+            return (f"'{shown}' does not implement all requirements for "
+                    f"'{ent['def'].name}'", notes)
+    return None
+
+
 def static_module_diagnostics(stmts, filename, source):
     """Diagnostics found by looking at the module's declarations alone, before
     anything runs -- the modular compiler reports these statically and reports
@@ -1675,6 +1756,14 @@ def static_module_diagnostics(stmts, filename, source):
             notes.append({'file': ent['file'], 'line': tr.line, 'name': tn,
                           'message': f"trait '{tn}' declared here"})
             record(st, f"'{st.name}' does not implement all requirements for '{tn}'", notes)
+            found = True
+        if found:
+            continue
+
+        # 4. candidate selection between conditional overloads
+        sel = _candidate_selection_record(st, filename, order)
+        if sel is not None:
+            record(st, sel[0], sel[1])
     records.extend(_static_call_records(stmts, filename, source))
     records.extend(_static_conversion_records(stmts, filename, source))
     if not records:

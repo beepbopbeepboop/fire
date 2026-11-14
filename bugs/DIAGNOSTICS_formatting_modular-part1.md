@@ -335,3 +335,22 @@ not the decorator's. Tests: `test_fieldwise_init_and_deprecated_conversion.py`.
 With the package source present, the whole real `diagnostics_in_missing_locs.mojo`
 now matches the real compiler except group K (line 137, the ambiguous
 `conforms_to` candidate selection). The source-less (precompile) run is unmet.
+
+### 2026-11-14 (late): group K landed; the source-bearing real test is byte-identical
+
+K: a required trait method implemented by two `where conforms_to(Self.T, X)`
+overloads, one provably valid (from `T: Movable` and the trait base's `where
+conforms_to(T, Copyable)`, closing ImplicitlyCopyable -> Copyable -> Movable) and
+one needing evidence -> `'S[T]' does not implement all requirements for 'Tr'`
+with `ambiguous reference to 'm': lacking evidence to select candidate`, the
+candidate/constraint notes, `provide evidence for or against...`, `required by
+trait method here` and the trait note. Other candidate mixes (two unknowns, two
+valid) are not measured and report nothing. Test:
+`test_candidate_selection_diagnostic.py`.
+
+**Milestone:** `fire.py run` on the real modular `diagnostics_in_missing_locs.mojo`
+with the package source present now prints output BYTE-IDENTICAL to `tools/mojo
+build -I` for the whole file (groups A-L, the warning included). What is left of
+this doc is the test's actual shape: `mojo precompile` the package, delete its
+source, and render the same diagnostics from the stored declarations (synthetic
+`# note - synthetic signature` lines and the `$0` constraint spelling).
