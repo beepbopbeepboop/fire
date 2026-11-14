@@ -6909,6 +6909,8 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['ComptimeVarStmt'] = {
         'target': 'char *',
         'value': 'int64_t',
+        'type_ann': 'char *',
+        'where_clause': 'char *',
         'line': 'int64_t',
         'col': 'int64_t',
     }
@@ -7114,6 +7116,8 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['StructDef'] = {
         'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
         'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
+        'comptime_member_types': 'MojoDict *',
+        'comptime_member_wheres': 'MojoDict *',
         'bases': 'MojoList *',
         # Parallel to `bases`: (base_name, where_text) per positional base.
         'base_constraints': 'MojoList *',
@@ -7142,6 +7146,7 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
         'bases': 'MojoList *',
+        'comptime_members': 'MojoList *',
         'line': 'int64_t', 'col': 'int64_t',
     }
     # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so

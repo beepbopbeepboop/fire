@@ -1,7 +1,7 @@
 # DIAGNOSTICS mojoc imports, part 2 — part 3: conformance error against an imported struct with an implicit default
 
 Part 3 of 3 of `bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`. Depends on
-`DIAGNOSTICS_mojoc_imports-part2-part1.md` (artifact and reader) and
+the precompiled signature artifact/reader (part 1, landed) and
 `mojo/middle/mojoc_signature.py` (synthetic signature printer, landed).
 
 ## Class
@@ -64,5 +64,5 @@ Command: `python3 test_mojoc_implicit_default_conformance.py`
 
 ## Status
 
-- **Open.** Blocked on parts 1 and 2. The measurement step above has not been
+- **Open.** Parts 1 and 2 landed; part 3 remains. The measurement step above has not been
   run yet.

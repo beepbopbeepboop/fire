@@ -7,7 +7,6 @@ deleted in the same commit, as for any bug.
 | doc | what it needs | for |
 |---|---|---|
 | `CODEGEN_simd_and_array_values_erase_to_int64.md` | see doc | workers |
-| `CODEGEN_tagged_generator_mixed_type_step2.md` | see doc | workers |
 | `COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md` | see doc | workers |
@@ -20,7 +19,6 @@ deleted in the same commit, as for any bug.
 | `DIAGNOSTICS_binding_deferrals-part2.md` | see doc | workers |
 | `DIAGNOSTICS_formatting_modular.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
-| `DIAGNOSTICS_mlir_annotations.md` | see doc | workers |
 | `DIAGNOSTICS_mojoc_imports.md` | see doc | workers |
 | `DIAGNOSTICS_mojoc_imports-part2.md` | see doc | workers |
 | `DIAGNOSTICS_trait_conformance.md` | see doc | workers |

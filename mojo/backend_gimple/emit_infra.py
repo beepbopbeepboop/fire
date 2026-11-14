@@ -78,6 +78,7 @@ from mojo.middle.infra_infer import (
 from mojo.middle.calls_shared import user_dunder_repr_call
 import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
+import mojo.middle.rt_call as rt_call
 from mojo.middle.stmts_shared import _annotation_container_elem_type, _iter_ast
 # The extended-unpacking (`*rest`) slot arithmetic, shared with the
 # for-loop lowering that has the same per-slot walk — see
@@ -2591,6 +2592,55 @@ def _is_pointer_view_helper(fname: str) -> bool:
     return False
 
 
+def _repr_fix_args(gen, fname: str, args: list) -> list:
+    """The last step before a runtime call is spelled: give every scalar
+    argument the representation its parameter really has.
+
+    The ladder above coerces from the type the CALLER CLAIMED in its
+    `(ctype, value)` pair to the type `_KNOWN_SIGS` lists.  Both can be wrong:
+    the claim (`('int64_t', v)` for a `v` declared `int`), and the table (it
+    lists 606 of the ~1,070 functions the runtime headers declare, so
+    `mojo_dict_set_bool`, `mojo_list_eq`, `mojo_range3` got no coercion at
+    all).  GCC neither checks nor converts a call argument in a `__GIMPLE`
+    function, so such an argument is passed as raw register bits: measured,
+    `mojo_box_word (<int>)` in `MojoString.byte_length` and `pow (2.0, <int64_t>)`.
+
+    So this step trusts neither.  The parameter type comes from the headers
+    (`rt_sigs.RT_SIGS`, generated) and the argument's type from its
+    DECLARATION (`gen.var_types`).  When the two are scalars of a different
+    class or width it emits exactly the conversion C would have applied
+    implicitly, as its own statement.  A pointer parameter handed a variable
+    declared `int64_t` (or the reverse) gets the cast that says so.  Nothing
+    else about pointers is decided here: container-kind and string
+    conversions are the ladder's.
+
+    A name the program itself defines (`gen.func_param_types`) is not a
+    runtime call, whatever it is spelled like."""
+    params: list[str] = rt_call.rt_param_types(fname)
+    if len(params) == 0:
+        return args
+    if fname in gen.func_param_types:
+        return args
+    out: list = []
+    i = 0
+    while i < len(args):
+        a = _as_str(args[i])
+        if i < len(params):
+            p = params[i]
+            if p == '...':
+                params = []
+            else:
+                d = gen.var_types.get(a)
+                if d is not None and (rt_call.arg_needs_repr_cast(p, _as_str(d))
+                                      or rt_call.arg_needs_word_cast(p, _as_str(d))):
+                    t = gen._new_temp(p)
+                    gen._emit(f"  {t} = ({p}){a};")
+                    a = t
+        out.append(a)
+        i += 1
+    return out
+
+
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
                arg_nodes: list = None) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
@@ -3164,6 +3214,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             coerced_args.append(ct)
         else:
             coerced_args.append(aval)
+    coerced_args = _repr_fix_args(gen, fname, coerced_args)
     args_str = ', '.join(coerced_args)
     # For imported functions with known C signatures, use the declared return type
     # to avoid "invalid conversion in gimple call" when the caller guessed wrong.
