@@ -53,11 +53,10 @@ def test_p1_reexport_home_module_is_the_defining_module():
         '(std/memory/memory.mojo):\n' + '\n'.join(refs))
 
 
-# part 2 (bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part2.md):
-# the overload suffix a reference to an IMPORTED free function carries is the
-# suffix of the DEFINING unit's signature. `std.collections.string.string`
-# calls `parsing_floats._atof`; measured today the call emits
-# `...__atof_55072c` (param `int64_t *`) while the defining unit emits
+# part 2 (fixed): the overload suffix a reference to an IMPORTED free function
+# carries is the suffix of the DEFINING unit's signature. `std.collections.string.string`
+# calls `parsing_floats._atof`; before the fix the call emitted
+# `...__atof_55072c` (param `int64_t *`) while the defining unit emitted
 # `...__atof_d719e0` (param `char *`) — an undefined reference at link time.
 _ATOF_FAMILY = (
     r'(?<![A-Za-z0-9_])'
