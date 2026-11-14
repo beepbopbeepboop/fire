@@ -151,6 +151,8 @@ def apply_orch_reviews():
       FIXED    the reviewer fixed the orchestration: wait until its branch has LANDED (its registry entry is gone), so
                the reset happens on the fixed code (a landing reloads the swarm), then reset.
       STOP / no verdict   the cap stays (a review that cannot help is not retried past MAX_CAP_REVIEWS)."""
+    for path in C.sweep_review_docs():
+        log("removed orchestration review doc %s: nothing still needs it" % os.path.relpath(path, C.MAIN))
     for name, t in C.load().items():
         cr = t.get("cap_review")
         if not cr or cr.get("applied"):

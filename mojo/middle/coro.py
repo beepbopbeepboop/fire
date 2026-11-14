@@ -66,6 +66,7 @@ def _cm_as_str(x) -> str:
 from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.loops_shared import _single_loop_target_name
 try:
     from mojo.middle.exprtypes import module_qualifier
 except Exception:
@@ -1240,6 +1241,135 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
     if kinds is None:
         return None
     return [k == 'tuple' for k in kinds]
+
+
+def _yield_nodes_of(fn: N.FunctionDef):
+    """Yield every `YieldExpr`/`YieldFromExpr` lexically inside `fn`, not
+    inside a nested `def`/`lambda`/comprehension — a yield there belongs to a
+    different scope, exactly the nesting rule `fire_compiler._scan_yield_bearing`
+    uses for `is_generator`. Own stack-based walk (the shared `_walk` cannot
+    express "skip this subtree, keep the rest")."""
+    stack = list(getattr(fn, 'body', None) or [])
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, (N.FunctionDef, N.LambdaExpr, N.Comprehension)):
+            # A different scope: whatever yields live there do not belong to
+            # `fn`. (A comprehension nested in `fn` containing a yield is a
+            # SyntaxError in real Python anyway; either way it is not
+            # `fn`'s yield.)
+            continue
+        if isinstance(cur, (N.YieldExpr, N.YieldFromExpr)):
+            yield cur
+            continue
+        d = getattr(cur, '__dict__', None)
+        if not d:
+            continue
+        for v in d.values():
+            if isinstance(v, list):
+                stack.extend(x for x in v if hasattr(x, '__dict__'))
+            elif hasattr(v, '__dict__'):
+                stack.append(v)
+
+
+def _yields_provably_nontuple(fn: N.FunctionDef) -> bool:
+    """True iff every `yield` DIRECTLY in `fn` yields a provably NON-tuple
+    value and there is no `yield from` at all.
+
+    The one generator fact the pipeline's own multi-slot refusal needs
+    before codegen (and therefore `_generator_value_kind` /
+    `tuple_slot_ctypes`) exists to answer it. This is deliberately a NARROW
+    and conservative predicate, never an approximation of the full
+    tuple-shape analysis: anything this does not prove non-tuple — a tuple
+    literal anywhere, any `yield from` — returns False and the caller defers
+    to codegen's own, better-informed refusal. A `True` here is the exact
+    condition under which codegen's `tuple_slot_ctypes` is None for every
+    binding of this function (the value slot cannot be tuple-shaped because
+    no yield is tuple-shaped), so a caller can refuse on it without ever
+    refusing a program codegen would have accepted."""
+    saw_yield = False
+    for n in _yield_nodes_of(fn):
+        if isinstance(n, N.YieldFromExpr):
+            return False
+        saw_yield = True
+        if isinstance(n.value, N.TupleExpr):
+            return False
+    return saw_yield
+
+
+def multi_slot_comprehension_refusal(target: str, callee: str) -> RuntimeError:
+    """The RuntimeError `_compr_generator_loop` raises for a multi-slot
+    comprehension target over a generator whose yield arity is not a tuple,
+    built in ONE place so the pipeline pre-pass
+    (`refuse_multi_slot_comprehension_over_nontuple_generator`) and the codegen
+    raise the IDENTICAL diagnostic — which of the two noticed first must not
+    change the message a program receives (a stage lowering happening to
+    preempt another is not a reason for a user to see two different errors
+    for one program)."""
+    return RuntimeError(
+        "cannot compile a multi-slot comprehension target over a "
+        f"generator whose yield arity is not a tuple (`{target} "
+        f"for {target} in {callee}(...)`): the generator "
+        "yields one value per resume, and unpacking that value needs a "
+        "runtime iterator protocol this scalar generator model does "
+        "not have")
+
+
+def refuse_multi_slot_comprehension_over_nontuple_generator(stmts: list) -> None:
+    """Refuse, BEFORE the unknown-declaration pass can report a derived
+    symptom, the comprehension shape codegen refuses by name: a multi-slot
+    generator-clause target in a comprehension over a generator of THIS
+    module whose every yield is provably one non-tuple value per resume.
+
+    `unknown_decl_check.check_module` runs earlier in the pipeline than the
+    codegen that owns this refusal, so a comprehension element reading an
+    undeclared name — `print([x for a, b in g()])` — used to reach that
+    pass first and die with its own, less specific `use of unknown
+    declaration 'x'`, never reaching the refusal the shape deserves (bug:
+    SUITE_gimplegenerators_multi_slot_comprehension). This pass answers the
+    arity question at the stage where it can still answer it, and only for
+    shapes it can prove:
+
+      * the clause target is a real multi-slot tuple target (the `(a,)` /
+        `a,` 1-tuple spelling binds ONE name and is not it);
+      * the iterable is a call of a module-level `def` of THIS module by its
+        bare name, and every candidate under that name is a generator whose
+        yields are all provably non-tuple (`_yields_provably_nontuple`).
+        An imported generator, a method, a `yield from` chain, or one
+        tuple-shaped yield anywhere defers to codegen's own refusal — that
+        is the same behavior as before this pass existed.
+
+    Raises the shared `multi_slot_comprehension_refusal`; returns None when
+    no clause matches."""
+    defs_by_name: dict = {}
+    for st in stmts or []:
+        if isinstance(st, N.FunctionDef):
+            defs_by_name.setdefault(str(st.name), []).append(st)
+    if not defs_by_name:
+        return
+    for st in stmts or []:
+        for node in _walk(st):
+            if not isinstance(node, N.Comprehension):
+                continue
+            for clause in getattr(node, 'generators', None) or []:
+                target = getattr(clause, 'target', None)
+                if not isinstance(target, str):
+                    continue
+                stripped = target.strip()
+                if not for_target_is_tuple(stripped):
+                    continue
+                if _single_loop_target_name(stripped) is not None:
+                    # The `(a,)` / `a,` 1-tuple spelling binds ONE name.
+                    continue
+                it = getattr(clause, 'iterable', None)
+                if not (isinstance(it, N.CallExpr)
+                        and isinstance(it.func, N.IdentExpr)):
+                    continue
+                candidates = [c for c in defs_by_name.get(it.func.name, ())
+                              if getattr(c, 'is_generator', False)
+                              and not getattr(c, 'is_async', False)]
+                if candidates and all(_yields_provably_nontuple(c)
+                                      for c in candidates):
+                    raise multi_slot_comprehension_refusal(target, it.func.name)
 
 
 def _conflicting_names_in(expr, env: dict | None) -> list:

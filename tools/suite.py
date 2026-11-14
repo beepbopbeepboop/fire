@@ -1963,8 +1963,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
             'reflect.py'],
      desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-          'agrees with the tree',
-     disabled='bugs/gate-formal-doc-truth.md')
+          'agrees with the tree')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
@@ -4214,6 +4213,14 @@ test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'],
      desc='registered by the estate audit (every test file runs)')
 test('where-clause-call-site-diagnostic', [PY, 'test_where_clause_call_site_diagnostic.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
+# Defaulted trait method conformance (DIAGNOSTICS_trait_conformance part 6):
+# a struct inheriting a trait default whose signature cannot be instantiated
+# for the conforming struct must be rejected at declaration time.
+test('defaulted-trait-method-conformance-diagnostic',
+     [PY, 'test_defaulted_trait_method_conformance_diagnostic.py'], mem='tiny',
+     desc='defaulted trait method conformance (part 6): inherited defaults '
+          'whose partially-applied return types are uninstantiable are '
+          'rejected, while Self/fully-applied defaults and overrides compile')
 # Landed with 06ea5b0ef ("compiler: enforce trait method requirement
 # evidence (part 2)") and registered nowhere until
 # bug:SUITE_trait_requirement_evidence_unregistered. Cheap (tiny, 0.1 GB
@@ -4560,7 +4567,7 @@ test('mojoc-implicit-default-conformance',
 
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'defaulted-trait-method-conformance-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',

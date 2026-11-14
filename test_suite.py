@@ -4203,6 +4203,10 @@ UNREGISTERED = {
     'test_unknown_decl_check.py':
         'Unit tests for the unknown-decl check/compiler-provided builtins '
         'helper module. Run directly; not registered.',
+    'test_suite_self_test_red.py':
+        'Regression pin for the SUITE_self_test_red suite-self-test '
+        'drift (self-host key, disabled/estate/census rows). Run directly; '
+        'not a registered bucket job.',
 
     # `test_formal_doc_truth.py` was here (listed rather than registered, its
     # branch's task said not to touch the registry) and is REGISTERED as
@@ -5271,6 +5275,8 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
     ('trait-comptime-member-conformance-diagnostic',
      'test_trait_comptime_member_conformance_diagnostic.py', 'part 5'),
+    ('defaulted-trait-method-conformance-diagnostic',
+     'test_defaulted_trait_method_conformance_diagnostic.py', 'part 6'),
     ('downcast-witness-diagnostic',
      'test_downcast_witness_diagnostic.py', 'part 7'),
 )
@@ -5279,18 +5285,19 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
 def test_the_trait_conformance_diagnostic_suites_are_gated():
     """Every trait-conformance diagnostic suite runs on every gate.
 
-    The three files landed with their fixes (`06ea5b0ef` part 2, `65cee30d4`
-    part 4, `ec12b76e1` part 7) and none was named by a spec, so
+    The first three files landed with their fixes (`06ea5b0ef` part 2,
+    `65cee30d4` part 4, `ec12b76e1` part 7) and none was named by a spec, so
     `suite-self-test`'s estate row was the only thing that mentioned them and
     no run executed their cases
     (`bug:SUITE_trait_requirement_evidence_unregistered`). Each was found by
     the estate check only after the previous one was "fixed", which is why
-    this pins the family and not one file.
+    this pins the family and not one file; parts 5 and 6 joined the tuple when
+    their declaration-time checks landed.
 
     The estate check above is what found each one, but it can only ask that
     SOME spec names the file; a name in a bucket `gate` does not expand to is
     the same hole one level over, and `regressions`/`orchestrator` are exactly
-    such buckets by design. All three are cheap (tiny, 0.0-0.1 GB measured,
+    such buckets by design. All of them are cheap (tiny, 0.0-0.1 GB measured,
     sub-second, no build) and pin compiler diagnostics, so they belong in the
     everyday loop, and this check pins that by name so dropping a
     registration — or moving one out of the gate — is a red row rather than a

@@ -80,6 +80,27 @@ def main():
                 assert t0.get("merge_capped") and not t0["cap_review"].get("applied"), "a running reviewer is waited on"
                 setup("FORWARD", reviewer_present=False); S.apply_orch_reviews(); t0 = C.load()[name]
                 assert t0.get("merge_capped") and t0["cap_review"]["applied"] == "no verdict", "a vanished reviewer: stays capped"
+
+            # (5) review docs are swept when nothing needs them (the STOP / no-verdict / vanished-reviewer docs used to stay
+            # forever): a still-capped task keeps its doc; an orphan goes; a doc a live reviewer holds stays; an uncapped
+            # task's doc goes.
+            bugs = os.path.join(d, "main", "bugs")
+            orphan = os.path.join(bugs, "ORCH_REVIEW_orphan.md")
+            held = os.path.join(bugs, "ORCH_REVIEW_bug-held.md")
+            for p in (orphan, held): open(p, "w").write("x\n")
+            assert os.path.exists(doc), "a still-capped task keeps its doc"
+            wt9 = os.path.join(d, "w9"); os.makedirs(wt9, exist_ok=True)
+            reg5 = C.load()
+            reg5["fix-orch-bug-held"] = {"branch": "work/rv", "state": "running", "claims": ["bug:ORCH_REVIEW_bug-held"],
+                                         "worktree": wt9, "pid": 0, "model": "m2", "slot": 99}
+            json.dump(reg5, open(os.path.join(ctl, "tasks.json"), "w"))
+            assert C.sweep_review_docs(dry_run=True) == [orphan], "dry run names the orphan and removes nothing"
+            assert os.path.exists(orphan)
+            assert C.sweep_review_docs() == [orphan] and not os.path.exists(orphan), "the orphan is swept"
+            assert os.path.exists(held) and os.path.exists(doc), "a live reviewer's doc and a capped task's doc stay"
+            reg6 = C.load(); reg6[name].pop("merge_capped"); json.dump(reg6, open(os.path.join(ctl, "tasks.json"), "w"))
+            assert C.sweep_review_docs() == [doc], "the doc of an uncapped task is no longer needed; the held one is still claimed"
+            assert not os.path.exists(doc) and os.path.exists(held)
         finally:
             for p in patches: p.stop()
     # (4) the reserved slot takes only tasks pinned to it

@@ -42,6 +42,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
+import mojo.middle.coro as coro_mod
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
@@ -6851,13 +6852,12 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     else:
         var_names = None
         if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
-            raise RuntimeError(
-                "cannot compile a multi-slot comprehension target over a "
-                f"generator whose yield arity is not a tuple (`{gen0.target} "
-                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
-                "yields one value per resume, and unpacking that value needs a "
-                "runtime iterator protocol this scalar generator model does "
-                "not have")
+            # The message lives in mojo/middle/coro.py beside the pipeline
+            # pre-pass that raises the same refusal earlier (before the
+            # unknown-declaration pass can answer with a less-specific
+            # diagnostic for the same program): one builder, one wording.
+            raise coro_mod.multi_slot_comprehension_refusal(gen0.target,
+                                                             api.get('base'))
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
