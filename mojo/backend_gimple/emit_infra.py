@@ -1378,8 +1378,20 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
             of = gimple_ctypes.os.path.join(wd, 'link_inline_module.o')
             with open(cf, 'w') as f:
                 f.write(cpp_code)
-            subprocess.run([gxx, *cpp_flags, '-c', '-o', of, cf], check=True,
-                           capture_output=True)
+            # Not `check=True`: that raises a CalledProcessError whose str() is
+            # only the argv and "returned non-zero exit status 1", and the
+            # compiler's own message (the ONLY thing that says what is wrong
+            # with the generated C++) lives in its captured stderr. That is how
+            # a real mistyped imported-module parameter surfaced eight lines
+            # later at link as "Undefined symbols ... _mojogen_*" instead of
+            # naming itself. Carry the stderr into the note; the `.cpp` also
+            # stays on disk at `cf` for a by-hand retry.
+            r = subprocess.run([gxx, *cpp_flags, '-c', '-o', of, cf],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                _msg = (r.stderr or r.stdout or '').strip()
+                raise RuntimeError(
+                    f'{gxx} failed on {cf} (exit {r.returncode}):\n{_msg}')
             with open(of, 'rb') as f:
                 return f.read()
 
