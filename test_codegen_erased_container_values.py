@@ -3,7 +3,7 @@
 CODEGEN_simd_and_array_values_erase_to_int64.
 
 Each `test_<prefix>_*` here is the Done-when test of an open part doc under
-bugs/mid/ and is RED until its part lands. This file is deliberately NOT a
+bugs/ and is RED until its part lands. This file is deliberately NOT a
 registered gate job: a red probe belongs to its bug doc's command, not to the
 green regression bucket. The landed parts' tests are in
 test_codegen_erased_container_values_pins.py.
@@ -21,7 +21,7 @@ import sys
 from test_codegen_erased_container_values_pins import _compile, _defn
 
 
-# part 1 (bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
+# part 1 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
 # a module-level `alias` of a type is expanded wherever an annotation is
 # resolved -- a parameter, a return, an explicitly annotated local, and a
 # container's element type.
@@ -108,7 +108,7 @@ def test_p2_alias_ctor_expands_callee():
     assert 'mojo_list_get_double' in abody, abody
 
 
-# part 3 (bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
+# part 3 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
 # a `comptime` name bound to a float DType resolves in a module-scope
 # signature, in a function-scope annotated local, and in the dtype argument
 # of a SIMD constructor.
@@ -155,7 +155,7 @@ def test_p3_comptime_dtype_resolves_in_all_type_positions():
     assert dsig.startswith('double ') and dsig.endswith('(double x)'), dbody
 
 
-# part 4 (bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part4.md):
+# part 4 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part4.md):
 # a container parameter's annotation is the static truth about its contents.
 # `Array[T, N]` and `FixedSizeArray[T, N]` parameters must be the same tracked
 # `MojoList *` a constructor produces, so `a[i]` and `Span(a)` inside the
