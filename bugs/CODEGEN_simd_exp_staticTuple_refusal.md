@@ -14,8 +14,10 @@
         instantiation of generic 'StaticTuple': its bracket arguments advance without converging,
         which would cause infinite recursion
 
-The run still ends `610 passed, 0 failed`. See `CODEGEN_stdlib_failed_elaboration_counted_as_pass.md`
-for why that count is wrong.
+The run used to still end `610 passed, 0 failed`; the wrong-verdict bug behind
+that count is fixed (2026-11-14): a module whose elaboration failed is now
+reported FAILED, and `std/simd.mojo` is listed in `compile_stdlib.py`'s
+`EXPECTED_FAILURES` until this refusal is gone.
 
 ## Reproduction
 

@@ -27,7 +27,10 @@ a `passed` line reads as a failure, or as noise nobody can act on. Either way th
 tell which lines matter. This is the output-side symptom of two underlying problems:
 
 - The refusal itself is a false positive: `bugs/CODEGEN_simd_exp_staticTuple_refusal.md`.
-- The run counts the module as PASSED despite the message: `bugs/CODEGEN_stdlib_failed_elaboration_counted_as_pass.md`.
+- The run used to count the module as PASSED despite the message; that verdict
+  bug is fixed (2026-11-14), so the module is now a FAILED entry in the
+  `EXPECTED_FAILURES` list and the count is honest. The console line is the
+  remaining output-side problem.
 
 Fixing the verdict alone (the second doc) would make the module FAILED and the output honest, but
 the `CAUGHT_IN_MAIN_LOOP` line would still print on every run for a refusal that is a bug. The
