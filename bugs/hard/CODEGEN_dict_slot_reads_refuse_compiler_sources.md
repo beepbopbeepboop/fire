@@ -1,3 +1,5 @@
+SPLIT: CODEGEN_dict_slot_reads_refuse_compiler_sources-part1, CODEGEN_dict_slot_reads_refuse_compiler_sources-part2, CODEGEN_dict_slot_reads_refuse_compiler_sources-part3
+
 # CODEGEN: compiling the compiler's own sources is refused: dict-slot reads are tagged words
 
 Found 2026-11-10. Since the dict-slot read work reached master (7ae229803, merged in 6b5c68c5b, then 3213b5e88), the

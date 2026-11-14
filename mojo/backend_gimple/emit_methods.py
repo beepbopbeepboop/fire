@@ -406,7 +406,7 @@ def _frame_enter(gen, node) -> None:
                 break
     _fname = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_fn_shown))}')
     _ffile = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(getattr(gen, "_current_filename", "") or "")))}')
-    _fline = gen._new_val('int64_t', f'(int64_t){int(getattr(node, "line", 0) or 0)}')
+    _fline = gen._cast('int64_t', f'{int(getattr(node, "line", 0) or 0)}')
     gen._void_call('mojo_frame_enter',
                    [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
     if _as_str(node.name).startswith('__mgco_') and _as_str(node.name).endswith('_body'):
@@ -537,6 +537,79 @@ def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):
             or method_name in getattr(gen, 'func_return_types', {})):
         return 'func'
     return 'other'
+
+
+def _register_sibling_module_member(gen, module_name: str, method_name: str,
+                                    sub_ref=None):
+    """Record `<module_name>.<method_name>` as an imported top-level FUNCTION
+    of the sibling module the alias names, so re-dispatching the call on the
+    bare name resolves to that definition's real mangled symbol.
+
+    Two steps, and BOTH are required:
+
+    1. `_note_own_func_home` pins the name's home module, so `_func_qualifier`
+       can qualify a bare name the caller's own flat tables don't know yet
+       (the defining module may be compiled LATER in an import cycle —
+       `emit_infra <-> emit_stmts`, `emit_infra -> emit_calls -> emit_exprs ->
+       emit_infra`).
+    2. Register the MEMBER itself. `_note_own_func_home` alone is NOT enough
+       and is recorded here so nobody re-lands it: a bare `import X as alias`
+       records `imported_symbols[alias]` for the MODULE, never for its
+       members, and `_func_mangleable`/`_func_csym` key off the SYMBOL's own
+       entry. Without it the re-dispatched bare call has no signature, emits
+       `__attribute__((weak)) ... "unavailable in compiled mode"`, returns 0,
+       and exits 0 — a silent wrong value, which is what lets the whole-
+       closure dump link and produce a wrong `.ci`.
+
+    The signature is rebuilt from the DEFINING module's own parsed
+    `FunctionDef` through `_resolved_export_entry`, NOT from
+    `module_loader`'s text scan: the scan answers `int64_t f (void)` for an
+    unannotated `def f(x)`, which as the only prototype in the file would
+    reject its own call site.
+
+    Registration happens ONLY when nothing has registered the name already.
+    An import this compile already resolved properly — `_emit_stdlib_import_
+    externs` for a stdlib/test module, `_register_link_imports` for a
+    `from X import Y` — has an entry whose signature came from the DEFINING
+    module's own compile, and overwriting it with a locally rebuilt one
+    produced `non-trivial conversion in 'function_decl'` across
+    `std/builtin/dtype.mojo` and `std/python/_cpython.mojo` (measured). A
+    missing entry is the whole bug; an existing one is not this code's to
+    improve.
+
+    Shared by the two module-qualified-call branches — the self-host sibling
+    one (`_selfhost_sibling_member_kind`, above) and the generic local-
+    project one (further down) — instead of each keeping its own copy of
+    these steps.
+
+    Returns `(sub_ref, raw_export_entry)`: the module ref the alias names, as
+    written in the import, and the scan's (un-upgraded) entry when the member
+    was not registered yet AND the defining module exports it, else None.
+    The generic branch's factory-value accessor still keys on that raw entry.
+    """
+    if sub_ref is None:
+        _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
+        sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
+                   or module_name)
+    try:
+        gen._note_own_func_home(method_name, sub_ref, record_scope=False)
+    except Exception:
+        pass
+    if method_name in (getattr(gen, 'imported_symbols', None) or {}):
+        return sub_ref, None
+    try:
+        _exps, _qual = gen._local_sibling_module_exports(sub_ref)
+    except Exception:
+        _exps, _qual = None, None
+    _raw = (_exps or {}).get(method_name)
+    if _raw:
+        _entry = gen._resolved_export_entry(sub_ref, method_name, _raw)
+        if _entry:
+            _entry = dict(_entry)
+            _entry['module'] = sub_ref
+            gen._register_imported_symbol(method_name, _entry, method_name,
+                                          write_param_types=True)
+    return sub_ref, _raw
 
 
 def _lower_bound_method_value(gen, struct_name: str, method: str,
@@ -2472,7 +2545,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `BUILTIN_VALUE_MAP` override for `_coro_resume_fn`/`_coro_destroy_fn`
     # when the stack-switch backend is enabled — see bugs/hard/CODEGEN_
     # coro_detached_async_take_handle.md.
-    if isinstance(func.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.UnaryOp)):
+    if (func.member in ('_set_noop_callback', '_take_handle')
+            and isinstance(func.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.UnaryOp))):
         _obj_type, _obj_val = gen.lower_expr(func.obj)
         if _obj_type in ('MojoAsync *', 'MojoGenerator *'):
             if func.member == '_set_noop_callback' and not node.args:
@@ -2836,7 +2910,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # imported function became a weak stub. Build ONE
                     # MojoList of all parts (expanding spreads) and join it.
                     _jl = gen._new_temp('MojoList *')
-                    gen._emit(f'  {_jl} = mojo_list_new();')
+                    gen._rt_into(_jl, 'mojo_list_new', [])
                     for _ja in node.args:
                         if isinstance(_ja, UnaryOp) and _ja.op == '*':
                             _jat, _jav = gen.lower_expr(_ja.operand)
@@ -3096,22 +3170,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # generalized). Gated to this compiler's own `gimple*.py` sources
         # so it can never intercept a real stdlib module method.
         if _selfhost_sibling_member_kind(gen, module_name, method_name) is not None:
-            # Pin the member's home to the sibling module the alias names so
-            # bare-name resolution below can qualify it even when that
-            # module is compiled later in a cycle (emit_infra <-> emit_stmts)
-            # and the member is not yet present in this gen's flat
-            # func_param_types/func_return_types tables. Without this, the
-            # re-dispatch resolves to an unqualified bare symbol and emits a
-            # weak "unavailable in compiled mode" stub while the real
-            # definition is emitted under its qualified mangled name.
-            _sh_info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
-            _sh_sub_ref = ((_sh_info.get('module')
-                            if isinstance(_sh_info, dict) else None)
-                           or module_name)
-            try:
-                gen._note_own_func_home(method_name, _sh_sub_ref, record_scope=False)
-            except Exception:
-                pass
+            # Pin the member's home to the sibling module the alias names AND
+            # register the member itself, so bare-name resolution below can
+            # qualify it even when that module is compiled later in a cycle
+            # (emit_infra <-> emit_stmts) and the member is not yet present
+            # in this gen's flat func_param_types/func_return_types tables.
+            # Without the member registration, the re-dispatch resolves to
+            # an unqualified bare symbol and emits a weak "unavailable in
+            # compiled mode" stub while the real definition is emitted under
+            # its qualified mangled name. The steps are shared with the
+            # generic module-qualified branch — see
+            # `_register_sibling_module_member`'s own docstring for why
+            # `_note_own_func_home` alone is not enough.
+            _register_sibling_module_member(gen, module_name, method_name)
             # Re-dispatch as a BARE-name call: the alias qualifier is a
             # Python-import artifact only. `_lower_call` owns struct-ctor
             # allocation, default-argument padding, keyword ordering and
@@ -3214,16 +3285,22 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     t = gen._new_temp('char *')
                     if is_callback:
                         fn_ptr_t, env_t = gen._lower_re_sub_callback(cb_arg)
-                        gen._emit(f'  {t} = mojo_regex_sub_fn ({prog_local}, {ranges_local}, {classinfo_local}, '
-                                   f'{info["root"]}, {info["ngroups"]}, {fn_ptr_t}, {env_t}, {src_val});')
+                        gen._rt_into(t, 'mojo_regex_sub_fn',
+                                     [f"{prog_local}", f"{ranges_local}",
+                                      f"{classinfo_local}", f'{info["root"]}',
+                                      f'{info["ngroups"]}', f"{fn_ptr_t}",
+                                      f"{env_t}", f"{src_val}"])
                     else:
                         repl_type, repl_val = gen.lower_expr(cb_arg)
                         if repl_type not in ('char *', 'void *'):
                             repl_cast = gen._new_temp('char *')
                             gen._cast_into(repl_cast, 'char *', f"{repl_val}")
                             repl_val = repl_cast
-                        gen._emit(f'  {t} = mojo_regex_sub_str ({prog_local}, {ranges_local}, {classinfo_local}, '
-                                   f'{info["root"]}, {info["ngroups"]}, {repl_val}, {src_val});')
+                        gen._rt_into(t, 'mojo_regex_sub_str',
+                                     [f"{prog_local}", f"{ranges_local}",
+                                      f"{classinfo_local}", f'{info["root"]}',
+                                      f'{info["ngroups"]}', f"{repl_val}",
+                                      f"{src_val}"])
                     return 'char *', t
                 pat_type, pat_val = gen.lower_expr(node.args[0])
                 # pattern/src may arrive as int64_t string handles; mojo_re_sub_fn
@@ -3718,71 +3795,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # symbol-resolution half and skipping the rest is
                     # exactly what caused the self-host regression noted
                     # above.
-                    gen._note_own_func_home(method_name, _mgc_sub_ref, record_scope=False)
-                    # …and register the MEMBER, which a bare `import X`
-                    # never did. `_note_own_func_home` alone is not enough
-                    # and this document's own next step says why: the entry
-                    # `_note_own_func_home` writes is the module's, and a
-                    # bare `import X` records only `imported_symbols['X']`
-                    # -- for the MODULE, not its members. So the re-dispatched
-                    # BARE call found no `imported_symbols['deep_fn']`,
-                    # `_func_mangleable('deep_fn')` was False,
-                    # `_func_csym` produced the bare `_safe_name('deep_fn')`
-                    # with no qualifier and no overload suffix, and
-                    # `_lower_named_call`'s `_is_unknown` branch emitted its
-                    # weak 0-returning stub:
-                    #
-                    #   __attribute__((weak)) int64_t deep_fn (...) {
-                    #     mojo_print ((char *)"deep_fn: unavailable in
-                    #                   compiled mode"); return (int64_t)0; }
-                    #   _t2 = deep_fn (1);
-                    #
-                    # exit 0, no diagnostic beyond the stub's own message,
-                    # and 0 where CPython prints 8. The inline
-                    # (`do_imports`) path emits `deep_deep_fn_9f63a2` for the
-                    # same two files, so the two paths disagreed about the
-                    # same symbol's NAME as well as about whether it exists.
-                    #
-                    # The signature comes from the DEFINING module's own
-                    # parsed FunctionDef via `_resolved_export_entry`, NOT
-                    # from `module_loader`'s text scan: the scan answers
-                    # `int64_t deep_fn (void)` for an unannotated
-                    # `def deep_fn(x)` (it reads signatures off the text),
-                    # which as the only prototype in the file would reject
-                    # its own call site. That is the same upgrade the
-                    # `from X import Y` path performs, through the same two
-                    # helpers -- `bugs/CODEGEN_bare_import_module_
-                    # qualified_call_answers_zero.md`, whose "partial fix
-                    # that is NOT enough, recorded so nobody re-lands it"
-                    # section is the `_note_own_func_home`-only version.
-                    try:
-                        _mgc_exps, _mgc_qual = gen._local_sibling_module_exports(
-                            _mgc_sub_ref)
-                    except Exception:
-                        _mgc_exps, _mgc_qual = None, None
-                    # ONLY when nothing has registered it already. An
-                    # import this compile already resolved properly --
-                    # `_emit_stdlib_import_externs` for a stdlib/test
-                    # module, `_register_link_imports` for a `from X import
-                    # Y` -- has an entry whose signature came from the
-                    # DEFINING module's own compile, and overwriting it with
-                    # a locally rebuilt one produced
-                    # `non-trivial conversion in 'function_decl'` across
-                    # `std/builtin/dtype.mojo` and `std/python/_cpython.mojo`
-                    # (measured). A missing entry is the whole bug; an
-                    # existing one is not this code's to improve.
-                    _mgc_raw = None
-                    if method_name not in gen.imported_symbols:
-                        _mgc_raw = (_mgc_exps or {}).get(method_name)
-                    if _mgc_raw:
-                        _mgc_entry = gen._resolved_export_entry(
-                            _mgc_sub_ref, method_name, _mgc_raw)
-                        if _mgc_entry:
-                            _mgc_entry = dict(_mgc_entry)
-                            _mgc_entry['module'] = _mgc_sub_ref
-                            gen._register_imported_symbol(
-                                method_name, _mgc_entry, method_name,
-                                write_param_types=True)
+                    # The two steps this bare re-dispatch needs — pin the
+                    # member's home module, then register the MEMBER itself,
+                    # which a bare `import X` never did — are ONE shared
+                    # helper (see `_register_sibling_module_member`'s
+                    # docstring for the measured failure and why
+                    # `_note_own_func_home` alone is the "partial fix that
+                    # is NOT enough, recorded so nobody re-lands it" in
+                    # `bugs/CODEGEN_bare_import_module_qualified_call_
+                    # answers_zero.md`). `_mgc_raw` is the un-registered
+                    # export entry, when there was one, for the factory-value
+                    # accessor below.
+                    _mgc_sub_ref, _mgc_raw = _register_sibling_module_member(
+                        gen, module_name, method_name, _mgc_sub_ref)
                     # The factory-value shape (the 2026-10-24 os.py shadow
                     # class, its ENTRY-side half): `f = _mk()` is a VALUE,
                     # not a top-level `def`, so the export scan carries no
@@ -6182,7 +6207,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                 gen._dyn_word_vals.add(raw)
             return 'int64_t', raw
     if method == 'update' and args:
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "update");')
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"update"'])
         other_type, other_val = gen.lower_expr(args[0])
         # `d1.update(d2)` where d2 is itself a builtin-`dict` subclass
         # instance — the real dict lives in its hidden `_data` field, not
@@ -6196,7 +6221,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._rt_void('mojo_dict_update', [ov_cast, other_val_cast])
         return 'int', gen._new_val('int', '0')
     if method == 'pop' and args:
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "pop");')
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"pop"'])
         # `d.pop(k)` / `d.pop(k, default)`. Two things were lost here and both
         # were silent wrong answers rather than refusals:
         #
@@ -6320,11 +6345,11 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._copy_dict_metadata(t, ov)
         return 'MojoDict *', t
     if method == 'clear':
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "clear");')
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"clear"'])
         gen._rt_void('mojo_dict_clear', [ov])
         return 'int', gen._new_val('int', '0')
     if method == 'setdefault' and args:
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "setdefault");')
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"setdefault"'])
         # `d.setdefault(key[, default])` — real Python: insert `default`
         # (None if omitted) under `key` when absent, then return the current
         # value. The previous lowering was just `mojo_dict_get_int`, which
@@ -6362,17 +6387,39 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             return dt, typed
         return 'int64_t', raw
     if method == 'popitem':
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "popitem");')
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"popitem"'])
         return 'int64_t', gen._new_val('int64_t', '0')
     if method == '__setitem__':
-        gen._emit(
-            f"  if ({ov} && ((MojoDict*){ov})->frozen) "
-            f"mojo_raise_type_error((char*)\"'frozendict' object does not support item assignment\");")
+        _dict = gen._cast('MojoDict *', f"{ov}")
+        _isnull = gen._bool_not('MojoDict *', f"{_dict}")
+        _bb_chk = gen._new_bb()
+        _bb_raise = gen._new_bb()
+        _bb_after = gen._new_bb()
+        gen._cond_goto(_isnull, _bb_after, _bb_chk)
+        gen._emit_label(_bb_chk)
+        _frozen = gen._new_val('int', f"{_dict}->frozen")
+        _is_frozen = gen._new_val('_Bool', f"{_frozen} != 0")
+        gen._cond_goto(_is_frozen, _bb_raise, _bb_after)
+        gen._emit_label(_bb_raise)
+        gen._rt_void('mojo_raise_type_error',
+                     ['"\'frozendict\' object does not support item assignment"'])
+        gen._emit_label(_bb_after)
         return 'int64_t', gen._new_val('int64_t', '0')
     if method == '__delitem__':
-        gen._emit(
-            f"  if ({ov} && ((MojoDict*){ov})->frozen) "
-            f"mojo_raise_type_error((char*)\"'frozendict' object does not support item deletion\");")
+        _dict = gen._cast('MojoDict *', f"{ov}")
+        _isnull = gen._bool_not('MojoDict *', f"{_dict}")
+        _bb_chk = gen._new_bb()
+        _bb_raise = gen._new_bb()
+        _bb_after = gen._new_bb()
+        gen._cond_goto(_isnull, _bb_after, _bb_chk)
+        gen._emit_label(_bb_chk)
+        _frozen = gen._new_val('int', f"{_dict}->frozen")
+        _is_frozen = gen._new_val('_Bool', f"{_frozen} != 0")
+        gen._cond_goto(_is_frozen, _bb_raise, _bb_after)
+        gen._emit_label(_bb_raise)
+        gen._rt_void('mojo_raise_type_error',
+                     ['"\'frozendict\' object does not support item deletion"'])
+        gen._emit_label(_bb_after)
         return 'int64_t', gen._new_val('int64_t', '0')
     if method == '__or__' and args:
         ot2, ov2 = gen.lower_expr(args[0])
@@ -6391,7 +6438,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             gen._dict_val_types[t] = gen._dict_val_types[ov]
         return 'MojoDict *', t
     if method == '__ior__':
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "__ior__");')
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"__ior__"'])
         return 'MojoDict *', ov
     return 'int64_t', gen._new_val('int64_t', '0')
 
@@ -7053,8 +7100,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         'title': 'mojo_str_title', 'capitalize': 'mojo_str_capitalize',
     }
     if method in _CSTR_CASE_METHODS:
-        return 'char *', gen._new_val(
-            'char *', f"{_CSTR_CASE_METHODS[method]} ({cstr_ov})")
+        return 'char *', gen._rt_call('char *', _CSTR_CASE_METHODS[method], [f"{cstr_ov}"])
     if method in _CSTR_METHODS:
         # `str.rstrip(chars)` / `str.lstrip(chars)` with a chars argument:
         # the plain mojo_str_rstrip/lstrip only strip whitespace and IGNORE
@@ -7067,8 +7113,8 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             _a0t, _a0v = arg_pairs[0]
             if _a0t != 'char *' and _a0t != 'void *':
                 _a0v = gen._coerce_to_type(_a0t, 'char *', _a0v)
-            return 'char *', gen._new_val('char *', f"{fn} ({cstr_ov}, {_a0v})")
-        return 'char *', gen._new_val('char *', f"{_CSTR_METHODS[method]} ({cstr_ov})")
+            return 'char *', gen._rt_call('char *', fn, [f"{cstr_ov}", f"{_a0v}"])
+        return 'char *', gen._rt_call('char *', _CSTR_METHODS[method], [f"{cstr_ov}"])
     if method == 'join':
         if arg_vals:
             iter_val = arg_vals[0]
@@ -7735,7 +7781,8 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             _jc = gen._new_val('_Bool', f"{_ji} < {_jlen}")
             gen._cond_goto(_jc, _bb, _ba)
             gen._emit_label(_bb)
-            _raw = gen._new_val(_je, f"({_je}) mojo_list_get_int ({it}, {_ji})")
+            _raw = gen._cast(
+                _je, gen._rt_call('int64_t', 'mojo_list_get_int', [f"{it}", f"{_ji}"]))
             _pl = gen._new_val('int64_t', f"(int64_t) {_raw}->_data")
             gen._emit_call('void', '', 'mojo_list_append_int',
                            [('MojoList *', _conv), ('int64_t', _pl)])

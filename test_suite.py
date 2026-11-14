@@ -473,8 +473,8 @@ def test_an_exclusive_job_reserves_its_class_and_nothing_more():
               f'a 3.7 GB build that holds the whole machine is the queue this '
               f'used to be')
         check('admission: ...and an ordinary one reserves its class',
-              suite.reserved_gb(suite.REGISTRY['gimple'])
-              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['gimple'])],
+              suite.reserved_gb(suite.REGISTRY['formal-receiver-spelling'])
+              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['formal-receiver-spelling'])],
               'the class is the promise the ceiling has to keep')
     else:
         print('      admission: MEMLIMIT_GB is set, so the checks that compare a '
@@ -1315,7 +1315,12 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # three are the overflow-trapping hole-count rows in
                      # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
-                     'gimplerunner': 20,
+     # `gimplerunner` at 1 (was 20): its 2026-11-13 re-run on master reports
+     # `626 passed, 1 failed` of 627, and the registry marker states that 1.
+     # The census had gone stale against the marker, which is the drift this
+     # check exists to catch (bug:SUITE_self_test_red). The remaining failure
+     # is `c_accessor_helpers_emitted_once_across_modules`.
+                     'gimplerunner': 1,
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
      # deleted with the work and the marker was retired with it (2026-11-13).
@@ -1326,8 +1331,11 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'per-item verdicts rather than against a summary line, see '
           f'`observed_fanout_failures`; the registry no longer carries one '
           f'(the stage2 dumps stopped failing the way the marker described). '
-          f'`gimplerunner` is here at 20 (bugs/hard/SUITE_gimplerunner_21_failing.md: '
-          f'its run prints `Results: 592 passed, 20 failed`). `formal-x86-endtoend` is the only '
+          f'`gimplerunner` is here at 1, the count its registry marker and '
+          f'its 2026-11-13 re-run both state (`626 passed, 1 failed` of 627; '
+          f'the one failure is '
+          f'`c_accessor_helpers_emitted_once_across_modules`). '
+          f'`formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
             f'interpreted one, and the count is checkable at all only because '
             f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
@@ -2159,10 +2167,14 @@ STALE_PER_CHILD_BUDGETS = {
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
     'test_imported_decorator_regression.py': 2,
+    'test_interp_list_ctor.py': 1,
     'test_metal_codegen.py': 9,
+    'test_module_globals_compiled.py': 3,
     'test_ptr_registry.py': 2,
     'test_python315_frozendict.py': 1,
     'test_python315_sentinel.py': 1,
+    'test_regress_gpu_offload_validation_modular_part1.py': 1,
+    'test_regress_gpu_offload_validation_modular_part4.py': 1,
     'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2189,6 +2201,21 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_disjoint_bases.py': 2,
     'test_python315_lazy_imports.py': 2,
     'test_unpacking_in_comprehensions.py': 1,
+    # +4 on 2026-11-13, the same day the three new test files below were
+    # registered (they had landed unregistered, so the estate check named them).
+    # Every one of these literals is a `subprocess` timeout on a COMPILE or a RUN
+    # the case itself performs — the RUN kind the census exists for, not a stale
+    # per-child budget: `test_interp_list_ctor.py` compiles then runs the
+    # interpreter and the compiled binary; `test_module_globals_compiled.py`
+    # builds with `fire.py build` (120 s), runs the produced executable (60 s)
+    # and allows 300 s for the whole build; the two
+    # `test_regress_gpu_offload_validation_modular_part*.py` rows are another
+    # workstream's, landing in the same commit only because the census is a
+    # ratchet and their literals arrived with them.
+    'test_interp_list_ctor.py': 1,
+    'test_module_globals_compiled.py': 3,
+    'test_regress_gpu_offload_validation_modular_part1.py': 1,
+    'test_regress_gpu_offload_validation_modular_part4.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -2692,24 +2719,35 @@ def test_a_disabled_test_is_registered_but_never_runs():
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
-    # The real-registry half, re-baselined 2026-10-28, gate triage. It used to
-    # run on `ab-native`, the live case: DISABLED since 2026-09-30, 20.5 GB,
-    # the `program` class (55), `excl` — the shape the synthetic half above
-    # reproduces at the same class ceiling, which is why the reserves-0
-    # property is still covered with no live case. `2f75609d` (2026-10-26)
-    # turned it back to `expect=` once the blowup its marker waited on closed
-    # (bugs/hard/CODEGEN_ab_native_fails.md: the run is 0.1 GB / ~10 s now), and the
-    # reason `disabled=` existed in the first place — a known outcome bought
-    # at a machine-sized price — is gone with it. So the state this half pins
-    # is the ABSENCE, stated rather than assumed: a disabled job that appears
-    # in the registry must be named here and its properties re-asserted on it,
-    # or the section above would stop saying anything about the live registry.
+    # The real-registry half: disabled jobs in the registry are known-red and
+    # too expensive or otherwise inappropriate to run, so each must be named
+    # here and have its reserves-0 / --list / --dry-run properties re-asserted.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
+    expected_disabled = ['cli-usage-text', 'formal-read-before-store', 'gimple', 'metalgpu']
     check('disabled: the real registry has no job that is not run',
-          real == [],
+          sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
           f'this section and its reserves-0 / --list / --dry-run properties '
-          f're-asserted on it, the way ab-native was until 2f75609d')
+          f're-asserted on it')
+    for name in real:
+        spec = suite.REGISTRY[name]
+        check(f'disabled: {name} reserves 0 while disabled',
+              suite.reserved_gb(spec) == 0.0,
+              f'reserved {suite.reserved_gb(spec)} GB')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_list()
+        listing = buf.getvalue()
+        check(f'disabled: {name} is listed with its doc',
+              name in listing and (spec.disabled or '') in listing,
+              f'missing from --list: {[l for l in listing.splitlines() if name in l]}')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_plan([name], _FakeOpts())
+        plan = buf.getvalue()
+        check(f'disabled: {name} planned as disabled and reserves 0',
+              'DISABLED: not run' in plan and 'reserves 0 GB' in plan,
+              plan[:200])
 
     # --list and --dry-run, because a decision a reader cannot see is not a
     # decision: both have to say DISABLED, and the plan has to say the
@@ -2822,23 +2860,12 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    # The vacuity this used to take from the real registry — at least one job
-    # is disabled, so the section above is saying something about the live
-    # tree — ended with the last disabled job: `ab-native` was the case until
-    # `2f75609d` turned it back to `expect=` on 2026-10-26 (the run is cheap
-    # now, which is the whole reason for the switch). The mechanism is not
-    # vacuous for that: the synthetic cases above run every time against the
-    # real runner code, the per-name loop below re-checks each marker against
-    # the tree the moment a job is disabled, and the guarded exec below
-    # proves the import-time refusal fires on a marker. What this check now
-    # pins is the STATE the section is written for, stated rather than
-    # assumed — the same re-baseline the sibling section above does.
+    expected_disabled = ['cli-usage-text', 'formal-read-before-store', 'gimple', 'metalgpu']
     check('disabled markers: the state the section is written for is stated, '
-          'not assumed: no registered job is disabled',
-          real == [],
+          'not assumed',
+          sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job must be named in this section and '
-          f'its marker re-checked against the tree, the way ab-native was '
-          f'until 2f75609d')
+          f'its marker re-checked against the tree')
     for name in real:
         spec = suite.REGISTRY[name]
         check(f'disabled markers: {name} names a doc that is in the tree',
@@ -2848,6 +2875,9 @@ def test_the_disabled_markers_in_the_registry_are_honest():
         check(f'disabled markers: {name} is not also marked expect=',
               not (getattr(spec, 'expect', '') or ''),
               'the two markers say opposite things about whether it runs')
+        check(f'disabled markers: {name} reserves 0 while disabled',
+              suite.reserved_gb(spec) == 0.0,
+              f'reserved {suite.reserved_gb(spec)} GB')
 
     # And the loudest half: the runner REFUSES TO START, rather than warning.
     # The bug-doc check is the one place in this mechanism where "loudly" is
@@ -4134,6 +4164,33 @@ UNREGISTERED = {
         '`arch -x86_64` and SKIPS where that is not available, which is why this '
         'is listed rather than registered — a registered job that skips its only '
         'substantive case is a green line that says nothing.',
+    'test_codegen_selfhost_link_two_unqualified_calls_part1.py':
+        'Standalone probe pin for the self-host link: a lifted closure must '
+        'see a plain function-body module alias import and lower the call to '
+        'the defining module\'s qualified symbol. Run directly; not registered.',
+    'test_codegen_simd_exp_statictuple.py':
+        'Standalone regression pin (unittest): std.simd elaboration must not '
+        'be refused as "advance without converging" for fixed comptime bracket '
+        'args. Run directly; not yet registered in a bucket.',
+    'test_codegen_yield_from_walk_ast_memo.py':
+        'Standalone probe: _cpp_yield_from rewrites must invalidate the walk '
+        'memo for the enclosing CallExpr. Run directly; not registered.',
+    'test_gimple_tables_consumer_link.py':
+        'Standalone repro/test for importing c_common.tables from a consumer '
+        'program (depends on external source tree; skips if absent). Run '
+        'directly; not registered.',
+    'test_mojoc_module_import_ambiguous.py':
+        'Standalone regression pin for ambiguous module-scope imports reported '
+        'at module scope with synthetic signatures. Run directly; not registered.',
+    'test_selfhost_cycle_sibling_call.py':
+        'Standalone probe for module-alias calls across import cycles in the '
+        'self-host sibling branch. Run directly inside a checkout; not registered.',
+    'test_stdlib_syntax_owned_pointer_asyncrt.py':
+        'Standalone pin: owned_pointer.mojo and _asyncrt.mojo must keep '
+        'transpiling. Run directly; not registered.',
+    'test_unknown_decl_check.py':
+        'Unit tests for the unknown-decl check/compiler-provided builtins '
+        'helper module. Run directly; not registered.',
 
     # `test_formal_doc_truth.py` was here (listed rather than registered, its
     # branch's task said not to touch the registry) and is REGISTERED as
@@ -4141,6 +4198,17 @@ UNREGISTERED = {
     # wanted it (0.17 s, no build, no Lean) and the one file whose job is "does
     # the document still say what the code says" was a test nobody ran, with
     # four of its rows drifted.
+
+    # The per-part Done-when probes of the still-open parts of
+    # CODEGEN_stdlib_dylib_lazy_undefined_refs. RED until each part lands, so
+    # not a registered job; each is run by its own bug doc's command
+    # (`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`), as
+    # the file's own docstring says. The landed pins are registered jobs.
+    'test_stdlib_dylib_lazy_undefined_refs_probes.py':
+        'The per-part Done-when probes of the still-open parts of '
+        'CODEGEN_stdlib_dylib_lazy_undefined_refs: red until each part lands, '
+        'so not a registered gate job. Run one by its own bug doc\'s command '
+        '(`python3 test_stdlib_dylib_lazy_undefined_refs_probes.py <prefix>`).',
 
     # ── the formal backend's per-construct suites, run by hand ──
     #
@@ -5185,6 +5253,8 @@ _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
     # sub-second.
     ('trait-requirement-evidence-diagnostic',
      'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
+    ('reg-conditional-conformance-candidate-diagnostic',
+     'test_conditional_conformance_candidate_diagnostic.py', 'part 3'),
     ('reg-conditional-conformance-synthesis-diagnostic',
      'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
     ('trait-comptime-member-conformance-diagnostic',
@@ -5225,6 +5295,58 @@ def test_the_trait_conformance_diagnostic_suites_are_gated():
               ('bug:SUITE_trait_requirement_evidence_unregistered: no spec '
                f'names {filename}, so it runs on nothing' if spec is None else
                'bug:SUITE_trait_requirement_evidence_unregistered: '
+               f'{name} is registered but not reachable from `gate` '
+               f'(cmd={sorted(files)})'))
+
+
+_SUITE_SELF_TEST_REGISTRATIONS = (
+    # (spec name, test file) — the test files the estate row named after they
+    # landed on master with no spec (bug:SUITE_self_test_red). The first five
+    # were there when this branch started; the next four arrived on master
+    # during the merge, and `test_mojoc_implicit_default_conformance.py` after
+    # its last one, each putting the job back to red. Each is a cheap
+    # in-process pin (measured: 0.0-0.1 GB peak, sub-second to ~12 s, no
+    # build), so they belong in `check`, which `gate` expands.
+    ('binding-evidence', 'test_binding_evidence.py'),
+    ('interp-list-ctor', 'test_interp_list_ctor.py'),
+    ('module-globals-compiled', 'test_module_globals_compiled.py'),
+    ('mojoc-precompile-signature', 'test_mojoc_precompile_signature.py'),
+    ('stdlib-syntax-variant', 'test_stdlib_syntax_variant.py'),
+    ('function-body-alias-class-import',
+     'test_function_body_alias_class_import.py'),
+    ('gpu-offload-validation-part3', 'test_gpu_offload_validation_part3.py'),
+    ('mojoc-import-conformance', 'test_mojoc_import_conformance.py'),
+    ('mojoc-synthetic-signature-default',
+     'test_mojoc_synthetic_signature_default.py'),
+    ('mojoc-implicit-default-conformance',
+     'test_mojoc_implicit_default_conformance.py'),
+)
+
+
+def test_the_suite_self_test_registrations_are_gated():
+    """Every test file the suite-self-test estate row named runs on every gate.
+
+    These files landed on master named by no spec, so `suite-self-test`'s estate
+    row was the only thing that mentioned them and no run executed their cases
+    (`bug:SUITE_self_test_red`). They are registered now, and the estate check
+    above is what keeps the next unregistered file from hiding — but it can
+    only ask that SOME spec names the file, and a name in a bucket `gate` does
+    not expand to is the same hole one level over. All of them are cheap
+    in-process pins, so they belong in the everyday loop, and this check pins
+    that by name: dropping a registration, or moving one out of the gate, is a
+    red row rather than a silent coverage loss.
+    """
+    for name, filename in _SUITE_SELF_TEST_REGISTRATIONS:
+        spec = suite.REGISTRY.get(name)
+        files = ({os.path.basename(str(c)) for c in spec.cmd}
+                 if spec is not None else set())
+        check(f'the gate: {name} runs on every gate',
+              spec is not None
+              and filename in files
+              and name in suite.expand_bucket('gate'),
+              ('bug:SUITE_self_test_red: no spec names '
+               f'{filename}, so it runs on nothing' if spec is None else
+               'bug:SUITE_self_test_red: '
                f'{name} is registered but not reachable from `gate` '
                f'(cmd={sorted(files)})'))
 
@@ -6670,6 +6792,7 @@ def main():
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
                test_the_trait_conformance_diagnostic_suites_are_gated,
+               test_the_suite_self_test_registrations_are_gated,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,

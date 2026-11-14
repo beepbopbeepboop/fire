@@ -1241,6 +1241,26 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             if _as_str(name) in getattr(gen, '_comptime_str_names', ()):
                 _w = gen._new_val('int64_t', str(_ct))
                 return 'char *', gen._cast('char *', _w)
+    # A MODULE NAMESPACE read as a value (`import M as A`; a bare `A`
+    # passed around, or — the case this exists for — the receiver of a
+    # lifted closure's `A.member(...)` before the callee path resolves it).
+    # A module is not a C value: `_gen_stmt_ImportStmt` materializes it as
+    # an `int64_t` marker local, and the module-marker branches of
+    # `_lower_MemberExpr`/the qualified-call paths read the NAME, not this
+    # placeholder word. A lifted closure has no such local (its enclosing
+    # function's scope frame carries the alias only as a name ->
+    # qualifier binding), so a read used to fall through to the generic
+    # "undeclared" placeholder below — the `(int64_t)0` with a
+    # `ct param or undeclared` comment that made `A.member(...)` a bare
+    # call. Answer the same marker instead, so the name reads as a
+    # namespace everywhere and nothing mistakes it for a value or a
+    # comptime parameter. Placed after every real binding above (captures,
+    # var_types, nested closures, comptime values) so an actual local of
+    # the same name still shadows the module alias, and it cannot suppress
+    # `_lower_MemberExpr`'s module-marker branches (they gate on
+    # `not in gen.var_types`, and this adds no var_types entry).
+    if name in gen._module_alias_names:
+        return 'int64_t', gen._new_val('int64_t', '0')
     # Unknown identifier (compile-time param, undeclared external, etc.).
     # Emit a placeholder so GCC doesn't see an undeclared reference.
     t = gen._new_temp('int64_t')
@@ -2055,13 +2075,15 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if _canon == 'sys' and node.member == 'argv':
             # Return the argv list wired from C main(argc, argv)
             t = gen._new_temp('MojoList *')
-            gen._emit(f"  {t} = mojo_get_argv();  /* sys.argv from C */")
+            gen._rt_into(t, 'mojo_get_argv', [])
+            gen._emit('  /* sys.argv from C */')
             # Track element type so subscript uses mojo_list_get_str
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
         if _canon == 'sys' and node.member == 'path':
             t = gen._new_temp('MojoList *')
-            gen._emit(f"  {t} = mojo_list_new ();  /* sys.path stub */")
+            gen._rt_into(t, 'mojo_list_new', [])
+            gen._emit('  /* sys.path stub */')
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
         if _canon == 'sys' and node.member == 'platform':
@@ -3299,7 +3321,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if op == '->':
             # GIMPLE: declare separate temp to avoid inline cast in rvalue
             field_tmp = gen._new_temp('int64_t')
-            gen._emit(f"  {field_tmp} = (int64_t){ov}{op}{gimple_ctypes._safe_field(node.member)};")
+            gen._cast_into(field_tmp, 'int64_t',
+                           f"{ov}{op}{gimple_ctypes._safe_field(node.member)}")
             t = field_tmp
         else:
             t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
@@ -4353,7 +4376,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                                        [('char', f"'{_code}'"),
                                         ('int64_t', _lv64),
                                         ('int64_t', _rv64)])
-                t = gen._new_val('_Bool', f'(int){_tcmp}')
+                t = gen._cast('_Bool', f"{_tcmp}")
                 return '_Bool', t
             _oc = {'+': '+', '-': '-', '*': '*', '%': '%'}[op]
             t = gen._call_expr('int64_t', 'mojo_pyobject_arith',
@@ -6372,33 +6395,26 @@ def _definitive_binding_type(gen, name) -> str | None:
                     pann_s = _as_str(pann).strip()
                     if pann_s in tparams or pann_s == 'AnyType' or pann_s == '':
                         return None
-                    # Concrete annotation: answer from the C type the
-                    # annotation resolves to (not from "not a type param"),
-                    # so a container/boxed annotation like `frozenset | None`
-                    # that lowers to an int64_t word is not claimed as Int.
+                    # A CONCRETE SCALAR annotation -> provably scalar. This
+                    # used to `return 'Int'` for EVERY other annotation, which
+                    # read `frozenset` — and every other container or opaque
+                    # spelling — as a proven Int and refused the whole module:
+                    # `if cap_name in mut_capture_names` at
+                    # mojo/backend_gimple/cpp_async.py:2652 aborted the selfhost,
+                    # `--dump-full fire.py` and the bootstrap gate jobs with
+                    # "'Int' does not implement the '__contains__' method".
+                    # `_SCALAR_ANNOTATION_FAMILY` (emit_stmts) is the one
+                    # definition of which annotations are scalar value types;
+                    # `_TYPE_MAP` covers the remaining plain scalar spellings.
                     try:
-                        resolved = gen._resolve_type(pann_s)
+                        from mojo.backend_gimple.emit_stmts import _annotation_scalar_family
+                        fam = _annotation_scalar_family(pann_s)
                     except Exception:
-                        resolved = gimple_ctypes._mojo_type(pann_s)
-                    if resolved == '_Bool':
-                        return 'Bool'
-                    if resolved == 'double':
-                        return 'Float64'
-                    if resolved in ('int', 'int64_t'):
-                        # Scalar-int C type is a proof only for a scalar
-                        # integer annotation (Int/int/...), not for a boxed
-                        # container that happens to erase to int64_t.
-                        _base = pann_s
-                        if ' | ' in _base:
-                            parts = [p.strip() for p in _base.split(' | ')]
-                            non_none = [p for p in parts if p != 'None']
-                            if non_none:
-                                _base = non_none[0]
-                        _base = _base.split('[', 1)[0].strip()
-                        if _base == 'int' or (getattr(gimple_ctypes, '_TYPE_MAP', {}).get(_base) in ('int', 'int64_t')
-                                              and _base not in ('list', 'dict', 'set', 'tuple', 'str', 'bytes')):
-                            return 'Int'
-                    # Container/pointer/erased annotation -> runtime dispatch.
+                        fam = None
+                    if fam is not None:
+                        return {'int': 'Int', 'float': 'Float64', 'bool': 'Bool'}[fam]
+                    if gimple_ctypes.is_scalar_annotation(pann_s):
+                        return 'Int'
                     return None
         # No function node context: a module-level binding cannot be a
         # container-proven Int either (it may be a boxed word).
@@ -7843,7 +7859,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # the store tells the runtime the key's SPELLING — an integer, so
         # the slot's repr prints the key unquoted.
         _orig = kv
-        kv = gen._new_val('char *', f"mojo_int_str_transient({_orig})")
+        kv = gen._rt_call('char *', 'mojo_int_str_transient', [f"{_orig}"])
         gen._cstr_key_src[kv] = _orig
         kt = 'char *'
     elif kt == 'MojoBytes *':

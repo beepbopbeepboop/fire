@@ -1,7 +1,7 @@
-SPLIT: parts 1-3; part 1 (conformance error on a precompiled import) landed
-with `test_mojoc_import_conformance.py`, so its doc is deleted. Remaining:
-`bugs/hard/DIAGNOSTICS_mojoc_imports-part2.md`,
-`bugs/mid/DIAGNOSTICS_mojoc_imports-part3.md`.
+SPLIT: parts 1 and 2 landed (`test_mojoc_import_conformance.py` and
+`test_mojoc_implicit_default_conformance.py`); their docs are deleted.
+Dual-mount mojoc import (import_dual_mount_mojoc.mojo) is covered by
+`test_mojoc_dual_mount_import.py`; its tracking doc is deleted.
 
 # DIAGNOSTICS step 10: mojoc / precompiled import errors
 
@@ -24,4 +24,9 @@ Each modular file's `error:` line is reproduced.
 One regression per file.
 
 ## Status
-- **Open.**
+- **Done.** `import_mojoc_conformance_error.mojo` and
+  `import_mojoc_implicit_default_param.mojo` are covered by landed
+  regressions (`test_mojoc_import_conformance.py`,
+  `test_mojoc_implicit_default_conformance.py`) and their docs are deleted.
+  `import_dual_mount_mojoc.mojo` (dual-mount / multiple-mount import) is
+  covered by `test_mojoc_dual_mount_import.py`.

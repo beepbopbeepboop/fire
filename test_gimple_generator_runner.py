@@ -9008,6 +9008,55 @@ def main():
         print(v)
 """, "5\n3\n1\n")
 
+    # ── keyword arguments at a DELEGATED generator call bind by NAME ──
+    # (`c_common/tables.py`'s `read_table` build bug: it does `yield from
+    # read_table(infile, header, sep=sep, fix=fix, _open=_open,
+    # _get_reader=_get_reader)`, and `c_common/fsutil.py`'s
+    # `yield from iter_files(root, suffix, relparent, get_files=..., ...)` /
+    # `yield from iter_many(items, onempty=None)` are the same shape.)
+    #
+    # The cpp coroutine path used to drop `call.kwargs` entirely at a
+    # delegated call: the arity check counted only positional arguments and
+    # refused the whole module ("`yield from tick(...)`: expected 3
+    # argument(s), got 1"). Appending the keywords positionally instead would
+    # pass the arity check but put `bump` in `step`'s slot, so this case
+    # writes them in REVERSE declaration order and pins the real values.
+    test_generator_stdout("generator_recursive_yield_from_keywords_bind_by_name", """\
+def tick(n, *, step, bump=100):
+    if n <= 0:
+        return
+    yield n + bump
+    yield from tick(n - step, bump=bump + 1, step=step)
+
+def main():
+    for v in tick(5, step=2, bump=0):
+        print(v)
+""", "5\n4\n3\n")
+
+    # The same binder serves `for ... in <generator>(...)` consumption
+    # (`cpp_core._cpp_for_generator_delegate`), which used to flatten the
+    # keywords into `call.args` in place — mutating the AST node, and
+    # correct only in declaration order. `extra=1, scale=scale` is reversed
+    # against `def pairs(n, *, scale, extra=0)`: the old flattening bound
+    # extra=1 to `scale` and printed 46, CPython prints 64.
+    test_generator_stdout("generator_for_in_keywords_bind_by_name", """\
+def pairs(n, *, scale, extra=0):
+    i = 0
+    while i < n:
+        yield i * scale + extra, 0
+        i = i + 1
+
+def consume(n, *, scale):
+    total = 0
+    for a, b in pairs(n, extra=1, scale=scale):
+        total = total + a + b
+    yield total
+
+def main():
+    for v in consume(4, scale=10):
+        print(v)
+""", "64\n")
+
     # ── lambda literals inside a generator body ───────────────────────
     # (the (since-fixed) compiled-generator lambda-expression bug) -- 0-, 1-
     # and 2-parameter lambdas, a lambda re-bound on each branch of an

@@ -275,6 +275,14 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         # (flat `.py`/`.mojo` and the package `__init__`): a stale `.mojoc`
         # beside live sources must never shadow them.
         mojo_paths.append(gimple_ctypes.os.path.join(d, f"{module_name}.mojoc"))
+        # A dotted module `pkg.sub` may be served by the package-level
+        # precompiled artifact `pkg.mojoc` (the package was precompiled as a
+        # whole and its sources deleted), with no per-submodule artifact or
+        # source tree. Try the top-level package artifact after the direct
+        # submodule candidates so a real `pkg/sub` source still wins.
+        if '.' in module_name:
+            _top_pkg = module_name.split('.', 1)[0]
+            mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_top_pkg}.mojoc"))
     # A DOTTED module_name (e.g. `import pkg.helper as m`, module_name ==
     # "pkg.helper") names a package-relative path, not a literal
     # filename with dots in it — the loop above only ever tried the
@@ -519,7 +527,7 @@ def publish_a3_generators(gen, meta) -> None:
             gen._generator_home_api[_key] = _api
 
 
-def _load_mojoc_signatures(gen, path: str) -> None:
+def _load_mojoc_signatures(gen, path: str, module_name: str = None) -> None:
     """Register a precompiled `.mojoc` artifact's struct/trait records on
     `gen`.
 
@@ -529,16 +537,72 @@ def _load_mojoc_signatures(gen, path: str) -> None:
     instantiation must be checked against — `_ensure_generic_struct` reads
     `gen._mojoc_structs` for that. Records keep their artifact spelling so
     the one record reader (`mojo/middle/mojoc_artifact.py`) stays the only
-    reader of the format."""
+    reader of the format.
+
+    When the same underlying artifact is reached under two different package
+    names (dual mount), the alias is resolved before the artifact is read:
+    warn once, and record the alias so the first name stays canonical.
+    """
     try:
         from mojo.middle import mojoc_artifact
         art = mojoc_artifact.load_artifact(path)
     except Exception as e:
         gimple_ctypes._debug_note('mojoc artifact unreadable', e)
         return
+    # Dual-mount detection: the package name as requested/imported (the top
+    # component of module_name) may alias the artifact's own package identity
+    # or another name that resolves to the same artifact file.
+    _pkg = None
+    if module_name:
+        _pkg = module_name.split('.', 1)[0].lstrip('.')
+    _art_pkg = art.get('package') or os.path.splitext(os.path.basename(path))[0]
+    if not _pkg:
+        _pkg = _art_pkg
+    try:
+        _real = os.path.realpath(path)
+    except Exception:
+        _real = os.path.abspath(path)
+    _canon_map = getattr(gen, '_mojoc_pkg_canonical', None)
+    _alias_map = getattr(gen, '_mojoc_pkg_alias', None)
+    import sys as _sys
+    # The artifact's declared package name is the canonical identity when
+    # available; a different requested name is an alias (dual mount).
+    _preferred = _art_pkg or _pkg
+    if _canon_map is not None and _real in _canon_map:
+        _canon = _canon_map[_real]
+    elif _canon_map is not None:
+        _canon = _preferred
+        _canon_map[_real] = _canon
+    else:
+        _canon = _preferred
+    # Warn if accessed via an alias name (different from canonical).
+    if _pkg != _canon and _alias_map is not None and _pkg not in _alias_map:
+        _alias_map[_pkg] = _canon
+        print(
+            f"warning: '{_pkg}' and '{_canon}' name the same package; "
+            f"remove the duplicate import root or file that reaches it twice",
+            file=_sys.stderr)
+        print(
+            f"note: '{_canon}' is the name used in error messages and debug info",
+            file=_sys.stderr)
+    # Also, if the artifact's own name differs from how it was first
+    # registered under some other realpath-equivalent situation, ensure
+    # consistency (canonical is already set).
+    _canon_name = _canon if _canon_map is not None else _pkg
     for _n, _rec in (art.get('structs') or {}).items():
         if isinstance(_rec, dict):
             gen._mojoc_structs.setdefault(_n, _rec)
+    # Expose the artifact's full records for symbol lookup by mojoc-backed
+    # package imports (structs and functions).
+    _pkg_recs = getattr(gen, '_mojoc_pkg_records', None)
+    if _pkg_recs is not None:
+        _entry = _pkg_recs.setdefault(_canon_name, {'structs': {}, 'functions': {}})
+        for _k, _v in (art.get('structs') or {}).items():
+            _entry['structs'].setdefault(_k, _v)
+        for _k, _v in (art.get('functions') or {}).items():
+            _entry['functions'].setdefault(_k, _v)
+        if _pkg != _canon_name and _alias_map is not None:
+            _pkg_recs.setdefault(_pkg, _pkg_recs.get(_canon_name, _entry))
 
 
 def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
@@ -563,7 +627,22 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
             if isinstance(path, str) and path.endswith('.mojoc'):
                 # A precompiled signature artifact: read the signatures, no
                 # statements to inline (there is no code in the artifact).
-                _load_mojoc_signatures(gen, path)
+                _mojoc_base = os.path.splitext(os.path.basename(path))[0]
+                _mod_top = module_name.split('.', 1)[0].lstrip('.') if module_name else ''
+                _is_pkg_fallback = ('.' in (module_name or '')
+                                    and _mojoc_base == _mod_top
+                                    and _mojoc_base != module_name.lstrip('.'))
+                if _is_pkg_fallback:
+                    # Package-level mojoc used to serve a submodule import
+                    # (e.g. utils.a -> utils.mojoc). Only when the package
+                    # has no live sources; a real source package must win.
+                    _pkg_dir = os.path.join(os.path.dirname(path), _mod_top)
+                    if (os.path.isfile(os.path.join(_pkg_dir, '__init__.mojo'))
+                            or os.path.isfile(os.path.join(_pkg_dir, '__init__.py'))
+                            or os.path.isfile(os.path.join(os.path.dirname(path), _mod_top + '.mojo'))
+                            or os.path.isfile(os.path.join(os.path.dirname(path), _mod_top + '.py'))):
+                        continue
+                _load_mojoc_signatures(gen, path, module_name=module_name)
                 return (None, [])
             _abspath = gimple_ctypes.os.path.abspath(path)
             # `_ap_key`: a fresh `_as_str`-typed local for the two
@@ -2069,7 +2148,19 @@ def _register_link_imports(gen, stmts: list) -> list:
                     # above (populated whether or not a dylib exists).
                     if source:
                         import module_loader as _mlmod
-                        _qual = _mlmod.module_name_for_path(source)
+                        # The DEFINING module when this statement only
+                        # reaches the name through a re-exporting package
+                        # `__init__` (`''` for a direct import / an
+                        # unresolvable name, where `source` is already the
+                        # right answer). `_note_own_func_home` is the SAME
+                        # registry `_emit_stdlib_import_externs` writes
+                        # later in the same compile, so the two must agree:
+                        # registering the named module here and the definer
+                        # there would mark the name _AMBIGUOUS_FUNC_HOME for
+                        # every reference instead of resolving it.
+                        _qual = (gen._reexported_defining_qualifier(
+                                     stmt.module, name, 'fn')
+                                 or _mlmod.module_name_for_path(source))
                         if _qual:
                             # _own_imported_func_home (per-instance): see
                             # its own comment — this module's own import
@@ -2419,11 +2510,18 @@ def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
 
     THE way to call a runtime function for its value.  Do not spell the call
     as text inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
-    return gen._new_val(ret_type, fname + ' (' + _rt_args(gen, fname, args) + ')')
+    rhs: str = fname + ' (' + _rt_args(gen, fname, args) + ')'
+    if _dtrace.enabled():
+        _dtrace.note(_dtrace.str_hash(_as_str(ret_type)) ^ _dtrace.str_hash(rhs))
+    t: str = gen._new_temp(ret_type)
+    ginf.note_call_result(gen, t, fname)
+    gen._emit('  ' + t + ' = ' + rhs + ';')
+    return t
 
 
 def _rt_into(gen, dst: str, fname: str, args: list) -> None:
     """`dst = fname (args);` for a runtime function, into an existing temp."""
+    ginf.note_call_result(gen, _as_str(dst).strip(), fname)
     gen._emit('  ' + _as_str(dst) + ' = ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
 
 
@@ -2466,9 +2564,12 @@ def _copy(gen, dst: str, src: str) -> None:
     st = gen.var_types.get(src)
     if dt is not None and st is not None:
         dts: str = _as_str(dt)
-        if rt_call.copy_needs_cast(dts, _as_str(st)):
+        sts: str = _as_str(st)
+        if rt_call.copy_needs_cast(dts, sts):
             gen._emit('  ' + dst + ' = (' + dts + ')' + src + ';')
             return
+        if dts == sts:
+            ginf.carry_value_info(gen, dst, src)
     gen._emit('  ' + dst + ' = ' + src + ';')
 
 
@@ -3388,8 +3489,9 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 else:
                     new_type_args.append(ta)
             type_args = new_type_args
-            info = el.elaborate_generic_call(module_src, g, type_args,
-                                             arg_count=len(arg_pairs))
+            info = el.elaborate_generic_call(
+                module_src, g, type_args, arg_count=len(arg_pairs),
+                origin_module=elaborate.declaring_module_name(gen, module_src))
             if info:
                 gen._refine_generic_return_type(
                     info, module_src, g, type_args, len(node.args),
@@ -3479,7 +3581,8 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                         "definition-site body cannot be emitted".format(
                             g, gen.current_func_name, _ann))
             info = el.elaborate_generic_call_inferred(
-                module_src, g, [ct for ct, _ in arg_pairs])
+                module_src, g, [ct for ct, _ in arg_pairs],
+                origin_module=elaborate.declaring_module_name(gen, module_src))
     except RuntimeError:
         # The nested-async-in-a-generic guard above raises RuntimeError
         # deliberately — an honest refusal, not a "try something else"
@@ -3757,7 +3860,8 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
                     and 'struct alignment must be a positive power of 2' in _emsg)
                 or ('function instantiation failed' in _emsg
                     and 'use of unknown declaration' in _emsg
-                    and '@align' in _emsg)):
+                    and '@align' in _emsg)
+                or _is_downcast_witness(e)):
             raise
         # A `where` clause of the struct that is provably false for these type
         # args is a real diagnostic (modular: `error: violated constraint`),
@@ -3813,7 +3917,8 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
                         and 'struct alignment must be a positive power of 2' in _emsg)
                     or ('function instantiation failed' in _emsg
                         and 'use of unknown declaration' in _emsg
-                        and '@align' in _emsg)):
+                        and '@align' in _emsg)
+                    or _is_downcast_witness(e)):
                 raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None
@@ -3823,6 +3928,14 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
     if not name:
         return None
     return gen._lower_struct_constructor(name, node.args, node.kwargs)
+
+
+def _is_downcast_witness(e):
+    """The `rebind[downcast[T, Trait]]` witness diagnostic (see
+    elaborate.is_downcast_witness_diagnostic): re-raised at the instantiation
+    site, never swallowed as an elaboration-capability failure."""
+    import elaborate
+    return elaborate.is_downcast_witness_diagnostic(e)
 
 
 def _register_generic_struct(gen, base_name, info):

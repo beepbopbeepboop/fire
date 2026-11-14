@@ -32,7 +32,6 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
-    'bugs/SUITE_silentnoop-part1-part2.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'build_stdlib_dylib.py': 1,
@@ -130,7 +129,6 @@ BASELINE = {
     'test_formal_x86_64_parity.py': 3,
     'test_getattr_default_miss_reg.py': 1,
     'test_gimple.py': 8,
-    'test_gpu_offload_validation_part3.py': 1,
     'test_imported_decorator_regression.py': 1,
     'test_nonlocal.py': 1,
     'test_path_word_runtime.py': 1,
@@ -142,7 +140,7 @@ BASELINE = {
     'test_silent_noop_iter.py': 1,
     'test_string_literal_lexing.py': 2,
     'test_struct_formal.py': 1,
-    'test_suite.py': 14,
+    'test_suite.py': 13,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/dangling_doc_refs.py': 1,
     'tools/dataclass_reflection_sites.py': 2,
