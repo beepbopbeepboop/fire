@@ -211,48 +211,12 @@ def deletes_doc_without_test(deleted, changed):
     return bool(deleted) and not any(os.path.basename(p).startswith("test_") and p.endswith(".py") for p in changed)
 
 
-def failing_files(suite_log):
-    """The failing stdlib files a suite.log names under `UNEXPECTED failed files:` (empty when it has no such
-    section, or the log is unreadable). The sweep prints one `  <file>` line per failure, each followed by a deeper-
-    indented error line."""
-    files, inside = [], False
-    try:
-        lines = open(suite_log, encoding="utf-8", errors="replace").read().splitlines()
-    except OSError:
-        return files
-    for line in lines:
-        if line.startswith("UNEXPECTED failed files:"):
-            inside = True
-        elif inside and line.startswith("  ") and not line.startswith("    "):
-            files.append(line.strip())
-        elif inside and line.startswith("    "):
-            continue                                 # the error line under a file
-        elif inside and line.strip():
-            break                                    # the next section starts
-    return files
-
-
-def is_preexisting(job, branch_files, master_files):
-    """Whether JOB's failure is master's, not the branch's. A job that is red on master is forgiven only when every
-    file it fails on the branch it also fails on master: a job-level comparison let a batch that broke 208 more stdlib
-    files land because `stdlib-syntax` was already red for 7 others (2026-11-15, ae41bf838). `master_files` is None
-    when master passes the job; a job that reports no files (nothing to compare) keeps the job-level rule."""
-    if master_files is None:
-        return False
-    if not branch_files:
-        return True
-    return set(branch_files) <= set(master_files)
-
-
 def red_on_master(job):
-    """The files JOB fails on master itself, as a list (empty when the job reports no files), or None when master
-    passes it. Run on a snapshot of master, so the shared tree is not touched."""
+    """Whether suite JOB fails on master itself. Run on a snapshot of master, so the shared tree is not touched."""
     d = tempfile.mkdtemp(prefix="masterred_")
     try:
         subprocess.run("git archive master | tar -x -C %s" % d, shell=True, cwd=C.MAIN, check=True)
-        if run(["python3", "tools/suite.py", job], d, os.path.join(d, "job.log")) == 0:
-            return None
-        return failing_files(os.path.join(d, "build", "suite.log"))
+        return run(["python3", "tools/suite.py", job], d, os.path.join(d, "job.log")) != 0
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -687,16 +651,7 @@ def main():
                 failed = failed_job_names(os.path.join(INTEG, "confirm.log")) or failed
             print("FAILED_JOBS: %s" % " ".join(failed))
     if rc != 0 and failed:
-        bf = failing_files(os.path.join(INTEG, "build", "suite.log"))     # the branch's failing files (stdlib sweep)
-        pre = []
-        for j in failed:
-            mf = red_on_master(j)
-            new_files = [f for f in bf if f not in (mf or [])] if (j == "stdlib-syntax" and mf is not None) else []
-            if j == "stdlib-syntax" and new_files:
-                print("stdlib-syntax is red on master, but %d file(s) fail only with this round: %s"
-                      % (len(new_files), " ".join(new_files[:10])))
-            if is_preexisting(j, bf if j == "stdlib-syntax" else [], mf):
-                pre.append(j)
+        pre = [j for j in failed if red_on_master(j)]
         if pre:
             print("PRE-EXISTING on master (not this round's): %s; their docs are written, no branch is held" % " ".join(pre))
             gate_doc(None, None, pre)
@@ -724,7 +679,19 @@ def main():
             gate_doc(None, None, names)
     if a.probe:
         jobs = failed_job_names(os.path.join(INTEG, "gate.log")) if rc else []
-        files = failing_files(os.path.join(INTEG, "build", "suite.log")) if rc else []   # the sweep's own section
+        files = []                                   # the stdlib sweep names each failing file under this heading
+        gl = os.path.join(INTEG, "build", "suite.log")   # the sweep's own section; gate.log has only the tally
+        if rc and os.path.exists(gl):
+            inside = False
+            for line in open(gl, encoding="utf-8", errors="replace"):
+                if line.startswith("UNEXPECTED failed files:"):
+                    inside = True
+                elif inside and line.startswith("  ") and not line.startswith("    "):
+                    files.append(line.strip())
+                elif inside and line.startswith("    "):
+                    continue                         # the error line under a file
+                elif inside and line.strip():
+                    break                            # the next section starts
         print("PROBE %s: %s" % ("GREEN" if rc == 0 else "RED", " ".join(merged)))
         print("FAILED_JOBS: %s" % " ".join(jobs))
         print("FAILED_FILES: %s" % " ".join(files))

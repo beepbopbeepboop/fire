@@ -5,10 +5,10 @@ Every `test_*` here is the Done-when test of a part that has LANDED: its bug
 doc is deleted and the assertion is now a standing pin. This is the registered
 `reg-codegen-erased-container-values` job, so it must stay green.
 
-The per-part Done-when probes of the still-open parts (the 2026-11-15 replan:
-`ctor_dtype_spelling`, `list_elem_across_return`, `simd_value_across_return`)
-live in test_codegen_erased_container_values.py and run by their bug docs'
-commands; a probe moves here, in the same commit that lands its part.
+The per-part Done-when probes of the still-open parts (p1_alias, p2_alias_ctor,
+p3_comptime) live in
+test_codegen_erased_container_values.py and run by their bug docs' commands; a
+probe moves here, in the same commit that lands its part.
 
 They assert on the C of one generated function body, not on the whole module:
 the module header already contains `double` and `float` (`extern double

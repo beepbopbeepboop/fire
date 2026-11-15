@@ -940,24 +940,17 @@ def failed_files(out):
     return ff.group(1).split() if ff else []
 
 
-def find_culprit(seq, failing, stdlib=True):
+def find_culprit(seq, failing):
     """The branch that turns the gate red when added to the ones before it: binary search for the smallest red prefix
-    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green). The search
-    probes behind the SAME gate the batch was probed behind (`stdlib`): behind the light gate a branch that breaks only
-    a full-gate job looked green, and the last branch of the batch was blamed, held and archived (2026-11-15: a good
-    bootstrap branch was held for a comptime-dtype-diagnostic break that belonged to its batch-mate). A sub-probe that
-    is neither GREEN nor RED (the lock was busy, nothing to merge) proves nothing, so the search stops and names no
-    culprit: (None, [])."""
+    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green)."""
     lo, hi = 0, len(seq)
     while hi - lo > 1:
         mid = (lo + hi) // 2
-        v2, _, f2, _ = probe(seq[:mid], stdlib=stdlib)
+        v2, _, f2, _ = probe(seq[:mid])
         if v2 == "RED":
             hi, failing = mid, f2
-        elif v2 == "GREEN":
-            lo = mid
         else:
-            return None, []
+            lo = mid
     return seq[hi - 1], failing or []
 
 
@@ -1025,11 +1018,7 @@ def land():
             break
         # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
         # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
-        culprit, failing = find_culprit(merged, failing, stdlib=build)
-        if culprit is None:
-            log("red: the batch is red but the culprit search was inconclusive (a sub-probe gave no GREEN/RED); "
-                "nothing is held and no gate doc is filed, the next pass retries")
-            break
+        culprit, failing = find_culprit(merged, failing)
         log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))
         I.gate_doc(culprit, tasks[culprit], failing, failed_files(out))
