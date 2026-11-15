@@ -61,6 +61,35 @@ bool/int/float/str/tuple from one function, so its return slot can never be a
 single C type. The float branch is the first one gcc refuses outright, but the
 int and bool branches are only accepted by accident.
 
+## Done when
+
+`python3 test_selfhost_struct_layout_map_regression.py` exits 0: the hardcoded
+AST layout map in `mojo/backend_gimple/module_gen.py` covers every field the
+classes in `fire_compiler.py` annotate, which is the defect class item 1 and
+its 2026-11-13 recurrences belong to (`Parser._lazy_import_blockers`,
+`Parser._last_bracket_variadics`, `Parser.errors`, `ImportStmt.lazy`,
+`FromImportStmt.lazy`, `FunctionDef.variadic_bracket_params`,
+`StructDef.where_clause`, `StructDef.bracket_types`, `StructDef.align_expr`,
+`StructDef.presence_fields`). The per-defect pins that landed with the other
+fixes also exit 0:
+
+    python3 test_slice_builtin_subscript_regression.py
+    python3 test_user_struct_pointer_named_method_regression.py
+    python3 test_float_into_pointer_return_regression.py
+    python3 test_codegen_selfhost_link_two_unqualified_calls_part1.py
+    python3 test_selfhost_closure_parses.py
+
+Items 3 (`_resolve_import_module`'s order-dependent return type) and 5
+(`compile_to_gimple_parallel_frozen`'s wrapper routing) are lowering facts
+whose only honest proof is the closure itself: the gate job this doc is named
+for, `python3 tools/suite.py selfhost`, last observed green in `6e1580c12`
+(the closure compiles, links, and the produced binary compiles the two-line
+and call+f-string probes). The static half of that job is green on this tree
+(121 closure modules, every generator lowered in place or its module refused
+whole; all 5076 functions' pinned prototypes match their definitions).
+
+This doc is deleted in the commit where the commands above pass.
+
 ## Status
 
 2026-11-12: 1-6 landed. Fresh `fire.ci` compiles clean; `make stage2/mojo`
