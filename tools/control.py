@@ -1233,8 +1233,9 @@ def cmd_refill(a):
 
     Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
     their worktree and branch removed, and nothing new starts for BREAKER_MIN minutes. Without it a limit turns this
-    loop into a worktree-and-branch factory. In `drain` mode (tools/pool.json `mode`, `control.py mode build|drain`)
-    only finishing work (FINISHING_PREFIXES, plus gate docs bug-gate-*) is started: new docs wait until the backlog lands."""
+    loop into a worktree-and-branch factory. Drain mode (tools/pool.json `mode`) only ORDERS the queue
+    (refill_key: finishing work first); it never leaves a free slot idle. A free slot takes the best startable task,
+    a plain bug doc included (owner, 2026-11-15: qwen sat idle for hours behind a drain filter)."""
     bounced = [n for n, t in list(load().items()) if dead_on_arrival(t) and bounce(n, t)]
     if bounced and not dead_models():   # a limit moved the work to another model; only an outage needs the pause
         json.dump({"until": time.time() + BREAKER_MIN * 60, "why": "%d workers died on arrival" % len(bounced)},
@@ -1272,8 +1273,6 @@ def cmd_refill(a):
     # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
     # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
     for it in items:
-        if mode() == "drain" and not it["name"].startswith(FINISHING_PREFIXES) and not it["name"].startswith("bug-gate-"):
-            continue                      # drain: the backlog is landed and master repaired before new work is cut
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
         unmet = [n for n in it["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]

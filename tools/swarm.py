@@ -17,7 +17,7 @@ One pass, repeated:
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
-import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time, traceback
+import argparse, atexit, fcntl, signal, glob, hashlib, json, os, re, subprocess, sys, time, traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
@@ -1098,6 +1098,13 @@ def main():
         sys.stderr = _lf
     global _CODE_HASH, _LOCK_FD
     _LOCK_FD = take_lock()     # held until this process exits
+    # 2026-11-15: the swarm vanished mid-landing with no log line. Catchable signals now say so; a SIGKILL cannot be
+    # caught, but then the log ends with no "stopped" line, which is itself the evidence.
+    log("started: pid %d, ppid %d, target %s, mode %s" % (os.getpid(), os.getppid(), a.target, C.mode()))
+    atexit.register(lambda: log("stopped: pid %d exiting normally" % os.getpid()))
+    for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(_sig, lambda n, f: (log("stopped: pid %d got %s (ppid %d)" % (os.getpid(), signal.Signals(n).name, os.getppid())),
+                                          sys.exit(128 + n)))
     _CODE_HASH = code_hash()   # the code this process runs; a change means re-exec (stale_code)
     while True:
         try:

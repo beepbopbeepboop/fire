@@ -72,14 +72,19 @@ class RefillClaimBlocked(unittest.TestCase):
         self.assertEqual(self.spawned, ["fix-replan-ok"])
         self.assertTrue(os.path.exists(os.path.join(self.qdir, "fix-merge-blocked-1.json")), "blocked task stays queued")
 
-    def test_drain_mode_starts_only_finishing_work(self):
-        # drain mode: new docs wait; FINISHING_PREFIXES (and gate docs) land the backlog. fix-replan-* is not
-        # finishing work and must not start; the two finishing items start even with everything else queued.
+    def test_drain_mode_orders_but_never_idles_a_free_slot(self):
+        # drain mode: finishing work goes FIRST, but a free slot still takes a non-finishing task (fix-replan-*)
         drain_pool = dict(POOL, mode="drain")
         with mock.patch.object(C, "load_pool", return_value=drain_pool), \
              mock.patch.object(C, "holds_claims", side_effect=lambda t: False):
             C.cmd_refill(argparse.Namespace(target=4, prefix="fix-"))
-        self.assertEqual(self.spawned, ["fix-merge-blocked-1", "fix-merge-blocked-2"])
+        self.assertEqual(self.spawned, ["fix-merge-blocked-1", "fix-merge-blocked-2"])   # two slots: finishing first
+        with mock.patch.object(C, "load_pool", return_value=dict(drain_pool, slots=POOL["slots"] + [
+                {"name": "c", "model": "m/c", "count": 1, "class": "easy"}])), \
+             mock.patch.object(C, "holds_claims", side_effect=lambda t: False):
+            self.spawned.clear()
+            C.cmd_refill(argparse.Namespace(target=4, prefix="fix-"))
+        self.assertEqual(self.spawned, ["fix-replan-ok"])    # a free slot takes the plain task in drain mode
 
     def test_started_task_claims_block_the_rest_of_the_pass(self):
         self.items.append(item("fix-second-on-y", "bug:Y", 4))
