@@ -5121,7 +5121,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             # guard, which is the shape this branch exists to fix.
             _p = gen._cast('int64_t', f"{_ptr_val}")
             _t = gen._new_temp('_Bool')
-            gen._emit(f'  {_t} = {_p} {op} 0;')
+            gen._binop_into(_t, _p, op, '0')
             return '_Bool', _t
         if _ptr_ty in ('int', 'int64_t', '_Bool', 'double', 'float'):
             # ...and the same comparison when the other side is NOT a
@@ -5304,7 +5304,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv, True)[1]
         cmp_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
         t = gen._new_temp('_Bool')
-        gen._emit(f'  {t} = {cmp_t} {op} 0;')
+        gen._binop_into(t, cmp_t, op, '0')
         return '_Bool', t
 
     # is / is not → pointer identity

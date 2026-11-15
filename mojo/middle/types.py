@@ -1816,7 +1816,7 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     nxt = gen._new_temp('uint64_t')
-    gen._emit(f"  {nxt} = {cur} | {1 << bit[1]}ULL;")
+    gen._binop_into(nxt, f"{cur}", '|', f"{1 << bit[1]}ULL")
     gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
 
 
@@ -1833,7 +1833,7 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     got = gen._new_temp('uint64_t')
-    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
+    gen._binop_into(got, f"{cur}", '&', f"{1 << bit[1]}ULL")
     msg = f"'{class_name}' object has no attribute '{member}'"
     # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
     # own basic block (the same goto shape `_lower_IfExpr` uses).

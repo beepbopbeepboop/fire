@@ -5761,7 +5761,7 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     gen._goto(bb_push)
     gen._emit_label(bb_push)
     fsave = gen._new_val('int64_t', '_mojo_exc_top')
-    fpush = gen._new_val('int64_t', f'{fsave} + (int64_t)1')
+    fpush = gen._binop('int64_t', f'{fsave}', '+', '(int64_t)1')
     gen._emit(f'  _mojo_exc_top = {fpush};')
     ftop = gen._new_val('int64_t', '_mojo_exc_top')
     gen._void_call('mojo_cleanup_checkpoint_save', [])
@@ -6707,7 +6707,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 continue
             _slot_i = i
             if star_idx >= 0 and i > star_idx:
-                _base = gen._new_val('int64_t', f"{_sub_len} - {n_after}LL")
+                _base = gen._binop('int64_t', f"{_sub_len}", '-', f"{n_after}LL")
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
                 _slot_i = gen._binop('int64_t', _base, '+', _off)
             _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
@@ -8797,7 +8797,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 bb_none = gen._new_bb()
                 bb_done = gen._new_bb()
                 _cond = gen._new_temp('_Bool')
-                gen._emit(f'  {_cond} = ({aval}) != 0;')
+                gen._binop_into(_cond, f'({aval})', '!=', '0')
                 gen._cond_goto(_cond, bb_some, bb_none)
                 gen._emit_label(bb_some)
                 _some_lit = gen._intern_string('Optional(Some)')
