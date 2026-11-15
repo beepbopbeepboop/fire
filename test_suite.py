@@ -2201,21 +2201,26 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_disjoint_bases.py': 2,
     'test_python315_lazy_imports.py': 2,
     'test_unpacking_in_comprehensions.py': 1,
-    # +4 on 2026-11-13, the same day the three new test files below were
-    # registered (they had landed unregistered, so the estate check named them).
-    # Every one of these literals is a `subprocess` timeout on a COMPILE or a RUN
-    # the case itself performs — the RUN kind the census exists for, not a stale
-    # per-child budget: `test_interp_list_ctor.py` compiles then runs the
-    # interpreter and the compiled binary; `test_module_globals_compiled.py`
-    # builds with `fire.py build` (120 s), runs the produced executable (60 s)
-    # and allows 300 s for the whole build; the two
-    # `test_regress_gpu_offload_validation_modular_part*.py` rows are another
-    # workstream's, landing in the same commit only because the census is a
-    # ratchet and their literals arrived with them.
-    'test_interp_list_ctor.py': 1,
-    'test_module_globals_compiled.py': 3,
-    'test_regress_gpu_offload_validation_modular_part1.py': 1,
-    'test_regress_gpu_offload_validation_modular_part4.py': 1,
+    # +4 on 2026-11-13 (the three estate-backlog files' rows; a colleague
+    # re-added the same four keys higher up, so the later copies were
+    # dead text — a dict keeps only the last) and +14 on 2026-11-14, all
+    # landed unregistered with the estate backlog. Every literal is a
+    # `subprocess` timeout on a COMPILE or a RUN the case performs — the
+    # RUN kind this census exists for.
+    'test_candidate_selection_diagnostic.py': 1,
+    'test_diagnostic_format_modular.py': 1,
+    'test_diagnostics_in_missing_locs.py': 1,
+    'test_fieldwise_init_and_deprecated_conversion.py': 1,
+    'test_invalid_downcast_build.py': 1,
+    'test_overload_diagnostic.py': 1,
+    'test_predicate_where_diagnostic.py': 1,
+    'test_srcless_package_diagnostics.py': 1,
+    'test_static_call_diagnostics.py': 5,
+    'test_trait_comptime_member_untyped.py': 1,
+    'test_trait_imported_diagnostic.py': 1,
+    'test_trait_members_diagnostic.py': 1,
+    'test_trait_requirements_diagnostic.py': 1,
+    'test_where_clause_diagnostic.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -2727,7 +2732,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
     # are. This list is the census the check compares the registry
     # against, so it tracks the tree rather than freezing it.
-    expected_disabled = ['formal-doc-truth', 'gimple', 'metalgpu', 'rthdrscan']
+    expected_disabled = ['gimple', 'metalgpu', 'rthdrscan']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2868,7 +2873,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
     # are. This list is the census the check compares the registry
     # against, so it tracks the tree rather than freezing it.
-    expected_disabled = ['formal-doc-truth', 'gimple', 'metalgpu', 'rthdrscan']
+    expected_disabled = ['gimple', 'metalgpu', 'rthdrscan']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
