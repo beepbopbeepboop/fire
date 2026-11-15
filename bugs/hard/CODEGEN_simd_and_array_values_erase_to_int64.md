@@ -1,4 +1,6 @@
-SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part1, CODEGEN_simd_and_array_values_erase_to_int64-part2, CODEGEN_simd_and_array_values_erase_to_int64-part3
+SPLIT: all three parts landed and their docs were deleted -- part1 the
+type-alias arm, part2 the alias as a constructor callee, part3 (2026-11-14,
+`a0f321f1c`) a `comptime`-bound float DType
 
 # CODEGEN: SIMD values and `Array`/`Span` elements erase to `int64_t`, so their real type is unknown
 
@@ -92,29 +94,21 @@ from the annotation it is written with.
    scalar C type of `X`, including when `X` is a `comptime` local bound to
    `DType.float32`/`float64`.
 
-## Remaining work (replanned 2026-11-15)
+## Remaining work (replanned 2026-11-13)
 
-Part 1 (the type-alias arm), part 2 (the alias as a constructor callee), part 3
-(a `comptime`-bound float DType), part 4 (a container parameter keeps its
-element type) and part 5 (`Scalar[X]` resolves to X's scalar C type) all
-landed; their docs were deleted and their assertions are pins in
-`test_codegen_erased_container_values_pins.py`.
+The container and literal-dtype halves have landed (see above and the pins in
+`test_codegen_erased_container_values_pins.py`). What still erases is the type
+*spelling* and a container that crosses a call boundary; each is filed as its
+own mid part under `bugs/mid/`:
 
-What still erases is now three easy parts under `bugs/`, each with a red
-Done-when probe in `test_codegen_erased_container_values.py`:
-
-- `CODEGEN_simd_and_array_values_erase_to_int64-part1.md` — a float
-  `SIMD`/`Scalar` constructor whose dtype is written as the scalar type name
-  (`SIMD[Float32, 4]`) keeps `float`/`double` instead of erasing to
-  `int64_t`. This is the leftover type *spelling*.
-- `CODEGEN_simd_and_array_values_erase_to_int64-part2.md` — a `List[T]()`
-  constructor's bracket element type reaches the caller of a function that
-  returns the list, so `List[Float32]` reads `1.5` instead of its bit
-  pattern. This is the leftover container crossing a call boundary.
-- `CODEGEN_simd_and_array_values_erase_to_int64-part3.md` — an unannotated
-  function returning a float SIMD local keeps the scalar C type at the
-  boundary (the body's local is already `float`; the inferred signature is
-  what truncates it).
+- `CODEGEN_simd_and_array_values_erase_to_int64-part1.md` — a module-local
+  `alias` of a type expands in annotations (parameter, return, local, element
+  type).
+- part2 (landed; doc deleted) — the same alias expands when it is the
+  callee of a constructor (`F2(1.0)`, `A4(fill=...)`).
+- part3 (landed 2026-11-14 `a0f321f1c`; doc deleted) — a `comptime`-bound
+  float DType resolves in a signature, an annotated local, and a SIMD
+  constructor's dtype argument.
 
 `(1)` landed in this worktree: `_lower_call`'s generic container constructors arm
 now handles `Array`/`FixedSizeArray`, builds `mojo_list_new()`, records

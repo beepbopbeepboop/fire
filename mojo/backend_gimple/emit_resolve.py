@@ -2136,8 +2136,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                     else:
                         ret = info.get('c_return_type', 'int64_t')
                         ptypes = _param_ctypes(info.get('c_parameters'))
-                    ret = gimple_ctypes.c_client_callable_ctype(ret)
-                    ptypes = [gimple_ctypes.c_client_callable_ctype(p) for p in ptypes]
                     gen.func_return_types[sym] = ret
                     gen.func_param_types[sym] = ptypes
                     # Record this function's home module (SB-1 fix,
@@ -2244,14 +2242,6 @@ def _register_reflected_struct(gen, name, type_info, exports, parse_c_sig):
         if not msig:
             continue
         mret, mptypes = parse_c_sig(msig)
-        # A reflected C++-typed callable parameter must be spelled as the
-        # runtime's boxed word in a C-side extern/prototype (client TU).
-        mret = gimple_ctypes.c_client_callable_ctype(mret)
-        mptypes = [gimple_ctypes.c_client_callable_ctype(p) for p in mptypes]
-        # Rebuild the extern signature from sanitized types so the
-        # declaration matches the stored param types (a `std::function<...>`
-        # in `msig` is not valid C).
-        msig = gimple_ctypes.c_client_sanitize_signature_text(msig)
         # The C symbol is the function name inside the signature — this is
         # whatever the defining module's own compile actually emitted
         # (see GimpleGen._struct_method_csym_static / reflect.py's

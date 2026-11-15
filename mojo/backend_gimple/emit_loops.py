@@ -146,8 +146,8 @@ def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
         t_gt   = gen._new_temp('_Bool')
         t_spos = gen._new_temp('_Bool')
         cond_t = gen._new_temp('_Bool')
-        gen._binop_into(t_lt, f"{ctr}", '<', f"{stop_v}")
-        gen._binop_into(t_gt, f"{ctr}", '>', f"{stop_v}")
+        gen._emit(f"  {t_lt}   = {ctr} < {stop_v};")
+        gen._emit(f"  {t_gt}   = {ctr} > {stop_v};")
         t_zero = gen._new_val('int64_t', "(int64_t)0")
         gen._binop_into(t_spos, f"{step_v}", '>', t_zero)
         gen._emit(f"  {cond_t} = {t_spos} ? {t_lt} : {t_gt};")
@@ -1372,7 +1372,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _it64v = gen._new_val('int64_t', it64)
                 _z0 = gen._new_val('int64_t', '0')
                 _zero_c = gen._cmp(_it64v, '==', _z0)
-                _z32 = gen._binop('int64_t', '1LL', '<<', '32')
+                _z32 = gen._new_val('int64_t', '1LL << 32')
                 _low_c = gen._cmp(_it64v, '<', _z32)
                 gen._cond_goto(_zero_c, bb_nonnum, bb_rngchk)
                 gen._emit_label(bb_rngchk)
@@ -2697,7 +2697,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 continue
             slot_i = i
             if star_idx >= 0 and i > star_idx:
-                _base = gen._binop('int64_t', f"{item_len}", '-', f"{n_after}LL")
+                _base = gen._new_val('int64_t', f"{item_len} - {n_after}LL")
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
                 slot_i = gen._binop('int64_t', _base, '+', _off)
             if vn.startswith('(') and vn.endswith(')'):

@@ -1,4 +1,4 @@
-SPLIT: GPU_offload_validation_modular-part5, GPU_offload_validation_modular-part6, GPU_offload_validation_modular-part7, GPU_offload_validation_modular-part8
+SPLIT: part2 `bugs/mid/GPU_offload_validation_modular-part2.md`; part3 dispositioned 2026-11-13 (BLOCKED: enqueue-time device-passable closure arg type/layout validation requires MAX `DeviceContext`/`compile_function`+compiled-kernel metadata and `DevicePassable` device encoding/layout support not present in this tree) with pinning test `test_gpu_offload_validation_part3.py`, doc deleted; part1 triage landed and its doc deleted 2026-11-13 (per-case matrix below); part4 dispositioned 2026-11-13: `test_regress_gpu_offload_validation_modular_part4.py`
 # GPU: offload validation for modular test cases (category C)
 
 ## Symptom
@@ -33,49 +33,6 @@ these, so they fail or produce wrong code.
   into compile-time checks, and (c) the device compilation/emission path.
 - The compiled path is a separate world from the interpreter: a guard added to
   `myinterpreter.py` does not validate a `fire.py <file>` build. Measure both.
-
-## Replan (2026-11-15): the live parts are 5-8
-
-Parts 1-4 were the 2026-11-13 dispositions and are kept below, because their
-measurements are what the remaining work is sized from. The work that can be
-done at the easy class is filed as four parts; each one names one quick test.
-
-| part | doc | covers | pinned by |
-|---|---|---|---|
-| 5 | `bugs/GPU_offload_validation_modular-part5.md` | `compile_offload_unbound_param_error.mojo`, interpreted half: an under-supplied specialization is a diagnostic, not `None` | `test_regress_gpu_offload_validation_modular_part5.py` |
-| 6 | `bugs/GPU_offload_validation_modular-part6.md` | the same case, compiled half: the build must refuse it instead of answering `0` | `test_regress_gpu_offload_validation_modular_part6.py` |
-| 7 | `bugs/GPU_offload_validation_modular-part7.md` | `compile_offload_missing_symbol_error.mojo`: a real `std.compile.compile_info` and the exported-symbol slicing check | `test_regress_gpu_offload_validation_modular_part7.py` |
-| 8 | `bugs/GPU_offload_validation_modular-part8.md` | `op_with_unsupported_type_error.mojo`, host half: the float8 dtype family and the conversion/operation refusal | `test_regress_gpu_offload_validation_modular_part8.py` |
-
-The old mid-class part 2 is superseded by parts 5-7 and is deleted in the
-commit that adds them: it bundled three cases, one of which
-(`compile_offload_bundle_order.mojo`) is target-specific and not easy work, and
-it had no runnable test.
-
-What is NOT a part, and why:
-
-- `compile_offload_bundle_order.mojo` and
-  `end_to_end_thunk_with_direct_compile.mojo` are `modular-target-specific`:
-  they need a device toolchain and target model (`A100.target`, NVPTX/PTX
-  emission, offload bundling). No test in this tree can prove them fixed.
-- the two `enqueue_function_device_passable_closure_*` cases are BLOCKED on the
-  MAX host runtime (Dispositions below).
-- `sanitize_address.mojo` and `sanitize_address_inlined.mojo` are sanitizer
-  toolchain integration; Modular itself marks them `UNSUPPORTED: asan`.
-- the NVPTX half of `op_with_unsupported_type_error.mojo` is target-specific
-  too; part 8 is the host half, which the row says to verify first.
-
-## Dispositions (2026-11-13, kept)
-
-- part1 (the triage) landed 2026-11-13; its doc was deleted and the per-case
-  matrix is the `## Triage (part 1)` section below.
-- part3 dispositioned 2026-11-13 (BLOCKED: the enqueue-time device-passable
-  closure arg type/layout validation requires MAX `DeviceContext` /
-  `compile_function` + compiled-kernel metadata and `DevicePassable` device encoding/layout support not present in this tree) with pinning test
-  `test_gpu_offload_validation_part3.py`, doc deleted.
-- part4 dispositioned 2026-11-13:
-  `test_regress_gpu_offload_validation_modular_part4.py` pins the SIMD-width
-  guards and records the ASAN/FP8/NVPTX blockers.
 
 ## Triage (part 1, measured 2026-11-13 in this worktree)
 

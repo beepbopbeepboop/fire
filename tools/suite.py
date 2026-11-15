@@ -1792,7 +1792,8 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_python.h',
             'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
-     desc='runtime header export scan sees every declaration')
+     desc='runtime header export scan sees every declaration',
+     disabled='bugs/gate-rthdrscan.md')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
@@ -1894,8 +1895,7 @@ test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
          'fire_compiler.py', 'myinterpreter.py', 'module_loader.py', 'cas.py',
          'ast_rewriter.py', 'fire.py', 'hello.mojo', 'class_jit.mojo',
          'test_struct.mojo', 'array_ops_jit.mojo'],
-     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)',
-     disabled='bugs/gate-gimple-lint.md')
+     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)')
 # The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
 # hard-coded one. Registered by the integrator: the test landed with help-rename
 # but in no bucket, which turned `suite-self-test`'s estate check red.
@@ -2549,8 +2549,7 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
-     disabled='bugs/gate-stdlib-syntax.md')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
@@ -4260,8 +4259,6 @@ test('downcast-witness-diagnostic', [PY, 'test_downcast_witness_diagnostic.py'],
           'conforming-struct positive controls still compiling')
 test('dead-worker-state', [PY, 'tools/test_dead_worker_state.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('land-doc', [PY, 'tools/test_land_doc.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
 test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
@@ -4310,8 +4307,6 @@ test('reg-codegen-import-extern-unannotated-param-dropped-arity', [PY, 'test_cod
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-codegen-local-bindings-cache', [PY, 'test_codegen_local_bindings_cache.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-comptime-bound-bracket-arg', [PY, 'test_comptime_bound_bracket_arg.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-15)')
 test('reg-codegen-local-generic-float-literal', [PY, 'test_codegen_local_generic_float_literal.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-codegen-tuple-slot-scalar-beside-list', [PY, 'test_codegen_tuple_slot_scalar_beside_list.py'], mem='tiny',
@@ -4407,8 +4402,8 @@ test('reg-mojoc-synthetic-signature-default', [PY, 'test_mojoc_synthetic_signatu
 test('reg-stdlib-syntax-variant', [PY, 'test_stdlib_syntax_variant.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
 # A Mojo keyword used as an ordinary Python identifier: the compiler compiles
-# its own sources, so `trait = ...` must parse (fixed in 4c7e5d1a4 by the
-# statement-dispatch carve-out). Not cached, like the other reg-* pins.
+# its own sources, so `trait = ...` must parse (bugs/PARSER_keyword_identifier_
+# collision_refuses_module.md). Not cached, like the other reg-* pins.
 test('reg-keyword-identifier-collision', [PY, 'test_keyword_identifier_collision.py'], mem='tiny',
      desc='a Mojo keyword used as an ordinary Python identifier (`trait = ...`) '
           'parses; a real `trait Foo:` declaration still parses')
@@ -4804,12 +4799,12 @@ BUCKETS = {
     # git binary at all. The tests stub `_git` and the registry, but that is a
     # property of the tests, not something a category boundary should rely on.
     # Run them explicitly: `make check-orchestrator`.
-    'orchestrator': ['dead-worker-state', 'land-doc', 'done-ratchet-landing', 'refill-claim-blocked',
+    'orchestrator': ['dead-worker-state', 'done-ratchet-landing', 'refill-claim-blocked',
                      'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why',
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus

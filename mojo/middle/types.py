@@ -1404,7 +1404,7 @@ def _mojo_type(ann: str | type | None) -> str:
             # type, no separate fixed-size struct. `FixedSizeArray` used to be
             # missing here, so its annotation erased to `int64_t` and a
             # parameter declared `int64_t a` (then cast to `MojoList *` at
-            # the call) — see `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
+            # the call) — see `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1816,7 +1816,7 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     nxt = gen._new_temp('uint64_t')
-    gen._binop_into(nxt, f"{cur}", '|', f"{1 << bit[1]}ULL")
+    gen._emit(f"  {nxt} = {cur} | {1 << bit[1]}ULL;")
     gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
 
 
@@ -1833,7 +1833,7 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     got = gen._new_temp('uint64_t')
-    gen._binop_into(got, f"{cur}", '&', f"{1 << bit[1]}ULL")
+    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
     msg = f"'{class_name}' object has no attribute '{member}'"
     # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
     # own basic block (the same goto shape `_lower_IfExpr` uses).
@@ -2750,55 +2750,6 @@ def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
             ptypes.append(_c_type_to_cpp(_as_str(p)))
     ps = ', '.join(ptypes)
     return f'std::function<{_c_type_to_cpp(_as_str(ret))}({ps})>'
-
-
-def c_client_callable_ctype(ct):
-    """Map a C++-only callable value type to the C runtime word type.
-
-    A callable is boxed as an `int64_t` word in the C runtime
-    (`mojo_dyn_call((int64_t)(intptr_t)(callee), ...)`); `std::function<...>`
-    is only expressible in cpp coroutine units, where the callable is
-    actually invoked through C++ syntax. Imported-function signatures and
-    arg temporaries emitted into a C translation unit (the link-mode client,
-    extern prototypes) must therefore spell the slot as `int64_t`. Idempotent
-    and safe for any non-callable ctype."""
-    if isinstance(ct, str) and ct.startswith('std::function<'):
-        return 'int64_t'
-    return ct
-
-
-def c_client_sanitize_signature_text(sig: str) -> str:
-    """Replace `std::function<...>` parameter/return types in a C signature
-    string with the runtime's boxed word type (`int64_t`).
-
-    Used at the C-emission boundary for extern/prototype text that may have
-    been derived from a cpp-typed callable slot. A simple non-nested scan is
-    sufficient for the `std::function<R(P...)>` shapes this compiler emits.
-    """
-    if not isinstance(sig, str) or 'std::function<' not in sig:
-        return sig
-    out = []
-    i = 0
-    needle = 'std::function<'
-    n = len(sig)
-    while i < n:
-        j = sig.find(needle, i)
-        if j < 0:
-            out.append(sig[i:])
-            break
-        out.append(sig[i:j])
-        # consume balanced <...> of std::function (no nested templates in our shapes)
-        k = j + len(needle)
-        depth = 1
-        while k < n and depth > 0:
-            if sig[k] == '<':
-                depth += 1
-            elif sig[k] == '>':
-                depth -= 1
-            k += 1
-        out.append('int64_t')
-        i = k
-    return ''.join(out)
 
 
 _CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')

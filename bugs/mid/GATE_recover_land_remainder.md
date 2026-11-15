@@ -38,10 +38,3 @@ on 2026-11-02 with 23 jobs failing. Known observations from that report:
    in the same commit as the evidence.
 3. Split unrelated failures into separate bug docs with their own OFF entries if
    needed, keeping every OFF entry's `doc` pointing at an existing file.
-
-## Done when
-
-`python3 tools/memslot.py --gb 8 --label gate-off-doc -- python3 -m unittest test_gates_off_entries_name_a_doc.py -v`
-passes, proving every `tools/gates.json` OFF entry names an existing doc and
-worker (so the 23-job recover-land entry is owned by a live doc, not a deleted
-path).

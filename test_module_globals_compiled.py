@@ -17,7 +17,6 @@ run, and print exactly what CPython prints.
 Run: `python3 test_module_globals_compiled.py`   (a few seconds, < 1 GB)
 """
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -41,62 +40,6 @@ print(sorted(opmap.items()))
 print(not_upper)
 '''
 
-# `file:line:col: error:` — the shape of every gcc/codegen diagnostic that
-# carries a location. Used to tell THIS program's diagnostics from the stdlib
-# dylib's own fallback blocks; see `_program_errors`.
-_LOCATED_ERROR = re.compile(r'\S+:\d+:\d+: error:')
-
-
-def _program_errors(out: str, src: str) -> list:
-    """`error:` lines attributable to THIS program's own translation.
-
-    `fire.py build` compiles the stdlib dylib on demand and streams its
-    per-module fallback diagnostics to the same stdout/stderr: a
-    `  skip <module>: ... error: ...` line per module that did not compile,
-    plus the gcc block that killed it (whose first line is
-    `<stdlib path>:<line>:<col>: error: ...`). Those are the `stdlib-dylib`
-    job's verdict, which it reaches by comparing that job's skip count -- not
-    a verdict on THIS program, which does not import the failing module and
-    still builds and runs correctly. Counting them here made this job red
-    whenever an unrelated stdlib module regressed (2026-11-15: a `(void)`
-    extern for the overloaded `std.time.sleep` made
-    `std/testing/assert_aborts.mojo` fall back), so only a diagnostic that
-    names THIS program's source, or one carrying no location at all (the
-    compiler's own refusals), counts.
-    """
-    src = os.path.abspath(src)
-    errs = []
-    for ln in out.splitlines():
-        if 'error:' not in ln:
-            continue
-        if src in ln or _LOCATED_ERROR.search(ln) is None:
-            errs.append(ln)
-    return errs
-
-
-def _filter_selfcheck(src: str) -> str | None:
-    """Pin both directions of `_program_errors`' provenance rule.
-
-    The filter IS part of the guard: widened back to "any line containing
-    `error:`", this test goes red whenever the stdlib dylib falls back for a
-    module it does not use, which is the `stdlib-dylib` job's verdict and not
-    this one's. Narrowed to "only the program's own file", a location-less
-    compiler refusal would be missed.
-    """
-    stdlib_block = (
-        '  skip ../new-modular/Mojo/stdlib/std/x.mojo: '
-        '/s/stdlib/std/x.mojo:2:0: error: nope\n'
-        '/s/stdlib/std/x.mojo:9:3: error: too many arguments\n')
-    if _program_errors(stdlib_block, src):
-        return 'stdlib fallback diagnostics are attributed to the program'
-    own = f'{src}:1:1: error: own program diagnostic\n'
-    if _program_errors(own, src) != [own.rstrip('\n')]:
-        return 'a program diagnostic carrying its own path is not reported'
-    bare = 'error: violated constraint\n'
-    if _program_errors(bare, src) != [bare.rstrip('\n')]:
-        return 'a location-less compiler refusal is not reported'
-    return None
-
 
 def main() -> int:
     tmp = tempfile.mkdtemp(dir=SCRATCH)
@@ -104,11 +47,6 @@ def main() -> int:
         src = os.path.join(tmp, 'globals_prog.py')
         with open(src, 'w') as f:
             f.write(PROGRAM)
-
-        bad = _filter_selfcheck(src)
-        if bad:
-            print(f'FAIL  test_module_globals_compiled  {bad}')
-            return 1
 
         ref = subprocess.run([sys.executable, src], capture_output=True, text=True,
                              timeout=120)
@@ -123,10 +61,10 @@ def main() -> int:
              '--label', 'module-globals-build', '--',
              sys.executable, os.path.join(HERE, 'fire.py'), 'build', '-o', exe, src],
             capture_output=True, text=True, cwd=HERE, timeout=300)
-        errs = _program_errors(build.stdout + build.stderr, src)
-        if build.returncode != 0 or errs:
+        out = build.stdout + build.stderr
+        if build.returncode != 0 or any('error:' in ln for ln in out.splitlines()):
             print(f'FAIL  test_module_globals_compiled  build exit {build.returncode}: '
-                  f'{errs[:1]}')
+                  f'{[ln for ln in out.splitlines() if "error:" in ln][:1]}')
             return 1
 
         got = subprocess.run([exe], capture_output=True, text=True, timeout=60)

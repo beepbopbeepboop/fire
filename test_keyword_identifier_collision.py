@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Regression: a Mojo keyword used as an ordinary identifier must parse.
 
-The compiler compiles its own Python sources as Mojo, so every Mojo keyword
-that is a legal Python identifier (`trait`, and the same shape for the
-others) can appear as a variable name.  `trait` was the one that broke: the
-statement dispatch committed to `_parse_trait()` unconditionally, so
-mojo/middle/mojoc_conformance.py's `trait = (records or {}).get(...)` was
-refused with "Expected NAME got ASSIGN('=')", aborting every whole-program
-self-host compile.  Fixed by the statement-dispatch carve-out (4c7e5d1a4):
-`trait` commits to the declaration parse only when the tokens after it could
-actually start one.
+bugs/PARSER_keyword_identifier_collision_refuses_module.md.  The compiler
+compiles its own Python sources as Mojo, so every Mojo keyword that is a legal
+Python identifier (`trait`, and the same shape for the others) can appear as a
+variable name.  `trait` was the one that broke: the statement dispatch committed
+to `_parse_trait()` unconditionally, so mojo/middle/mojoc_conformance.py's
+`trait = (records or {}).get(...)` was refused with
+"Expected NAME got ASSIGN('=')", aborting every whole-program self-host compile.
 """
 
 import os
