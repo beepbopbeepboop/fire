@@ -996,6 +996,8 @@ def land():
         _t0 = time.time()
         verdict, merged, failing, out = probe(batch, stdlib=build)
         log("landing: probe %s in %.0f s (merged %d of %d)" % (verdict, time.time() - _t0, len(merged), len(batch)))
+        if verdict == "EMPTY":      # no PROBE line at all: the probe died or found nothing to merge; say what it printed
+            log("landing: probe printed no verdict; its last lines: %s" % " | ".join(out.strip().splitlines()[-4:])[:400])
         for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
                 log("conflict %s: filing its LAND doc" % c)
@@ -1156,7 +1158,9 @@ def main():
                 verify_async()
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")
-        except Exception as e:      # an unattended loop must survive one bad pass
+        except (Exception, SystemExit) as e:      # an unattended loop must survive one bad pass. SystemExit too: control.git()
+            #   and friends call sys.exit on a failed git command, which is not an Exception and used to end this
+            #   process with no log line (2026-11-14 13:43, 2026-11-15 10:31: a MERGE_RR.lock collision)
             log("pass failed: %r\n%s" % (e, traceback.format_exc()))   # the traceback names the line; the repr alone cost a code read (2026-11-12)
         if not a.interval:
             return

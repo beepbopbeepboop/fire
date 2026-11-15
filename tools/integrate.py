@@ -399,7 +399,20 @@ def commit_doc(path, message):
     C.git("add", "--", rel, cwd=C.MAIN)
     if not C.git("diff", "--cached", "--name-only", "--", rel, cwd=C.MAIN):
         return
-    C.git("commit", "-q", "--only", "-m", message, "--", rel, cwd=C.MAIN)
+    # A concurrent git process (the integrator's probe merge, a worker's commit) can hold .git/MERGE_RR.lock or
+    # index.lock for a moment: retry. C.git would sys.exit on the failure, and a SystemExit out of here ended the
+    # swarm process silently (2026-11-14 13:43 and 2026-11-15 10:31, both "Unable to create .../MERGE_RR.lock").
+    last = ""
+    for attempt in range(6):
+        r = subprocess.run(["git", "commit", "-q", "--only", "-m", message, "--", rel],
+                           cwd=C.MAIN, capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+        last = (r.stderr or r.stdout).strip()
+        if "lock" not in last:
+            break
+        time.sleep(2 + 2 * attempt)
+    raise RuntimeError("could not commit %s: %s" % (rel, last[:300]))
 
 
 def commit_gate_doc(path, job, branch):
