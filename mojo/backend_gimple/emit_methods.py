@@ -591,6 +591,20 @@ def _register_sibling_module_member(gen, module_name: str, method_name: str,
         _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
         sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
                    or module_name)
+    # A function the alias's module only RE-EXPORTS (`emit_resolve` does `from
+    # mojo.middle.resolve_shared import _calls_in_stmts`; the thin GimpleGen
+    # wrapper calls `grsl._calls_in_stmts(...)`) is DEFINED in another module,
+    # under that module's qualifier. Pinning the home to the alias's module left
+    # the re-dispatched bare call unqualified -- a weak "unavailable in compiled
+    # mode" stub while the real definition sat under its mangled name -- which
+    # is why the self-hosted compiler ran every wrapper as a no-op (~100 stubs).
+    # `_find_symbol_home_module` follows re-exports (memoised, cycle-guarded).
+    try:
+        _defining = gen._find_symbol_home_module(sub_ref, method_name, 'fn')
+    except Exception:
+        _defining = None
+    if _defining and _defining != sub_ref:
+        sub_ref = _defining
     try:
         gen._note_own_func_home(method_name, sub_ref, record_scope=False)
     except Exception:

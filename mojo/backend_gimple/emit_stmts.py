@@ -1245,7 +1245,7 @@ def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
     return '1'
 
 
-def _gen_stmt_AssignStmt(gen, node):
+def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
     # `globals()[key] = value` at module scope: a store through the module's
     # namespace dict, which in the compiled path IS the `_<mod>_globals`
     # struct. Lowered to a name dispatch over the statically-known module
@@ -4475,7 +4475,7 @@ def _gen_stmt_IfStmt(gen, node):
         gen._last_was_terminal = True
 
 
-def _gen_stmt_StructDef(gen, node):
+def _gen_stmt_StructDef(gen, node: gimple_ctypes.StructDef) -> None:
     """A `class` statement, reached only when it sits inside a function body
     (a module-level StructDef is emitted by gen_module, never through
     gen_stmt). The class body runs when the statement executes, so each
