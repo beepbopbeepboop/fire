@@ -1970,7 +1970,19 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
             m = _z9_meths[_z9k]
             if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
                 base_cname = self._struct_method_csym(sd.name, m.name, '')
-                if base_cname not in _emitted_base:
+                # A DUNDER's bare symbol is not defined by any overload, and
+                # since the call sites name a concrete overload (the subscript
+                # dispatch and the comparison lowering both score same-arity
+                # candidates) nothing references it. Emitting the declaration
+                # anyway is what produced the bare
+                # `_std_...___getitem__`/`___eq__` undefined references in
+                # bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md. An
+                # overloaded ORDINARY method is the case the declaration exists
+                # for (`_lower_bound_method_value`'s unsuffixed fallback), so
+                # only dunders skip it.
+                _is_dunder = (_gmi_as_str(m.name).startswith('__')
+                              and _gmi_as_str(m.name).endswith('__'))
+                if base_cname not in _emitted_base and not _is_dunder:
                     base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
                                 or self._resolve_type(m.return_type))
                     parts.append(f"{base_ret} {base_cname} (...);")

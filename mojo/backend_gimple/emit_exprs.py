@@ -4991,8 +4991,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             # translation unit of a struct from another module.
             _negate = op == '!=' and '__ne__' not in gen._struct_method_names.get(_eq_struct, ())
             _dunder = '__eq__' if _negate or op == '==' else '__ne__'
-            _eq_val = gen._call_expr('_Bool', gen._struct_method_csym(_eq_struct, _dunder, ''),
-                                     [(lt, lv), (rt, rv)])
+            # An overloaded dunder must be named by a CONCRETE overload: the
+            # suffix-less symbol is never defined, so a bare call here is an
+            # undefined reference at link (StringSpan's `__eq__(Int)` and
+            # `__eq__(StringSpan)` are the same arity).
+            _eq_oid = ''
+            _eq_cands = gmp._struct_method_candidates(gen, _eq_struct, _dunder)
+            if _eq_cands:
+                _eq_oid = (gmp._pick_overload_by_ctype(
+                    _eq_cands, [rt]) or {}).get('overload_id', '') or ''
+            _eq_val = gen._call_expr(
+                '_Bool', gen._struct_method_csym(_eq_struct, _dunder, _eq_oid),
+                [(lt, lv), (rt, rv)])
             if _negate:
                 _eq_val = gen._bool_not('_Bool', _eq_val)
             return '_Bool', _eq_val
@@ -5007,13 +5017,27 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         _ord_struct = gimple_exprtypes._struct_name_of(lt)
         _ord_have = gen._struct_method_names.get(_ord_struct, ())
         _ord_dunder, _ord_refl = _USER_ORD_REFLECT[op]
+        _ord_oid = ''
+        _ord_cands = gmp._struct_method_candidates(gen, _ord_struct, _ord_dunder)
+        if _ord_cands:
+            # Non-reflected: self is the left operand, so the non-self
+            # argument is the RIGHT one.
+            _ord_oid = (gmp._pick_overload_by_ctype(
+                _ord_cands, [rt]) or {}).get('overload_id', '') or ''
         if _ord_dunder in _ord_have:
             return '_Bool', gen._call_expr(
-                '_Bool', gen._struct_method_csym(_ord_struct, _ord_dunder, ''),
+                '_Bool', gen._struct_method_csym(_ord_struct, _ord_dunder, _ord_oid),
                 [(lt, lv), (rt, rv)])
         if _ord_refl in _ord_have:
+            _ord_oid = ''
+            _ord_cands = gmp._struct_method_candidates(gen, _ord_struct, _ord_refl)
+            if _ord_cands:
+                # Reflected: the operands are swapped, so the non-self
+                # argument is the LEFT one.
+                _ord_oid = (gmp._pick_overload_by_ctype(
+                    _ord_cands, [lt]) or {}).get('overload_id', '') or ''
             return '_Bool', gen._call_expr(
-                '_Bool', gen._struct_method_csym(_ord_struct, _ord_refl, ''),
+                '_Bool', gen._struct_method_csym(_ord_struct, _ord_refl, _ord_oid),
                 [(rt, rv), (lt, lv)])
 
     if op in _CONTAINER_CMP_OPS:
