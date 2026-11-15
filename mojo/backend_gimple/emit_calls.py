@@ -10165,6 +10165,33 @@ def _box_escaping_dict_slot_read(gen, enode, vtype: str, v: str) -> tuple[str, s
     return 'int64_t', v
 
 
+def _truthy_operand(e):
+    """`bool(A or B)` / `bool(A and B)` asks only for TRUTHINESS, never for the
+    selected operand, so it is `bool(A) or bool(B)` (`and` likewise) -- the same
+    answer and the same short-circuit, with every operand lowered on its own
+    terms. Lowering the `or` first made a value of the two operands' joined C
+    type, which cannot exist when they are different containers (a list on one
+    side, a dict on the other: `getattr(f, 'params', None) or getattr(f,
+    'annotations', None)`) -- the self-host's `cannot coerce MojoDict * to
+    MojoList *`. Recursive, so a chain is rewritten throughout; any other
+    expression is returned untouched."""
+    if (isinstance(e, gimple_ctypes.BinaryOp) and _as_str(e.op) in ('and', 'or')):
+        return gimple_ctypes.BinaryOp(
+            op=e.op, left=_truthy_call(e.left), right=_truthy_call(e.right),
+            line=getattr(e, 'line', 0), col=getattr(e, 'col', 0))
+    return e
+
+
+def _truthy_call(e):
+    inner = _truthy_operand(e)
+    if inner is not e:
+        return inner     # already a chain of `_Bool` operands
+    return gimple_ctypes.CallExpr(
+        func=gimple_ctypes.IdentExpr(name='bool', line=getattr(e, 'line', 0),
+                                     col=getattr(e, 'col', 0)),
+        args=[e], kwargs=[], line=getattr(e, 'line', 0), col=getattr(e, 'col', 0))
+
+
 def lower_call_args(gen, args: list) -> list:
     """Lower a call's positional arguments, expanding `*x` when `x` is a
     tuple of statically known ARITY into that many positional pairs.
@@ -10896,7 +10923,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and 'object' not in gen.func_return_types):
         return 'int64_t', gen._new_val('int64_t', '0')
 
-    arg_pairs = lower_call_args(gen, node.args)
+    _args = node.args
+    if (fname_raw == 'bool' and len(_args) == 1 and not node.kwargs
+            and not gen._locally_binds_name('bool')):
+        _args = [_truthy_operand(_args[0])]
+    arg_pairs = lower_call_args(gen, _args)
     if fname_raw in ('min', 'max', 'iter') and not gen._locally_binds_name(fname_raw):
         for _at, _ in arg_pairs:
             _refuse_namedtuple_tuple_use(gen, _at, f'calling {fname_raw} on')

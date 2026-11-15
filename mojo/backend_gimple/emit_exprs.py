@@ -3557,6 +3557,20 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                                and gen._is_dyn_word(node.left, lval))))
         if _bool_word:
             _mixed_word = True
+        # TWO CONTAINER POINTERS OF DIFFERENT KINDS (`getattr(f, 'comptime_params',
+        # None) or getattr(f, 'comptime_param_annotations', None)`: a list on one
+        # side, a dict on the other). The join picks one pointer type and the
+        # other operand is then `coerce`d into it -- a cast between MojoList/
+        # MojoDict/MojoSet/MojoBytes reinterprets one struct as another, which
+        # `_sce_simple_emit` refuses (the self-host's `cannot coerce MojoDict *
+        # to MojoList *`). Python's value is whichever operand was selected, so
+        # it is a word of unknown kind, answered by the runtime, exactly like
+        # the string/word and bytes/str mixes above.
+        if (not _bool_merge and not _mixed_word
+                and ltype != _rq
+                and ltype in gimple_ctypes._CONTAINER_KIND_TYPES
+                and _rq in gimple_ctypes._CONTAINER_KIND_TYPES):
+            _mixed_word = True
         if _mixed_word:
             res_type = 'int64_t'
         # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
