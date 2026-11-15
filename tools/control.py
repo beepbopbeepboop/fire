@@ -879,7 +879,8 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
-FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-", "fix-gate-", "fix-landed-")   # tasks that carry finished work to master
+FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-", "fix-gate-", "fix-landed-", "bug-land-")   # tasks that carry finished work to master
+# bug-land-* is a LAND doc (integrate.land_doc): a finished branch that could not land.
 # fix-gate-* repairs master itself (a red gate job) and fix-landed-* repairs what verify_landed.py found after a
 # landing: both finish work that already exists, so both are finishing work, not fresh docs.
 def refill_key(item):

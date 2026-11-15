@@ -43,6 +43,7 @@ class MergeFixDepth(unittest.TestCase):
         reg = {name: {"state": "exited-ok"}}
         with mock.patch.object(I.C, "registry") as reg_cm, \
              mock.patch.object(I.C, "ahead_since_base", return_value=2), \
+             mock.patch.object(I, "land_doc") as ld, \
              mock.patch.object(I.C, "cmd_enqueue") as enq:
             reg_cm.return_value.__enter__.return_value = reg
             reg_cm.return_value.__exit__.return_value = False
@@ -50,6 +51,7 @@ class MergeFixDepth(unittest.TestCase):
             enq.assert_not_called()
             self.assertEqual(reg[name]["state"], "abandoned")
             self.assertTrue(reg[name]["merge_capped"])         # pick_candidates skips it: no re-probe every pass
+            ld.assert_called_once()                            # and a LAND doc carries the work on
 
     def _requeue(self, name, ahead, **extra):
         """Run enqueue_merge_fix for NAME whose own round added AHEAD commits; return (queued meta or None, reg)."""
@@ -59,10 +61,12 @@ class MergeFixDepth(unittest.TestCase):
              mock.patch.object(I.C, "ahead_since_base", return_value=ahead), \
              mock.patch.object(I.C, "doc_exists_for", return_value=True), \
              mock.patch.object(I.C, "free_task_name", side_effect=lambda n: n), \
+             mock.patch.object(I, "land_doc") as ld, \
              mock.patch.object(I.C, "cmd_enqueue") as enq:
             reg_cm.return_value.__enter__.return_value = reg
             reg_cm.return_value.__exit__.return_value = False
             I.enqueue_merge_fix(name, t, "")
+        self.land_doc = ld
         return (enq.call_args[0][0].meta if enq.called else None), reg
 
     def test_a_fixer_that_committed_nothing_is_not_a_level(self):
@@ -80,6 +84,7 @@ class MergeFixDepth(unittest.TestCase):
         meta, reg = self._requeue(name, ahead=0, merge_depth=3, merge_idle=I.MERGE_FIX_IDLE)
         self.assertIsNone(meta)
         self.assertTrue(reg[name]["merge_capped"])
+        self.land_doc.assert_called_once()
 
     def test_a_fixer_that_committed_counts_and_resets_the_idle_run(self):
         meta, _ = self._requeue("fix-merge-x", ahead=1, merge_depth=1, merge_idle=1)
@@ -90,6 +95,7 @@ class MergeFixDepth(unittest.TestCase):
         reg = {name: {"state": "exited-ok"}}
         with mock.patch.object(I.C, "registry") as reg_cm, \
              mock.patch.object(I.C, "doc_exists_for", return_value=False), \
+             mock.patch.object(I, "land_doc") as ld, \
              mock.patch.object(I.C, "cmd_enqueue") as enq:
             reg_cm.return_value.__enter__.return_value = reg
             reg_cm.return_value.__exit__.return_value = False
@@ -97,6 +103,7 @@ class MergeFixDepth(unittest.TestCase):
             enq.assert_not_called()
             self.assertTrue(reg[name]["merge_capped"])
             self.assertNotIn("fixer", reg[name])
+            ld.assert_called_once()
 
     def test_pick_candidates_skips_a_capped_branch(self):
         t = {"slot": 1, "state": "exited-ok", "merge_capped": "x", "branch": "b", "worktree": "/w", "claims": []}

@@ -22,7 +22,7 @@ One round:
      nothing to check, and the round is refused. A red landing gate is a stop,
      not an ungate.
 """
-import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile
+import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 import stash_ff as SF
@@ -265,6 +265,47 @@ MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
 MERGE_FIX_IDLE = 2    # consecutive fixer rounds that committed nothing before they count as depth like any other
 
 
+def land_doc(name, t, reason, detail=""):
+    """A finished branch that cannot land and that no fixer chain will carry is not dropped and not left to loop: it
+    gets a doc, bugs/LAND-<root>.md, which the feeder routes like any bug (a worker picks it up on any free slot, drain
+    mode starts it first, several workers can hunt several of these at once) while the integrator lands everything else
+    unbothered. The doc names the branch and what stopped it, and its Status section accumulates one dated entry per
+    attempt, so the work survives across workers and days. An existing doc gets a new Status entry instead of a second
+    doc. Returns the doc path."""
+    root = re.sub(r"^(fix-(merge|proof|red|orch|gate|landed)-)+", "", name)
+    root = re.sub(r"^bug-", "", root)
+    root = re.sub(r"[^\w.-]+", "-", root)[:60].strip("-")
+    p = os.path.join(C.MAIN, "bugs", "LAND-%s.md" % root)
+    stamp = time.strftime("%F %T")
+    entry = "- %s: %s%s\n" % (stamp, reason, ("\n  " + detail.strip().replace("\n", "\n  ")) if detail.strip() else "")
+    if os.path.exists(p):
+        with open(p) as f:
+            body = f.read()
+        if "## Status" not in body:
+            body += "\n## Status\n"
+        with open(p, "w") as f:
+            f.write(body.rstrip("\n") + "\n" + entry)
+    else:
+        claims = ", ".join(t.get("claims") or []) or "(none)"
+        with open(p, "w") as f:
+            f.write(
+                "# Land: finished branch %s cannot land\n\n"
+                "**Branch:** `%s` (task `%s`; if the branch is gone, its tip is `refs/archive/%s`).\n"
+                "**Original work:** %s\n**Original claims:** %s\n\n"
+                "The integrator could not land this finished branch and no merge-fixer chain is carrying it. This doc is the\n"
+                "work: get the branch's change onto master. Start from master, bring the branch in (`git merge %s`, or\n"
+                "cherry-pick its commits), resolve every conflict by reading BOTH sides and keeping both sides' intent, make the\n"
+                "result coherent, and run the narrow tests that cover the files involved plus the branch's own tests. If the\n"
+                "change is already on master in another form, say so, and delete the doc.\n\n"
+                "## Done when\n\nThe branch's change is committed on your branch, its tests pass, and this doc is `git rm`'d in\n"
+                "that same commit (then `python3 tools/dangling_doc_refs.py --ratchet`).\n\n"
+                "## Status\n%s"
+                % (name, t["branch"], name, t["branch"], (t.get("summary") or "")[:300], claims, t["branch"], entry))
+    commit_doc(p, "land: %s cannot land (%s); the doc is the work\n\nFiled by the integrator." % (name, reason.split(":")[0][:60]))
+    print("land doc %s: %s" % (os.path.relpath(p, C.MAIN), reason), flush=True)
+    return p
+
+
 def _cap_merge_fix(name, why, kind=None):
     """Stop handing NAME to merge fixers. `merge_capped` is what pick_candidates reads: the state alone is not enough,
     because abandoned/superseded branches are still landing candidates (their work is finished), so without the flag
@@ -294,14 +335,18 @@ def enqueue_merge_fix(name, t, conflict_text):
     idle = t.get("merge_idle", 0)
     forgive = depth > 0 and idle < MERGE_FIX_IDLE and C.ahead_since_base(t) == 0
     if depth - forgive >= MERGE_FIX_DEPTH:
-        _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name, kind="merge-fix depth")
+        why = "merge-fix depth cap: %s is abandoned, not fixed again" % name
+        _cap_merge_fix(name, why)         # no orchestration review: the LAND doc below is the continuing work
+        land_doc(name, t, why, "conflict with master persisted across %d merge-fixer round(s)" % depth)
         return
     if not C.doc_exists_for(t.get("claims") or []):
         # sync drops a queued task whose claims name no doc, so this fixer would be removed on the next pass and the
         # branch would be re-probed, conflict and be handed to a new fixer forever (2026-11-11: 170 rounds on
         # fix-gate-formal-doc-truth, and bug-mid-codegen-tagged-generator-mixed-t left `fixer` naming a vanished task)
-        _cap_merge_fix(name, "merge-fix: %s has no bug doc for its claims %s; no fixer is queued (sync would drop it)"
-                       % (name, t.get("claims")))
+        why = ("merge-fix: %s has no bug doc for its claims %s; no fixer is queued (sync would drop it)"
+               % (name, t.get("claims")))
+        _cap_merge_fix(name, why)
+        land_doc(name, t, why, "its own doc is gone (deleted by the branch or by a landing): carry the change to master")
         return
     files = sorted(set(l.split("Merge conflict in ")[-1].strip() for l in conflict_text.splitlines() if "Merge conflict in" in l))
     task = ("Branch %s (a finished, verified worker branch; original task: %s) conflicts with current master in: %s. "
@@ -323,8 +368,8 @@ def enqueue_merge_fix(name, t, conflict_text):
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
-def commit_gate_doc(path, job, branch):
-    """Commit one gate doc onto master as a PATH-LIMITED commit. A worker is cut from a git commit, so a doc that is
+def commit_doc(path, message):
+    """Commit one doc onto master as a PATH-LIMITED commit. A worker is cut from a git commit, so a doc that is
     only an untracked file in MAIN is invisible to it and blocks the ledger merge (2026-11-13: "would be overwritten by
     merge", every job's marker held on verify-ledger). `commit --only -- <path>` takes that one path and leaves the rest
     of MAIN's index and working tree exactly as they were. Nothing is committed when the doc is already tracked and
@@ -339,9 +384,13 @@ def commit_gate_doc(path, job, branch):
     C.git("add", "--", rel, cwd=C.MAIN)
     if not C.git("diff", "--cached", "--name-only", "--", rel, cwd=C.MAIN):
         return
-    C.git("commit", "-q", "--only", "-m",
-          "gate: %s is red on master (branch %s); the doc is the work\n\nFiled by the integrator's gate round."
-          % (job, branch), "--", rel, cwd=C.MAIN)
+    C.git("commit", "-q", "--only", "-m", message, "--", rel, cwd=C.MAIN)
+
+
+def commit_gate_doc(path, job, branch):
+    """Commit one gate doc (see commit_doc)."""
+    commit_doc(path, "gate: %s is red on master (branch %s); the doc is the work\n\nFiled by the integrator's gate round."
+               % (job, branch))
 
 
 def _gate_off_patterns():
