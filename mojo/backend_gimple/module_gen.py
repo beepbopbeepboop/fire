@@ -3257,6 +3257,31 @@ def _is_dispatch_name(_n) -> bool:
     return dispatch_table_global_ctype(_as_str(_n)) is not None
 
 
+def _unique_module_globals(items: list) -> list:
+    """One entry per C field NAME, in first-seen order, for the struct and the
+    accessors emitted from `_module_globals[mod]`. That list is keyed on the whole
+    (name, c_type, g_mtype) triple on purpose (see the note where it is filled),
+    so a name registered under two different mtypes -- `tokens` in
+    ownership_check's and ownership_destruct's `if __name__ == '__main__'` block
+    -- is listed twice, and used to be emitted twice: `duplicate member 'tokens'`
+    plus a redefined `__mojo_global_get_` accessor (the self-host's GCC errors).
+    Every emitter of a module's globals struct must go through here: the module's
+    own block AND the sibling-module preamble. Two different C types for one name
+    can only be held in the box."""
+    out = []
+    index = {}
+    for _it in items:
+        _nm = _c_field_name(_as_str(_it[0]))
+        if _nm not in index:
+            index[_nm] = len(out)
+            out.append(_it)
+        else:
+            _prev = out[index[_nm]]
+            if _as_str(_prev[1]) != _as_str(_it[1]):
+                out[index[_nm]] = (_prev[0], 'int64_t', _prev[2])
+    return out
+
+
 def _gmi_assigns_global_at_toplevel(stmt_list: list, gname: str) -> bool:
     """True when the module body `stmt_list` binds `gname` itself at top
     level (a plain/annotated assignment, a `var`, or one target of a chained
@@ -17340,7 +17365,7 @@ def gen_module_impl(self, stmts: list):
             parts.append(f'#ifndef {_toplev_guard}')
             parts.append(f'#define {_toplev_guard}')
             parts.append(f'typedef struct {struct_name} {{')
-            for _kf in _known_fields:
+            for _kf in _unique_module_globals(_known_fields):
                 # Index, don't unpack: reading `_kf_ctype`/`_kf_name` out of the
                 # 3-tuple re-boxes the str slots to int64_t on the self-hosted
                 # path, so the field decl came out `<addr> ANY;` — a live heap
@@ -18287,25 +18312,7 @@ def gen_module_impl(self, stmts: list):
     # compiled program got an empty `typedef struct _<mod>_toplev {}` /
     # `_<mod>_globals = {}` block even with no module-level globals.
     if len(_mg_list) > 0:
-        # One struct member and one accessor per NAME. `_module_globals` is
-        # keyed on the whole (name, c_type, g_mtype) triple on purpose (see the
-        # note above), so a name registered under two different mtypes --
-        # `tokens` in ownership_check/ownership_destruct's `if __name__ ==
-        # '__main__'` block -- is listed twice, and emitted twice as `duplicate
-        # member 'tokens'` plus a redefinition of its accessor (the self-host's
-        # GCC errors). Collapse by C field name, keeping the first position; two
-        # different C types for one name can only be held in the box.
-        globals_list = []
-        _gl_index = {}
-        for _gt0 in _mg_list:
-            _gl_name = _c_field_name(_as_str(_gt0[0]))
-            if _gl_name not in _gl_index:
-                _gl_index[_gl_name] = len(globals_list)
-                globals_list.append(_gt0)
-            else:
-                _gl_prev = globals_list[_gl_index[_gl_name]]
-                if _as_str(_gl_prev[1]) != _as_str(_gt0[1]):
-                    globals_list[_gl_index[_gl_name]] = (_gl_prev[0], 'int64_t', _gl_prev[2])
+        globals_list = _unique_module_globals(_mg_list)
         current_mod_str = str(current_mod_name) if current_mod_name else "root"
         safe_name = _c_field_name(current_mod_str) if current_mod_str else "root"
         typedef_name = f"_{safe_name}_toplev"

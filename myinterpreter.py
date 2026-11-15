@@ -2001,15 +2001,16 @@ def _synthetic_text(path, line, name):
 
 
 def _repeat_char(ch: str, n: int) -> str:
-    """`ch` repeated `n` times (0 for a non-positive count). A function with a
-    typed `n`, not `ch * n` inline: the operands here come out of a record dict,
-    which the self-hosted compiler reads as boxed words, and `'~' * <word>` is
-    then `char * * char *` (a GCC error in the self-host build)."""
-    out = ''
-    i = 0
-    while i < n:
-        out += ch
-        i += 1
+    """`ch` repeated `n` times (empty for a non-positive count). Callers pass
+    counts read out of a record dict, which the self-hosted compiler holds as
+    boxed words; taking them through this typed `n` is what lets the repeat
+    lower (an inline `'~' * <word>` was `char * * char *` in the self-host
+    build). Built by appending, not `ch * n`, for the same reason."""
+    count: int = n
+    out: str = ''
+    while count > 0:
+        out = out + ch
+        count = count - 1
     return out
 
 

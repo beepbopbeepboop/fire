@@ -1243,12 +1243,19 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
     return [k == 'tuple' for k in kinds]
 
 
-def _yield_nodes_of(fn: N.FunctionDef):
-    """Yield every `YieldExpr`/`YieldFromExpr` lexically inside `fn`, not
-    inside a nested `def`/`lambda`/comprehension — a yield there belongs to a
-    different scope, exactly the nesting rule `fire_compiler._scan_yield_bearing`
-    uses for `is_generator`. Own stack-based walk (the shared `_walk` cannot
-    express "skip this subtree, keep the rest")."""
+def _yield_nodes_of(fn: N.FunctionDef) -> list:
+    """Every `YieldExpr`/`YieldFromExpr` lexically inside `fn`, not inside a
+    nested `def`/`lambda`/comprehension — a yield there belongs to a different
+    scope, exactly the nesting rule `fire_compiler._scan_yield_bearing` uses for
+    `is_generator`. Own stack-based walk (the shared `_walk` cannot express "skip
+    this subtree, keep the rest").
+
+    An EAGER list, not a generator: this module is in the self-host closure and
+    the compiler's own generators must be ones the A3 pass (this very module)
+    claims, and a module that holds one it cannot lower is refused whole
+    (`test_selfhost.py::closure_coroutines_are_lowerable`; the same fix as
+    `_walk_lists`)."""
+    found = []
     stack = list(getattr(fn, 'body', None) or [])
     while stack:
         cur = stack.pop()
@@ -1259,7 +1266,7 @@ def _yield_nodes_of(fn: N.FunctionDef):
             # `fn`'s yield.)
             continue
         if isinstance(cur, (N.YieldExpr, N.YieldFromExpr)):
-            yield cur
+            found.append(cur)
             continue
         d = getattr(cur, '__dict__', None)
         if not d:
@@ -1269,6 +1276,7 @@ def _yield_nodes_of(fn: N.FunctionDef):
                 stack.extend(x for x in v if hasattr(x, '__dict__'))
             elif hasattr(v, '__dict__'):
                 stack.append(v)
+    return found
 
 
 def _yields_provably_nontuple(fn: N.FunctionDef) -> bool:

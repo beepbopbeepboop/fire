@@ -752,13 +752,18 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             by_name[_as_str(_sd0.name)] = _sd0
     resolved = set()
 
-    def resolve(s):
-        s = _as_structdef_node(s)
-        _sn = _as_str(s.name)
+    # NOT named `s`: the compiled path types a parameter/local per bare NAME
+    # across the module, and the other `s` in this file (the loop variable
+    # below, and the interpreter's `MojoClass`-typed ones in the closure) made
+    # `s.methods` a MojoDict read here (`cannot coerce MojoDict * to
+    # MojoList *` at `s.methods = inherited + s.methods`).
+    def resolve(sdef0):
+        sdef = _as_structdef_node(sdef0)
+        _sn = _as_str(sdef.name)
         if _sn in resolved:
             return
         resolved.add(_sn)  # mark first: guards against an inheritance cycle
-        _bases = getattr(s, 'bases', None) or []
+        _bases = getattr(sdef, 'bases', None) or []
         if not _bases:
             return
         merged_fields = []
@@ -773,16 +778,16 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             for m in base.methods:
                 merged_methods[_as_str(_as_funcdef_node(m).name)] = m
         own_names = set()
-        for m in s.methods:
+        for m in sdef.methods:
             own_names.add(_as_str(_as_funcdef_node(m).name))
         inherited = [m for name, m in sorted(merged_methods.items()) if name not in own_names]
-        s.fields = merged_fields + s.fields
-        s.methods = inherited + s.methods
+        sdef.fields = merged_fields + sdef.fields
+        sdef.methods = inherited + sdef.methods
         # An in-place AST mutation, so `_walk_ast`'s memo — keyed on node
         # identity, and therefore blind to "this node now reaches more
         # children than when it was last walked" — must not be able to answer
-        # for `s`, or for any node that contains it, again.
-        _walk_ast_invalidate(s)
+        # for `sdef`, or for any node that contains it, again.
+        _walk_ast_invalidate(sdef)
 
     for s in all_struct_defs:
         if isinstance(s, StructDef):
