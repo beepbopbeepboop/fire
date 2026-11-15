@@ -3669,6 +3669,37 @@ def test_missing_dep_is_reported():
               'other' in out, f'rc={rc} out={out!r}')
 
 
+def test_a_skipped_dep_skips_its_dependents():
+    """A gate turned OFF must not turn the run red.
+
+    `--skip` is how tools/gates.json turns a known-red job OFF for a backlog.
+    It removed the job from `chosen` and left every dependent selected with a
+    dependency no job in the plan could satisfy, so `execute` reported
+    `ERROR dependency not selected` against the dependent — the gate was red by
+    construction on a policy meant to keep a known red out of it. The
+    integrator's confirm step then re-ran that dependent by name (which selects
+    its deps, the OFF job among them), the real red job ran after all, and a
+    fresh per-job gate doc was filed for a job gates.json already tracks. A
+    dependent of a skipped test is skipped, as one whose dep failed is.
+    """
+    log = os.path.join(HERE, 'build', 'test-suite-skipdep.log')
+    with Sandbox(prereq=dict(cmd=ok_cmd('pass')),
+                 needs=dict(cmd=ok_cmd('raise SystemExit(1)'), deps=['prereq']),
+                 other=dict(cmd=ok_cmd('pass'))):
+        class Opts:
+            only = None
+            skip = [r'^prereq$']
+        names = suite.select(['needs', 'other'], Opts())
+        check('skip: a dep and its dependent are both out of the plan',
+              names == ['other'], f'got {names}')
+        rc, out = run(['needs', 'other'], skip=r'^prereq$', log=log)
+    text = open(log).read() if os.path.exists(log) else ''
+    check('skip: a dependent of a skipped dep does not fail the run',
+          rc == 0 and '1 passed' in out, f'rc={rc} out={out!r}')
+    check('skip: no dependency-not-selected error is recorded',
+          'dependency not selected' not in text, text[-400:])
+
+
 def test_named_test_brings_its_deps():
     """Naming a test names what it needs to run.
 
@@ -6841,6 +6872,7 @@ def main():
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
+               test_a_skipped_dep_skips_its_dependents,
                test_dependent_waits_for_the_whole_fanout,
                test_log_has_passes_screen_does_not,
                test_checked_run_key_covers_what_it_names,
