@@ -2810,6 +2810,38 @@ def test_imported_module_path_word_generator_unit_compiles() -> bool:
     return True
 
 
+def test_imported_callable_default_param_is_c_word_in_client() -> bool:
+    """Regression: an imported callable-default parameter must be a C word.
+
+    An imported plain function whose default is a known foreign callable
+    (e.g. `def w(x, _open=open): ...`) is typed `std::function<...>` for the
+    cpp coroutine unit, but the link-mode C client must spell that slot as the
+    runtime's boxed `int64_t` word. `driver.compile_program` (not the
+    `fire.py` inline fallback) must build and run the consumer; the binary's
+    stdout must match CPython.
+    """
+    pkg = {
+        'pkg_c/__init__.py': '',
+        'pkg_c/mod.py': (
+            'def w(x, _open=open):\n'
+            '    return x\n'
+        ),
+        'pkg_c/main.py': (
+            'from pkg_c.mod import w\n'
+            'print(w(7))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'pkg_c/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg_c/main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '7')
+    if not ok:
+        print(f"  ✗ imported_callable_default_param_is_c_word_in_client: "
+              f"rc={rc} stdout={stdout!r} py_rc={py_rc} py={py_stdout!r}")
+    return ok
+
+
 def test_link_inline_cpp_unit_failure_reports_compiler_stderr() -> bool:
     """Regression test for the diagnostic half of
     bug:COMPILE_FAIL_Tools_c-analyzer_c_common_tables_consumer_link: when an
@@ -2899,6 +2931,7 @@ CASES = [
     test_two_modules_specialize_one_generic_differently,
     test_imported_global_accessor_in_link_mode,
     test_imported_module_path_word_generator_unit_compiles,
+    test_imported_callable_default_param_is_c_word_in_client,
     test_link_inline_cpp_unit_failure_reports_compiler_stderr,
     test_generator_string_equality_compares_content,
 ]

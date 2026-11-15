@@ -1896,7 +1896,9 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
                 param_ctypes = per_overload_params
             elif gimple_ctypes._params_have_vararg(m.params):
                 param_ctypes = self._signature_ctypes(m.params, m, sd.name, sentinel='MojoList *')
-                self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, sd.name)
+                self.func_param_types[method_full_name] = [
+                    gimple_ctypes.c_client_callable_ctype(t)
+                    for t in self._signature_ctypes(m.params, m, sd.name)]
             else:
                 param_ctypes = []
                 for i, (pname, ptype) in enumerate(m.params):
@@ -11264,7 +11266,7 @@ def gen_module_impl(self, stmts: list):
             continue
         if isinstance(s, FunctionDef):
             if gimple_ctypes._params_have_vararg(s.params):
-                self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                self.func_param_types[s.name] = [gimple_ctypes.c_client_callable_ctype(t) for t in self._signature_ctypes(s.params, s)]
                 self._note_vararg_trailing_param_types(s)
             else:
                 self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
@@ -11277,7 +11279,7 @@ def gen_module_impl(self, stmts: list):
                 if method_full_name in self._selfhost_locked_param_types:
                     continue
                 if gimple_ctypes._params_have_vararg(m.params):
-                    self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, s.name)
+                    self.func_param_types[method_full_name] = [gimple_ctypes.c_client_callable_ctype(t) for t in self._signature_ctypes(m.params, m, s.name)]
                 else:
                     param_ctypes = []
                     # Index, don't unpack: `for i, (pname, ptype) in
@@ -13790,7 +13792,7 @@ def gen_module_impl(self, stmts: list):
             continue
         if isinstance(s, FunctionDef):
             if gimple_ctypes._params_have_vararg(s.params):
-                self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                self.func_param_types[s.name] = [gimple_ctypes.c_client_callable_ctype(t) for t in self._signature_ctypes(s.params, s)]
                 self._note_vararg_trailing_param_types(s)
             else:
                 self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
@@ -15066,7 +15068,7 @@ def gen_module_impl(self, stmts: list):
             continue
         if isinstance(s, FunctionDef):
             if gimple_ctypes._params_have_vararg(s.params):
-                self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                self.func_param_types[s.name] = [gimple_ctypes.c_client_callable_ctype(t) for t in self._signature_ctypes(s.params, s)]
                 self._note_vararg_trailing_param_types(s)
             else:
                 self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
@@ -16718,7 +16720,7 @@ def gen_module_impl(self, stmts: list):
         # membership check against it missed, whereas the plain unpack's
         # `pn` hashes correctly. Do not "index-ify" this loop.
         if gimple_ctypes._params_have_vararg(fdef.params):
-            self.func_param_types[fdef.name] = self._signature_ctypes(fdef.params, fdef)
+            self.func_param_types[fdef.name] = [gimple_ctypes.c_client_callable_ctype(t) for t in self._signature_ctypes(fdef.params, fdef)]
             self._note_vararg_trailing_param_types(fdef)
         else:
             inferred_params = self._inferred_param_types.get(fdef.name, {}) if hasattr(self, '_inferred_param_types') else {}
@@ -17226,7 +17228,7 @@ def gen_module_impl(self, stmts: list):
     ])
 
     for _decl in self._link_import_decl_list:
-        parts.append(_decl)
+        parts.append(gimple_ctypes.c_client_sanitize_signature_text(_decl))
 
     our_mod = self.module_name if len(self.module_name) > 0 else "root"
     if not self.module_name and self._current_filename:
@@ -19371,6 +19373,7 @@ def gen_module_impl(self, stmts: list):
                     if _rt_match and _rt_match.end() < len(signature):
                         signature = (_home_ret_hit + ' ' + safe
                                      + signature[_rt_match.end():])
+                signature = gimple_ctypes.c_client_sanitize_signature_text(signature)
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
             _raw_ret = _as_str(sym_info.get('return_type', 'int64_t'))
@@ -19630,7 +19633,7 @@ def gen_module_impl(self, stmts: list):
         # missed even though the plain unpack's `pn` hashes correctly.
         if gimple_ctypes._params_have_vararg(fdef.params):
             param_ctypes = self._signature_ctypes(fdef.params, fdef, sentinel='MojoList *')
-            self.func_param_types[fdef.name] = self._signature_ctypes(fdef.params, fdef)
+            self.func_param_types[fdef.name] = [gimple_ctypes.c_client_callable_ctype(t) for t in self._signature_ctypes(fdef.params, fdef)]
             self._note_vararg_trailing_param_types(fdef)
         else:
             param_ctypes = []

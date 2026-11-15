@@ -7459,6 +7459,13 @@ def compile_linked(mojo_src: str, filename: str = "",
     # declaration and `_compile_imported_module`'s matching write site for
     # the full reasoning (“COMPILE_FAIL: Tools/cases_generator/parser.py”).
     needs_cxx = gen._link_needs_cxx or gen._link_needs_cxx_box[0] or bool(gen.generated_cpp)
+    # A callable-valued slot is `std::function<...>` in cpp coroutine typing
+    # but the C translation unit (client.c) must spell it as the runtime's
+    # boxed `int64_t` word. Sanitize any residual form at the C-emission
+    # boundary so link-mode clients never see C++-only types in C output.
+    if 'std::function<' in code:
+        import mojo.middle.types as _mtypes
+        code = _mtypes.c_client_sanitize_signature_text(code)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),
             list(dict.fromkeys(gen._link_objects)),
