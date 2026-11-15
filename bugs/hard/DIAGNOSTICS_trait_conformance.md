@@ -1,6 +1,6 @@
 # DIAGNOSTICS step 2: Trait conformance diagnostics
 
-SPLIT: DIAGNOSTICS_trait_conformance-part1, DIAGNOSTICS_trait_conformance-part4, DIAGNOSTICS_trait_conformance-part5 (part 6 fixed: declaration-time defaulted trait method conformance, pinned by `test_defaulted_trait_method_conformance_diagnostic.py`; its doc was deleted with the fix)
+SPLIT: the three sub-steps (their docs were deleted with their fixes; see Status 2026-11-14 below — part 6 was already recorded as fixed here)
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
 plan: `docs/diagnostics-missing-validation-plan.md` §2.
