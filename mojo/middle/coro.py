@@ -3013,12 +3013,21 @@ def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str, struct_def=None) 
     return None
 
 
+# The most argument slots (a method's receiver included) the runtime's
+# `__mojo_gen_new_<n>` constructors cover (runtime/fire_coro_gen.c). A generator
+# with more used to lower fine and then reference `__mojo_gen_new_9`, which does
+# not exist, at LINK (the compiler's own `_trait_method_requirements`).
+MAX_GEN_SLOTS = 12
+
+
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
         return False, 'comptime params'
+    if len(getattr(fn, 'params', None) or []) > MAX_GEN_SLOTS:
+        return False, f'too many parameters (the runtime constructs at most {MAX_GEN_SLOTS} slots)'
     _decos = getattr(fn, 'decorators', None) or []
     # `@contextlib.contextmanager` (dotted or bare) is the ONE decorator a
     # generator may carry without changing what this backend has to emit, so

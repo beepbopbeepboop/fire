@@ -9313,10 +9313,10 @@ def gen_module_impl(self, stmts: list):
                             exports[_fn] = {
                                 'kind': 'function', 'mojoc': _fr,
                                 'return_type': _ret,
-                                'c_return_type': self._mojo_type(_ret) if _ret else 'int64_t',
+                                'c_return_type': _mojo_type(_ret) if _ret else 'int64_t',
                                 'parameters': [],
                                 'c_parameters': [],
-                                'signature': f"{self._mojo_type(_ret) if _ret else 'int64_t'} {_fn} (...)",
+                                'signature': f"{_mojo_type(_ret) if _ret else 'int64_t'} {_fn} (...)",
                             }
                 except Exception:
                     pass
@@ -19193,14 +19193,19 @@ def gen_module_impl(self, stmts: list):
                             signature)
                         if _m_sig:
                             _eff_list = _as_list(_def_pts)
-                            # Only a definition compiled in THIS translation
-                            # unit has a prototype this extern can conflict
-                            # with; a `*args` function defined elsewhere keeps
-                            # the sentinel spelling every other extern of it
-                            # uses (`std_os_path_path_join (char *, ...)` is
-                            # declared twice in one unit and the two must
-                            # agree).
-                            _def_in_this_tu = _ggf_dup._local_def_pts(self, _sn) is not None
+                            # In a whole-program INLINE compile (`do_imports`) every
+                            # sibling's definition lands in this translation unit,
+                            # whatever order the modules compile in, so an extern for a
+                            # `*args` function must spell the definition's own packed
+                            # `MojoList *` (`cas__hash (MojoList *)`). A per-file
+                            # compile (the stdlib: `do_imports` off) defines it in
+                            # another unit and keeps the sentinel spelling every
+                            # other extern of it uses (`std_os_path_path_join
+                            # (char *, ...)` is declared twice in one unit and the
+                            # two must agree). The local-definition test is NOT the
+                            # right switch: it is empty exactly when the importer
+                            # compiles before the definition, which is the case.
+                            _def_in_this_tu = bool(self.do_imports)
                             _scan_sig = _as_str(_m_sig.group(2))
                             if _scan_sig.strip() in ('', 'void'):
                                 _scan_parts = []
@@ -19226,7 +19231,7 @@ def gen_module_impl(self, stmts: list):
                                 # conflicts with the definition's own.
                                 if _tp == '...' and _def_in_this_tu:
                                     _tp = 'MojoList *'
-                                if _keep_names:
+                                if _keep_names and _tp != '...':
                                     _toks = _scan_parts[_pi].split()
                                     if len(_toks) >= 2 and re.match(
                                             r'^[A-Za-z_]\w*$',
@@ -19307,10 +19312,14 @@ def gen_module_impl(self, stmts: list):
                     # (`char *`, `MojoList *`) ending where the function
                     # NAME begins — `safe` — so replace up to the first
                     # occurrence of the name, not just the first token.
-                    _m = re.match(r'.*?' + re.escape(safe), signature)
-                    if _m and _m.end() < len(signature):
+                    # NOT `_m`: the compiled path types a local by its bare
+                    # NAME across the function, and `_m` is a FunctionDef loop
+                    # variable elsewhere in `gen_module_impl`, so `_m.end()`
+                    # became a call to `FunctionDef_end` (undefined at link).
+                    _rt_match = re.match(r'.*?' + re.escape(safe), signature)
+                    if _rt_match and _rt_match.end() < len(signature):
                         signature = (_home_ret_hit + ' ' + safe
-                                     + signature[_m.end():])
+                                     + signature[_rt_match.end():])
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
             _raw_ret = _as_str(sym_info.get('return_type', 'int64_t'))

@@ -1963,7 +1963,7 @@ def _constrained_compile_error(gen, node, msg, cond_node=None):
     raise RuntimeError(f'{loc}constraint failed: {msg}')
 
 
-def _try_lower_constrained(gen, node):
+def _try_lower_constrained(gen, node: gimple_ctypes.CallExpr) -> tuple:
     """Compile-time diagnostic for `constrained[cond, msg]()` / `constrained(cond, msg)`.
 
     The Mojo builtin `constrained` is a compile-time check: a provably-false
