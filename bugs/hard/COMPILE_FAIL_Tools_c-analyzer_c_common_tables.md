@@ -1,4 +1,3 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3
 
 
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
