@@ -67,16 +67,7 @@ from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.loops_shared import _single_loop_target_name
-try:
-    from mojo.middle.exprtypes import module_qualifier
-except Exception:
-    try:
-        from mojo.middle.module_shared import module_qualifier
-    except Exception:
-        def module_qualifier(q):  # type: ignore
-            if not q:
-                return ''
-            return q.replace('.', '_')
+from mojo.middle.exprtypes import module_qualifier
 # `module_qualifier` is a module-level name here (the import above binds it), so
 # `coro.module_qualifier` already exists as an attribute. It used to be attached
 # again through `sys.modules[__name__]`, which the compiled compiler has no

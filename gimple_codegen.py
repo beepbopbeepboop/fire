@@ -6806,13 +6806,16 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                     except Exception: pass
     except Exception:
         pass
+    # This module's own caches, cleared by NAME. Not `globals().get(name)` over a
+    # tuple of names: `globals()` is a stub in the compiled compiler ("globals:
+    # unavailable in compiled mode", four hits per compile), which then returned
+    # 0 and cleared nothing, so the self-hosted binary kept every table across
+    # compiles.
     try:
-        for _c in ('_SELFHOST_FUNC_RETURN_TYPES', '_SELFHOST_PARAM_TYPES',
-                   '_SELFHOST_GG_CACHE', '_compile_cache'):
-            _v = globals().get(_c, None)
-            if isinstance(_v, (dict, list, set)):
-                try: _v.clear()
-                except Exception: pass
+        _SELFHOST_FUNC_RETURN_TYPES.clear()
+        _SELFHOST_PARAM_TYPES.clear()
+        _SELFHOST_GG_CACHE.clear()
+        _compile_cache.clear()
     except Exception:
         pass
     # Clear remaining module-level caches/accumulators (coro, types, monomorphize,
