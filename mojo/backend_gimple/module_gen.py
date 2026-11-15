@@ -1970,17 +1970,7 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
             m = _z9_meths[_z9k]
             if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
                 base_cname = self._struct_method_csym(sd.name, m.name, '')
-                # A DUNDER is different: its bare symbol can only be reached
-                # through `_lower_bound_method_value`'s unsuffixed fallback,
-                # and no overload defines it, so the declaration is dead
-                # weight that shows up as the bare `_std_...___getitem__`
-                # undefined references in
-                # bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md. A
-                # bound method to an overloaded ORDINARY method is the case
-                # the declaration exists for, so only dunders skip it.
-                _is_dunder = (_gmi_as_str(m.name).startswith('__')
-                              and _gmi_as_str(m.name).endswith('__'))
-                if base_cname not in _emitted_base and not _is_dunder:
+                if base_cname not in _emitted_base:
                     base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
                                 or self._resolve_type(m.return_type))
                     parts.append(f"{base_ret} {base_cname} (...);")

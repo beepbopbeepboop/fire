@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part3
+SPLIT: the bare-dunder part (its doc was deleted when it landed)
 (part1 and part2 landed: a re-exported free function's reference now carries
 the DEFINING module's qualifier — `_reexported_defining_qualifier` — and its
 overload suffix is the DEFINING unit's; re-measure the count.
