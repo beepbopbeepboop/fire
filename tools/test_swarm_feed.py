@@ -234,8 +234,14 @@ def main():
     # the culprit search: a fake probe that is red once the culprit is in the prefix
     _probe = S.probe
     for bad, seq in [("c", ["a", "b", "c", "d", "e"]), ("a", ["a", "b", "c"]), ("e", ["a", "b", "c", "d", "e"])]:
-        S.probe = lambda s, bad=bad: ("RED", s, ["job-" + bad], "") if bad in s else ("GREEN", s, [], "")
+        S.probe = lambda s, bad=bad, stdlib=True: ("RED", s, ["job-" + bad], "") if bad in s else ("GREEN", s, [], "")
         ok &= check("the culprit search finds %s in %s" % (bad, seq), S.find_culprit(seq, ["job-" + bad])[0] == bad)
+    seen = []
+    S.probe = lambda s, stdlib=True: (seen.append(stdlib), ("RED", s, ["j"], ""))[1]
+    S.find_culprit(["a", "b", "c"], ["j"], stdlib=False)
+    ok &= check("the culprit search probes behind the batch's own gate", seen and not any(seen))
+    S.probe = lambda s, stdlib=True: ("BUSY", [], [], "another integrator")
+    ok &= check("an inconclusive sub-probe names no culprit", S.find_culprit(["a", "b", "c"], ["j"]) == (None, []))
     S.probe = _probe
     print("all passed" if ok else "FAILED")
     return 0 if ok else 1
