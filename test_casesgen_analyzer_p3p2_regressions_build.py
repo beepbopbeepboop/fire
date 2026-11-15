@@ -52,23 +52,28 @@ def main() -> int:
                   f'{len(errors)} error line(s); first: {errors[:1]}')
             return 1
 
-        compiled = subprocess.run([exe], capture_output=True, text=True,
-                                  timeout=RUN_TIMEOUT)
+        # Compare raw bytes: "byte-identical" is the contract, and the pre-fix
+        # binary prints raw pointer bytes through the shadowed-builtin bug,
+        # which is not decodable UTF-8 on its own (text=True raised
+        # UnicodeDecodeError and hid the divergence this driver exists to show).
+        compiled = subprocess.run([exe], capture_output=True, timeout=RUN_TIMEOUT)
         if compiled.returncode != 0:
             print(f'FAIL  casesgen-p3p2 compiled exit {compiled.returncode}: '
-                  f'{compiled.stderr[:500]}')
+                  f'{compiled.stderr[:500]!r}')
             return 1
 
         ref = subprocess.run([sys.executable, src], capture_output=True,
-                             text=True, cwd=tmp, timeout=RUN_TIMEOUT)
+                             cwd=tmp, timeout=RUN_TIMEOUT)
         if ref.returncode != 0:
             print(f'FAIL  casesgen-p3p2 CPython exit {ref.returncode}: '
-                  f'{ref.stderr[:500]}')
+                  f'{ref.stderr[:500]!r}')
             return 1
         if compiled.stdout != ref.stdout:
+            def show(data: bytes) -> str:
+                return data.decode('utf-8', 'backslashreplace')
             print(f'FAIL  casesgen-p3p2 compiled output differs from CPython:\n'
-                  f'--- compiled ---\n{compiled.stdout}\n--- CPython ---\n'
-                  f'{ref.stdout}')
+                  f'--- compiled ---\n{show(compiled.stdout)}\n--- CPython ---\n'
+                  f'{show(ref.stdout)}')
             return 1
 
         print('PASS  casesgen p3p2 regressions build and match CPython')
