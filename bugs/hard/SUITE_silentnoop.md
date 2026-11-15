@@ -2,67 +2,40 @@
 
 SPLIT: SUITE_silentnoop-part2
 
-**Status:** OPEN — surfaced by `make check` run on 2026-11-08 (suite: 35 passed, 23 failed).
+**Status:** CLOSED 2026-11-14 — `python3 tools/suite.py silentnoop` reports
+**2 passed, 0 failed** (was 1 passed, 1 failed). Not a timeout: the job runs
+~5 min against its registered `timeout=1500`.
 
-Not a timeout: the job runs ~8.5 min against its registered `timeout=1500` and
-still fails.
+Two separate defects, both fixed:
 
-- Part 1 (investigation) is closed; its doc is deleted. It found exactly two
-  failing cases sharing one build-time refusal.
-- That refusal — a parameter whose call sites disagree across literal kinds —
-  is FIXED (`e4a2cc2ed`, "specialize literal-kind mixed params including
-  None/comprehensions"). Both of part 1's cases now pass
-  (`parameter_rebound_to_one_container_kind_is_not_multi_kind` re-run green).
+1. **A parameter whose call sites disagree across literal kinds, used as a
+   container** — refused at build time. Fixed in `e4a2cc2ed` ("specialize
+   literal-kind mixed params including None/comprehensions"). Part 1
+   (investigation) was closed and its doc deleted; its two cases
+   (`parameter_rebound_to_one_container_kind_is_not_multi_kind`,
+   `sorted_two_string_set_pinning`) pass.
+2. **`zip_nested_tuple_target`** — a `zip` whose first target slot is itself a
+   tuple:
 
-**The job is still red, on one different case:**
+   ```python
+   def f(pairs, others):
+       for (a, b), g in zip(pairs, others):
+           print(a, b, g)
+   ```
 
-```
-FAIL  zip_nested_tuple_target  compiled 'done\n' != reference '1 2 9\ndone\n'
-```
+   `gen._zip_bind_slot` recursed into the nested target with the bare Python
+   loop index `j`. `j` is an int and `idx_t` reaches `_rt_call` as a C
+   EXPRESSION; `_rt_args` spells the argument list with `', '.join(parts)`
+   and `_as_str` is deliberately identity (`return e`, see its docstring), so
+   the join raised `sequence item 1: expected str instance, int found`.
+   `_gen_stmt_ForStmt`'s zip branch is transactional, so that exception
+   silently became the generic zero-iteration `mojo_unsupported_iter`
+   fallback — the loop body never ran, printing `done` instead of `1 2 9`.
+   Fixed in `6461fdf4c` (pass `str(j)`). Introduced by `1507c34f1` ("gir
+   stage 2a: runtime calls take values, not text (501 sites)"), which
+   converted the site from an f-string — which stringified `j` and hid the
+   type error — to `_rt_call`.
 
-```python
-def f(pairs, others):
-    for (a, b), g in zip(pairs, others):
-        print(a, b, g)
-
-def main():
-    f([(1, 2)], [9])
-    print("done")
-```
-
-The loop body never runs, so `1 2 9` is missing. This is a regression guard on
-a lowering that already worked (the case's own comment says so). It is **not**
-from `e4a2cc2ed`. Bisected with `git worktree` at each step and a HEAD check
-(the case passes at `1a7b1f413`, where it was added, and at the 2026-11-11 tip
-`aca94072a`):
-
-```
-7c5d42be9  PASSES
-1507c34f1  FAILS   <- first bad
-```
-
-and there is exactly ONE commit in `7c5d42be9..1507c34f1`, so the regression
-is **`1507c34f1` — "gir stage 2a: runtime calls take values, not text (501
-sites)"** (2026-11-13 18:31). That is the refactor that made runtime calls take
-values, and `zip(...)` is a runtime call. Re-run:
-`python3 test_silent_noop_iter.py zip_nested_tuple_target`.
-
-The kept artifact
-(`.tmp/silentnoop-failures/zip_nested_tuple_target/program.ci`) shows what the
-lowering did, and it is not a wrong answer but a REFUSAL:
-
-```
-_t11 = (void *)pairs;
-_t12 = (void *)others;
-_t10 = mojo_zip (_t11, _t12);
-_t13 = _slit_10000;          /* "program.py:2: void *" */
-mojo_unsupported_iter (_t13);
-```
-
-so the whole `for` was replaced by `mojo_unsupported_iter`, and both
-arguments reached `mojo_zip` through a `void *` cast. A plain `ValueError` out
-of the zip lowering is what makes `_gen_stmt_ForStmt` fall back to that
-zero-iteration generic path (see `ZipLongestFillRefusal`'s own docstring), so
-the question is which narrowing now raises for a nested-tuple target.
-
-The fix doc is `bugs/SUITE_silentnoop-part2.md`.
+Left in place deliberately: `bugs/SUITE_silentnoop-part2.md`'s Acceptance says
+the parent is not deleted by that task — "if this closes the parent, say so in
+the commit rather than removing the doc" — so this record is that statement.
