@@ -167,7 +167,7 @@ def test_p2_imported_suffix_matches_the_defining_unit():
         % (sorted(call_syms), sorted(def_syms)))
 
 
-# part 3 (bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part3.md):
+# part 3 (the bare-dunder group, landed 2026-11-14):
 # a struct method dunder with two same-arity overloads is never referenced
 # bare (no overload id); the call site names one concrete overload — for
 # `p[0]`, the Int one.

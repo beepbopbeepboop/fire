@@ -9605,6 +9605,18 @@ def _unmodelled_instruction(word: int):
         else:
             which = ("SUBS/CMP extended" if (word >> 29) & 1 else
                      "SUB extended" if (word >> 30) & 1 else "ADD extended")
+            # The word's OWN fields, by architectural name. A reader holding a
+            # hex word (the position this refusal fires from, on an image the
+            # emitter grew a new encoder for) otherwise has to re-decode sf,
+            # option and imm3 by hand; the paragraph above explains the CLASS,
+            # not this word.
+            _opt = (word >> 13) & 0x7
+            _imm3 = (word >> 10) & 0x7
+            _sf = (word >> 31) & 0x1
+            _opts = ("UXTB", "UXTH", "UXTW", "UXTX",
+                     "SXTB", "SXTH", "SXTW", "SXTX")
+            _dec = ("32-bit, " if _sf == 0 else "")
+            _dec = _dec + f"option={_opt:03b} ({_opts[_opt]}), imm3={_imm3}"
             return (which,
                     "A64's EXTENDED-register `ADD`/`SUB` — bits 28..24 = 01011 with "
                     "bit 21 set — which is where the architecture keeps the SP "
@@ -9613,7 +9625,8 @@ def _unmodelled_instruction(word: int):
                     "`Rn = 31` as the zero register. This class is modelled for UXTX "
                     "(option=011), 64-bit only; the other extend options remain unmodelled. "
                     "Measured by assembling the spelling and running it: `add x0, sp, x1, uxtw` "
-                    "remains unmodelled while `add x0, sp, x1, lsl #0` (UXTX) is modelled.")
+                    "remains unmodelled while `add x0, sp, x1, lsl #0` (UXTX) is modelled. "
+                    + _dec)
     top = word & 0xffc00000
     if top in (0xf8000000, 0xf8400000):
         which = "STUR" if top == 0xf8000000 else "LDUR"

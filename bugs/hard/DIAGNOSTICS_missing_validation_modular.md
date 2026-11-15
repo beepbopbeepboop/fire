@@ -257,6 +257,20 @@ Category A, measured (`rc` = our exit code):
 | not_conformance.mojo, where_message.mojo, variadic_kwargs.mojo | FAIL | `%parse-mojo-isolated | FileCheck` on an MLIR dump, not a diagnostic: cannot pass by construction |
 | struct_conditional_trait_conformance_errors.mojo, import_*(split-input-file) | UNSUPPORTED by the harness | `-verify-diagnostics` / `-split-input-file` |
 
+**2026-11-14 (later): `align_decorator_parametric_error.mojo` is fixed on
+this tree** (`43bd3dcba`). The table above records it as `FAIL rc=0 ...
+accepted silently`, measured through `tools/modular_filecheck.py` (whose
+`FIRE` is the mojo-reference checkout, not this tree). Measured here,
+`fire.py build` also exited 0 and built a binary, so it was a real miss:
+`_check_fn_signature_binding_violations` iterated `fn.params` only, and a
+generic-struct mention in a RETURN type -- `@align(calc(alignment))` on
+`struct Aligned[...]`, used as `-> Aligned[23]` -- was never
+instantiation-checked, because `@align` was validated only on the
+construction path. It now checks the return type too, through the same
+`_validate_align_decorators_for_struct`. The canonical file fails with
+exactly its two CHECK lines (`function instantiation failed`; `struct
+alignment must be a positive power of 2, got 69`).
+
 Next, in order of how much of it the static pass already gives: the rc=1 ones
 (a diagnostic is produced but differs: capture `tools/mojo build` output next to
 ours and fix the delta, as was done for diagnostics_in_missing_locs), then the

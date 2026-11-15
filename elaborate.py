@@ -929,7 +929,78 @@ def _collect_type_apps_in_text(text: str):
         i += 1
 
 
-def _validate_inherited_default(method, struct_name, struct_tparams, bindings):
+_VALUE_PARAM_RE = re.compile(r'^\s*(def|fn)\b')
+
+
+def _struct_value_param_names(sd):
+    """The struct's bracket parameters whose type is a VALUE type (`def`/`fn`).
+
+    `struct Map[Strat: Strategy, Dest: Copyable, //, mapFn: def (...)]` has one:
+    `mapFn`. `Strat`/`Dest` are trait-bounded TYPE parameters, not values.
+    """
+    out = []
+    for rec in (getattr(sd, 'bracket_param_info', None) or []):
+        if not (isinstance(rec, (list, tuple)) and len(rec) >= 2):
+            continue
+        nm = _as_str(rec[0]).lstrip('*')
+        if nm and _VALUE_PARAM_RE.match(_as_str(rec[1])):
+            out.append(nm)
+    return out
+
+
+def _method_bracket_param_names(fn):
+    """The names a method declares in its own bracket block, in order."""
+    out = []
+    for attr in ('comptime_params', 'variadic_bracket_params'):
+        vals = getattr(fn, attr, None) or []
+        for v in vals:
+            if isinstance(v, (list, tuple)) and v:
+                nm = _as_str(v[0])
+            else:
+                nm = _as_str(v)
+            if nm and nm not in out:
+                out.append(nm)
+    return out
+
+
+def _respell_app_with_struct_value_params(app_text, sd, method):
+    """Re-spell `Struct[arg, ...]` using the CONFORMING STRUCT's value-parameter
+    names instead of the trait method's.
+
+    A defaulted trait method's signature is written with the METHOD's own
+    bracket parameters (`def map[To: Copyable, //, mapper: def (...)] ->
+    Map[mapper]`). When the inherited default is formed for a struct whose
+    parameter is spelled differently (`struct Map[..., //, mapFn: def (...)]`),
+    Modular reports the STRUCT's spelling: `'Map[mapFn]' does not implement all
+    requirements for 'Strategy'` (it prints `structDecl.getTypeDeclSelf()`,
+    `lib/MojoParser/Traits.cpp:458`, at `:542`). We printed the application text
+    as written in the method, so the canonical case spelled it `Map[mapper]`.
+
+    Only an argument that IS one of the method's own bracket parameters is
+    renamed, and only to the struct's value parameter at the same position, so
+    an application written with the struct's type parameters (`Map[Self]`) is
+    left alone.
+    """
+    vnames = _struct_value_param_names(sd)
+    if not vnames:
+        return app_text
+    m = re.match(r'^(\s*)([A-Za-z_]\w*)\s*\[(.*)\](\s*)$', app_text)
+    if not m:
+        return app_text
+    names = _method_bracket_param_names(method)
+    if not names:
+        return app_text
+    args = [a.strip() for a in m.group(3).split(',')]
+    for i in range(len(args)):
+        if i >= len(vnames):
+            break
+        if args[i] in names:
+            args[i] = vnames[i]
+    return f'{m.group(1)}{m.group(2)}[{", ".join(args)}]{m.group(4)}'
+
+
+def _validate_inherited_default(method, struct_name, struct_tparams, bindings,
+                                sd=None):
     """Return (ok, bad_instantiation_name_or_None).
 
     A default trait method inherited by the struct must be formable for it.
@@ -962,14 +1033,17 @@ def _validate_inherited_default(method, struct_name, struct_tparams, bindings):
         for base, args, full in _collect_type_apps_in_text(tsub):
             if base == sname:
                 if len(args) != expected:
-                    # report the application as it appears (after substitution)
-                    return False, full
+                    # report the application with the CONFORMING STRUCT's own
+                    # value-parameter spelling, not the trait method's
+                    return False, _respell_app_with_struct_value_params(
+                        full, sd, method)
     return True, None
 
 
 def _trait_method_requirements(trait_def, struct_name, methods_by_name,
                                struct_tparams, bindings, module_src,
-                               assumption, check_override_evidence=True,
+                               assumption, sd=None,
+                               check_override_evidence=True,
                                check_required_evidence=True):
     """Yield one failure per unmet requirement of `trait_def`.
 
@@ -1013,7 +1087,7 @@ def _trait_method_requirements(trait_def, struct_name, methods_by_name,
                 continue
             # Inherited default: must be formable/substitutable for this struct.
             ok_def, bad_inst = _validate_inherited_default(
-                tm, struct_name, struct_tparams, bindings)
+                tm, struct_name, struct_tparams, bindings, sd)
             if not ok_def:
                 yield ('default', tname, bad_inst)
                 return
@@ -1107,7 +1181,7 @@ def check_conformance(module_src: str, type_name: str, trait_name: str):
     s_tparams = _sd_bracket_param_names(sd)
     for kind, tname, detail in _trait_method_requirements(
             trait_def, _as_str(getattr(sd, 'name', '')), by_name, s_tparams,
-            bindings, module_src, assumption):
+            bindings, module_src, assumption, sd=sd):
         if tname in base_method_names:
             # A base struct supplies the method; its signature may mention the
             # base's own type parameters, so it cannot be compared here.
@@ -1703,7 +1777,7 @@ def _check_decl_trait_methods(struct_defs, trait_defs):
                 pass
             for kind, tname, detail in _trait_method_requirements(
                     td, _as_str(sd.name), by_name, s_tparams, tbindings,
-                    module_src=None, assumption='',
+                    module_src=None, assumption='', sd=sd,
                     check_override_evidence=False,
                     check_required_evidence=False):
                 if tname in base_method_names:

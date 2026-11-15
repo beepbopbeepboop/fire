@@ -1970,7 +1970,19 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
             m = _z9_meths[_z9k]
             if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
                 base_cname = self._struct_method_csym(sd.name, m.name, '')
-                if base_cname not in _emitted_base:
+                # A DUNDER's bare symbol is not defined by any overload, and
+                # since the call sites name a concrete overload (the subscript
+                # dispatch and the comparison lowering both score same-arity
+                # candidates) nothing references it. Emitting the declaration
+                # anyway is what produced the bare
+                # `_std_...___getitem__`/`___eq__` undefined references in
+                # bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md. An
+                # overloaded ORDINARY method is the case the declaration exists
+                # for (`_lower_bound_method_value`'s unsuffixed fallback), so
+                # only dunders skip it.
+                _is_dunder = (_gmi_as_str(m.name).startswith('__')
+                              and _gmi_as_str(m.name).endswith('__'))
+                if base_cname not in _emitted_base and not _is_dunder:
                     base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
                                 or self._resolve_type(m.return_type))
                     parts.append(f"{base_ret} {base_cname} (...);")
@@ -5022,14 +5034,21 @@ def _find_struct_template_source(gen, module_src, name):
 
 def _check_fn_signature_binding_violations(gen, fn, module_src):
     params = getattr(fn, 'params', None) or []
-    if not params:
+    if not params and getattr(fn, 'return_type', None) is None:
         return
+    # Parameters AND the return type: a generic-struct mention in either is an
+    # instantiation, so the same declaration-time checks apply. The return type
+    # was missing, and with it `@align` on a struct used only as
+    # `-> Aligned[23]` -- an illegal alignment accepted silently.
+    _anns = []
     for item in params:
-        # params are typically (name, annotation[, ...]) tuples/lists.
         try:
-            ptype = item[1] if len(item) > 1 else None
+            _anns.append(item[1] if len(item) > 1 else None)
         except Exception:
-            ptype = None
+            _anns.append(None)
+    _anns.append(getattr(fn, 'return_type', None))
+    for ptype in _anns:
+        # params are typically (name, annotation[, ...]) tuples/lists.
         ann = _ann_to_str(gen, ptype)
         base, args = _parse_generic_inst_annotation(ann)
         if not base or not args:
@@ -5042,6 +5061,11 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
             targs = _elaborate_mod.bind_type_args(tmpl, list(args))
             if targs is None:
                 continue
+            # `@align` on the template, evaluated with these arguments. Same
+            # validator the construction path uses (`instantiate`), so the two
+            # cannot disagree about what an illegal alignment is.
+            _elaborate_mod._validate_align_decorators_for_struct(
+                struct_module_src or module_src or '', tmpl, base, targs)
             # Part 1: only provably-false where clauses (violated constraint).
             try:
                 _elaborate_mod.check_where_clauses(struct_module_src or module_src or '', tmpl, targs)

@@ -4293,6 +4293,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         _dt_ctype = _DTYPE_CAST_CTYPES.get(str(_dt_name).replace('DType.', '').lstrip('.'))
                 except Exception:
                     _dt_ctype = None
+            # A `comptime dt = DType.float32` bound name: neither of the two
+            # lookups above knows a bare `dt`, but the folded VALUE is in
+            # `gen._comptime_vals`.  The shared resolver reads it (including
+            # the tuple-REPR string that map stores).
+            if _dt_ctype is None and _idxs:
+                _e0 = _idxs[0]
+                if isinstance(_e0, gimple_ctypes.IdentExpr):
+                    _cv = getattr(gen, '_comptime_vals', None)
+                    if _cv:
+                        _dt_ctype = gimple_ctypes._dtype_token_ctype(
+                            _cv.get(_as_str(_e0.name)))
             if _dt_ctype in ('float', 'double', '__fp16'):
                 _target = _dt_ctype
             else:
