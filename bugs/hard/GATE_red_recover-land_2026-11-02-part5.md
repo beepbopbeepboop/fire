@@ -1,3 +1,4 @@
+SPLIT: GATE_red_recover-land_2026-11-02-part5-part1, GATE_red_recover-land_2026-11-02-part5-part2, GATE_red_recover-land_2026-11-02-part5-part3, GATE_red_recover-land_2026-11-02-part5-part4
 # Turn the three bootstrap gate jobs back on once the closure is stub-free (part 5)
 
 Part 5 of 5 of `bugs/hard/GATE_red_recover-land_2026-11-02.md`. Class: easy —
