@@ -1215,7 +1215,7 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
         return 'char *'
     return ctype
 
-def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None) -> str | None:
+def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None, known: dict | None=None, home_generator_api: dict | None=None, imported_symbols: dict | None=None, module_alias_names=None) -> str | None:
     """The C type a `yield from <expr>` site contributes to its enclosing
     generator's overall yield-value type, for _generator_yield_ctype's
     same-type-everywhere check — None if `<expr>` isn't a bare call to a
@@ -1243,7 +1243,8 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         _inner_yf = YieldFromExpr(value=_inner) if not isinstance(_inner, YieldFromExpr) else _inner
         _inner_ctype = _yield_from_delegate_ctype(_inner_yf, generator_api,
                                                   nested_generator_api=nested_generator_api,
-                                                  outer_fn_name=outer_fn_name)
+                                                  outer_fn_name=outer_fn_name,
+                                                  known=known)
         return _inner_ctype if _inner_ctype not in (None, 'char *') else 'int64_t'
     # `yield from cls.<generator>(...)` -- a @classmethod generator
     # delegating to a SIBLING generator method of the same class. Resolved
@@ -1270,6 +1271,25 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         _mapi = generator_method_api.get((self_struct_name, _mname))
         if _mapi is not None:
             return _mapi.get('value_ctype')
+    # `yield from module.gen(...)` where `module.gen` resolves to a compiled
+    # generator in another module of the same whole-program build. The
+    # emission side resolves this via `_cpp_resolve_generator_call_api`;
+    # mirror that here so tuple/ctype inference does not refuse a
+    # delegatable yield-from. Real: c_common/scriptutil.py's
+    # `_iter_filenames` doing `yield from fsutil.process_filenames(...)`
+    # beside a 4-tuple yield site.
+    if (home_generator_api is not None and isinstance(call, CallExpr)
+            and isinstance(call.func, MemberExpr)
+            and isinstance(call.func.obj, IdentExpr)):
+        bname = call.func.obj.name
+        if module_alias_names and bname in module_alias_names:
+            info = (imported_symbols or {}).get(bname) or {}
+            mod = info.get('module')
+            if mod:
+                qual = module_qualifier(mod)
+                api = home_generator_api.get(f"{qual}::{call.func.member}")
+                if api is not None:
+                    return api.get('value_ctype')
     if isinstance(call, CallExpr) and isinstance(call.func, IdentExpr):
         api = (generator_api or {}).get(call.func.name)
         if api is None and nested_generator_api is not None and outer_fn_name is not None:
@@ -1301,6 +1321,23 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         et = (local_elem_types or {}).get(call.name)
         if et is not None:
             return et if et in ('char *', 'double') else 'int64_t'
+        # `yield from <opaque word local>` — a local/param this unit holds as
+        # a bare `int64_t` word: `items = iter(...)` passed into an escaped
+        # nested generator, a tuple-unpacked element of an unknown-kind call
+        # result, a captured `object` parameter. The emitter drives exactly
+        # these through the runtime's dynamic iterable view
+        # (`mojo_iter_word` — see cpp_core._cpp_yield_from), which consumes a
+        # list, a first-class list iterator, a dict/set, a string, or a live
+        # generator handle and yields each element as a boxed WORD. The one
+        # value-slot type that carries those boxed words is `int64_t`;
+        # reporting the old `char *` default here made `yield peeked` (an
+        # int64_t word) and `yield from items` (a word iterator) look like
+        # conflicting yield kinds, so the whole generator was refused even
+        # though the emitter can compile both sites. A name whose element
+        # type IS known (`local_elem_types`) keeps its precise type above;
+        # this is only the genuinely opaque case.
+        if known is not None and known.get(call.name) == 'int64_t':
+            return 'int64_t'
     return 'char *'
 
 def _is_itertools_repeat2_call(call: 'CallExpr') -> bool:
@@ -1360,7 +1397,7 @@ def _walk_own_body(node):
             out.append(n)
     return out
 
-def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, generator_api: dict | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None) -> tuple[bool, list | None]:
+def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, generator_api: dict | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None, home_generator_api: dict | None=None, imported_symbols: dict | None=None, module_alias_names=None) -> tuple[bool, list | None]:
     """Companion to `_generator_yield_ctype` for the tuple-valued-yield
     case (`yield a, b` / `yield a, b, c`): computes the unified per-SLOT
     C++ element type list every tuple-yield site in `fn`'s own body must
@@ -1441,6 +1478,19 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr) and isinstance(n.value, TupleExpr):
             site = [_infer_simple_expr_ctype(el, known, self_fields, async_api, closure_api) or 'int64_t' for el in n.value.elements]
+            # A slot holding a callable value (a parameter a tuple yield
+            # passes on, e.g. `_iter_filenames`'s `check` lambda) is stored
+            # in the tuple's MojoList as its WORD: `_cpp_yield_tuple` picks
+            # `mojo_list_append_int` for it (`TypeLattice.list_suffix` maps
+            # every non-float/non-str ctype to 'int'), and a consumer's
+            # `mojo_list_get_int` hands the word back. Declaring the slot
+            # `std::function<...>` therefore cannot be assigned from that
+            # read, and it made the slot disagree with another site that
+            # inferred the same callable as an int64_t word. Normalize here
+            # so the unified slot list and the storage agree.
+            for _si in range(len(site)):
+                if site[_si].startswith('std::function<'):
+                    site[_si] = 'int64_t'
             # A tuple slot that is a TAGGED word -- a name the body tests with
             # `isinstance(<name>, tuple)` (so it is a boxed word that is
             # sometimes a tuple) and otherwise uses as a string -- is a string
@@ -1454,6 +1504,26 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
             delegate_api = (generator_api or {}).get(n.value.func.name)
             if delegate_api is None and nested_generator_api is not None and outer_fn_name is not None:
                 delegate_api = nested_generator_api.get((outer_fn_name, n.value.func.name))
+            delegate_slots = delegate_api.get('tuple_slot_ctypes') if delegate_api else None
+            if delegate_slots is None:
+                continue
+            site = list(delegate_slots)
+        elif (isinstance(n, YieldFromExpr) and isinstance(n.value, CallExpr)
+              and isinstance(n.value.func, MemberExpr)
+              and isinstance(n.value.func.obj, IdentExpr)):
+            # `yield from module.gen(...)` — mirror the emission side's
+            # whole-program resolution (`_cpp_resolve_generator_call_api`)
+            # so a delegating generator's tuple-slot shape is the foreign
+            # delegate's. Real: `_iter_filenames` delegating to
+            # `fsutil.process_filenames`.
+            bname = n.value.func.obj.name
+            delegate_api = None
+            if home_generator_api is not None and module_alias_names and bname in module_alias_names:
+                info = (imported_symbols or {}).get(bname) or {}
+                mod = info.get('module')
+                if mod:
+                    qual = module_qualifier(mod)
+                    delegate_api = home_generator_api.get(f"{qual}::{n.value.func.member}")
             delegate_slots = delegate_api.get('tuple_slot_ctypes') if delegate_api else None
             if delegate_slots is None:
                 continue
@@ -1475,6 +1545,12 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
                     merged.append(a)
                 elif 'char *' in (a, b):
                     merged.append('char *')
+                elif {a, b} == {'int64_t', '_Bool'}:
+                    # A bool and a word share one scalar slot: int64_t holds
+                    # both. Real: `process_filenames` yields its `solo` flag
+                    # from a tuple whose slot is `_Bool`, while a delegating
+                    # site infers the same flag as an int64_t word.
+                    merged.append('int64_t')
                 else:
                     return (True, None)
             slots = merged
@@ -1621,7 +1697,39 @@ def _tuple_guarded_bare_yields(fn) -> set:
     return out
 
 
-def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None) -> str | None:
+def _yield_from_is_opaque_word_iterator(n: 'YieldFromExpr', generator_api: dict | None, local_elem_types: dict | None, known: dict | None) -> bool:
+    """True when `n` is `yield from <bare local/param held as a boxed word>`
+    — the shape `_yield_from_delegate_ctype`'s last IdentExpr arm types as
+    `int64_t` and `cpp_core._cpp_yield_from` drives through the runtime's
+    dynamic iterable view (`mojo_iter_word`).
+
+    Such a site says nothing about WHAT the elements are: `mojo_iter_word`
+    consumes a list, a first-class list iterator, a dict/set, a string or a
+    live generator handle, and the element word can be an int, a string
+    pointer, or a boxed tuple-list pointer. `_generator_yield_ctype` uses
+    this predicate to let the site adopt a `MojoList *` promise decided by
+    another yield site (a tuple yield, or a tuple-yielding delegate), since
+    at runtime the elements of a word iterator over tuples ARE those boxed
+    tuple lists — the emission side casts them to `MojoList *` in exactly
+    that case (see `_cpp_yield_from`'s `/*YFWORD*/` marker and
+    cpp_async._cpp_adapt_word_iter_yields).
+
+    Mirrors `_yield_from_delegate_ctype`'s own decision order exactly: a
+    name that resolves as a compiled generator (`generator_api`) or has a
+    known element type (`local_elem_types`) is handled by an earlier arm,
+    and only the genuinely opaque int64_t word remains here.
+    """
+    call = n.value
+    if not isinstance(call, IdentExpr):
+        return False
+    if generator_api is None or call.name in generator_api:
+        return False
+    if (local_elem_types or {}).get(call.name) is not None:
+        return False
+    return known is not None and known.get(call.name) == 'int64_t'
+
+
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None, home_generator_api: dict | None=None, imported_symbols: dict | None=None, module_alias_names=None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1706,6 +1814,15 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     # top-down `yield top, dirs, nondirs`.
     _tuple_guarded = _tuple_guarded_bare_yields(fn)
     ctype = None
+    # True while the promise type is int64_t SOLELY because of
+    # `yield from <opaque word iterator>` sites (see
+    # `_yield_from_is_opaque_word_iterator`). Such a site's elements are
+    # whatever the word holds at run time, so a `MojoList *` promise decided
+    # by a tuple-yield site (or a tuple-yielding delegate) wins: emission
+    # casts each word to `MojoList *` (the boxed tuple list it points at).
+    # A plain `yield <value>` makes this False — a generator that really
+    # mixes scalars and tuples still refuses below.
+    _word_only = False
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
@@ -1730,6 +1847,10 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                     t = 'char *'
                 if t is None:
                     t = 'int64_t'
+            # A concrete-value yield is not a word-iterator site: the promise
+            # must be decided by real types from here on (see the
+            # `_word_only` declaration above).
+            _word_only = False
             if ctype is None:
                 ctype = t
             elif ctype != t:
@@ -1756,6 +1877,8 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
         elif isinstance(n, YieldFromExpr):
             if isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name == fn.name):
                 continue
+            _word_iter = _yield_from_is_opaque_word_iterator(
+                n, generator_api, local_elem_types, known)
             # `yield from walk(root)` where `walk` is a PARAMETER holding a
             # callable as a word: what the call yields is an unsolved word.
             if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
@@ -1769,15 +1892,33 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                                                generator_method_api,
                                                self_struct_name,
                                                nested_generator_api,
-                                               outer_fn_name)
+                                               outer_fn_name,
+                                               known,
+                                               home_generator_api,
+                                               imported_symbols,
+                                               module_alias_names)
             if t is None:
                 return None
             if ctype is None:
                 ctype = t
-            elif ctype != t:
-                if 'MojoList *' in (ctype, t) and 'char *' in (ctype, t):
+                _word_only = _word_iter and t == 'int64_t'
+            elif ctype == t:
+                if t == 'int64_t' and not _word_iter:
+                    _word_only = False
+            else:
+                if _word_iter and t == 'int64_t' and ctype == 'MojoList *':
+                    # The word iterator's elements ARE the boxed tuple lists
+                    # this generator already yields (the `_iter_filenames`
+                    # `yield from items` shape: `items` is a first-class
+                    # iterator over the 4-tuples another site yields).
+                    # Nothing to change here; emission casts the word.
+                    pass
+                elif _word_only and ctype == 'int64_t' and t == 'MojoList *':
+                    ctype = t
+                    _word_only = False
+                elif 'MojoList *' in (ctype, t) and 'char *' in (ctype, t):
                     return None
-                if ctype == 'char *' or t == 'char *':
+                elif ctype == 'char *' or t == 'char *':
                     # Widen to the common `char *` representation ONLY when
                     # both sides are pointer-shaped — which is all the
                     # coroutine's single promise slot can hold (a struct

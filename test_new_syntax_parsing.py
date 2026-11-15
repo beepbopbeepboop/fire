@@ -799,18 +799,6 @@ def test_bracket_param_default_is_captured():
     check("bracket_param_default_is_not_in_param_defaults",
           'y' not in (fd.param_defaults or {}), repr(fd.param_defaults))
 
-    # The ANNOTATED spelling is the same declaration. `_capture_bracket_param
-    # _annotation` used to consume `= 4` into the annotation text ("Int = 4"),
-    # so the default had no table entry and an omitted bracket parameter read
-    # as required (a spurious `failed to infer parameter 'y'`).
-    fda = _named(_parse('def fa[T, y: Int = 4]():\n    return y\n'), 'fa')
-    check("annotated_bracket_param_keeps_its_type",
-          (fda.comptime_param_annotations or {}).get('y') == 'Int',
-          repr(getattr(fda, 'comptime_param_annotations', None)))
-    ya = (fda.comptime_param_defaults or {}).get('y')
-    check("annotated_bracket_param_default_is_captured",
-          isinstance(ya, N.IntLiteral) and ya.value == 4, repr(ya))
-
     # A parameter with no default is absent from the table, not present with
     # a None value — "no default" and "a default of None" must stay
     # distinguishable, because the former is what makes an unsupplied

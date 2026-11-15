@@ -1,9 +1,9 @@
-# Land: should finished branch bug-mid-compile-fail-tools-c-analyzer-c-2 land?
+# Land: should finished branch bug-codegen-giant-lowering-functions-spl land?
 
-**Branch:** `work/bug-mid-compile-fail-tools-c-analyzer-c-2` (task `bug-mid-compile-fail-tools-c-analyzer-c-2`; its tip is also saved as `refs/archive/work/bug-mid-compile-fail-tools-c-analyzer-c-2`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-12; 10 commit(s) ahead of master, 400 behind it; task started 2026-11-15 10:16:11
-**Original work:** An earlier attempt left 9 commit(s) on branch work/bug-mid-compile-fail-tools-c-analyzer-c-1, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/
-**Original claims:** bug:COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil-part4
+**Branch:** `work/bug-codegen-giant-lowering-functions-spl` (task `bug-codegen-giant-lowering-functions-spl`; its tip is also saved as `refs/archive/work/bug-codegen-giant-lowering-functions-spl`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 25 behind it; task started 2026-11-15 10:31:50
+**Original work:** Fix the bug in bugs/CODEGEN_giant_lowering_functions_split_by_arm.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning tes
+**Original claims:** bug:CODEGEN_giant_lowering_functions_split_by_arm
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 11:17:10: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-12; 10 commit(s) ahead of master, 400 behind it; task started 2026-11-15 10:16:11)
-  Branch: work/bug-mid-compile-fail-tools-c-analyzer-c-2
-  Conflicting files: mojo/backend_gimple/cpp_async.py, mojo/backend_gimple/cpp_core.py, mojo/backend_gimple/module_gen.py, tools/dangling_refs_baseline.py
+- 2026-11-15 11:48:21: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 25 behind it; task started 2026-11-15 10:31:50)
+  Branch: work/bug-codegen-giant-lowering-functions-spl
+  Conflicting files: mojo/backend_gimple/emit_exprs.py

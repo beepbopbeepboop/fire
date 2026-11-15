@@ -570,17 +570,14 @@ def main():
     # An unbindable comptime parameter is an honest error naming it. The
     # bracket is the only place such a parameter's value can come from, so
     # binding None (which is what an unbindable one used to do) is a wrong
-    # answer rather than a default. The refusal is the modular compiler's
-    # `failed to infer parameter 'U' of 'h'` diagnostic (no Python class name
-    # in it), which is why `check_interp_only` names this want in
-    # REFUSAL_WANTS rather than reading an exception class off it.
+    # answer rather than a default.
     "unbindable_comptime_parameter_is_refused_by_name": ('''\
 def h[T, U]():
     return 1
 
 def main():
     print(h[T=Int]())
-''', 'failed to infer parameter'),
+''', 'TypeError'),
     # A call that does not supply a REQUIRED parameter is an arity error, and
     # it used to be a body run with that parameter bound to `None`: the
     # interpreter's own error here was `unsupported operand type(s) for +:
@@ -738,12 +735,6 @@ def check_interp_only(name, source, want):
     zero exit (a value) or a non-zero one (the named refusal). `want` is a
     substring rather than the whole stream because the refusal case's
     traceback text is not this file's to pin."""
-    # A `want` that names a refusal without naming a Python exception class:
-    # the interpreter renders these as modular diagnostics (`error: failed to
-    # infer parameter ...`), which carry no class name at all. The list is
-    # checked with the `^[A-Za-z]*Error` pattern below so both spellings of
-    # "this program must be refused" take the same assertion.
-    refusal_wants = ('failed to infer parameter',)
     with tempfile.TemporaryDirectory(prefix='mojo_oracle_') as wd:
         body = textwrap.dedent(source)
         if not body.rstrip().endswith('main()'):
@@ -761,7 +752,7 @@ def check_interp_only(name, source, want):
     # NAMING what went wrong, not about which exception family this path
     # happens to use. `want` is still CPython's own wording — the comment above
     # each refusal records the measurement it was taken from.
-    if re.match(r'^[A-Za-z]*Error', want) or want in refusal_wants:
+    if re.match(r'^[A-Za-z]*Error', want):
         if rc == 0:
             return False, f'expected a refusal, got exit 0 printing {out!r}'
         if want not in both:

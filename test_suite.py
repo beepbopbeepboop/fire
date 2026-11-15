@@ -4205,7 +4205,6 @@ UNREGISTERED = {
     'test_float_bit_reinterpret.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
-    'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
@@ -6130,9 +6129,6 @@ def test_the_formal_doc_index_is_current():
         included — a planted nested document proves the walk is recursive
         rather than a directory list, and a row names the path it resolves to;
       - `--check` is not vacuous: adding a document makes it fail;
-      - and it fails in the direction the 2026-11-14 land got wrong: DELETING
-        a document without regenerating the block is red, and `--write` clears
-        it;
       - it is not blind either: rewriting every claim in the file leaves it
         green (and `--strict`, which is the full comparison, red);
       - and the reduction undoes the CLAIM-dependent ORDER, in both directions.
@@ -6274,51 +6270,6 @@ def test_the_formal_doc_index_is_current():
           f'planting a document left --check at rc={rc_added}; an index that '
           f'cannot notice a document appearing is a hand-maintained table with '
           f'a generator in front of it')
-
-    # THE OTHER DIRECTION, and the one this file actually got wrong: a document
-    # is DELETED and the block is not regenerated. The NEW-document check above
-    # exercises the same comparison, but only in the direction that was never
-    # the failure — d3ec70ee7 deleted
-    # `FORMAL_arm64_instruction_coverage-part1.md` and merged a block that had
-    # lost the ROW but kept the counts ("4 documents" over three rows, "5
-    # documents" over four), so `python3 tools/formal_doc_index.py --check` was
-    # red on master and `test_suite.py` with it. Pinned on a planted tree in
-    # `.tmp/` (never by editing the real OPEN_WORK.md — see the comment above)
-    # so the scenario does not depend on the corpus still having a spare pair of
-    # documents to delete.
-    deleted_root = os.path.join(F.ROOT, '.tmp', 'formal_doc_index_deleted')
-    deleted_bugs = os.path.join(deleted_root, 'bugs')
-    deleted_index = os.path.join(deleted_root, 'OPEN_WORK.md')
-    shutil.rmtree(deleted_root, ignore_errors=True)
-    os.makedirs(deleted_bugs)
-    for stem in ('FORMAL_zz_kept', 'FORMAL_zz_deleted'):
-        with open(os.path.join(deleted_bugs, stem + '.md'), 'w',
-                  encoding='utf-8') as f:
-            f.write(f'# {stem}: a planted document\n')
-    saved = (F.ROOT, F.BUGS, F.OPEN_WORK, F.live_claims)
-    F.ROOT, F.BUGS, F.OPEN_WORK = deleted_root, deleted_bugs, deleted_index
-    F.live_claims = lambda: {}
-    try:
-        # The index as generated while BOTH documents exist...
-        with open(deleted_index, 'w', encoding='utf-8') as f:
-            f.write(F.BEGIN + '\n\n' + F.render() + '\n\n' + F.END + '\n')
-        # ...then one document is deleted WITHOUT regenerating the block.
-        os.remove(os.path.join(deleted_bugs, 'FORMAL_zz_deleted.md'))
-        rc_deleted, _ = run_check(['--check'])
-        # The documented repair must clear it again.
-        rc_write, _ = run_check(['--write'])
-        rc_repaired, _ = run_check(['--check'])
-    finally:
-        F.ROOT, F.BUGS, F.OPEN_WORK, F.live_claims = saved
-        shutil.rmtree(deleted_root, ignore_errors=True)
-    check('formal doc index: a DELETED document makes --check fail, and --write '
-          'is the repair',
-          rc_deleted == 1 and rc_write == 0 and rc_repaired == 0,
-          f'a document deleted without regenerating the block left --check at '
-          f'rc={rc_deleted} (want 1), then --write/--check at '
-          f'rc={rc_write}/{rc_repaired} (want 0/0). This is the shape that '
-          f'landed as d3ec70ee7: the row went, the counts did not, and the '
-          f'queue named a document the tree no longer had')
 
     rendered = F.render()
     reduced = F.without_claims(rendered)

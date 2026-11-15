@@ -383,6 +383,34 @@ def _cpp_tag_yield_sites(body_lines: list):
     return out
 
 
+def _cpp_adapt_word_iter_yields(body_lines: list, value_ctype: str | None) -> list:
+    """Rewrite every `/*YFWORD*/`-marked `co_yield` (a `yield from <opaque
+    word iterator>` site — see `cpp_core._cpp_yield_from`) to carry the
+    generator's FINAL promise type.
+
+    `_cpp_yield_from` runs while the body is emitted, which is BEFORE
+    `_generator_yield_ctype` decides the promise type (it needs the local
+    types the body walk itself records). Such a site yields a boxed WORD,
+    but when another yield site in the same generator is a tuple yield (or a
+    tuple-yielding delegate) the promise is `MojoList *` — the word is the
+    boxed tuple list, so the emitted `co_yield` must cast it back to that
+    pointer. That is exactly the `_iter_filenames` shape (`yield filename,
+    ...` beside `yield from items`, where `items` is a first-class iterator
+    over the 4-tuples). Any other promise type keeps the word as it is
+    (int64_t is the representation every `mojo_iter_word` consumer uses).
+    The marker is always stripped, so a type that needs no conversion is
+    byte-identical to the unmarked emission."""
+    out = []
+    for ln in body_lines:
+        if '/*YFWORD*/' in ln:
+            if value_ctype == 'MojoList *':
+                ln = ln.replace('/*YFWORD*/ ', '(MojoList *)(intptr_t)')
+            else:
+                ln = ln.replace('/*YFWORD*/ ', '')
+        out.append(ln)
+    return out
+
+
 def _delegates_first(stmts: list, generator_ids) -> list:
     """`stmts` reordered so a generator that `yield from`s a SIBLING generator of
     the same module comes after it (stable otherwise). The consumer-visible shape
@@ -421,6 +449,17 @@ def _delegates_first(stmts: list, generator_ids) -> list:
                 placed.add(id(st))
                 out.append(st)
     return out
+
+
+def _home_generator_context(gen) -> dict:
+    """The whole-program generator/import registries `_generator_yield_ctype`
+    and `_generator_tuple_yield_slot_ctypes` need to type a
+    `yield from module.gen(...)` delegate the same way the emission side's
+    `_cpp_resolve_generator_call_api` resolves it (see
+    `_yield_from_delegate_ctype`'s module-qualified arm)."""
+    return dict(home_generator_api=getattr(gen, '_generator_home_api', None),
+                imported_symbols=getattr(gen, 'imported_symbols', None),
+                module_alias_names=getattr(gen, '_module_alias_names', None))
 
 
 def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
@@ -1033,7 +1072,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         fn, declared, self_fields, gen._async_api,
         generator_api=gen._generator_api,
         nested_generator_api=getattr(gen, '_nested_generator_api', None),
-        outer_fn_name=fn.name)
+        outer_fn_name=fn.name,
+        **_home_generator_context(gen))
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     # Value-carrying `return <expr>` support (real CPython 3.14
     # asyncio/futures.py's `Future.__await__`: `yield self` ... `return
@@ -1082,6 +1122,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_list_local_elem_types = {}
     gen._cpp_word_locals = set()
     gen._cpp_word_iter_locals = set()
+    # Locals that must be represented as a plain function-pointer WORD
+    # because they are yielded as a tuple element (see
+    # cpp_core._cpp_word_lambda_names / _cpp_lambda_word_expr).
+    gen._cpp_word_lambda_names = gcc_._cpp_word_lambda_names(gen, fn)
     # Locals of this unit that hold a TAGGED word (a generator's boxed slot
     # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
     gen._cpp_tagged_word_names = set()
@@ -1228,7 +1272,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             self_struct_ctype=(f"{struct_name} *" if struct_name else None),
             module_global_types=getattr(gen, '_cpp_module_global_ctypes', None),
             nested_generator_api=getattr(gen, '_nested_generator_api', None),
-            outer_fn_name=fn.name)
+            outer_fn_name=fn.name,
+            **_home_generator_context(gen))
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-
@@ -1244,10 +1289,16 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             fn, declared, self_fields, gen._async_api,
             generator_api=gen._generator_api,
             nested_generator_api=getattr(gen, '_nested_generator_api', None),
-            outer_fn_name=fn.name)
+            outer_fn_name=fn.name,
+            **_home_generator_context(gen))
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
+        # `yield from <opaque word iterator>` sites were emitted as a boxed
+        # word before the promise type was known; now that it is (it can be
+        # `MojoList *` from a tuple-yield site), cast them to the promise's
+        # own representation. See _cpp_adapt_word_iter_yields.
+        body_lines = _cpp_adapt_word_iter_yields(body_lines, value_ctype)
         gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None) or getattr(gen, '_cpp_word_iter_locals', None))
         # TAGGED-word value slot: the yields' kinds are all KNOWN but not one
         # type (the solver cannot keep it tight), and the module only ever
@@ -1363,6 +1414,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_declared = None
         gen._cpp_func_scope_decls = None
         gen._cpp_list_local_elem_types = {}
+        gen._cpp_word_lambda_names = set()
         gen._cpp_module_global_ctypes = None
         gen._cpp_nested_helper_syms = {}
         gen._cpp_closure_factory_names = set()
@@ -2922,7 +2974,8 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
             async_api=gen._async_api, closure_api=_closure_api_scoped,
             known_structs=frozenset(gen.struct_field_types.keys()),
             method_return_types=gen.func_return_types,
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None),
+            **_home_generator_context(gen))
         # Step I: an async function whose body NEVER reaches an
         # ordinary `return <expr>` at all (real Mojo's own idiom for an
         # always-raising helper, e.g. `async def failing_async() raises
@@ -4026,7 +4079,8 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         fn, declared, None, gen._async_api,
         generator_api=gen._generator_api,
         nested_generator_api=getattr(gen, '_nested_generator_api', None),
-        outer_fn_name=fn.name)
+        outer_fn_name=fn.name,
+        **_home_generator_context(gen))
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     # Same per-unit module-constant map as the other two unit emitters
     # (see _gen_cpp_generator_unit's seeding site), so an async GENERATOR
@@ -4048,7 +4102,8 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
             self_fields=None, async_api=gen._async_api,
             known_structs=frozenset(gen.struct_field_types.keys()),
             method_return_types=gen.func_return_types,
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None),
+            **_home_generator_context(gen))
         # See _gen_cpp_generator_unit's identical companion call for
         # the full rationale — same tuple-yield slot-type resolution,
         # reused verbatim for the async-generator (`async for`) case.
@@ -4056,10 +4111,12 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
             fn, declared, None, gen._async_api,
             generator_api=gen._generator_api,
             nested_generator_api=getattr(gen, '_nested_generator_api', None),
-            outer_fn_name=fn.name)
+            outer_fn_name=fn.name,
+            **_home_generator_context(gen))
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
+        body_lines = _cpp_adapt_word_iter_yields(body_lines, value_ctype)
         gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None) or getattr(gen, '_cpp_word_iter_locals', None))
     finally:
         gen._cpp_emit_kind = 'generator'

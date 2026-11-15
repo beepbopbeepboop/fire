@@ -1,4 +1,6 @@
-SPLIT: FORMAL_arm64_instruction_coverage-part1, FORMAL_arm64_instruction_coverage-part2, FORMAL_arm64_instruction_coverage-part3
+SPLIT: the three parts (their docs were deleted with their fixes -- part 1 the
+option census, part 2 the refusal naming the word's own sf/option/imm3, part 3
+the emitter-dormancy pin)
 
 The first split's three parts landed: the CMP-register SP-form spelling with
 3049e7aa7 (on master), the UXTX SP-form branches 86-88 with 2a3ab7d27 (on

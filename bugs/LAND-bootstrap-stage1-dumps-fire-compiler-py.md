@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gpu-offload-validation-modular-part7 land?
+# Land: should finished branch fix-gate-bootstrap-stage1-dumps-fire-compiler-py land?
 
-**Branch:** `work/bug-gpu-offload-validation-modular-part7` (task `bug-gpu-offload-validation-modular-part7`; its tip is also saved as `refs/archive/work/bug-gpu-offload-validation-modular-part7`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 14 behind it; task started 2026-11-15 14:32:19
-**Original work:** Fix the bug in bugs/GPU_offload_validation_modular-part7.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
-**Original claims:** bug:GPU_offload_validation_modular-part7
+**Branch:** `work/fix-gate-bootstrap-stage1-dumps-fire-compiler-py` (task `fix-gate-bootstrap-stage1-dumps-fire-compiler-py`; if the branch is gone, its tip is `refs/archive/work/fix-gate-bootstrap-stage1-dumps-fire-compiler-py`).
+**Age:** last commit 2026-11-12, first unlanded commit 2026-11-12; 1 commit(s) ahead of master, 971 behind it; task started 2026-11-12 14:28:42
+**Original work:** The full gate (0cce3da3) is red on master in job `bootstrap-stage1-dumps:fire_compiler.py`. Last working commit: e8421fc41b. First not working: c38d24c92d. Read the failing output in /Users/mrs/net/ch
+**Original claims:** gate:bootstrap-stage1-dumps:fire_compiler.py
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,5 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 15:26:00: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 14 behind it; task started 2026-11-15 14:32:19)
-  Branch: work/bug-gpu-offload-validation-modular-part7
-  Conflicting files: myinterpreter.py
+- 2026-11-15 10:31:54: worker says PARTIAL, not DONE, and no bug doc is left to continue it on (last commit 2026-11-12, first unlanded commit 2026-11-12; 1 commit(s) ahead of master, 971 behind it; task started 2026-11-12 14:28:42)
+  Branch: work/fix-gate-bootstrap-stage1-dumps-fire-compiler-py
