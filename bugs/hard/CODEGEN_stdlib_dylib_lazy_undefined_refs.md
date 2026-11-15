@@ -1,12 +1,4 @@
-SPLIT: the bare-dunder part (its doc was deleted when it landed)
-(part1 and part2 landed: a re-exported free function's reference now carries
-the DEFINING module's qualifier — `_reexported_defining_qualifier` — and its
-overload suffix is the DEFINING unit's; re-measure the count.
-part3 landed 2026-11-14: a same-arity struct dunder names one concrete
-overload (subscript dispatch AND the comparison lowering), and the suffix-less
-forward declaration for an overloaded dunder is no longer emitted — the bare
-`_std_...___getitem__`/`___eq__` references are gone (0 in `nm -u`), and the
-total count is 50 -> 43 -> 32 with 0 modules falling back to source.)
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part4, CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part7, CODEGEN_stdlib_dylib_lazy_undefined_refs-part8, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
@@ -14,6 +6,66 @@ total count is 50 -> 43 -> 32 with 0 modules falling back to source.)
 that the dylib LOADS (a data/class-table reference to an undefined symbol is fatal there; see
 `tools/stdlib_dylib_ratchet.py`). These 50 are lazy CALL references: they do not stop the load, but a
 client that reaches one through the dylib aborts at that call unless another image happens to define it.
+
+## Replan (2026-11-15): the live parts are 4-9
+
+Parts 1-3 landed and their docs were deleted when they landed:
+
+- part 1: a re-exported free function's reference carries the DEFINING module's
+  qualifier (`_reexported_defining_qualifier`).
+- part 2: an imported free function's overload suffix is the DEFINING unit's
+  (the text-scan `Span`/`StringSlice` -> `char *` mapping).
+- part 3: a same-arity struct dunder names one concrete overload (subscript
+  dispatch and the comparison lowering); the suffix-less forward declaration
+  for an overloaded dunder is gone. The total was 50 -> 43 -> 32 by
+  2026-11-14, with 0 modules falling back to source.
+
+The title's "50" is the 2026-11-12 measurement and is stale; the live
+residual is the table below. Measured 2026-11-15 in this worktree by compiling
+each caller and definer module with `compile_module_to_c` and comparing the
+undefined `_std_` names against the definers' exported names (no whole-stdlib
+build, no link), then confirming the end-to-end shape with two-module
+`build_stdlib_dylib.build` dylibs. The probes are
+`test_stdlib_dylib_lazy_undefined_refs_probes.py`.
+
+| part | doc | class | example symbols |
+|---|---|---|---|
+| 4 | `bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part4.md` | a `comptime if` chain emits the other TARGET's bodies; only the host's `_linux`/`_macos` variant is built | 4 x `std_os__linux_{aarch64,x86}__{lstat,stat}` from `std/os/path/path.mojo` |
+| 5 | `...-part5.md` | a body the backend cannot lower vanishes, so the caller's qualified name has no definition (its own calls get a BARE weak stub) | `std_sys_info_is_{apple,nvidia,amd}_gpu`, `std_python__cpython_CPython_as_imm` |
+| 6 | `...-part6.md` | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
+| 7 | `...-part7.md` | a struct type private to the defining module becomes `int64_t` on the caller side | `std_benchmark_benchmark__run_impl` |
+| 8 | `...-part8.md` | two same-name free functions in one module are neither defined nor callable; the call becomes a bare `(void)` stub | `std_bit_mask_splat`, `std_memory_memory__free`, `..._unsafe_memset_zero`, `..._to_integer` |
+| 9 | `...-part9.md` | a generic free function instantiated only by another module is never emitted | `..._forget_deinit`, `..._unsafe_destroy_n`, `..._dealloc`, `std_time_time_time_function` |
+
+Not a part:
+
+- The five `_std_ffi___init___OwnedDLHandle_*` references from
+  `std/python/_cpython.mojo` are not a name mismatch. Their defining module,
+  `std/ffi/__init__.mojo`, does not compile in this tree at all:
+  `std/ffi/__init__.mojo:360:0: error: invalid bindings in signature: lacking
+  evidence` (the same error `std/simd.mojo` gives at 2247). A module that
+  falls back to source is the dylib's documented, accepted state; making ffi
+  compile is a diagnostics/elaboration bug (see the `lacking evidence` note in
+  `bugs/hard/DIAGNOSTICS_missing_validation_modular.md` and
+  `test_binding_deferral_diagnostic.py`), not this doc's name-resolution work.
+- The Array/Deque/List `__getitem__` entries in the old bare-dunder list are
+  gone after part 3; the in-flight
+  `CODEGEN_simd_and_array_values_erase_to_int64` lane is not touched by these
+  parts.
+- The `unresolved_stdlib_refs` count is not made a gate condition here: the
+  ratchet's contract is still "the dylib LOADS", and the parts shrink the lazy
+  gap one class at a time.
+
+**Working the parts:** each part's `## Done when` names one probe in
+`test_stdlib_dylib_lazy_undefined_refs_probes.py`; run it red first, fix, run
+it green. The probe file is deliberately not a registered gate job.
+
+
+**This section is the 2026-11-12 snapshot**, kept for the measurements'
+provenance. Several of its group diagnoses are superseded by the
+`## Replan (2026-11-15)` table above (notably: `mask_splat` is
+`std/bit/mask.mojo`'s `splat`, an overloaded free function, and
+`_run_impl` is a suffix mismatch, not a missing function).
 
 **Measured on master `793118227`, 2026-11-12**, with the ratchet's own build and the `nm` pair the bug
 doc for the matcher used:
@@ -71,9 +123,8 @@ test: run `nm -u` against `nm -gU` and require the `_std_` difference to *shrink
 `stdlib-dylib` fail on it until the count is zero: all 50 exist before the fix and the job's documented
 contract is that the dylib need not be complete.
 
-**Exact next step:** re-measure the undefined `_std_` count first — the qualifier group and the
-imported-suffix group have both landed, so the "50" in the title is stale. Then take the remaining
-groups: `_lower_struct_subscript_dunder`'s arity-only overload choice, the "Function not emitted at
-all" class, and the target-mismatched references. The Array/Deque/List `__getitem__` entries overlap
-the in-flight `CODEGEN_simd_and_array_values_erase_to_int64` lane — re-measure after that lands before
-touching them.
+**Exact next step:** work parts 4-9, in the order of the table above. Each
+part's `## Done when` names the probe that is red today and green when the
+part lands. The old advice to take "the arity-only overload choice" is part 3,
+which landed; the remaining classes are the replan table's, not this
+section's.
