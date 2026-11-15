@@ -308,6 +308,11 @@ def land_doc(name, t, reason, detail=""):
     root = re.sub(r"^(bug-)?(land-)?", "", root)
     root = re.sub(r"[^\w.-]+", "-", root)[:60].strip("-")
     p = os.path.join(C.MAIN, "bugs", "LAND-%s.md" % root)
+    # The tip is saved at once, so a DROP (or a later cleanup of the branch) never loses the work: the doc can always
+    # name `refs/archive/<branch>`. Re-filing moves the ref to the newest tip.
+    sha = C.git("rev-parse", "--verify", "-q", t["branch"], cwd=C.MAIN, check=False)
+    if sha:
+        C.git("update-ref", C.ARCHIVE_REF + t["branch"], sha, cwd=C.MAIN, check=False)
     stamp = time.strftime("%F %T")
     entry = "- %s: %s (%s)%s\n" % (stamp, reason, branch_age(t), ("\n  " + detail.strip().replace("\n", "\n  ")) if detail.strip() else "")
     if os.path.exists(p):
@@ -322,7 +327,7 @@ def land_doc(name, t, reason, detail=""):
         with open(p, "w") as f:
             f.write(
                 "# Land: should finished branch %s land?\n\n"
-                "**Branch:** `%s` (task `%s`; if the branch is gone, its tip is `refs/archive/%s`).\n"
+                "**Branch:** `%s` (task `%s`; its tip is also saved as `refs/archive/%s`, so dropping it loses nothing).\n"
                 "**Age:** %s\n"
                 "**Original work:** %s\n**Original claims:** %s\n\n"
                 "This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:\n"
