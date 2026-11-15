@@ -76,6 +76,44 @@ class _ConstraintViolation(RuntimeError):
     comptime parameters. May carry a `mojo_record` (see mojo_diagnostic)."""
 
 
+class _UnboundComptimeParameter(TypeError):
+    """A bracket supplied too FEW comptime parameters: one it omitted is
+    declared without a default, so `_invoke` would bind it to None and the body
+    would run on a value that is not there (the reported symptom:
+    `unsupported operand type(s) for +: 'int' and 'NoneType'`).
+
+    Deliberately carries NO fields. The callee and the parameter name travel
+    through `_UNBOUND_FUNC`/`_UNBOUND_PARAM` instead: this file self-hosts, and
+    the self-hosted compiler types an `except X as e:` binding as a known
+    struct pointer or a plain message string, so an exception's own attributes
+    are not a shape it can read back (same reason `MojoRaisedException` is
+    fieldless). The subscript site reads those slots back and renders the
+    modular compiler's `failed to infer parameter 'y' of 'f'` diagnostic (via
+    `_unbound_comptime_record` / `mojo_diagnostic`) instead of a traceback. A
+    TypeError subclass because an under-supplied specialization is a program
+    error, and because that is what the interpreter's other bracket refusals
+    are."""
+
+
+# What the `_UnboundComptimeParameter` now being raised is about, set by
+# `_raise_unbound_comptime_error` and consumed by the subscript site that
+# renders the diagnostic (`Interpreter._raise_unbound_comptime`). Module slots,
+# like `_CALL_SITE`, not fields on the exception — see the class docstring.
+_UNBOUND_FUNC = [None]
+_UNBOUND_PARAM = ['']
+
+
+def _raise_unbound_comptime_error(func, param: str):
+    """Record the callee/parameter and raise `_UnboundComptimeParameter` with
+    the canonical message. The caller that owns the subscript turns it into a
+    bracket-located diagnostic record."""
+    _UNBOUND_FUNC[0] = func
+    _UNBOUND_PARAM[0] = param
+    raise _UnboundComptimeParameter(
+        f"failed to infer parameter '{param}' of "
+        f"'{getattr(func, 'name', '')}'")
+
+
 def _unwrap_dataclass_field(value):
     """The default a declared field takes, given the value its initializer
     evaluated to. `field(default=...)` and `field(default_factory=...)` are
@@ -1312,6 +1350,76 @@ def _bracket_arg_kinds(source, call_func):
         m = re.match(r'^\s*([A-Za-z_]\w*)\s*=(?!=)', part)
         out.append((True, m.group(1)) if m else (False, None))
     return out
+
+
+def _comptime_default_names(func):
+    """The declared comptime parameters of `func` that have a default, and may
+    therefore be omitted from the bracket. Both default sources `_invoke`
+    consults are read here — `comptime_param_defaults` (the bracket's own
+    `def f[T, y=0]`) and the `_pd` entries (a runtime parameter must never
+    shadow one, but `_invoke` looks there too) — so there is one answer to
+    "may this parameter be omitted?"."""
+    names = set((getattr(func, 'comptime_param_defaults', None) or {}).keys())
+    for name, _value in getattr(func, '_pd', None) or []:
+        names.add(name)
+    return names
+
+
+def _unbound_comptime_param(func, bound_names):
+    """The first declared comptime parameter of `func` that `bound_names` does
+    not bind and that declares no default, or None when every one is either
+    supplied or defaulted. The bracket is the only place such a parameter's
+    value can come from, so omitting it is an error at the bracket — `_invoke`
+    binding it to None is what made the body run on a value that is not
+    there (`int + None`)."""
+    defaults = _comptime_default_names(func)
+    for name in getattr(func, 'comptime_params', None) or []:
+        if name not in bound_names and name not in defaults:
+            return name
+    return None
+
+
+def _bracket_caret(node):
+    """(line, col) of the `[` in the SubscriptExpr `node`, from the callee's
+    own position. Neither bracket spelling records the bracket: the keyword
+    branch copies the CALLEE's position onto the node, and the positional
+    branch leaves the dataclass defaults (`0:0`). The bracket is the token
+    just past the callee, which for `f` is `col + len(name)` and for `p.f` is
+    past the `.member` (`MemberExpr.col` is the dot)."""
+    obj = getattr(node, 'obj', None)
+    line = getattr(obj, 'line', 0) or getattr(node, 'line', 0)
+    col = getattr(obj, 'col', 0)
+    if col > 0 and hasattr(obj, 'member'):
+        col = col + 1 + len(obj.member)
+    elif col > 0 and hasattr(obj, 'name'):
+        col = col + len(obj.name)
+    else:
+        return 0, 0
+    return (line, col) if line > 0 else (0, 0)
+
+
+def _unbound_comptime_record(filename, node, func, param):
+    """The modular-format record for an `_UnboundComptimeParameter`:
+    `failed to infer parameter 'y' of 'f'`, caret on the bracket that omitted
+    it, and a note at the declaration when its location is known. None when
+    the bracket has no usable position; the caller then keeps the plain
+    TypeError."""
+    bl, bc = _bracket_caret(node)
+    cl, cc = _callee_start(getattr(node, 'obj', node))
+    if bl < 1 or bc < 1:
+        bl, bc = cl, cc
+    if bl < 1 or bc < 1:
+        return None
+    notes = []
+    loc = _FUNC_DEF_LOCS.get(id(func))
+    if loc is not None and loc[1] > 0:
+        notes.append(_note(file=loc[0], line=loc[1], name=func.name,
+                           message='function declared here'))
+    return _rec(file=filename, line=bl, caret=bc,
+                tilde_from=cc if cl == bl and 0 < cc < bc else 0,
+                message=f"failed to infer parameter '{param}' of "
+                        f"'{func.name}'",
+                notes=notes)
 
 
 def _fieldwise_init_record(filename, source, n, sub, st, sfile):
@@ -2681,6 +2789,21 @@ class MojoFunction:
         how many comptime parameters it declares, because "too many" is a
         different mistake from "too few" and the caller can only fix it if it
         is told which.
+
+        **A parameter the bracket omits and the declaration does not default is
+        refused too, and it used to bind `None`.** `_invoke` binds every
+        still-unbound comptime parameter to `None`, which is right for one that
+        a later pass will infer from the call's argument types but wrong for one
+        the bracket was supposed to supply: `param_fn[2](1)` on
+        `def param_fn[x: Int, y: Int](a)` ran the body with `y = None` and died
+        with `unsupported operand type(s) for +: 'int' and 'NoneType'`, an
+        interpreter traceback one call away from the mistake. The canonical
+        case (`compile_offload_unbound_param_error.mojo`) wants
+        `failed to infer parameter 'y' of 'param_fn'`, so that is what
+        `_UnboundComptimeParameter` carries to `eval_SubscriptExpr`, which
+        renders it as a diagnostic record at the bracket. A call with no
+        bracket at all does not pass through here and keeps `_invoke`'s
+        inference-friendly `None`.
         """
         values = item if isinstance(item, tuple) else (item,)
         declared = len(self.comptime_params)
@@ -2693,6 +2816,9 @@ class MojoFunction:
                 f"argument(s) but {self.name} declares {declared} comptime "
                 f"parameter(s): {names}")
         bindings = dict(zip(self.comptime_params, values))
+        unbound = _unbound_comptime_param(self, bindings)
+        if unbound is not None:
+            _raise_unbound_comptime_error(self, unbound)
         return _MojoBoundComptimeFunction(self, bindings)
 
     def _invoke(self, interpreter, comptime_bindings, args, kwargs):
@@ -9569,7 +9695,10 @@ class Interpreter:
         # uses for the compiled path, so both engines answer alike.
         _attrs = getattr(expr, 'attrs', None)
         if _attrs:
-            _bound = self._bind_bracket_comptime(obj, _attrs, expr)
+            try:
+                _bound = self._bind_bracket_comptime(obj, _attrs)
+            except _UnboundComptimeParameter as exc:
+                self._raise_unbound_comptime(expr, exc)
             if _bound is not None:
                 return _bound
         idx = self.eval_expr(expr.index)
@@ -9577,9 +9706,30 @@ class Interpreter:
             if hasattr(obj, '__call__'):
                 return obj
             raise TypeError(f"{type(obj).__name__} object is not subscriptable")
-        return obj[idx]
+        try:
+            return obj[idx]
+        except _UnboundComptimeParameter as exc:
+            self._raise_unbound_comptime(expr, exc)
 
-    def _bind_bracket_comptime(self, obj, attrs, node):
+    def _raise_unbound_comptime(self, node, exc):
+        """Attach the bracket-located diagnostic record to `exc` and re-raise
+        it. Both bracket spellings (`f[2]`'s positional tuple and
+        `f[T=Int]`'s keyword attrs) land here, so the caret and the message
+        are chosen once (see `_unbound_comptime_record`). When the bracket
+        has no usable source position the plain TypeError is kept.
+
+        The callee and parameter are read from `_UNBOUND_FUNC`/`_UNBOUND_PARAM`
+        rather than off `exc` (a fieldless exception; see its docstring)."""
+        func = _UNBOUND_FUNC[0]
+        param = _UNBOUND_PARAM[0]
+        _UNBOUND_FUNC[0] = None
+        _UNBOUND_PARAM[0] = ''
+        rec = _unbound_comptime_record(self.filename, node, func, param)
+        if rec is not None:
+            setattr(exc, 'mojo_record', rec)
+        raise exc
+
+    def _bind_bracket_comptime(self, obj, attrs):
         """`f[...]` with keyword-bracket `attrs`: bind `obj`'s declared
         comptime parameters and return the callable, or None when `obj` has
         no comptime parameter list to bind (the caller then keeps its own
@@ -9599,8 +9749,9 @@ class Interpreter:
         `operation`.
 
         A parameter with neither a supplied value nor a declared default is
-        an honest TypeError naming it, not a silent None: the bracket is
-        the ONLY place its value can come from.
+        an `_UnboundComptimeParameter` naming it, not a silent None: the
+        bracket is the ONLY place its value can come from, and the subscript
+        site renders the modular `failed to infer parameter ...` diagnostic.
 
         `obj` is the callee VALUE, so it is also a method receiver
         (`obj.body[f_key=show_k]()`); its declared parameters live on
@@ -9621,7 +9772,7 @@ class Interpreter:
                 poss.append(pair[1])
             else:
                 kws[nm] = pair[1]
-        dflts = getattr(decl, 'comptime_param_defaults', None) or {}
+        defaults = _comptime_default_names(decl)
         bindings = {}
         pos_i = 0
         for cp in cps:
@@ -9633,10 +9784,8 @@ class Interpreter:
                 pos_i += 1
             if given is not None:
                 bindings[cp] = self.eval_expr(given)
-            elif cp not in dflts:
-                raise TypeError(
-                    f"{self._loc(node)}comptime parameter '{cp}' is neither "
-                    f"given in the bracket nor has a default")
+            elif cp not in defaults:
+                _raise_unbound_comptime_error(decl, cp)
         if decl is not obj:
             return _MojoBoundComptimeReceiver(obj, bindings)
         return _MojoBoundComptimeFunction(obj, bindings)

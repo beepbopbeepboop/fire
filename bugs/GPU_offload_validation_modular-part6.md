@@ -2,7 +2,9 @@
 
 Parent: `bugs/hard/GPU_offload_validation_modular.md`. This part is the
 compiled-path half of the `compile_offload_unbound_param_error.mojo` row; the
-interpreted half is `GPU_offload_validation_modular-part5.md`.
+interpreted half is part 5, fixed 2026-11-15 (the interpreter now refuses the
+under-supplied bracket with `failed to infer parameter 'y' of 'param_fn'`; its
+doc was deleted with the fix).
 
 ## Goal
 
@@ -47,8 +49,8 @@ have been specialised.
 
 1. Find the link-mode instantiation site that matches a bracketed call to its
    declaration and refuse when the bracket supplies fewer items than the
-   declaration's non-defaulted comptime parameters — the same rule part 5 adds
-   to `MojoFunction.__getitem__`.
+   declaration's non-defaulted comptime parameters — the rule part 5 added to
+   `MojoFunction.__getitem__`.
 2. Reuse part 5's message (`failed to infer parameter 'y' of 'param_fn'`) so
    the two engines name one mistake one way; `test_interp_oracle.py`'s premise
    is that they agree.

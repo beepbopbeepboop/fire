@@ -1,8 +1,8 @@
 """Part 5: an under-supplied specialization is a diagnostic, not a `None`.
 
-`bugs/GPU_offload_validation_modular-part5.md` (parent:
-`bugs/hard/GPU_offload_validation_modular.md`, row
-`compile_offload_unbound_param_error.mojo`).
+Parent: `bugs/hard/GPU_offload_validation_modular.md` (row
+`compile_offload_unbound_param_error.mojo`, interpreted half). This part's own
+doc was deleted with the fix; it is pinned by this file.
 
 Measured on the pre-fix tree (`fa105c747`): `fire.py run` on the first probe
 exit 1 with a Python traceback --
@@ -12,9 +12,12 @@ declared comptime parameter `y` bound to `None`. The canonical Modular case
 wants `failed to infer parameter 'y'` instead.
 
 The second probe is the control: supplying both parameters already works
-(prints `6`), so the fix must not turn every bracketed call into an error.
+(prints `6`), so the fix must not turn every bracketed call into an error. The
+third is the other control: a declared default (`y: Int = 4`) may be omitted,
+which also covers the parser capturing the ANNOTATED default spelling rather
+than swallowing `= 4` into the annotation.
 
-Quick test: this file only (two interpreter runs, ~2 s, < 0.1 GB).
+Quick test: this file only (three interpreter runs, ~2 s, < 0.1 GB).
 """
 
 import subprocess
@@ -42,6 +45,17 @@ FULLY_SUPPLIED = '''def param_fn[x: Int, y: Int](a: Int) -> Int:
 
 def main():
     print(param_fn[2, 3](1))
+'''
+
+# Acceptance item 3: a comptime parameter with a declared DEFAULT may be
+# omitted from the bracket (the under-supply refusal must not turn every
+# short bracket into an error).
+DEFAULTED = '''def param_fn[x: Int, y: Int = 4](a: Int) -> Int:
+    return a + x + y
+
+
+def main():
+    print(param_fn[2](1))
 '''
 
 
@@ -115,6 +129,14 @@ class TestUnboundSpecializationParameter(unittest.TestCase):
             r.returncode, 0, msg=f"expected success\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
         )
         self.assertIn("6", r.stdout)
+
+    def test_defaulted_parameter_may_be_omitted(self) -> None:
+        r = _run(DEFAULTED, "gpu-part5-default")
+        self.assertEqual(
+            r.returncode, 0, msg=f"expected success\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        )
+        # x=2 from the bracket, y=4 from the declaration, a=1: 1 + 2 + 4.
+        self.assertIn("7", r.stdout)
 
 
 if __name__ == "__main__":
