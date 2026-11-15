@@ -100,6 +100,18 @@ def gate_skip_args():
 
 def pool_total():
     return sum(sl["count"] for sl in load_pool()["slots"])
+
+
+def mode():
+    """The campaign the pool is running, from tools/pool.json `mode`: `build` (high volume: the light --stdlib gate,
+    no batch cap, land everything fast) or `drain` (work the backlog down: finishing and gate-repair work starts first,
+    the full landing gate, batches of 8). One declaration, read by refill and the lander, instead of each guessing
+    from who is running or how the owner feels. An unreadable or unknown value is `drain`: the careful campaign."""
+    try:
+        m = load_pool().get("mode", "drain")
+    except (OSError, ValueError):
+        return "drain"
+    return m if m in ("build", "drain") else "drain"
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
@@ -867,7 +879,9 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
-FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-")   # tasks that carry finished work to master
+FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-", "fix-gate-", "fix-landed-")   # tasks that carry finished work to master
+# fix-gate-* repairs master itself (a red gate job) and fix-landed-* repairs what verify_landed.py found after a
+# landing: both finish work that already exists, so both are finishing work, not fresh docs.
 def refill_key(item):
     """Queue order for refill: tasks that finish done work first, then oldest first."""
     return (0 if item["name"].startswith(FINISHING_PREFIXES) else 1, item["added"])
@@ -1219,7 +1233,8 @@ def cmd_refill(a):
 
     Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
     their worktree and branch removed, and nothing new starts for BREAKER_MIN minutes. Without it a limit turns this
-    loop into a worktree-and-branch factory."""
+    loop into a worktree-and-branch factory. In `drain` mode (tools/pool.json `mode`, `control.py mode build|drain`)
+    only finishing work (FINISHING_PREFIXES, plus gate docs bug-gate-*) is started: new docs wait until the backlog lands."""
     bounced = [n for n, t in list(load().items()) if dead_on_arrival(t) and bounce(n, t)]
     if bounced and not dead_models():   # a limit moved the work to another model; only an outage needs the pause
         json.dump({"until": time.time() + BREAKER_MIN * 60, "why": "%d workers died on arrival" % len(bounced)},
@@ -1257,6 +1272,8 @@ def cmd_refill(a):
     # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
     # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
     for it in items:
+        if mode() == "drain" and not it["name"].startswith(FINISHING_PREFIXES) and not it["name"].startswith("bug-gate-"):
+            continue                      # drain: the backlog is landed and master repaired before new work is cut
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
         unmet = [n for n in it["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]
@@ -1352,6 +1369,17 @@ def cmd_priority(a):
     if a.names:
         json.dump(a.names, open(os.path.join(ctl_dir(), "priority.json"), "w"))
     print("integration priority: " + " > ".join(priority_list() or ["(none: slot order)"]))
+
+
+def cmd_mode(a):
+    """mode [build|drain] — declare which campaign the swarm is running (see mode()). With no argument, print it."""
+    if a.name:
+        if a.name not in ("build", "drain"):
+            sys.exit("mode is one of: build, drain")
+        p = load_pool()
+        p["mode"] = a.name
+        json.dump(p, open(POOL_FILE, "w"), indent=2)
+    print("mode: %s" % mode())
 
 
 def cmd_queue(a):
@@ -2170,6 +2198,8 @@ def main():
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
+    s = sub.add_parser("mode"); s.add_argument("name", nargs="?", choices=["build", "drain"])
+    s.set_defaults(f=cmd_mode)
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)

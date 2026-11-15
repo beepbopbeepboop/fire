@@ -20,7 +20,7 @@ import sys
 from test_codegen_erased_container_values_pins import _compile, _defn
 
 
-# part 1 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
+# part 1 (landed; doc deleted):
 # a module-level `alias` of a type is expanded wherever an annotation is
 # resolved -- a parameter, a return, an explicitly annotated local, and a
 # container's element type.
@@ -107,7 +107,7 @@ def test_p2_alias_ctor_expands_callee():
     assert 'mojo_list_get_double' in abody, abody
 
 
-# part 3 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
+# part 3 (landed 2026-11-14, a0f321f1c):
 # a `comptime` name bound to a float DType resolves in a module-scope
 # signature, in a function-scope annotated local, and in the dtype argument
 # of a SIMD constructor.

@@ -13,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
-POOL = {"default_slot": "a", "slots": [
+POOL = {"default_slot": "a", "mode": "build", "slots": [
     {"name": "a", "model": "m/a", "count": 1, "class": "easy"},
     {"name": "b", "model": "m/b", "count": 1, "class": "easy"},
 ]}
@@ -71,6 +71,15 @@ class RefillClaimBlocked(unittest.TestCase):
         C.cmd_refill(argparse.Namespace(target=2, prefix="fix-"))
         self.assertEqual(self.spawned, ["fix-replan-ok"])
         self.assertTrue(os.path.exists(os.path.join(self.qdir, "fix-merge-blocked-1.json")), "blocked task stays queued")
+
+    def test_drain_mode_starts_only_finishing_work(self):
+        # drain mode: new docs wait; FINISHING_PREFIXES (and gate docs) land the backlog. fix-replan-* is not
+        # finishing work and must not start; the two finishing items start even with everything else queued.
+        drain_pool = dict(POOL, mode="drain")
+        with mock.patch.object(C, "load_pool", return_value=drain_pool), \
+             mock.patch.object(C, "holds_claims", side_effect=lambda t: False):
+            C.cmd_refill(argparse.Namespace(target=4, prefix="fix-"))
+        self.assertEqual(self.spawned, ["fix-merge-blocked-1", "fix-merge-blocked-2"])
 
     def test_started_task_claims_block_the_rest_of_the_pass(self):
         self.items.append(item("fix-second-on-y", "bug:Y", 4))

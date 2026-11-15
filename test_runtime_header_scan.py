@@ -617,7 +617,7 @@ def test_every_declaration_is_seen():
     # Both are word-shaped: no float and no named container crosses the
     # boundary, so word 431 -> 433 and total 942 -> 944; box stays 511.
     # `--fix` wrote this rung and every quoted figure above from that one scan.
-    for header, want in (('fire_runtime.h', 834),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 837),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

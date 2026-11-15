@@ -1,7 +1,12 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part3
+SPLIT: the bare-dunder part (its doc was deleted when it landed)
 (part1 and part2 landed: a re-exported free function's reference now carries
 the DEFINING module's qualifier — `_reexported_defining_qualifier` — and its
-overload suffix is the DEFINING unit's; re-measure the count.)
+overload suffix is the DEFINING unit's; re-measure the count.
+part3 landed 2026-11-14: a same-arity struct dunder names one concrete
+overload (subscript dispatch AND the comparison lowering), and the suffix-less
+forward declaration for an overloaded dunder is no longer emitted — the bare
+`_std_...___getitem__`/`___eq__` references are gone (0 in `nm -u`), and the
+total count is 50 -> 43 -> 32 with 0 modules falling back to source.)
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
