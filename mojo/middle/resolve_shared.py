@@ -2279,6 +2279,66 @@ def _subst_idents(gen, expr, mapping: dict):
         return gimple_ctypes.dataclasses.replace(expr, **changes) if changes else expr
     return expr
 
+def _comptime_bound_text(gen, name: str):
+    """The textual value of a comptime-bound NAME, or None when `name` is not
+    bound to a value this renderer can spell.
+
+    A bracket argument can be an ordinary identifier bound by an earlier
+    `comptime name = value` (`comptime dtype = DType.float32` then
+    `compare[dtype](...)`). `_type_expr_to_ann` used to return the identifier
+    itself in that case, so the callee was instantiated with its OWN parameter
+    name as the argument: `compare[dtype]` became
+    `compare_5_dtype_5_dtype_7_verbose_4_True` for BOTH the Float32 and
+    Float64 call sites. The two distinct instantiations then collided on one C
+    symbol with two different return types (gcc: "conflicting types"), which
+    is the stdlib-syntax red `test/math/test_tanh.mojo` names. The value is
+    folded here so it substitutes into the callee text exactly like the
+    literal branch does.
+
+    Strings are deliberately NOT folded: a string constant would need quoting
+    this renderer does not do, and a string-valued comptime is also recorded
+    in `_comptime_str_names` (a type alias stored as text is not distinguished
+    from a string value there, so leaving strings alone keeps the pre-existing
+    behaviour for both). A DType value is rendered in its canonical
+    `DType.<name>` spelling, which every dtype reader in the compiler accepts
+    (`comptime._dtype_spelling_name`, `types._dtype_token_ctype`,
+    `infra_infer._resolve_type`)."""
+    vals = getattr(gen, '_comptime_vals', None)
+    if not vals or name not in vals:
+        return None
+    # A bracket PARAMETER of the enclosing function/struct is not a bound
+    # value, even when a same-named comptime constant is also in the table
+    # (`comptime N = 4` at module scope, and `def f[N: Int]`): the parameter
+    # must stay the parameter so the call is reproduced by the OUTER
+    # monomorphization, not specialized to the constant of the moment.
+    _fn = getattr(gen, '_current_func_node', None)
+    if _fn is not None and name in (getattr(_fn, 'comptime_params', None) or ()):
+        return None
+    if name in (getattr(gen, '_current_struct_type_params', None) or ()):
+        return None
+    v = vals.get(name)
+    # `('DType', 'float32')`, or the tuple's REPR string, which module-level
+    # bindings store. A bare `('.', x)` is NOT folded: comptime.py's
+    # `_is_dtype_value` records it as an enum variant in general and a dtype
+    # only relative to the other operand, so rendering it as `DType.x` here
+    # would be a guess.
+    if isinstance(v, tuple) and len(v) == 2 and v[0] in ('DType', 'dtype'):
+        return f'DType.{v[1]}'
+    if isinstance(v, str):
+        m = gimple_ctypes.re.match(
+            r"^\(\s*'(?:DType|dtype)'\s*,\s*'([^']*)'\s*\)$", v.strip())
+        if m:
+            return f'DType.{m.group(1)}'
+        return None
+    if isinstance(v, bool):
+        return 'True' if v else 'False'
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return _float_type_arg_text(v) or None
+    return None
+
+
 def _type_expr_to_ann(gen, node) -> str:
     """Reconstruct a type-annotation string from a type expression node, so
     parametric types in external_call/MLIR positions resolve via _mojo_type.
@@ -2295,9 +2355,15 @@ def _type_expr_to_ann(gen, node) -> str:
     node-to-string step, which previously returned '' for every literal
     (IntLiteral/BoolLiteral/negative-int UnaryOp), making
     _is_concrete_type_arg reject it and silently falling back to the
-    placeholder-0 codegen instead of ever binding/invoking the callee."""
+    placeholder-0 codegen instead of ever binding/invoking the callee.
+
+    An identifier bound by `comptime name = value` resolves to that value
+    (`_comptime_bound_text`), not to its own name — the same defect one level
+    further out, and the reason two dtype specializations of one generic used
+    to share one mangled symbol."""
     if isinstance(node, gimple_ctypes.IdentExpr):
-        return node.name
+        _bound = _comptime_bound_text(gen, node.name)
+        return _bound if _bound is not None else node.name
     if isinstance(node, gimple_ctypes.SubscriptExpr):
         base = gen._type_expr_to_ann(node.obj)
         idx = node.index
