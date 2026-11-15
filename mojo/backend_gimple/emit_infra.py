@@ -1591,27 +1591,8 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
                 continue
             ret = info.get('c_return_type', 'int64_t')
             c_params = info.get('c_parameters') or []
-            # A callable-valued parameter is `std::function<...>` in the
-            # exported signature (the cpp coroutine unit's own typing), but a
-            # C translation unit / extern prototype can only spell that slot as
-            # the runtime's boxed word (`int64_t`). Map at the C-emission
-            # boundary so the client decl, stored param types and signature all
-            # agree.
-            ret = gimple_ctypes.c_client_callable_ctype(ret)
-            _c_params_sanitized = []
-            ptypes = []
-            for cp in c_params:
-                _parts = cp.rsplit(None, 1) if isinstance(cp, str) else [str(cp)]
-                if len(_parts) > 1:
-                    _pt, _pn = _parts[0], _parts[1]
-                    _pt = gimple_ctypes.c_client_callable_ctype(_pt)
-                    ptypes.append(_pt)
-                    _c_params_sanitized.append(f"{_pt} {_pn}")
-                else:
-                    _pt = gimple_ctypes.c_client_callable_ctype(_parts[0])
-                    ptypes.append(_pt)
-                    _c_params_sanitized.append(_pt)
-            c_params = _c_params_sanitized
+            ptypes = [' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
+                      for cp in c_params]
             # A name in _NEEDS_SELF_EXTERN has ONE true C prototype, pinned in
             # _LIBC_SIGS. The export-derived signature (module_loader maps the
             # exporting Mojo wrapper's Int64-level types to int64_t text) can
@@ -1648,8 +1629,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
                     _tail = sig.split(None, 1)
                     if len(_tail) == 2:
                         sig = ret + ' ' + _tail[1]
-            if not (sym in gen._NEEDS_SELF_EXTERN and gen._LIBC_SIGS.get(sym)):
-                sig = f"{ret} {name} ({', '.join(c_params) if c_params else 'void'})"
             gen.func_return_types[sym] = ret
             gen.func_param_types[sym] = ptypes
             gen.imported_symbols[sym] = {
@@ -5761,7 +5740,7 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     gen._goto(bb_push)
     gen._emit_label(bb_push)
     fsave = gen._new_val('int64_t', '_mojo_exc_top')
-    fpush = gen._binop('int64_t', f'{fsave}', '+', '(int64_t)1')
+    fpush = gen._new_val('int64_t', f'{fsave} + (int64_t)1')
     gen._emit(f'  _mojo_exc_top = {fpush};')
     ftop = gen._new_val('int64_t', '_mojo_exc_top')
     gen._void_call('mojo_cleanup_checkpoint_save', [])
@@ -6707,7 +6686,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                 continue
             _slot_i = i
             if star_idx >= 0 and i > star_idx:
-                _base = gen._binop('int64_t', f"{_sub_len}", '-', f"{n_after}LL")
+                _base = gen._new_val('int64_t', f"{_sub_len} - {n_after}LL")
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
                 _slot_i = gen._binop('int64_t', _base, '+', _off)
             _emit_slot_assign(sub_list, vn, _slot_i, slot_elems[i])
@@ -8797,7 +8776,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 bb_none = gen._new_bb()
                 bb_done = gen._new_bb()
                 _cond = gen._new_temp('_Bool')
-                gen._binop_into(_cond, f'({aval})', '!=', '0')
+                gen._emit(f'  {_cond} = ({aval}) != 0;')
                 gen._cond_goto(_cond, bb_some, bb_none)
                 gen._emit_label(bb_some)
                 _some_lit = gen._intern_string('Optional(Some)')

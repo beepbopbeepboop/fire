@@ -879,8 +879,7 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
-FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-", "fix-gate-", "fix-landed-", "bug-land-")   # tasks that carry finished work to master
-# bug-land-* is a LAND doc (integrate.land_doc): a finished branch that could not land.
+FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-", "fix-gate-", "fix-landed-")   # tasks that carry finished work to master
 # fix-gate-* repairs master itself (a red gate job) and fix-landed-* repairs what verify_landed.py found after a
 # landing: both finish work that already exists, so both are finishing work, not fresh docs.
 def refill_key(item):
@@ -1234,9 +1233,8 @@ def cmd_refill(a):
 
     Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
     their worktree and branch removed, and nothing new starts for BREAKER_MIN minutes. Without it a limit turns this
-    loop into a worktree-and-branch factory. Drain mode (tools/pool.json `mode`) only ORDERS the queue
-    (refill_key: finishing work first); it never leaves a free slot idle. A free slot takes the best startable task,
-    a plain bug doc included (owner, 2026-11-15: qwen sat idle for hours behind a drain filter)."""
+    loop into a worktree-and-branch factory. In `drain` mode (tools/pool.json `mode`, `control.py mode build|drain`)
+    only finishing work (FINISHING_PREFIXES, plus gate docs bug-gate-*) is started: new docs wait until the backlog lands."""
     bounced = [n for n, t in list(load().items()) if dead_on_arrival(t) and bounce(n, t)]
     if bounced and not dead_models():   # a limit moved the work to another model; only an outage needs the pause
         json.dump({"until": time.time() + BREAKER_MIN * 60, "why": "%d workers died on arrival" % len(bounced)},
@@ -1274,6 +1272,8 @@ def cmd_refill(a):
     # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
     # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
     for it in items:
+        if mode() == "drain" and not it["name"].startswith(FINISHING_PREFIXES) and not it["name"].startswith("bug-gate-"):
+            continue                      # drain: the backlog is landed and master repaired before new work is cut
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
         unmet = [n for n in it["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]
@@ -1422,7 +1422,7 @@ def cmd_ps(a):
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
     tasks = load()
-    print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % ("name", "pid", "alive", "tag", "cls", "model", "claims"))
+    print("%-40s %-6s %-5s %-6s %-28s %s" % ("name", "pid", "alive", "cls", "model", "claims"))
     for name, t in sorted(tasks.items()):
         if t.get("state") != "running":
             continue
@@ -1436,10 +1436,7 @@ def cmd_ps(a):
         claims = ",".join(t.get("claims") or [])[:40]
         model = (t.get("model") or t.get("pool") or "?")[:28]
         cls = (t.get("cls") or "?")[:6]
-        # a worker that exited with a DONE verdict and commits master lacks is waiting to LAND, not dead: the registry
-        # still says `running` until the integrator moves it, so `alive: no` alone reads as a crash (2026-11-15)
-        tag = "landable" if (not alive and state_of(t) == "exited-ok" and verdict(t) == "DONE" and ahead(t) > 0) else ""
-        print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", tag, cls, model, claims))
+        print("%-40s %-6s %-5s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", cls, model, claims))
     # live process scan
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0

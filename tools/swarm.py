@@ -10,14 +10,14 @@ One pass, repeated:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
   2. REFILL  `control.py refill --target N --prefix bug-,fix-` -- a worker that finishes frees its slot at once.
-  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py`; a conflicting branch is handed to a LAND doc
-             (bugs/LAND-*.md) (integrate.hand_to_land_doc). The campaign is tools/pool.json `mode`: `build` lands everything fast
+  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py`; a conflicting branch is handed to a merge-fixer
+             task (integrate.enqueue_merge_fix). The campaign is tools/pool.json `mode`: `build` lands everything fast
              behind the light --stdlib gate; `drain` (the default) lands batches of 8 behind the full landing gate,
-             finishing work (fix-gate/fix-merge/fix-proof/fix-orch, bug-land-*) first, in priority.json order.
+             finishing work (fix-gate/fix-merge/fix-proof/fix-orch) first, in priority.json order.
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
-import argparse, atexit, fcntl, signal, glob, hashlib, json, os, re, subprocess, sys, time, traceback
+import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time, traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
@@ -964,20 +964,13 @@ def land():
     build = C.mode() == "build"
     LAND_BATCH = 0 if build else 8
     proofs = []
-    stuck = []
-    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs, stuck_out=stuck) if n.startswith(PREFIXES) and n not in BUSY["names"]]
+    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     for n, deleted in proofs:               # a DONE branch that deletes a doc without a test: a reviewer decides, not a person
         if n.startswith(PREFIXES) and n not in BUSY["names"]:
             tn = C.load()[n]
             log("proof review: %s deletes %s with no test changed; handing it to a reviewer (TEST or NOTESTCASE)"
                 % (n, " ".join(deleted)))
             I.enqueue_proof_review(n, tn, deleted)
-    for n, why, detail in stuck:            # a finished branch nothing will land or continue: its LAND doc carries it
-        if n.startswith(PREFIXES) and n not in BUSY["names"]:
-            tn = C.load()[n]
-            log("stuck: %s (%s); filing its LAND doc" % (n, why))
-            I._cap_merge_fix(n, "land doc: %s: %s" % (n, why))     # capped: no longer a candidate, never filed twice
-            I.land_doc(n, tn, why, "Branch: %s\n%s" % (tn["branch"], detail))
     names = fresh_first(names, C.load())
     if not build:
         # drain: the work that carries finished patches to master goes first, in priority.json order, then the rest.
@@ -991,17 +984,11 @@ def land():
     if LAND_BATCH:
         batch = batch[:LAND_BATCH]                     # drain: a red full gate poisons few; the rest land next pass
     while batch:
-        log("landing: probing %d branch(es) behind the %s gate: %s" % (
-            len(batch), "light --stdlib" if build else "full", " ".join(batch)[:300]))
-        _t0 = time.time()
         verdict, merged, failing, out = probe(batch, stdlib=build)
-        log("landing: probe %s in %.0f s (merged %d of %d)" % (verdict, time.time() - _t0, len(merged), len(batch)))
-        if verdict == "EMPTY":      # no PROBE line at all: the probe died or found nothing to merge; say what it printed
-            log("landing: probe printed no verdict; its last lines: %s" % " | ".join(out.strip().splitlines()[-4:])[:400])
         for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
-                log("conflict %s: filing its LAND doc" % c)
-                I.hand_to_land_doc(c, tasks[c], out)
+                log("conflict %s: handing it to a merge fixer" % c)
+                I.enqueue_merge_fix(c, tasks[c], out)
                 batch.remove(c)
         if verdict == "BUSY":
             log("integrator busy (another integrator round holds the lock); landing waits for the next pass")
@@ -1111,13 +1098,6 @@ def main():
         sys.stderr = _lf
     global _CODE_HASH, _LOCK_FD
     _LOCK_FD = take_lock()     # held until this process exits
-    # 2026-11-15: the swarm vanished mid-landing with no log line. Catchable signals now say so; a SIGKILL cannot be
-    # caught, but then the log ends with no "stopped" line, which is itself the evidence.
-    log("started: pid %d, ppid %d, target %s, mode %s" % (os.getpid(), os.getppid(), a.target, C.mode()))
-    atexit.register(lambda: log("stopped: pid %d exiting normally" % os.getpid()))
-    for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(_sig, lambda n, f: (log("stopped: pid %d got %s (ppid %d)" % (os.getpid(), signal.Signals(n).name, os.getppid())),
-                                          sys.exit(128 + n)))
     _CODE_HASH = code_hash()   # the code this process runs; a change means re-exec (stale_code)
     while True:
         try:
@@ -1158,9 +1138,7 @@ def main():
                 verify_async()
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")
-        except (Exception, SystemExit) as e:      # an unattended loop must survive one bad pass. SystemExit too: control.git()
-            #   and friends call sys.exit on a failed git command, which is not an Exception and used to end this
-            #   process with no log line (2026-11-14 13:43, 2026-11-15 10:31: a MERGE_RR.lock collision)
+        except Exception as e:      # an unattended loop must survive one bad pass
             log("pass failed: %r\n%s" % (e, traceback.format_exc()))   # the traceback names the line; the repr alone cost a code read (2026-11-12)
         if not a.interval:
             return

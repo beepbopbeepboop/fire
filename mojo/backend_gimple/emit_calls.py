@@ -6974,9 +6974,9 @@ def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
         # verdict is FALSE, so its yes-branch is the negated test.
         bb_yes = gen._new_bb(); bb_no = gen._new_bb()
         if keep == 'falsy':
-            _t = gen._cmp(f'({kret_v})', '==', '0')
+            _t = gen._new_val('_Bool', f'({kret_v}) == 0')
         else:
-            _t = gen._cmp(f'({kret_v})', '!=', '0')
+            _t = gen._new_val('_Bool', f'({kret_v}) != 0')
         gen._cond_goto(_t, bb_yes, bb_no)
         gen._emit_label(bb_yes)
         if _kelem_t == 'double':
@@ -8270,11 +8270,11 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                     _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
                     gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                     gen._emit_label(_bb_c2)
-                    _z32 = gen._binop('int64_t', '1LL', '<<', '32')
+                    _z32 = gen._new_val('int64_t', '1LL << 32')
                     _pc2 = gen._cmp(_b64v, '>=', _z32)
                     gen._cond_goto(_pc2, _bb_c3, _bb_good)
                     gen._emit_label(_bb_c3)
-                    _z48 = gen._binop('int64_t', '1LL', '<<', '48')
+                    _z48 = gen._new_val('int64_t', '1LL << 48')
                     _pc3 = gen._cmp(_b64v, '<', _z48)
                     gen._cond_goto(_pc3, _bb_bad, _bb_good)
                     gen._emit_label(_bb_bad)
@@ -8304,7 +8304,7 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
                 _pc1 = gen._rt_call('int', 'mojo_pyobject_is_container', [_b64v])
                 gen._cond_goto(_pc1, _bb_bad, _bb_c2)
                 gen._emit_label(_bb_c2)
-                _z32 = gen._binop('int64_t', '1LL', '<<', '32')
+                _z32 = gen._new_val('int64_t', '1LL << 32')
                 _pc2 = gen._cmp(_b64v, '>=', _z32)
                 gen._cond_goto(_pc2, _bb_bad, _bb_good)
                 gen._emit_label(_bb_bad)

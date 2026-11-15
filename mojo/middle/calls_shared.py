@@ -359,10 +359,6 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     is deliberately not made louder here — what changed is that every
     RESOLVABLE callable default stopped being indistinguishable from it.
     """
-    # A `std::function<...>`-typed slot is only spellable in a C++ unit;
-    # in C emission the callable travels as the runtime's boxed word.
-    if not cxx and isinstance(param_ctype, str) and param_ctype.startswith('std::function<'):
-        param_ctype = 'int64_t'
     if _dflt is None:
         return _null_default_pair(param_ctype)
     _cv = _callable_value_symbol(gen, _dflt, cxx=cxx)
