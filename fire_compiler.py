@@ -8531,7 +8531,8 @@ class Parser:
         """Consume a `def f[dtype: DType, width: SIMDSize, //, ...](...)`
         generic/comptime parameter block like `_skip_bracketed`, but also
         return the parameter names in declaration order together with the
-        DECLARED DEFAULTS of the ones written `name = expr` — enough for
+        DECLARED DEFAULTS of the ones written `name = expr` or
+        `name: Type = expr` — enough for
         the interpreter to bind a call-site subscript (`f[Int32]()`) to
         names by position, e.g. so the function body can read `dtype` as a
         plain value, and to answer `f[T=Int]()` for a parameter the bracket
@@ -8605,6 +8606,16 @@ class Parser:
                 if self._peek().kind == "COLON":
                     self._advance()
                     annotations[_nm] = self._capture_bracket_param_annotation()
+                    # `name: Type = default`: the annotation span stops at the
+                    # top-level `=`, so the default is read here, exactly as for
+                    # the unannotated `name = default` spelling above. Without
+                    # this the `= 4` was swallowed into the annotation text and
+                    # `comptime_param_defaults` had no entry, which made a
+                    # legal declaration look like an omitted required parameter
+                    # at the bracket.
+                    if self._peek().kind == "ASSIGN":
+                        self._advance()
+                        defaults[_nm] = self._parse_bracket_param_default()
                     continue
                 if self._peek().kind == "ASSIGN":
                     self._advance()
@@ -8617,12 +8628,15 @@ class Parser:
     def _capture_bracket_param_annotation(self) -> str:
         """The DECLARED TYPE of a bracketed parameter, as source text.
 
-        Consumes tokens until the next top-level COMMA or RBRACKET and returns
-        them joined with spaces -- the same span discipline as
-        `_parse_bracket_param_default`, and for the same reason: what FOLLOWS is
-        parameter-list punctuation (`//`, `,`, `]`), not part of the type. Text
-        and not a parsed expression because a type is not an expression here, and
-        the consumers (`model.param_annotation` -> `declared_type_kind`,
+        Consumes tokens until the next top-level COMMA or RBRACKET -- or a
+        top-level `=` that introduces the parameter's default
+        (`def f[x: Int = 4]`), which `_parse_generic_params_capture` then reads
+        with `_parse_bracket_param_default` -- and returns them joined with
+        spaces. Same span discipline as `_parse_bracket_param_default`, and for
+        the same reason: what FOLLOWS is parameter-list punctuation (`//`, `,`,
+        `]`), not part of the type. Text and not a parsed expression because a
+        type is not an expression here, and the consumers
+        (`model.param_annotation` -> `declared_type_kind`,
         `model.optional_receiver_types`) reduce it from text.
 
         The span is consumed whether or not anybody wants it, so the caller's
@@ -8639,6 +8653,11 @@ class Parser:
             if t.kind == "COMMA" and depth == 1:
                 break
             if t.kind == "RBRACKET" and depth == 1:
+                break
+            # A `=` at bracket depth 1 is the parameter's DEFAULT, not part of
+            # its type (`def f[x: Int = 4]`). One inside a function-typed
+            # annotation's parens lives at depth > 1 and stays part of it.
+            if t.kind == "ASSIGN" and depth == 1:
                 break
             if t.kind in ("LBRACKET", "LPAREN", "LBRACE"):
                 depth += 1
