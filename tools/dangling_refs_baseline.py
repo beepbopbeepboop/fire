@@ -227,6 +227,7 @@ BARE_BASELINE = {
     'tools/formal_sweep.py': 1,
     'tools/formal_sweep_causes.py': 1,
     'tools/formal_template_call_census.py': 1,
+    'tools/test_orch_review.py': 1,
     'tools/test_swarm_class_refresh.py': 3,
     'tools/test_swarm_feed.py': 6,
 }
