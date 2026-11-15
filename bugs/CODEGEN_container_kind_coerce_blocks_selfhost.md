@@ -83,3 +83,37 @@ inference said `MojoList *` and a value that is really a `MojoDict *`/`MojoSet *
 which is the parameter container-kind inference class that the silentnoop
 `pick` refusal belonged to (fixed in e4a2cc2ed, "specialize literal-kind mixed
 params including None/comprehensions").
+
+## Root cause of the last one (2026-11-14): `GimpleGen(no_mangle=...)`
+
+The final refusal, `monomorphize.py:1146 in function instantiate_build`
+(`cannot coerce MojoSet * to MojoList *`), was not an inference bug at all:
+
+```python
+gen = GimpleGen(emit_entry_points=False, module_name='', no_mangle={mangled})
+```
+
+`{mangled}` is a SET literal, but the parameter was declared
+
+```python
+def __init__(self, ..., no_mangle=(), relaxed_imports: bool = False, ...):
+```
+
+with an unannotated `no_mangle` whose default `()` the compiler types as
+`MojoList *`. Every one of the three call sites that pass a set literal
+(`comptime.py:67`, `tools/repro_indexlist.py:38`, `monomorphize.py:1146`) was
+therefore a set-into-list coercion, and the first one reached in a
+whole-program compile aborted it. The parameter is used only as
+`set(no_mangle)`, and the body's own field is annotated `set[str]`, so the
+declaration now says what it always meant:
+
+```python
+no_mangle: set[str] = (),
+```
+
+Measured: `python3 fire.py --dump-full monomorphize.py` reports **0**
+`cannot coerce` lines and `✓ Generated monomorphize.ci` (was 1 refusal and a
+failed compile).
+
+Note the diagnostic's `monomorphize.py:1146` was the ENCLOSING function's line,
+not the failing statement's — the same derived-name/line caveat as above.
