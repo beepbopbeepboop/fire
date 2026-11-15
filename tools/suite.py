@@ -5925,10 +5925,34 @@ def execute(jobs, per_test, opts, log: Log):
                 log.line(_line(job, res, done, total, len(running)))
 
             if waiting and not running and not ready:
-                # Nothing running, nothing ready: a dependency no job in this
-                # plan can ever satisfy (a test whose dep was not selected).
-                # Say so instead of spinning.
+                # Nothing running, nothing ready. Two shapes reach here, and
+                # they are not the same defect. One is a dependency that
+                # settled to a non-pass verdict THIS iteration: the blocked
+                # branch above deleted and settled it after this job had
+                # already been seen as merely pending, so the job lost its
+                # dep between the two halves of the same pass. That job is a
+                # dependent that lost, and it gets the same SKIP the blocked
+                # branch gives its own dependants — it was selected, it was
+                # never going to run, and "dependency not selected: " with an
+                # EMPTY list (the shape a whole cascade settling in one pass
+                # produced, turning a red upstream chain into a fresh
+                # NEW-no-bug-doc ERROR against an innocent gate job) says
+                # neither. Only a dependency with no verdict AND no job that
+                # could produce one is the shape this branch exists for: a dep
+                # that was never selected, and a plan that would spin forever.
                 job = sorted(waiting.values(), key=lambda j: order[j.key])[0]
+                failed = [d for d in job.spec.deps
+                          if d in state and state[d] not in DEP_SATISFIED]
+                if failed:
+                    res = Result(SKIP, detail='dependency did not pass: '
+                                 + ', '.join(f'{d}={state[d]}' for d in failed))
+                    del waiting[job.key]
+                    with lock:
+                        results[job.key] = res
+                        done += 1
+                        settle(job.spec.name, SKIP)
+                    log.line(_line(job, res, done, total, len(running)))
+                    continue
                 missing = [d for d in job.spec.deps if pending(d)]
                 res = Result(ERROR, detail='dependency not selected: '
                              + ', '.join(missing))

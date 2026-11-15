@@ -1875,6 +1875,37 @@ def test_deps_order_and_skip():
         check('deps: the skip says which dep', 'b' in out, out)
 
 
+def test_a_cascade_skip_is_a_skip_not_an_error():
+    """A dependent of a dep that settled to SKIP in the same pass is SKIP.
+
+    The scheduler evaluates a job's deps at the top of the loop and settles
+    blocked ones at the bottom, so when a whole cascade settles in one pass
+    (a fails, b is blocked by a, c is blocked by b) c is still merely
+    'pending' when the nothing-running-nothing-ready branch fires. That branch
+    used to ERROR c with `dependency not selected: ` and an EMPTY list — its
+    dep had a verdict, it was never missing — which counted a lost cascade
+    as a FAILED test and, in the 2026-11-14 confirm gate, put the stage2 and
+    stage3 dumps fanouts in the FAILED list with that empty detail: the red
+    verdict that writes bug docs for jobs whose only crime was sitting behind
+    a red upstream chain. c gets the same SKIP the blocked branch would have
+    given it, naming the dep that did not pass.
+    """
+    with Sandbox(a=dict(cmd=ok_cmd('raise SystemExit(1)')),
+                 b=dict(cmd=ok_cmd('pass'), deps=['a']),
+                 c=dict(cmd=ok_cmd('pass'), deps=['b'])):
+        log = os.path.join(HERE, 'build', 'test-suite-cascade-skip.log')
+        rc, out = run(['a', 'b', 'c'], jobs=4, log=log)
+        text = open(log).read() if os.path.exists(log) else ''
+        check('cascade: the root failure still fails the run',
+              rc == 1, f'rc={rc}')
+        check('cascade: the dependent is SKIPPED, not ERROR',
+              'dependency not selected' not in out + text, out + text)
+        check('cascade: the skip names the dep that did not pass',
+              'dependency did not pass' in text and 'b=skip' in text, text)
+        check('cascade: the tally counts one failure, not two',
+              '0 passed, 1 failed, 2 skipped' in out, out)
+
+
 def test_exclusive_is_alone():
     """An exclusive test must not overlap anything else — that is the whole
     mechanism that lets a 55 GB job share a machine with a test suite.
@@ -6791,6 +6822,7 @@ def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
                test_deps_order_and_skip,
+               test_a_cascade_skip_is_a_skip_not_an_error,
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
