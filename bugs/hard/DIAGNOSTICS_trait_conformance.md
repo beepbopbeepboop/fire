@@ -1,6 +1,8 @@
+SPLIT: DIAGNOSTICS_trait_conformance-part1
+
 # DIAGNOSTICS step 2: Trait conformance diagnostics
 
-SPLIT: the three sub-steps (their docs were deleted with their fixes; see Status 2026-11-14 below — part 6 was already recorded as fixed here)
+SPLIT (historical): the three sub-steps (their docs were deleted with their fixes; see Status 2026-11-14 below — part 6 was already recorded as fixed here)
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
 plan: `docs/diagnostics-missing-validation-plan.md` §2.
