@@ -72,14 +72,17 @@ def test_two_preexisting_gains_are_pinned():
     """SUITE_doc_refs_ratchet_two_preexisting_gains (2026-11-13): the doc-refs
     ratchet was red on master for two pre-existing citation gains, neither
     caused by the lane that filed the bug —
-      * bugs/GATE_selfhost_closure_cannot_compile.md cited the deleted
-        parse_module sig-table doc (CODEGEN_selfhost_sig_table_parse_module_
-        recover, fixed in 32d9c79c7) by its `bugs/` path, and
+      * the self-host closure GATE doc cited the deleted parse_module
+        sig-table doc (CODEGEN_selfhost_sig_table_parse_module_recover, fixed
+        in 32d9c79c7) by its `bugs/` path, and
       * bugs/hard/README.md kept the row of the deleted align-decorator doc
         (DIAGNOSTICS_align_decorator, whose three parts all landed) bare.
     The fix retargeted the GATE doc's citation at the bug and its fix commit,
     dropped the dead row, and deleted this bug's own doc, which cited the
-    align-decorator doc in a sentence the bare walk could not skip. This pins
+    align-decorator doc in a sentence the bare walk could not skip. The GATE
+    doc has since been fixed and deleted in its own commit (the self-host
+    closure compiles and the gate job is green), so its half is pinned by
+    absence: a restored copy would re-cite the sig-table doc again. This pins
     the ratchet green and keeps both files free of the deleted docs. The stems
     are assembled below without the suffix and never written through as one
     token: this file is a tracked .py, its ratchet budget is already used by
@@ -91,11 +94,9 @@ def test_two_preexisting_gains_are_pinned():
     assert result.returncode == 0, \
         f'ratchet still red after the two preexisting gains were fixed:\n' \
         f'{result.stdout}{result.stderr}'
-    sig_table_doc = 'CODEGEN_selfhost_sig_table_parse_module_recover' + '.md'
-    with open(os.path.join(HERE, 'bugs', 'GATE_selfhost_closure_cannot_compile.md'),
-              encoding='utf-8') as f:
-        assert f'bugs/mid/{sig_table_doc}' not in f.read(), \
-            'deleted sig-table doc cited by path again in the GATE doc'
+    gate_doc = 'GATE_selfhost_closure_cannot_compile' + '.md'
+    assert not os.path.exists(os.path.join(HERE, 'bugs', gate_doc)), \
+        'the fixed GATE doc is back; it cited the deleted sig-table doc'
     align_doc = 'DIAGNOSTICS_align_decorator' + '.md'
     with open(os.path.join(HERE, 'bugs', 'hard', 'README.md'), encoding='utf-8') as f:
         assert align_doc not in f.read(), \
