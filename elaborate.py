@@ -510,15 +510,6 @@ def bind_type_args(template_src: str, type_args):
 # method, with matching parameter/return types). A non-conforming type yields
 # a `ConformanceError` rather than a broken instantiation downstream.
 
-# A bracket parameter's bound is a TRAIT LIST (a conformance requirement,
-# `T: Copyable` or `T: Movable & Deinitable`) only when every `&`-joined piece
-# is a (dotted) name. Anything else — a value or function type such as
-# `fn(Strat.Value) -> Dest` — is a type constraint, not a list of traits to
-# prove conformance against, and the trait-bound evidence check must skip it
-# rather than test membership in it.
-_TRAIT_LIST_RE = re.compile(r'[\w.]+(\s*&\s*[\w.]+)*')
-
-
 # `[T: Trait, U: Other, count: Int]` — capture the bound that follows each
 # type-param name. A param with no `: Bound` (or a value param like `count:
 # Int`, which we treat as unbounded for our purposes) maps to None.
@@ -2758,10 +2749,7 @@ def _bound_trait_evidence(struct_src, arg, trait, fn_bounds, seen):
     and both are ones we can name:
 
       * the bound argument is a bare signature type parameter that does not
-        carry the trait — and the trait is one this module can decide (a
-        declared trait or one in play as a base); a concrete-type bound such
-        as `length: SIMDLength` is a type constraint, not a trait, and
-        cannot be unproven;
+        carry the trait;
       * it is a generic instantiation whose conformance to the trait is
         declared CONDITIONALLY (`Copyable where conforms_to(T, Copyable)`),
         and reducing that condition through the supplied arguments lands on a
@@ -2796,32 +2784,8 @@ def _bound_trait_evidence(struct_src, arg, trait, fn_bounds, seen):
         b = fb[arg]
         if b is None:
             return 'proven'
-        # The enclosing signature's own declaration for `arg` may be a
-        # non-trait TYPE: a bracket parameter is declared with a function or
-        # value type (`mapFn: fn(Self.Value) -> Dest`), and that type is a
-        # constraint on what may be bound to it, not a list of traits the
-        # bound must conform to. There is nothing to prove conformance to, so
-        # it cannot be evidence for or against this requirement — the same
-        # "unreadable means unprovable, not proven-false" rule as a None.
-        # (The declared DEFAULT of a bounded parameter is already stripped
-        # from the map before it gets here; see
-        # `check_signature_param_bound_evidence`.)
-        if not _TRAIT_LIST_RE.fullmatch(b):
-            return 'proven'
         traits = [t.strip() for t in b.split('&') if t.strip()]
-        if trait in traits:
-            return 'proven'
-        # The enclosing signature does not imply the requirement. That is
-        # unprovable only when the requirement is a conformance this module
-        # can decide: a trait declared here or in play as a base (the same
-        # test the where-clause evidence uses). A concrete type bound
-        # (`SIMDLength`, `DType`, `Int`) is a type constraint, not a trait —
-        # there is no conformance to prove — and std/simd.mojo's
-        # `_shuffle_variadic` returns `SIMD[Self.dtype, output_size]` with
-        # `output_size: Int` against `SIMD`'s `length: SIMDLength`.
-        if not _is_trait_like_bound(struct_src, trait):
-            return 'proven'
-        return 'unproven'
+        return 'proven' if trait in traits else 'unproven'
     m = re.fullmatch(r'([A-Za-z_]\w*)\s*\[(.*)\]', arg, re.S)
     if not m:
         return 'proven'
@@ -2866,29 +2830,8 @@ def check_signature_param_bound_evidence(struct_src, tmpl, targs, fn_bounds):
     bounds = parse_bounds(tmpl)
     if not bounds:
         return None
-    # The fn-side bounds come from the parser capture
-    # (`comptime_param_annotations`), which keeps the declared DEFAULT of a
-    # bounded bracket parameter inside the annotation text (`'DType = Self .
-    # dtype'`). The struct-side reader (`parse_bounds`) strips it; without the
-    # same strip here the bound list for such a parameter would be
-    # `['DType = Self . dtype']`, a required `DType` could never be found in
-    # it, and every bounded+defaulted type parameter used in a signature
-    # (std/simd.mojo's `_refine`, std/ffi's `get_function`, std/compile's
-    # `compile_info`) raised a false "lacking evidence".
-    fn_bounds = {
-        k: v.partition('=')[0].strip() if isinstance(v, str) else v
-        for k, v in (fn_bounds or {}).items()
-    }
     for pname, bound in bounds.items():
         if not bound or pname not in targs:
-            continue
-        # Only a TRAIT LIST is a conformance requirement. A bracket parameter
-        # may instead be constrained by a non-trait type (a value or function
-        # type, `mapFn: fn(Strat.Value) -> Dest`): that is a type constraint,
-        # not a trait, and nothing can be "unproven" about it. Accepting it
-        # mirrors `check_bounds`'s oracle, which answers (True, []) for
-        # anything it cannot resolve as a trait.
-        if not _TRAIT_LIST_RE.fullmatch(bound):
             continue
         arg = targs[pname].strip()
         for trait in [b.strip() for b in bound.split('&') if b.strip()]:

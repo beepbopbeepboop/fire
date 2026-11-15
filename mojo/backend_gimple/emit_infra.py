@@ -1649,11 +1649,7 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
                     if len(_tail) == 2:
                         sig = ret + ' ' + _tail[1]
             if not (sym in gen._NEEDS_SELF_EXTERN and gen._LIBC_SIGS.get(sym)):
-                # Only the C++-only callable spelling is rewritten. Rebuilding the whole signature from `c_params`
-                # (as an earlier version did) dropped every parameter of an export that carries only a `signature`
-                # text and no `c_parameters`: `std_bit_mask_splat(int64_t)` became `(void)`, and 208 stdlib files
-                # failed with "too many arguments ... expected 0, have 1".
-                sig = gimple_ctypes.c_client_sanitize_signature_text(sig)
+                sig = f"{ret} {name} ({', '.join(c_params) if c_params else 'void'})"
             gen.func_return_types[sym] = ret
             gen.func_param_types[sym] = ptypes
             gen.imported_symbols[sym] = {

@@ -1,9 +1,9 @@
-# Land: should finished branch fix-proof-fix-gate-gimple-lint land?
+# Land: should finished branch fix-gate-bootstrap-stage1-dumps-fire-compiler-py land?
 
-**Branch:** `work/fix-proof-fix-gate-gimple-lint` (task `fix-proof-fix-gate-gimple-lint`; its tip is also saved as `refs/archive/work/fix-proof-fix-gate-gimple-lint`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 33 behind it; task started 2026-11-15 13:09:53
-**Original work:** Branch work/fix-gate-gimple-lint (a finished worker branch; original task: The full gate (aafb549c) is red on master in job `gimple-lint`. Last working commit: d3ec70ee73. First not working: a0dfc3b0f
-**Original claims:** gate:gimple-lint
+**Branch:** `work/fix-gate-bootstrap-stage1-dumps-fire-compiler-py` (task `fix-gate-bootstrap-stage1-dumps-fire-compiler-py`; if the branch is gone, its tip is `refs/archive/work/fix-gate-bootstrap-stage1-dumps-fire-compiler-py`).
+**Age:** last commit 2026-11-12, first unlanded commit 2026-11-12; 1 commit(s) ahead of master, 971 behind it; task started 2026-11-12 14:28:42
+**Original work:** The full gate (0cce3da3) is red on master in job `bootstrap-stage1-dumps:fire_compiler.py`. Last working commit: e8421fc41b. First not working: c38d24c92d. Read the failing output in /Users/mrs/net/ch
+**Original claims:** gate:bootstrap-stage1-dumps:fire_compiler.py
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,5 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 13:51:49: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 33 behind it; task started 2026-11-15 13:09:53)
-  Branch: work/fix-proof-fix-gate-gimple-lint
-  Conflicting files: see `git merge master`
+- 2026-11-15 10:31:54: worker says PARTIAL, not DONE, and no bug doc is left to continue it on (last commit 2026-11-12, first unlanded commit 2026-11-12; 1 commit(s) ahead of master, 971 behind it; task started 2026-11-12 14:28:42)
+  Branch: work/fix-gate-bootstrap-stage1-dumps-fire-compiler-py

@@ -2251,7 +2251,8 @@ def _register_reflected_struct(gen, name, type_info, exports, parse_c_sig):
         # Rebuild the extern signature from sanitized types so the
         # declaration matches the stored param types (a `std::function<...>`
         # in `msig` is not valid C).
-        msig = gimple_ctypes.c_client_sanitize_signature_text(msig)
+        _msig_name = msig.split('(', 1)[0].strip().split()[-1].lstrip('*')
+        msig = f"{mret} {_msig_name} ({', '.join(mptypes) if mptypes else 'void'})"
         # The C symbol is the function name inside the signature — this is
         # whatever the defining module's own compile actually emitted
         # (see GimpleGen._struct_method_csym_static / reflect.py's

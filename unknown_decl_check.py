@@ -47,11 +47,7 @@ _NON_NAME_NODES = (N.StringLiteral, N.TstringLiteral, N.DottedLiteral)
 # Fields that hold an attribute name, not a binding.
 _NON_BINDING_STR_FIELDS = frozenset({'member'})
 
-# A backtick-escaped identifier (`var `!` = 1`) is one identifier spelling, not
-# two punctuations: the parser keeps the backticks in the name, so a binding
-# walk that only knew `[A-Za-z_]\w*` bound NOTHING for it and then reported the
-# read of the same spelling as undeclared.
-_IDENT_RE = re.compile(r'`[^`\n]+`|[A-Za-z_]\w*')
+_IDENT_RE = re.compile(r'[A-Za-z_]\w*')
 
 # Fields whose reads are not checked here. A decorator's or `@align(...)`'s
 # arguments are compile-time arguments that elaborate.py resolves and reports
