@@ -1875,6 +1875,37 @@ def test_deps_order_and_skip():
         check('deps: the skip says which dep', 'b' in out, out)
 
 
+def test_a_cascade_skip_is_a_skip_not_an_error():
+    """A dependent of a dep that settled to SKIP in the same pass is SKIP.
+
+    The scheduler evaluates a job's deps at the top of the loop and settles
+    blocked ones at the bottom, so when a whole cascade settles in one pass
+    (a fails, b is blocked by a, c is blocked by b) c is still merely
+    'pending' when the nothing-running-nothing-ready branch fires. That branch
+    used to ERROR c with `dependency not selected: ` and an EMPTY list — its
+    dep had a verdict, it was never missing — which counted a lost cascade
+    as a FAILED test and, in the 2026-11-14 confirm gate, put the stage2 and
+    stage3 dumps fanouts in the FAILED list with that empty detail: the red
+    verdict that writes bug docs for jobs whose only crime was sitting behind
+    a red upstream chain. c gets the same SKIP the blocked branch would have
+    given it, naming the dep that did not pass.
+    """
+    with Sandbox(a=dict(cmd=ok_cmd('raise SystemExit(1)')),
+                 b=dict(cmd=ok_cmd('pass'), deps=['a']),
+                 c=dict(cmd=ok_cmd('pass'), deps=['b'])):
+        log = os.path.join(HERE, 'build', 'test-suite-cascade-skip.log')
+        rc, out = run(['a', 'b', 'c'], jobs=4, log=log)
+        text = open(log).read() if os.path.exists(log) else ''
+        check('cascade: the root failure still fails the run',
+              rc == 1, f'rc={rc}')
+        check('cascade: the dependent is SKIPPED, not ERROR',
+              'dependency not selected' not in out + text, out + text)
+        check('cascade: the skip names the dep that did not pass',
+              'dependency did not pass' in text and 'b=skip' in text, text)
+        check('cascade: the tally counts one failure, not two',
+              '0 passed, 1 failed, 2 skipped' in out, out)
+
+
 def test_exclusive_is_alone():
     """An exclusive test must not overlap anything else — that is the whole
     mechanism that lets a 55 GB job share a machine with a test suite.
@@ -3636,6 +3667,37 @@ def test_missing_dep_is_reported():
             rc, out = 1, str(e)
         check('deps: a missing dep is an error naming it', rc == 1 and
               'other' in out, f'rc={rc} out={out!r}')
+
+
+def test_a_skipped_dep_skips_its_dependents():
+    """A gate turned OFF must not turn the run red.
+
+    `--skip` is how tools/gates.json turns a known-red job OFF for a backlog.
+    It removed the job from `chosen` and left every dependent selected with a
+    dependency no job in the plan could satisfy, so `execute` reported
+    `ERROR dependency not selected` against the dependent — the gate was red by
+    construction on a policy meant to keep a known red out of it. The
+    integrator's confirm step then re-ran that dependent by name (which selects
+    its deps, the OFF job among them), the real red job ran after all, and a
+    fresh per-job gate doc was filed for a job gates.json already tracks. A
+    dependent of a skipped test is skipped, as one whose dep failed is.
+    """
+    log = os.path.join(HERE, 'build', 'test-suite-skipdep.log')
+    with Sandbox(prereq=dict(cmd=ok_cmd('pass')),
+                 needs=dict(cmd=ok_cmd('raise SystemExit(1)'), deps=['prereq']),
+                 other=dict(cmd=ok_cmd('pass'))):
+        class Opts:
+            only = None
+            skip = [r'^prereq$']
+        names = suite.select(['needs', 'other'], Opts())
+        check('skip: a dep and its dependent are both out of the plan',
+              names == ['other'], f'got {names}')
+        rc, out = run(['needs', 'other'], skip=r'^prereq$', log=log)
+    text = open(log).read() if os.path.exists(log) else ''
+    check('skip: a dependent of a skipped dep does not fail the run',
+          rc == 0 and '1 passed' in out, f'rc={rc} out={out!r}')
+    check('skip: no dependency-not-selected error is recorded',
+          'dependency not selected' not in text, text[-400:])
 
 
 def test_named_test_brings_its_deps():
@@ -6791,6 +6853,7 @@ def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
                test_deps_order_and_skip,
+               test_a_cascade_skip_is_a_skip_not_an_error,
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
@@ -6809,6 +6872,7 @@ def main():
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
+               test_a_skipped_dep_skips_its_dependents,
                test_dependent_waits_for_the_whole_fanout,
                test_log_has_passes_screen_does_not,
                test_checked_run_key_covers_what_it_names,

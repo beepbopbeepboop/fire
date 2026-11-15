@@ -160,4 +160,37 @@ was removed; the entry is now re-pointed at `bugs/mid/GATE_recover_land_remainde
 (fixed by `test_gates_off_entries_name_a_doc.py`). Part 5 still cannot turn
 stage1-transitive on without narrowing that 23-job entry.
 
+## Status 2026-11-14 (the per-job gate docs for stage2/stage3-dumps were a runner artifact)
+
+The integrator filed per-job gate docs for `bootstrap-stage2-dumps` and
+`bootstrap-stage3-dumps` at 12:22 as if `master` had just turned both red. It
+had not: both jobs are OFF in this doc's entry, as they have been since
+2026-11-02, and the 9-of-46 self-host dump failures recorded above are the red
+they have always been. The new docs came from the runner, in three steps:
+
+1. `--skip` (how `tools/gates.json`'s OFF entry is applied) removed the OFF
+   jobs from the plan but left their dependents selected, so `execute` reported
+   `ERROR dependency not selected` for
+   `ab-native`, `native-dumpfull`, `selfhost-memory`, `selfhost-memory-fire`,
+   `bootstrap-stage2-cc`, `bootstrap-stage2-transitive` and
+   `bootstrap-stage3-transitive` — a gate red by construction on a policy that
+   exists to keep a known red out of the gate.
+2. The integrator's confirm step re-ran those seven dependents by name, and
+   naming a test selects its deps, so the OFF `bootstrap-stage2-dumps` /
+   `bootstrap-stage3-dumps` fanouts ran after all (with the 30 GB
+   stage2-transitive) and failed the known 9 items.
+3. `gate_doc` then filed one doc per failing job, duplicating this one.
+
+Fixed in `tools/suite.py` (`select` drops every dependent of a skipped test,
+transitively: no plan can carry an unsatisfiable dep) and `tools/integrate.py`
+(`gate_doc` files nothing for a job its gates.json OFF entry already tracks).
+Pinned by `test_suite.py::test_a_skipped_dep_skips_its_dependents` and
+`tools/test_gate_doc.py::test_a_gate_that_is_off_files_no_second_doc`; the first
+was measured failing before the fix (`ERROR needs dependency not selected:
+prereq`, exit 1) and passing after, the second filing the OFF job's per-job doc
+before and not after. The stage3 duplicate is deleted here (this doc owns the
+red); the stage2 lane resolves its own copy. Nothing about part 5 changed:
+making the three jobs green still needs the heavy chain
+(`python3 tools/suite.py bootstrap-verify`), which only the integrator runs.
+
 

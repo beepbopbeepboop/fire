@@ -5771,8 +5771,28 @@ def select(names, opts):
             if not kept:
                 raise SystemExit(f"suite.py: --only {pat!r} matched nothing")
             chosen = kept
-    for pat in getattr(opts, 'skip', None) or []:
-        chosen = [n for n in chosen if not re.search(pat, n)]
+    skip = getattr(opts, 'skip', None) or []
+    if skip:
+        chosen = [n for n in chosen if not any(re.search(p, n) for p in skip)]
+        # A dependent of a skipped test is skipped too. `--skip` is how
+        # tools/gates.json turns a known-red job OFF for a backlog, and a
+        # dependent cannot run without it; leaving it selected made `execute`
+        # report `ERROR dependency not selected` against the dependent, so the
+        # gate was RED BY CONSTRUCTION on a policy that is supposed to make it
+        # green. Worse, the integrator's confirm step then re-ran that
+        # dependent by name — which selects its deps, the OFF job among them —
+        # the real red job ran after all, and a fresh `bugs/gate-<job>.md` was
+        # filed for a job gates.json already tracks (2026-11-14:
+        # bootstrap-stage2-dumps and bootstrap-stage3-dumps, duplicates of the
+        # recover-land OFF entry's doc). Dropping the dependent here is what
+        # make does when a prerequisite is excluded: the target is not remade.
+        while True:
+            present = set(chosen)
+            kept = [n for n in chosen
+                    if all(d in present for d in REGISTRY[n].deps)]
+            if len(kept) == len(chosen):
+                break
+            chosen = kept
     if not chosen:
         raise SystemExit("suite.py: nothing selected")
     return chosen
@@ -5925,10 +5945,34 @@ def execute(jobs, per_test, opts, log: Log):
                 log.line(_line(job, res, done, total, len(running)))
 
             if waiting and not running and not ready:
-                # Nothing running, nothing ready: a dependency no job in this
-                # plan can ever satisfy (a test whose dep was not selected).
-                # Say so instead of spinning.
+                # Nothing running, nothing ready. Two shapes reach here, and
+                # they are not the same defect. One is a dependency that
+                # settled to a non-pass verdict THIS iteration: the blocked
+                # branch above deleted and settled it after this job had
+                # already been seen as merely pending, so the job lost its
+                # dep between the two halves of the same pass. That job is a
+                # dependent that lost, and it gets the same SKIP the blocked
+                # branch gives its own dependants — it was selected, it was
+                # never going to run, and "dependency not selected: " with an
+                # EMPTY list (the shape a whole cascade settling in one pass
+                # produced, turning a red upstream chain into a fresh
+                # NEW-no-bug-doc ERROR against an innocent gate job) says
+                # neither. Only a dependency with no verdict AND no job that
+                # could produce one is the shape this branch exists for: a dep
+                # that was never selected, and a plan that would spin forever.
                 job = sorted(waiting.values(), key=lambda j: order[j.key])[0]
+                failed = [d for d in job.spec.deps
+                          if d in state and state[d] not in DEP_SATISFIED]
+                if failed:
+                    res = Result(SKIP, detail='dependency did not pass: '
+                                 + ', '.join(f'{d}={state[d]}' for d in failed))
+                    del waiting[job.key]
+                    with lock:
+                        results[job.key] = res
+                        done += 1
+                        settle(job.spec.name, SKIP)
+                    log.line(_line(job, res, done, total, len(running)))
+                    continue
                 missing = [d for d in job.spec.deps if pending(d)]
                 res = Result(ERROR, detail='dependency not selected: '
                              + ', '.join(missing))
@@ -6765,7 +6809,7 @@ def main(argv=None):
                     help='re-run cached tests instead of replaying them '
                          '(fresh results are still published)')
     ap.add_argument('--skip', action='append', metavar='RE', default=[],
-                    help='drop tests whose name matches RE (repeatable): a gate turned OFF for a backlog, see tools/gates.json')
+                    help='drop tests whose name matches RE (repeatable), and every test that depends on one: a gate turned OFF for a backlog, see tools/gates.json')
     ap.add_argument('--only', action='append', metavar='RE',
                     help='within the selected buckets, keep only tests whose '
                          'name matches RE (repeatable)')
