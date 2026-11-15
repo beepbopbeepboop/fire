@@ -457,8 +457,8 @@ MEASURED_PEAK_GB = {
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     'sqliteruntime':               (2.3, 'measured'),
-    'bootstrap-stage1-transitive': (2.2, 'measured'),
-    'bootstrap-stage2-cc':         (2.3, 'measured'),
+    'bootstrap-stage1-transitive': (4.1, 'measured'),
+    'bootstrap-stage2-cc':         (4.1, 'measured'),
     'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
     'ptrreg-boxed-str':            (0.2,  'measured'),
@@ -2609,8 +2609,12 @@ CLOSURE_INCOMPLETE = r'# ERROR: compiling imported module|unavailable in compile
 SELFHOST_DUMP_REJECT = r'mojo_unsupported_iter|unavailable in compiled mode'
 test('bootstrap-stage1-transitive',
      [PY, '../fire.py', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='tiny', cwd='stage1', env={'PYTHONPATH': '..'},
+     driver='mem', mem='small', cwd='stage1', env={'PYTHONPATH': '..'},
      deps=['bootstrap-stage1-dumps'], reject=CLOSURE_INCOMPLETE,
+     memwhy='measured 4.1 GB (2026-11-14 bootstrap run): the whole-closure '
+            'python dump peaks at 4.1 GB; 1.5x = 6.15 GB so `small` (8) is the '
+            'ratchet class, not `mid` (6). Over the 4 GB debt line — see '
+            + MEM_DEBT_DOC,
      desc='stage1: the one transitive-closure fire.ci that stage2 compiles')
 
 # The gcc -O0 -fgimple compile of the 40 MB closure into a real binary. Its
@@ -2620,18 +2624,25 @@ test('bootstrap-stage1-transitive',
 # a few minutes, and a wrong hit could not survive its own output being
 # compared by `verify` a few steps later.
 #
-# `mem='tiny'` (4), down from `stage` (96) — the class that used to be
-# documented on exactly this workload, "the largest footprint ever observed
-# completing a self-compile". Measured peak 1.9 GB as the tree stands (gcc -O0
-# over the translation unit, `bootstrap-stage2-cc`), so the ratchet assigns
-# 2.85 GB. The Makefile's own `stage2/mojo` rule names the same
-# class, so a hand-run `make stage2/mojo` and this step cannot disagree — and
-# they must not, because a recipe asking for more than the job reserved takes a
-# second reservation inside a tree the first already accounts for, which
-# deadlocks instead of failing.
-test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
+# `mem='small'` (8), measured peak 4.0 GB on 2026-11-14; the ratchet assigns the
+# smallest class covering 1.5x (mid = 6 GB is ≥ 4.0×1.5 = 6.0 GB, so the rule `mid`
+# is the official ratchet answer), but both `mid` and `small` are in the debt-line
+# territory since 6 > 4.0 and the job is over the line by the suite's MEM_DEBT_GB
+# rule — see MEASURED_PEAK_GB and MEM_DEBT_DOC — so the class registered is the
+# one that actually completes the gcc compile under memslot. The Makefile's own
+# `stage2/mojo` rule names the same class, so a hand-run `make stage2/mojo` and
+# this step cannot disagree — and they must not, because a recipe asking for more
+# than the job reserved takes a second reservation inside a tree the first already
+# accounts for, which deadlocks instead of failing. The old `tiny` (4) measured
+# 1.9 GB when this job passed; the tree has grown since.
+test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='small',
      deps=['bootstrap-stage1-transitive'],
      artifact='stage2/mojo', inputs=['stage1/fire.ci', RUNTIME_SRC, RUNTIME_HDR],
+     memwhy='measured 4.1 GB (2026-11-14 bootstrap run, MEMLIMIT_GB=96, gcc '
+            'completed): gcc -O0 over the 40 MB translation unit peaks at 4.1 GB; '
+            '1.5x = 6.15 GB so `small` (8) is the ratchet class — `mid` (6) covers '
+            'only 1.46x and the run was RESOURCE-capped at it. Over the 4 GB debt '
+            'line — see ' + MEM_DEBT_DOC,
      desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo')
 
 # `tiny` (4), down from `module` (24): 0.5 GB measured PER ITEM, the only
