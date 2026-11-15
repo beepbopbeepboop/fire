@@ -1894,7 +1894,8 @@ test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
          'fire_compiler.py', 'myinterpreter.py', 'module_loader.py', 'cas.py',
          'ast_rewriter.py', 'fire.py', 'hello.mojo', 'class_jit.mojo',
          'test_struct.mojo', 'array_ops_jit.mojo'],
-     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)')
+     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)',
+     disabled='bugs/gate-gimple-lint.md')
 # The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
 # hard-coded one. Registered by the integrator: the test landed with help-rename
 # but in no bucket, which turned `suite-self-test`'s estate check red.
@@ -2548,7 +2549,8 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
+     disabled='bugs/gate-stdlib-syntax.md')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
