@@ -2806,11 +2806,6 @@ def _bound_trait_evidence(struct_src, arg, trait, fn_bounds, seen):
         # (The declared DEFAULT of a bounded parameter is already stripped
         # from the map before it gets here; see
         # `check_signature_param_bound_evidence`.)
-        # `comptime_param_annotations` records an annotation TOGETHER with its
-        # default (`'DType = Self.dtype'`), so the trait list is what precedes
-        # the first `=`; comparing the whole string made every defaulted
-        # parameter read as unproven (the stdlib-syntax red at simd.mojo:2247).
-        b = re.split(r'\s*=\s*', b, 1)[0]
         if not _TRAIT_LIST_RE.fullmatch(b):
             return 'proven'
         traits = [t.strip() for t in b.split('&') if t.strip()]

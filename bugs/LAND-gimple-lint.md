@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-gimple-lint land?
+# Land: should finished branch fix-proof-fix-gate-gimple-lint land?
 
-**Branch:** `work/bug-land-gimple-lint` (task `bug-land-gimple-lint`; its tip is also saved as `refs/archive/work/bug-land-gimple-lint`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 22 behind it; task started 2026-11-15 14:12:40
-**Original work:** Fix the bug in bugs/LAND-gimple-lint.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report). QUICK tests on
-**Original claims:** bug:LAND-gimple-lint
+**Branch:** `work/fix-proof-fix-gate-gimple-lint` (task `fix-proof-fix-gate-gimple-lint`; its tip is also saved as `refs/archive/work/fix-proof-fix-gate-gimple-lint`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 33 behind it; task started 2026-11-15 13:09:53
+**Original work:** Branch work/fix-gate-gimple-lint (a finished worker branch; original task: The full gate (aafb549c) is red on master in job `gimple-lint`. Last working commit: d3ec70ee73. First not working: a0dfc3b0f
+**Original claims:** gate:gimple-lint
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 15:26:00: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 22 behind it; task started 2026-11-15 14:12:40)
-  Branch: work/bug-land-gimple-lint
-  Conflicting files: myinterpreter.py
+- 2026-11-15 13:51:49: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 33 behind it; task started 2026-11-15 13:09:53)
+  Branch: work/fix-proof-fix-gate-gimple-lint
+  Conflicting files: see `git merge master`

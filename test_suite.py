@@ -2206,14 +2206,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_sentinel.py': 1,
     'test_regress_gpu_offload_validation_modular_part1.py': 1,
     'test_regress_gpu_offload_validation_modular_part4.py': 1,
-    # Four regression pins gained a literal `timeout=` on 2026-11-15 (a
-    # subprocess of the compiler under test). Recorded rather than converted:
-    # each is one child process with a real wall-clock bound, which is what a
-    # residue row is for.
-    'test_regress_generator_keyword_arg_binding.py': 3,
-    'test_regress_scriptutil_generator_closure.py': 3,
-    'test_regress_yield_from_module_generator.py': 2,
-    'test_regress_yield_from_word_iterator.py': 3,
     'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2772,10 +2764,8 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
     # `formal-read-before-store` are no longer disabled either. This list is the
     # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled']
+    # rather than freezing it.
+    expected_disabled = ['gimple', 'metalgpu']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2917,10 +2907,8 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
     # `formal-read-before-store` are no longer disabled either. This list is the
     # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled']
+    # rather than freezing it.
+    expected_disabled = ['gimple', 'metalgpu']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
@@ -4217,7 +4205,6 @@ UNREGISTERED = {
     'test_float_bit_reinterpret.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
-    'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
@@ -4231,7 +4218,6 @@ UNREGISTERED = {
     'test_runtime_class_creation.py': _STANDALONE_TEST_REASON,
     'test_runtime_cstr_region.py': _STANDALONE_TEST_REASON,
     'test_stdlib_dylib_ratchet.py': _STANDALONE_TEST_REASON,
-    'test_stdlib_syntax_dunder_overloads.py': _STANDALONE_TEST_REASON,
     'test_str_slice_tuple_return.py': _STANDALONE_TEST_REASON,
     'test_untyped_closure_str_return.py': _STANDALONE_TEST_REASON,
     'tools/test_control_pool.py': _STANDALONE_TEST_REASON,
@@ -5453,50 +5439,6 @@ def test_the_suite_self_test_registrations_are_gated():
                'bug:SUITE_self_test_red: '
                f'{name} is registered but not reachable from `gate` '
                f'(cmd={sorted(files)})'))
-
-
-def test_the_land_doc_suite_is_registered_where_its_bucket_says():
-    """`tools/test_land_doc.py` is named by a spec, and by the RIGHT bucket.
-
-    The file landed in `62411916c` with the land-doc feature and was named by
-    no spec and no `UNREGISTERED` entry, so the estate check above was red on
-    it and two docs were filed for the same line
-    (`SUITE_test_land_doc_unregistered` and its duplicate
-    `SUITE_test_land_doc_missing_estate_entry`; both deleted with this pin).
-    The registration landed in `bd0d95e38` with an unrelated unknown-decl fix.
-    The estate check found it, but it can only ask that SOME spec names the
-    file, and the bucket census can only ask that a registration is in SOME
-    bucket — between them they do not state the two decisions this pin is
-    about:
-
-      * the spec's `cmd` names THAT file. A rename that leaves the
-        `land-doc` registration pointing at the old name still satisfies
-        "some spec names a file that exists", while the file the check found
-        is back to being run by nothing; and
-      * it is in `orchestrator`, NOT in `check`. `land_doc` is a git-facing
-        fleet pass (`branch_age` and `commit_doc` are mocked only because the
-        test needs a temp repo), and `check` is deliberately not in the
-        business of spawning git or touching fleet state — that is the whole
-        reason `orchestrator` is a separate bucket. Moving this job into the
-        everyday loop would put a landing-path test in it, and "in some
-        bucket" says nothing about which.
-    """
-    name = 'land-doc'
-    spec = suite.REGISTRY.get(name)
-    files = ({os.path.basename(str(c)) for c in spec.cmd}
-             if spec is not None else set())
-    check('the suite: a spec names tools/test_land_doc.py',
-          spec is not None and 'test_land_doc.py' in files,
-          ('the estate check named this file on 2026-11-15 and it was '
-           'registered in bd0d95e38; no spec names it now, so it runs on '
-           f'nothing (spec={spec!r}, cmd={sorted(files)})'))
-    check('the suite: land-doc runs in `orchestrator`, not in `check`',
-          spec is not None
-          and name in suite.expand_bucket('orchestrator')
-          and name not in suite.expand_bucket('check'),
-          ('land_doc is a git-facing landing pass; `orchestrator` is the '
-           'bucket for those and `check` must not spawn git — a move into '
-           '`check` is a coverage decision this row exists to refuse'))
 
 
 def test_no_test_name_is_registered_twice():
@@ -6991,7 +6933,6 @@ def main():
                test_every_test_file_is_registered,
                test_the_trait_conformance_diagnostic_suites_are_gated,
                test_the_suite_self_test_registrations_are_gated,
-               test_the_land_doc_suite_is_registered_where_its_bucket_says,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,

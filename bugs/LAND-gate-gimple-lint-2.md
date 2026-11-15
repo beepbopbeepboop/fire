@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-gate-gimple-lint-2 land?
+# Land: should finished branch bug-gate-gimple-lint-2 land?
 
-**Branch:** `work/bug-land-gate-gimple-lint-2` (task `bug-land-gate-gimple-lint-2`; its tip is also saved as `refs/archive/work/bug-land-gate-gimple-lint-2`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 13 behind it; task started 2026-11-15 14:32:17
-**Original work:** Fix the bug in bugs/LAND-gate-gimple-lint-2.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report). QUICK t
-**Original claims:** bug:LAND-gate-gimple-lint-2
+**Branch:** `work/bug-gate-gimple-lint-2` (task `bug-gate-gimple-lint-2`; its tip is also saved as `refs/archive/work/bug-gate-gimple-lint-2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-14, first unlanded commit 2026-11-14; 1 commit(s) ahead of master, 208 behind it; task started 2026-11-15 13:28:07
+**Original work:** An earlier attempt left 1 commit(s) on branch work/bug-gate-gimple-lint, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted the doc, which is not
+**Original claims:** bug:gate-gimple-lint
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 15:26:00: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 2 commit(s) ahead of master, 13 behind it; task started 2026-11-15 14:32:17)
-  Branch: work/bug-land-gate-gimple-lint-2
-  Conflicting files: myinterpreter.py
+- 2026-11-15 14:20:29: conflicts with master (last commit 2026-11-14, first unlanded commit 2026-11-14; 1 commit(s) ahead of master, 208 behind it; task started 2026-11-15 13:28:07)
+  Branch: work/bug-gate-gimple-lint-2
+  Conflicting files: test_selfhost_closure_parses.py

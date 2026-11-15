@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a command under a total-footprint ceiling, killing it if it goes over.
+"""Run a command under a total-RSS ceiling, killing it if it goes over.
 
 Why this exists rather than `ulimit -v` / RLIMIT_AS: on macOS neither is a
 usable cap. RLIMIT_AS bounds address space, which the allocator is entitled to
@@ -29,14 +29,9 @@ The measurement and the kill both live in `tools/procrun.py` rather than
 here, because `tools/suite.py` needs the same two — to kill a job's whole tree
 on a timeout, and to read a peak — and a second copy of the process-walk and
 kill order is a second copy of the ways to get them wrong. That file documents
-the two approximations in the number (the figure is summed over the process
-TREE, and summing double-counts shared pages, so the cap reads high — the safe
+the two approximations in the number (RSS is summed over the process TREE, and
+summing double-counts shared pages, so the cap reads high — the safe
 direction).
-
-The figure is `phys_footprint` (resident + compressed + swapped), NOT RSS.
-macOS compresses and swaps cold dirty pages out of RSS, so a runaway can read
-1-2 GB of RSS at 35 GB of real cost and sail under any RSS ceiling while the
-machine swaps itself to death (2026-11-15). See "Footprint" in procrun.py.
 """
 
 import argparse
@@ -52,7 +47,7 @@ from procrun import GB                                           # noqa: E402
 
 POLL_SECONDS = 0.5
 # macOS `ps` costs ~50-100ms, and a 3-minute run is ~360 samples. Sampling
-# more finely than this buys nothing: memory does not move fast enough between
+# more finely than this buys nothing: RSS does not move fast enough between
 # samples for the 3.5x margin to matter.
 
 
@@ -90,7 +85,7 @@ def main(argv):
         prog="memcap", description=__doc__.split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--limit-gb", type=float, default=55.0,
-                    help="total memory-footprint ceiling for the process tree, in GB "
+                    help="total RSS ceiling for the process tree, in GB "
                          "(default 55.0, the measured healthy peak)")
     ap.add_argument("--label", default=None,
                     help="what to call the command in progress output")

@@ -937,17 +937,6 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
             # of this dispatch scores the same way in `_resolve_overload`.
             chosen = _pick_overload_by_ctype(
                 matching, [p[0] for p in arg_pairs])
-            if chosen is None:
-                # No ctype signal at all. Every survivor already has this
-                # call's arity, and `_emit_call` coerces each argument to
-                # the chosen overload's declared C parameter type, so any
-                # survivor is ABI-valid; naming one is strictly better than
-                # the bare symbol no overload defines. Deterministic first,
-                # the same tie-break `_pick_overload_by_ctype` itself uses
-                # when two candidates score equally. Measured:
-                # `StringDict[StringSpan, Int][StringSpan("fruit")]` — both
-                # `__getitem__` overloads erase to `(self, int64_t)`.
-                chosen = matching[0]
     overload_id = (chosen or {}).get('overload_id', '') or ''
     mangled = _gmm_as_str(_ggf._struct_method_csym(gen, sn, method, overload_id))
     ret_type = (chosen or {}).get('ret_type') or gen.func_return_types.get(
@@ -2768,105 +2757,6 @@ def _lmc_tagged_word_receiver(gen, node: gimple_ctypes.CallExpr, method: str, ot
     return None
 
 
-_IMPLICIT_COPY_RUNTIME = {
-    'MojoList *': 'mojo_list_copy',
-    'MojoDict *': 'mojo_dict_copy',
-    'MojoSet *': 'mojo_set_copy',
-    'MojoBytes *': 'mojo_bytes_copy',
-}
-
-
-def _emit_fieldwise_copy_into(gen, dst, src_local, sname, depth):
-    """Copy every registered field of `sname` from `src_local` into `dst`.
-
-    This is real Mojo's implicit copy for a fieldwise struct: one copy per
-    field (struct_field_types, the same table the ctor fallback writes),
-    DEEP for runtime CONTAINER fields (`MojoList`/`MojoDict`/`MojoSet`/
-    `MojoBytes` have their own `*_copy`) and for in-TU struct-pointer
-    fields. A raw word copy would alias the source's mutable state —
-    measured: the cycle wrapper's aliased inner cursor (test_cycle_copyable),
-    and `BinaryHeap[Int](copy=heap)` sharing `_data` so popping one heap
-    drained the other. GIMPLE: a component_ref is not a valid store RHS
-    (`invalid RHS for gimple memory store: 'component_ref'`, measured) —
-    every field read and every copied store goes through a local.
-    """
-    for _fn in (gen.struct_field_types.get(sname) or {}):
-        _fnm = gimple_ctypes._safe_field(_as_str(_fn))
-        _ft = _as_str((gen.struct_field_types.get(sname) or {})[_fn])
-        _fv = gen._new_temp(_ft)
-        gen._emit(f"  {_fv} = {src_local}->{_fnm};")
-        _cpy = _IMPLICIT_COPY_RUNTIME.get(_ft)
-        if _cpy is not None:
-            _fv = gen._call_expr(_ft, _cpy, [(_ft, _fv)])
-        _fsn = (gimple_exprtypes._struct_name_of(_ft)
-                if _ft.endswith(' *') else None)
-        if (_fsn and depth < 4
-                and _fsn in getattr(gen, '_intu_prereg_structs', ())):
-            _sub = gen._new_temp(_ft)
-            gen._struct_allocs_needed.add(_fsn)
-            gen._rt_into(_sub, f"_alloc_{_fsn}", [])
-            # PART 6 (2026-10-23, family D piece 2): a field whose
-            # struct type registers an EXPLICIT copy constructor (an
-            # __init__ resolvable on the `copy` kwarg — Observable's,
-            # CopyCounter's) is copied THROUGH that constructor, not by
-            # raw fieldwise recursion: real Mojo's implicit field copy
-            # invokes the field type's copy ctor, and that ctor is exactly
-            # where the counting side effect lives (the Observable copy
-            # ctor's `self._copies.value()[] += 1` — the raw recursion
-            # would copy the pointer word and skip the increment, leaving
-            # copy_b at 0). Structs with no copy ctor (the _ListIterOwned
-            # family) keep the raw recursion in the else.
-            _fcands = gen._struct_method_signatures.get(
-                _gmm_sms_key(_fsn, '__init__'))
-            _fch = None
-            if _fcands:
-                _fch = gen._resolve_overload(
-                    _fcands, [],
-                    [('copy', gimple_ctypes.IdentExpr(name=_fv))])
-            if _fch is not None:
-                init_fname = gen._struct_method_csym(
-                    _fsn, '__init__', _fch['overload_id'])
-                gen._rt_void(f"{init_fname}", [_sub, f"{_fv}"])
-            else:
-                _emit_fieldwise_copy_into(gen, _sub, _fv, _fsn, depth + 1)
-            _fv = _sub
-        gen._emit(f"  {dst}->{_fnm} = {_fv};")
-        # PART 6 (2026-10-22, family C): a TAGGED-Optional field's is_some
-        # side-band is a layout-only member (module_gen's typedef renderer
-        # adds it; it is NOT in struct_field_types), so this fieldwise loop
-        # never copies it — the fresh object's tag byte would be malloc
-        # garbage (its _alloc is a plain malloc) and every tag reader
-        # (`if self._f:` -> `f_is_some`) would act on uninitialized state.
-        # Measured: test_once's `it.copy()` copied the word, not the tag.
-        _tagged_f = gen._tagged_optional_fields.get(sname)
-        if _tagged_f and _as_str(_fn) in _tagged_f:
-            _sv = gen._new_temp('_Bool')
-            gen._emit(f"  {_sv} = {src_local}->{_fnm}_is_some;")
-            gen._emit(f"  {dst}->{_fnm}_is_some = {_sv};")
-    # The presence words are not in struct_field_types (see
-    # StructDef.presence_fields), so the loop above never copies them: a
-    # copy of an object that had a minted field set must keep answering
-    # hasattr True.
-    gimple_ctypes.presence_copy_emit(
-        gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
-
-
-def _lower_implicit_struct_copy(gen, csn, ot, ov):
-    """Allocate `csn` and fill it with a fieldwise copy of `ov`.
-
-    Returns `(ctype, value)` or None when this struct's layout was never
-    registered (a reflected/dylib-only struct has no fields to copy).
-    """
-    if not gen.struct_field_types.get(csn):
-        return None
-    t = gen._new_temp(f'{csn} *')
-    gen._struct_allocs_needed.add(csn)
-    gen._rt_into(t, f"_alloc_{csn}", [])
-    _recv_local = gen._ensure_local(ot, ov)
-    _emit_fieldwise_copy_into(gen, t, _recv_local, csn, 0)
-    return f'{csn} *', t
-
-
 def _lmc_copy(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[str, str]:
     """`x.copy()`.
 
@@ -2938,11 +2828,106 @@ def _lmc_copy(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[str, str]
             # _CycleIterator wrapper — note the latter DOES register
             # a fieldwise __init__, so the gate is "resolvable on
             # the copy kwarg", not "has any __init__"). Synthesize
-            # real Mojo's implicit fieldwise copy; see
-            # `_emit_fieldwise_copy_into`.
-            _implicit = _lower_implicit_struct_copy(gen, _csn, ot, ov)
-            if _implicit is not None:
-                return _implicit
+            # real Mojo's implicit fieldwise copy: alloc + one copy
+            # per source field (struct_field_types, the same table
+            # the ctor fallback writes), DEEP for fields that are
+            # pointers to other in-TU structs (a pointer alias
+            # shares the field's mutable state — measured: the
+            # cycle wrapper's aliased inner cursor, test_cycle_
+            # copyable). GIMPLE: a component_ref is not a valid
+            # store RHS (`invalid RHS for gimple memory store:
+            # 'component_ref'`, measured) — every field read and
+            # every deep-copied store goes through a local.
+            _cf = gen.struct_field_types.get(_csn)
+            if _cf:
+                t = gen._new_temp(f'{_csn} *')
+                gen._struct_allocs_needed.add(_csn)
+                gen._rt_into(t, f"_alloc_{_csn}", [])
+                _recv_local = gen._ensure_local(ot, ov)
+
+                def _emit_fw_copy(dst, src_local, sname, depth):
+                    for _fn in (gen.struct_field_types.get(sname)
+                                or {}):
+                        _fnm = gimple_ctypes._safe_field(_as_str(_fn))
+                        _ft = _as_str((gen.struct_field_types
+                                        .get(sname) or {})[_fn])
+                        _fv = gen._new_temp(_ft)
+                        gen._emit(f"  {_fv} = {src_local}->{_fnm};")
+                        _fsn = (gimple_exprtypes._struct_name_of(_ft)
+                                if _ft.endswith(' *') else None)
+                        if (_fsn and depth < 4
+                                and _fsn in getattr(
+                                    gen, '_intu_prereg_structs', ())):
+                            _sub = gen._new_temp(_ft)
+                            gen._struct_allocs_needed.add(_fsn)
+                            gen._rt_into(_sub, f"_alloc_{_fsn}", [])
+                            # PART 6 (2026-10-23, family D piece 2): a
+                            # field whose struct type registers an
+                            # EXPLICIT copy constructor (an __init__
+                            # resolvable on the `copy` kwarg —
+                            # Observable's, CopyCounter's) is copied
+                            # THROUGH that constructor, not by raw
+                            # fieldwise recursion: real Mojo's implicit
+                            # field copy invokes the field type's copy
+                            # ctor, and that ctor is exactly where the
+                            # counting side effect lives (the Observable
+                            # copy ctor's `self._copies.value()[] += 1`
+                            # — the raw recursion would copy the pointer
+                            # word and skip the increment, leaving
+                            # copy_b at 0). The (a)-branch above does
+                            # the same for the RECEIVER; this is the
+                            # field-level twin. Structs with no copy
+                            # ctor (the _ListIterOwned family) keep the
+                            # raw recursion in the else.
+                            _fcands = gen._struct_method_signatures.get(
+                                _gmm_sms_key(_fsn, '__init__'))
+                            _fch = None
+                            if _fcands:
+                                _fch = gen._resolve_overload(
+                                    _fcands, [],
+                                    [('copy', gimple_ctypes.IdentExpr(
+                                        name=_fv))])
+                            if _fch is not None:
+                                init_fname = gen._struct_method_csym(
+                                    _fsn, '__init__',
+                                    _fch['overload_id'])
+                                gen._rt_void(f"{init_fname}", [_sub, f"{_fv}"])
+                            else:
+                                _emit_fw_copy(
+                                    _sub, _fv, _fsn, depth + 1)
+                            _fv = _sub
+                        gen._emit(f"  {dst}->{_fnm} = {_fv};")
+                        # PART 6 (2026-10-22, family C): a TAGGED-
+                        # Optional field's is_some side-band is a
+                        # layout-only member (module_gen's typedef
+                        # renderer adds it; it is NOT in
+                        # struct_field_types), so this fieldwise loop
+                        # never copies it — the fresh object's tag
+                        # byte would be malloc garbage (its _alloc is
+                        # a plain malloc) and every tag reader
+                        # (`if self._f:` -> `f_is_some`) would act on
+                        # uninitialized state. Measured: test_once's
+                        # `it.copy()` copied the word, not the tag.
+                        # Propagate it with the same same-type
+                        # component-ref read + store the writers use.
+                        _tagged_f = gen._tagged_optional_fields.get(
+                            sname)
+                        if _tagged_f and _as_str(_fn) in _tagged_f:
+                            _sv = gen._new_temp('_Bool')
+                            gen._emit(
+                                f"  {_sv} = {src_local}->{_fnm}"
+                                f"_is_some;")
+                            gen._emit(
+                                f"  {dst}->{_fnm}_is_some = {_sv};")
+                    # The presence words are not in struct_field_types
+                    # (see StructDef.presence_fields), so the loop above
+                    # never copies them: a copy of an object that had a
+                    # minted field set must keep answering hasattr True.
+                    gimple_ctypes.presence_copy_emit(
+                        gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
+
+                _emit_fw_copy(t, _recv_local, _csn, 0)
+                return f'{_csn} *', t
     return ot, ov
 
 
@@ -6073,497 +6058,6 @@ def _dict_key_probe(gen, key_type: str, key_val: str) -> tuple[str, str, bool]:
     return kt, kv, False
 
 
-def _ldm_setdefault(gen, ov: str, args: list) -> tuple:
-    """dict.setdefault(key, default): the stored default is converted to the dict's value type and returned, and the key is inserted when absent.
-
-    One arm of `_lower_dict_method`, which tests the condition and calls this."""
-    gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"setdefault"'])
-    # `d.setdefault(key[, default])` — real Python: insert `default`
-    # (None if omitted) under `key` when absent, then return the current
-    # value. The previous lowering was just `mojo_dict_get_int`, which
-    # returns 0 for an absent key and NEVER inserts — so the ubiquitous
-    # `d.setdefault(k, []).append(x)` accumulator pattern (this compiler's
-    # own `gen_module_impl` uses it) appended to a NULL list and
-    # segfaulted the self-hosted binary.
-    key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
-    if len(args) >= 2:
-        dt, dv = gen.lower_expr(args[1])
-    else:
-        dt, dv = 'int64_t', '0'
-    if key_is_bytes:
-        # bytes keys live in their own dict key domain — see
-        # _DictSlot.keykind. `_char_to_cstr` would have cast the
-        # MojoBytes POINTER to char*, so the insert went into the str
-        # domain under an address and the read-back never found it.
-        dv64 = gen._to_int64(dt, dv)
-        return 'int64_t', gen._call_expr(
-            'int64_t', 'mojo_dict_setdefault_bytes_int',
-            [('MojoDict *', ov), ('MojoBytes *', key_val), ('int64_t', dv64)])
-    if dt == 'char *':
-        return 'char *', gen._call_expr(
-            'char *', 'mojo_dict_setdefault_str',
-            [('MojoDict *', ov), (key_type, key_val), ('char *', dv)])
-    dv64 = gen._to_int64(dt, dv)
-    raw = gen._call_expr(
-        'int64_t', 'mojo_dict_setdefault_int',
-        [('MojoDict *', ov), (key_type, key_val), ('int64_t', dv64)])
-    # Preserve a container/pointer default's static type so a chained
-    # `.append(...)` / `[...]` resolves against the real runtime type.
-    if dt not in ('int64_t', 'int', '_Bool', 'double', ''):
-        typed = gen._cast(dt, raw)
-        gen._elem_types[typed] = gen._elem_types.get(dv, gen._elem_types.get(_gmm_as_str(raw)))
-        return dt, typed
-    return 'int64_t', raw
-
-
-def _ldm_pop(gen, ov: str, args: list) -> tuple:
-    """dict.pop(key[, default]): removes the key, returning its stored value (converted to the dict's value type) or the default when the key is absent.
-
-    One arm of `_lower_dict_method`, which tests the condition and calls this."""
-    gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"pop"'])
-    # `d.pop(k)` / `d.pop(k, default)`. Two things were lost here and both
-    # were silent wrong answers rather than refusals:
-    #
-    # * the DEFAULT. `mojo_dict_pop_int` had no `dflt` parameter, so the
-    #   `-1` the source wrote was never lowered and a MISS answered 0 — a
-    #   real value in this model, so a "remove if present, else report
-    #   absence" idiom got a plausible number with exit 0
-    #   (“CODEGEN: `d.pop(k, default)` returns 0 on a MISS”);
-    # * the VALUE accessor. Only the int spelling existed, so a str-valued
-    #   dict popped its value as a raw pointer decimal
-    #   (“A dict's value accessor is guessed from the DEFAULT argument”).
-    #
-    # Both are one implementation now: the runtime carries the same three
-    # value domains in both key domains, and this picks the domain and
-    # hands the default to it.
-    key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
-    val_type = gen._dict_val_of(ov)
-    val_known = gen._dict_val_is_known(ov)
-    dflt_is_none = False
-    # `d.pop(key, *args)` (weakref's WeakKeyDictionary.pop): the default is the
-    # first spread element when there is one, else absent. A packed `*args` list
-    # is a MojoList, which is not a value of the dict's slot type, so the usual
-    # default-type check below would refuse it; select the element instead.
-    _pop_spread = (args[1] if len(args) == 2
-                   and isinstance(args[1], gimple_ctypes.UnaryOp)
-                   and args[1].op == '*' else None)
-    if _pop_spread is not None and val_type in ('int64_t', 'int') :
-        _sl_t, _sl_v = gen.lower_expr(_pop_spread.operand)
-        if _sl_t == 'MojoList *':
-            _sl_n = gen._call_expr('int64_t', 'mojo_list_len', [(_sl_t, _sl_v)])
-            _sl_0 = gen._call_expr('int64_t', 'mojo_list_get_int',
-                                   [(_sl_t, _sl_v), ('int64_t', gen._new_val('int64_t', '(int64_t)0'))])
-            _sl_z = gen._new_val('int64_t', '(int64_t)0')
-            dflt_ty = 'int64_t'
-            _sl_c = gen._cmp(_sl_n, '>', _sl_z)
-            dflt_val = gen._new_val('int64_t', f'{_sl_c} ? {_sl_0} : {_sl_z}')
-            _pop_spread_done = True
-        else:
-            _pop_spread_done = False
-    else:
-        _pop_spread_done = False
-    if _pop_spread_done:
-        pass
-    elif len(args) > 1:
-        dflt_ty, dflt_val = gen.lower_expr(args[1])
-        dflt_is_none = bool(_is_none_literal(args[1]))
-    else:
-        dflt_ty, dflt_val = None, None
-    if not val_known:
-        # An unobserved dict takes the DEFAULT's type as its result type:
-        # that is the only thing known about what the slot holds, and it is
-        # the `get` lowering's existing rule (the arm above).
-        val_type = dflt_ty if dflt_ty in ('char *', 'double') else 'int64_t'
-    _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
-    if val_known and not _container_vt and not dflt_is_none \
-            and dflt_val is not None \
-            and _dict_val_domain(val_type) != _dict_val_domain(dflt_ty):
-        # CPython answers the default on a miss and the stored value on a
-        # hit, and one int64_t slot cannot be both. Choosing either side
-        # makes one of them a wrong answer — `(char *)<an int>` is a wild
-        # pointer that `print` then calls `strlen` on — so this is refused
-        # with both types named instead. `None` is in every domain, and an
-        # UNOBSERVED dict is already handled above.
-        raise RuntimeError(
-            f"d.pop(key, default) with a {dflt_ty} default on a dict whose "
-            f"values are {val_type}: one dict slot cannot hold both, so "
-            f"the hit and the miss cannot share a result type (use a "
-            f"default of the dict's own value type, or a dict whose value "
-            f"type is not statically known)")
-    _sfx = '_bytes' if key_is_bytes else ''
-    # The no-default spelling raises KeyError in CPython; this model has no
-    # such error and every mojo_dict_get_* already answers a miss with the
-    # absent box, so it passes the same domain-specific zero.
-    _absent = 'NULL' if val_type == 'char *' else ('0.0' if val_type == 'double' else '0')
-    if dflt_val is None or dflt_is_none:
-        dflt_expr, dflt_ct = _absent, val_type
-    elif val_type == 'char *':
-        dflt_expr, dflt_ct = dflt_val, 'char *'
-    elif val_type == 'double':
-        dflt_expr, dflt_ct = gen._coerce_to_type(dflt_ty, 'double', dflt_val), 'double'
-    elif _container_vt:
-        # The empty-container-literal reifier the `get` arm above uses: an
-        # empty `[]`/`{}`/`set()` default carries no evidence for a
-        # particular container KIND, so build the kind this dict holds.
-        _reified = gimple_ctypes.reify_empty_container_literal(gen, dflt_ty, val_type, args[1])
-        if _reified is None:
-            raise RuntimeError(
-                f"d.pop(key, default) with a {dflt_ty} default on a dict "
-                f"whose values are {val_type}: only an EMPTY "
-                f"{val_type} literal can stand in for an absent "
-                f"{val_type}, and this one is not")
-        dflt_expr, dflt_ct = gen._to_int64(dflt_ty, _reified), 'int64_t'
-    else:
-        dflt_expr, dflt_ct = gen._to_int64(dflt_ty, dflt_val), 'int64_t'
-    _rt = _DICT_POP_RT.get(val_type)
-    if _rt is None:
-        # Not one of the three SCALAR value domains: a container, or a
-        # struct pointer (`self._owner[fn.name] = fn` — `d.pop(k)` on a
-        # `dict[str, FunctionDef *]` reaches here, and a plain
-        # `_DICT_POP_RT[val_type]` raised `KeyError: 'FunctionDef *'`).
-        # A dict slot is one raw int64_t either way, so pop the WORD and
-        # cast it back — the same shape the `get` arm and `d[k]` both use
-        # for a non-scalar-valued dict, and the only one that can carry a
-        # container or a struct pointer.
-        raw = gen._call_expr(
-            'int64_t', f'mojo_dict_pop{_sfx}_int',
-            [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt_expr)])
-        t = gen._cast(val_type, raw)
-        _nd = gen._dict_nested_val_types.get(ov)
-        if _nd:
-            if val_type == 'MojoDict *':
-                gen._dict_val_types[t] = _nd
-            else:
-                gen._elem_types[t] = _nd
-        return val_type, t
-    return val_type, gen._call_expr(
-        _rt[1], f'mojo_dict_pop{_sfx}_{_rt[0]}',
-        [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
-
-
-def _ldm_get(gen, ov: str, args: list) -> tuple:
-    """dict.get(key[, default]): reads the slot with the dict's key type and returns the value (converted to the dict's value type), or the default when the key is absent.
-
-    One arm of `_lower_dict_method`, which tests the condition and calls this."""
-    key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
-    default_ty = None
-    default_val = None
-    if len(args) > 1:
-        default_ty, default_val = gen.lower_expr(args[1])
-    val_type = gen._dict_val_of(ov)
-    # `dict.get(k, <char* default>)` on a dict whose value type is
-    # UNKNOWN: the default must NOT be coerced through a list accessor.
-    # If the caller supplied a char* default, treat the result as char* —
-    # a plain pointer round-trip, never a `mojo_list_get_int(default, 0)`
-    # (a hard segfault on the self-hosted `--dump myinterpreter.py`).
-    #
-    # "Unknown" has to mean unknown, which is what
-    # `_dict_val_is_known` is for. `_dict_val_of` answers `'int64_t'` for a
-    # dict that is KNOWN to hold ints as well as for one nobody has
-    # observed, so the old `val_type == 'int64_t'` test also matched the
-    # first — and a `char *` default then overrode a known int value type:
-    # `d = {"a": 1}; print(d.get("a", "y"))` emitted
-    # `mojo_dict_get_str(d, "a")`, `print` called `strlen(1)` and the
-    # program died. The MISS rows passed because the absent-key path never
-    # reads the slot at all, which is what made this look like a
-    # default-type question rather than an evidence question. See
-    # “A dict's value accessor is guessed from the DEFAULT argument”.
-    if not gen._dict_val_is_known(ov) and default_ty == 'char *':
-        val_type = 'char *'
-    # The runtime keeps a bytes key in its own domain, so the VALUE
-    # accessor has to be the bytes one too — the `_bytes` suffixed
-    # helpers are the only ones that probe that domain at all. Pairing
-    # the key domain with the value domain is the whole fix: both
-    # halves existed and only the pairing was missing, so
-    # `d[b'a'] = 7; d.get(b'a')` read the str domain and answered 0.
-    _sfx = '_bytes' if key_is_bytes else ''
-    if gen._is_none_literal(args[0]):
-        # `d.get(None)`: the None-key entry (keykind 3), which the integer 0
-        # the literal lowers to would miss (it reads the int-0 entry).
-        if val_type == 'char *':
-            raw = gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
-        elif val_type == 'double':
-            raw = gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
-        else:
-            raw = gen._call_expr('int64_t', 'mojo_dict_get_none_key_int', [('MojoDict *', ov)])
-    elif val_type == 'char *':
-        raw = gen._call_expr('char *', f'mojo_dict_get{_sfx}_str', [('MojoDict *', ov), (key_type, key_val)])
-    elif val_type == 'double':
-        raw = gen._call_expr('double', f'mojo_dict_get{_sfx}_double', [('MojoDict *', ov), (key_type, key_val)])
-    else:
-        raw = gen._call_expr('int64_t', f'mojo_dict_get{_sfx}_int', [('MojoDict *', ov), (key_type, key_val)])
-    if default_val is not None:
-        # dict.get(key, default) must return the default when the key
-        # is ABSENT — the plain mojo_dict_get_* helpers return 0/NULL
-        # for a missing key, so the previous lowering silently DROPPED
-        # the default (e.g. `BUILTIN_VALUE_MAP.get(fname_raw,
-        # _func_csym(fname_raw))` → 0/NULL for every non-builtin
-        # function name — a NULL `fname` that later crashed the
-        # `fname in self.imported_symbols` containment check). Fall
-        # back to the default when the raw get returns the absent
-        # sentinel (0/NULL), matching how this codebase everywhere
-        # treats 0 as the None/absent box. When the dict's value type
-        # isn't statically known (defaults to int64_t), the default
-        # argument's own type is the real result type. Lowered with
-        # explicit if/else basic blocks (NOT a `cond ? a : b`
-        # ternary): a GIMPLE cond_expr in a __GIMPLE body was silently
-        # miscompiled by gcc here (the compiled mojoc then emitted raw
-        # heap/static addresses as variable/type names), so the
-        # default-application is spelled as branch-and-assign.
-        result_type = val_type
-        _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
-        # CPython's `get(k, default)` has a HETEROGENEOUS result: the
-        # stored value on a hit, the default on a miss, and those two can
-        # be different types. One C slot cannot be both, so the result type
-        # is the one that is SAFE to hold either, and the side that is not
-        # in that domain is materialised into it:
-        #
-        # * a `char *` result can hold any domain, because the model
-        #   already has `mojo_cstr_or_int_str` (an int64 word read as
-        #   "itself if it really is a `char *`, else its decimal") — so
-        #   if EITHER side is a string, the result is `char *`;
-        # * otherwise the result is the dict's value domain when that is
-        #   KNOWN, and the default's when it is not (there the default is
-        #   the only thing known about the slot).
-        #
-        # Reading the value type off the DEFAULT instead — which is what the
-        # `int64_t`-means-unknown confusion above used to do — is what made
-        # `d = {"a": 1}; d.get("a", "y")` call `strlen(1)`. Taking the
-        # result type from the value domain and only widening to `char *`
-        # when a side needs it is what makes BOTH disagreeing rows right:
-        # `d.get("a", "y")` prints `1` and `d.get("z", "y")` prints `y`.
-        _dflt_scalar = default_ty in ('char *', 'double', '_Bool') or default_ty in ('int64_t', 'int')
-        if not _container_vt and (val_type == 'char *' or default_ty == 'char *'):
-            result_type = 'char *'
-        elif not _container_vt and result_type not in ('char *', 'double', '_Bool'):
-            result_type = (val_type if gen._dict_val_is_known(ov)
-                           and val_type in ('int64_t', 'int', '_Bool')
-                           else (default_ty if _dflt_scalar and default_ty in ('double', '_Bool')
-                                 else 'int64_t'))
-        # The HIT read, in the RESULT's domain. A `char *` result over a
-        # non-string slot cannot use `mojo_dict_get_str` (that reads the
-        # slot's word as a pointer and `print` then calls `strlen` on the
-        # integer 1), and cannot use `mojo_dict_get_int` either (that hands
-        # the default's string bits back as a word, which prints as a
-        # pointer decimal) — `mojo_cstr_or_int_str` is the model's own
-        # answer to exactly this question.
-        _pres_word = None
-        if (result_type == 'char *' and val_type not in ('char *',)
-                and not _container_vt):
-            # An int-valued dict's `raw` above IS the int getter's word:
-            # reuse it. A second call would read the key again, and a
-            # container key's placeholder was consumed by the first, so the
-            # second call missed (`t.get(("a", 1), "dflt")` printed the
-            # default for a stored value).
-            if val_type in ('int64_t', 'int', '_Bool'):
-                _pres_word = raw
-            else:
-                _pres_word = gen._call_expr(
-                    'int64_t', f'mojo_dict_get{_sfx}_int',
-                    [('MojoDict *', ov), (key_type, key_val)])
-            raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
-                                 [('int64_t', _pres_word)])
-            val_type = 'char *'
-        if (result_type == 'char *' and default_ty not in ('char *', 'MojoStr *')
-                and default_ty is not None):
-            # The DEFAULT also has to be in the result's domain, and a
-            # `(char *)<an int>` is a wild pointer. Materialise it the same
-            # way, so `d.get(k, 7)` prints `7` on a str-valued dict.
-            if default_ty in ('double', 'float'):
-                _dm = gen._call_expr('char *', 'mojo_str_from_double',
-                                     [('double', gen._coerce_to_type(
-                                         default_ty, 'double', default_val))])
-            elif (isinstance(args[1], gimple_ctypes.NoneLiteral)
-                    or (isinstance(args[1], gimple_ctypes.IdentExpr)
-                        and args[1].name == 'None')):
-                # `d.get(k, None)`: None in a `char *` slot is the NULL
-                # word (the 'p' slot kind's own convention). Through
-                # `mojo_cstr_or_int_str` it became the STRING "0", so
-                # `d.get(k, None) is None` was False on every miss -- the
-                # self-hosted compiler's own
-                # `func_return_types.get(m, func_return_types.get(b, None))`
-                # then typed every unknown method call's result `0`.
-                _dm = gen._new_temp('char *')
-                gen._emit(f"  {_dm} = (char *)0;")
-            else:
-                _dm = gen._call_expr('char *', 'mojo_cstr_or_int_str',
-                                     [('int64_t', gen._to_int64(default_ty, default_val))])
-            default_val, default_ty = _dm, 'char *'
-        if _container_vt:
-            # `d.get(k, {})` on `d: dict[K, <container>]` — keep the
-            # container type (was collapsed to int64_t, losing every
-            # downstream `x[k2]` / `x.items()` / `member in x`).
-            raw_r = gen._cast(result_type, raw)
-        else:
-            raw_r = gen._coerce_to_type(val_type, result_type, raw)
-        # `d.get(k, ())` / `d.get(k, [])` / `d.get(k, set())` used
-        # purely as an "empty, container-kind-agnostic fallback" (real:
-        # gimple_cpp_core.py/gimple_cpp_async.py's `d.get(k, ())` on a
-        # dict[str, Set[...]], only ever consumed via `in`/iteration) —
-        # see gimple_ctypes.reify_empty_container_literal.
-        _reified = (gimple_ctypes.reify_empty_container_literal(gen, default_ty, result_type, args[1])
-                    if _container_vt else None)
-        if _reified is not None:
-            default_r = _reified
-        else:
-            default_r = gen._coerce_to_type(default_ty, result_type, default_val)
-        # Presence test on the RAW int64_t (0 == absent, per the comment
-        # above) — NOT `_ensure_bool_cond(result_type, raw_r)`, which for
-        # a container result type emits `mojo_list_len(raw_r)` and
-        # dereferences: a dict whose value slot happens to hold a small
-        # non-pointer int (a stale/garbage `func_param_types` entry) then
-        # segfaulted in `mojo_list_len(1)` instead of falling to the
-        # default.
-        if _container_vt:
-            cond = gen._ensure_bool_cond('int64_t', raw)
-        elif _pres_word is not None:
-            # The materialised `char *` read is TRUTHY for a miss — the
-            # absent slot is 0, and "0" is a non-empty string — so the
-            # presence test has to stay on the int64 word it came from, not
-            # on the string. Testing the string made every miss take the HIT
-            # branch and print `0` instead of the default.
-            cond = gen._ensure_bool_cond('int64_t', _pres_word)
-        elif result_type == 'char *':
-            # A STRING hit is tested for PRESENCE, not truth: an empty
-            # string is a real value, and `d.get(k, k)` over `{k: ''}`
-            # answered `k` -- the self-hosted compiler's
-            # `_inline_module_qualifiers.get('root', 'root')` turned the
-            # root module's '' qualifier into `root_` symbols nothing
-            # defines.
-            #
-            # The test is on the RAW pointer word (NULL == absent, and ""
-            # is a non-NULL pointer), NOT a second `mojo_dict_contains`
-            # probe: a content-keyed (tuple/container) key is a one-shot
-            # placeholder `_apply_kw_keys` consumes at the FIRST dict call
-            # that takes it, so a second lookup with the same key value
-            # probed the plain char* domain and always missed
-            # (`d.get(("a", 1), "none")` answered "none" on a hit).
-            cond = gen._ensure_bool_cond('int64_t',
-                                         gen._to_int64('char *', raw))
-        else:
-            cond = gen._ensure_bool_cond(result_type, raw_r)
-        t = gen._new_temp(result_type)
-        bb_true = gen._new_bb()
-        bb_false = gen._new_bb()
-        bb_done = gen._new_bb()
-        gen._cond_goto(f"{cond}", bb_true, bb_false)
-        gen._emit_label(bb_true)
-        gen._copy(f"{t}", f"{raw_r}")
-        gen._goto(bb_done)
-        gen._emit_label(bb_false)
-        gen._copy(f"{t}", f"{default_r}")
-        gen._emit_label(bb_done)
-        if _container_vt:
-            _nd = gen._dict_nested_val_types.get(ov)
-            if _nd:
-                if result_type == 'MojoDict *':
-                    gen._dict_val_types[t] = _nd
-                else:
-                    # `dict[K, list[E]]` / `dict[K, set[E]]`: E is the
-                    # ELEMENT type of the container this .get() returns,
-                    # so `d.get(k)[i]` / `for x in d.get(k)` reads with
-                    # the right accessor rather than boxing the pointer.
-                    gen._elem_types[t] = _nd
-        # A value of a dict nobody recorded the value type of is a word of
-        # unknown kind (`_mark_unknown_dict_value`'s rule for `d[k]`, here
-        # for `.get`): its truth value, its str() and its == have to ask
-        # the runtime -- `not sym_info.get('c_parameters')` called an
-        # empty list true. Only the MERGED result is marked: the presence
-        # test above is on the raw word, where 0 means absent.
-        if result_type == 'int64_t' and not gen._dict_val_is_known(ov):
-            gen._dyn_word_vals.add(t)
-        return result_type, t
-    if val_type == 'char *':
-        return 'char *', raw
-    elif val_type == 'double':
-        return 'double', raw
-    elif val_type in ('MojoDict *', 'MojoList *', 'MojoSet *'):
-        t = gen._cast(val_type, raw)
-        _nd = gen._dict_nested_val_types.get(ov)
-        if _nd:
-            if val_type == 'MojoDict *':
-                gen._dict_val_types[t] = _nd
-            else:
-                gen._elem_types[t] = _nd
-        return val_type, t
-    else:
-        if not gen._dict_val_is_known(ov):
-            gen._dyn_word_vals.add(raw)
-        return 'int64_t', raw
-
-
-def _ldm_fromkeys(gen, ov: str, args: list) -> tuple:
-    """dict.fromkeys(keys[, value]): builds a dict from the key collection, tagging each slot with the value's kind (double, string, bool, None or int) so the stored bits read back as the right type.
-
-    One arm of `_lower_dict_method`, which tests the condition and calls this."""
-    _keys_t, _keys_v = gen.lower_expr(args[0])
-    _keys_v = gen._materialize_as_list(_keys_t, _keys_v)
-    _vkind = '4'
-    _vval = '0'
-    _vstr = gen._new_val('char *', '(char *)0')
-    if len(args) > 1:
-        _vt, _vv = gen.lower_expr(args[1])
-        if _vt == 'double':
-            _vkind = '1'
-            _tmp = gen._new_val('int64_t', '0')
-            gen._rt_void('memcpy', [f"&{_tmp}", f"&{_vv}", '8'])
-            _vval = _tmp
-        elif _vt in ('char *', 'MojoStr *'):
-            _vkind = '2'
-            _vval = gen._new_val('int64_t', f'(int64_t)(intptr_t){_vv}')
-        elif isinstance(args[1], gimple_ctypes.NoneLiteral) or (
-                isinstance(args[1], gimple_ctypes.IdentExpr)
-                and args[1].name == 'None'):
-            _vkind = '4'; _vval = '0'
-        elif _vt == '_Bool':
-            _vkind = '3'; _vval = gen._cast('int64_t', _vv)
-        else:
-            _vkind = '0'; _vval = gen._cast('int64_t', _vv)
-    t = gen._rt_call('MojoDict *', 'mojo_dict_fromkeys_on', [ov, _keys_v, f"{_vval}", _vkind, _vstr])
-    return 'MojoDict *', t
-
-
-def _ldm_values(gen, ov: str) -> tuple:
-    """dict.values(): builds the value list and records the dict's value type on it, so element reads (and the repr walker) use the value's own kind instead of the int64_t default.
-
-    One arm of `_lower_dict_method`, which tests the condition and calls this."""
-    t = gen._rt_call('MojoList *', 'mojo_dict_values', [ov])
-    # Carry the dict's VALUE type onto the value-list temp (mirrors
-    # `keys()` recording 'char *') so `for v in d.values():` types `v`
-    # from it instead of the int64_t default — without this a
-    # `for sd in track_best.values()` over a dict of `StructDef *`
-    # left `sd` boxed and every `sd.name` read a pointer-decimal.
-    # Record int64_t EXPLICITLY too, not just the pointer-ish cases.
-    # Leaving an int-valued dict's element type unset is what made
-    # `z = {"a": 0}.values()` print `[None]`: with nothing recorded, the
-    # repr walker hit its int-vs-pointer heuristic on the boxed 0. An
-    # int list is an int list, and saying so is what every other
-    # container lowering here does.
-    _vt = gen._dict_val_of(ov)
-    # A dict that RECORDED a struct repr shim is proof that its values are
-    # not plain ints, so an `int64_t` answer here is the "cannot name this
-    # value" default rather than a fact -- and recording it picks the INT
-    # repr walker for a list whose elements the runtime is about to hand to
-    # that struct's own shim (`mojo_dict_values` copies `d->val_repr` onto
-    # the list it builds, the same bargain `mojo_list_inherit_kinds`
-    # makes). Leaving the element type unrecorded instead is what routes
-    # the read through `_list_repr_fn`'s generic walker, the one that asks
-    # `mojo_list_repr_elem` per slot.
-    #
-    # Reachable, and measured both ways: `emit_dict_int_value_store`
-    # records the shim from the value's own ctype, and a dict whose values
-    # arrive through a comprehension append has no `_dict_val_types` entry
-    # to name them. The literal case now names its struct values
-    # (`dict_literal_val_ctype`), so `e = {"k": p}` records `P *` and this
-    # guard does not fire for it -- but it is the same guard for the
-    # comprehension-built dict, and without it `print(d.values())` renders
-    # each element with `mojo_repr_int`, i.e. the struct's own pointer as a
-    # decimal.
-    if not (_vt == 'int64_t' and gen._dict_val_repr.get(ov)) and _vt:
-        gen._elem_types[t] = _vt
-    return 'MojoList *', t
-
-
 def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
     """Lower MojoDict * method calls."""
     if method == 'keys':
@@ -6571,7 +6065,41 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._elem_types[t] = 'char *'
         return 'MojoList *', t
     if method == 'values':
-        return _ldm_values(gen, ov)
+        t = gen._rt_call('MojoList *', 'mojo_dict_values', [ov])
+        # Carry the dict's VALUE type onto the value-list temp (mirrors
+        # `keys()` recording 'char *') so `for v in d.values():` types `v`
+        # from it instead of the int64_t default — without this a
+        # `for sd in track_best.values()` over a dict of `StructDef *`
+        # left `sd` boxed and every `sd.name` read a pointer-decimal.
+        # Record int64_t EXPLICITLY too, not just the pointer-ish cases.
+        # Leaving an int-valued dict's element type unset is what made
+        # `z = {"a": 0}.values()` print `[None]`: with nothing recorded, the
+        # repr walker hit its int-vs-pointer heuristic on the boxed 0. An
+        # int list is an int list, and saying so is what every other
+        # container lowering here does.
+        _vt = gen._dict_val_of(ov)
+        # A dict that RECORDED a struct repr shim is proof that its values are
+        # not plain ints, so an `int64_t` answer here is the "cannot name this
+        # value" default rather than a fact -- and recording it picks the INT
+        # repr walker for a list whose elements the runtime is about to hand to
+        # that struct's own shim (`mojo_dict_values` copies `d->val_repr` onto
+        # the list it builds, the same bargain `mojo_list_inherit_kinds`
+        # makes). Leaving the element type unrecorded instead is what routes
+        # the read through `_list_repr_fn`'s generic walker, the one that asks
+        # `mojo_list_repr_elem` per slot.
+        #
+        # Reachable, and measured both ways: `emit_dict_int_value_store`
+        # records the shim from the value's own ctype, and a dict whose values
+        # arrive through a comprehension append has no `_dict_val_types` entry
+        # to name them. The literal case now names its struct values
+        # (`dict_literal_val_ctype`), so `e = {"k": p}` records `P *` and this
+        # guard does not fire for it -- but it is the same guard for the
+        # comprehension-built dict, and without it `print(d.values())` renders
+        # each element with `mojo_repr_int`, i.e. the struct's own pointer as a
+        # decimal.
+        if not (_vt == 'int64_t' and gen._dict_val_repr.get(ov)) and _vt:
+            gen._elem_types[t] = _vt
+        return 'MojoList *', t
     if method == 'items':
         t = gen._rt_call('MojoList *', 'mojo_dict_items', [ov])
         # Record the dict's VALUE type on the item-list temp so the
@@ -6581,9 +6109,277 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._dict_items_val_elems[t] = gen._dict_val_of(ov)
         return 'MojoList *', t
     if method == 'fromkeys' and args:
-        return _ldm_fromkeys(gen, ov, args)
+        _keys_t, _keys_v = gen.lower_expr(args[0])
+        _keys_v = gen._materialize_as_list(_keys_t, _keys_v)
+        _vkind = '4'
+        _vval = '0'
+        _vstr = gen._new_val('char *', '(char *)0')
+        if len(args) > 1:
+            _vt, _vv = gen.lower_expr(args[1])
+            if _vt == 'double':
+                _vkind = '1'
+                _tmp = gen._new_val('int64_t', '0')
+                gen._rt_void('memcpy', [f"&{_tmp}", f"&{_vv}", '8'])
+                _vval = _tmp
+            elif _vt in ('char *', 'MojoStr *'):
+                _vkind = '2'
+                _vval = gen._new_val('int64_t', f'(int64_t)(intptr_t){_vv}')
+            elif isinstance(args[1], gimple_ctypes.NoneLiteral) or (
+                    isinstance(args[1], gimple_ctypes.IdentExpr)
+                    and args[1].name == 'None'):
+                _vkind = '4'; _vval = '0'
+            elif _vt == '_Bool':
+                _vkind = '3'; _vval = gen._cast('int64_t', _vv)
+            else:
+                _vkind = '0'; _vval = gen._cast('int64_t', _vv)
+        t = gen._rt_call('MojoDict *', 'mojo_dict_fromkeys_on', [ov, _keys_v, f"{_vval}", _vkind, _vstr])
+        return 'MojoDict *', t
     if method == 'get' and args:
-        return _ldm_get(gen, ov, args)
+        key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
+        default_ty = None
+        default_val = None
+        if len(args) > 1:
+            default_ty, default_val = gen.lower_expr(args[1])
+        val_type = gen._dict_val_of(ov)
+        # `dict.get(k, <char* default>)` on a dict whose value type is
+        # UNKNOWN: the default must NOT be coerced through a list accessor.
+        # If the caller supplied a char* default, treat the result as char* —
+        # a plain pointer round-trip, never a `mojo_list_get_int(default, 0)`
+        # (a hard segfault on the self-hosted `--dump myinterpreter.py`).
+        #
+        # "Unknown" has to mean unknown, which is what
+        # `_dict_val_is_known` is for. `_dict_val_of` answers `'int64_t'` for a
+        # dict that is KNOWN to hold ints as well as for one nobody has
+        # observed, so the old `val_type == 'int64_t'` test also matched the
+        # first — and a `char *` default then overrode a known int value type:
+        # `d = {"a": 1}; print(d.get("a", "y"))` emitted
+        # `mojo_dict_get_str(d, "a")`, `print` called `strlen(1)` and the
+        # program died. The MISS rows passed because the absent-key path never
+        # reads the slot at all, which is what made this look like a
+        # default-type question rather than an evidence question. See
+        # “A dict's value accessor is guessed from the DEFAULT argument”.
+        if not gen._dict_val_is_known(ov) and default_ty == 'char *':
+            val_type = 'char *'
+        # The runtime keeps a bytes key in its own domain, so the VALUE
+        # accessor has to be the bytes one too — the `_bytes` suffixed
+        # helpers are the only ones that probe that domain at all. Pairing
+        # the key domain with the value domain is the whole fix: both
+        # halves existed and only the pairing was missing, so
+        # `d[b'a'] = 7; d.get(b'a')` read the str domain and answered 0.
+        _sfx = '_bytes' if key_is_bytes else ''
+        if gen._is_none_literal(args[0]):
+            # `d.get(None)`: the None-key entry (keykind 3), which the integer 0
+            # the literal lowers to would miss (it reads the int-0 entry).
+            if val_type == 'char *':
+                raw = gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
+            elif val_type == 'double':
+                raw = gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
+            else:
+                raw = gen._call_expr('int64_t', 'mojo_dict_get_none_key_int', [('MojoDict *', ov)])
+        elif val_type == 'char *':
+            raw = gen._call_expr('char *', f'mojo_dict_get{_sfx}_str', [('MojoDict *', ov), (key_type, key_val)])
+        elif val_type == 'double':
+            raw = gen._call_expr('double', f'mojo_dict_get{_sfx}_double', [('MojoDict *', ov), (key_type, key_val)])
+        else:
+            raw = gen._call_expr('int64_t', f'mojo_dict_get{_sfx}_int', [('MojoDict *', ov), (key_type, key_val)])
+        if default_val is not None:
+            # dict.get(key, default) must return the default when the key
+            # is ABSENT — the plain mojo_dict_get_* helpers return 0/NULL
+            # for a missing key, so the previous lowering silently DROPPED
+            # the default (e.g. `BUILTIN_VALUE_MAP.get(fname_raw,
+            # _func_csym(fname_raw))` → 0/NULL for every non-builtin
+            # function name — a NULL `fname` that later crashed the
+            # `fname in self.imported_symbols` containment check). Fall
+            # back to the default when the raw get returns the absent
+            # sentinel (0/NULL), matching how this codebase everywhere
+            # treats 0 as the None/absent box. When the dict's value type
+            # isn't statically known (defaults to int64_t), the default
+            # argument's own type is the real result type. Lowered with
+            # explicit if/else basic blocks (NOT a `cond ? a : b`
+            # ternary): a GIMPLE cond_expr in a __GIMPLE body was silently
+            # miscompiled by gcc here (the compiled mojoc then emitted raw
+            # heap/static addresses as variable/type names), so the
+            # default-application is spelled as branch-and-assign.
+            result_type = val_type
+            _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
+            # CPython's `get(k, default)` has a HETEROGENEOUS result: the
+            # stored value on a hit, the default on a miss, and those two can
+            # be different types. One C slot cannot be both, so the result type
+            # is the one that is SAFE to hold either, and the side that is not
+            # in that domain is materialised into it:
+            #
+            # * a `char *` result can hold any domain, because the model
+            #   already has `mojo_cstr_or_int_str` (an int64 word read as
+            #   "itself if it really is a `char *`, else its decimal") — so
+            #   if EITHER side is a string, the result is `char *`;
+            # * otherwise the result is the dict's value domain when that is
+            #   KNOWN, and the default's when it is not (there the default is
+            #   the only thing known about the slot).
+            #
+            # Reading the value type off the DEFAULT instead — which is what the
+            # `int64_t`-means-unknown confusion above used to do — is what made
+            # `d = {"a": 1}; d.get("a", "y")` call `strlen(1)`. Taking the
+            # result type from the value domain and only widening to `char *`
+            # when a side needs it is what makes BOTH disagreeing rows right:
+            # `d.get("a", "y")` prints `1` and `d.get("z", "y")` prints `y`.
+            _dflt_scalar = default_ty in ('char *', 'double', '_Bool') or default_ty in ('int64_t', 'int')
+            if not _container_vt and (val_type == 'char *' or default_ty == 'char *'):
+                result_type = 'char *'
+            elif not _container_vt and result_type not in ('char *', 'double', '_Bool'):
+                result_type = (val_type if gen._dict_val_is_known(ov)
+                               and val_type in ('int64_t', 'int', '_Bool')
+                               else (default_ty if _dflt_scalar and default_ty in ('double', '_Bool')
+                                     else 'int64_t'))
+            # The HIT read, in the RESULT's domain. A `char *` result over a
+            # non-string slot cannot use `mojo_dict_get_str` (that reads the
+            # slot's word as a pointer and `print` then calls `strlen` on the
+            # integer 1), and cannot use `mojo_dict_get_int` either (that hands
+            # the default's string bits back as a word, which prints as a
+            # pointer decimal) — `mojo_cstr_or_int_str` is the model's own
+            # answer to exactly this question.
+            _pres_word = None
+            if (result_type == 'char *' and val_type not in ('char *',)
+                    and not _container_vt):
+                # An int-valued dict's `raw` above IS the int getter's word:
+                # reuse it. A second call would read the key again, and a
+                # container key's placeholder was consumed by the first, so the
+                # second call missed (`t.get(("a", 1), "dflt")` printed the
+                # default for a stored value).
+                if val_type in ('int64_t', 'int', '_Bool'):
+                    _pres_word = raw
+                else:
+                    _pres_word = gen._call_expr(
+                        'int64_t', f'mojo_dict_get{_sfx}_int',
+                        [('MojoDict *', ov), (key_type, key_val)])
+                raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                     [('int64_t', _pres_word)])
+                val_type = 'char *'
+            if (result_type == 'char *' and default_ty not in ('char *', 'MojoStr *')
+                    and default_ty is not None):
+                # The DEFAULT also has to be in the result's domain, and a
+                # `(char *)<an int>` is a wild pointer. Materialise it the same
+                # way, so `d.get(k, 7)` prints `7` on a str-valued dict.
+                if default_ty in ('double', 'float'):
+                    _dm = gen._call_expr('char *', 'mojo_str_from_double',
+                                         [('double', gen._coerce_to_type(
+                                             default_ty, 'double', default_val))])
+                elif (isinstance(args[1], gimple_ctypes.NoneLiteral)
+                        or (isinstance(args[1], gimple_ctypes.IdentExpr)
+                            and args[1].name == 'None')):
+                    # `d.get(k, None)`: None in a `char *` slot is the NULL
+                    # word (the 'p' slot kind's own convention). Through
+                    # `mojo_cstr_or_int_str` it became the STRING "0", so
+                    # `d.get(k, None) is None` was False on every miss -- the
+                    # self-hosted compiler's own
+                    # `func_return_types.get(m, func_return_types.get(b, None))`
+                    # then typed every unknown method call's result `0`.
+                    _dm = gen._new_temp('char *')
+                    gen._emit(f"  {_dm} = (char *)0;")
+                else:
+                    _dm = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                         [('int64_t', gen._to_int64(default_ty, default_val))])
+                default_val, default_ty = _dm, 'char *'
+            if _container_vt:
+                # `d.get(k, {})` on `d: dict[K, <container>]` — keep the
+                # container type (was collapsed to int64_t, losing every
+                # downstream `x[k2]` / `x.items()` / `member in x`).
+                raw_r = gen._cast(result_type, raw)
+            else:
+                raw_r = gen._coerce_to_type(val_type, result_type, raw)
+            # `d.get(k, ())` / `d.get(k, [])` / `d.get(k, set())` used
+            # purely as an "empty, container-kind-agnostic fallback" (real:
+            # gimple_cpp_core.py/gimple_cpp_async.py's `d.get(k, ())` on a
+            # dict[str, Set[...]], only ever consumed via `in`/iteration) —
+            # see gimple_ctypes.reify_empty_container_literal.
+            _reified = (gimple_ctypes.reify_empty_container_literal(gen, default_ty, result_type, args[1])
+                        if _container_vt else None)
+            if _reified is not None:
+                default_r = _reified
+            else:
+                default_r = gen._coerce_to_type(default_ty, result_type, default_val)
+            # Presence test on the RAW int64_t (0 == absent, per the comment
+            # above) — NOT `_ensure_bool_cond(result_type, raw_r)`, which for
+            # a container result type emits `mojo_list_len(raw_r)` and
+            # dereferences: a dict whose value slot happens to hold a small
+            # non-pointer int (a stale/garbage `func_param_types` entry) then
+            # segfaulted in `mojo_list_len(1)` instead of falling to the
+            # default.
+            if _container_vt:
+                cond = gen._ensure_bool_cond('int64_t', raw)
+            elif _pres_word is not None:
+                # The materialised `char *` read is TRUTHY for a miss — the
+                # absent slot is 0, and "0" is a non-empty string — so the
+                # presence test has to stay on the int64 word it came from, not
+                # on the string. Testing the string made every miss take the HIT
+                # branch and print `0` instead of the default.
+                cond = gen._ensure_bool_cond('int64_t', _pres_word)
+            elif result_type == 'char *':
+                # A STRING hit is tested for PRESENCE, not truth: an empty
+                # string is a real value, and `d.get(k, k)` over `{k: ''}`
+                # answered `k` -- the self-hosted compiler's
+                # `_inline_module_qualifiers.get('root', 'root')` turned the
+                # root module's '' qualifier into `root_` symbols nothing
+                # defines.
+                #
+                # The test is on the RAW pointer word (NULL == absent, and ""
+                # is a non-NULL pointer), NOT a second `mojo_dict_contains`
+                # probe: a content-keyed (tuple/container) key is a one-shot
+                # placeholder `_apply_kw_keys` consumes at the FIRST dict call
+                # that takes it, so a second lookup with the same key value
+                # probed the plain char* domain and always missed
+                # (`d.get(("a", 1), "none")` answered "none" on a hit).
+                cond = gen._ensure_bool_cond('int64_t',
+                                             gen._to_int64('char *', raw))
+            else:
+                cond = gen._ensure_bool_cond(result_type, raw_r)
+            t = gen._new_temp(result_type)
+            bb_true = gen._new_bb()
+            bb_false = gen._new_bb()
+            bb_done = gen._new_bb()
+            gen._cond_goto(f"{cond}", bb_true, bb_false)
+            gen._emit_label(bb_true)
+            gen._copy(f"{t}", f"{raw_r}")
+            gen._goto(bb_done)
+            gen._emit_label(bb_false)
+            gen._copy(f"{t}", f"{default_r}")
+            gen._emit_label(bb_done)
+            if _container_vt:
+                _nd = gen._dict_nested_val_types.get(ov)
+                if _nd:
+                    if result_type == 'MojoDict *':
+                        gen._dict_val_types[t] = _nd
+                    else:
+                        # `dict[K, list[E]]` / `dict[K, set[E]]`: E is the
+                        # ELEMENT type of the container this .get() returns,
+                        # so `d.get(k)[i]` / `for x in d.get(k)` reads with
+                        # the right accessor rather than boxing the pointer.
+                        gen._elem_types[t] = _nd
+            # A value of a dict nobody recorded the value type of is a word of
+            # unknown kind (`_mark_unknown_dict_value`'s rule for `d[k]`, here
+            # for `.get`): its truth value, its str() and its == have to ask
+            # the runtime -- `not sym_info.get('c_parameters')` called an
+            # empty list true. Only the MERGED result is marked: the presence
+            # test above is on the raw word, where 0 means absent.
+            if result_type == 'int64_t' and not gen._dict_val_is_known(ov):
+                gen._dyn_word_vals.add(t)
+            return result_type, t
+        if val_type == 'char *':
+            return 'char *', raw
+        elif val_type == 'double':
+            return 'double', raw
+        elif val_type in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+            t = gen._cast(val_type, raw)
+            _nd = gen._dict_nested_val_types.get(ov)
+            if _nd:
+                if val_type == 'MojoDict *':
+                    gen._dict_val_types[t] = _nd
+                else:
+                    gen._elem_types[t] = _nd
+            return val_type, t
+        else:
+            if not gen._dict_val_is_known(ov):
+                gen._dyn_word_vals.add(raw)
+            return 'int64_t', raw
     if method == 'update' and args:
         gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"update"'])
         other_type, other_val = gen.lower_expr(args[0])
@@ -6599,7 +6395,125 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._rt_void('mojo_dict_update', [ov_cast, other_val_cast])
         return 'int', gen._new_val('int', '0')
     if method == 'pop' and args:
-        return _ldm_pop(gen, ov, args)
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"pop"'])
+        # `d.pop(k)` / `d.pop(k, default)`. Two things were lost here and both
+        # were silent wrong answers rather than refusals:
+        #
+        # * the DEFAULT. `mojo_dict_pop_int` had no `dflt` parameter, so the
+        #   `-1` the source wrote was never lowered and a MISS answered 0 — a
+        #   real value in this model, so a "remove if present, else report
+        #   absence" idiom got a plausible number with exit 0
+        #   (“CODEGEN: `d.pop(k, default)` returns 0 on a MISS”);
+        # * the VALUE accessor. Only the int spelling existed, so a str-valued
+        #   dict popped its value as a raw pointer decimal
+        #   (“A dict's value accessor is guessed from the DEFAULT argument”).
+        #
+        # Both are one implementation now: the runtime carries the same three
+        # value domains in both key domains, and this picks the domain and
+        # hands the default to it.
+        key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
+        val_type = gen._dict_val_of(ov)
+        val_known = gen._dict_val_is_known(ov)
+        dflt_is_none = False
+        # `d.pop(key, *args)` (weakref's WeakKeyDictionary.pop): the default is the
+        # first spread element when there is one, else absent. A packed `*args` list
+        # is a MojoList, which is not a value of the dict's slot type, so the usual
+        # default-type check below would refuse it; select the element instead.
+        _pop_spread = (args[1] if len(args) == 2
+                       and isinstance(args[1], gimple_ctypes.UnaryOp)
+                       and args[1].op == '*' else None)
+        if _pop_spread is not None and val_type in ('int64_t', 'int') :
+            _sl_t, _sl_v = gen.lower_expr(_pop_spread.operand)
+            if _sl_t == 'MojoList *':
+                _sl_n = gen._call_expr('int64_t', 'mojo_list_len', [(_sl_t, _sl_v)])
+                _sl_0 = gen._call_expr('int64_t', 'mojo_list_get_int',
+                                       [(_sl_t, _sl_v), ('int64_t', gen._new_val('int64_t', '(int64_t)0'))])
+                _sl_z = gen._new_val('int64_t', '(int64_t)0')
+                dflt_ty = 'int64_t'
+                _sl_c = gen._cmp(_sl_n, '>', _sl_z)
+                dflt_val = gen._new_val('int64_t', f'{_sl_c} ? {_sl_0} : {_sl_z}')
+                _pop_spread_done = True
+            else:
+                _pop_spread_done = False
+        else:
+            _pop_spread_done = False
+        if _pop_spread_done:
+            pass
+        elif len(args) > 1:
+            dflt_ty, dflt_val = gen.lower_expr(args[1])
+            dflt_is_none = bool(_is_none_literal(args[1]))
+        else:
+            dflt_ty, dflt_val = None, None
+        if not val_known:
+            # An unobserved dict takes the DEFAULT's type as its result type:
+            # that is the only thing known about what the slot holds, and it is
+            # the `get` lowering's existing rule (the arm above).
+            val_type = dflt_ty if dflt_ty in ('char *', 'double') else 'int64_t'
+        _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
+        if val_known and not _container_vt and not dflt_is_none \
+                and dflt_val is not None \
+                and _dict_val_domain(val_type) != _dict_val_domain(dflt_ty):
+            # CPython answers the default on a miss and the stored value on a
+            # hit, and one int64_t slot cannot be both. Choosing either side
+            # makes one of them a wrong answer — `(char *)<an int>` is a wild
+            # pointer that `print` then calls `strlen` on — so this is refused
+            # with both types named instead. `None` is in every domain, and an
+            # UNOBSERVED dict is already handled above.
+            raise RuntimeError(
+                f"d.pop(key, default) with a {dflt_ty} default on a dict whose "
+                f"values are {val_type}: one dict slot cannot hold both, so "
+                f"the hit and the miss cannot share a result type (use a "
+                f"default of the dict's own value type, or a dict whose value "
+                f"type is not statically known)")
+        _sfx = '_bytes' if key_is_bytes else ''
+        # The no-default spelling raises KeyError in CPython; this model has no
+        # such error and every mojo_dict_get_* already answers a miss with the
+        # absent box, so it passes the same domain-specific zero.
+        _absent = 'NULL' if val_type == 'char *' else ('0.0' if val_type == 'double' else '0')
+        if dflt_val is None or dflt_is_none:
+            dflt_expr, dflt_ct = _absent, val_type
+        elif val_type == 'char *':
+            dflt_expr, dflt_ct = dflt_val, 'char *'
+        elif val_type == 'double':
+            dflt_expr, dflt_ct = gen._coerce_to_type(dflt_ty, 'double', dflt_val), 'double'
+        elif _container_vt:
+            # The empty-container-literal reifier the `get` arm above uses: an
+            # empty `[]`/`{}`/`set()` default carries no evidence for a
+            # particular container KIND, so build the kind this dict holds.
+            _reified = gimple_ctypes.reify_empty_container_literal(gen, dflt_ty, val_type, args[1])
+            if _reified is None:
+                raise RuntimeError(
+                    f"d.pop(key, default) with a {dflt_ty} default on a dict "
+                    f"whose values are {val_type}: only an EMPTY "
+                    f"{val_type} literal can stand in for an absent "
+                    f"{val_type}, and this one is not")
+            dflt_expr, dflt_ct = gen._to_int64(dflt_ty, _reified), 'int64_t'
+        else:
+            dflt_expr, dflt_ct = gen._to_int64(dflt_ty, dflt_val), 'int64_t'
+        _rt = _DICT_POP_RT.get(val_type)
+        if _rt is None:
+            # Not one of the three SCALAR value domains: a container, or a
+            # struct pointer (`self._owner[fn.name] = fn` — `d.pop(k)` on a
+            # `dict[str, FunctionDef *]` reaches here, and a plain
+            # `_DICT_POP_RT[val_type]` raised `KeyError: 'FunctionDef *'`).
+            # A dict slot is one raw int64_t either way, so pop the WORD and
+            # cast it back — the same shape the `get` arm and `d[k]` both use
+            # for a non-scalar-valued dict, and the only one that can carry a
+            # container or a struct pointer.
+            raw = gen._call_expr(
+                'int64_t', f'mojo_dict_pop{_sfx}_int',
+                [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt_expr)])
+            t = gen._cast(val_type, raw)
+            _nd = gen._dict_nested_val_types.get(ov)
+            if _nd:
+                if val_type == 'MojoDict *':
+                    gen._dict_val_types[t] = _nd
+                else:
+                    gen._elem_types[t] = _nd
+            return val_type, t
+        return val_type, gen._call_expr(
+            _rt[1], f'mojo_dict_pop{_sfx}_{_rt[0]}',
+            [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
     if method in ('copy',):
         t = gen._rt_call('MojoDict *', 'mojo_dict_copy', [ov])
         gen._copy_dict_metadata(t, ov)
@@ -6609,7 +6523,43 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._rt_void('mojo_dict_clear', [ov])
         return 'int', gen._new_val('int', '0')
     if method == 'setdefault' and args:
-        return _ldm_setdefault(gen, ov, args)
+        gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"setdefault"'])
+        # `d.setdefault(key[, default])` — real Python: insert `default`
+        # (None if omitted) under `key` when absent, then return the current
+        # value. The previous lowering was just `mojo_dict_get_int`, which
+        # returns 0 for an absent key and NEVER inserts — so the ubiquitous
+        # `d.setdefault(k, []).append(x)` accumulator pattern (this compiler's
+        # own `gen_module_impl` uses it) appended to a NULL list and
+        # segfaulted the self-hosted binary.
+        key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
+        if len(args) >= 2:
+            dt, dv = gen.lower_expr(args[1])
+        else:
+            dt, dv = 'int64_t', '0'
+        if key_is_bytes:
+            # bytes keys live in their own dict key domain — see
+            # _DictSlot.keykind. `_char_to_cstr` would have cast the
+            # MojoBytes POINTER to char*, so the insert went into the str
+            # domain under an address and the read-back never found it.
+            dv64 = gen._to_int64(dt, dv)
+            return 'int64_t', gen._call_expr(
+                'int64_t', 'mojo_dict_setdefault_bytes_int',
+                [('MojoDict *', ov), ('MojoBytes *', key_val), ('int64_t', dv64)])
+        if dt == 'char *':
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_dict_setdefault_str',
+                [('MojoDict *', ov), (key_type, key_val), ('char *', dv)])
+        dv64 = gen._to_int64(dt, dv)
+        raw = gen._call_expr(
+            'int64_t', 'mojo_dict_setdefault_int',
+            [('MojoDict *', ov), (key_type, key_val), ('int64_t', dv64)])
+        # Preserve a container/pointer default's static type so a chained
+        # `.append(...)` / `[...]` resolves against the real runtime type.
+        if dt not in ('int64_t', 'int', '_Bool', 'double', ''):
+            typed = gen._cast(dt, raw)
+            gen._elem_types[typed] = gen._elem_types.get(dv, gen._elem_types.get(_gmm_as_str(raw)))
+            return dt, typed
+        return 'int64_t', raw
     if method == 'popitem':
         gen._rt_void('mojo_frozendict_check_no_mut_method', [f"{ov}", '"popitem"'])
         return 'int64_t', gen._new_val('int64_t', '0')
@@ -8404,98 +8354,6 @@ def _imported_method_declared_ret(gen, struct_name: str, method: str):
     return None
 
 
-def _lsmc_autostub(gen, method: str, mangled: str, struct_name: str) -> tuple | None:
-    """call to a struct method whose mangled C name has no known declaration: emits the stub the call site needs, unless the method body is already emitted in this translation unit.
-
-    One arm of `_lower_struct_method_call`, which tests the condition and calls this."""
-    _stub_guard = gimple_ctypes._stub_guard_name(f'{struct_name}_{method}')
-    # A struct with at least one base class we couldn't resolve to a
-    # known StructDef (e.g. `class IDGatherer(html.parser.HTMLParser)`
-    # — an external/unmodeled class) may call inherited methods
-    # (`self.feed(...)`) that are genuinely never defined anywhere in
-    # this program — not now, not later in this TU, not in any other
-    # module. A bare forward declaration below (`int64_t X (...);`)
-    # is fine for the ordinary case this auto-stub exists for (a
-    # same-struct sibling method not yet emitted, which gets a real
-    # definition later), but here it just leaves an undefined symbol
-    # at link time (bugs/consolidated/
-    # COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md). Emit an
-    # actual (weak) definition instead, matching the existing
-    # "unavailable in compiled mode" convention _stub_only_modules
-    # uses just below for imports from unresolvable modules.
-    if struct_name in getattr(gen, '_structs_with_unresolved_base', ()):
-        # The first parameter must match the real call site's actual
-        # receiver type (`{struct_name} *`, the same struct this
-        # method is being called on) — not int64_t. A bare int64_t
-        # here mismatched the real pointer argument every call site
-        # passes, producing a *new* `-Wint-conversion` "makes integer
-        # from pointer without a cast" hard error (a different entry
-        # in the same bugs/consolidated/ compile-fail catalog) in
-        # place of the undefined-symbol error this stub exists to fix.
-        _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
-                  f'__attribute__((weak)) int64_t {mangled} ({struct_name} *_self, ...) '
-                  f'{{ (void)_self; mojo_print ((char *)'
-                  f'"{struct_name}.{method}: unavailable in compiled mode '
-                  f'(inherited from an unmodeled base class)"); return (int64_t)0; }}\n#endif')
-    else:
-        if mangled == 'int64_t_as_unsafe_any_origin':
-            # fire_runtime DEFINES this as `int64_t
-            # int64_t_as_unsafe_any_origin (int64_t v)` — a plain
-            # single-param word identity, no variadic. The declaration
-            # must match: with a zero-named `(...)` decl the AArch64
-            # caller puts the word on the stack while the definition
-            # reads its named register param — the pointer args of the
-            # ladder's test_dict PyDict_Next came back garbage
-            # (measured 2026-10-22). See fire_runtime.c.
-            _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
-                      f'int64_t {mangled} (int64_t);\n#endif')
-        else:
-            _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
-    if _stub not in gen._elaborated_externs:
-        gen._elaborated_externs.append(_stub)
-    gen._auto_stubbed.add(mangled)
-    return None
-
-
-def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pairs: list, expected_non_self, full_param_list, is_class_ref: bool) -> tuple | None:
-    """call that omits trailing method arguments: appends each missing slot's recorded default, or a typed NULL for a pointer parameter, so the emitted call matches the method's C signature.
-
-    One arm of `_lower_struct_method_call`, which tests the condition and calls this."""
-    # Pad missing trailing args with the method's OWN recorded defaults
-    # (`def _emit_label(self, label, freq_hint='')` called as
-    # `gen._emit_label(label)` must pad with `""`, not `0`), mirroring
-    # `_lower_named_call`'s free-function padding. `_method_dflts` holds
-    # only the params that have a default, starting at the first
-    # defaulted position, so it indexes from
-    # `expected_non_self - len(_method_dflts)` (BUG-2026-020 shape).
-    _first_dflt = expected_non_self - len(_method_dflts)
-    # `full_param_list` carries the RECEIVER in slot 0 unless this is a
-    # static method reached through an instance, and `arg_pairs` does
-    # not — so a padded slot's declared type is read at `_pos + shift`.
-    _recv_shift = 0 if (is_class_ref and not _is_cls_receiver) else 1
-    while len(arg_pairs) < expected_non_self:
-        _pos = len(arg_pairs)
-        _dv = (_method_dflts[_pos - _first_dflt][1]
-               if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
-        # "No value" for a POINTER parameter is a typed NULL, not the
-        # integer 0: 0 coerced into a `char *` parameter becomes the
-        # one-character string "0" (via `mojo_cstr_or_int_str`), which
-        # is true. Same fix as `_lower_named_call`'s identical loop; see
-        # `_default_expr_to_pair`'s `param_ctype` for the self-hosted
-        # parser failure it caused (`Parser._expect(self, kind, value: str
-        # = None)` delivered "0" and refused every file).
-        _pct = (full_param_list[_pos + _recv_shift]
-                if 0 <= _pos + _recv_shift < len(full_param_list) else None)
-        if _dv is not None:
-            arg_pairs.append(ggc._default_expr_to_pair(gen, _dv,
-                                                       param_ctype=_pct))
-        elif _is_pointer_ctype(_pct):
-            arg_pairs.append((_pct, '0'))
-        else:
-            arg_pairs.append(('int', '0'))
-    return None
-
-
 def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple:
     """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
     func = node.func
@@ -8783,9 +8641,38 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # C parameter is supplied by the receiver — same as `not is_class_ref`.
     expected_non_self = len(full_param_list) - (0 if (is_class_ref and not _is_cls_receiver) else 1)
     if full_param_list and len(arg_pairs) < expected_non_self:
-        _arm_r = _lsmc_pad_defaults(gen, _is_cls_receiver, _method_dflts, arg_pairs, expected_non_self, full_param_list, is_class_ref)
-        if _arm_r is not None:
-            return _arm_r
+        # Pad missing trailing args with the method's OWN recorded defaults
+        # (`def _emit_label(self, label, freq_hint='')` called as
+        # `gen._emit_label(label)` must pad with `""`, not `0`), mirroring
+        # `_lower_named_call`'s free-function padding. `_method_dflts` holds
+        # only the params that have a default, starting at the first
+        # defaulted position, so it indexes from
+        # `expected_non_self - len(_method_dflts)` (BUG-2026-020 shape).
+        _first_dflt = expected_non_self - len(_method_dflts)
+        # `full_param_list` carries the RECEIVER in slot 0 unless this is a
+        # static method reached through an instance, and `arg_pairs` does
+        # not — so a padded slot's declared type is read at `_pos + shift`.
+        _recv_shift = 0 if (is_class_ref and not _is_cls_receiver) else 1
+        while len(arg_pairs) < expected_non_self:
+            _pos = len(arg_pairs)
+            _dv = (_method_dflts[_pos - _first_dflt][1]
+                   if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
+            # "No value" for a POINTER parameter is a typed NULL, not the
+            # integer 0: 0 coerced into a `char *` parameter becomes the
+            # one-character string "0" (via `mojo_cstr_or_int_str`), which
+            # is true. Same fix as `_lower_named_call`'s identical loop; see
+            # `_default_expr_to_pair`'s `param_ctype` for the self-hosted
+            # parser failure it caused (`Parser._expect(self, kind, value: str
+            # = None)` delivered "0" and refused every file).
+            _pct = (full_param_list[_pos + _recv_shift]
+                    if 0 <= _pos + _recv_shift < len(full_param_list) else None)
+            if _dv is not None:
+                arg_pairs.append(ggc._default_expr_to_pair(gen, _dv,
+                                                           param_ctype=_pct))
+            elif _is_pointer_ctype(_pct):
+                arg_pairs.append((_pct, '0'))
+            else:
+                arg_pairs.append(('int', '0'))
     # Auto-stub if the mangled method name has no known declaration. Check
     # both the suffixed key (this specific overload) and the bare key
     # (set for ANY overload by Pass 2b's return-type inference, which
@@ -8834,9 +8721,52 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             and mangled not in gen._auto_stubbed
             and mangled not in gimple_codegen._SELFHOST_HARDCODED_FUNCS
             and f'{struct_name}_{method}' not in gimple_codegen._SELFHOST_HARDCODED_FUNCS):
-        _arm_r = _lsmc_autostub(gen, method, mangled, struct_name)
-        if _arm_r is not None:
-            return _arm_r
+        _stub_guard = gimple_ctypes._stub_guard_name(f'{struct_name}_{method}')
+        # A struct with at least one base class we couldn't resolve to a
+        # known StructDef (e.g. `class IDGatherer(html.parser.HTMLParser)`
+        # — an external/unmodeled class) may call inherited methods
+        # (`self.feed(...)`) that are genuinely never defined anywhere in
+        # this program — not now, not later in this TU, not in any other
+        # module. A bare forward declaration below (`int64_t X (...);`)
+        # is fine for the ordinary case this auto-stub exists for (a
+        # same-struct sibling method not yet emitted, which gets a real
+        # definition later), but here it just leaves an undefined symbol
+        # at link time (bugs/consolidated/
+        # COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md). Emit an
+        # actual (weak) definition instead, matching the existing
+        # "unavailable in compiled mode" convention _stub_only_modules
+        # uses just below for imports from unresolvable modules.
+        if struct_name in getattr(gen, '_structs_with_unresolved_base', ()):
+            # The first parameter must match the real call site's actual
+            # receiver type (`{struct_name} *`, the same struct this
+            # method is being called on) — not int64_t. A bare int64_t
+            # here mismatched the real pointer argument every call site
+            # passes, producing a *new* `-Wint-conversion` "makes integer
+            # from pointer without a cast" hard error (a different entry
+            # in the same bugs/consolidated/ compile-fail catalog) in
+            # place of the undefined-symbol error this stub exists to fix.
+            _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                      f'__attribute__((weak)) int64_t {mangled} ({struct_name} *_self, ...) '
+                      f'{{ (void)_self; mojo_print ((char *)'
+                      f'"{struct_name}.{method}: unavailable in compiled mode '
+                      f'(inherited from an unmodeled base class)"); return (int64_t)0; }}\n#endif')
+        else:
+            if mangled == 'int64_t_as_unsafe_any_origin':
+                # fire_runtime DEFINES this as `int64_t
+                # int64_t_as_unsafe_any_origin (int64_t v)` — a plain
+                # single-param word identity, no variadic. The declaration
+                # must match: with a zero-named `(...)` decl the AArch64
+                # caller puts the word on the stack while the definition
+                # reads its named register param — the pointer args of the
+                # ladder's test_dict PyDict_Next came back garbage
+                # (measured 2026-10-22). See fire_runtime.c.
+                _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                          f'int64_t {mangled} (int64_t);\n#endif')
+            else:
+                _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
+        if _stub not in gen._elaborated_externs:
+            gen._elaborated_externs.append(_stub)
+        gen._auto_stubbed.add(mangled)
 
     # For a `cls.` receiver the value passed is the classmethod's own
     # `int64_t cls` (a class-tag placeholder, not a real struct pointer) —

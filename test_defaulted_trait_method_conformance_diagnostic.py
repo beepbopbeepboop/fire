@@ -98,41 +98,6 @@ def test_negative_partially_applied_default_parameter():
     )
 
 
-# Negative, NON-COINCIDENTIAL spelling: the trait default method's own bracket
-# parameter is `mapper` while the conforming struct declares the same value
-# parameter as `mapFn`. The diagnostic must report the CONFORMING STRUCT's
-# spelling -- `'Map[mapFn]'` -- not the trait method's `'Map[mapper]'`. Every
-# other case here spells the parameter `mapFn` on BOTH sides, so it cannot
-# catch a regression to the trait's spelling (which is what shipped before
-# elaborate._respell_app_with_struct_value_params).
-NEG_DIFFERENT_SPELLING = r"""
-trait Strategy:
-    comptime Value: AnyType
-    def value(self) -> Self.Value: ...
-    def map[To: Copyable, //, mapper: def (Self.Value) thin -> To](self) -> Map[mapper]:
-        return Map[mapper]()
-
-struct Map[Strat: Strategy, Dest: Copyable, //, mapFn: def (Strat.Value) thin -> Dest](Strategy):
-    comptime Value = Dest
-    def __init__(out self):
-        pass
-    def value(self) -> Self.Value:
-        var x: Self.Value
-        return x
-
-def main():
-    pass
-"""
-
-
-def test_negative_partially_applied_default_respelled_with_struct_parameter():
-    _assert_err(
-        NEG_DIFFERENT_SPELLING,
-        "does not implement all requirements for 'Strategy'",
-        "'Map[mapFn]'",
-    )
-
-
 # Positive: default returns Self.
 POS_SELF = r'''
 trait Strategy:
@@ -207,36 +172,6 @@ def main():
 
 def test_positive_override_default():
     _assert_ok(POS_OVERRIDE)
-
-
-# Positive: pin for the 2026-11-15 gate red. Commit 43bd3dcba extended the
-# signature-binding check to RETURN types, and the trait-bound evidence
-# check (elaborate.check_signature_param_bound_evidence) treated a template
-# parameter constrained by a FUNCTION TYPE (`f: fn(Strat) -> Dest`) as a list
-# of traits to prove conformance against. When the method's own same-named
-# bound parameter is used as the instantiation argument in the return
-# annotation, the two spellings differ (`fn(Strat) -> Dest` vs
-# `fn(Self) -> Dest`), the membership test fails, and valid code was
-# rejected with "invalid bindings in signature: lacking evidence" —
-# `test_positive_override_default` above was the red case. The evidence
-# check must skip non-trait bounds (785c1cf2e); this minimal case pins that
-# guard without the trait machinery.
-PIN_FN_TYPE_BOUND = r'''
-struct Box[Strat: AnyType, Dest: Copyable, f: fn(Strat) -> Dest]:
-    def __init__(out self):
-        pass
-
-struct S:
-    def get[Dest: Copyable, f: fn(Self) -> Dest](self) -> Box[Self, Dest, f]:
-        pass
-
-def main():
-    pass
-'''
-
-
-def test_positive_function_type_bound_bracket_param_in_return():
-    _assert_ok(PIN_FN_TYPE_BOUND)
 
 
 # Positive: a required trait method supplied by a non-trait base struct

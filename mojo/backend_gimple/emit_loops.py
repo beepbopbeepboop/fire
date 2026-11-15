@@ -1280,11 +1280,11 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                                       [('int64_t', gen._to_int64(it_type, it_val))])
                 _flp64 = gen._to_int64('MojoList *', _flp)
                 _flpz = gen._new_val('int64_t', '0')
-                _flp_null = gen._cmp(_flp64, '==', _flpz)
+                _flp_null = gen._new_val('_Bool', f'{_flp64} == {_flpz}')
                 # Push/free unconditionally (NULL is a no-op for both) so the
                 # scope-exit cancel count is static, as every other loop temp's
                 # is: a push emitted only in one arm would unbalance it.
-                gen._rt_void('mojo_cleanup_push_list_strs', [_flp])
+                gen._emit(f"  mojo_cleanup_push_list_strs ({_flp});")
                 ginf._scope_register(gen, _flp, 'mojo_list_free_owned_strs')
                 _bb_file = gen._new_bb()
                 _bb_list = gen._new_bb()
@@ -1322,8 +1322,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                                           [('int64_t', it64)])
                     _flw64 = gen._to_int64('MojoList *', _flw)
                     _flwz = gen._new_val('int64_t', '0')
-                    _flw_null = gen._cmp(_flw64, '==', _flwz)
-                    gen._rt_void('mojo_cleanup_push_list_strs', [_flw])
+                    _flw_null = gen._new_val('_Bool', f'{_flw64} == {_flwz}')
+                    gen._emit(f"  mojo_cleanup_push_list_strs ({_flw});")
                     ginf._scope_register(gen, _flw, 'mojo_list_free_owned_strs')
                     bb_file = gen._new_bb(); bb_not_file = gen._new_bb()
                     gen._cond_goto(_flw_null, bb_not_file, bb_file)

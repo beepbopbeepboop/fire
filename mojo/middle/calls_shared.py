@@ -166,30 +166,12 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     _vshapes = getattr(gen, '_variadic_func_shape', None) or {}
     _vshape = _vshapes.get(_target) or _vshapes.get(_c_name) or _vshapes.get(_fname)
     if _vshape is not None:
-        # The address of a function is not a legal GIMPLE operand either as
-        # `&f` (no unary `&` in the grammar) or as `(void *)f` ("invalid
-        # operand in unary operation"); read the `static void * _funcptr_`
-        # global this codegen emits for every function-as-a-value site (a
-        # generator's bare csym is redirected to `<base>_start` by gen_module's
-        # `_funcptr_target`, which is exactly the address wanted here).
-        gen._funcptr_builtins_needed.add(_target)
-        _fnv = gen._new_val('void *', f'_funcptr_{_target}')
-        # The three counts go through `_new_val` as real operands, NOT as
-        # parenthesized literals: a parenthesized sub-expression is not a
-        # legal GIMPLE operand, so `(2)` as a call argument is a hard parse
-        # failure ("expected expression before '(' token" / "invalid
-        # argument to gimple call") whenever this value is referenced from a
-        # `__GIMPLE`-tagged body — which is every compiled free function.
-        # Real: c_common/scriptutil.py's `add_progress_cli` binding the
-        # variadic generator `track_progress_compact` as a value.
-        _nfv = gen._new_val('int64_t', str(_vshape[0]))
-        _kdv = gen._new_val('int64_t', str(_vshape[1]))
-        _hsv = gen._new_val('int64_t', '0')
+        _fnv = gen._cast('void *', f"{_target}")
         _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
                              [('void *', _fnv), ('void *', '0'),
-                              ('int64_t', _nfv),
-                              ('int64_t', _kdv),
-                              ('int64_t', _hsv)])
+                              ('int64_t', f'({_vshape[0]})'),
+                              ('int64_t', f'({_vshape[1]})'),
+                              ('int64_t', '(0)')])
         return 'void *', gen._cast('void *', _vf)
     if cxx:
         return ('void *', f'(void *){_target}')

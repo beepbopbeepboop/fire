@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part4, CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part8, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part4, CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part7, CODEGEN_stdlib_dylib_lazy_undefined_refs-part8, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
@@ -7,9 +7,9 @@ that the dylib LOADS (a data/class-table reference to an undefined symbol is fat
 `tools/stdlib_dylib_ratchet.py`). These 50 are lazy CALL references: they do not stop the load, but a
 client that reaches one through the dylib aborts at that call unless another image happens to define it.
 
-## Replan (2026-11-15): the live parts are 4-6, 8 and 9
+## Replan (2026-11-15): the live parts are 4-9
 
-Parts 1-3 and 7 landed and their docs were deleted when they landed:
+Parts 1-3 landed and their docs were deleted when they landed:
 
 - part 1: a re-exported free function's reference carries the DEFINING module's
   qualifier (`_reexported_defining_qualifier`).
@@ -19,15 +19,6 @@ Parts 1-3 and 7 landed and their docs were deleted when they landed:
   dispatch and the comparison lowering); the suffix-less forward declaration
   for an overloaded dunder is gone. The total was 50 -> 43 -> 32 by
   2026-11-14, with 0 modules falling back to source.
-- part 7: a parameter typed with a struct private to the DEFINING module
-  (`benchmark._run_impl(opts: _RunOptions)`) is `Name *` there but `int64_t`
-  in the importer's text scan, so the two hashed different overload suffixes.
-  The importer now hashes the definer's list (`_home_signature_ctypes`, ranked
-  ahead of the shared slot by `_imported_private_struct_pts`) while still
-  DECLARING and CALLING the extern with the opaque `int64_t` word: naming
-  `Name` there makes the importer lower `.field` as a typed `->` against a
-  struct it never defines. 32 -> 31 undefined `_std_` names, the one that went
-  being `_std_benchmark_benchmark__run_impl_9f63a2`; none new.
 
 The title's "50" is the 2026-11-12 measurement and is stale; the live
 residual is the table below. Measured 2026-11-15 in this worktree by compiling
@@ -42,6 +33,7 @@ build, no link), then confirming the end-to-end shape with two-module
 | 4 | `bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part4.md` | a `comptime if` chain emits the other TARGET's bodies; only the host's `_linux`/`_macos` variant is built | 4 x `std_os__linux_{aarch64,x86}__{lstat,stat}` from `std/os/path/path.mojo` |
 | 5 | `...-part5.md` | a body the backend cannot lower vanishes, so the caller's qualified name has no definition (its own calls get a BARE weak stub) | `std_sys_info_is_{apple,nvidia,amd}_gpu`, `std_python__cpython_CPython_as_imm` |
 | 6 | `...-part6.md` | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
+| 7 | `...-part7.md` | a struct type private to the defining module becomes `int64_t` on the caller side | `std_benchmark_benchmark__run_impl` |
 | 8 | `...-part8.md` | two same-name free functions in one module are neither defined nor callable; the call becomes a bare `(void)` stub | `std_bit_mask_splat`, `std_memory_memory__free`, `..._unsafe_memset_zero`, `..._to_integer` |
 | 9 | `...-part9.md` | a generic free function instantiated only by another module is never emitted | `..._forget_deinit`, `..._unsafe_destroy_n`, `..._dealloc`, `std_time_time_time_function` |
 
@@ -131,73 +123,8 @@ test: run `nm -u` against `nm -gU` and require the `_std_` difference to *shrink
 `stdlib-dylib` fail on it until the count is zero: all 50 exist before the fix and the job's documented
 contract is that the dylib need not be complete.
 
-**Exact next step:** work parts 4-6, 8 and 9, in the order of the table above. Each
+**Exact next step:** work parts 4-9, in the order of the table above. Each
 part's `## Done when` names the probe that is red today and green when the
 part lands. The old advice to take "the arity-only overload choice" is part 3,
 which landed; the remaining classes are the replan table's, not this
 section's.
-
-## Re-measured 2026-11-15: the JOB is green; 32 references remain
-
-The job this doc was filed against now PASSES:
-
-    python3 tools/stdlib_dylib_ratchet.py
-    -> stdlib-dylib: 0 module(s) fell back to source (0 expected)
-    -> exit 0
-
-and `tools/control.py gate list` no longer turns `stdlib-dylib` off. The count
-is **32**, down from the 50 the Symptom above records (43 after part 1, 32
-after part 3). Of the 32, **12 carry no overload suffix** — `_std_sys_info_
-is_apple_gpu`, `_std_sys_info_is_nvidia_gpu`, `_std_random_random_seed`,
-`_std_time_time_sleep`, `_std_memory_memory__free`, `_std_bit_mask_splat`,
-`_std_collections_string_string__calc_initial_buffer_size`,
-`_std_python__cpython_CPython_as_imm`, `_std_sys_info_is_amd_gpu`,
-`_std_sys_info_has_nvidia_gpu_accelerator`, `_std_time_time_time_function`,
-`_std_memory_memory_unsafe_memset_zero` — and the other 20 carry a suffix that
-is not the defining unit's.
-
-All 12 unsuffixed ones were calls to an OVERLOADED free function from a module
-that did not define it (`std/sys/info.mojo`'s `is_apple_gpu()` has both a
-`()` and a `[subarch: StaticString]()` overload). **Fixed 2026-11-15
-(`ddc086d41`)**: a MIXED overload set (one plain head + one bracketed head) was
-caught by the generic-import registration and returned early, so it never
-reached the overload registration, and the opener set `'('` could not even see
-a bracketed head; `_elaborate_overload_call` also mangled from the BARE name,
-dropping the defining module's qualifier. The references are now correct --
-`_std_sys_info_is_apple_gpu__void`, `_std_pwd__macos__getpw_macos__1_0_6_
-String` / `__1_0_6_UInt32`.
-
-**The count went 32 -> 38, and that is an honest regression in the metric,
-not a fix.** The names are right now, and being right exposes references the
-dylib never defined: both `getpw_macos` overloads are referenced where before
-only the one the ABI scan happened to pick was, and two `_gpu_intrinsics_`
-entries appeared. The job still PASSES (0 modules fall back to source, ratchet
-exit 0) because these are lazy call references a client falls back from, but
-the definers are still absent from the dylib -- that, not the naming, is now
-the visible remaining work.
-
-## 2026-11-15 (later): the next layer -- `external_call` bodies are dropped
-
-The 38 references are not one class. Naming is now right; what remains is that
-some DEFINERS contribute no body at all. Measured on
-`std/pwd/_macos.mojo` through `build_stdlib_dylib.compile_module_to_c`:
-
-* the module's generated C contains `extern int64_t external_call (...);
-  /* from std.ffi */` -- `std.ffi.external_call` was never compiled, only
-  declared;
-* `_getpw_macos` (both overloads) and `_stat_macos` appear ONLY as guarded
-  forward declarations (`#ifndef _MOJO_STUB__getpw_macos` /
-  `int64_t _getpw_macos (...);`), with zero occurrences of `getpwuid` /
-  `getpwnam` in the whole file -- their bodies are gone;
-* `_build_pw_struct` from the SAME module IS defined
-  (`_std_pwd__macos__build_pw_struct_9f63a2`), and it is the one that does not
-  call `external_call`.
-
-So the correlation is exact: a function whose body calls `external_call` loses
-that body. `external_call` is an ordinary generic function in
-`std/ffi/__init__.mojo` -- `def external_call[callee: StaticString,
-return_type: RegisterPassable, *types: AnyType,
-num_fixed_args: Optional[Int] = None](*args: *types) -> return_type` -- so the
-gap is the VARIADIC generic call (`*args: *types` captured and forwarded), not
-the FFI lowering itself. This is a different and deeper defect than the naming
-one above; filing it here rather than half-fixing it.
