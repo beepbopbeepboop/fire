@@ -19193,6 +19193,14 @@ def gen_module_impl(self, stmts: list):
                             signature)
                         if _m_sig:
                             _eff_list = _as_list(_def_pts)
+                            # Only a definition compiled in THIS translation
+                            # unit has a prototype this extern can conflict
+                            # with; a `*args` function defined elsewhere keeps
+                            # the sentinel spelling every other extern of it
+                            # uses (`std_os_path_path_join (char *, ...)` is
+                            # declared twice in one unit and the two must
+                            # agree).
+                            _def_in_this_tu = _ggf_dup._local_def_pts(self, _sn) is not None
                             _scan_sig = _as_str(_m_sig.group(2))
                             if _scan_sig.strip() in ('', 'void'):
                                 _scan_parts = []
@@ -19216,7 +19224,7 @@ def gen_module_impl(self, stmts: list):
                                 # `extern char * f (... parts)` ("expected ')'
                                 # before 'parts'") or, nameless, a prototype that
                                 # conflicts with the definition's own.
-                                if _tp == '...':
+                                if _tp == '...' and _def_in_this_tu:
                                     _tp = 'MojoList *'
                                 if _keep_names:
                                     _toks = _scan_parts[_pi].split()
@@ -19226,6 +19234,14 @@ def gen_module_impl(self, stmts: list):
                                         _tp = _tp + ' ' + _as_str(
                                             _toks[len(_toks) - 1])
                                 _new_parts.append(_tp)
+                                # C's `...` must be last. `_signature_ctypes` keeps params
+                                # that follow `*args` so call sites can still
+                                # coerce them, but a prototype cannot spell
+                                # `(int64_t, ..., int64_t)`; drop the tail,
+                                # exactly as the loader's own scan does for
+                                # that shape.
+                                if _tp == '...':
+                                    break
                             signature = (_m_sig.group(1) + '('
                                          + ', '.join(_new_parts) + ')')
                 if signature.startswith('MojoTuple_'):
