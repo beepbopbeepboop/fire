@@ -1,5 +1,5 @@
 """Regression for the cases-generator analyzer compile bugs
-(bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md), root causes
+(COMPILE_FAIL_Tools_cases_generator_analyzer, doc deleted with the fix), root causes
 #2A / #2B / #3. The shapes mirror Tools/cases_generator/parsing.py:
 
   #2A  `kind: Literal["inst", "op"]` — an all-string-literal `Literal[...]`

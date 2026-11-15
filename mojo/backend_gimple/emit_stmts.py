@@ -642,6 +642,11 @@ def _gen_stmt_VarDecl(gen, node):
         # `.wait()` handling.
         if actual_dst == 'MojoGenerator *' and v in gen._generator_var_api:
             gen._generator_var_api[node.name] = gen._generator_var_api[v]
+            # A named local now holds the handle and may be read again
+            # (another consumption, or simply falling out of scope): the
+            # drains of this value must not destroy it (see
+            # _generator_value_owned).
+            gen._generator_value_owned[node.name] = False
         if actual_dst == 'MojoAsync *' and v in gen._async_var_api:
             gen._async_var_api[node.name] = gen._async_var_api[v]
         # `var f = <closure value>` / `var f = lambda: False` (see
@@ -1182,6 +1187,11 @@ def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
     api = None
     if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
         api = gen._generator_var_api[v]
+        # The handle is about to live in a module global: whatever drains
+        # it later does so through a fresh read-back temp (marked False at
+        # the read site), never through this one — so no consumer of this
+        # temp may destroy it either (see _generator_value_owned).
+        gen._generator_value_owned[v] = False
     if api is None:
         if key in gen._global_generator_api:
             gen._global_generator_api_poisoned.add(key)
@@ -2184,6 +2194,11 @@ def _gen_stmt_AssignStmt(gen, node):
         # generator_not_first_class_value.md.
         if dst == 'MojoGenerator *' and v in gen._generator_var_api:
             gen._generator_var_api[tname] = gen._generator_var_api[v]
+            # A named local now holds the handle and may be read again
+            # (another consumption, or simply falling out of scope): the
+            # drains of this value must not destroy it (see
+            # _generator_value_owned).
+            gen._generator_value_owned[tname] = False
         # Step I: `var task = create_task(f())` -- mirrors the
         # MojoGenerator* carry-through immediately above exactly (see
         # self._async_var_api's own docstring for the identical "value

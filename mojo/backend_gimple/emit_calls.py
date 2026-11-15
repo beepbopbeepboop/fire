@@ -214,8 +214,19 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                 _gen_kwarg_values = []
                 continue
             # A keyword argument binds to the slot of its own NAME, not to the
-            # next free slot in sequence.
-            _gen_pnames = list(gen._func_param_names.get(fname_raw) or [])
+            # next free slot in sequence. The table lookup misses a lowered
+            # generator: gen_module's `_func_param_names` pass ran after
+            # coro.py's rewrite renamed the def to `__mgco_<g>_body` (whose
+            # only param is `__c`), so the ORIGINAL name is absent and the
+            # fallback is the api entry's own `param_names` snapshot (the
+            # DEFINING module's, for a cross-module import) -- the same
+            # order `c_params`/`func_param_types[f"{base}_start"]` use.
+            # Without it, `tokenize(src, filename=filename)` against
+            # `def tokenize(src, line=1, filename="")` popped the filename
+            # word into the `line` slot (the "class b" garbage in
+            # COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fix).
+            _gen_pnames = (list(gen._func_param_names.get(fname_raw) or [])
+                           or list(api.get('param_names') or []))
             if (_gen_kwarg_dict and len(_gen_pnames) == len(_gen_expected)
                     and _pos < len(_gen_pnames)
                     and _gen_pnames[_pos] in _gen_kwarg_dict):
@@ -323,6 +334,12 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
         gen._safe_coerce_emit('int64_t', 'MojoGenerator *', _noted, _coerced)
         t = _coerced
         gen._generator_var_api[t] = api
+    # Fresh construction: the returned temp is this handle's only named
+    # reference until it is bound to a variable or a module global, which
+    # re-marks the BOUND name False on the way (emit_stmts.py). A consumer
+    # that drains the temp directly must destroy it afterwards (see the
+    # _generator_value_owned docstring in GimpleGen.__init__).
+    gen._generator_value_owned[t] = True
     return t
 
 
@@ -5269,8 +5286,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # (“OPEN: `from mod import Class as Alias”).
     # Applied AFTER the keyword rename because `_struct_import_aliases`
     # already records the renamed name (see `_note_struct_import_alias`).
-    _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
-                   or {}).get(_fname_ctor, _fname_ctor)
+    _aliases_ctor = getattr(gen, '_struct_import_aliases', None) or {}
+    _ctor_was_aliased = _fname_ctor in _aliases_ctor
+    if _ctor_was_aliased:
+        _fname_ctor = _aliases_ctor[_fname_ctor]
     # ...and a class declared INSIDE a function body, which is hoisted to
     # module scope so the struct pipeline will give it a layout at all. A
     # hoisted name that collided with an existing struct is renamed, and the
@@ -5280,6 +5299,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # reads exactly as a module-level class's does. See
     # `_gmi_hoist_nested_structs`.
     _fname_ctor = gmp._resolve_fn_scoped_struct_name(gen, _fname_ctor)
+    # Cross-module collision, local-first (see `_local_cname_map`): a bare
+    # `StackEffect(...)` in analyzer.py constructs analyzer.py's own class,
+    # which the collision pass renamed `analyzer_StackEffect`, not the
+    # winner that holds the bare name in the shared `struct_field_types`
+    # (the old path allocated the parsing-side `StackEffect(Node)` layout
+    # for the analyzer-side `StackEffect(inputs, outputs)` value). The
+    # import-alias spelling (`from parsing import StackEffect as PSE;
+    # PSE(...)`) explicitly names the imported struct, so it is never
+    # remapped.
+    if not _ctor_was_aliased:
+        _lcm_ctor = getattr(gen, '_local_cname_map', None)
+        if _lcm_ctor and _fname_ctor in _lcm_ctor:
+            _fname_ctor = _lcm_ctor[_fname_ctor]
     if _fname_ctor in gen.struct_field_types:
         # `node.kwargs` (a direct CallExpr field read) NOT
         # `getattr(node, 'kwargs', None)` — the 3-arg getattr lowers to a
@@ -9726,6 +9758,10 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         _gen_t = gen._new_val('MojoGenerator *', f'(MojoGenerator *){raw_t}')
         gen._actual_types[_gen_t] = 'MojoGenerator *'
         gen._generator_var_api[_gen_t] = _cap_api
+        # The call returned a freshly constructed generator: own it, so a
+        # direct consumer of this result destroys it after draining (see
+        # _generator_value_owned).
+        gen._generator_value_owned[_gen_t] = True
         return 'MojoGenerator *', _gen_t
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
@@ -11048,15 +11084,24 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
         if at == 'double':
             return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
-        # A tagged/boxed word (a double box holds the double's bits, not a
-        # numeric int64_t) must be read by kind: `mojo_box_int` returns the
-        # double box truncated toward zero (Python's `int(float)`), and the
-        # raw word for a non-double box or a plain int. Without this, int(x)
-        # of a boxed 2.5 returned the box or its bits instead of 2.
-        if at in ('int64_t', 'int', '_Bool') and av in getattr(gen, '_boxed_vals', ()):
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', av)])
+        # A word of UNKNOWN KIND in an int64_t slot: the old pass-through
+        # (`return av`) assumed every int64_t word is a plain integer, so a
+        # string slice (`mojo_word_slice`), a kind-mixed list slot, or a
+        # boxed double handed straight on: `result.replicated =
+        # int(anno[10:-1])` in Tools/cases_generator/analyzer.py's make_uop
+        # stored the string's ADDRESS, and the following
+        # `for oparg in range(result.replicated):` loop spun forever
+        # (bugs/COMPILE_FAIL_Tools_cases_generator_analyzer: a 170K-
+        # generator/sec BlockStmt.tokens drain instead of CPython's 55ms).
+        # `mojo_int_of_word` is the kind-aware read (its runtime comment
+        # names the cases): identity for a genuinely numeric word, digit
+        # parse for a bare or boxed string, truncation for a double box —
+        # it also subsumes the former `av in _boxed_vals` special case
+        # (mojo_box_int answered a boxed string with the pointer, the same
+        # defect, and a None box with 0 where CPython raises).
         if at == 'int64_t':
-            return 'int64_t', av
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_int_of_word',
+                                             [('int64_t', gen._ensure_local('int64_t', av))])
         if at in ('int', '_Bool'):
             return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
 
@@ -11217,6 +11262,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _gf = gen._fn_returns_generator.get(fname_raw)
         if _gf is not None and _gf in gen._generator_api:
             gen._generator_var_api[t] = gen._generator_api[_gf]
+            # `mk()` returned a freshly constructed generator: own it, so a
+            # direct consumer of the result destroys it after draining (a
+            # `g = mk()` binding re-marks the bound name False, see
+            # _generator_value_owned).
+            gen._generator_value_owned[t] = True
     # A callee that RETURNS a kinds-carrying value: the result is still
     # described, but the compile-time NAME the per-slot kinds were recorded
     # against died with the callee's frame. Mark it so a read with no
@@ -12055,7 +12105,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 _skd = _sk[_si]
                 idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
                 if _skd == 'double':
-                    return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
+                    return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
                 if _skd == 'bytes':
                     return _list_slot_bytes(gen, ov, idx64)
                 if _skd == 'str':
@@ -12067,8 +12117,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     # always a heterogeneous list LITERAL, including one that
                     # came back through a `return`
                     # (`gen._return_value_slot_kinds`).
-                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
-                return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
+                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
+                return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
         # A tuple (or any list with per-slot C types recorded) subscripted at
         # a compile-time constant index: the slot's own C type is the answer.
         # This must run BEFORE the generic `_maybe_kinds_vals` boxed read,
@@ -12087,15 +12137,15 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 _sct = _as_str(_ts[_si])
                 idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
                 if _sct == 'double':
-                    return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
+                    return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
                 if _sct == 'char *':
-                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
+                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
                 if _sct == 'MojoBytes *':
                     return _list_slot_bytes(gen, ov, idx64)
                 if _sct == '_Bool':
                     return '_Bool', gen._new_val(
-                        '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")
-                t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
+                        '_Bool', f"(_Bool) mojo_list_get_int_checked ({ov}, {idx64})")
+                t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
                 if _sct and _sct.endswith(' *'):
                     gen._actual_types[t] = _sct
                     cast_t = gen._new_val(_sct, f'({_sct}){t}')
@@ -12136,12 +12186,12 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             gen._boxed_vals.add(t)
             return 'int64_t', t
         if suf == 'double':
-            t = gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
+            t = gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
             return 'double', t
         if suf == 'str':
-            t = gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
+            t = gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
             return 'char *', t
-        t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
+        t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
         # Return the actual pointer type for pointer elements (MojoDict*,
         # MojoList*, MojoSet*) so downstream consumers (subscript, method
         # dispatch) see the real type instead of raw int64_t.  Without this,

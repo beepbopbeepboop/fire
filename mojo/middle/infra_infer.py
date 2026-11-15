@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from __future__ import annotations
 import dataclasses
-import os
 import re
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _sms_key
 import regex_compile
@@ -81,6 +80,20 @@ def _resolve_type(gen, ann: str | None) -> str:
                 if not _ann_s:
                     break
             ann = _ann_s
+    # Cross-module collision, local-first: when THIS module defines a struct
+    # under `ann`'s bare name and that struct is the collision LOSER (its C
+    # name is qualified — recorded in `_local_cname_map`), a bare annotation
+    # in this module's source means the LOCAL class, not the winner that
+    # holds the bare name in the shared `struct_field_types` (measured:
+    # analyzer.py's `families: dict[str, Family]` / `-> StackEffect` resolved
+    # to parsing.py's `Family(Node)` / `StackEffect(Node)` layouts, so the
+    # root-side constructor wrote into the wrong fields and the wrong method
+    # table answered the dispatch). A dotted annotation is an explicit module
+    # reference (`op: parser.InstDef`) and never remaps.
+    if isinstance(ann, str) and '.' not in ann:
+        _lcm_r = getattr(gen, '_local_cname_map', None)
+        if _lcm_r and ann in _lcm_r:
+            return f"{_lcm_r[ann]} *"
     if ann in gen.struct_field_types:
         return f"{ann} *"
     # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —
