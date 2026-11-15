@@ -1,6 +1,6 @@
-SPLIT: part1 (the type-alias arm; its doc was deleted with its fix), part2
-(the alias as a constructor callee; deleted with its fix), part3 (a
-`comptime`-bound float DType; deleted with its fix 2026-11-14)
+SPLIT: all three parts landed and their docs were deleted -- part1 the
+type-alias arm, part2 the alias as a constructor callee, part3 (2026-11-14,
+`a0f321f1c`) a `comptime`-bound float DType
 
 # CODEGEN: SIMD values and `Array`/`Span` elements erase to `int64_t`, so their real type is unknown
 

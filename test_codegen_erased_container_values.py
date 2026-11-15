@@ -20,7 +20,7 @@ import sys
 from test_codegen_erased_container_values_pins import _compile, _defn
 
 
-# part 1 (bugs/CODEGEN_simd_and_array_values_erase_to_int64-part1.md):
+# part 1 (landed; doc deleted):
 # a module-level `alias` of a type is expanded wherever an annotation is
 # resolved -- a parameter, a return, an explicitly annotated local, and a
 # container's element type.
