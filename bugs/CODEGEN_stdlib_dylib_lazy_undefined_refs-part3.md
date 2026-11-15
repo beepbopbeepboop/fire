@@ -81,3 +81,23 @@ matching each candidate's declared parameter CTYPES against the provided
 argument ctypes before falling back. Keep the fallback shape (no match →
 today's behavior); do not widen `min_arity <= n <= max_arity` beyond
 disambiguating a genuine tie.
+
+## Status
+
+- **Landed 2026-11-14.** Two changes, both in the dispatch the doc names:
+  1. `mojo/backend_gimple/emit_methods.py::_lower_struct_subscript_dunder`
+     now scores same-arity survivors by how many of their declared
+     `param_ctypes` agree with the ALREADY-LOWERED argument ctypes, by FAMILY
+     (`_dunder_ctype_family`: the lowered `int` of a literal vs a declared
+     `int64_t`; `char *` stays distinct from the numeric families). A unique
+     candidate and a no-match candidate keep today's behaviour exactly — the
+     latter still falls through to the existing refusal.
+  2. `mojo/backend_gimple/module_gen.py` no longer emits the suffix-less
+     `{ret} {base_cname} (...);` forward declaration for an overloaded
+     DUNDER. That declaration existed for `_lower_bound_method_value`'s
+     unsuffixed fallback on an overloaded ordinary method; for a dunder no
+     overload defines the bare symbol, so it was dead weight and is exactly
+     the bare `_std_...___getitem__` reference the parent doc lists.
+  `python3 test_stdlib_dylib_lazy_undefined_refs_probes.py p3_same_arity`
+  passes: no `pair_Pair___getitem__ (` anywhere, the `p[0]` call names the
+  Int-parameter overload, and that overload's definition exists.

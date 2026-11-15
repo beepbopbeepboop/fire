@@ -817,6 +817,29 @@ def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
     return ret_type, gen._cast(ret_type, raw_t)
 
 
+def _dunder_ctype_family(ct) -> str:
+    """The coarse C-type family two spellings of one value can share.
+
+    `_lower_struct_subscript_dunder` receives ALREADY-LOWERED argument
+    ctypes, and a literal's lowered type (`int` for `0`) is not spelled the
+    way the parameter's declaration is (`int64_t`). Discriminating same-arity
+    overloads needs the family, not the exact spelling; `char *` (a string)
+    and a container pointer stay distinct from the numeric families.
+    """
+    t = _gmm_as_str(ct or '').strip()
+    if not t:
+        return ''
+    if t.endswith(' *'):
+        return 'char *' if t == 'char *' else 'ptr'
+    if t in ('float', 'double'):
+        return 'float'
+    if t == '_Bool':
+        return 'bool'
+    if t.startswith('int') or t.startswith('uint') or t.endswith('_t'):
+        return 'int'
+    return t
+
+
 def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
                                    arg_pairs: list) -> tuple[str, str] | None:
     """Dispatch `obj[key]` / `obj[key] = v` protocol on a USER-STRUCT
@@ -878,6 +901,31 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
                    [c for c in cands if c.get('min_arity', 0) <= n]
         if len(matching) == 1:
             chosen = matching[0]
+        elif len(matching) > 1:
+            # Same-arity overloads: the reference must name ONE concrete
+            # overload, never the suffix-less catch-all. Score each survivor
+            # by how many of the ALREADY-LOWERED argument ctypes agree with
+            # its declared parameter ctypes, by FAMILY (the lowered `int` of
+            # a literal vs a declared `int64_t`). The bare-name twin of this
+            # dispatch scores the same way in `_resolve_overload`; a unique
+            # candidate and a no-match candidate both keep today's behaviour
+            # (the latter still falls through to the existing refusal).
+            _best = None
+            _best_score = 0
+            for _c in matching:
+                _score = 0
+                _pcs = _c.get('param_ctypes') or []
+                for _i in range(len(arg_pairs)):
+                    if _i >= len(_pcs):
+                        break
+                    if (_dunder_ctype_family(arg_pairs[_i][0])
+                            == _dunder_ctype_family(_pcs[_i])):
+                        _score += 1
+                if _score > _best_score:
+                    _best = _c
+                    _best_score = _score
+            if _best is not None:
+                chosen = _best
     overload_id = (chosen or {}).get('overload_id', '') or ''
     mangled = _gmm_as_str(_ggf._struct_method_csym(gen, sn, method, overload_id))
     ret_type = (chosen or {}).get('ret_type') or gen.func_return_types.get(
