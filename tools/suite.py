@@ -1894,8 +1894,7 @@ test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
          'fire_compiler.py', 'myinterpreter.py', 'module_loader.py', 'cas.py',
          'ast_rewriter.py', 'fire.py', 'hello.mojo', 'class_jit.mojo',
          'test_struct.mojo', 'array_ops_jit.mojo'],
-     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)',
-     disabled='bugs/gate-gimple-lint.md')
+     desc='typed-IR check of emitted GIMPLE: call arguments, copies, returns (ratchet)')
 # The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
 # hard-coded one. Registered by the integrator: the test landed with help-rename
 # but in no bucket, which turned `suite-self-test`'s estate check red.
