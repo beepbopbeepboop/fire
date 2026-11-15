@@ -2000,6 +2000,19 @@ def _synthetic_text(path, line, name):
     return f"def {name}{brackets}({', '.join(params)}){ret}{where}"
 
 
+def _repeat_char(ch: str, n: int) -> str:
+    """`ch` repeated `n` times (0 for a non-positive count). A function with a
+    typed `n`, not `ch * n` inline: the operands here come out of a record dict,
+    which the self-hosted compiler reads as boxed words, and `'~' * <word>` is
+    then `char * * char *` (a GCC error in the self-host build)."""
+    out = ''
+    i = 0
+    while i < n:
+        out += ch
+        i += 1
+    return out
+
+
 def _render_record_text(rec, filename, source):
     """Text rendering of an overload_diagnostic_record, in `mojo build`'s
     shape: `file:line:col: error: msg`, the source line, then a marker line
@@ -2080,15 +2093,15 @@ def _render_record_text(rec, filename, source):
             pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:caret - 1])
             if tilde_from and idx == 0 and rec.get('tilde_to'):
                 marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
-                out.append(marks + '~' * (rec['tilde_to'] - tilde_from + 1)
-                           + ' ' * (caret - rec['tilde_to'] - 1) + '^')
+                out.append(marks + _repeat_char('~', rec['tilde_to'] - tilde_from + 1)
+                           + _repeat_char(' ', caret - rec['tilde_to'] - 1) + '^')
             elif tilde_from:
                 marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
-                out.append(marks + '~' * (caret - tilde_from) + '^'
-                           + '~' * rec.get('after', 0))
+                out.append(marks + _repeat_char('~', caret - tilde_from) + '^'
+                           + _repeat_char('~', rec.get('after', 0)))
             else:
                 after = rec.get('after', 0) if idx == 0 else extras.get(idx, (0, None))[0]
-                out.append(pad + '^' + '~' * after)
+                out.append(pad + '^' + _repeat_char('~', after))
                 if idx in extras and extras[idx][1]:
                     out.append(pad + extras[idx][1])
     return '\n'.join(out)

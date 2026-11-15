@@ -6660,6 +6660,9 @@ def gen_module_impl(self, stmts: list):
             # '_comptime_rhs_failures'` / `'_struct_param_names'`.
             '_comptime_rhs_failures': 'MojoList *',
             '_struct_param_names': 'MojoList *',
+            # Parser._struct_bracket_param_info: the per-struct accumulator that
+            # becomes StructDef.bracket_param_info (same missing-row failure).
+            '_struct_bracket_param_info': 'MojoList *',
             # `Parser._lazy_import_blockers` (PEP 810 lazy imports): the stack
             # `parse_funcdef`/`parse_struct`/`parse_trait`/`parse_try` push the
             # enclosing scope onto and `parse_lazy_import` reads the innermost
@@ -7211,6 +7214,11 @@ def gen_module_impl(self, stmts: list):
         # mojo/middle/types.py's presence-bit helpers).
         'align_expr': 'int64_t',
         'presence_fields': 'MojoList *',
+        # `(name, annotation, default text)` per bracket parameter
+        # (fire_compiler.StructDef.bracket_param_info); the dataclass field
+        # landed without a row, so gcc rejected `'StructDef' has no member
+        # named 'bracket_param_info'`.
+        'bracket_param_info': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',

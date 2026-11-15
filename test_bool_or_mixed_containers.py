@@ -34,7 +34,33 @@ def test_bool_of_or_over_a_list_and_a_dict_compiles():
     assert 'generic_names' in c
 
 
+VALUE_SRC = '''from fire_compiler import FunctionDef
+
+
+def pick(stmts):
+    out = []
+    for st in (stmts or []):
+        if isinstance(st, FunctionDef):
+            chosen = (getattr(st, 'comptime_params', None)
+                      or getattr(st, 'comptime_param_annotations', None))
+            out.append(chosen)
+    return out
+'''
+
+
+def test_or_as_a_value_over_a_list_field_and_a_dict_field_compiles():
+    # The same shape with the selected operand kept (not just its truthiness):
+    # `_quick_type` of `getattr(st, 'field', None)` now reads the narrowed
+    # receiver's field type, so the merge is typed before the right operand
+    # lowers, and two container kinds become a word of unknown kind.
+    c = compile_module_to_c(VALUE_SRC, os.path.join(HERE, '.tmp', 'value_or_mixed.py'),
+                            'value_or_mixed', linkable=False)
+    assert 'pick' in c
+
+
 if __name__ == '__main__':
     test_bool_of_or_over_a_list_and_a_dict_compiles()
     print('ok test_bool_of_or_over_a_list_and_a_dict_compiles')
+    test_or_as_a_value_over_a_list_field_and_a_dict_field_compiles()
+    print('ok test_or_as_a_value_over_a_list_field_and_a_dict_field_compiles')
     print('all tests passed')

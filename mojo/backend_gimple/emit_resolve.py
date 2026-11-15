@@ -2859,6 +2859,20 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         # immediate build-time error naming both types and the value.
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
+        if not line:
+            # `_current_line` is rarely set; the statement the failing store
+            # belongs to is named by the last `#line N "file"` directive
+            # already emitted above it.
+            _bl = getattr(gen, 'body_lines', None) or []
+            _k = len(_bl) - 1
+            while _k >= 0 and _k > len(_bl) - 400:
+                _ln = _bl[_k]
+                if _ln.startswith('#line '):
+                    _parts = _ln.split()
+                    if len(_parts) >= 2 and _parts[1].isdigit():
+                        line = int(_parts[1])
+                    break
+                _k -= 1
         loc = f'{filename}:{line}' if line else filename
         _fn = getattr(gen, 'current_func_name', None)
         if _fn:
