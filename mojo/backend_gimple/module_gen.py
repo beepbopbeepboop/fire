@@ -19207,11 +19207,18 @@ def gen_module_impl(self, stmts: list):
                                            == len(_eff_list))
                             for _pi in range(len(_eff_list)):
                                 _tp = _as_str(_eff_list[_pi])
-                                _is_vararg = (_tp == '...')
-                                # A name after `...` is not C (`(... parts)`:
-                                # "expected ')' before 'parts'"); only a real
-                                # parameter keeps its scanned name.
-                                if _keep_names and not _is_vararg:
+                                # `...` in a parameter list is this codegen's
+                                # PACKING SENTINEL for a `*args` parameter (call
+                                # sites pack the extra arguments into one list),
+                                # never C's variadic: the definition takes the
+                                # packed `MojoList *`, so that is what the
+                                # prototype must say. Spelled `...` it is
+                                # `extern char * f (... parts)` ("expected ')'
+                                # before 'parts'") or, nameless, a prototype that
+                                # conflicts with the definition's own.
+                                if _tp == '...':
+                                    _tp = 'MojoList *'
+                                if _keep_names:
                                     _toks = _scan_parts[_pi].split()
                                     if len(_toks) >= 2 and re.match(
                                             r'^[A-Za-z_]\w*$',
@@ -19219,14 +19226,6 @@ def gen_module_impl(self, stmts: list):
                                         _tp = _tp + ' ' + _as_str(
                                             _toks[len(_toks) - 1])
                                 _new_parts.append(_tp)
-                                # C's `...` must be last. `_signature_ctypes`
-                                # keeps params that follow `*args` so call
-                                # sites can still coerce them, but a prototype
-                                # cannot spell `(int64_t, ..., int64_t)`; drop
-                                # the tail, exactly as the loader's own scan
-                                # does for that shape.
-                                if _is_vararg:
-                                    break
                             signature = (_m_sig.group(1) + '('
                                          + ', '.join(_new_parts) + ')')
                 if signature.startswith('MojoTuple_'):
