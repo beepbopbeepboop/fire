@@ -63,3 +63,25 @@ Measured against the canonical Modular sources:
   lines (`function instantiation failed` + the witness-table note; `'S[T]' does
   not implement all requirements for 'Iterable'`) are covered by the passing
   tests above.
+
+## Status 2026-11-14 (later): the spelling residual is FIXED
+
+`_validate_inherited_default` now re-spells a partial application with the
+CONFORMING STRUCT's own value-parameter name (`_respell_app_with_struct_value_params`,
+`elaborate.py`), so the canonical case emits exactly its CHECK line:
+
+```
+error: 'Map[mapFn]' does not implement all requirements for 'Strategy'
+```
+
+(commit `2c7529d7a`). Only an argument that is one of the trait method's own
+bracket parameters is renamed, and only to the struct's `def`/`fn`-typed
+("value") bracket parameter at the same position, so an application written
+with the struct's type parameters (`Map[Self]`) is untouched.
+
+What is left is NOT this doc's: `struct_conditional_trait_conformance_errors.mojo`
+runs under `%parse-mojo-isolated -verify-diagnostics`, which the umbrella
+already records as harness-UNSUPPORTED (an `-verify-diagnostics` runner, not a
+compiler diagnostic). `enum_exhaustive_errors.mojo` does not exist in the
+Modular tree. Both belong to
+`bugs/hard/DIAGNOSTICS_missing_validation_modular.md`, not here.
