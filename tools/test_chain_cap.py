@@ -63,6 +63,28 @@ class ConflictBecomesLandDoc(unittest.TestCase):
         self.assertTrue(reg["fix-merge-fix-merge-fix-merge-fix-x"]["merge_capped"])
         ld.assert_called_once()
 
+    def test_a_not_done_branch_with_no_doc_is_reported_stuck(self):
+        t = {"slot": 1, "state": "exited-ok", "branch": "b", "worktree": "/w", "claims": ["bug:GONE"]}
+        stuck = []
+        with mock.patch.object(I.C, "load", return_value={"n": t}), \
+             mock.patch.object(I.C, "state_of", return_value="exited-ok"), \
+             mock.patch.object(I.C, "verdict", return_value="BLOCKED"), \
+             mock.patch.object(I.C, "ahead", return_value=2), \
+             mock.patch.object(I.C, "doc_exists_for", return_value=False):
+            self.assertEqual(I.pick_candidates(quiet=True, stuck_out=stuck), [])
+        self.assertEqual([n for n, _, _ in stuck], ["n"])
+
+    def test_a_done_branch_with_a_dirty_tree_is_reported_stuck(self):
+        t = {"slot": 1, "state": "exited-ok", "branch": "b", "worktree": "/w", "claims": ["bug:X"]}
+        stuck = []
+        with mock.patch.object(I.C, "load", return_value={"n": t}), \
+             mock.patch.object(I.C, "state_of", return_value="exited-ok"), \
+             mock.patch.object(I.C, "verdict", return_value="DONE"), \
+             mock.patch.object(I.C, "ahead", return_value=1), \
+             mock.patch.object(I.C, "tree_extras", return_value=["a.py"]):
+            self.assertEqual(I.pick_candidates(quiet=True, stuck_out=stuck), [])
+        self.assertIn("a.py", stuck[0][2])
+
     def test_pick_candidates_skips_a_capped_branch(self):
         t = {"slot": 1, "state": "exited-ok", "merge_capped": "x", "branch": "b", "worktree": "/w", "claims": []}
         with mock.patch.object(I.C, "load", return_value={"n": t}), \

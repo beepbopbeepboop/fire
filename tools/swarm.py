@@ -964,13 +964,20 @@ def land():
     build = C.mode() == "build"
     LAND_BATCH = 0 if build else 8
     proofs = []
-    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs) if n.startswith(PREFIXES) and n not in BUSY["names"]]
+    stuck = []
+    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs, stuck_out=stuck) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     for n, deleted in proofs:               # a DONE branch that deletes a doc without a test: a reviewer decides, not a person
         if n.startswith(PREFIXES) and n not in BUSY["names"]:
             tn = C.load()[n]
             log("proof review: %s deletes %s with no test changed; handing it to a reviewer (TEST or NOTESTCASE)"
                 % (n, " ".join(deleted)))
             I.enqueue_proof_review(n, tn, deleted)
+    for n, why, detail in stuck:            # a finished branch nothing will land or continue: its LAND doc carries it
+        if n.startswith(PREFIXES) and n not in BUSY["names"]:
+            tn = C.load()[n]
+            log("stuck: %s (%s); filing its LAND doc" % (n, why))
+            I._cap_merge_fix(n, "land doc: %s: %s" % (n, why))     # capped: no longer a candidate, never filed twice
+            I.land_doc(n, tn, why, "Branch: %s\n%s" % (tn["branch"], detail))
     names = fresh_first(names, C.load())
     if not build:
         # drain: the work that carries finished patches to master goes first, in priority.json order, then the rest.

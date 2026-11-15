@@ -221,7 +221,7 @@ def red_on_master(job):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), proof_out=None):
+def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), proof_out=None, stuck_out=None):
     """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
     cands = []
     say = (lambda *_: None) if quiet else print
@@ -242,12 +242,25 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
             continue                        # the merge-fix chain was stopped (depth cap, or no doc for a fixer to serve)
         if t.get("fixer"):
             continue                        # a merge/red fixer owns this branch; re-probing it would queue a second one
+        if (stuck_out is not None and st in ("exited-ok", "exited-err") and C.verdict(t) != "DONE" and C.ahead(t)
+                and not C.doc_exists_for(t.get("claims") or [])):
+            # not DONE, so nothing lands it, and its doc is gone, so continue_partial has no doc to continue it on:
+            # without a LAND doc these commits would sit for ever
+            stuck_out.append((name, "worker says %s, not DONE, and no bug doc is left to continue it on"
+                              % (C.verdict(t) or "nothing"), ""))
+            continue
         if C.verdict(t) != "DONE" and name not in ignore_verdict:
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
             say("skip %s: no commits" % name); continue
         if C.tree_extras(t["worktree"]) and name not in allow_dirty:
-            say("skip %s: dirty worktree (unfinished)" % name); continue
+            say("skip %s: dirty worktree (unfinished)" % name)
+            if stuck_out is not None and st in ("exited-ok", "exited-err"):
+                extras = C.tree_extras(t["worktree"])
+                stuck_out.append((name, "DONE, but its worktree %s has uncommitted work" % t["worktree"],
+                                  "Uncommitted entries: %s%s. Commit what belongs to the change, discard the rest."
+                                  % (", ".join(extras[:12]), " ..." if len(extras) > 12 else "")))
+            continue
         deleted = [p for p in C.git("diff", "--name-only", "--diff-filter=D", "master...%s" % t["branch"],
                                     check=False).split() if p.startswith("bugs/") and p.endswith(".md")]
         changed = C.git("diff", "--name-only", "master...%s" % t["branch"], check=False).split()
