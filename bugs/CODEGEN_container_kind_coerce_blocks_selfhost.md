@@ -117,3 +117,25 @@ failed compile).
 
 Note the diagnostic's `monomorphize.py:1146` was the ENCLOSING function's line,
 not the failing statement's — the same derived-name/line caveat as above.
+
+## Status 2026-11-14: the coercion refusals are FIXED; the chain is not yet green
+
+`GimpleGen.__init__`'s `no_mangle` parameter is now annotated `set[str]` (was
+unannotated with a `()` default the compiler typed `MojoList *`), which is the
+root cause above. Measured:
+
+- `python3 fire.py --dump-full monomorphize.py` -> **0** `cannot coerce` lines,
+  `✓ Generated monomorphize.ci`.
+- `python3 fire.py --dump-full fire.py` -> **0** `# ERROR` lines and **0**
+  `cannot coerce` lines; the `unavailable in compiled mode` weak-stub count
+  goes **178 -> 119**.
+- `test_gimple.py` 460/0.
+
+What still blocks `bootstrap-stage1-transitive` is a DIFFERENT check: its
+`reject=CLOSURE_INCOMPLETE` refuses the run on ANY
+`unavailable in compiled mode` stub, and 119 remain (the GATE doc's own repro
+is `grep -c 'unavailable in compiled mode' fire.ci`, first measured at 26).
+So the gate entries stay OFF — re-enabling them now would make the landing
+gate red. The full `fire.py build fire.py` link also still fails, on gcc
+errors unrelated to the container kinds. Those are the remaining work; this
+doc's specific defect is done.
