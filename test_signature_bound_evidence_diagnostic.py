@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regression: `error: invalid bindings in signature: lacking evidence` raised
-for VALID declarations (bugs/gate-mojoc.md).
+for VALID declarations (the `mojoc` gate red; its doc is gone).
 
 Commit 43bd3dcba extended `_check_fn_signature_binding_violations` to the
 RETURN type, exposing three false positives in the trait-bound evidence check
