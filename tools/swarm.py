@@ -10,10 +10,10 @@ One pass, repeated:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
   2. REFILL  `control.py refill --target N --prefix bug-,fix-` -- a worker that finishes frees its slot at once.
-  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py`; a conflicting branch is handed to a merge-fixer
-             task (integrate.enqueue_merge_fix). The campaign is tools/pool.json `mode`: `build` lands everything fast
+  3. LAND    finished bug-*/fix-* branches are merged by `integrate.py`; a conflicting branch is handed to a LAND doc
+             (bugs/LAND-*.md) (integrate.hand_to_land_doc). The campaign is tools/pool.json `mode`: `build` lands everything fast
              behind the light --stdlib gate; `drain` (the default) lands batches of 8 behind the full landing gate,
-             finishing work (fix-gate/fix-merge/fix-proof/fix-orch) first, in priority.json order.
+             finishing work (fix-gate/fix-merge/fix-proof/fix-orch, bug-land-*) first, in priority.json order.
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
@@ -991,8 +991,8 @@ def land():
         log("landing: probe %s in %.0f s (merged %d of %d)" % (verdict, time.time() - _t0, len(merged), len(batch)))
         for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
-                log("conflict %s: handing it to a merge fixer" % c)
-                I.enqueue_merge_fix(c, tasks[c], out)
+                log("conflict %s: filing its LAND doc" % c)
+                I.hand_to_land_doc(c, tasks[c], out)
                 batch.remove(c)
         if verdict == "BUSY":
             log("integrator busy (another integrator round holds the lock); landing waits for the next pass")

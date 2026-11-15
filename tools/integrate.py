@@ -261,8 +261,6 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
     return cands
 
 
-MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
-MERGE_FIX_IDLE = 2    # consecutive fixer rounds that committed nothing before they count as depth like any other
 
 
 def land_doc(name, t, reason, detail=""):
@@ -273,7 +271,7 @@ def land_doc(name, t, reason, detail=""):
     attempt, so the work survives across workers and days. An existing doc gets a new Status entry instead of a second
     doc. Returns the doc path."""
     root = re.sub(r"^(fix-(merge|proof|red|orch|gate|landed)-)+", "", name)
-    root = re.sub(r"^bug-", "", root)
+    root = re.sub(r"^(bug-)?(land-)?", "", root)
     root = re.sub(r"[^\w.-]+", "-", root)[:60].strip("-")
     p = os.path.join(C.MAIN, "bugs", "LAND-%s.md" % root)
     stamp = time.strftime("%F %T")
@@ -293,14 +291,14 @@ def land_doc(name, t, reason, detail=""):
                 "**Branch:** `%s` (task `%s`; if the branch is gone, its tip is `refs/archive/%s`).\n"
                 "**Original work:** %s\n**Original claims:** %s\n\n"
                 "The integrator could not land this finished branch and no merge-fixer chain is carrying it. This doc is the\n"
-                "work: get the branch's change onto master. Start from master, bring the branch in (`git merge %s`, or\n"
+                "work: get the branch's change onto master. Start from master, bring the NEWEST branch named in Status in (`git merge <it>`, or\n"
                 "cherry-pick its commits), resolve every conflict by reading BOTH sides and keeping both sides' intent, make the\n"
                 "result coherent, and run the narrow tests that cover the files involved plus the branch's own tests. If the\n"
                 "change is already on master in another form, say so, and delete the doc.\n\n"
                 "## Done when\n\nThe branch's change is committed on your branch, its tests pass, and this doc is `git rm`'d in\n"
                 "that same commit (then `python3 tools/dangling_doc_refs.py --ratchet`).\n\n"
                 "## Status\n%s"
-                % (name, t["branch"], name, t["branch"], (t.get("summary") or "")[:300], claims, t["branch"], entry))
+                % (name, t["branch"], name, t["branch"], (t.get("summary") or "")[:300], claims, entry))
     commit_doc(p, "land: %s cannot land (%s); the doc is the work\n\nFiled by the integrator." % (name, reason.split(":")[0][:60]))
     print("land doc %s: %s" % (os.path.relpath(p, C.MAIN), reason), flush=True)
     return p
@@ -321,51 +319,16 @@ def _cap_merge_fix(name, why, kind=None):
         C.enqueue_orch_review(name, kind, why)
 
 
-def enqueue_merge_fix(name, t, conflict_text):
-    """A branch that cannot merge onto master is handed back to a worker, not left for a human: queue a
-    merge task that starts from the branch, merges master into it, resolves, and verifies narrowly."""
-    import argparse as _ap
-    # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
-    # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
-    # A fixer that finished without committing anything did not try the merge (2026-11-13: the third fixer of
-    # bug-mid-codegen-simd-and-array found an old merge commit "already present", reported DONE, left the branch
-    # untouched and the next probe conflicted again). That round converged nothing, so it is not a level of the chain:
-    # the next fixer takes its depth, up to MERGE_FIX_IDLE times in a row, then it counts like any other round.
-    depth = C.fixer_depth(name, t, "merge_depth")
-    idle = t.get("merge_idle", 0)
-    forgive = depth > 0 and idle < MERGE_FIX_IDLE and C.ahead_since_base(t) == 0
-    if depth - forgive >= MERGE_FIX_DEPTH:
-        why = "merge-fix depth cap: %s is abandoned, not fixed again" % name
-        _cap_merge_fix(name, why)         # no orchestration review: the LAND doc below is the continuing work
-        land_doc(name, t, why, "conflict with master persisted across %d merge-fixer round(s)" % depth)
-        return
-    if not C.doc_exists_for(t.get("claims") or []):
-        # sync drops a queued task whose claims name no doc, so this fixer would be removed on the next pass and the
-        # branch would be re-probed, conflict and be handed to a new fixer forever (2026-11-11: 170 rounds on
-        # fix-gate-formal-doc-truth, and bug-mid-codegen-tagged-generator-mixed-t left `fixer` naming a vanished task)
-        why = ("merge-fix: %s has no bug doc for its claims %s; no fixer is queued (sync would drop it)"
-               % (name, t.get("claims")))
-        _cap_merge_fix(name, why)
-        land_doc(name, t, why, "its own doc is gone (deleted by the branch or by a landing): carry the change to master")
-        return
+def hand_to_land_doc(name, t, conflict_text):
+    """A branch that cannot merge onto master becomes a LAND doc (see land_doc), not a chain of fixer tasks: the doc
+    persists across workers and days, a free slot picks it up (drain mode first), and the integrator lands everything
+    else unbothered. The branch is capped (`merge_capped`): it is no longer a landing candidate and is never re-probed.
+    The doc's newest `Branch:` Status line is where the next worker continues. This replaced the fix-merge-* fixer
+    chain and its depth/idle caps (owner, 2026-11-15)."""
     files = sorted(set(l.split("Merge conflict in ")[-1].strip() for l in conflict_text.splitlines() if "Merge conflict in" in l))
-    task = ("Branch %s (a finished, verified worker branch; original task: %s) conflicts with current master in: %s. "
-            "You start on that branch. Run `git merge master`, resolve every conflict by reading BOTH sides and keeping both "
-            "sides' intent (never take one side wholesale, never drop a test; a doc a branch git rm'd because its bug is fixed "
-            "stays removed), then make the merged tree COHERENT, not just textually merged (two fixes for one thing: consolidate, "
-            "CLAUDE.md). Verify with the narrow tests that cover the files involved and the branch's own new tests, each wrapped in "
-            "python3 tools/memslot.py --gb 8 --label x --. You are a light worker: no gate, no self-host build. Never use git stash. "
-            "Commit the merge. Finish with the REPORT block and a CONTROL-STATUS line."
-            % (t["branch"], t["summary"][:150], ", ".join(files) or "see `git merge master`"))
-    mname = C.free_task_name("fix-merge-" + name)
-    meta = C.depth_meta(t, "merge_depth", name)
-    meta["merge_depth"] -= forgive                  # an idle round is not a level
-    meta["merge_idle"] = idle + 1 if forgive else 0
-    C.cmd_enqueue(_ap.Namespace(name=mname, claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"), meta=meta))
-    with C.registry() as reg:
-        reg[name]["state"] = "superseded"
-        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
+    why = "conflicts with master"
+    _cap_merge_fix(name, "land doc: %s %s" % (name, why))
+    land_doc(name, t, why, "Branch: %s\nConflicting files: %s" % (t["branch"], ", ".join(files) or "see `git merge master`"))
 
 
 def commit_doc(path, message):
@@ -529,7 +492,7 @@ def main():
             elif a.dry_run:                          # a dry run reports; it never enqueues fixers or touches the registry
                 print("(dry-run) %s conflicts: left out" % name)
             else:
-                enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
+                hand_to_land_doc(name, tasks[name], r.stdout)   # caps the branch and files its LAND doc
         else:
             merged.append(name); print("merged %s" % name)
     print("MERGED: %s" % " ".join(merged))
