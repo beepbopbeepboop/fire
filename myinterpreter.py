@@ -907,19 +907,14 @@ def where_violation_record(filename, node, loc, cond, site, bare=False):
             after = len(callee.member)
     elif hasattr(callee, 'name') and not bare:
         after = len(callee.name) - 1     # `^~~~` over the whole name
-    cond_note = {'file': loc[0], 'line': wl, 'col': wc, 'name': None,
-                 'message': f"constraint declared here evaluated to False, expected '{text}'"}
+    cond_note = _note(file=loc[0], line=wl, col=wc, name='', message=f"constraint declared here evaluated to False, expected '{text}'")
     if loc[0] in _SYNTHETIC_FILES:
         # No source: the note shows the constraint with its parameters spelled
         # by position.
-        cond_note['synth'] = _constraint_text(cond, list(node.comptime_params))
-    return msg, {
-        'file': filename, 'line': site.line, 'caret': caret,
-        'tilde_from': tilde_from, 'after': after, 'message': msg,
-        'notes': [
+        cond_note.synth = _constraint_text(cond, list(node.comptime_params))
+    return msg, _rec(file=filename, line=site.line, caret=caret, tilde_from=tilde_from, after=after, message=msg, notes=[
             cond_note,
-            {'file': loc[0], 'line': loc[1], 'name': node.name,
-             'message': 'function declared here'}]}
+            _note(file=loc[0], line=loc[1], name=node.name, message='function declared here')])
 
 
 def check_where_clause(interp, func, node, scope):
@@ -1345,21 +1340,11 @@ def _fieldwise_init_record(filename, source, n, sub, st, sfile):
     cl, cc = _callee_start(sub)
     if cl != n.line or cc < 1 or n.col <= cc:
         return None
-    return {
-        'file': filename, 'line': n.line, 'caret': n.col, 'tilde_from': cc,
-        'after': 1, 'message': 'no matching function in initialization',
-        'notes': [
-            {'file': sfile, 'line': st.line + 1 if st.decorators else st.line, 'col': 1,
-             'name': None,
-             'text': 'def __init__(out self, *, deinit move: Self)    # note - generated function',
-             'message': "candidate not viable: missing required argument: 'move'"},
-            {'file': sfile, 'line': st.line + 1 if st.decorators else st.line, 'col': 1,
-             'name': None,
-             'text': 'def __init__(out self)    # note - generated function',
-             'message': f"candidate not viable: failed to infer parameter '{unbound[0]}' "
-                        f"of parent struct '{st.name}'"},
-            {'file': sfile, 'line': st.line, 'name': st.name,
-             'message': ' struct declared here'}]}
+    return _rec(file=filename, line=n.line, caret=n.col, tilde_from=cc, after=1, message='no matching function in initialization', notes=[
+            _note(file=sfile, line=st.line + 1 if st.decorators else st.line, col=1, name='', text='def __init__(out self, *, deinit move: Self)    # note - generated function', message="candidate not viable: missing required argument: 'move'"),
+            _note(file=sfile, line=st.line + 1 if st.decorators else st.line, col=1, name='', text='def __init__(out self)    # note - generated function', message=f"candidate not viable: failed to infer parameter '{unbound[0]}' "
+                        f"of parent struct '{st.name}'"),
+            _note(file=sfile, line=st.line, name=st.name, message=' struct declared here')])
 
 
 def _predicate_call_record(filename, c, cfile, cond, env, site, bare):
@@ -1412,20 +1397,11 @@ def _predicate_call_record(filename, c, cfile, cond, env, site, bare):
         after = len(callee.name) - 1
     wl, wc = _expr_start(cond)
     shown = ', '.join(f"Int({v})" for v in vals)
-    return {
-        'file': filename, 'line': site.line, 'caret': caret,
-        'tilde_from': tilde_from, 'after': after,
-        'message': f"invalid call to '{c.name}': lacking evidence to prove correctness",
-        'notes': [
-            {'file': cfile, 'line': c.line, 'name': c.name,
-             'message': 'cannot prove constraint for candidate'},
-            {'file': cfile, 'line': wl, 'col': wc, 'name': None,
-             'nosnippet': cfile in _SYNTHETIC_FILES,
-             'message': f"constraint declared here needs evidence for '{pname}({shown})'"},
-            {'file': pfile, 'line': pred.line, 'name': pname,
-             'message': 'cannot evaluate call to non-builtin function declared here'},
-            {'file': filename, 'line': site.line, 'col': call_note_col, 'name': None,
-             'message': 'provide evidence for the constraint here to aid in candidate selection'}]}
+    return _rec(file=filename, line=site.line, caret=caret, tilde_from=tilde_from, after=after, message=f"invalid call to '{c.name}': lacking evidence to prove correctness", notes=[
+            _note(file=cfile, line=c.line, name=c.name, message='cannot prove constraint for candidate'),
+            _note(file=cfile, line=wl, col=wc, name='', nosnippet=cfile in _SYNTHETIC_FILES, message=f"constraint declared here needs evidence for '{pname}({shown})'"),
+            _note(file=pfile, line=pred.line, name=pname, message='cannot evaluate call to non-builtin function declared here'),
+            _note(file=filename, line=site.line, col=call_note_col, name='', message='provide evidence for the constraint here to aid in candidate selection')])
 
 
 def _scope_from_stmts_cached(path):
@@ -1490,7 +1466,7 @@ def _static_call_records(stmts, filename, source=''):
                 if sdef is not None:
                     rec = _fieldwise_init_record(filename, source, n, sub, sdef, sfile)
                     if rec is not None:
-                        out.append(((n.line, rec['caret']), rec))
+                        out.append(((n.line, rec.caret), rec))
                     continue
             cands, cfile = _resolve_callee(callee, sc, filename, bound)
             if not cands or any(c.decorators for c in cands):
@@ -1515,7 +1491,7 @@ def _static_call_records(stmts, filename, source=''):
                 for c in cands:
                     _FUNC_DEF_LOCS.pop(id(c), None)
                 if rec is not None:
-                    out.append(((n.line, rec['caret']), rec))
+                    out.append(((n.line, rec.caret), rec))
             elif sub is not None and len(cands) == 1 and cands[0].where_clause is not None:
                 c = cands[0]
                 idx = sub.index
@@ -1535,7 +1511,7 @@ def _static_call_records(stmts, filename, source=''):
                     else:
                         rec = _predicate_call_record(filename, c, cfile, cond, env, n, bare)
                     if rec is not None:
-                        out.append(((n.line, rec['caret']), rec))
+                        out.append(((n.line, rec.caret), rec))
                         break
     return out
 
@@ -1586,16 +1562,9 @@ def _static_conversion_records(stmts, filename, source):
                 continue
             raw = lit.raw if getattr(lit, 'raw', None) else str(lit.value)
             pad = ' ' * (lit.col - 1)
-            out.append(((lit.line, lit.col), {
-                'kind': 'warning', 'file': filename, 'line': lit.line,
-                'caret': lit.col, 'tilde_from': 0, 'after': len(raw) - 1,
-                'message': f"deprecated implicit conversion from 'IntLiteral[{lit.value}]' to '{nm}'",
-                'notes': [
-                    {'file': filename, 'line': lit.line, 'col': lit.col, 'name': None,
-                     'after': len(raw) - 1, 'fixit': f"{nm}({' ' * (len(raw) - 2 if len(raw) >= 2 else 1)})",
-                     'message': f"call '{nm}(...)' explicitly"},
-                    {'file': sfile, 'line': init.line, 'name': '__init__',
-                     'message': f"implicit constructor for '{nm}' declared here"}]}))
+            out.append(((lit.line, lit.col), _rec(kind='warning', file=filename, line=lit.line, caret=lit.col, tilde_from=0, after=len(raw) - 1, message=f"deprecated implicit conversion from 'IntLiteral[{lit.value}]' to '{nm}'", notes=[
+                    _note(file=filename, line=lit.line, col=lit.col, name='', after=len(raw) - 1, fixit=f"{nm}({' ' * (len(raw) - 2 if len(raw) >= 2 else 1)})", message=f"call '{nm}(...)' explicitly"),
+                    _note(file=sfile, line=init.line, name='__init__', message=f"implicit constructor for '{nm}' declared here")])))
     return out
 
 
@@ -1648,28 +1617,20 @@ def _candidate_selection_record(st, filename, order):
                 kinds.append('valid' if w.args[1].name in evidence else 'unknown')
             if kinds is None or kinds.count('valid') != 1 or kinds.count('unknown') != 1:
                 continue
-            notes = [{'file': ent['file'], 'line': tm.line, 'name': tm.name,
-                      'nosnippet': ent['file'] in _SYNTHETIC_FILES,
-                      'message': f"ambiguous reference to '{tm.name}': lacking evidence to select candidate"}]
+            notes = [_note(file=ent['file'], line=tm.line, name=tm.name, nosnippet=ent['file'] in _SYNTHETIC_FILES, message=f"ambiguous reference to '{tm.name}': lacking evidence to select candidate")]
             for m, k in zip(cands, kinds):
                 if k == 'unknown':
                     wl, wc = _expr_start(m.where_clause)
-                    notes.append({'file': filename, 'line': m.line, 'name': m.name,
-                                  'message': 'cannot prove constraint for candidate'})
-                    notes.append({'file': filename, 'line': wl, 'col': wc, 'name': None,
-                                  'message': "constraint declared here needs evidence for '"
-                                             + _constraint_text(m.where_clause) + "'"})
+                    notes.append(_note(file=filename, line=m.line, name=m.name, message='cannot prove constraint for candidate'))
+                    notes.append(_note(file=filename, line=wl, col=wc, name='', message="constraint declared here needs evidence for '"
+                                             + _constraint_text(m.where_clause) + "'"))
                 else:
-                    notes.append({'file': filename, 'line': m.line, 'name': m.name,
-                                  'message': 'candidate is valid but cannot be selected until '
-                                             'other candidates are disproved'})
-            notes.append({'file': filename, 'line': st.line, 'name': st.name,
-                          'message': 'provide evidence for or against the constraints here '
-                                     'to aid in candidate selection'})
-            notes.append({'file': ent['file'], 'line': tm.line, 'name': tm.name,
-                          'message': 'required by trait method here'})
-            notes.append({'file': ent['file'], 'line': ent['def'].line, 'name': ent['def'].name,
-                          'message': f"trait '{ent['def'].name}' declared here"})
+                    notes.append(_note(file=filename, line=m.line, name=m.name, message='candidate is valid but cannot be selected until '
+                                             'other candidates are disproved'))
+            notes.append(_note(file=filename, line=st.line, name=st.name, message='provide evidence for or against the constraints here '
+                                     'to aid in candidate selection'))
+            notes.append(_note(file=ent['file'], line=tm.line, name=tm.name, message='required by trait method here'))
+            notes.append(_note(file=ent['file'], line=ent['def'].line, name=ent['def'].name, message=f"trait '{ent['def'].name}' declared here"))
             shown = st.name
             if getattr(st, 'bracket_param_info', None):
                 shown += '[' + ', '.join(b[0] for b in st.bracket_param_info) + ']'
@@ -1705,9 +1666,7 @@ def static_module_diagnostics(stmts, filename, source, werror=False):
     records = []
 
     def record(st, msg, notes):
-        records.append(((1, st.line, 0), {'file': filename, 'line': st.line, 'caret': 0,
-                                  'tilde_from': 0, 'name': st.name,
-                                  'message': msg, 'notes': notes}))
+        records.append(((1, st.line, 0), _rec(file=filename, line=st.line, caret=0, tilde_from=0, name=st.name, message=msg, notes=notes)))
 
     for st in stmts:
         if not isinstance(st, N.StructDef):
@@ -1731,8 +1690,7 @@ def static_module_diagnostics(stmts, filename, source, werror=False):
                         found = True
                         record(st, f"name conflict between parameter '{pname}' in the "
                                    f"default trait method and a parameter in the struct",
-                               [{'file': ent['file'], 'line': m.line, 'name': m.name,
-                                 'message': 'trait method declared here'}])
+                               [_note(file=ent['file'], line=m.line, name=m.name, message='trait method declared here')])
         if found:
             continue
 
@@ -1750,10 +1708,8 @@ def static_module_diagnostics(stmts, filename, source, werror=False):
                 record(st, f"trait method requirement '{mname}' has conflicting default "
                            f"implementations in '{t1}' and '{t2}'; you must implement it "
                            f"manually",
-                       [{'file': e1['file'], 'line': m1.line, 'name': mname,
-                         'message': f"original default implementation from trait '{t1}' here"},
-                        {'file': e2['file'], 'line': m2.line, 'name': mname,
-                         'message': f"conflicting implementation from trait '{t2}' here"}])
+                       [_note(file=e1['file'], line=m1.line, name=mname, message=f"original default implementation from trait '{t1}' here"),
+                        _note(file=e2['file'], line=m2.line, name=mname, message=f"conflicting implementation from trait '{t2}' here")])
         if found:
             continue
 
@@ -1770,8 +1726,7 @@ def static_module_diagnostics(stmts, filename, source, werror=False):
             items = []   # (line, note)
             for m in tr.methods:
                 if _is_required_method(m) and m.name not in have:
-                    items.append((m.line, {'file': ent['file'], 'line': m.line, 'name': m.name,
-                                           'message': f"required function '{m.name}' is not implemented"}))
+                    items.append((m.line, _note(file=ent['file'], line=m.line, name=m.name, message=f"required function '{m.name}' is not implemented")))
             for (mn, mt, _w) in getattr(tr, 'comptime_members', []):
                 pos = _trait_member_line(ent['src'], tr, mn)
                 if pos is None:
@@ -1786,14 +1741,12 @@ def static_module_diagnostics(stmts, filename, source, werror=False):
                            f"to trait's required type '{mt}'")
                 else:
                     continue
-                items.append((pos[0], {'file': ent['file'], 'line': pos[0], 'col': pos[1],
-                                       'name': None, 'synth': mn, 'message': msg}))
+                items.append((pos[0], _note(file=ent['file'], line=pos[0], col=pos[1], name='', synth=mn, message=msg)))
             if not items:
                 continue
             items.sort(key=lambda it: it[0])
             notes = [it[1] for it in items]
-            notes.append({'file': ent['file'], 'line': tr.line, 'name': tn,
-                          'message': f"trait '{tn}' declared here"})
+            notes.append(_note(file=ent['file'], line=tr.line, name=tn, message=f"trait '{tn}' declared here"))
             record(st, f"'{st.name}' does not implement all requirements for '{tn}'", notes)
             found = True
         if found:
@@ -1812,9 +1765,9 @@ def static_module_diagnostics(stmts, filename, source, werror=False):
         return None, 0
     if werror:
         for r in records:
-            r[1]['kind'] = 'error'
+            r[1].kind = 'error'
     records.sort(key=lambda r: r[0])
-    errors = sum(1 for r in records if r[1].get('kind', 'error') == 'error')
+    errors = sum(1 for r in records if r[1].kind == 'error')
     return '\n'.join(_render_record_text(r[1], filename, source) for r in records), errors
 
 
@@ -1874,19 +1827,14 @@ def overload_diagnostic_record(oset, call, args, kwargs, filename):
         return None
     notes = []
     for r in reasons:
-        notes.append({'file': r[1][0], 'line': r[1][1], 'name': oset.name,
-                      'message': 'candidate not viable: ' + r[0]})
-    rec = {'file': filename, 'line': call.line,
-           'caret': call.col if missing else cc,
-           'tilde_from': cc if missing else 0,
-           'message': f"no matching function in call to '{oset.name}'",
-           'notes': notes}
+        notes.append(_note(file=r[1][0], line=r[1][1], name=oset.name, message='candidate not viable: ' + r[0]))
+    rec = _rec(file=filename, line=call.line, caret=call.col if missing else cc, tilde_from=cc if missing else 0, message=f"no matching function in call to '{oset.name}'", notes=notes)
     if not missing:
         tail0 = call.func
         while hasattr(tail0, 'index') and hasattr(tail0, 'obj'):
             tail0 = tail0.obj
         if hasattr(tail0, 'name'):
-            rec['after'] = len(tail0.name) - 1
+            rec.after = len(tail0.name) - 1
         # "unexpected argument": when every candidate runs out of parameters at
         # the SAME argument, the caret is on that argument and the callee's name
         # is underlined; otherwise it is on the callee's first character.
@@ -1903,9 +1851,9 @@ def overload_diagnostic_record(oset, call, args, kwargs, filename):
                 end = cc + len(tail.name) - 1 if hasattr(tail, 'name') else (
                     tail.col + len(tail.member) if hasattr(tail, 'member') else cc)
                 if al == call.line and ac > end:
-                    rec['caret'] = ac
-                    rec['tilde_from'] = cc
-                    rec['tilde_to'] = end
+                    rec.caret = ac
+                    rec.tilde_from = cc
+                    rec.tilde_to = end
     return rec
 
 
@@ -2000,6 +1948,69 @@ def _synthetic_text(path, line, name):
     return f"def {name}{brackets}({', '.join(params)}){ret}{where}"
 
 
+class _Diag:
+    """One entry of a diagnostic record: the main `error:`/`warning:` (kind
+    'error'/'warning') or one of its `note:`s (kind 'note'), the same shape for
+    both so the renderer reads every entry alike.
+
+    A CLASS with typed attributes, not a dict: the self-hosted compiler types a
+    dict's per-key values from the literal that builds it, so a key added later
+    or present in only some records read back as the wrong kind (`rec['tilde_to']`
+    was a `char *` read where an int was meant: GCC `assignment to 'char *' from
+    'long int'`). `name`/`text`/`synth`/`fixit` use '' for "none"."""
+    kind: str
+    file: str
+    line: int
+    message: str
+    name: str
+    caret: int
+    col: int
+    text: str
+    synth: str
+    nosnippet: bool
+    tilde_from: int
+    tilde_to: int
+    after: int
+    fixit: str
+    notes: list
+
+    def __init__(self, kind: str, file: str, line: int, message: str,
+                 name: str, caret: int, col: int, text: str, synth: str,
+                 nosnippet: bool, tilde_from: int, tilde_to: int, after: int,
+                 fixit: str, notes: list) -> None:
+        self.kind = kind
+        self.file = file
+        self.line = line
+        self.message = message
+        self.name = name
+        self.caret = caret
+        self.col = col
+        self.text = text
+        self.synth = synth
+        self.nosnippet = nosnippet
+        self.tilde_from = tilde_from
+        self.tilde_to = tilde_to
+        self.after = after
+        self.fixit = fixit
+        self.notes = notes
+
+
+def _note(file: str, line: int, message: str, name: str = '', col: int = 0,
+          text: str = '', synth: str = '', nosnippet: bool = False,
+          after: int = 0, fixit: str = '') -> _Diag:
+    """One `note:` of a diagnostic record."""
+    return _Diag('note', file, line, message, name, 0, col, text, synth,
+                 nosnippet, 0, 0, after, fixit, [])
+
+
+def _rec(file: str, line: int, caret: int, message: str, notes: list,
+         name: str = '', kind: str = 'error', tilde_from: int = 0,
+         tilde_to: int = 0, after: int = 0) -> _Diag:
+    """The main entry of a diagnostic record."""
+    return _Diag(kind, file, line, message, name, caret, 0, '', '', False,
+                 tilde_from, tilde_to, after, '', notes)
+
+
 def _repeat_char(ch: str, n: int) -> str:
     """`ch` repeated `n` times (empty for a non-positive count). Callers pass
     counts read out of a record dict, which the self-hosted compiler holds as
@@ -2014,30 +2025,31 @@ def _repeat_char(ch: str, n: int) -> str:
     return out
 
 
-def _render_record_text(rec, filename, source):
-    """Text rendering of an overload_diagnostic_record, in `mojo build`'s
-    shape: `file:line:col: error: msg`, the source line, then a marker line
-    (`~` from tilde_from up to the caret, `^` at the caret column)."""
+def _render_record_text(rec: _Diag, filename: str, source: str) -> str:
+    """Text rendering of a diagnostic record, in `mojo build`'s shape:
+    `file:line:col: error: msg`, the source line, then a marker line (`~` from
+    tilde_from up to the caret, `^` at the caret column, `~` for `after` more
+    columns). Notes follow; one in a file with no source (a precompiled package)
+    shows a synthetic signature instead (see `_synthetic_text`)."""
     out = []
-    items = [(rec.get('kind', 'error'), rec['file'], rec['line'], rec['caret'],
-              rec['tilde_from'], rec['message'], rec.get('name'))]
-    synthetic = {}
-    extras = {}
-    nd = {}
-    for n in rec['notes']:
-        items.append(('note', n['file'], n['line'], n.get('col', 0), 0, n['message'], n['name']))
-        nd[len(items) - 1] = n
-        if n.get('text') is not None:
-            synthetic[len(items) - 1] = n['text']
-        if n.get('after') or n.get('fixit'):
-            extras[len(items) - 1] = (n.get('after', 0), n.get('fixit'))
-    for idx, (kind, f, line, caret, tilde_from, message, name) in enumerate(items):
+    entries = [rec] + rec.notes
+    for idx in range(len(entries)):
+        e = entries[idx]
+        kind = e.kind
+        f = e.file
+        line = e.line
+        message = e.message
+        name = e.name
+        caret = e.caret if idx == 0 else e.col
+        tilde_from = e.tilde_from
         text = _record_source_line(f, line, filename, source)
-        if idx in synthetic:
+        have_text = text is not None
+        if e.text != '':
             # A compiler-generated declaration has no source: the note shows a
             # synthesized signature instead of the file's line.
-            text = synthetic[idx]
-        if name is not None and text is not None:
+            text = e.text
+            have_text = True
+        if name != '' and have_text:
             pat = re.compile(r'\b(?:def|fn|struct|trait)\s+(' + re.escape(name) + r')\b')
             m = pat.search(text)
             if m is None:
@@ -2049,7 +2061,9 @@ def _render_record_text(rec, filename, source):
                         break
                     m2 = pat.search(t2)
                     if m2 is not None:
-                        line, text, m = line + k, t2, m2
+                        line = line + k
+                        text = t2
+                        m = m2
                         break
             caret = m.start(1) + 1 if m else 0
         syn = f in _SYNTHETIC_FILES
@@ -2057,26 +2071,27 @@ def _render_record_text(rec, filename, source):
             # A package with no source: `file:line:1`, the declaration's
             # synthetic signature (or a compiler-generated one) and a caret in
             # column 1; a few notes carry no snippet at all.
-            note = nd[idx]
             caret = 1
-            if note.get('nosnippet'):
+            if e.nosnippet:
                 out.append(f"{f}:{line}: {kind}: {message}")
                 continue
-            if idx in synthetic:
-                text = synthetic[idx]
-            elif note.get('synth') is not None:
-                text = note['synth']
-            elif name is not None:
-                text = _synthetic_text(f, line, name)
+            if e.text != '':
+                text = e.text
+                have_text = True
+            elif e.synth != '':
+                text = e.synth
+                have_text = True
+            elif name != '':
+                st = _synthetic_text(f, line, name)
+                have_text = st is not None
+                text = st if st is not None else ''
             else:
-                text = None
-            if text is not None:
-                text = text + ('' if idx in synthetic and 'generated' in text
-                               else '    # note - synthetic signature' if idx not in synthetic
-                               and not text.startswith('(') else '')
+                have_text = False
+            if have_text and e.text == '' and not text.startswith('('):
+                text = text + '    # note - synthetic signature'
         if caret < 1:
             caret = 1
-        if f != rec['file'] and source is not None and not syn:
+        if f != rec.file and source is not None and not syn:
             # A candidate declared in another file is introduced by the
             # importing statement: `Imported from <this file>:<line>:`.
             base = os.path.basename(f)
@@ -2086,25 +2101,24 @@ def _render_record_text(rec, filename, source):
                              + re.escape(mod) + r'\b)')
             for i, src_line in enumerate(source.splitlines()):
                 if pat.match(src_line):
-                    out.append(f"Imported from {rec['file']}:{i + 1}:")
+                    out.append(f"Imported from {rec.file}:{i + 1}:")
                     break
         out.append(f"{f}:{line}:{caret}: {kind}: {message}")
-        if text is not None:
+        if have_text:
             out.append(text)
             pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:caret - 1])
-            if tilde_from and idx == 0 and rec.get('tilde_to'):
+            if tilde_from > 0 and idx == 0 and e.tilde_to > 0:
                 marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
-                out.append(marks + _repeat_char('~', rec['tilde_to'] - tilde_from + 1)
-                           + _repeat_char(' ', caret - rec['tilde_to'] - 1) + '^')
-            elif tilde_from:
+                out.append(marks + _repeat_char('~', e.tilde_to - tilde_from + 1)
+                           + _repeat_char(' ', caret - e.tilde_to - 1) + '^')
+            elif tilde_from > 0:
                 marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
                 out.append(marks + _repeat_char('~', caret - tilde_from) + '^'
-                           + _repeat_char('~', rec.get('after', 0)))
+                           + _repeat_char('~', e.after))
             else:
-                after = rec.get('after', 0) if idx == 0 else extras.get(idx, (0, None))[0]
-                out.append(pad + '^' + _repeat_char('~', after))
-                if idx in extras and extras[idx][1]:
-                    out.append(pad + extras[idx][1])
+                out.append(pad + '^' + _repeat_char('~', e.after))
+                if e.fixit != '':
+                    out.append(pad + e.fixit)
     return '\n'.join(out)
 
 

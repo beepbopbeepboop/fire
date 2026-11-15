@@ -19208,7 +19208,10 @@ def gen_module_impl(self, stmts: list):
                             for _pi in range(len(_eff_list)):
                                 _tp = _as_str(_eff_list[_pi])
                                 _is_vararg = (_tp == '...')
-                                if _keep_names:
+                                # A name after `...` is not C (`(... parts)`:
+                                # "expected ')' before 'parts'"); only a real
+                                # parameter keeps its scanned name.
+                                if _keep_names and not _is_vararg:
                                     _toks = _scan_parts[_pi].split()
                                     if len(_toks) >= 2 and re.match(
                                             r'^[A-Za-z_]\w*$',

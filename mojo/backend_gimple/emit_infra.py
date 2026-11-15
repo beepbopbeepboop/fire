@@ -7078,7 +7078,7 @@ def _bind_local_decl(gen, name, ctype):
         gen._block_scope_frames[-1].append((name, saved))
 
 
-def _open_block_scope(gen):
+def _open_block_scope(gen) -> list:
     """Open a block body (an if/else/elif, loop, with, try/except/finally or
     match-case body). Returns the frame `_close_block_scope` needs."""
     frame = []
@@ -7086,7 +7086,7 @@ def _open_block_scope(gen):
     return frame
 
 
-def _close_block_scope(gen, frame: list):
+def _close_block_scope(gen, frame: list) -> None:
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""

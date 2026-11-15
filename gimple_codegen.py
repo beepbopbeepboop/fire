@@ -651,7 +651,7 @@ _SELFHOST_KWARGS_HAS_VARARG = {
 }
 
 
-def _selfhost_syms():
+def _selfhost_syms() -> list:
     """`[(qualified C symbol, return ctype, [param ctypes])]` for every
     `_SELFHOST_SIGS` entry, in a DETERMINISTIC order.
 

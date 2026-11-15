@@ -312,7 +312,7 @@ def _is_param_marker(p: str) -> bool:
     return bool(p) and all(ch in '/*' for ch in p)
 
 
-def type_param_names(template_src: str):
+def type_param_names(template_src: str) -> list:
     """The generic's type-parameter names — for `fn` or `struct`, e.g.
     `struct Box[T, U]` -> ['T', 'U']. Skips the positional-only / keyword-only
     separators (`/`, `//`, `*`, `**`), which are not parameter names — see
@@ -1611,7 +1611,7 @@ def _iter_function_defs(stmts):
                     yield m
 
 
-def check_conditional_rp_origin(stmts, struct_defs):
+def check_conditional_rp_origin(stmts: list, struct_defs: list) -> None:
     """Reject returning ref[x] tied to a conditionally-RegisterPassable arg."""
     cond_rp = {}
     for sd in (struct_defs or []):
@@ -1709,7 +1709,7 @@ def _check_decl_trait_methods(struct_defs, trait_defs):
     return errors
 
 
-def check_conformance_declarations(struct_defs, trait_defs):
+def check_conformance_declarations(struct_defs: list, trait_defs: list) -> None:
     """Declaration-time checks for conditional trait conformance (parts 1, 4, 6)."""
     trait_bases = {}
     for td in (trait_defs or []):
@@ -1948,7 +1948,8 @@ def _flatten_and_assumptions(a_atoms):
     return assumptions
 
 
-def check_conditional_conformance_candidates(struct_defs, trait_defs, module_src=''):
+def check_conditional_conformance_candidates(struct_defs: list, trait_defs: list,
+                                             module_src: str = '') -> None:
     """Declaration-time candidate selection for conditional trait conformance
     (part 3)."""
     trait_by_name = {}
@@ -2346,7 +2347,7 @@ def _field_copy_move_problem(enclosing, fname, ftype_text, want_trait, struct_ma
     return ('cond', needed)
 
 
-def check_copy_move_synthesis(struct_defs, trait_defs):
+def check_copy_move_synthesis(struct_defs: list, trait_defs: list) -> None:
     """Declaration-time synthesized copy/move constructor diagnostics (part 4)."""
     trait_bases = {}
     for td in (trait_defs or []):
@@ -2521,7 +2522,7 @@ def _where_conforms_to_pred(module_src: str, targs: dict):
     return pred
 
 
-def check_where_clauses(module_src: str, template_src: str, targs: dict):
+def check_where_clauses(module_src: str, template_src: str, targs: dict) -> None:
     """Enforce the template's `where` clauses for the concrete `targs`.
 
     Each clause is folded by the shared constant folder

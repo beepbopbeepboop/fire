@@ -953,7 +953,7 @@ def _ggc_as_str(x) -> str:
     return x
 
 
-def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
+def _lower_device_launch(gen, node: gimple_ctypes.CallExpr) -> tuple:
     """A call whose target is an offloaded DEVICE function.
 
     A `@gpu` function has no C definition -- it is MSL, living in the
@@ -1561,7 +1561,7 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
     return _wt, wv
 
 
-def _class_struct_of_arg(gen, a):
+def _class_struct_of_arg(gen, a) -> str:
     """The struct a class-valued argument names: `Cls` (a known struct, not shadowed by a local)
     or `cls` inside a classmethod; None otherwise."""
     if not isinstance(a, gimple_ctypes.IdentExpr):
