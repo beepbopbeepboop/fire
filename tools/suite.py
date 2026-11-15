@@ -4401,8 +4401,8 @@ test('reg-mojoc-synthetic-signature-default', [PY, 'test_mojoc_synthetic_signatu
 test('reg-stdlib-syntax-variant', [PY, 'test_stdlib_syntax_variant.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
 # A Mojo keyword used as an ordinary Python identifier: the compiler compiles
-# its own sources, so `trait = ...` must parse (bugs/PARSER_keyword_identifier_
-# collision_refuses_module.md). Not cached, like the other reg-* pins.
+# its own sources, so `trait = ...` must parse (fixed in 4c7e5d1a4 by the
+# statement-dispatch carve-out). Not cached, like the other reg-* pins.
 test('reg-keyword-identifier-collision', [PY, 'test_keyword_identifier_collision.py'], mem='tiny',
      desc='a Mojo keyword used as an ordinary Python identifier (`trait = ...`) '
           'parses; a real `trait Foo:` declaration still parses')
