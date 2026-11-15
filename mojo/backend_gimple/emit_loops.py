@@ -820,6 +820,28 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     return lp
 
 
+_STR_METHOD_NAMES = frozenset(dir(str))
+
+
+def _loop_var_used_as_object(body, var) -> bool:
+    """True when the loop body reads an attribute of the loop variable that is
+    not a `str` method (`item.key`, `item.value`): the elements are then
+    records, so the `char *` element evidence is wrong and an OPEN-FILE arm
+    (whose lines are strings) has nothing to do with this loop. Lowering such a
+    body twice -- once per arm -- gave GCC an internal compiler error on
+    `Counter.subtract`'s `self._data.setdefault(item.key.copy(), 0) -= item.value`
+    (std/collections/counter.mojo)."""
+    if not isinstance(var, str):
+        return False
+    for n in gimple_exprtypes._walk_ast(body):
+        if (isinstance(n, gimple_ctypes.MemberExpr)
+                and isinstance(n.obj, gimple_ctypes.IdentExpr)
+                and _as_str(n.obj.name) == var
+                and _as_str(n.member) not in _STR_METHOD_NAMES):
+            return True
+    return False
+
+
 def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # `for m in <compile-time-known-pattern>.finditer(text):` — see
     # regex_compile.py / BACKLOG-CODEGEN.md §4f. Checked structurally,
@@ -1239,7 +1261,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _lp_known = None
             if (_lp_known is not None
                     and gen._elem_of(_lp_known) == 'char *'
-                    and it_type in ('int', 'int64_t', 'void *')):
+                    and it_type in ('int', 'int64_t', 'void *')
+                    and not _loop_var_used_as_object(node.body, var)):
                 # A word with STRING-LIST evidence can still be an OPEN FILE
                 # HANDLE at run time. `c_common/strutil.py`'s
                 # `_iter_significant_lines(lines)` is the real shape: one
@@ -1294,21 +1317,22 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # dict/list/set registries below unchanged. See the
                 # string-list-evidence arm above for the full rationale and
                 # the `_iter_significant_lines` repro.
-                _flw = gen._call_expr('MojoList *', 'mojo_file_lines',
-                                      [('int64_t', it64)])
-                _flw64 = gen._to_int64('MojoList *', _flw)
-                _flwz = gen._new_val('int64_t', '0')
-                _flw_null = gen._new_val('_Bool', f'{_flw64} == {_flwz}')
-                gen._emit(f"  mojo_cleanup_push_list_strs ({_flw});")
-                ginf._scope_register(gen, _flw, 'mojo_list_free_owned_strs')
-                bb_file = gen._new_bb(); bb_not_file = gen._new_bb()
-                gen._cond_goto(_flw_null, bb_not_file, bb_file)
-                gen._emit_label(bb_file)
-                gen._elem_types[_flw] = 'char *'
-                gen._gen_for_list(var, _flw, node.body,
-                                  share_var_with_sibling_arm=True)
-                gen._goto(bb_after)
-                gen._emit_label(bb_not_file)
+                if not _loop_var_used_as_object(node.body, var):
+                    _flw = gen._call_expr('MojoList *', 'mojo_file_lines',
+                                          [('int64_t', it64)])
+                    _flw64 = gen._to_int64('MojoList *', _flw)
+                    _flwz = gen._new_val('int64_t', '0')
+                    _flw_null = gen._new_val('_Bool', f'{_flw64} == {_flwz}')
+                    gen._emit(f"  mojo_cleanup_push_list_strs ({_flw});")
+                    ginf._scope_register(gen, _flw, 'mojo_list_free_owned_strs')
+                    bb_file = gen._new_bb(); bb_not_file = gen._new_bb()
+                    gen._cond_goto(_flw_null, bb_not_file, bb_file)
+                    gen._emit_label(bb_file)
+                    gen._elem_types[_flw] = 'char *'
+                    gen._gen_for_list(var, _flw, node.body,
+                                      share_var_with_sibling_arm=True)
+                    gen._goto(bb_after)
+                    gen._emit_label(bb_not_file)
                 isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
                 gen._cond_goto(isd, bb_dict, bb_not_dict)
                 gen._emit_label(bb_not_dict)
