@@ -910,7 +910,7 @@ class GimpleGen:
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
                  emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False,
-                 no_mangle=(), relaxed_imports: bool = False,
+                 no_mangle: set[str] = (), relaxed_imports: bool = False,
                  auto_gpu: bool = True):
         # Function names that must NOT be overload-mangled in this TU — e.g. a
         # generic instantiation's own symbol, which is already uniquely named by
