@@ -1421,7 +1421,7 @@ def cmd_ps(a):
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
     tasks = load()
-    print("%-40s %-6s %-5s %-6s %-28s %s" % ("name", "pid", "alive", "cls", "model", "claims"))
+    print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % ("name", "pid", "alive", "tag", "cls", "model", "claims"))
     for name, t in sorted(tasks.items()):
         if t.get("state") != "running":
             continue
@@ -1435,7 +1435,10 @@ def cmd_ps(a):
         claims = ",".join(t.get("claims") or [])[:40]
         model = (t.get("model") or t.get("pool") or "?")[:28]
         cls = (t.get("cls") or "?")[:6]
-        print("%-40s %-6s %-5s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", cls, model, claims))
+        # a worker that exited with a DONE verdict and commits master lacks is waiting to LAND, not dead: the registry
+        # still says `running` until the integrator moves it, so `alive: no` alone reads as a crash (2026-11-15)
+        tag = "landable" if (not alive and state_of(t) == "exited-ok" and verdict(t) == "DONE" and ahead(t) > 0) else ""
+        print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", tag, cls, model, claims))
     # live process scan
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
