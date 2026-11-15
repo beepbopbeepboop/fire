@@ -174,6 +174,36 @@ def test_positive_override_default():
     _assert_ok(POS_OVERRIDE)
 
 
+# Positive: pin for the 2026-11-15 gate red. Commit 43bd3dcba extended the
+# signature-binding check to RETURN types, and the trait-bound evidence
+# check (elaborate.check_signature_param_bound_evidence) treated a template
+# parameter constrained by a FUNCTION TYPE (`f: fn(Strat) -> Dest`) as a list
+# of traits to prove conformance against. When the method's own same-named
+# bound parameter is used as the instantiation argument in the return
+# annotation, the two spellings differ (`fn(Strat) -> Dest` vs
+# `fn(Self) -> Dest`), the membership test fails, and valid code was
+# rejected with "invalid bindings in signature: lacking evidence" —
+# `test_positive_override_default` above was the red case. The evidence
+# check must skip non-trait bounds (785c1cf2e); this minimal case pins that
+# guard without the trait machinery.
+PIN_FN_TYPE_BOUND = r'''
+struct Box[Strat: AnyType, Dest: Copyable, f: fn(Strat) -> Dest]:
+    def __init__(out self):
+        pass
+
+struct S:
+    def get[Dest: Copyable, f: fn(Self) -> Dest](self) -> Box[Self, Dest, f]:
+        pass
+
+def main():
+    pass
+'''
+
+
+def test_positive_function_type_bound_bracket_param_in_return():
+    _assert_ok(PIN_FN_TYPE_BOUND)
+
+
 # Positive: a required trait method supplied by a non-trait base struct
 # satisfies the trait. The declaration-time pre-pass runs before
 # `_merge_struct_inheritance`, so it must resolve base-struct methods itself
