@@ -99,3 +99,23 @@ Two orderings have to be checked while landing this:
 
 Scope the lookup to a bracketed dtype argument; do not rewrite arbitrary
 annotations that merely share the name.
+
+## Status
+
+- **Landed 2026-11-14.** Two changes, both in the dtype resolution the doc
+  names:
+  1. `mojo/middle/types.py` gains `_dtype_token_ctype`, the ONE resolver: it
+     accepts a `('DType', 'float32')` tuple, the REPR of that tuple as a
+     string (which is what `gen._comptime_vals` stores for
+     `comptime dt = DType.float32`), a `DType.`/`dtype.`/leading-dot spelling,
+     or a bare `float32`/`Float32`/`f32`/`f64` — and reads the ONE table
+     `_SIMD_FLOAT_DTYPE_CTYPE`. `infra_infer._resolve_type`'s inner
+     `_dtype_ctype` now delegates to it, and so does the constructor lowerer.
+  2. `infra_infer._resolve_type` no longer gates the `Scalar`/`SIMD` arm on
+     width 1: a `SIMD[<float dtype>, N]` value has the dtype's SCALAR C type
+     for every N, so `SIMD[dt, 2]` was falling through to `int64_t` for no
+     reason. `emit_calls`' `SIMD`/`Scalar` arm additionally consults
+     `gen._comptime_vals` for a bare bound name.
+  `python3 test_codegen_erased_container_values.py p3_comptime` passes:
+  `float p3_comptime_id_simd_9f63a2 (float x)`, `float r;` / `float v;`, and
+  the function-scope `comptime d2` local.
