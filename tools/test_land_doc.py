@@ -16,11 +16,12 @@ class LandDoc(unittest.TestCase):
     def test_creates_then_appends(self):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, "bugs"))
-            with mock.patch.object(C, "MAIN", d), mock.patch.object(I, "commit_doc") as cd:
+            with mock.patch.object(C, "MAIN", d), mock.patch.object(I, "commit_doc") as cd, \
+                 mock.patch.object(I, "branch_age", return_value="last commit 2026-10-01; 3 commit(s) ahead of master, 90 behind it"):
                 p = I.land_doc("fix-merge-fix-merge-bug-x", T, "merge-fix depth cap", "conflicts in a.py")
                 self.assertEqual(os.path.basename(p), "LAND-x.md")      # the fix-merge- chain collapses to the root name
                 body = open(p).read()
-                self.assertIn("`work/bug-x`", body); self.assertIn("conflicts in a.py", body)
+                self.assertIn("`work/bug-x`", body); self.assertIn("**Age:**", body); self.assertIn("**DROP**", body); self.assertIn("conflicts in a.py", body)
                 I.land_doc("bug-x", T, "second attempt")
                 body = open(p).read()
                 self.assertEqual(body.count("# Land:"), 1)               # one doc, not two

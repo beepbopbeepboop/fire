@@ -262,7 +262,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
                                   % (", ".join(extras[:12]), " ..." if len(extras) > 12 else "")))
             continue
         deleted = [p for p in C.git("diff", "--name-only", "--diff-filter=D", "master...%s" % t["branch"],
-                                    check=False).split() if p.startswith("bugs/") and p.endswith(".md")]
+                                    check=False).split() if p.startswith("bugs/") and p.endswith(".md")
+                   and not os.path.basename(p).startswith("LAND-")]   # a LAND doc's DROP is a decision, not a claimed fix
         changed = C.git("diff", "--name-only", "master...%s" % t["branch"], check=False).split()
         if deletes_doc_without_test(deleted, changed) and not (name.startswith("fix-proof-") and has_notestcase(t["branch"])):
             say("skip %s: deletes %s with no test file changed; a reviewer decides TEST or NOTESTCASE (fix-proof-*)"
@@ -276,9 +277,29 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
 
 
 
+def branch_age(t):
+    """One line on how old a branch's unlanded work is: first and last commit date, commits ahead of and behind master,
+    and the task's start. Never raises: a gone branch reports what is still known."""
+    out = []
+    br = t.get("branch", "")
+    try:
+        ahead = C.git("rev-list", "--count", "master..%s" % br, cwd=C.MAIN, check=False)
+        behind = C.git("rev-list", "--count", "%s..master" % br, cwd=C.MAIN, check=False)
+        last = C.git("log", "-1", "--format=%cs", br, cwd=C.MAIN, check=False)
+        first = C.git("log", "--reverse", "--format=%cs", "master..%s" % br, cwd=C.MAIN, check=False).splitlines()
+        if last:
+            out.append("last commit %s%s; %s commit(s) ahead of master, %s behind it" % (
+                last, (", first unlanded commit %s" % first[0]) if first else "", ahead or "?", behind or "?"))
+    except Exception:
+        pass
+    if t.get("started"):
+        out.append("task started %s" % t["started"])
+    return "; ".join(out) or "unknown (branch not readable)"
+
+
 def land_doc(name, t, reason, detail=""):
-    """A finished branch that cannot land and that no fixer chain will carry is not dropped and not left to loop: it
-    gets a doc, bugs/LAND-<root>.md, which the feeder routes like any bug (a worker picks it up on any free slot, drain
+    """A finished branch that cannot land and that no fixer chain will carry is not left to loop: it gets an
+    ASSESSMENT doc (land, adapt or drop: the worker decides, with the branch's age in front of it), bugs/LAND-<root>.md, which the feeder routes like any bug (a worker picks it up on any free slot, drain
     mode starts it first, several workers can hunt several of these at once) while the integrator lands everything else
     unbothered. The doc names the branch and what stopped it, and its Status section accumulates one dated entry per
     attempt, so the work survives across workers and days. An existing doc gets a new Status entry instead of a second
@@ -288,7 +309,7 @@ def land_doc(name, t, reason, detail=""):
     root = re.sub(r"[^\w.-]+", "-", root)[:60].strip("-")
     p = os.path.join(C.MAIN, "bugs", "LAND-%s.md" % root)
     stamp = time.strftime("%F %T")
-    entry = "- %s: %s%s\n" % (stamp, reason, ("\n  " + detail.strip().replace("\n", "\n  ")) if detail.strip() else "")
+    entry = "- %s: %s (%s)%s\n" % (stamp, reason, branch_age(t), ("\n  " + detail.strip().replace("\n", "\n  ")) if detail.strip() else "")
     if os.path.exists(p):
         with open(p) as f:
             body = f.read()
@@ -300,18 +321,31 @@ def land_doc(name, t, reason, detail=""):
         claims = ", ".join(t.get("claims") or []) or "(none)"
         with open(p, "w") as f:
             f.write(
-                "# Land: finished branch %s cannot land\n\n"
+                "# Land: should finished branch %s land?\n\n"
                 "**Branch:** `%s` (task `%s`; if the branch is gone, its tip is `refs/archive/%s`).\n"
+                "**Age:** %s\n"
                 "**Original work:** %s\n**Original claims:** %s\n\n"
-                "The integrator could not land this finished branch and no merge-fixer chain is carrying it. This doc is the\n"
-                "work: get the branch's change onto master. Start from master, bring the NEWEST branch named in Status in (`git merge <it>`, or\n"
-                "cherry-pick its commits), resolve every conflict by reading BOTH sides and keeping both sides' intent, make the\n"
-                "result coherent, and run the narrow tests that cover the files involved plus the branch's own tests. If the\n"
-                "change is already on master in another form, say so, and delete the doc.\n\n"
-                "## Done when\n\nThe branch's change is committed on your branch, its tests pass, and this doc is `git rm`'d in\n"
-                "that same commit (then `python3 tools/dangling_doc_refs.py --ratchet`).\n\n"
+                "This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:\n"
+                "decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.\n\n"
+                "Assess first (record the findings in Status):\n"
+                "- Does the branch's own test still fail on master and pass on the branch? If master already passes it, the bug\n"
+                "  may be fixed another way.\n"
+                "- Does master now solve the same problem differently or better (same files rewritten, the doc's subject gone,\n"
+                "  the function replaced)? Then the branch is obsolete.\n"
+                "- Is the change still correct and wanted against today's master, or was it written for a design that moved on?\n"
+                "- How stale is it, and how much of it merges cleanly?\n\n"
+                "Then do ONE of:\n"
+                "- **LAND**: start from master, bring in the NEWEST branch named in Status (`git merge <it>`, or cherry-pick), resolve\n"
+                "  conflicts keeping both sides' intent, make the result coherent, run the narrow tests that cover the files\n"
+                "  involved plus the branch's own tests, and commit.\n"
+                "- **ADAPT**: land only the part that is still right, rewritten against master, and say what you left out and why.\n"
+                "- **DROP**: land nothing. The reason goes in the commit message that deletes this doc.\n"
+                "In every case, `git rm` this doc in your commit (then `python3 tools/dangling_doc_refs.py --ratchet`). If the\n"
+                "original bug is still open, leave its own doc alone.\n\n"
+                "## Done when\n\nA commit exists that records the decision: the change (LAND/ADAPT) or the reason it was dropped\n"
+                "(DROP), and this doc is gone.\n\n"
                 "## Status\n%s"
-                % (name, t["branch"], name, t["branch"], (t.get("summary") or "")[:300], claims, entry))
+                % (name, t["branch"], name, t["branch"], branch_age(t), (t.get("summary") or "")[:300], claims, entry))
     commit_doc(p, "land: %s cannot land (%s); the doc is the work\n\nFiled by the integrator." % (name, reason.split(":")[0][:60]))
     print("land doc %s: %s" % (os.path.relpath(p, C.MAIN), reason), flush=True)
     return p
