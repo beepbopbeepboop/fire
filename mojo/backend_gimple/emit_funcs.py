@@ -3452,7 +3452,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         # visible once that overload's signature was correct).
         # `Array[T, N]` and `FixedSizeArray[T, N]` carry the count SECOND, so
         # they take their element from the first bracket argument too — see
-        # `CODEGEN_simd_and_array_values_erase_to_int64-part4`. Without this
+        # `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`. Without this
         # their two-arg bracket fails the `len(_pin) != 1` gate below and the
         # parameter's element type was never seeded.
         if _pbase in ('Span', 'Array', 'FixedSizeArray'):
@@ -3492,7 +3492,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 # `mojo_list_get_float` and `Span(a)` read `_mojo_at_float`,
                 # while the same value built by a constructor read
                 # `mojo_list_get_double`/`_mojo_at_double` — see
-                # `CODEGEN_simd_and_array_values_erase_to_int64-part4`.
+                # `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
                 _ec = 'double'
             if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)

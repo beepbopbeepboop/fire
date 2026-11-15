@@ -32,6 +32,15 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
+    # A point-in-time record, not a claim: this land doc quotes a `git status`
+    # listing of its worktree, and the four names in it (`SUITE_comptime_
+    # bracket_params_stale_link_mode_message.md`,
+    # `SUITE_doc_refs_ratchet_two_preexisting_gains.md`,
+    # `hard/CODEGEN_simd_and_array_values_erase_to_int64-part4.md`,
+    # `mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md`) were real
+    # files when the snapshot was taken and are gone now. Rewording them would
+    # falsify the record, so the citation is deliberate.
+    'bugs/LAND-codegen-nested-bracket-generic-call-4.md': 4,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 1,
