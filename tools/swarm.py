@@ -984,7 +984,11 @@ def land():
     if LAND_BATCH:
         batch = batch[:LAND_BATCH]                     # drain: a red full gate poisons few; the rest land next pass
     while batch:
+        log("landing: probing %d branch(es) behind the %s gate: %s" % (
+            len(batch), "light --stdlib" if build else "full", " ".join(batch)[:300]))
+        _t0 = time.time()
         verdict, merged, failing, out = probe(batch, stdlib=build)
+        log("landing: probe %s in %.0f s (merged %d of %d)" % (verdict, time.time() - _t0, len(merged), len(batch)))
         for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
                 log("conflict %s: handing it to a merge fixer" % c)
