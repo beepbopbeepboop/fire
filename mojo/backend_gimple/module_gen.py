@@ -18279,7 +18279,25 @@ def gen_module_impl(self, stmts: list):
     # compiled program got an empty `typedef struct _<mod>_toplev {}` /
     # `_<mod>_globals = {}` block even with no module-level globals.
     if len(_mg_list) > 0:
-        globals_list = _mg_list
+        # One struct member and one accessor per NAME. `_module_globals` is
+        # keyed on the whole (name, c_type, g_mtype) triple on purpose (see the
+        # note above), so a name registered under two different mtypes --
+        # `tokens` in ownership_check/ownership_destruct's `if __name__ ==
+        # '__main__'` block -- is listed twice, and emitted twice as `duplicate
+        # member 'tokens'` plus a redefinition of its accessor (the self-host's
+        # GCC errors). Collapse by C field name, keeping the first position; two
+        # different C types for one name can only be held in the box.
+        globals_list = []
+        _gl_index = {}
+        for _gt0 in _mg_list:
+            _gl_name = _c_field_name(_as_str(_gt0[0]))
+            if _gl_name not in _gl_index:
+                _gl_index[_gl_name] = len(globals_list)
+                globals_list.append(_gt0)
+            else:
+                _gl_prev = globals_list[_gl_index[_gl_name]]
+                if _as_str(_gl_prev[1]) != _as_str(_gt0[1]):
+                    globals_list[_gl_index[_gl_name]] = (_gl_prev[0], 'int64_t', _gl_prev[2])
         current_mod_str = str(current_mod_name) if current_mod_name else "root"
         safe_name = _c_field_name(current_mod_str) if current_mod_str else "root"
         typedef_name = f"_{safe_name}_toplev"
