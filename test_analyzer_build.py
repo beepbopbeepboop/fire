@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end acceptance for bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer-part3
+"""End-to-end acceptance for bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part3
 (the original bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md):
 
 1. `fire.py build` of CPython's Tools/cases_generator/analyzer.py exits 0 with
