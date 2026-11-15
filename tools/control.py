@@ -100,6 +100,18 @@ def gate_skip_args():
 
 def pool_total():
     return sum(sl["count"] for sl in load_pool()["slots"])
+
+
+def mode():
+    """The campaign the pool is running, from tools/pool.json `mode`: `build` (high volume: the light --stdlib gate,
+    no batch cap, land everything fast) or `drain` (work the backlog down: finishing and gate-repair work starts first,
+    the full landing gate, batches of 8). One declaration, read by refill and the lander, instead of each guessing
+    from who is running or how the owner feels. An unreadable or unknown value is `drain`: the careful campaign."""
+    try:
+        m = load_pool().get("mode", "drain")
+    except (OSError, ValueError):
+        return "drain"
+    return m if m in ("build", "drain") else "drain"
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
@@ -867,7 +879,9 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
-FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-")   # tasks that carry finished work to master
+FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-", "fix-gate-", "fix-landed-")   # tasks that carry finished work to master
+# fix-gate-* repairs master itself (a red gate job) and fix-landed-* repairs what verify_landed.py found after a
+# landing: both finish work that already exists, so both are finishing work, not fresh docs.
 def refill_key(item):
     """Queue order for refill: tasks that finish done work first, then oldest first."""
     return (0 if item["name"].startswith(FINISHING_PREFIXES) else 1, item["added"])
@@ -1219,7 +1233,9 @@ def cmd_refill(a):
 
     Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
     their worktree and branch removed, and nothing new starts for BREAKER_MIN minutes. Without it a limit turns this
-    loop into a worktree-and-branch factory."""
+    loop into a worktree-and-branch factory. Drain mode (tools/pool.json `mode`) only ORDERS the queue
+    (refill_key: finishing work first); it never leaves a free slot idle. A free slot takes the best startable task,
+    a plain bug doc included (owner, 2026-11-15: qwen sat idle for hours behind a drain filter)."""
     bounced = [n for n, t in list(load().items()) if dead_on_arrival(t) and bounce(n, t)]
     if bounced and not dead_models():   # a limit moved the work to another model; only an outage needs the pause
         json.dump({"until": time.time() + BREAKER_MIN * 60, "why": "%d workers died on arrival" % len(bounced)},
@@ -1354,6 +1370,17 @@ def cmd_priority(a):
     print("integration priority: " + " > ".join(priority_list() or ["(none: slot order)"]))
 
 
+def cmd_mode(a):
+    """mode [build|drain] — declare which campaign the swarm is running (see mode()). With no argument, print it."""
+    if a.name:
+        if a.name not in ("build", "drain"):
+            sys.exit("mode is one of: build, drain")
+        p = load_pool()
+        p["mode"] = a.name
+        json.dump(p, open(POOL_FILE, "w"), indent=2)
+    print("mode: %s" % mode())
+
+
 def cmd_queue(a):
     """Every queued task, and what it waits on right now (computed here, so no pass has to log it)."""
     tasks, pool = load(), load_pool()
@@ -1394,7 +1421,7 @@ def cmd_ps(a):
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
     tasks = load()
-    print("%-40s %-6s %-5s %-6s %-28s %s" % ("name", "pid", "alive", "cls", "model", "claims"))
+    print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % ("name", "pid", "alive", "tag", "cls", "model", "claims"))
     for name, t in sorted(tasks.items()):
         if t.get("state") != "running":
             continue
@@ -1408,7 +1435,10 @@ def cmd_ps(a):
         claims = ",".join(t.get("claims") or [])[:40]
         model = (t.get("model") or t.get("pool") or "?")[:28]
         cls = (t.get("cls") or "?")[:6]
-        print("%-40s %-6s %-5s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", cls, model, claims))
+        # a worker that exited with a DONE verdict and commits master lacks is waiting to LAND, not dead: the registry
+        # still says `running` until the integrator moves it, so `alive: no` alone reads as a crash (2026-11-15)
+        tag = "landable" if (not alive and state_of(t) == "exited-ok" and verdict(t) == "DONE" and ahead(t) > 0) else ""
+        print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", tag, cls, model, claims))
     # live process scan
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
@@ -2170,6 +2200,8 @@ def main():
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
+    s = sub.add_parser("mode"); s.add_argument("name", nargs="?", choices=["build", "drain"])
+    s.set_defaults(f=cmd_mode)
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)

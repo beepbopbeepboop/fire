@@ -42,6 +42,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
+import mojo.middle.coro as coro_mod
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
@@ -1398,6 +1399,8 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         obj, _hit = cas.get_or_build(key, '.o', _build_fn)
         return obj
     except Exception as e:
+        msg = f'[gimple_codegen] failed to compile link-mode inline-module cpp unit: {e}'
+        print(msg, flush=True)
         gimple_ctypes._debug_note('failed to compile link-mode inline-module cpp unit', e)
         return None
 
@@ -1647,48 +1650,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
                         sig = ret + ' ' + _tail[1]
             if not (sym in gen._NEEDS_SELF_EXTERN and gen._LIBC_SIGS.get(sym)):
                 sig = f"{ret} {name} ({', '.join(c_params) if c_params else 'void'})"
-            gen.func_return_types[sym] = ret
-            gen.func_param_types[sym] = ptypes
-            gen.imported_symbols[sym] = {
-                'module': mod, 'original_name': name,
-                'c_return_type': ret, 'signature': sig,
-            }
-            # A name in _NEEDS_SELF_EXTERN has ONE true C prototype, pinned in
-            # _LIBC_SIGS. The export-derived signature (module_loader maps the
-            # exporting Mojo wrapper's Int64-level types to int64_t text) can
-            # disagree with that pin — e.g. std.sys._libc's `def dup(oldfd:
-            # c_int)` exports `int64_t dup (int64_t oldfd)`, while every bare-
-            # call site records the pinned `extern int dup (int);` into
-            # _external_protos via _ensure_libc_self_extern — leaving TWO
-            # conflicting declarations of the same libc symbol in one TU (hard
-            # gcc "conflicting types for 'dup'/'pipe'" in the stdlib dylib's
-            # std_io_io/std_os_process units). Pin the recorded + emitted
-            # signature to the same libc truth so every declaration path for
-            # these names agrees.
-            if sym in gen._NEEDS_SELF_EXTERN:
-                _pin = gen._LIBC_SIGS.get(sym)
-                if _pin:
-                    ret = _pin[0]
-                    ptypes = list(_pin[1])
-                    sig = f"{ret} {name} ({', '.join(ptypes)})"
-            if isinstance(ret, str) and ret.startswith('MojoTuple_'):
-                # Part 4 (measured 2026-10-21 integration, `split`'s
-                # `-> Tuple[String, String]`): the export text scan resolves a
-                # `Tuple[...]` RETURN annotation to the synthesized by-value
-                # struct, but the defining unit made the body-sensitive
-                # decision (a body that builds the tuple as a RUNTIME
-                # list-backed literal returns `MojoList *`) and published
-                # that answer for its own definition — it must win, or this
-                # `_MOJO_STUB_` extern disagrees with the definition's own
-                # prototype. A defining unit that never compiled in this
-                # closure publishes nothing; `MojoList *` is the only shape a
-                # runtime tuple literal has, so it is the honest fallback.
-                _home_ret = gen._func_return_type_for_call(name, None)
-                if not (_home_ret and _home_ret.startswith('MojoTuple_')):
-                    ret = _home_ret if _home_ret else 'MojoList *'
-                    _tail = sig.split(None, 1)
-                    if len(_tail) == 2:
-                        sig = ret + ' ' + _tail[1]
             gen.func_return_types[sym] = ret
             gen.func_param_types[sym] = ptypes
             gen.imported_symbols[sym] = {
@@ -6914,13 +6875,12 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     else:
         var_names = None
         if _one is None and gimple_ctypes.for_target_is_tuple(_target_str):
-            raise RuntimeError(
-                "cannot compile a multi-slot comprehension target over a "
-                f"generator whose yield arity is not a tuple (`{gen0.target} "
-                f"for {gen0.target} in {api.get('base')}(...)`): the generator "
-                "yields one value per resume, and unpacking that value needs a "
-                "runtime iterator protocol this scalar generator model does "
-                "not have")
+            # The message lives in mojo/middle/coro.py beside the pipeline
+            # pre-pass that raises the same refusal earlier (before the
+            # unknown-declaration pass can answer with a less-specific
+            # diagnostic for the same program): one builder, one wording.
+            raise coro_mod.multi_slot_comprehension_refusal(gen0.target,
+                                                             api.get('base'))
         saved_target = _compr_bind_target(gen, _tgt, vct)
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -7141,7 +7101,7 @@ def _bind_local_decl(gen, name, ctype):
         gen._block_scope_frames[-1].append((name, saved))
 
 
-def _open_block_scope(gen):
+def _open_block_scope(gen) -> list:
     """Open a block body (an if/else/elif, loop, with, try/except/finally or
     match-case body). Returns the frame `_close_block_scope` needs."""
     frame = []
@@ -7149,7 +7109,7 @@ def _open_block_scope(gen):
     return frame
 
 
-def _close_block_scope(gen, frame: list):
+def _close_block_scope(gen, frame: list) -> None:
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""

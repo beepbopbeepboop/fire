@@ -23,7 +23,8 @@ from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           BoolLiteral, IntLiteral, FloatLiteral,
                           ComptimeVarStmt, CallExpr, BinaryOp, UnaryOp,
                           SubscriptExpr,
-                          align_value_error, _expr_constraint_text, MemberExpr)
+                          align_value_error, _expr_constraint_text, MemberExpr,
+                          ExprStmt, PassStmt, EllipsisLiteral)
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to, eval_const_int)
@@ -208,7 +209,7 @@ def _binds_from_args(template_src: str, arg_ctypes) -> bool:
 
 
 def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None,
-                      arg_ctypes=None):
+                      arg_ctypes: list | None = None):
     """Pull the source text of a single `fn fn_name[...](...): body` from a
     module, by indentation (the generic template we'll instantiate). None if
     not found.
@@ -311,7 +312,7 @@ def _is_param_marker(p: str) -> bool:
     return bool(p) and all(ch in '/*' for ch in p)
 
 
-def type_param_names(template_src: str):
+def type_param_names(template_src: str) -> list:
     """The generic's type-parameter names — for `fn` or `struct`, e.g.
     `struct Box[T, U]` -> ['T', 'U']. Skips the positional-only / keyword-only
     separators (`/`, `//`, `*`, `**`), which are not parameter names — see
@@ -580,6 +581,41 @@ def _method_sig(fn: FunctionDef):
     return (fn.name, ptypes, _alpha_rename_method_params(fn, fn.return_type))
 
 
+def _canonical_method_sig(fn: FunctionDef):
+    """`_method_sig` with the method's OWN bracket parameters renamed by
+    position.
+
+    A generic method's type-parameter NAME is local to the declaration: a trait
+    requirement `def as_uninit[T](...) -> MaybeUninit[T]` and an implementation
+    `def as_uninit[U](...) -> MaybeUninit[U]` are the same method, but their
+    signature texts differ. Renaming each declared parameter to `$t<position>`
+    makes the comparison renaming-invariant while still refusing a different
+    parameter in the same position (and a different generic arity). `Self.T` is
+    not the method's `T` — it names a parameter of the conforming struct — so
+    the substitution only matches a name not preceded by a dot or identifier
+    character."""
+    name, ptypes, ret = _method_sig(fn)
+    params = [_as_str(p) for p in (getattr(fn, 'comptime_params', None) or [])]
+    def canon(t):
+        text = _ann_to_str(t)
+        for i, param in enumerate(params):
+            if param:
+                text = re.sub(rf'(?<![\w.]){re.escape(param)}\b',
+                              f'$t{i}', text)
+        return text
+    return (name, len(params), [canon(t) for t in ptypes], canon(ret))
+
+
+def _method_implements(cand: FunctionDef, req: FunctionDef) -> bool:
+    """Does method `cand` implement the trait method `req`?
+
+    Exact textual signatures match first (the common case); otherwise the
+    declaration's own bracket parameters are alpha-renamed, so a renamed
+    generic parameter is not reported as a signature mismatch."""
+    return (_method_sig(cand) == _method_sig(req)
+            or _canonical_method_sig(cand) == _canonical_method_sig(req))
+
+
 def extract_trait(module_src: str, trait_name: str):
     """The required method signatures of `trait trait_name`, as a list of
     (name, [param_types], ret_type). None if the trait is not defined here."""
@@ -598,6 +634,41 @@ def _extract_trait_def(module_src: str, trait_name: str):
     except Exception:
         return None
     return None
+
+
+def _struct_effective_methods(sd, struct_map, seen=None):
+    """(own methods by name, method names supplied by base structs).
+
+    The declaration-time pre-pass runs before `_merge_struct_inheritance`, so
+    `sd.methods` holds only the struct's own methods. A required method or a
+    trait default may be supplied by a base struct instead; those are returned
+    separately because a base's signatures may mention the base's own type
+    parameters and cannot be compared textually without instantiating them, so
+    the caller treats a base method by NAME as satisfied (unknown stays
+    accepted)."""
+    own = {}
+    for m in (getattr(sd, 'methods', None) or []):
+        sig = _method_sig(m)
+        own.setdefault(sig[0], []).append((sig, m))
+    inherited = set()
+    if not struct_map:
+        return own, inherited
+    seen = set(seen or ())
+    if id(sd) in seen:
+        return own, inherited
+    seen.add(id(sd))
+    base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+    if not base_constraints:
+        base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
+    for bname, _wtext in base_constraints:
+        base_name, _args = _split_base_type_args(_as_str(bname))
+        base = struct_map.get(base_name)
+        if base is None or base is sd:
+            continue
+        bown, binherited = _struct_effective_methods(base, struct_map, seen)
+        inherited.update(bown)
+        inherited.update(binherited)
+    return own, inherited
 
 
 def type_methods(module_src: str, type_name: str):
@@ -642,9 +713,11 @@ def _find_struct_def(module_src: str, type_name: str):
     except Exception:
         return None, {}
     base, targs_list = _split_base_type_args(type_name)
+    structs = {s.name: s for s in stmts if isinstance(s, StructDef)}
     for s in stmts:
         if isinstance(s, StructDef) and s.name == base:
-            return s, {'base': base, 'targs_list': targs_list}
+            return s, {'base': base, 'targs_list': targs_list,
+                       'structs': structs}
     return None, {}
 
 
@@ -798,13 +871,258 @@ def _constraint_implied_for_evidence(method_where: str, assumption: str, module_
         return True
 
 
+def _is_default_trait_method(fn: FunctionDef) -> bool:
+    """A trait method is a default when it has a real body.
+
+    A body consisting only of `...`/`pass` (any number of them) is the
+    abstract/required spelling; anything else implements the method."""
+    body = getattr(fn, 'body', None) or []
+    if not body:
+        return False
+    for s in body:
+        if isinstance(s, PassStmt):
+            continue
+        if isinstance(s, ExprStmt) and isinstance(getattr(s, 'value', None),
+                                                  EllipsisLiteral):
+            continue
+        return True
+    return False
+
+
+def _collect_type_apps_in_text(text: str):
+    """Yield (base, args_list, full_text) for bracketed type applications in
+    `text`, best-effort over a type-expression string."""
+    if not text or '[' not in text:
+        return
+    s = str(text)
+    i = 0
+    while i < len(s):
+        if s[i].isalpha() or s[i] == '_':
+            j = i + 1
+            while j < len(s) and (s[j].isalnum() or s[j] in '_.'):
+                j += 1
+            if j < len(s) and s[j] == '[':
+                base = s[i:j]
+                depth = 0
+                k = j
+                while k < len(s):
+                    c = s[k]
+                    if c == '[':
+                        depth += 1
+                    elif c == ']':
+                        depth -= 1
+                        if depth == 0:
+                            inner = s[j + 1:k]
+                            args = _split_top_level_type_args('[' + inner + ']')
+                            if args is not None:
+                                yield (base, args, s[i:k + 1])
+                            # recurse into inner
+                            for sub in _collect_type_apps_in_text(inner):
+                                yield sub
+                            i = k + 1
+                            break
+                    k += 1
+                else:
+                    i = j + 1
+                    continue
+                continue
+        i += 1
+
+
+_VALUE_PARAM_RE = re.compile(r'^\s*(def|fn)\b')
+
+
+def _struct_value_param_names(sd):
+    """The struct's bracket parameters whose type is a VALUE type (`def`/`fn`).
+
+    `struct Map[Strat: Strategy, Dest: Copyable, //, mapFn: def (...)]` has one:
+    `mapFn`. `Strat`/`Dest` are trait-bounded TYPE parameters, not values.
+    """
+    out = []
+    for rec in (getattr(sd, 'bracket_param_info', None) or []):
+        if not (isinstance(rec, (list, tuple)) and len(rec) >= 2):
+            continue
+        nm = _as_str(rec[0]).lstrip('*')
+        if nm and _VALUE_PARAM_RE.match(_as_str(rec[1])):
+            out.append(nm)
+    return out
+
+
+def _method_bracket_param_names(fn):
+    """The names a method declares in its own bracket block, in order."""
+    out = []
+    for attr in ('comptime_params', 'variadic_bracket_params'):
+        vals = getattr(fn, attr, None) or []
+        for v in vals:
+            if isinstance(v, (list, tuple)) and v:
+                nm = _as_str(v[0])
+            else:
+                nm = _as_str(v)
+            if nm and nm not in out:
+                out.append(nm)
+    return out
+
+
+def _respell_app_with_struct_value_params(app_text, sd, method):
+    """Re-spell `Struct[arg, ...]` using the CONFORMING STRUCT's value-parameter
+    names instead of the trait method's.
+
+    A defaulted trait method's signature is written with the METHOD's own
+    bracket parameters (`def map[To: Copyable, //, mapper: def (...)] ->
+    Map[mapper]`). When the inherited default is formed for a struct whose
+    parameter is spelled differently (`struct Map[..., //, mapFn: def (...)]`),
+    Modular reports the STRUCT's spelling: `'Map[mapFn]' does not implement all
+    requirements for 'Strategy'` (it prints `structDecl.getTypeDeclSelf()`,
+    `lib/MojoParser/Traits.cpp:458`, at `:542`). We printed the application text
+    as written in the method, so the canonical case spelled it `Map[mapper]`.
+
+    Only an argument that IS one of the method's own bracket parameters is
+    renamed, and only to the struct's value parameter at the same position, so
+    an application written with the struct's type parameters (`Map[Self]`) is
+    left alone.
+    """
+    vnames = _struct_value_param_names(sd)
+    if not vnames:
+        return app_text
+    m = re.match(r'^(\s*)([A-Za-z_]\w*)\s*\[(.*)\](\s*)$', app_text)
+    if not m:
+        return app_text
+    names = _method_bracket_param_names(method)
+    if not names:
+        return app_text
+    args = [a.strip() for a in m.group(3).split(',')]
+    for i in range(len(args)):
+        if i >= len(vnames):
+            break
+        if args[i] in names:
+            args[i] = vnames[i]
+    return f'{m.group(1)}{m.group(2)}[{", ".join(args)}]{m.group(4)}'
+
+
+def _validate_inherited_default(method, struct_name, struct_tparams, bindings,
+                                sd=None):
+    """Return (ok, bad_instantiation_name_or_None).
+
+    A default trait method inherited by the struct must be formable for it.
+    If its signature applies the conforming struct with a non-full parameter
+    list, the struct is non-conforming and the bad application name is the one
+    the diagnostic reports."""
+    # Substitute Self / Self.member / struct params into signature texts.
+    subs = dict(bindings)
+    subs.setdefault('Self', _as_str(struct_name))
+    sname = _as_str(struct_name)
+    texts = []
+    try:
+        texts.append(_ann_to_str(getattr(method, 'return_type', None)))
+    except Exception:
+        pass
+    try:
+        for _n, t in (getattr(method, 'params', None) or []):
+            if _as_str(_n) == 'self':
+                continue
+            texts.append(_ann_to_str(t))
+    except Exception:
+        pass
+    expected = len(struct_tparams)
+    if expected <= 0:
+        return True, None
+    for text in texts:
+        if not text:
+            continue
+        tsub = _substitute_constraint_text(text, subs)
+        for base, args, full in _collect_type_apps_in_text(tsub):
+            if base == sname:
+                if len(args) != expected:
+                    # report the application with the CONFORMING STRUCT's own
+                    # value-parameter spelling, not the trait method's
+                    return False, _respell_app_with_struct_value_params(
+                        full, sd, method)
+    return True, None
+
+
+def _trait_method_requirements(trait_def, struct_name, methods_by_name,
+                               struct_tparams, bindings, module_src,
+                               assumption, sd=None,
+                               check_override_evidence=True,
+                               check_required_evidence=True):
+    """Yield one failure per unmet requirement of `trait_def`.
+
+    `methods_by_name` maps a method name to `[(signature, FunctionDef)]` for
+    the conforming struct's own methods. Each failure is
+    `(kind, method_name, detail)` with kind one of:
+
+    - `'missing'`: no method of that name at all;
+    - `'mismatch'`: methods of that name exist but none has the required
+      signature (detail is `(param_types, return_type)`);
+    - `'evidence'`: the implementation's `where` clause is not implied by the
+      conformance assumption;
+    - `'default'`: the inherited default cannot be formed for this struct
+      (detail is the offending instantiation name, or None).
+
+    A struct's own method of the same name always wins over a trait default.
+    This is the single requirement-checking definition shared by the
+    instantiation-time (`check_conformance`) and declaration-time
+    (`check_conformance_declarations`) entry points.
+    """
+    for tm in (getattr(trait_def, 'methods', None) or []):
+        tname, ptypes, ret = _method_sig(tm)
+        cands = methods_by_name.get(tname) or []
+        if _is_default_trait_method(tm):
+            if cands:
+                if check_override_evidence:
+                    impl = None
+                    for _csig, m in cands:
+                        if _method_implements(m, tm):
+                            impl = m
+                            break
+                    if impl is not None:
+                        mw = getattr(impl, 'where_clause', None)
+                        if mw is not None:
+                            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
+                            asn = assumption if assumption is not None else ''
+                            if not _constraint_implied_for_evidence(
+                                    mw_text, asn, module_src, bindings):
+                                yield ('evidence', tname, None)
+                                return
+                continue
+            # Inherited default: must be formable/substitutable for this struct.
+            ok_def, bad_inst = _validate_inherited_default(
+                tm, struct_name, struct_tparams, bindings, sd)
+            if not ok_def:
+                yield ('default', tname, bad_inst)
+                return
+            continue
+
+        # Required (non-default) method.
+        impl = None
+        for _csig, m in cands:
+            if _method_implements(m, tm):
+                impl = m
+                break
+        if impl is None:
+            if not cands:
+                yield ('missing', tname, None)
+            else:
+                yield ('mismatch', tname, (ptypes, ret))
+            continue
+        if not check_required_evidence:
+            continue
+        mw = getattr(impl, 'where_clause', None)
+        if mw is not None:
+            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
+            asn = assumption if assumption is not None else ''
+            if not _constraint_implied_for_evidence(
+                    mw_text, asn, module_src, bindings):
+                yield ('evidence', tname, None)
+                return
+
+
 def check_conformance(module_src: str, type_name: str, trait_name: str):
     """Does concrete `type_name` satisfy `trait_name`? Returns (ok, missing)."""
     trait_base, trait_args = _split_base_type_args(trait_name)
     trait_def = _extract_trait_def(module_src, trait_base)
     if trait_def is None:
         return True, []
-    required = [_method_sig(m) for m in trait_def.methods]
     sd, info = _find_struct_def(module_src, type_name)
     if sd is None:
         return True, []
@@ -857,31 +1175,29 @@ def check_conformance(module_src: str, type_name: str, trait_name: str):
         else:
             assumption = None
 
-    by_name = {}
-    for m in (getattr(sd, 'methods', None) or []):
-        sig = _method_sig(m)
-        by_name.setdefault(sig[0], []).append((sig[1], sig[2], m))
+    by_name, base_method_names = _struct_effective_methods(
+        sd, info.get('structs') or {})
     missing = []
-    for tname, ptypes, ret in required:
-        cands = by_name.get(tname)
-        if cands is None:
-            missing.append(f"missing method '{tname}'")
+    s_tparams = _sd_bracket_param_names(sd)
+    for kind, tname, detail in _trait_method_requirements(
+            trait_def, _as_str(getattr(sd, 'name', '')), by_name, s_tparams,
+            bindings, module_src, assumption, sd=sd):
+        if tname in base_method_names:
+            # A base struct supplies the method; its signature may mention the
+            # base's own type parameters, so it cannot be compared here.
             continue
-        impl = None
-        for cp, cr, m in cands:
-            if cp == ptypes and cr == ret:
-                impl = m
-                break
-        if impl is None:
+        if kind == 'default':
+            if detail:
+                return False, [f"'{detail}' does not implement all requirements for '{trait_base}'"]
+            return False, [f"does not implement all requirements for '{trait_base}'"]
+        if kind == 'evidence':
+            return False, [f"does not implement all requirements for '{trait_base}'"]
+        if kind == 'mismatch':
+            ptypes, ret = detail
             want = f"({', '.join(ptypes)}) -> {ret}"
             missing.append(f"method '{tname}' signature mismatch (want {want})")
-            continue
-        mw = getattr(impl, 'where_clause', None)
-        if mw is not None:
-            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
-            asn = assumption if assumption is not None else ''
-            if not _constraint_implied_for_evidence(mw_text, asn, module_src, bindings):
-                return False, [f"does not implement all requirements for '{trait_base}'"]
+        else:
+            missing.append(f"missing method '{tname}'")
     return (not missing), missing
 
 
@@ -1086,14 +1402,24 @@ def _constraint_implies_text(derived_text, base_text, trait_bases, cache):
     return _atom_implies(da, ba, trait_bases, cache)
 
 
-def _ancestors_with_paths(base_name, base_where, trait_bases, cache, path=None):
-    """Yield (ancestor, where_text, path_names) for all reachable ancestors including base."""
-    if path is None:
-        path = [base_name]
-    yield (base_name, base_where, list(path))
-    for parent in (trait_bases.get(base_name) or []):
+def _ancestors_with_paths(base_name, base_where, trait_bases, cache, path=None) -> list:
+    """[(ancestor, where_text, path_names)] for all reachable ancestors including
+    base, preorder. An eager LIST, not a generator: this module is in the
+    self-host closure, and a recursive `yield from` generator is one neither the
+    stack-switch lowering nor (in the whole-program build) the C++20 path leaves
+    in a linkable state (`_mojogen_elaborate__ancestors_with_paths_*` undefined at
+    link)."""
+    out = []
+    _collect_ancestors(base_name, base_where, trait_bases,
+                       [base_name] if path is None else path, out)
+    return out
+
+
+def _collect_ancestors(name, where_text, trait_bases, path: list, out: list) -> None:
+    out.append((name, where_text, list(path)))
+    for parent in (trait_bases.get(name) or []):
         # Parent traits are unconditional in this part's model.
-        yield from _ancestors_with_paths(parent, base_where, trait_bases, cache, path + [parent])
+        _collect_ancestors(parent, where_text, trait_bases, path + [parent], out)
 
 
 def _as_str(x):
@@ -1369,7 +1695,7 @@ def _iter_function_defs(stmts):
                     yield m
 
 
-def check_conditional_rp_origin(stmts, struct_defs):
+def check_conditional_rp_origin(stmts: list, struct_defs: list) -> None:
     """Reject returning ref[x] tied to a conditionally-RegisterPassable arg."""
     cond_rp = {}
     for sd in (struct_defs or []):
@@ -1401,8 +1727,74 @@ def check_conditional_rp_origin(stmts, struct_defs):
                 f"RegisterPassable type")
 
 
-def check_conformance_declarations(struct_defs, trait_defs):
-    """Declaration-time checks for conditional trait conformance (part 1)."""
+def _sd_decl_bindings(sd):
+    """The struct's comptime aliases/constants, with no instantiation args.
+
+    The declaration-time pre-pass has no module source or type arguments, so it
+    is `_struct_targ_bindings` with neither: one reader of the aliases and
+    comptime fields, not a second copy that can drift from it."""
+    return _struct_targ_bindings('', sd, [])
+
+
+def _check_decl_trait_methods(struct_defs, trait_defs):
+    trait_map = {}
+    for td in (trait_defs or []):
+        if isinstance(td, TraitDef):
+            trait_map[_as_str(getattr(td, 'name', ''))] = td
+    struct_map = {}
+    for sd in (struct_defs or []):
+        if isinstance(sd, StructDef):
+            struct_map[_as_str(getattr(sd, 'name', ''))] = sd
+    errors = []
+    for sd in (struct_defs or []):
+        if not isinstance(sd, StructDef):
+            continue
+        sline = getattr(sd, 'line', 0) or 0
+        base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+        if not base_constraints:
+            base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
+        s_tparams = _sd_bracket_param_names(sd)
+        bindings = _sd_decl_bindings(sd)
+        by_name, base_method_names = _struct_effective_methods(sd, struct_map)
+        for bname, wtext in base_constraints:
+            bname_s = _as_str(bname)
+            wtext_s = _as_str(wtext) if wtext is not None else ''
+            if wtext_s:
+                continue
+            trait_base, trait_args = _split_base_type_args(bname_s)
+            td = trait_map.get(trait_base)
+            if td is None:
+                continue
+            # bind trait type params if any
+            tbindings = dict(bindings)
+            tbindings.setdefault('Self', _as_str(sd.name))
+            try:
+                tparams = [p[0] for p in (getattr(td, 'params', None) or []) if isinstance(p, (list, tuple)) and p]
+                for i, tp in enumerate(tparams):
+                    if i < len(trait_args):
+                        tbindings.setdefault(tp, trait_args[i])
+            except Exception:
+                pass
+            for kind, tname, detail in _trait_method_requirements(
+                    td, _as_str(sd.name), by_name, s_tparams, tbindings,
+                    module_src=None, assumption='', sd=sd,
+                    check_override_evidence=False,
+                    check_required_evidence=False):
+                if tname in base_method_names:
+                    # Supplied (possibly after substitution) by a base struct.
+                    continue
+                if kind == 'default' and detail:
+                    errors.append((sline,
+                        f"'{detail}' does not implement all requirements for '{trait_base}'"))
+                else:
+                    errors.append((sline,
+                        f"'{_as_str(sd.name)}' does not implement all requirements for '{trait_base}'"))
+                break
+    return errors
+
+
+def check_conformance_declarations(struct_defs: list, trait_defs: list) -> None:
+    """Declaration-time checks for conditional trait conformance (parts 1, 4, 6)."""
     trait_bases = {}
     for td in (trait_defs or []):
         if isinstance(td, TraitDef):
@@ -1480,7 +1872,8 @@ def check_conformance_declarations(struct_defs, trait_defs):
 
     # Comptime member requirements (part 5)
     errors.extend(_comptime_member_errors(struct_defs, trait_defs))
-
+    # Part 6: declaration-time method/default checks for unconditional bases.
+    errors.extend(_check_decl_trait_methods(struct_defs, trait_defs))
     if errors:
         line, msg = sorted(errors, key=lambda x: x[0])[0]
         raise RuntimeError(f"error: {msg}")
@@ -1639,7 +2032,8 @@ def _flatten_and_assumptions(a_atoms):
     return assumptions
 
 
-def check_conditional_conformance_candidates(struct_defs, trait_defs, module_src=''):
+def check_conditional_conformance_candidates(struct_defs: list, trait_defs: list,
+                                             module_src: str = '') -> None:
     """Declaration-time candidate selection for conditional trait conformance
     (part 3)."""
     trait_by_name = {}
@@ -2037,7 +2431,7 @@ def _field_copy_move_problem(enclosing, fname, ftype_text, want_trait, struct_ma
     return ('cond', needed)
 
 
-def check_copy_move_synthesis(struct_defs, trait_defs):
+def check_copy_move_synthesis(struct_defs: list, trait_defs: list) -> None:
     """Declaration-time synthesized copy/move constructor diagnostics (part 4)."""
     trait_bases = {}
     for td in (trait_defs or []):
@@ -2212,7 +2606,7 @@ def _where_conforms_to_pred(module_src: str, targs: dict):
     return pred
 
 
-def check_where_clauses(module_src: str, template_src: str, targs: dict):
+def check_where_clauses(module_src: str, template_src: str, targs: dict) -> None:
     """Enforce the template's `where` clauses for the concrete `targs`.
 
     Each clause is folded by the shared constant folder
@@ -2504,7 +2898,7 @@ _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
 
 
-def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
+def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     """{type-param: concrete value} from unifying ONE parameter's declared type
     annotation against ONE argument's actual C type, or `{}` when the shape is
     not one we can prove.
@@ -2556,7 +2950,10 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     if ann.startswith('Self.'):
         ann = ann[5:]
     if ann in pnames:
-        bound = c_to_mojo(arg_ctype)
+        # `arg_mojo` is the argument's Mojo type when the CALLER can prove it
+        # from the call's own syntax (`Foo()` is a `Foo`), which its C type
+        # `Foo *` cannot say: a `Foo *` is equally a `Pointer[Foo]`.
+        bound = arg_mojo if arg_mojo else c_to_mojo(arg_ctype)
         return {} if bound is None else {ann: bound}
     # `Scalar[dtype]` and `SIMD[dtype, width]`. SIMD is erased to `int64_t`, so
     # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
@@ -2848,7 +3245,7 @@ def _fill_erased_params(template_src, params, binding) -> dict:
     return binding
 
 
-def infer_type_args(template_src: str, arg_ctypes):
+def infer_type_args(template_src: str, arg_ctypes, arg_mojo_types=None):
     """Infer a generic's type args from the C types of its call arguments. For
     each type parameter that appears in a parameter's type ANNOTATION, bind it
     to the Mojo type of the matching argument (`_unify_param_ann` says which
@@ -2868,7 +3265,8 @@ def infer_type_args(template_src: str, arg_ctypes):
     for i, (_pname, ann) in enumerate(fn.params):
         if i >= len(arg_ctypes):
             break
-        for k, v in _unify_param_ann(ann, params, arg_ctypes[i]).items():
+        _am = arg_mojo_types[i] if arg_mojo_types and i < len(arg_mojo_types) else None
+        for k, v in _unify_param_ann(ann, params, arg_ctypes[i], _am).items():
             binding.setdefault(k, v)
     binding = _fill_erased_params(template_src, params, binding)
     # A parameter no argument binds but the template DEFAULTS
@@ -3281,14 +3679,15 @@ class Elaborator:
                 'params': [_mojo_type(p) for p in ptypes]}
 
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes,
-                                        origin_module: str | None = None) -> dict:
+                                        origin_module: str | None = None,
+                                        arg_mojo_types=None) -> dict:
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
         tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
                                  arg_ctypes=arg_ctypes)
         if tmpl is None:
             return None
-        type_args = infer_type_args(tmpl, arg_ctypes)
+        type_args = infer_type_args(tmpl, arg_ctypes, arg_mojo_types)
         if type_args is None:
             return None
         try:
@@ -3527,23 +3926,32 @@ def gimple_exprtypes_split_commas(s):
     return out
 
 
-def _walk_nodes(node):
+def _walk_nodes(node) -> list:
+    """Every node under `node` (lists and dicts descended, the node itself
+    included), preorder. An eager LIST for the reason `_ancestors_with_paths`
+    gives (a recursive generator is not linkable in the self-host build)."""
+    out = []
+    _walk_nodes_into(node, out)
+    return out
+
+
+def _walk_nodes_into(node, out: list) -> None:
     if node is None:
         return
     if isinstance(node, list):
         for x in node:
-            yield from _walk_nodes(x)
+            _walk_nodes_into(x, out)
         return
-    yield node
+    out.append(node)
     if isinstance(node, dict):
         for v in node.values():
-            yield from _walk_nodes(v)
+            _walk_nodes_into(v, out)
         return
     try:
         fields = getattr(node, '__dataclass_fields__', None)
         if fields:
             for f in fields:
-                yield from _walk_nodes(getattr(node, f))
+                _walk_nodes_into(getattr(node, f), out)
             return
     except Exception:
         pass
@@ -3551,7 +3959,7 @@ def _walk_nodes(node):
     for attr in ('body','then_body','else_body','elifs','value','args','kwargs','func','obj','target','iterable','condition','left','right','operand','elements'):
         if hasattr(node, attr):
             try:
-                yield from _walk_nodes(getattr(node, attr))
+                _walk_nodes_into(getattr(node, attr), out)
             except Exception:
                 pass
 

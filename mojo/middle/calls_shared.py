@@ -365,8 +365,6 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
         param_ctype = 'int64_t'
     if _dflt is None:
         return _null_default_pair(param_ctype)
-    if _dflt is None:
-        return _null_default_pair(param_ctype)
     _cv = _callable_value_symbol(gen, _dflt, cxx=cxx)
     if _cv is not None:
         return _cv

@@ -5030,7 +5030,7 @@ def align_value_error(val: int) -> str | None:
     return None
 
 
-def _expr_constraint_text(node):
+def _expr_constraint_text(node: object) -> str:
     """Best-effort source-like text for a conditional-conformance `where`
     expression. Only the forms needed for declaration-time implication checks
     are rendered precisely (conforms_to calls, and/or/not, names, members,

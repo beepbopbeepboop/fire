@@ -156,10 +156,28 @@ def extract_package_signatures(pkg_dir):
     return {"structs": structs, "functions": funcs}
 
 
+def _package_sources(pkg_dir):
+    """{file name: source text} of the package's top-level .mojo files. Carried
+    so an importer whose package sources are gone can still re-read the
+    declarations (traits, where clauses, defaults) the signature records do not
+    keep, to render synthetic-signature diagnostics."""
+    out = {}
+    if os.path.isdir(pkg_dir):
+        for fn in sorted(os.listdir(pkg_dir)):
+            if fn.endswith('.mojo'):
+                try:
+                    with open(os.path.join(pkg_dir, fn), encoding='utf-8') as f:
+                        out[fn] = f.read()
+                except OSError:
+                    pass
+    return out
+
+
 def write_artifact(pkg_dir, out_path):
     recs = extract_package_signatures(pkg_dir)
     pkg_name = os.path.basename(os.path.normpath(pkg_dir))
-    data = {"package": pkg_name, "structs": recs["structs"], "functions": recs["functions"]}
+    data = {"package": pkg_name, "structs": recs["structs"], "functions": recs["functions"],
+            "sources": _package_sources(pkg_dir)}
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(data, f, sort_keys=True)

@@ -748,7 +748,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # table: an unstamped node has no evidence of its own, and the
         # table's entry belongs to whichever module ran last.
         _ptr_ev = getattr(fn, '_ptr_evidence', ())
-        if (ctype == 'char *' and (pt is None or pt == '')
+        if ((ctype == 'char *' or ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'))
+                and (pt is None or pt == '')
                 and pn in _ptr_ev
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
                         and isinstance(_n.func, gimple_ctypes.IdentExpr)
@@ -758,8 +759,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                         and isinstance(_n.args[1], gimple_ctypes.IdentExpr)
                         and _n.args[1].name in ('str', 'bytes')
                         for _n in gimple_exprtypes._walk_ast(fn))):
-            # a path word the body asks `isinstance(p, bytes)` of: it may be a
-            # str OR a bytes at run time, so it is the word, not a `char *`
+            # A path/union word the body asks `isinstance(p, str|bytes)` of:
+            # it may be a str/bytes OR another runtime object at run time (e.g.
+            # a file handle or iterable passed in), so it is the runtime word,
+            # not a narrowed pointer type inferred from a particular call site.
             ctype = 'int64_t'
         if (ctype == 'int64_t' and (pt is None or pt == '')
                 and pn in gimple_exprtypes._list_method_params(fn)):
@@ -1680,6 +1683,14 @@ def _cpp_sig_default_word(gen, dv, is_double: bool = False) -> str | None:
                 and dv.name not in getattr(gen, 'struct_field_types', {})):
             gen._cpp_module_func_refs.add(dv.name)
             return f"(int64_t)(intptr_t)(void *)@@CSYM:{dv.name}@@"
+        # A builtin with a runtime-callable-word implementation: `_open=open`
+        # is Tools/c-analyzer's `read_table` default. One unspellable default
+        # drops the generator's whole signature (see `_cpp_generator_sig_lines`),
+        # which also lost the perfectly spellable `csv.reader` and the tab
+        # separator, so calls by value got 0 for every default.
+        _bw = _BUILTIN_DEFAULT_WORDS.get(dv.name)
+        if _bw is not None:
+            return f"(int64_t)(intptr_t)(void *){_bw}"
         return None
     if isinstance(dv, gimple_ctypes.IntLiteral):
         return str(dv.value)
@@ -1698,6 +1709,14 @@ _RUNTIME_CALLABLE_WORDS = {
     'glob.glob': 'mojo_glob_w',
     'glob.iglob': 'mojo_glob_w',
     'csv.reader': 'mojo_csv_reader_w',
+}
+
+#: Builtins that can be a parameter DEFAULT and have a runtime entry point
+#: taking the arguments `mojo_dyn_call` passes a plain function (integer
+#: words). `open` is the real one: `_open=open` in Tools/c-analyzer's
+#: `read_table`.
+_BUILTIN_DEFAULT_WORDS = {
+    'open': 'mojo_open_default',
 }
 
 
