@@ -5442,6 +5442,50 @@ def test_the_suite_self_test_registrations_are_gated():
                f'(cmd={sorted(files)})'))
 
 
+def test_the_land_doc_suite_is_registered_where_its_bucket_says():
+    """`tools/test_land_doc.py` is named by a spec, and by the RIGHT bucket.
+
+    The file landed in `62411916c` with the land-doc feature and was named by
+    no spec and no `UNREGISTERED` entry, so the estate check above was red on
+    it and two docs were filed for the same line
+    (`SUITE_test_land_doc_unregistered` and its duplicate
+    `SUITE_test_land_doc_missing_estate_entry`; both deleted with this pin).
+    The registration landed in `bd0d95e38` with an unrelated unknown-decl fix.
+    The estate check found it, but it can only ask that SOME spec names the
+    file, and the bucket census can only ask that a registration is in SOME
+    bucket — between them they do not state the two decisions this pin is
+    about:
+
+      * the spec's `cmd` names THAT file. A rename that leaves the
+        `land-doc` registration pointing at the old name still satisfies
+        "some spec names a file that exists", while the file the check found
+        is back to being run by nothing; and
+      * it is in `orchestrator`, NOT in `check`. `land_doc` is a git-facing
+        fleet pass (`branch_age` and `commit_doc` are mocked only because the
+        test needs a temp repo), and `check` is deliberately not in the
+        business of spawning git or touching fleet state — that is the whole
+        reason `orchestrator` is a separate bucket. Moving this job into the
+        everyday loop would put a landing-path test in it, and "in some
+        bucket" says nothing about which.
+    """
+    name = 'land-doc'
+    spec = suite.REGISTRY.get(name)
+    files = ({os.path.basename(str(c)) for c in spec.cmd}
+             if spec is not None else set())
+    check('the suite: a spec names tools/test_land_doc.py',
+          spec is not None and 'test_land_doc.py' in files,
+          ('the estate check named this file on 2026-11-15 and it was '
+           'registered in bd0d95e38; no spec names it now, so it runs on '
+           f'nothing (spec={spec!r}, cmd={sorted(files)})'))
+    check('the suite: land-doc runs in `orchestrator`, not in `check`',
+          spec is not None
+          and name in suite.expand_bucket('orchestrator')
+          and name not in suite.expand_bucket('check'),
+          ('land_doc is a git-facing landing pass; `orchestrator` is the '
+           'bucket for those and `check` must not spawn git — a move into '
+           '`check` is a coverage decision this row exists to refuse'))
+
+
 def test_no_test_name_is_registered_twice():
     """A second `test('name', …)` overwrites the first, and nothing says so.
 
@@ -6934,6 +6978,7 @@ def main():
                test_every_test_file_is_registered,
                test_the_trait_conformance_diagnostic_suites_are_gated,
                test_the_suite_self_test_registrations_are_gated,
+               test_the_land_doc_suite_is_registered_where_its_bucket_says,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
