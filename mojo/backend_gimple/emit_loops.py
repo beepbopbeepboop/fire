@@ -37,6 +37,7 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_is_tuple, for_target_names, target_slots
 import mojo.middle.iter_factory as iter_factory
+import mojo.middle.coro as coro_mod
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -4009,12 +4010,11 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
             # name, which is not C (`gcc: expected ')' before ',' token`).
             # Refuse by name rather than emit that, matching this project's
             # "fall back to interpreting the module from source" convention.
-            raise RuntimeError(
-                "cannot compile a multi-slot `for` target over a generator "
-                f"whose yield arity is not a tuple (`for {var} in "
-                f"{api.get('base')}(...)`): the generator yields one value per "
-                "resume, and unpacking that value needs a runtime iterator "
-                "protocol this scalar generator model does not have")
+            # The message lives in mojo/middle/coro.py beside the pipeline
+            # pre-pass that raises the same refusal earlier (before the
+            # unknown-declaration pass can answer with a less-specific
+            # diagnostic for the same program): one builder, one wording.
+            raise coro_mod.multi_slot_for_refusal(var, api.get('base'))
         # Retype a name a sibling loop already declared with another kind
         # (see the docstring); `force` mints a fresh C name and rebinds every
         # later read of `var` in this body to it. Same rule as the list arm
