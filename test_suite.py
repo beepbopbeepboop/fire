@@ -2759,11 +2759,13 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # too expensive or otherwise inappropriate to run, so each must be named
     # here and have its reserves-0 / --list / --dry-run properties re-asserted.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
-    # Measured 2026-11-14: `cli-usage-text` and `formal-read-before-store`
-    # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
-    # are. This list is the census the check compares the registry
-    # against, so it tracks the tree rather than freezing it.
-    expected_disabled = ['gimple', 'metalgpu', 'rthdrscan']
+    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
+    # two `issubclass` declarations) and `formal-doc-truth` is green again
+    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
+    # `formal-read-before-store` are no longer disabled either. This list is the
+    # census the check compares the registry against, so it tracks the tree
+    # rather than freezing it.
+    expected_disabled = ['gimple', 'metalgpu']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2900,11 +2902,13 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    # Measured 2026-11-14: `cli-usage-text` and `formal-read-before-store`
-    # are no longer disabled, and `formal-doc-truth` and `rthdrscan` now
-    # are. This list is the census the check compares the registry
-    # against, so it tracks the tree rather than freezing it.
-    expected_disabled = ['gimple', 'metalgpu', 'rthdrscan']
+    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
+    # two `issubclass` declarations) and `formal-doc-truth` is green again
+    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
+    # `formal-read-before-store` are no longer disabled either. This list is the
+    # census the check compares the registry against, so it tracks the tree
+    # rather than freezing it.
+    expected_disabled = ['gimple', 'metalgpu']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),

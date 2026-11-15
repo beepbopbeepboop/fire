@@ -604,7 +604,20 @@ def test_every_declaration_is_seen():
     #   +1  `mojo_float_to_bits`   (float in, int64_t out)
     #       Both carry a float across the boundary, so neither is word-shaped:
     #       total 940 -> 942, word 431 unchanged, box 509 -> 511.
-    for header, want in (('fire_runtime.h', 832),   # --fix writes the live figure
+    # 832 -> 834 (2026-11-14, the gate fix for `rthdrscan` at e13c0d2506):
+    # TWO names, read off the call on the live header, from be6de3790
+    # ("issubclass: lower it instead of emitting the weak stub"), which landed
+    # after the 832 rung without one:
+    #   +1  `mojo_is_classword` (int64_t in, int out) — "is this word a class?",
+    #       the `object` arm of `issubclass` for a value the hierarchy cannot
+    #       answer statically.
+    #   +1  `mojo_issubclass_rtclass` (two int64_t in, int out) — the runtime
+    #       class-table arm, which reuses `_class_derives` rather than walking
+    #       the hierarchy a second time.
+    # Both are word-shaped: no float and no named container crosses the
+    # boundary, so word 431 -> 433 and total 942 -> 944; box stays 511.
+    # `--fix` wrote this rung and every quoted figure above from that one scan.
+    for header, want in (('fire_runtime.h', 837),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
