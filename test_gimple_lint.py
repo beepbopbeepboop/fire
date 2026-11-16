@@ -227,6 +227,38 @@ def test_gate_wiring() -> None:
     # November 2026 with every other check here green).
 
 
+def test_value_tables_reset() -> None:
+    """Every table `carry_value_info` copies describes a VALUE and is keyed by
+    the name holding it. Names restart in each function, so each table must
+    be emptied by `_reset_func` and captured / put back by `save_func_state`
+    / `restore_func_state`. Four were not until 2026-11-16, and a later
+    function's `_t58` inherited an earlier one's generator API."""
+    print("value tables: each one carry_value_info copies is reset per function")
+    import re
+    path = os.path.join(ROOT, 'mojo', 'backend_gimple', 'emit_infra.py')
+    with open(path, encoding='utf-8') as f:
+        src = f.read()
+
+    def body(name: str) -> str:
+        m = re.search(r'^def ' + name + r'\(.*?(?=^def |^class )', src, re.S | re.M)
+        return m.group(0) if m else ''
+    carry = body('carry_value_info')
+    tables = sorted(set(re.findall(r'src in gen\.(_\w+)', carry)))
+    check(len(tables) >= 18, f"found {len(tables)} tables in carry_value_info")
+    reset = body('_reset_func')
+    save = body('save_func_state')
+    restore = body('restore_func_state')
+    for t in tables:
+        ok = ((re.search(r'gen\.' + t + r'\b[^=\n]*= ', reset) is not None
+               or ('gen.' + t + '.clear()') in reset)
+              and ('st.fs' + t + ' = gen.' + t) in save
+              and ('gen.' + t + ' = st.fs' + t) in restore)
+        if not ok:
+            check(False, f"gen.{t} is copied by carry_value_info but is not reset in "
+                         f"_reset_func and saved/restored in FuncState (emit_infra.py)")
+    check(True, f"{len(tables)} value tables are reset, saved and restored")
+
+
 def test_rt_sigs() -> None:
     print("rt_sigs: the generated runtime signature table is current")
     r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'gen_rt_sigs.py'),
@@ -579,6 +611,7 @@ def main() -> int:
     if 'unit' in which:
         test_unit()
         test_gate_wiring()
+        test_value_tables_reset()
         test_rt_sigs()
         test_text_calls()
         test_text_casts()
