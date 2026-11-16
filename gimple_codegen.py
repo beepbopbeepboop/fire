@@ -3196,7 +3196,6 @@ class GimpleGen:
         # the suffix and the qualifier halves of one mangled symbol can
         # never disagree about which entry they mean.
         self._imported_home_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
-        self._private_struct_pts_cache: dict[str, list] = {}  # '<home module>\x00<fn name>' -> home-private-struct param ctypes, or [] (see _imported_private_struct_pts)
         # _pair_key(sanitized home-module qualifier, fn name) -> [param ctypes] —
         # the WHOLE-PROGRAM-SHARED definition-side truth for free-function
         # signatures, written ONLY by a unit that actually defines the name
@@ -5119,8 +5118,6 @@ class GimpleGen:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):
         return gfn._parsed_import(self, module)
-    def _home_signature_ctypes(self, module: str, fs) -> list:
-        return gfn._home_signature_ctypes(self, module, fs)
     def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
         return gfn._note_struct_import_alias(self, module, alias, orig_name)
     def _note_struct_attr_alias(self, module: str, alias: str, member: str):
