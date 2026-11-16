@@ -1,19 +1,13 @@
-"""Part 7: `compile_info` must refuse a kernel it cannot slice out as a symbol.
+"""Regression: `std.compile.compile_info` must refuse an unsliceable kernel.
 
-`bugs/GPU_offload_validation_modular-part7.md` (parent:
-`bugs/hard/GPU_offload_validation_modular.md`, row
-`compile_offload_missing_symbol_error.mojo`).
+Covers the `compile_offload_missing_symbol_error.mojo` case: a statically named
+module-level kernel is accepted, while a computed kernel -- a runtime function
+pointer (`get_fn[False]()`) or a parametrized reference (`get_fn[False]`) -- is
+refused with `cannot slice out exported symbol`, not silently stubbed to 0.
+Only the call form names the sliced symbol (`scale`); the parametrized
+reference names the parameterized callee it mentions (`get_fn`).
 
-Today `std.compile` is not shimmed, so it falls through to the generic `std.*`
-auto-stub (`_AutoStubNamespace`): `compile_info[...]()` answers `0` for a real
-module-level kernel AND for a runtime function pointer (`get_fn[False]()`),
-and the program exits 0 either way. The canonical Modular case requires the
-second one to be refused with `cannot slice out exported symbol ... scale ...`.
-
-The first probe is the control: a kernel named statically is sliceable and must
-keep working.
-
-Quick test: this file only (two interpreter runs, ~2 s, < 0.1 GB).
+Quick test: this file only (three interpreter runs, ~3 s, < 0.1 GB).
 """
 
 import subprocess
@@ -52,6 +46,22 @@ def get_fn[flag: Bool]():
 
 def main():
     compile_info[get_fn[False](), emission_kind="llvm"]()
+    print(0)
+'''
+
+PARAMETRIZED_REFERENCE_KERNEL = '''from std.compile import compile_info
+
+
+def scale(x: Int) -> Int:
+    return x * 3
+
+
+def get_fn[flag: Bool]():
+    return scale
+
+
+def main():
+    compile_info[get_fn[False], emission_kind="llvm"]()
     print(0)
 '''
 
@@ -110,6 +120,25 @@ class TestCompileInfoExportedSymbol(unittest.TestCase):
             "scale",
             combined,
             msg=f"diagnostic does not name the symbol\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}",
+        )
+        self.assertNotIn(
+            "Traceback (most recent call last)",
+            combined,
+            msg=f"an internal traceback is not a diagnostic\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}",
+        )
+
+    def test_parametrized_reference_kernel_is_refused(self) -> None:
+        # `get_fn[False]` (no call) is still a computed kernel: the bracket
+        # names a specialization, not a symbol that can be sliced out.
+        r = _run(PARAMETRIZED_REFERENCE_KERNEL, "gpu-part7-paramref")
+        combined = r.stdout + r.stderr
+        self.assertNotEqual(
+            r.returncode, 0, msg=f"expected refusal\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        )
+        self.assertIn(
+            "cannot slice out exported symbol",
+            combined,
+            msg=f"missing the canonical diagnostic\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}",
         )
         self.assertNotIn(
             "Traceback (most recent call last)",
