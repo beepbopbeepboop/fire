@@ -1315,9 +1315,12 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # three are the overflow-trapping hole-count rows in
                      # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
-     # `gimplerunner` left this census 2026-11-16: re-measured at 628 passed /
-     # 0 failed, so its `expect=` marker was removed and the census entry with
-     # it (an expect= that passes is reported as a failure).
+     # `gimplerunner` at 1 (was 20): its 2026-11-13 re-run on master reports
+     # `626 passed, 1 failed` of 627, and the registry marker states that 1.
+     # The census had gone stale against the marker, which is the drift this
+     # check exists to catch (bug:SUITE_self_test_red). The remaining failure
+     # is `c_accessor_helpers_emitted_once_across_modules`.
+                     'gimplerunner': 1,
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
      # deleted with the work and the marker was retired with it (2026-11-13).
@@ -2772,7 +2775,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
     # bare overloaded-dunder call sites it reddened on are fixed and the job is
     # back on.
-    expected_disabled = []
+    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2917,7 +2920,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
     # bare overloaded-dunder call sites it reddened on are fixed and the job is
     # back on.
-    expected_disabled = []
+    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
@@ -4202,18 +4205,6 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
-    # The cases-generator analyzer landing (2026-11-17) left these regression
-    # pins next to their fixes without registering them. Each runs directly;
-    # the `*_build.py` siblings compile one small source with `fire.py build`
-    # in seconds, and the export-table pin is the dylib cross-check that same
-    # landing carried (its subject is `build_stdlib_dylib.py`, not the
-    # analyzer). The landing's own end-to-end test is `test_analyzer_build.py`,
-    # registered as `reg-analyzer-build`.
-    'test_casesgen_dataclass_ctor_literal_union.py': _STANDALONE_TEST_REASON,
-    'test_casesgen_dataclass_ctor_literal_union_build.py': _STANDALONE_TEST_REASON,
-    'test_casesgen_decorated_method_gate.py': _STANDALONE_TEST_REASON,
-    'test_casesgen_preseed_takeover_union_elems.py': _STANDALONE_TEST_REASON,
-    'test_export_table_suffix_mismatch.py': _STANDALONE_TEST_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
     'test_codegen_sys_encoding_capture.py': _STANDALONE_TEST_REASON,
@@ -6345,7 +6336,7 @@ def test_the_formal_doc_index_is_current():
     # is DELETED and the block is not regenerated. The NEW-document check above
     # exercises the same comparison, but only in the direction that was never
     # the failure — d3ec70ee7 deleted
-    # the arm64 extend-option census (part 1) and merged a block that had
+    # `FORMAL_arm64_instruction_coverage-part1.md` and merged a block that had
     # lost the ROW but kept the counts ("4 documents" over three rows, "5
     # documents" over four), so `python3 tools/formal_doc_index.py --check` was
     # red on master and `test_suite.py` with it. Pinned on a planted tree in

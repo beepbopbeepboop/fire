@@ -126,23 +126,16 @@ def _stdlib_declared_names(stdlib_root: str) -> frozenset:
 def _compiler_runtime_names() -> frozenset:
     """Every function the compiler provides to a program at run time.
 
-    Three tables. `RT_SIGS` (mojo/middle/rt_sigs.py) is generated from the
+    Two tables. `RT_SIGS` (mojo/middle/rt_sigs.py) is generated from the
     runtime headers and names every C function the runtime exports; a program
     may call any of them by name. `GimpleGen._KNOWN_SIGS` is hand-written and
     covers fewer of those, but also holds the compile-time builtins such as
     `conforms_to`, which the compiler lowers specially and no header declares.
-    `gimple_codegen._RUNTIME_FUNCS` is the table a call resolves against: it
-    holds functions whose definition is emitted by the compiler itself rather
-    than exported by a header, e.g. the GPU sidecar's `_mojo_gpu_*`
-    introspection entry points (mojo/backend_gimple/device_glue.py), so
-    omitting it rejected a program calling them with "use of unknown
-    declaration". Read lazily because gimple_codegen imports this module at
-    load time.
+    Read lazily because gimple_codegen imports this module at load time.
     """
     import gimple_codegen
     from mojo.middle.rt_sigs import RT_SIGS
-    return (frozenset(gimple_codegen.GimpleGen._KNOWN_SIGS) | frozenset(RT_SIGS)
-            | frozenset(gimple_codegen._RUNTIME_FUNCS))
+    return frozenset(gimple_codegen.GimpleGen._KNOWN_SIGS) | frozenset(RT_SIGS)
 
 
 def _known_names() -> frozenset:

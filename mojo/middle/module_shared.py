@@ -899,8 +899,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
         try:
             _pts_snap = None
             for _fs in (self._parsed_import(_eff_mod)[2] or []):
-                if (isinstance(_fs, FunctionDef) and _fs.name == orig_name
-                        and not (getattr(_fs, 'comptime_params', None) or [])):
+                if isinstance(_fs, FunctionDef) and _fs.name == orig_name:
                     _pts_snap = self._home_signature_ctypes(_eff_mod, _fs)
                     break
         except Exception:

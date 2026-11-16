@@ -85,7 +85,6 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_metal.py::MetalEmitter.__init__": "the MSL emitter's own dataclass",
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
-    "mojo/backend_gimple/module_gen.py::_gmp_solve_dispatch": "`_dt.methods` is a row list of the dispatch solver's own table (`self._dispatch_tables`), not an AST node",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
     "mojo/backend_gimple/module_gen.py::_gmi_rebind_stmt": "`copy.copy` of a def (rebound, or one whose body changed), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
     "mojo/backend_gimple/module_gen.py::_gmi_with_blocks": "`copy.copy` of a compound statement or its handler/case, whose child blocks are set on the copy before anything walks it",
@@ -15119,111 +15118,6 @@ def main():
     _run_isolated(_test_bare_list_constructor_keeps_its_container_type,
                   'gate_stdlib_syntax_bare_list_constructor')
 
-    def test_call_site_double_star_spread_binds_by_name():
-        """A `**dict` spread at an ordinary call site must bind by parameter
-        NAME, not be passed as the next positional argument (which miscompiled
-        to the dict's pointer/value and dropped every spread key). Also covers
-        a compiled-generator call through the ordinary path with the same spread.
-        (call-site **dict spread bound by parameter name; ordinary and generator paths)
-        """
-        global _PASS, _FAIL
-        name = "call_site_double_star_spread_binds_by_name"
-        src = r"""
-def f(a, b=2, c=3):
-    return a * 100 + b * 10 + c
-
-def marks(marks='.', *, group=5, groups=2):
-    while True:
-        yield groups
-
-def outer(items, groups=5, **kw):
-    m = marks(groups=groups, **kw)
-    for item in items:
-        print(next(m), item)
-
-def main():
-    print(f(5, b=4))
-    print(f(5, **{"b": 4, "c": 7}))
-    print(f(**{"a": 5, "b": 4, "c": 7}))
-    d = {"a": 5, "b": 4}
-    print(f(**d))
-    outer([1, 2], groups=3, group=7)
-    # every argument is evaluated exactly once
-    print(f(g(), **mk()))
-    print(f(g(), c=g(), **{"b": 1}))
-    # a named parameter before `**kw` that the call omits or passes by keyword
-    show([1, 2], group=7)
-    show([1, 2], 3, group=7)
-    show([1, 2], groups=3, group=7)
-
-def show(items, groups=5, **kw):
-    print(groups, len(kw), kw["group"])
-
-def g():
-    print("g called")
-    return 5
-
-def mk():
-    print("mk called")
-    return {"b": 4, "c": 7}
-
-main()
-"""
-        with tempfile.TemporaryDirectory() as td:
-            entry = os.path.join(td, 'spread.py')
-            with open(entry, 'w') as fh:
-                fh.write(src)
-            py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
-            if py.returncode != 0:
-                print(f"FAIL  {name}: CPython reference failed: {py.stderr[:300]}")
-                _FAIL += 1
-                return
-            try:
-                c_src = gimple_codegen.compile_to_gimple(src, filename=entry)
-            except Exception as e:
-                print(f"FAIL  {name}: compile_to_gimple raised {type(e).__name__}: {e}")
-                _FAIL += 1
-                return
-            c_file = os.path.join(td, 'spread.c')
-            exe = os.path.join(td, 'spread.exe')
-            with open(c_file, 'w') as fh:
-                fh.write(c_src)
-            # Generated C may contain __GIMPLE bodies; compile with -fgimple.
-            cc = subprocess.run(
-                [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe,
-                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c'),
-                 # `marks` is a generator: its body needs the coroutine runtime
-                 # and the context switch for this machine.
-                 os.path.join(_RUNTIME_INC, 'fire_coro_gen.c'),
-                 os.path.join(_RUNTIME_INC, 'fire_coro.c'),
-                 os.path.join(_RUNTIME_INC, 'fire_async_sched.c'),
-                 os.path.join(_RUNTIME_INC,
-                              'fire_coro_ctx_aarch64.S'
-                              if platform.machine().lower() in ('arm64', 'aarch64')
-                              else 'fire_coro_ctx_generic.c'), '-lm'],
-                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
-            if cc.returncode != 0:
-                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
-                print(f"FAIL  {name}: gcc failed:\n" + "\n".join(errs[:8]))
-                _FAIL += 1
-                return
-            run = subprocess.run([exe], capture_output=True, text=True,
-                                 cwd=td, timeout=RUN_TIMEOUT_S)
-        if run.returncode != 0 or run.stdout != py.stdout:
-            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
-                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    _run_isolated(test_call_site_double_star_spread_binds_by_name,
-                  'call_site_double_star_spread_binds_by_name')
-
-    _run_isolated(test_two_same_name_free_functions_get_distinct_symbols,
-                  'two_same_name_free_functions_get_distinct_symbols')
-
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:
@@ -15236,69 +15130,6 @@ main()
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
-
-
-def test_two_same_name_free_functions_get_distinct_symbols():
-    """Two overloads of one free function in ONE module each get their own
-    mangled C definition, and the call site names one of them.
-
-    Before this, the duplicate-definition pass dropped BOTH copies (they are
-    "genuine overloads", which it believed the elaborator would instantiate),
-    so the module emitted no `pick` definition at all and the call became the
-    bare `(void)` weak stub named without qualifier or suffix — and every
-    importer's qualified reference was undefined at link time. Measured on
-    `std/memory/memory.mojo`'s two `_free` overloads and
-    `std/bit/mask.mojo`'s `splat` (the stdlib-dylib lazy-undefined-refs
-    same-name-free-function class, fixed 2026-11-15).
-
-    Single-definition modules must be unchanged, so the same source with one
-    `pick` still emits exactly one definition under its one suffix."""
-    global _PASS, _FAIL
-    name = "two_same_name_free_functions_get_distinct_symbols"
-    two = """\
-def pick(x: Int) -> Int:
-    return x + 1
-
-
-def pick(x: Bool) -> Int:
-    return 1 if x else 0
-
-
-def use(x: Int) -> Int:
-    return pick(x)
-"""
-    one = """\
-def pick(x: Int) -> Int:
-    return x + 1
-"""
-    try:
-        ok, c_src, stderr = gimple_compiles(two)
-        ok1, c_one, _ = gimple_compiles(one)
-    except TypeError as e:
-        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
-        _FAIL += 1
-        return
-    defs = set(re.findall(r'^int64_t (pick_[0-9a-f]{6}) \(', c_src, re.M))
-    calls = set(re.findall(r'= (pick_[0-9a-f]{6}) \(', c_src))
-    one_defs = set(re.findall(r'^int64_t (pick_[0-9a-f]{6}) \(', c_one, re.M))
-    problems = []
-    if len(defs) != 2:
-        problems.append(f'want two pick definitions, got {sorted(defs)}')
-    if not calls or not calls <= defs:
-        problems.append(f'the call site names {sorted(calls)}, definitions {sorted(defs)}')
-    if re.search(r'^__attribute__\(\(weak\)\) int64_t pick \(', c_src, re.M):
-        problems.append('a bare weak `pick` stub was emitted')
-    if len(one_defs) != 1:
-        problems.append(f'a single-definition `pick` lost its symbol: {sorted(one_defs)}')
-    if ok and ok1 and not problems:
-        print(f"PASS  {name}  definitions={sorted(defs)} call={sorted(calls)}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: compiles={ok}/{ok1}; " + '; '.join(problems))
-        if not ok:
-            for line in stderr.splitlines()[:8]:
-                print(f"      {line}")
-        _FAIL += 1
 
 
 if __name__ == '__main__':

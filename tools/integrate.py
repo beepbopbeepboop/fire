@@ -407,74 +407,6 @@ def _cap_merge_fix(name, why, kind=None):
         C.enqueue_orch_review(name, kind, why)
 
 
-# Files where two branches each ADD a block at the same place (every codegen fix appends its test and its
-# `_run_isolated(...)` line at the end of run_tests). git calls that a conflict; keeping both blocks is the answer.
-UNION_OK = ("test_gimple.py", "test_gimple_runner.py")
-
-
-def conflict_lines(merge_stdout):
-    """The `CONFLICT ...` lines of one `git merge`, complete (a tail of the output loses files)."""
-    return "\n".join(l for l in merge_stdout.splitlines() if l.startswith("CONFLICT")) or merge_stdout[-600:]
-
-
-def conflict_section(out, name):
-    """The part of a probe's output that belongs to branch NAME: from its `CONFLICT name:` line to the next
-    branch's line. A probe prints every branch one after another, so the whole output names every branch's files."""
-    keep, on = [], False
-    for l in out.splitlines():
-        if l.startswith("CONFLICT %s:" % name):
-            on = True
-            continue
-        if on and (re.match(r"CONFLICT \S+:$", l) or l.startswith(("merged ", "MERGED:", "(probe)", "(dry-run)"))):
-            break
-        if on:
-            keep.append(l)
-    return "\n".join(keep)
-
-
-def union_resolve(tree):
-    """A merge in TREE has stopped on conflicts. If every conflicted file is in UNION_OK, and in each of them one
-    side of every conflict added lines where the other added different lines (the common ancestor has NOTHING
-    there), keep both sides, check each file still parses, stage them and return True. Otherwise change nothing
-    and return False. A conflict where both sides EDITED the same existing lines is never resolved here."""
-    un = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=tree, capture_output=True, text=True).stdout.split()
-    if not un or any(f not in UNION_OK for f in un):
-        return False
-    done = {}
-    for f in un:
-        r = subprocess.run(["git", "checkout", "--conflict=diff3", "--", f], cwd=tree, capture_output=True, text=True)
-        if r.returncode:
-            return False
-        out, state, base_lines = [], 0, 0
-        with open(os.path.join(tree, f)) as fh:
-            for l in fh.read().split("\n"):
-                if l.startswith("<<<<<<< "):
-                    state, base_lines = 1, 0
-                elif state == 1 and l.startswith("||||||| "):
-                    state = 2
-                elif state == 2 and l == "=======":
-                    if base_lines:
-                        return False               # both sides rewrote existing lines: a real conflict
-                    state = 3
-                elif state == 3 and l.startswith(">>>>>>> "):
-                    state = 0
-                elif state == 2:
-                    base_lines += 1
-                else:
-                    out.append(l)
-        text = "\n".join(out)
-        try:
-            compile(text, f, "exec")
-        except SyntaxError:
-            return False
-        done[f] = text
-    for f, text in done.items():
-        with open(os.path.join(tree, f), "w") as fh:
-            fh.write(text)
-        subprocess.run(["git", "add", "--", f], cwd=tree)
-    return True
-
-
 def hand_to_land_doc(name, t, conflict_text):
     """A branch that cannot merge onto master becomes a LAND doc (see land_doc), not a chain of fixer tasks: the doc
     persists across workers and days, a free slot picks it up (drain mode first), and the integrator lands everything
@@ -653,13 +585,9 @@ def main():
     for name in cands:
         r = subprocess.run(["git", "merge", "--no-ff", "-m", "integrate %s" % name, tasks[name]["branch"]],
                            cwd=INTEG, capture_output=True, text=True)
-        if r.returncode and union_resolve(INTEG):
-            subprocess.run(["git", "commit", "-q", "--no-edit"], cwd=INTEG)
-            merged.append(name); print("merged %s (append-only test conflicts kept both sides)" % name)
-            continue
         if r.returncode:
             subprocess.run(["git", "merge", "--abort"], cwd=INTEG)
-            print("CONFLICT %s:\n%s" % (name, conflict_lines(r.stdout)))
+            print("CONFLICT %s:\n%s" % (name, r.stdout[-600:]))
             if a.no_fixers or a.probe:               # a probe: just leave it out, no side effects
                 print("(probe) %s conflicts: left out" % name)
             elif a.dry_run:                          # a dry run reports; it never enqueues fixers or touches the registry

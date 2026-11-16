@@ -9564,7 +9564,7 @@ def _unmodelled_instruction(word: int):
         12-bit-offset access cannot express, which in practice means a NEGATIVE
         frame offset (measured: `0xf81a83a0` is `stur x0, [x29, #-0x58]`, and
         `#-0x58` is exactly what a spill below the frame base needs).
-        the arm64 instruction-coverage survey lists this pair as the one
+        `bugs/hard/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
         instruction whose emission carried a real bug, and the step table still
         has no arm for it.
       * **the EXTENDED-register `ADD`/`SUB`** — bits 28..23 = `010111`, bit 21
@@ -9634,7 +9634,7 @@ def _unmodelled_instruction(word: int):
                 f"the unscaled (9-bit displacement) form, which is how a "
                 f"frame access at a NEGATIVE offset is reached; the step table "
                 f"has arms for the scaled `STR`/`LDR` and not for these, and "
-                f"the arm64 instruction-coverage survey lists the pair "
+                f"`bugs/hard/FORMAL_arm64_instruction_coverage.md` lists the pair "
                 f"as uncovered.")
     return (None, "")
 
@@ -12027,31 +12027,13 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  have hguard_{bi} : {_condtxt} := by")
                 if m_run > 0 and cert_name is not None:
                     A(f"{IND}    rw [hsid_{bi}]")
-                # The guard's state is a CHAIN: `hsid_{bi}` names `s_{bi}` in
-                # terms of the previous block's state, which `hsid_{prev}`
-                # names in turn, back to `Arm64State.init`.  Unfolding only
-                # this block's own defs leaves the earlier `s_k` as free
-                # variables, and `native_decide` refuses a goal that has any
-                # ("Expected type must not contain free variables") -- so the
-                # path-scoped hsids and block defs go in, exactly as the
-                # taken-dead `cbz` arm's `hne` does above.
-                _unfold = list(reversed(ctx.get("flow_hsid") or [])) + list(
-                    ctx.get("flow_defs") or []) + list(def_names) + [
+                _unfold = list(def_names) + [
                     'arm64_reg', 'arm64_set_reg', 'Arm64State.init',
                     'arm64_subs_flags', 'arm64_matches_condition',
                     'mem_read_u64', 'mem_write_u64', 'mem_write_u32',
                     'mem_write_u16', 'mem_write_u8']
                 A(f"{IND}    simp only [{', '.join(_unfold)}]")
-                # The prologue stored the free input (`n`, a callee-saved
-                # register's value) on the stack, so the floor-word read still
-                # MENTIONS it under the write chain even though the answer does
-                # not depend on it; `native_decide` takes only a closed goal.
-                # The address facts are decidable, so resolve the reads first
-                # (the taken-dead `cbz` arm's `hne` does the same), then
-                # decide what is left.
-                A(f"{IND}    try simp (disch := decide) [mem_read_after_write_u64, "
-                  f"mem_read_after_write_u64_ne, mem_read_two_writes_same]")
-                A(f"{IND}    all_goals native_decide")
+                A(f"{IND}    native_decide")
                 A(f"{IND}  exact absurd hguard_{bi} hc_{bi}")
                 return
             if _is_sc_self:

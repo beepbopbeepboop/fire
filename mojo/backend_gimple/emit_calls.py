@@ -131,288 +131,6 @@ def _generator_api_for_start_symbol(gen, start_name: str):
     return None
 
 
-
-
-def _call_has_double_star_spread(node) -> bool:
-    for _a in getattr(node, 'args', None) or []:
-        if isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '**':
-            return True
-    return False
-
-
-def _callee_expected_params(gen, fname, fname_raw):
-    """The C parameter types the callee `fname_raw` (emitted as `fname`)
-    expects, or an empty list when nothing is known about it."""
-    # Function-local import: gimple_gen_funcs already imports this module.
-    import mojo.backend_gimple.emit_funcs as _ggf_eff
-    # For a call this module resolved to ONE of its own same-named free
-    # functions, the arity/coercion contract is THAT overload's, not the
-    # canonical first declaration's: `_effective_param_types(fname_raw)` reads
-    # tier 1 (`_local_def_pts`) by bare name, so a 1-argument `b64encode(span)`
-    # was padded to the 2-argument sibling's arity ("too many arguments").
-    # `_local_overload_call_symbol` recorded the chosen overload's ctypes under
-    # the emitted `fname`; prefer it exactly when the name is an overload set.
-    _ov_nodes = (getattr(gen, '_local_def_overloads', None) or {}).get(fname_raw)
-    if _ov_nodes and len(_ov_nodes) >= 2:
-        expected_params = gen.func_param_types.get(fname) or []
-    else:
-        expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
-    if not expected_params:
-        expected_params = gen.func_param_types.get(fname_raw, [])
-    if not expected_params and fname_raw in gen._KNOWN_SIGS:
-        expected_params = gen._KNOWN_SIGS[fname_raw][1]
-    elif not expected_params and fname in gen._KNOWN_SIGS:
-        # `fname_raw` (the ORIGINAL Python name, e.g. 'eval') is never
-        # itself a _KNOWN_SIGS key — only its BUILTIN_VALUE_MAP-renamed
-        # C symbol ('mojo_eval') is. Python's 1-arg `eval(expr)` (the
-        # overwhelmingly common form; globals/locals default to the
-        # caller's own scope) called this renamed 3-arg C function with
-        # only 1 argument, a hard "too few arguments" compile error —
-        # found via Tools/build/generate_token.py's own `eval(string)`.
-        # mojo_eval's own globals/locals params are unused anyway (a
-        # documented eval() stub — real eval() can't run in a compiled
-        # C bootstrap), so padding with NULL below is exactly right,
-        # not just "doesn't crash."
-        expected_params = gen._KNOWN_SIGS[fname][1]
-    return expected_params
-
-
-def _try_lower_call_with_dict_spreads(gen, node, fname, fname_raw,
-                                      expected_params, defaults,
-                                      param_names, kwslot=-1,
-                                      for_generator_start=False):
-    """Bind a call that contains `**dict` argument spreads by parameter NAME.
-
-    Returns a full `arg_pairs` list when handled, or None when this helper
-    cannot safely lower the shape (so callers may fall back). Raises
-    RuntimeError to refuse an ambiguous/unsupported spread shape rather than
-    miscompiling it (a positional guess is never correct).
-    """
-    args = list(getattr(node, 'args', None) or [])
-    kwargs = list(getattr(node, 'kwargs', None) or [])
-    spread_args = []
-    pos_nodes = []
-    has_star_spread = False
-    for _a in args:
-        if isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '**':
-            spread_args.append(_a.operand)
-        elif isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '*':
-            has_star_spread = True
-            pos_nodes.append(_a)
-        else:
-            pos_nodes.append(_a)
-    if not spread_args:
-        return None
-    # Shapes this helper does not bind are left to the ordinary call path
-    # (return None), exactly as before this helper existed. They must not be
-    # a compile error: the compiler's own interpreter forwards
-    # `_mojo_minmax(True, *args, **kwargs)`, and a refusal here made
-    # myinterpreter.py uncompilable. The decision is taken BEFORE anything is
-    # lowered, so the fallback evaluates each argument once.
-    #   - several `**` spreads, or `*` mixed with `**`;
-    #   - a callee whose parameter names are not known statically;
-    #   - more positional arguments than named slots;
-    #   - a `double` parameter (no runtime pop for it yet).
-    if len(spread_args) != 1 or has_star_spread:
-        return None
-    if not param_names or not expected_params or len(param_names) != len(expected_params):
-        return None
-    _named_slots = len(expected_params)
-    if kwslot is not None and 0 <= kwslot < _named_slots:
-        _named_slots -= 1
-    if len(pos_nodes) > _named_slots:
-        return None
-    if 'double' in expected_params:
-        return None
-    # Disallow duplicate explicit keyword names (should not parse, but be safe).
-    seen_kw = set()
-    for _kn, _ in kwargs:
-        _ks = _as_str(_kn)
-        if _ks in seen_kw:
-            raise RuntimeError(
-                f"cannot compile module: duplicate keyword argument {_ks!r} "
-                f"in call to {fname_raw!r}")
-        seen_kw.add(_ks)
-
-    nparams = len(expected_params)
-    # Build defaults by parameter name (trailing-defaults convention).
-    dflt_by_name = {}
-    if defaults:
-        # defaults are usually list of (name, expr) or just exprs aligned to tail;
-        # handle common forms.
-        try:
-            if defaults and isinstance(defaults[0], tuple):
-                for _dn, _dv in defaults:
-                    dflt_by_name[_as_str(_dn)] = _dv
-            else:
-                _first = nparams - len(defaults)
-                for _i, _dv in enumerate(defaults):
-                    _pi = _first + _i
-                    if 0 <= _pi < len(param_names):
-                        dflt_by_name[_as_str(param_names[_pi])] = _dv
-        except Exception:
-            pass
-
-    # Lower positional args and explicit kwargs.
-    pos_pairs = [gen.lower_expr(_a) for _a in pos_nodes]
-    kw_pairs = { _as_str(_kn): gen.lower_expr(_kv) for _kn, _kv in kwargs }
-    # Validate positional count.
-    if len(pos_pairs) > nparams:
-        # let normal arity handling/refusal deal with surplus in general,
-        # but with spread binding it's unsafe to guess.
-        pass
-    # Bind fixed params by name, collecting extras for **kwargs slot if present.
-    bound = [None] * nparams
-    # Positionals fill in order, but skip kwslot (if it's a real slot position).
-    pos_i = 0
-    # Determine which slots are "fixed" user params. kwslot is callee's **kwargs.
-    # For generator starts, kwslot semantics come from api/registration.
-    fixed_slots = list(range(nparams))
-    if kwslot is not None and kwslot >= 0:
-        # **kwargs slot is filled specially.
-        pass
-
-    # First assign positionals left-to-right to slots, but do not assign into
-    # a **kwargs-only slot when it represents packed kwargs dict? kwslot in
-    # _func_kwargs_slot is the C signature slot index of MojoDict* for **kwargs.
-    # A positional arg should not go there unless callee expects it (rare). We
-    # follow normal rule: fill slots in order up to kwslot/nparams.
-    for _i in range(nparams):
-        if pos_i >= len(pos_pairs):
-            break
-        if kwslot is not None and _i == kwslot and kwslot >= 0:
-            # if kwslot is also where positional filling would go, still fill? no,
-            # **kwargs slot isn't a positional param. skip it.
-            continue
-        bound[_i] = pos_pairs[pos_i]
-        pos_i += 1
-    # If there are leftover positionals and kwslot wasn't consumed in order,
-    # try to place remaining before/after carefully.
-    # (simple cases are enough for this bug; complex cases refuse below)
-    if pos_i < len(pos_pairs):
-        # left over positionals - could be going to *args/vararg or error; refuse
-        # for spread-binding path to be safe.
-        raise RuntimeError(
-            f"cannot compile module: call to {fname_raw!r} with **dict "
-            f"spread has positional arguments that cannot be bound safely")
-
-    # Apply explicit keywords to named slots.
-    for _k, _v in list(kw_pairs.items()):
-        if _k in param_names:
-            _idx = param_names.index(_k)
-            if bound[_idx] is not None:
-                raise RuntimeError(
-                    f"cannot compile module: multiple values for argument "
-                    f"{_k!r} in call to {fname_raw!r}")
-            bound[_idx] = _v
-            del kw_pairs[_k]
-        else:
-            # extra explicit kwarg: only ok if callee has **kwargs slot
-            if kwslot is None or kwslot < 0:
-                raise RuntimeError(
-                    f"cannot compile module: unexpected keyword argument {_k!r} "
-                    f"in call to {fname_raw!r} with **dict spread")
-
-    # Prepare spread dict (copy so pops don't mutate original in unexpected ways).
-    _spr_t, _spr_v = gen.lower_expr(spread_args[0])
-    if _spr_t != 'MojoDict *':
-        _spr_v = gen._cast('MojoDict *', _spr_v)
-    _dvar = gen._rt_call('MojoDict *', 'mojo_dict_copy', [f"{_spr_v}"])
-
-    # Fill remaining slots by name from spread dict or defaults.
-    # For kwslot, build a kwargs dict: start with copy? easier to merge remaining
-    # explicit extras (none expected now except if kwslot exists) and any unconsumed
-    # spread keys that don't map to fixed params - but we must consume fixed params
-    # by name. So for each fixed param slot != kwslot, if unbound, try pop from _dvar.
-    # Remaining keys in _dvar plus explicit extra kw_pairs go to kwslot if present.
-    for _i, _name in enumerate(param_names):
-        if kwslot is not None and _i == kwslot and kwslot >= 0:
-            continue
-        if bound[_i] is not None:
-            continue
-        _name_s = _as_str(_name)
-        _pct = expected_params[_i] if _i < len(expected_params) else 'int64_t'
-        _dflt_expr = dflt_by_name.get(_name_s)
-        # Compute default value expression/pair.
-        if _dflt_expr is not None:
-            _dv_pair = gen._default_expr_to_pair(_dflt_expr, param_ctype=_pct)
-        else:
-            # No static default known: for spread binding this is unsafe to guess 0
-            # except maybe not possible; but we can try to produce typed null/0.
-            _dv_pair = _null_default_pair(_pct)
-        # Runtime lookup in spread dict by parameter name.
-        # Support int64_t and char* directly; other pointer/scalar types best-effort.
-        _key = f'"{_name_s}"'
-        _has = gen._call_expr('int', 'mojo_dict_contains', [('MojoDict *', _dvar), ('char *', _key)])
-        if _pct == 'char *':
-            _dct = _dv_pair[0]
-            _dcv = _dv_pair[1]
-            if _dct != 'char *':
-                _dcv = gen._cast('char *', _dcv) if _dct.endswith(' *') else gen._cast('char *', _dcv)
-            _val = gen._call_expr('char *', 'mojo_dict_pop_str',
-                                  [('MojoDict *', _dvar), ('char *', _key), ('char *', _dcv)])
-            bound[_i] = ('char *', _val)
-        elif _pct == 'double':
-            # no pop_double helper known; refuse unsupported for now.
-            raise RuntimeError(
-                f"cannot compile module: **dict spread for double parameter "
-                f"{_name_s!r} in call to {fname_raw!r} is not yet supported")
-        else:
-            # Treat as int64_t-like scalar/pointer word.
-            _dct = _dv_pair[0]
-            _dcv = _dv_pair[1]
-            if _dct != 'int64_t':
-                _dcv = gen._cast('int64_t', _dcv)
-            _val = gen._call_expr('int64_t', 'mojo_dict_pop_int',
-                                  [('MojoDict *', _dvar), ('char *', _key), ('int64_t', _dcv)])
-            # Cast back to expected param type if needed.
-            if _pct != 'int64_t':
-                _val = gen._cast(_pct, _val)
-                bound[_i] = (_pct, _val)
-            else:
-                bound[_i] = ('int64_t', _val)
-
-    # Fill **kwargs slot if present: merge remaining spread keys with explicit extra kwargs.
-    if kwslot is not None and kwslot >= 0:
-        # start with remaining spread dict _dvar (it still has unconsumed keys)
-        _kwdict = gen._rt_call('MojoDict *', 'mojo_dict_copy', [f"{_dvar}"])
-        # merge explicit extra kwargs (kw_pairs now only has extras)
-        for _k, (_vt, _vv) in kw_pairs.items():
-            # best-effort set by type
-            if _vt == 'char *':
-                gen._rt_void('mojo_dict_set_str', [('MojoDict *', _kwdict), ('char *', f'"{_k}"'), ('char *', _vv)])
-            elif _vt == 'double':
-                gen._rt_void('mojo_dict_set_double', [('MojoDict *', _kwdict), ('char *', f'"{_k}"'), ('double', _vv)])
-            else:
-                _wv = _vv if _vt == 'int64_t' else gen._cast('int64_t', _vv)
-                gen._rt_void('mojo_dict_set_int', [('MojoDict *', _kwdict), ('char *', f'"{_k}"'), ('int64_t', _wv)])
-        bound[kwslot] = ('MojoDict *', _kwdict)
-        kw_pairs = {}
-    else:
-        # No **kwargs slot: remaining spread keys / extra kwargs would be TypeError
-        # in Python. We can't easily detect unconsumed keys at compile time except
-        # by runtime check, but for correctness prefer to at least not miscompile;
-        # a conservative refusal would be safer, yet common case has all keys consumed.
-        # We'll leave _dvar possibly non-empty; ignore extras for now? Better refuse? 
-        # To avoid breaking, we only refuse if there were explicit extra kwargs (done above).
-        pass
-
-    # Any still-unbound slots: use default/null.
-    for _i in range(nparams):
-        if bound[_i] is None:
-            if kwslot is not None and _i == kwslot and kwslot >= 0:
-                bound[_i] = ('MojoDict *', gen._rt_call('MojoDict *', 'mojo_dict_new', []))
-            else:
-                _pct = expected_params[_i]
-                _name_s = _as_str(param_names[_i]) if _i < len(param_names) else ''
-                _dflt_expr = dflt_by_name.get(_name_s)
-                if _dflt_expr is not None:
-                    bound[_i] = gen._default_expr_to_pair(_dflt_expr, param_ctype=_pct)
-                else:
-                    bound[_i] = _null_default_pair(_pct)
-    return bound
-
-
 def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                fname_raw: str) -> str:
     """Shared lowering for every bare-call CONSTRUCTION of a compiled
@@ -429,34 +147,6 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     of _lower_call) so the padding/kwslot/registration logic can't drift.
     """
     _record_generator_value_kind(api)
-    _gen_kwargs = getattr(node, 'kwargs', []) or []
-    _gen_expected = gen.func_param_types.get(f"{api['base']}_start", [])
-    _gen_is_cpp = not _as_str(api['base']).startswith('__mgco_')
-    _gen_kwslot = gen._func_kwargs_slot.get(
-        fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
-    if api.get('kwargs_slot') is not None:
-        _gen_kwslot = api['kwargs_slot']
-    _gen_star = _generator_star_slot(api, node)
-    _gen_nfixed = _gen_star if _gen_star is not None else len(_gen_expected)
-    _gen_dflts = (gen._func_param_defaults.get(f"{api['base']}_start")
-                  or api.get('defaults') or [])
-    _gen_pnames = list(api.get('param_names')
-                       or gen._func_param_names.get(fname_raw) or [])
-
-    # A call-site `**dict` spread is not a positional argument: bind by
-    # parameter name with runtime lookups. A positional guess is never correct.
-    # (call-site **dict spread miscompile)
-    _spread_pairs = _try_lower_call_with_dict_spreads(
-        gen, node, f"{api['base']}_start", fname_raw,
-        _gen_expected, _gen_dflts, _gen_pnames,
-        kwslot=_gen_kwslot, for_generator_start=True)
-    if _spread_pairs is not None:
-        arg_pairs = _spread_pairs
-        if _gen_star is not None:
-            arg_pairs = _pack_generator_star_args(gen, arg_pairs, _gen_star)
-        ginf._tag_mixed_list_call_args(gen, fname_raw, arg_pairs)
-        return _finish_generator_start(gen, api, arg_pairs)
-
     # Argument lowering reuses the exact same gen.lower_expr(a)-per-
     # arg + _call_expr/_emit_call path every ordinary function call
     # in this file uses — func_param_types[f"{base}_start"] (registered in
@@ -477,9 +167,58 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     # arguments to function '<base>_start'" compile error since
     # `<base>_start`'s real C signature has one slot per Python
     # parameter, unconditionally.
+    _gen_kwargs = getattr(node, 'kwargs', []) or []
+    _gen_expected = gen.func_param_types.get(f"{api['base']}_start", [])
+    # Which C-signature slot (if any) is this generator function's
+    # OWN `**kwargs` parameter — see _func_kwargs_slot's docstring.
+    # A literal keyword argument destined for that slot must be
+    # PACKED into a real MojoDict (via _pack_kwargs_dict), exactly
+    # like _lower_named_call's identical `_kwslot_for_pack` handling
+    # for ordinary (non-generator) functions — mirrored here rather
+    # than duplicated differently. Without this, the loop below
+    # just popped the next literal keyword argument's raw lowered
+    # VALUE into whichever slot came next in sequence, with no
+    # awareness that one particular slot is a `MojoDict *`:
+    # `gen_forward(3, b=5)` emitted `_t4 = (MojoDict *)_t3` — the
+    # integer 5 reinterpreted as a dict pointer — which segfaults
+    # the moment the generator body reads its own `**kwargs`.
+    # Only a C++-path generator registers a runtime signature
+    # (`mojo_gen_sig_register`); a stack-switch one (`__mgco_`) does not.
+    _gen_is_cpp = not _as_str(api['base']).startswith('__mgco_')
+    _gen_kwslot = gen._func_kwargs_slot.get(
+        fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
+    if api.get('kwargs_slot') is not None:
+        _gen_kwslot = api['kwargs_slot']
+    # A `*args` callee: the fixed slots before it are padded here, and the
+    # positional arguments from its own slot on are packed into one list
+    # below. `_gen_nfixed` is therefore the count of FIXED slots, which is
+    # `len(_gen_expected)` only when there is no `*args` slot.
+    _gen_star = _generator_star_slot(api, node)
+    _gen_nfixed = _gen_star if _gen_star is not None else len(_gen_expected)
     if _gen_expected and len(arg_pairs) < _gen_nfixed:
         _gen_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gen_kwargs}
         _gen_kwarg_values = list(_gen_kwarg_dict.values())
+        # The api entry carries the DEFINING module's own default snapshot
+        # (`api['defaults']`), which is the only record of them when this
+        # scope reaches the generator through a module (`lib.counter(4)`,
+        # `from pkg.lib import counter`): this gen's `_func_param_defaults`
+        # never saw that module's registration pass. Without the fallback
+        # the omitted `step=1` was padded as a typed 0, so
+        # `sum(lib.counter(4))` answered 0 and a `suffix=None` default
+        # arrived as the non-None word 0.
+        _gen_dflts = (gen._func_param_defaults.get(f"{api['base']}_start")
+                      or api.get('defaults') or [])
+        # The 1:1 name list for these C slots is the api entry's own
+        # `param_names` (every generator registration records it). The
+        # historical `_func_param_names` map is keyed for ORDINARY functions
+        # and never carries a compiled generator, so reading only that here
+        # meant `_gen_pnames` was always empty, the by-name branch below never
+        # ran, and every generator call fell back to the positional-last
+        # convention: `marks(groups=3)` bound 3 to the FIRST slot (`group`)
+        # and answered the default `groups=2`, while `marks(groups=6, group=7)`
+        # answered 7 — a silent wrong answer, exit 0, on master.
+        _gen_pnames = list(api.get('param_names')
+                           or gen._func_param_names.get(fname_raw) or [])
         while len(arg_pairs) < _gen_nfixed:
             _pos = len(arg_pairs)
             if _gen_kwslot >= 0 and _pos == _gen_kwslot:
@@ -499,9 +238,19 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             if _gen_kwarg_values and not (_gen_kwarg_dict and len(_gen_pnames) == len(_gen_expected)):
                 arg_pairs.append(_gen_kwarg_values.pop(0))
                 continue
+            # Trailing-run offset via the shared helper (`param_defaults`
+            # only covers params that HAVE one — `def prod(n, step=10)`
+            # called as `prod(3)` must pad slot 1 with 10, not 0; plain
+            # `_gen_dflts[_pos]` indexing missed every time here, silently
+            # miscompiling the omitted arg to a typed zero).
             _dv = gimple_exprtypes._trailing_default_at(
                 _gen_dflts, _gen_nfixed, _pos)
             if _dv is not None:
+                # A default that names a FUNCTION (`_walk=walk_tree`) is
+                # meaningful in the CALLEE's module, not the caller's scope:
+                # take the word the callee registered for it
+                # (`mojo_gen_sig_register`) instead of lowering the name here,
+                # where it is unbound and padded as 0.
                 if _gen_is_cpp and isinstance(_dv, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)) \
                         and not (isinstance(_dv, gimple_ctypes.IdentExpr)
                                  and _dv.name in ('None', 'True', 'False')):
@@ -512,9 +261,18 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                              [('void *', _gsv[1]), ('int64_t', str(_pos))])
                         arg_pairs.append(('int64_t', _gw))
                         continue
+                # `_gen_expected` is the callee's declared C type per slot: a
+                # `None` default for a POINTER slot must pad as a typed NULL,
+                # not the integer 0 that `mojo_cstr_or_int_str` would render as
+                # the non-null string "0" (see `_default_expr_to_pair`'s
+                # `param_ctype`). Same fix as `_lower_named_call`'s padding.
                 _pct = _gen_expected[_pos] if _pos < len(_gen_expected) else None
                 arg_pairs.append(gen._default_expr_to_pair(_dv, param_ctype=_pct))
             else:
+                # No default is known HERE (a generator reached through a
+                # module whose parameter defaults this scope never recorded):
+                # the callee's registered signature knows, and answers 0 for a
+                # parameter that has none, which is what was padded before.
                 _gsv0 = (_callable_value_symbol(
                     gen, gimple_ctypes.IdentExpr(fname_raw, node.line, node.col))
                     if _gen_is_cpp else None)
@@ -523,6 +281,8 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                           [('void *', _gsv0[1]), ('int64_t', str(_pos))])
                     arg_pairs.append(('int64_t', _gw0))
                 else:
+                    # Same typed-NULL rule as the default branch above: a
+                    # POINTER slot padded with a bare int 0 becomes "0".
                     _pct0 = _gen_expected[_pos] if _pos < len(_gen_expected) else None
                     arg_pairs.append(_null_default_pair(_pct0))
     else:
@@ -577,12 +337,6 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
         gen._safe_coerce_emit('int64_t', 'MojoGenerator *', _noted, _coerced)
         t = _coerced
         gen._generator_var_api[t] = api
-    # Fresh construction: the returned temp is this handle's only named
-    # reference until it is bound to a variable or a module global, which
-    # re-marks the BOUND name False on the way (emit_stmts.py). A consumer
-    # that drains the temp directly must destroy it afterwards (see the
-    # _generator_value_owned docstring in GimpleGen.__init__).
-    gen._generator_value_owned[t] = True
     return t
 
 
@@ -3259,29 +3013,8 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # above uses to keep the stub.
         if (isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.name in gen.func_return_types
-                # A name with a generic DECLARATION is not "owned" by the
-                # plain overload that happens to share it: a bracketed call
-                # really names the generic, and when that generic cannot be
-                # instantiated here the pre-existing disposition is the stub
-                # below, not a refusal (the generic itself was stripped from
-                # `func_return_types` before plain overloads were kept).
-                and node.func.obj.name not in getattr(
-                    gen, '_local_generic_func_names', ())
                 and node.func.obj.name not in gen.imported_symbols
-                and node.func.obj.name not in gen._imported_generic_structs
-                # ...but only when the callee really IS this TU's generic
-                # template. A module may declare a PLAIN function beside a
-                # same-named generic one (std/sys/info.mojo's
-                # `is_amd_gpu()` / `is_amd_gpu[arch: StaticString]()`), and
-                # the plain def puts the bare name in `func_return_types`
-                # without making `is_amd_gpu[arch]()` an instantiable
-                # local generic. Those bracket calls (inside the module's
-                # own `comptime for` target queries) have always lowered to
-                # the stub below; refusing them turned a compiling module
-                # into a hard failure. The measured refusal case —
-                # `def a[T: Int]()` with NO plain sibling — is unchanged.
-                and node.func.obj.name not in getattr(
-                    gen, '_local_plain_func_names', ())):
+                and node.func.obj.name not in gen._imported_generic_structs):
             _base_name = node.func.obj.name
             raise RuntimeError(
                 f"cannot compile module: a bracketed call {_base_name}[...]() "
@@ -4327,17 +4060,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `emit_infra.lower_module_globals_read` for the precise bound.
     if ginf.is_module_globals_call(gen, node):
         return ginf.lower_module_globals_read(gen, node)
-    # `typing.cast(type, value)`: the run-time no-op that returns value
-    # unchanged. `from typing import cast` lands in
-    # _unresolved_import_aliases (the compiler does not compile CPython's
-    # Lib/typing.py), and without this the call bound to the weak
-    # "unavailable in compiled mode" stub that returned 0 — the
-    # Tools/cases_generator analyzer's
-    # `kind = cast(Literal["inst", "op"], tkn.text)` then misclassified
-    # every instruction. See `emit_infra.is_typing_cast_call` for the
-    # precise bound.
-    if ginf.is_typing_cast_call(gen, node):
-        return ginf.lower_typing_cast_call(gen, node)
     _c = _try_lower_constrained(gen, node)
     if _c is not None:
         return _c
@@ -4705,12 +4427,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _gen = (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
             and node.func.obj.name in gen._imported_generics) or \
            (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generics)
-    # A bracketed call to a SIBLING generic of the instantiation this unit is
-    # compiling (monomorphize.instantiate's `generic_paths`): explicit only, see
-    # emit_resolve._elaborate_generic_call.
-    _gen = _gen or (isinstance(node.func, gimple_ctypes.SubscriptExpr)
-                    and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                    and node.func.obj.name in (getattr(gen, '_sibling_generic_paths', None) or {}))
     if _gen:
         res = gen._elaborate_generic_call(node)
         if res is not None:
@@ -5829,10 +5545,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # (“OPEN: `from mod import Class as Alias”).
     # Applied AFTER the keyword rename because `_struct_import_aliases`
     # already records the renamed name (see `_note_struct_import_alias`).
-    _aliases_ctor = getattr(gen, '_struct_import_aliases', None) or {}
-    _ctor_was_aliased = _fname_ctor in _aliases_ctor
-    if _ctor_was_aliased:
-        _fname_ctor = _aliases_ctor[_fname_ctor]
+    _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
+                   or {}).get(_fname_ctor, _fname_ctor)
     # ...and a class declared INSIDE a function body, which is hoisted to
     # module scope so the struct pipeline will give it a layout at all. A
     # hoisted name that collided with an existing struct is renamed, and the
@@ -5842,19 +5556,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # reads exactly as a module-level class's does. See
     # `_gmi_hoist_nested_structs`.
     _fname_ctor = gmp._resolve_fn_scoped_struct_name(gen, _fname_ctor)
-    # Cross-module collision, local-first (see `_local_cname_map`): a bare
-    # `StackEffect(...)` in analyzer.py constructs analyzer.py's own class,
-    # which the collision pass renamed `analyzer_StackEffect`, not the
-    # winner that holds the bare name in the shared `struct_field_types`
-    # (the old path allocated the parsing-side `StackEffect(Node)` layout
-    # for the analyzer-side `StackEffect(inputs, outputs)` value). The
-    # import-alias spelling (`from parsing import StackEffect as PSE;
-    # PSE(...)`) explicitly names the imported struct, so it is never
-    # remapped.
-    if not _ctor_was_aliased:
-        _lcm_ctor = getattr(gen, '_local_cname_map', None)
-        if _lcm_ctor and _fname_ctor in _lcm_ctor:
-            _fname_ctor = _lcm_ctor[_fname_ctor]
     if _fname_ctor in gen.struct_field_types:
         # `node.kwargs` (a direct CallExpr field read) NOT
         # `getattr(node, 'kwargs', None)` — the 3-arg getattr lowers to a
@@ -10479,10 +10180,6 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         _gen_t = gen._cast('MojoGenerator *', raw_t)
         gen._actual_types[_gen_t] = 'MojoGenerator *'
         gen._generator_var_api[_gen_t] = _cap_api
-        # The call returned a freshly constructed generator: own it, so a
-        # direct consumer of this result destroys it after draining (see
-        # _generator_value_owned).
-        gen._generator_value_owned[_gen_t] = True
         return 'MojoGenerator *', _gen_t
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
@@ -11012,59 +10709,6 @@ static gs_stat_result * stat_8_PathLike_6_String (char * path)
 """
 
 
-class _NamedSlotFill:
-    """Result of `_fill_named_slots_before_kwargs`: the argument pairs for the
-    named parameters, and the keyword arguments left for `**kwargs`."""
-
-    def __init__(self, pairs: list, rest: dict):
-        self.slot_pairs = pairs
-        self.left_kwargs = rest
-
-
-def _fill_named_slots_before_kwargs(gen, fname, fname_raw, fixed_pairs: list,
-                                    n_fixed: int, kwarg_dict: dict):
-    """Bind the named parameters `len(fixed_pairs) .. n_fixed-1` of a callee
-    that also takes `**kwargs`: from the call's keyword of that name, else
-    from the parameter's default. Returns a `_NamedSlotFill`, or None when the
-    callee's parameter names are not known or a parameter has neither (the
-    caller then keeps what it had)."""
-    _names = (gen._func_param_names.get(fname_raw)
-              or gen._func_param_names.get(fname) or [])
-    _ptypes = _callee_expected_params(gen, fname, fname_raw)
-    if len(_names) < n_fixed:
-        return None
-    _dflt_by_name = {}
-    for _d in (gen._func_param_defaults.get(fname)
-               or gen._func_param_defaults.get(fname_raw) or []):
-        if isinstance(_d, tuple) and len(_d) == 2:
-            _dflt_by_name[_as_str(_d[0])] = _d[1]
-    _taken = set()
-    _plan = []
-    _i = len(fixed_pairs)
-    while _i < n_fixed:
-        _pn = _as_str(_names[_i])
-        if _pn in kwarg_dict:
-            _taken.add(_pn)
-        elif _pn not in _dflt_by_name:
-            return None
-        _plan.append(_pn)
-        _i += 1
-    _pairs = list(fixed_pairs)
-    _i = len(fixed_pairs)
-    for _pn in _plan:
-        if _pn in _taken:
-            _pairs.append(kwarg_dict[_pn])
-        else:
-            _pct = _ptypes[_i] if _i < len(_ptypes) else 'int64_t'
-            _pairs.append(gen._default_expr_to_pair(_dflt_by_name[_pn], param_ctype=_pct))
-        _i += 1
-    _rest = {}
-    for _k in kwarg_dict:
-        if _as_str(_k) not in _taken:
-            _rest[_k] = kwarg_dict[_k]
-    return _NamedSlotFill(_pairs, _rest)
-
-
 def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
                            call_has_spread=False):
     """Pack a call's LITERAL keyword arguments into the callee's own `**kwargs`
@@ -11101,18 +10745,6 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
         _n_fixed = max(0, _kwslot_for_pack - 1) if _has_vararg else _kwslot_for_pack
         _fixed_pairs = arg_pairs[:_n_fixed]
         _vararg_pairs = arg_pairs[_n_fixed:]
-        # Fewer positionals than named parameters before the `*args`/`**kw`
-        # slots: each missing one is bound by its keyword if the call names
-        # it, else by its default. Without this the packed dict was passed
-        # in the first missing slot and that parameter's default landed in
-        # the `**kw` slot (`def outer(items, groups=5, **kw)` called as
-        # `outer(x, group=7)` received `kw == 5` and crashed on first use).
-        if len(_fixed_pairs) < _n_fixed:
-            _fill = _fill_named_slots_before_kwargs(
-                gen, fname, fname_raw, _fixed_pairs, _n_fixed, kwarg_dict)
-            if _fill is not None:
-                _fixed_pairs = _fill.slot_pairs
-                kwarg_dict = _fill.left_kwargs
         _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
         if _has_vararg:
             _lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
@@ -11189,24 +10821,15 @@ def _lnc_int(gen, arg_pairs: list) -> tuple[str, str] | None:
         return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
     if at == 'double':
         return 'int64_t', gen._cast('int64_t', f"{av}")
-    # A word of UNKNOWN KIND in an int64_t slot: the old pass-through
-    # (`return av`) assumed every int64_t word is a plain integer, so a
-    # string slice (`mojo_word_slice`), a kind-mixed list slot, or a
-    # boxed double handed straight on: `result.replicated =
-    # int(anno[10:-1])` in Tools/cases_generator/analyzer.py's make_uop
-    # stored the string's ADDRESS, and the following
-    # `for oparg in range(result.replicated):` loop spun forever
-    # (bugs/COMPILE_FAIL_Tools_cases_generator_analyzer: a 170K-
-    # generator/sec BlockStmt.tokens drain instead of CPython's 55ms).
-    # `mojo_int_of_word` is the kind-aware read (its runtime comment
-    # names the cases): identity for a genuinely numeric word, digit
-    # parse for a bare or boxed string, truncation for a double box —
-    # it also subsumes the former `av in _boxed_vals` special case
-    # (mojo_box_int answered a boxed string with the pointer, the same
-    # defect, and a None box with 0 where CPython raises).
+    # A tagged/boxed word (a double box holds the double's bits, not a
+    # numeric int64_t) must be read by kind: `mojo_box_int` returns the
+    # double box truncated toward zero (Python's `int(float)`), and the
+    # raw word for a non-double box or a plain int. Without this, int(x)
+    # of a boxed 2.5 returned the box or its bits instead of 2.
+    if at in ('int64_t', 'int', '_Bool') and av in getattr(gen, '_boxed_vals', ()):
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', av)])
     if at == 'int64_t':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_int_of_word',
-                                         [('int64_t', gen._ensure_local('int64_t', av))])
+        return 'int64_t', av
     if at in ('int', '_Bool'):
         return 'int64_t', gen._cast('int64_t', f"{av}")
     return None
@@ -11430,129 +11053,6 @@ def _lnc_unknown(gen, fname_raw: str, fname: str) -> tuple[str, str] | None:
     return None
 
 
-def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr):
-    """The C symbol for a call to one of THIS module's own same-named free
-    functions, or None when the name is not an overload set.
-
-    A module may declare two overloads of one free function
-    (`def pick(x: Int)` / `def pick(x: Bool)`,
-    `std/bit/mask.mojo`'s `splat`, `std/memory/memory.mojo`'s `_free`).
-    Both definitions now emit, each under the symbol its own parameter
-    signature mangles to; the call must name ONE of them. The selection is
-    `_resolve_overload` — the same arity/keyword/argument-type scorer the
-    struct-method and imported-overload paths use — over candidate dicts
-    built from the defining nodes. A truly indistinguishable pair falls
-    back to the first in declaration order, which is also the canonical
-    cross-module signature (see emit_funcs._def_is_canonical), so the call
-    still names a definition that exists rather than a bare stub."""
-    over = getattr(gen, '_local_def_overloads', None) or {}
-    nodes = over.get(fname_raw)
-    if not nodes or len(nodes) < 2:
-        return None
-    cands = []
-    for n in nodes:
-        pnames = []
-        pts = [gimple_ctypes.c_client_callable_ctype(t)
-               for t in gen._signature_ctypes(n.params, n)]
-        star_idx = -1
-        for _ppn, _ppt in n.params:
-            pnames.append(_as_str(_ppn).lstrip('*'))
-            if star_idx < 0 and _ppn.startswith('*') and not _ppn.startswith('**'):
-                star_idx = len(pnames) - 1
-        defaults = getattr(n, 'param_has_default', None) or {}
-        _real = [(pn, pt) for pn, pt in n.params
-                 if not (pn.startswith('*') and not pn.startswith('**'))]
-        if star_idx >= 0:
-            _pre = n.params[:star_idx]
-            min_arity = 0
-            for _pn, _pt in _pre:
-                if _pn not in defaults:
-                    min_arity += 1
-            max_arity = float('inf')
-            pts = [c for c in pts if c != '...']
-        else:
-            min_arity = 0
-            for _pn, _pt in _real:
-                if _pn not in defaults and not _pn.startswith('**'):
-                    min_arity += 1
-            max_arity = len(_real)
-        cands.append({
-            'overload_id': '',
-            'param_names': pnames,
-            'param_ctypes': pts,
-            'min_arity': min_arity,
-            'max_arity': max_arity,
-            'has_varargs': star_idx >= 0,
-            'pre_star_count': star_idx if star_idx >= 0 else None,
-        })
-    # Prefer a candidate that is NOT the function currently being emitted.
-    # A source call to one's own name inside one's own body is normally a
-    # call to a DIFFERENT overload (`to_integer(...)` inside `to_integer`), and
-    # when type erasure cannot separate two overloads (`b64encode(span)`
-    # inside a sibling `b64encode`) choosing self would emit a self-recursive
-    # body with the wrong arity. Only when every surviving candidate is the
-    # enclosing function does this stay a genuine recursive call.
-    _cur_node = getattr(gen, '_current_func_node', None)
-    _nonself = []
-    _nonself_nodes = []
-    for _ci in range(len(cands)):
-        if nodes[_ci] is not _cur_node:
-            _nonself.append(cands[_ci])
-            _nonself_nodes.append(nodes[_ci])
-    chosen = None
-    if _nonself:
-        chosen = _resolve_overload(gen, _nonself, node.args,
-                                   getattr(node, 'kwargs', None))
-    if chosen is not None:
-        cands = _nonself
-        nodes = _nonself_nodes
-    else:
-        chosen = _resolve_overload(gen, cands, node.args,
-                                   getattr(node, 'kwargs', None))
-    # Recover the NODE by candidate identity. Never carry the FunctionDef
-    # inside the candidate dict: the self-hosted backend erases a dict's
-    # values to one boxed word, so a node stored there comes back as an
-    # opaque int and `_func_csym` would read its fields off that word.
-    _def = nodes[0]
-    for _ci in range(len(cands)):
-        if cands[_ci] is chosen:
-            _def = nodes[_ci]
-            break
-    _def_pts = [gimple_ctypes.c_client_callable_ctype(t)
-                for t in gen._signature_ctypes(_def.params, _def)]
-    _sym = (getattr(gen, '_def_sym_by_id', None) or {}).get(id(_def)) \
-        or gen._func_csym(fname_raw, _def_pts)
-    # The chosen overload's own parameter/return types, under its own symbol
-    # (the bare-name slots belong to whichever overload was registered last).
-    gen.func_param_types[_sym] = _def_pts
-    _ret_ann = getattr(_def, 'return_type', None)
-    if _ret_ann is not None:
-        # The same rule the definition applies (`gen_func`): the annotation
-        # decides, whatever node type the parser gave it. Testing for a
-        # plain string skipped every Mojo annotation (`-> Float32` is a type
-        # node), so an annotated overload was inferred from its body as
-        # `void` and its prototype contradicted its definition
-        # (stdlib test/benchmark/test_quick_bench.mojo, "conflicting types").
-        import mojo.backend_gimple.emit_funcs as _ggf_ret
-        _rt_ann = gen._resolve_type(_ret_ann)
-        if (isinstance(_rt_ann, str) and _rt_ann.startswith('MojoTuple_')
-                and not _ggf_ret._body_builds_struct_tuple(
-                    getattr(_def, 'body', None))):
-            _rt_ann = 'MojoList *'
-        gen.func_return_types[_sym] = _rt_ann
-    else:
-        # An unannotated overload (the `raises`-only validators here) is not
-        # the bare-name slot's `char *`/`int64_t` from a sibling; infer THIS
-        # body. Left at the sibling's type, a void callee was used as an
-        # expression ("invalid use of void expression").
-        try:
-            _rt = gen._infer_return_type(_def.body)
-        except Exception:
-            _rt = 'void'
-        gen.func_return_types[_sym] = _rt or 'void'
-    return _sym
-
-
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
@@ -11584,10 +11084,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # overload-suffix scheme the definition itself used), so route
     # straight to it, bypassing BUILTIN_VALUE_MAP entirely, whenever this
     # module locally binds the name.
-    _over_sym = _local_overload_call_symbol(gen, fname_raw, node)
-    if _over_sym:
-        fname = _over_sym
-    elif fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
+    if fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
         fname = gen._func_csym(fname_raw)
     # C reserved function renaming
     elif (fname_raw in gimple_ctypes._C_RESERVED_FUNCS and fname_raw not in gen.func_return_types
@@ -11742,28 +11239,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     if (fname_raw == 'bool' and len(_args) == 1 and not node.kwargs
             and not gen._locally_binds_name('bool')):
         _args = [_truthy_operand(_args[0])]
-    # A call-site `**dict` spread binds by parameter NAME with runtime
-    # lookups; passing the dict as the next positional argument is wrong.
-    # Decided HERE, before any argument is lowered: the binder lowers the
-    # arguments itself, so lowering them first evaluated every argument
-    # twice (`f(g(), **d)` called `g` twice).
-    _spread_bound = None
-    if _call_has_double_star_spread(node):
-        _sb_kwslot = gen._func_kwargs_slot.get(fname)
-        if _sb_kwslot is None:
-            _sb_kwslot = gen._func_kwargs_slot.get(fname_raw, -1)
-        _spread_bound = _try_lower_call_with_dict_spreads(
-            gen, node, fname, fname_raw,
-            _callee_expected_params(gen, fname, fname_raw),
-            (gen._func_param_defaults.get(fname)
-             or gen._func_param_defaults.get(fname_raw) or []),
-            (gen._func_param_names.get(fname_raw)
-             or gen._func_param_names.get(fname) or []),
-            kwslot=_sb_kwslot, for_generator_start=False)
-    if _spread_bound is not None:
-        arg_pairs = _spread_bound
-    else:
-        arg_pairs = lower_call_args(gen, _args)
+    arg_pairs = lower_call_args(gen, _args)
     if fname_raw in ('min', 'max', 'iter') and not gen._locally_binds_name(fname_raw):
         for _at, _ in arg_pairs:
             _refuse_namedtuple_tuple_use(gen, _at, f'calling {fname_raw} on')
@@ -11828,9 +11304,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # `gimple_codegen.compile_to_gimple(src, do_imports=True,
     # filename=input_file)` compiled natively to `(src, 0, "")` instead of
     # `(src, 1, input_file)`. The `-> str` re-view restores the real key.
-    kwarg_dict = {}
-    if _spread_bound is None:
-        kwarg_dict = {_ggc_as_str(kname): gen.lower_expr(kexpr) for kname, kexpr in kwargs}
+    kwarg_dict = {_ggc_as_str(kname): gen.lower_expr(kexpr) for kname, kexpr in kwargs}
 
     # Disambiguate a call to a `(*args, **kwargs)`-declared callee by
     # the CALL SITE's own shape, not the callee's signature alone (see
@@ -11856,22 +11330,16 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # unresolved/imported names with no recorded signature.
     _call_has_spread = any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
                            for _a in node.args)
-    if _spread_bound is not None:
-        _call_has_spread = False
-    else:
-        arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
-            fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
+    arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
+        fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
     # `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
     # followed by more (keyword-only) params but no `**kwargs`; see
     # `_pack_vararg_trailing_params`'s own docstring for the full
     # rationale (shared with `_gen_stmt_ExprStmt`'s statement-level
     # twin call path below).
-    if _spread_bound is None:
-        arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
-            fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
-
-    expected_params = _callee_expected_params(gen, fname, fname_raw)
+    arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
+        fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
     # General kwarg padding when expected param count is known. A call
     # compiled in isolation (e.g. monomorphize.py's instantiate(), which
@@ -11895,6 +11363,26 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # monitor's start_crafting), and padding/truncating against whichever
     # sibling registered last produced both "too few" and "too many
     # arguments" GCC errors against the correctly-suffixed prototype.
+    # Function-local import: gimple_gen_funcs already imports this module.
+    import mojo.backend_gimple.emit_funcs as _ggf_eff
+    expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
+    if not expected_params:
+        expected_params = gen.func_param_types.get(fname_raw, [])
+    if not expected_params and fname_raw in gen._KNOWN_SIGS:
+        expected_params = gen._KNOWN_SIGS[fname_raw][1]
+    elif not expected_params and fname in gen._KNOWN_SIGS:
+        # `fname_raw` (the ORIGINAL Python name, e.g. 'eval') is never
+        # itself a _KNOWN_SIGS key — only its BUILTIN_VALUE_MAP-renamed
+        # C symbol ('mojo_eval') is. Python's 1-arg `eval(expr)` (the
+        # overwhelmingly common form; globals/locals default to the
+        # caller's own scope) called this renamed 3-arg C function with
+        # only 1 argument, a hard "too few arguments" compile error —
+        # found via Tools/build/generate_token.py's own `eval(string)`.
+        # mojo_eval's own globals/locals params are unused anyway (a
+        # documented eval() stub — real eval() can't run in a compiled
+        # C bootstrap), so padding with NULL below is exactly right,
+        # not just "doesn't crash."
+        expected_params = gen._KNOWN_SIGS[fname][1]
 
     # `f(*iterable)` unpacking against a fixed-arity callee — shared with
     # _gen_stmt_ExprStmt's statement-level twin path (see that site).
@@ -12274,11 +11762,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _gf = gen._fn_returns_generator.get(fname_raw)
         if _gf is not None and _gf in gen._generator_api:
             gen._generator_var_api[t] = gen._generator_api[_gf]
-            # `mk()` returned a freshly constructed generator: own it, so a
-            # direct consumer of the result destroys it after draining (a
-            # `g = mk()` binding re-marks the bound name False, see
-            # _generator_value_owned).
-            gen._generator_value_owned[t] = True
     # A callee that RETURNS a kinds-carrying value: the result is still
     # described, but the compile-time NAME the per-slot kinds were recorded
     # against died with the callee's frame. Mark it so a read with no
@@ -12593,35 +12076,6 @@ def _lower_struct_constructor(gen, struct_name: str,
         _fnames = []
         for _fn0 in _sft:
             _fnames.append(_as_str(_fn0))
-        # CPython's synthesized dataclass __init__ takes a positional
-        # parameter ONLY for init fields: a field declared in a base class
-        # that is not itself a dataclass is storage the constructor never
-        # takes an argument for, and so is a `field(init=False, ...)`
-        # declaration. `gen._struct_noninit_fields` (module_gen, recorded
-        # at desugar time — the only pipeline point that sees the `init=`
-        # flag — and read back post-merge, in the order the merged layout
-        # folds base attributes in) names exactly those merged-layout
-        # slots for every
-        # dataclass struct — filtering here is what keeps a
-        # `@dataclass class InstDef(Node)` with a `Node.context` base
-        # attribute from shifting its six positional constructor args one
-        # slot right (every node read then answered its neighbour — the
-        # measured Tools/cases_generator `assert node.kind == "op"` trap).
-        # A struct absent from the table (not a dataclass, or a
-        # cross-module collision the capture could not see) keeps the
-        # legacy full-layout mapping.
-        _nif = getattr(gen, '_struct_noninit_fields', None)
-        if _nif is not None and struct_name in _nif:
-            _excl = _nif[struct_name]
-            if _excl:
-                _excl_set = set()
-                for _en in _excl:
-                    _excl_set.add(_as_str(_en))
-                _fnames2 = []
-                for _fn in _fnames:
-                    if _fn not in _excl_set:
-                        _fnames2.append(_fn)
-                _fnames = _fnames2
         # Assign positional args first (by field declaration order)
         for i, arg in enumerate(args):
             if i < len(_fnames):
@@ -13228,7 +12682,7 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
             _skd = _sk[_si]
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             if _skd == 'double':
-                return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
+                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
             if _skd == 'bytes':
                 return _list_slot_bytes(gen, ov, idx64)
             if _skd == 'str':
@@ -13240,8 +12694,8 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
                 # always a heterogeneous list LITERAL, including one that
                 # came back through a `return`
                 # (`gen._return_value_slot_kinds`).
-                return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
-            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
     # A tuple (or any list with per-slot C types recorded) subscripted at
     # a compile-time constant index: the slot's own C type is the answer.
     # This must run BEFORE the generic `_maybe_kinds_vals` boxed read,
@@ -13260,16 +12714,16 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
             _sct = _as_str(_ts[_si])
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             if _sct == 'double':
-                return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
+                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
             if _sct == 'char *':
-                return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
             if _sct == 'MojoBytes *':
                 return _list_slot_bytes(gen, ov, idx64)
             if _sct == '_Bool':
                 return '_Bool', gen._cast(
                     '_Bool',
-                    gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64]))
-            t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
+                    gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64]))
+            t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
             if _sct and _sct.endswith(' *'):
                 gen._actual_types[t] = _sct
                 cast_t = gen._cast(_sct, t)
@@ -13310,12 +12764,12 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
         gen._boxed_vals.add(t)
         return 'int64_t', t
     if suf == 'double':
-        t = gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
+        t = gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
         return 'double', t
     if suf == 'str':
-        t = gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
+        t = gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
         return 'char *', t
-    t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
+    t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
     # Return the actual pointer type for pointer elements (MojoDict*,
     # MojoList*, MojoSet*) so downstream consumers (subscript, method
     # dispatch) see the real type instead of raw int64_t.  Without this,

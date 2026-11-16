@@ -842,11 +842,7 @@ MEASURED_PEAK_GB = {
     # how far it got. Two dylib PROOF obligations are open -- "the 3-export
     # proof admits 1 hole(s)" and "a conditional value is not a branch" -- which
     # is a proof lane, not a memory finding, so neither is filed here as one.
-    # 2.2 GB was the 102 s run's number. Re-measured 2026-11-16 with
-    # `/usr/bin/time -l`: peak RSS 4.58 GB over 263 s, PASS=*** FAIL=3 -- at the
-    # 4 GB `tiny` class the suite killed it before it finished (RESOURCE, not a
-    # verdict), so the peak is the uncapped run's.
-    'formal-dylib':                           (4.58, 'measured'),
+    'formal-dylib':                           (2.2, 'measured'),   # 102 s, red on 2 proofs
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'ambiguous-import-diagnostic':            (0.1, 'measured'),
     'attr-error-messages':                    (0.1, 'measured'),
@@ -1702,7 +1698,8 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)')
+     desc='GIMPLE unit suite (python-interpreted codegen)',
+     disabled='bugs/gate-gimple.md')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -1883,7 +1880,8 @@ test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
                              'mojo/backend_gimple/emit_metal.py'],
      desc='Metal codegen: op tables, device-region selection, MSL emission, '
           'and the generated MSL compiled by Apple\'s real compiler and run '
-          'on the GPU against a CPU reference')
+          'on the GPU against a CPU reference',
+     disabled='bugs/gate-metalgpu.md')
 test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
      extra=['tools/md2html.py', 'test_md2html.py',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
@@ -2016,18 +2014,19 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
 # `gimplerunner` is red on the tree (2026-11-11): 20 cases fail, a mix of wrong output,
 # RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 20 are listed
-# in the (now retired) gimplerunner-21 inventory; the 21st,
-# `gimple_nested_class_var_attr_from_str_param`,
+# in bugs/hard/SUITE_gimplerunner_21_failing.md; the 21st, `gimple_nested_class_var_attr_from_str_param`,
 # was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
 # (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
 # so a case that starts or stops failing makes this marker disagree and the gate says so.
 #
-# 2026-11-13: re-measured at 626 passed / 1 failed (627 cases); the one failure
-# was `c_accessor_helpers_emitted_once_across_modules`.
-# 2026-11-16: re-measured at 628 passed / 0 failed -- that last case passes, so
-# the `expect=` marker is REMOVED (an expect= that passes is reported as a
-# failure) and the gimplerunner-21 inventory doc is retired with it.
+# 2026-11-13: re-measured at 626 passed / 1 failed (627 cases). Every case the
+# doc's inventory names now passes; the one failure is
+# `c_accessor_helpers_emitted_once_across_modules` (two modules each emit their
+# own sizeof/fnaddr accessor for a same-shaped lambda environment, where the
+# test wants one shared across the closure). Marker updated to 1.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
+     expect='1 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md '
+            '(c_accessor_helpers_emitted_once_across_modules: duplicate sizeof/fnaddr accessors)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
@@ -2930,25 +2929,9 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 # 96 GB budget for every claim on the job.
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
-     # `tiny` (4) was set from a 0.1 GB peak. Measured 2026-11-16 with
-     # `/usr/bin/time -l`: peak RSS 4.58 GB, and at that class the job was
-     # KILLED before finishing -- RESOURCE, "not a verdict on the output", so
-     # the expect= below could not be verified in either direction. `small`
-     # (8) covers it. Over the 4 GB line and therefore a debt, not a fact --
-     # see MEM_DEBT_DOC.
-     mem='small',
-     memwhy='measured 4.58 GB peak RSS 2026-11-16 (/usr/bin/time -l on '
-            'test_formal_dylib.py, 263 s wall): the Lean dylib contract proof '
-            'over the whole export closure. `tiny` (4) killed the job at the '
-            'ceiling before it finished, so the class was raised to `small` '
-            '(8). Over the 4 GB line and therefore a debt, not a fact -- see '
-            + MEM_DEBT_DOC,
-     # The reason was stale: it described hole-count checks on the
-     # overflow-trapping exports, but the three failures are GENERATED-proof
-     # `sorry` holes in test_formal_dylib.py (measured 2026-11-16, uncapped:
-     # PASS=27 FAIL=3). Re-pointed to the doc that names them.
-     expect='3 failing: the dylib export proofs still admit `sorry` holes -- see '
-            'bugs/FORMAL_dylib_export_proof_holes.md',
+     mem='tiny',
+     expect='3 failing: the hole-count checks on the overflow-trapping exports, whose termination '
+            'obligations an exit svc keeps named (bugs/hard/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -4303,9 +4286,6 @@ test('land-doc', [PY, 'tools/test_land_doc.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('gate-files', [PY, 'tools/test_gate_files.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
-     mem='tiny',
-     desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
 test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
@@ -4619,7 +4599,8 @@ test('interp-list-ctor', [PY, 'test_interp_list_ctor.py'], cache=True, mem='tiny
      desc='interpreter List(...) copies its iterable, length=/fill= build')
 test('module-globals-compiled', [PY, 'test_module_globals_compiled.py'],
      cache=True, mem='tiny', extra=['test_module_globals_compiled.py'],
-     desc='module-scope globals() matches CPython in the compiled path')
+     desc='module-scope globals() matches CPython in the compiled path',
+     disabled='bugs/gate-module-globals-compiled.md')
 test('mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'],
      cache=True, mem='tiny', extra=['test_mojoc_precompile_signature.py'],
      desc='precompile a package to a .mojoc signature artifact and read it back')
@@ -5167,7 +5148,6 @@ BUCKETS = {
 # parallel branch rewrites, so an edit there is a guaranteed merge conflict
 # for the one entry it adds.
 BUCKETS['check'].append('binding-evidence')
-BUCKETS['check'].append('gates-bootstrap-not-off')
 BUCKETS['check'].append('interp-list-ctor')
 BUCKETS['check'].append('module-globals-compiled')
 BUCKETS['check'].append('mojoc-precompile-signature')

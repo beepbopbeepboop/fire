@@ -40,8 +40,7 @@ extern int     mojo_exc_pending_get(void);
 extern int     mojo_coro_frame_base(void);
 extern int     mojo_coro_cleanup_base(void);
 extern void   *mojo_coro_slice_save(int frame_base, int cleanup_base);
-extern int     mojo_coro_slice_restore(void *snap);
-extern void    mojo_cleanup_pad_checkpoint(int lvl, int nc);
+extern void    mojo_coro_slice_restore(void *snap);
 
 /* Deterministic exception-class tags -- must match GimpleGen._exc_type_id
    ((zlib.crc32(b"Name") & 0x7fffffff) or 1). Same hardcoding pattern as
@@ -116,12 +115,8 @@ coro_trampoline(mojo_xfer_t in)
 
     /* Top-level landing pad: an exception the body does not catch unwinds
        to here (its inner handlers pop _mojo_exc_top back down to this
-       frame first -- standard). The pad owns the cleanup records the BODY
-       pushes while it runs (the resumer's records sit at/below the current
-       depth), so record its checkpoint now; a later resume re-records it
-       with the body's re-pushed slice depth (see __mojo_coro_yield). */
+       frame first -- standard). */
     _mojo_exc_top += 1;
-    mojo_cleanup_pad_checkpoint(_mojo_exc_top, 0);
     if (setjmp(_mojo_exc_stack[_mojo_exc_top]) == 0) {
         c->body(c, c->env);
         _mojo_exc_top -= 1;                 /* normal fall-off */
@@ -291,21 +286,12 @@ __mojo_coro_yield(MojoCoro *c, int64_t val_box)
 
     /* --- resumed: restore our exception state --- */
     c->status = MOJO_CORO_RUNNING;
-    int repushed = mojo_coro_slice_restore(c->slice);
+    mojo_coro_slice_restore(c->slice);
     c->slice = NULL;
     if (c->exc_slice_n > 0)
         memcpy(&_mojo_exc_stack[c->exc_base + 1], c->exc_slice,
                (size_t)c->exc_slice_n * sizeof(jmp_buf));
     _mojo_exc_top = c->exc_base + c->exc_slice_n;
-    /* Re-record the pad's cleanup checkpoint at its (restored) level: the
-       `repushed` records just re-pushed by slice_restore sit on top of the
-       resumer's, and they -- plus anything the body pushes in THIS run
-       segment -- are exactly what an unwind to the pad (a destroyed
-       generator's injected GeneratorExit, or an exception the body does
-       not catch) must run. Without this the slot holds whatever an
-       earlier try at the same depth left there, and the unwind frees
-       live owned locals of outer frames. */
-    mojo_cleanup_pad_checkpoint(_mojo_exc_top, repushed);
     mojo_exc_type_set(c->exc_type_save);
     mojo_exc_msg_set(c->exc_msg_save);
     mojo_exc_obj_set(c->exc_obj_save);

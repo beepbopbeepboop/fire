@@ -1,39 +1,8 @@
 # CODEGEN: a bracketed generic call inside a generic instantiation compiles to a silent 0
 
-**Status (2026-11-17): partially fixed — the integer-valued repro below is fixed and landed;
-the DType/string-literal half (step 3) is still open.**
-
-Landed (integer-valued bracket arguments, the repro below):
-
-- Root cause: a generic instantiation is compiled by `monomorphize.instantiate` in a fresh
-  `GimpleGen` that sees only its own concrete source. `ident` (the callee) was not visible there,
-  so `_elaborate_generic_call` declined and `emit_calls._lower_call` stubbed the call to `0`. The
-  callee's object would also have been dropped at the `instantiate` boundary even if it had been
-  elaborated.
-- Fix: `monomorphize.instantiate(generic_paths=, links_out=)` passes the caller's generic templates
-  down (`gen._sibling_generic_paths`, resolved only for explicitly bracketed calls, since a bare
-  `log(x)` inside math's `log[...]` names a non-generic overload). A template that makes such a call
-  folds each callee's source digest into its key (`_sibling_fingerprints`), and its nested objects
-  are recorded in a `.links` CAS sidecar and attached at the call by
-  `emit_resolve._emit_generic_instantiation`. Forwarding is `emit_resolve._generic_paths_for`, so
-  two levels of nesting resolve too.
-- Measured: the repro below prints `13` (was `1`).
-- Tests: `test_elaboration_recursion_diagnostic.py::test_nested_bracketed_call_in_instantiation_is_materialized`
-  (13) and `::test_nested_bracketed_calls_two_levels_and_shared_callee` (37) pass. The file's other
-  seven cases pass too, except `::test_intrinsic_name_bracket_arg_builds`, which fails before
-  elaboration on an unrelated pre-existing unknown-declaration false positive (`type_of`) —
-  `bugs/DIAGNOSTICS_type_of_builtin_reported_undeclared.md`. Not run here:
-  `stdlib-dylib` / `stdlib-syntax` skip and FAILED counts (integrator gate).
-
-Still open (the doc stays until these pass):
-
-- DType and string-literal bracket arguments still stub. Measured 2026-11-13: with
-  `tag[s: StaticString](x) = x + 100` called as `tag["abc"](x)` and `ident[dt: DType](x) = x + 10`
-  called as `ident[.uint32](x)`, `wrap[1](5)` prints `1` (expected `121`). Cause:
-  `_type_expr_to_ann` renders `StringLiteral` and `DottedLiteral` as `''`, so
-  `_elaborate_generic_call` refuses them. This is step 3 below.
-- The stdlib call sites this affects (`_format_float._truncate[.uint32]`, `llvm_intrinsic["llvm.*"]`)
-  still compile to 0 in the dylib.
+**Status (2026-11-13):** open. Found while fixing `stdlib-dylib` (the gate job went red on
+`b3e501b60` + `e920f3a03`); the job is green again without this being fixed, because the
+stdlib calls that exercise it take the same stub path they took before `b3e501b60`.
 
 ## Repro
 
@@ -49,7 +18,7 @@ Built with `python3 fire.py build <file> -o <bin>`:
         print(wrap[1](5))
 
 - **Expected:** `13` (`ident[7](5) = 12`, plus `i = 1`).
-- **Observed (before the fix):** `1` — `ident[7](5)` was emitted as the stub `(int64_t)0`
+- **Observed (current tree):** `1` — `ident[7](5)` was emitted as the stub `(int64_t)0`
   (`gimple_codegen`'s "indirect call stubbed" path in `mojo/backend_gimple/emit_calls.py`,
   `_lower_call`), so the nested call contributes 0 and nothing is reported.
 
@@ -86,11 +55,16 @@ own gaps. Reverted; the rendering is the right direction but needs those gaps cl
 
 ## Exact next step
 
-1. DONE (2026-11-13): the nested call is registered and materialized; the `13` probe passes.
-2. DONE (2026-11-13): tests above; the repro is `13`.
-3. Retry the `_type_expr_to_ann` rendering of `StringLiteral`/`DottedLiteral` in
-   `mojo/middle/resolve_shared.py` (render `repr` / `.<path>`), now that nested calls reach the
-   elaborator. Earlier attempts exposed gaps in the callees (`benchmark`, `_rng`, `simd`,
-   `_amdgpu`); close them one at a time. Measure after each with the DType/string probe above.
-4. Tighten `test_concrete_unrenderable_type_arg_is_not_refused` to assert `121` once step 3 lands,
-   then delete this doc in the same commit (and run `tools/dangling_doc_refs.py --ratchet`).
+1. Find where a bracketed call inside an elaborated body loses its instantiation. The probe above
+   prints `1`; the emitted C for `wrap` will show the `(int64_t)0` stub. Compare the top-level path
+   (`main` -> `ident[7]`, which works) with the nested path in `elab_intu._collect_inner`'s
+   `visit` (`mojo/backend_gimple/elab_intu.py`). Hypothesis, NOT measured: the nested call is never
+   registered because `_collect_inner` walks only the bodies of instantiations it materializes,
+   and `ident` is reached only through `wrap`'s own elaboration. Confirm by dumping the registered
+   work keys while compiling the repro before changing anything.
+2. Once the nested `ident[7]` materializes, re-measure `probe` = `13`.
+3. Then retry the `_type_expr_to_ann` rendering of `StringLiteral`/`DottedLiteral` and close the
+   `benchmark`/`_rng`/`simd`/`_amdgpu` gaps it exposes, one at a time.
+4. Tests: `test_elaboration_recursion_diagnostic.py::test_concrete_unrenderable_type_arg_is_not_refused`
+   asserts only that the build is not refused. Tighten it to assert `13` once step 2 lands, and
+   delete this doc in the same commit.
