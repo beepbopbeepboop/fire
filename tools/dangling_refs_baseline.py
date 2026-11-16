@@ -192,7 +192,6 @@ BASELINE = {
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
-    'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'fire.py': 1,
     'formal/arm64_codegen.py': 1,
     'formal/arm64_proof_gen.py': 1,

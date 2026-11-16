@@ -1903,6 +1903,14 @@ def _populate_decorated_method_wrapped(self, stmts, imported_stmts) -> None:
             _dw_dec_csym = None
             for _dw_d0 in (getattr(_dw_m, 'decorators', None) or []):
                 _dw_ds = _as_str(_dw_d0)
+                # `@deco(args)` / `@mod.deco` are NODES (CallExpr/MemberExpr),
+                # not bare names, and have no lowering here yet: the bare-name
+                # gate below skips them. Guard the `re` call on the string
+                # test the prototype walk's own gate uses (emit_infra's
+                # `isinstance(_dwp[1], str)`), because `_as_str` is identity
+                # and a node reached it unchanged.
+                if not isinstance(_dw_ds, str):
+                    continue
                 if (_dw_ds in ('staticmethod', 'classmethod', 'property')
                         or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', _dw_ds)):
                     continue
