@@ -1,16 +1,15 @@
-"""Part 8: refuse conversion/operation on an unsupported float8 dtype.
+"""Part 8 (fixed): refuse conversion/operation on an unsupported float8 dtype.
 
-`bugs/GPU_offload_validation_modular-part8.md` (parent:
-`bugs/hard/GPU_offload_validation_modular.md`, row
-`op_with_unsupported_type_error.mojo`, host half).
-
-Today the float8 family does not exist in the interpreter (`DType` is a
-SimpleNamespace with int/uint/float16-64/bfloat16/bool), so
-`DType.float8_e3m4` raises `AttributeError`; a program spelling
-`Float8_e3m4` as an annotation is accepted and `var b: Float32 = a` silently
-copies the value (`1.0`, exit 0). The canonical Modular case wants
-`conversion from 'f8e3m4' to 'f32' is not implemented` and
-`operation with a type 'f8e3m4' is not implemented`.
+Host half of the `op_with_unsupported_type_error.mojo` row in
+`bugs/hard/GPU_offload_validation_modular.md`: a scalar whose dtype has no
+conversion or arithmetic rule here — the `float8` family the canonical case
+uses (`float8_e3m4`) — must be refused at the point it is used, with the two
+messages Modular prints: `conversion from 'f8e3m4' to 'f32' is not
+implemented` and `operation with a type 'f8e3m4' is not implemented`. Before
+the fix the float8 family did not exist in the interpreter's type table
+(`DType.float8_e3m4` raised `AttributeError`), a `Float8_e3m4` annotation
+was dropped, and `var b: Float32 = a` silently copied the value (`1.0`,
+exit 0).
 
 Quick test: this file only (three interpreter runs, ~3 s, < 0.1 GB).
 """
