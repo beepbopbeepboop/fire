@@ -11,14 +11,14 @@ Noted while deleting the defaulted-trait-method-conformance gate doc
 (no file cited it, so that deletion added no dangling citations).
 `python3 tools/dangling_doc_refs.py --ratchet` fails identically at
 master's tip (6b7ed9014) and on this branch: exactly ONE file is over its
-baseline, `bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md` (count 5,
+baseline, `bugs/LAND-codegen-nested-bracket-generic-call-4.md` (count 5,
 baseline 0), and every one of its five citations points at a doc that is
 gone. Run `python3 tools/dangling_doc_refs.py` (no `--ratchet`) to list
 the five names; they are the Status-log line in that doc recording the
 uncommitted entries of worktree work-7059 — five doc paths logged verbatim,
 all since deleted with their fixes.
 
-`bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md` is byte-identical to
+`bugs/LAND-codegen-nested-bracket-generic-call-4.md` is byte-identical to
 its master copy, so the red predates any branch off 6b7ed9014. It appeared
 AFTER the 2026-11-15 10:13 gate round — the LAND doc landed at d4e7a742e
 (10:31) — which is why no gate doc for this job existed when this lane ran.
