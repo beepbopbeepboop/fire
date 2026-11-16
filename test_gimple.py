@@ -15119,6 +15119,55 @@ def main():
     _run_isolated(_test_bare_list_constructor_keeps_its_container_type,
                   'gate_stdlib_syntax_bare_list_constructor')
 
+    def _test_none_passed_to_parameter_is_none():
+        global _PASS, _FAIL
+        name = "none_passed_to_parameter_is_none"
+        src = r'''
+def a(x):
+    print("unann is None:", x is None)
+    print("unann == None:", x == None)
+
+
+def b(x: str):
+    print("str is None:", x is None)
+    print("str == None:", x == None)
+
+
+def c(x: str):
+    return x
+
+
+a(None)
+b(None)
+print("repr:", repr(c(None)))
+print("in:", None in (None, "a"))
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython did not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if not isinstance(got, str):
+                kind, detail = got
+                print(f"FAIL  {name} ({mode}): {kind}")
+                for line in str(detail).splitlines()[:8]:
+                    print(f"      {line}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} ({mode}): compiled stdout differs from CPython")
+                print("  want: " + repr(want))
+                print("  got:  " + repr(got))
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(_test_none_passed_to_parameter_is_none,
+                  'none_passed_to_parameter_is_none')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:

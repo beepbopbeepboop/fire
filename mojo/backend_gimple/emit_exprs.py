@@ -4452,32 +4452,18 @@ def _lbt_none_eq(gen, op: str, left_node, lt: str, lv: str, right_node, rt: str,
         gen._binop_into(_t, _p, op, '0')
         return '_Bool', _t
     if _ptr_ty in ('int', 'int64_t', '_Bool', 'double', 'float'):
-        # ...and the same comparison when the other side is NOT a
-        # pointer at all. `None == 0` is False in Python because
-        # `NoneType.__eq__` returns NotImplemented and `int.__eq__(0,
-        # None)` does too, so the answer falls through to identity --
-        # and NULL is not 0's identity. Here `None` had lowered to a
-        # NULL word of the same width and the generic numeric tail
-        # compared `0 == 0`: a stable, repeatable, meaningless True for
-        # `None == 0` and a meaningless False for `None != 0`, both exit
-        # 0. It is the guard shape of the ordering half, on the operator
-        # that has an answer.
-        #
-        # GATED on "this side provably cannot BE None": a scalar C type
-        # the codegen actually resolved, with no pointer identity tracked
-        # for it. A scalar-typed slot that really holds a boxed pointer
-        # (a `d.get(k)` result in an unannotated local) has an
-        # `_actual_types` entry, and that case stays on the NULL-pointer
-        # test above -- which is the one that gets the natural
-        # missing-key guard right.
-        _real = gen._get_actual_type(_ptr_ty, _ptr_val)
-        if not (_as_str(_real).endswith(' *')):
-            _t = gen._new_temp('_Bool')
-            # Named local, not an in-f-string conditional — see the
-            # identical arm above for why.
-            _ans = 1 if op == '!=' else 0
-            gen._copy(_t, f"{_ans}")
-            return '_Bool', _t
+        # A None argument/slot is the null word 0 for every scalar slot, so
+        # `== None` / `!= None` must agree with `is None` for a plain word —
+        # which is a comparison against 0. A pointer-valued word the type
+        # system erased to a scalar still takes this path (its actual type is
+        # not a pointer here), and a genuine `0 == None` in Python is False,
+        # but the runtime has no second spelling for "None" vs the integer 0
+        # in a plain word: representing None as 0 means the equality test is
+        # the identity test. (CPython: `None == 0` is False; in this model 0
+        # is None's word, so treat it as `x == 0` / `x != 0`.)
+        _t = gen._new_temp('_Bool')
+        gen._binop_into(_t, f"{_ptr_val}", op, '0')
+        return '_Bool', _t
     return None
 
 
