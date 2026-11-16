@@ -59,7 +59,7 @@ from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
     _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
-    _home_signature_ctypes, _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
+    _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
@@ -623,7 +623,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                 try:
                     for _fs in (gen._parsed_import(_fi_eff_mod)[2] or []):
                         if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
-                            _fi_pts = gen._home_signature_ctypes(_fi_eff_mod, _fs)
+                            _fi_pts = gen._signature_ctypes(_fs.params, _fs)
                             break
                 except Exception:
                     _fi_pts = None
@@ -2185,19 +2185,7 @@ def overload_suffix_for(c_param_types) -> str:
     # own codegen. 6 hex digits emitted via `chr()` (compiled char*
     # subscription yields the byte value, not a 1-char string, so a
     # hex-alphabet index would not work).
-    # An importer's parameter list can carry `struct Name *` for a struct
-    # private to the defining module (see `_effective_param_types_hash`: the
-    # importer has no `Name` typedef, so the tag spells it), where the
-    # definer's own list says `Name *`. Hash the definer's spelling so both
-    # sides name one symbol. Plain slicing, no regex: this runs in the
-    # self-hosted compiler.
-    _norm = []
-    for _cpt in c_param_types:
-        _t = _as_str(_cpt)
-        if _t[:7] == 'struct ':
-            _t = _t[7:]
-        _norm.append(_t)
-    _s = ','.join(_norm)
+    _s = ','.join(c_param_types)
     _h = 0
     _i = 0
     _sn = len(_s)
@@ -2583,63 +2571,20 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
     return None
 
 
-def _opaque_struct_tags(gen, pts):
-    """PTS with each `struct N *` (the tag spelling of a struct private to an
-    imported function's home module, see `_effective_param_types_hash`)
-    replaced by what THIS unit can name: `N *` when the unit really knows the
-    struct, else the opaque `int64_t` word every unknown struct is boxed as.
-    Anything else is returned unchanged, and None stays None."""
-    if not pts:
-        return pts
-    _known = getattr(gen, 'struct_field_types', None)
-    _out = []
-    for _p in pts:
-        _s = _as_str(_p)
-        if _s[:7] == 'struct ' and _s[-2:] == ' *':
-            _base = _s[7:-2].strip()
-            if _known and _base in _known:
-                _out.append(_base + ' *')
-            else:
-                _out.append('int64_t')
-        else:
-            _out.append(_p)
-    return _out
-
-
 def _effective_param_types(gen, bare_name: str) -> list | None:
     """The parameter ctypes a reference to `bare_name` in THIS compile unit
-    must honor when it CALLS it (argument coercion, the mangled-key mirror,
-    the extern's re-typing): `_effective_param_types_hash` with a struct private
-    to the home module spelled as this unit can name it (an opaque word unless
-    the unit knows the struct). `_overload_suffix` hashes the unfiltered list."""
-    return _opaque_struct_tags(gen, _effective_param_types_hash(gen, bare_name))
-
-
-def _effective_param_types_hash(gen, bare_name: str) -> list | None:
-    """The parameter ctypes a reference to `bare_name` in THIS compile unit
-    must honor — the single source of truth for the mangled free-function
-    symbol: `_overload_suffix` hashes this list. A parameter typed with a
-    struct private to the DEFINING module is `struct N *` here (its tag form;
-    `overload_suffix_for` hashes it as the definer's `N *`), which is why
-    callers that coerce arguments use `_effective_param_types`, not this.
-    Tier order:
+    must honor — the single source of truth for BOTH halves of a mangled
+    free-function symbol: `_overload_suffix` hashes this list, and
+    _func_csym's mangled-key mirror feeds it to _emit_call's argument
+    coercion. Tier order:
     1. _local_def_pts — this unit defines the name (BUG-2026-019).
     2. _imported_def_pts — an imported name's home-module signature,
        recorded at FromImportStmt registration (BUG-2026-024).
-    2b. _imported_private_struct_pts — the same home signature, asked for
-       directly, when it names a struct private to the home module.
     3. shared func_param_types[bare] — legacy fallback; permanently
        oscillates when same-named siblings exist, so tiers 1/2 exist."""
     pts = _local_def_pts(gen, bare_name)
     if pts is None:
         pts = _imported_def_pts(gen, bare_name)
-    if pts is None:
-        # A parameter typed with a struct private to the home module hashes as
-        # the definer's `N *`. The text scan boxes the unknown name to
-        # `int64_t`, and the extern's own registration stores THAT in
-        # `func_param_types` just before it asks for the mangled name, so this
-        # must outrank the shared slot (tier 2 is not recorded yet then).
-        pts = _imported_private_struct_pts(gen, bare_name)
     if pts is None:
         pts = gen.func_param_types.get(bare_name)
     if pts is None:
@@ -2647,58 +2592,6 @@ def _effective_param_types_hash(gen, bare_name: str) -> list | None:
     if pts:
         pts = [gimple_ctypes.c_client_callable_ctype(p) for p in pts]
     return pts
-
-
-def _home_private_struct_pts(gen, info) -> list | None:
-    """`_home_signature_ctypes` of the one FunctionDef an import entry names, but
-    ONLY when it names a struct private to the home module (some element is
-    `struct N *`); else None, so every other import keeps its scanned types.
-
-    `info` is an `imported_symbols` entry: `module` is where the function is
-    defined and `original_name` its name there. None when the module does not
-    parse, the name is not defined exactly once (overloads share a name and the
-    extern is variadic), or the entry is a re-export (the FunctionDef is not in
-    that file)."""
-    _mod = _as_str(info.get('module'))
-    _name = _as_str(info.get('original_name'))
-    if not _mod or not _name:
-        return None
-    _stmts = gen._parsed_import(_mod)[2] or []
-    _found = None
-    _n = 0
-    for _fs in _stmts:
-        if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == _name:
-            _found = _fs
-            _n = _n + 1
-    if _n != 1:
-        return None
-    _pts = gen._home_signature_ctypes(_mod, _found)
-    for _p in _pts:
-        if _as_str(_p)[:7] == 'struct ':
-            return _pts
-    return None
-
-
-def _imported_private_struct_pts(gen, bare_name: str) -> list | None:
-    """`_home_private_struct_pts` for the import entry named BARE_NAME, memoized
-    per generator (every reference to the name asks, and the home module's
-    statements are scanned each time otherwise). The cache holds `[]` for
-    "no home-private struct" so the typed field never holds None."""
-    _info = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
-    if not _info or not _as_str(_info.get('signature')):
-        return None
-    _kmod = _as_str(_info.get('module'))
-    _kname = _as_str(_info.get('original_name'))
-    if not _kmod or not _kname:
-        return None
-    _key = _kmod + '\x00' + _kname
-    _cache = gen._private_struct_pts_cache
-    if _key in _cache:
-        _hit = _cache[_key]
-        return _hit if _hit else None
-    _pts = _home_private_struct_pts(gen, _info)
-    _cache[_key] = list(_pts) if _pts else []
-    return _pts
 
 
 def _import_entry_param_types(gen, bare_name: str) -> list | None:
@@ -2750,7 +2643,7 @@ def _overload_suffix(gen, bare_name: str) -> str:
     # extern ("expected 'TuffBricks *' but argument is of type 'Tuff *'").
     # The qualifier tier already disambiguates the NAME; this gives the
     # SUFFIX the same per-module truth.
-    return gen.overload_suffix_for(_effective_param_types_hash(gen, bare_name))
+    return gen.overload_suffix_for(_effective_param_types(gen, bare_name))
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,

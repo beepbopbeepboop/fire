@@ -1,17 +1,9 @@
-"""Part 7: `compile_info` must refuse a kernel it cannot slice out as a symbol.
+"""Regression: `std.compile.compile_info` must refuse an unsliceable kernel.
 
-`bugs/GPU_offload_validation_modular-part7.md` (parent:
-`bugs/hard/GPU_offload_validation_modular.md`, row
-`compile_offload_missing_symbol_error.mojo`).
-
-Today `std.compile` is not shimmed, so it falls through to the generic `std.*`
-auto-stub (`_AutoStubNamespace`): `compile_info[...]()` answers `0` for a real
-module-level kernel AND for a runtime function pointer (`get_fn[False]()`),
-and the program exits 0 either way. The canonical Modular case requires the
-second one to be refused with `cannot slice out exported symbol ... scale ...`.
-
-The first probe is the control: a kernel named statically is sliceable and must
-keep working.
+Covers the `compile_offload_missing_symbol_error.mojo` case: a statically named
+module-level kernel is accepted, while a kernel instantiated from a runtime
+function pointer (e.g. `get_fn[False]()`) is refused with
+`cannot slice out exported symbol` naming the symbol, not silently stubbed to 0.
 
 Quick test: this file only (two interpreter runs, ~2 s, < 0.1 GB).
 """

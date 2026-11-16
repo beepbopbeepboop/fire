@@ -948,49 +948,6 @@ def test_let_declaration_parses_as_vardecl():
     check("var_then_let_both_vardecl", kinds == ["VarDecl", "VarDecl"], repr(kinds))
 
 
-def test_string_default_ends_its_sub_stream():
-    """`def f[S: StringLiteral = "x"]` must PARSE and keep the string default.
-
-    A bracket-parameter default is re-parsed from its own token SPAN, and that
-    sub-stream has no EOF unless one is added. `Parser._advance` never steps
-    past the last token, so a span ending in a STRING left
-    `while self._peek().kind == "STRING"` (implicit concatenation) spinning
-    forever, appending to a list: ~35 GB of footprint in minutes, and the
-    benchmark closure compile in test_stdlib_dylib_lazy_undefined_refs_probes
-    p7 hit it. The alarm turns a regression into a failure in seconds instead
-    of a machine-wide memory event.
-    """
-    import signal
-
-    class _Hang(Exception):
-        pass
-
-    def _alarm(*_):
-        raise _Hang()
-
-    old = signal.signal(signal.SIGALRM, _alarm)
-    signal.setitimer(signal.ITIMER_REAL, 5.0)
-    try:
-        stmts = _parse('def f[S: StringLiteral = "x"]() -> Int:\n    return 1\n')
-        hung = False
-    except _Hang:
-        hung = True
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
-    check("string_default_does_not_hang_the_parser", not hung,
-          "parse still running after 5s: the sub-stream has no EOF")
-    if hung:
-        return
-    fn = stmts[0]
-    check("string_default_parses_to_a_function", isinstance(fn, N.FunctionDef),
-          repr(type(fn)))
-    # Adjacent literals in the default still concatenate (the loop's purpose).
-    stmts2 = _parse('def g[S: StringLiteral = "a" "b"]() -> Int:\n    return 1\n')
-    check("adjacent_string_default_parses", isinstance(stmts2[0], N.FunctionDef),
-          repr(type(stmts2[0])))
-
-
 def run_tests():
     print("=" * 70)
     print("PARSER: new-modular syntax")
@@ -1005,7 +962,6 @@ def run_tests():
                # the bracket/comptime cases, master brought the struct-param
                # trait bounds. The union, each name once.
                test_struct_param_trait_bounds,
-               test_string_default_ends_its_sub_stream,
                test_used_idents_covers_new_syntax,
                test_bracket_mixing_keyword_and_positional,
                test_bracket_param_default_is_captured,

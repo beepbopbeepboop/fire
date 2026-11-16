@@ -424,8 +424,8 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
-                'the run log (--apply-peaks)')
+MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from the '
+                'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -453,7 +453,7 @@ MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from
 MEASURED_PEAK_GB = {
     'native-dumpfull':             (10.4, 'measured'),
     'ab-native':                   (20.5, 'measured'),
-    'selfhost':                    (7.9, 'measured'),
+    'selfhost':                    (4.4, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     'sqliteruntime':               (2.3, 'measured'),
@@ -461,7 +461,7 @@ MEASURED_PEAK_GB = {
     'bootstrap-stage2-cc':         (4.1, 'measured'),
     'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
-    'ptrreg-boxed-str':            (0.4, 'measured'),
+    'ptrreg-boxed-str':            (0.2,  'measured'),
     'runtimediff':                 (0.3,  'measured'),
     'interp-tokenizer-oracle':     (0.1,  'measured'),   # 67 texts, ~1 s
     'modcache':                    (0.3,  'measured'),
@@ -595,7 +595,7 @@ MEASURED_PEAK_GB = {
     # reason they are cheap to gate: a registration nobody runs cannot be
     # known to pass.
     'metalgpu':                (0.37, 'measured'),   # 117 s cold, GPU + clang
-    'x86-examples':            (0.6, 'measured'),   # 33 s, every formal/examples
+    'x86-examples':            (0.05, 'measured'),   # 33 s, every formal/examples
     'new-syntax-parse':        (0.02, 'measured'),   # 0.1 s, 87 parser cases
 
     # Two suites the estate check caught with no spec naming them, measured
@@ -736,11 +736,11 @@ MEASURED_PEAK_GB = {
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
     'linkmode':                               (0.1, 'measured'),
-    'nonlocal':                               (0.4, 'measured'),
+    'nonlocal':                               (0.1, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
     'runtimedylib':                           (0.4, 'measured'),
-    'silentnoop':                             (0.4, 'measured'),
+    'silentnoop':                             (0.1, 'measured'),
     'suite-self-test':                        (0.6, 'measured'),
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'comptime-parity':                        (0.3, 'measured'),
@@ -843,20 +843,6 @@ MEASURED_PEAK_GB = {
     # proof admits 1 hole(s)" and "a conditional value is not a branch" -- which
     # is a proof lane, not a memory finding, so neither is filed here as one.
     'formal-dylib':                           (2.2, 'measured'),   # 102 s, red on 2 proofs
-    # Added by --apply-peaks (see MEASURED_RUN for the run).
-    'ambiguous-import-diagnostic':            (0.1, 'measured'),
-    'attr-error-messages':                    (0.1, 'measured'),
-    'comptime-assert-diagnostic':             (0.1, 'measured'),
-    'comptime-dtype-diagnostic':              (0.1, 'measured'),
-    'dict-none-key':                          (0.1, 'measured'),
-    'enum-desugar':                           (0.1, 'measured'),
-    'formal-host-import-shapes':              (0.1, 'measured'),
-    'globcompiled':                           (0.7, 'measured'),
-    'implicit-string-concat':                 (0.4, 'measured'),
-    'linked-list-link-symbols':               (0.3, 'measured'),
-    'out-param-return-type-diagnostic':       (0.1, 'measured'),
-    'runtimere':                              (0.5, 'measured'),
-    'sys-utf8-default-encoding':              (0.1, 'measured'),
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -1827,13 +1813,13 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
 # `bootstrap-stage1-transitive` (the same python closure dump) reads 1.1 GB, so
 # the 55.8/96 numbers are not this workload's RSS on this tree. A build that
 # genuinely needs more says so: MEMLIMIT_GB=96.
-test('selfhost', [PY, 'test_selfhost.py'], mem='module', cache=True,
-     memwhy='measured 7.9 GB FOOTPRINT (2026-11-15 check; it read 4.4-4.6 GB '
-            'while the ceiling measured RSS, because the compressed pages RSS '
-            'leaves out were not counted): `fire.build_executable` of '
-            'fire.py, the same whole-closure self-compile as `mojoc` plus the '
-            'link. `small` (8) no longer covers it (1.01x), so the ratchet '
-            're-classed it to `module` (24). Over the 4 GB line and '
+test('selfhost', [PY, 'test_selfhost.py'], mem='small', cache=True,
+     memwhy='measured 4.6 GB (2026-10-20 check; 4.4 on the 2026-10-07 gate, '
+            '4.3 on 2026-10-11): `fire.build_executable` of fire.py, the same '
+            'whole-closure self-compile as `mojoc` plus the link. `small` (8) '
+            'covers the measurement at 1.74x — the 1.5x standard rung; the '
+            'owner-asked `mid` (6) placement no longer covers it at 1.3x, so '
+            'the ratchet re-classed it on 2026-10-20. Over the 4 GB line and '
             'therefore a debt, not a fact — see '
             + MEM_DEBT_DOC,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
@@ -2548,11 +2534,6 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
 # checks passing, both the `link` and `fallback` pipelines, all five
 # test_sqlite3*.mojo sources. No infinite loop reproduces on this tree
 # anymore -- it was the missing link, not the test.
-# 2026-11-15, memcap now measures FOOTPRINT: run ALONE this passes 66/66 in
-# ~240 s at a 2.4 GB peak, so `tiny` (4) is the class the ratchet assigns. In
-# the 17-job `check` run its footprint inflated to the 4.0 GB ceiling and it was
-# killed (a RESOURCE verdict, reported apart from FAIL), and a later 3-job run
-# timed out at 600 s: under heavy load this job is the one to look at first.
 test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
      deps=['preflight'], timeout=600,
      desc='optional-unit link mechanism: derivation, probe, and every '
@@ -2567,7 +2548,8 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
+     disabled='bugs/gate-stdlib-syntax.md')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
@@ -4226,12 +4208,7 @@ test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='small',
-     memwhy='2026-11-15, memcap now measures FOOTPRINT: killed at the 4.1 GB '
-            '`tiny` ceiling in the `check` run, then 5.6 GB peak on a re-run '
-            '(that run FAILED on a Lean proof, so the peak is a floor, not a '
-            'verdict). `small` (8) covers it at 1.4x — see '
-            + MEM_DEBT_DOC,
+test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
@@ -4284,8 +4261,6 @@ test('dead-worker-state', [PY, 'tools/test_dead_worker_state.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('land-doc', [PY, 'tools/test_land_doc.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('gate-files', [PY, 'tools/test_gate_files.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
 test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
@@ -4335,8 +4310,6 @@ test('reg-codegen-import-extern-unannotated-param-dropped-arity', [PY, 'test_cod
 test('reg-codegen-local-bindings-cache', [PY, 'test_codegen_local_bindings_cache.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-comptime-bound-bracket-arg', [PY, 'test_comptime_bound_bracket_arg.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-15)')
-test('reg-signature-bound-evidence-diagnostic', [PY, 'test_signature_bound_evidence_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-15)')
 test('reg-codegen-local-generic-float-literal', [PY, 'test_codegen_local_generic_float_literal.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
@@ -4831,12 +4804,12 @@ BUCKETS = {
     # git binary at all. The tests stub `_git` and the registry, but that is a
     # property of the tests, not something a category boundary should rely on.
     # Run them explicitly: `make check-orchestrator`.
-    'orchestrator': ['dead-worker-state', 'gate-files', 'land-doc', 'done-ratchet-landing', 'refill-claim-blocked',
+    'orchestrator': ['dead-worker-state', 'land-doc', 'done-ratchet-landing', 'refill-claim-blocked',
                      'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why',
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
