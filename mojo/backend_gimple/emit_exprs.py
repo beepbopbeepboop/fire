@@ -4333,9 +4333,11 @@ def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
     # Select by box kind
     _a = lv if _tag_l else '0'
     _b = rv if _tag_r else '0'
-    _t = gen._call_expr('_Bool', 'mojo_float_cmp_select', [
-        ('int64_t', _a), ('int64_t', _b), ('int', _ires), ('int', _dres)])
-    return '_Bool', _t
+    # The runtime function returns `int`; the `_Bool` is made from it by a
+    # comparison (an `int` call result stored straight into a `_Bool` is
+    # rejected by GCC in a `__GIMPLE` function).
+    _sel = gen._rt_call('int', 'mojo_float_cmp_select', [_a, _b, _ires, _dres])
+    return '_Bool', gen._cmp(_sel, '!=', '0')
 
 
 def _lbt_dict_union(gen, lt: str, lv: str, rt: str, rv: str) -> tuple[str, str]:

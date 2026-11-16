@@ -39,7 +39,8 @@ from mojo.ir import types as T              # noqa: E402
 CORPUS = [
     'myinterpreter.py', 'fire_compiler.py', 'module_loader.py', 'cas.py',
     'ast_rewriter.py', 'mojo/middle/solvers.py', 'mojo/middle/comptime.py',
-    'mojo/middle/iter_factory.py', 'hello.mojo', 'class_jit.mojo',
+    'mojo/middle/iter_factory.py', 'mojo/backend_gimple/module_gen.py',
+    'hello.mojo', 'class_jit.mojo',
     'test_struct.mojo', 'array_ops_jit.mojo',
 ]
 

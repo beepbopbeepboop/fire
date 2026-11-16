@@ -267,10 +267,25 @@ that is meant to be behaviour-preserving:
   byte-identical `.ci`; the new parameters have the C types the parent's
   locals had in the compiler's own output, the one exception being
   `_ls_pointer_arith`'s `ot`, which the parent casts at the call site
-  (`MojoList *`) because that arm uses it as a container. `gen_module_impl`
-  (15,491 lines) is NOT started: its file does not compile in single-file
-  `--dump` mode, so the parameter types of an extracted phase cannot be
-  checked the same way.
+  (`MojoList *`) because that arm uses it as a container.
+- **Stage 6, passes of `gen_module_impl` (started 2026-11-16).**
+  `module_gen.py` now compiles in single-file `--dump` mode (one
+  `any(<generator expression>)` was in the way) and is in gimple-lint's
+  corpus. `tools/extract_arm.py --phase` moves a WHOLE top-level statement
+  (a pass: a `for`, an `if` with its test) into a function that returns
+  nothing; it refuses a statement that returns, that binds a name the
+  parent or one of its nested functions reads afterwards, or that calls a
+  nested function. 18 passes were moved (`_gmp_*`, 3,731 lines):
+  `gen_module_impl` is 15,554 -> 11,841 lines. Generated output for the
+  corpus is byte-identical. In the compiler's own output the new
+  parameters have the C types the locals had; a list or dict parameter
+  whose elements are strings is annotated `list[str]` so element reads
+  stay typed. About 100 of 54,000 runtime calls in `module_gen.ci` differ,
+  most of them boxing calls that are gone because a local no longer
+  shares its name with a differently-typed local of another pass.
+  NOT moved: the passes that call a nested function of `gen_module_impl`
+  (59 of them) or bind a name read later; those need the nested functions
+  lifted to module level first.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.
