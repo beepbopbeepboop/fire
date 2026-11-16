@@ -208,6 +208,17 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
         # arrived as the non-None word 0.
         _gen_dflts = (gen._func_param_defaults.get(f"{api['base']}_start")
                       or api.get('defaults') or [])
+        # The 1:1 name list for these C slots is the api entry's own
+        # `param_names` (every generator registration records it). The
+        # historical `_func_param_names` map is keyed for ORDINARY functions
+        # and never carries a compiled generator, so reading only that here
+        # meant `_gen_pnames` was always empty, the by-name branch below never
+        # ran, and every generator call fell back to the positional-last
+        # convention: `marks(groups=3)` bound 3 to the FIRST slot (`group`)
+        # and answered the default `groups=2`, while `marks(groups=6, group=7)`
+        # answered 7 — a silent wrong answer, exit 0, on master.
+        _gen_pnames = list(api.get('param_names')
+                           or gen._func_param_names.get(fname_raw) or [])
         while len(arg_pairs) < _gen_nfixed:
             _pos = len(arg_pairs)
             if _gen_kwslot >= 0 and _pos == _gen_kwslot:
@@ -216,7 +227,6 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                 continue
             # A keyword argument binds to the slot of its own NAME, not to the
             # next free slot in sequence.
-            _gen_pnames = list(gen._func_param_names.get(fname_raw) or [])
             if (_gen_kwarg_dict and len(_gen_pnames) == len(_gen_expected)
                     and _pos < len(_gen_pnames)
                     and _gen_pnames[_pos] in _gen_kwarg_dict):
