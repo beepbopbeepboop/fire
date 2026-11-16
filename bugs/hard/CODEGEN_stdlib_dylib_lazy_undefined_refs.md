@@ -314,5 +314,16 @@ imported module is not the one the `module_gen.py` pre-pass populates, so the
 exemption never fires. Both edits were reverted (tree clean, the iteration-19
 changes verified still present); recorded rather than shipped as a no-op.
 
-Next step is to find where THAT generator is built and publish the overload
-set there (or scope the refusal by "am I compiling an imported module").
+**FIXED 2026-11-16 (`a00f40d02`).** The symbol and the signature come from
+`mangle_signature`, not from the object, and `_emit_generic_instantiation`
+already tolerates `object=None` (a recursive-cycle instantiation returns it).
+So `elaborate_overload_call` now keeps them and drops only the link object when
+the standalone snippet cannot compile. Measured: `std/collections/span.mojo`
+emits only `std_bit_mask_splat__1_0_4_Bool` (was the unsuffixed
+`std_bit_mask_splat`); the dylib's undefined `_std_` population falls
+**37 -> 31**, and `_std_pwd__linux__getpw_linux__*` now resolves outright.
+
+The remaining 15 unsuffixed-or-undefined names are now the OTHER half only:
+correctly-named references to symbols the definer never emits, because
+BUG-2026-021 drops a genuine overload family whole. That policy is the single
+remaining cause of this table.
