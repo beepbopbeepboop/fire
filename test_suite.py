@@ -2206,6 +2206,14 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_sentinel.py': 1,
     'test_regress_gpu_offload_validation_modular_part1.py': 1,
     'test_regress_gpu_offload_validation_modular_part4.py': 1,
+    # Four regression pins gained a literal `timeout=` on 2026-11-15 (a
+    # subprocess of the compiler under test). Recorded rather than converted:
+    # each is one child process with a real wall-clock bound, which is what a
+    # residue row is for.
+    'test_regress_generator_keyword_arg_binding.py': 3,
+    'test_regress_scriptutil_generator_closure.py': 3,
+    'test_regress_yield_from_module_generator.py': 2,
+    'test_regress_yield_from_word_iterator.py': 3,
     'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2767,7 +2775,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # rather than freezing it. `stdlib-syntax` joined it 2026-11-15
     # (`bugs/gate-stdlib-syntax.md`): the job is a whole-tree gcc
     # -fsyntax-only pass whose remaining reds are tracked there.
-    expected_disabled = ['gimple', 'metalgpu', 'stdlib-syntax']
+    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled', 'stdlib-syntax']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2912,7 +2920,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # rather than freezing it. `stdlib-syntax` joined it 2026-11-15
     # (`bugs/gate-stdlib-syntax.md`): the job is a whole-tree gcc
     # -fsyntax-only pass whose remaining reds are tracked there.
-    expected_disabled = ['gimple', 'metalgpu', 'stdlib-syntax']
+    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled', 'stdlib-syntax']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
