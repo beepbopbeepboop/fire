@@ -23,6 +23,10 @@ import threading
 from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
 from mojo.middle.simd_width import is_valid_width as _simd_width_is_valid
+from mojo.middle.float8_dtype import FLOAT8_TYPE_NAMES as _FLOAT8_DTYPE_NAMES
+from mojo.middle.float8_dtype import SCALAR_TYPE_SPELLINGS as _SCALAR_DTYPE_SPELLINGS
+from mojo.middle.float8_dtype import conversion_message as _float8_conversion_message
+from mojo.middle.float8_dtype import operation_message as _float8_operation_message
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -4834,28 +4838,17 @@ class _MojoScalarType:
 # a binary operation with one, are refused with Modular's own diagnostic
 # instead of silently computing on a type with no rule behind it (the float8
 # dtype legality fix for `op_with_unsupported_type_error.mojo`, host half;
-# pinned by test_regress_gpu_offload_validation_modular_part8.py). The
-# family is enumerated ONCE here, the interpreter's copy of the closed list
-# the other paths carry (formal/model/types.py's NARROW_FLOAT_TYPE_NAMES is
-# the formal path's).
-_FLOAT8_TYPE_NAMES = (
-    'Float8_e3m4', 'Float8_e4m3fn', 'Float8_e4m3fnuz',
-    'Float8_e5m2', 'Float8_e5m2fnuz', 'Float8_e8m0fnu',
-)
+# pinned by test_regress_gpu_offload_validation_modular_part8.py). The family
+# and its lowered spellings are `mojo.middle.float8_dtype`'s one table, read
+# by the compiled path's resolver and refusals too — not a second copy here;
+# formal/model/types.py's NARROW_FLOAT_TYPE_NAMES is the formal path's.
+_FLOAT8_TYPE_NAMES = _FLOAT8_DTYPE_NAMES
 
-# The lowered spellings of the scalar types in the interpreter's type table,
-# the IR names Modular's diagnostics word the types in (`conversion from
-# 'f8e3m4' to 'f32' is not implemented`); a declared type outside the table
-# falls back to its raw spelling at the refusal site.
-_SCALAR_TYPE_SPELLINGS = {
-    'Int': 'i64', 'Int8': 'i8', 'Int16': 'i16', 'Int32': 'i32', 'Int64': 'i64',
-    'UInt': 'u64', 'UInt8': 'u8', 'UInt16': 'u16', 'UInt32': 'u32', 'UInt64': 'u64',
-    'Float': 'f64', 'Float16': 'f16', 'Float32': 'f32', 'Float64': 'f64',
-    'BFloat16': 'bf16', 'Bool': 'bool',
-    'Float8_e3m4': 'f8e3m4', 'Float8_e4m3fn': 'f8e4m3fn',
-    'Float8_e4m3fnuz': 'f8e4m3fnuz', 'Float8_e5m2': 'f8e5m2',
-    'Float8_e5m2fnuz': 'f8e5m2fnuz', 'Float8_e8m0fnu': 'f8e8m0fnu',
-}
+# The lowered spellings of the scalar types in the type table, the IR names
+# Modular's diagnostics word the types in (`conversion from 'f8e3m4' to 'f32'
+# is not implemented`); a declared type outside the table falls back to its
+# raw spelling at the refusal site.
+_SCALAR_TYPE_SPELLINGS = _SCALAR_DTYPE_SPELLINGS
 
 
 class _MojoFloat8Value(float):
@@ -7654,9 +7647,9 @@ class Interpreter:
                     and _SCALAR_TYPE_SPELLINGS[type_ann] == value.spelling):
                 return value
             self._refuse_unsupported_float8(
-                node, "conversion from '" + value.spelling + "' to '"
-                + _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)
-                + "' is not implemented")
+                node, _float8_conversion_message(
+                    value.spelling,
+                    _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)))
         if type_ann in _FLOAT8_TYPE_NAMES:
             if value is None:
                 return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], 0.0)
@@ -7731,8 +7724,7 @@ class Interpreter:
         f8_spelling = _float8_operand_spelling(current, rhs)
         if f8_spelling is not None:
             self._refuse_unsupported_float8(
-                node, "operation with a type '" + f8_spelling
-                + "' is not implemented")
+                node, _float8_operation_message(f8_spelling))
         op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
         if op == '+':
             return current + rhs
@@ -9448,8 +9440,7 @@ class Interpreter:
         f8_spelling = _float8_operand_spelling(left, right)
         if f8_spelling is not None:
             self._refuse_unsupported_float8(
-                expr, "operation with a type '" + f8_spelling
-                + "' is not implemented")
+                expr, _float8_operation_message(f8_spelling))
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -9536,8 +9527,7 @@ class Interpreter:
             f8_spelling = _float8_operand_spelling(left, right)
             if f8_spelling is not None:
                 self._refuse_unsupported_float8(
-                    expr, "operation with a type '" + f8_spelling
-                    + "' is not implemented")
+                    expr, _float8_operation_message(f8_spelling))
             if not self._apply_compare_op(op, left, right):
                 return False
             left = right
