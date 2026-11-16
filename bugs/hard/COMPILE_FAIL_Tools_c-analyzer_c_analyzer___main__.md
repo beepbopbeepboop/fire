@@ -335,3 +335,22 @@ diagnosable, and treating it as an ordering bug would be chasing the
    `c_parser/parser/_func_body.py` and `c_parser/match.py` still fail in this
    closure (callable-valued loop refusal fixed in `c_analyzer/__init__.py:check_all`),
    so clearing `render` alone will not make this file build.
+
+## 2026-11-16 (wakeup 32): re-measured -- the "exactly two lines" above is stale
+
+`python3 fire.py build -o .tmp/ca/out .tmp/ca/c_analyzer/__main__.py` on this
+tree: exit 1, and the failure is no longer only the two coroutine refusals.
+
+* the same two `Unsupported shape(s)` lines for `fmt_summary` / `section` are
+  still there;
+* the link step now also emits `link_inline_module.cpp` with **38 C++ compile
+  errors**, e.g. `invalid conversion from 'int64_t' to 'char*'`,
+  `request for member 'kind' in 'parent', which is of non-class type 'char*'`,
+  and `'KIND' was not declared in this scope` (lines 100, 163, 169, 170, 268
+  of that generated file);
+* a third unresolved callee appears in the log, `anonymous_names(...)`.
+
+So the file's remaining work is not one capture-model defect: the C++ backend
+also mis-models at least one value as `char*` where a class instance is
+required, and `KIND` is emitted without its declaration. Recorded rather than
+folded into the coroutine item, because the two have different owners.
