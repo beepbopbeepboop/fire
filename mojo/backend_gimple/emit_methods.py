@@ -937,17 +937,6 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
             # of this dispatch scores the same way in `_resolve_overload`.
             chosen = _pick_overload_by_ctype(
                 matching, [p[0] for p in arg_pairs])
-            if chosen is None:
-                # No ctype signal at all. Every survivor already has this
-                # call's arity, and `_emit_call` coerces each argument to
-                # the chosen overload's declared C parameter type, so any
-                # survivor is ABI-valid; naming one is strictly better than
-                # the bare symbol no overload defines. Deterministic first,
-                # the same tie-break `_pick_overload_by_ctype` itself uses
-                # when two candidates score equally. Measured:
-                # `StringDict[StringSpan, Int][StringSpan("fruit")]` — both
-                # `__getitem__` overloads erase to `(self, int64_t)`.
-                chosen = matching[0]
     overload_id = (chosen or {}).get('overload_id', '') or ''
     mangled = _gmm_as_str(_ggf._struct_method_csym(gen, sn, method, overload_id))
     ret_type = (chosen or {}).get('ret_type') or gen.func_return_types.get(
@@ -2768,105 +2757,6 @@ def _lmc_tagged_word_receiver(gen, node: gimple_ctypes.CallExpr, method: str, ot
     return None
 
 
-_IMPLICIT_COPY_RUNTIME = {
-    'MojoList *': 'mojo_list_copy',
-    'MojoDict *': 'mojo_dict_copy',
-    'MojoSet *': 'mojo_set_copy',
-    'MojoBytes *': 'mojo_bytes_copy',
-}
-
-
-def _emit_fieldwise_copy_into(gen, dst, src_local, sname, depth):
-    """Copy every registered field of `sname` from `src_local` into `dst`.
-
-    This is real Mojo's implicit copy for a fieldwise struct: one copy per
-    field (struct_field_types, the same table the ctor fallback writes),
-    DEEP for runtime CONTAINER fields (`MojoList`/`MojoDict`/`MojoSet`/
-    `MojoBytes` have their own `*_copy`) and for in-TU struct-pointer
-    fields. A raw word copy would alias the source's mutable state —
-    measured: the cycle wrapper's aliased inner cursor (test_cycle_copyable),
-    and `BinaryHeap[Int](copy=heap)` sharing `_data` so popping one heap
-    drained the other. GIMPLE: a component_ref is not a valid store RHS
-    (`invalid RHS for gimple memory store: 'component_ref'`, measured) —
-    every field read and every copied store goes through a local.
-    """
-    for _fn in (gen.struct_field_types.get(sname) or {}):
-        _fnm = gimple_ctypes._safe_field(_as_str(_fn))
-        _ft = _as_str((gen.struct_field_types.get(sname) or {})[_fn])
-        _fv = gen._new_temp(_ft)
-        gen._emit(f"  {_fv} = {src_local}->{_fnm};")
-        _cpy = _IMPLICIT_COPY_RUNTIME.get(_ft)
-        if _cpy is not None:
-            _fv = gen._call_expr(_ft, _cpy, [(_ft, _fv)])
-        _fsn = (gimple_exprtypes._struct_name_of(_ft)
-                if _ft.endswith(' *') else None)
-        if (_fsn and depth < 4
-                and _fsn in getattr(gen, '_intu_prereg_structs', ())):
-            _sub = gen._new_temp(_ft)
-            gen._struct_allocs_needed.add(_fsn)
-            gen._rt_into(_sub, f"_alloc_{_fsn}", [])
-            # PART 6 (2026-10-23, family D piece 2): a field whose
-            # struct type registers an EXPLICIT copy constructor (an
-            # __init__ resolvable on the `copy` kwarg — Observable's,
-            # CopyCounter's) is copied THROUGH that constructor, not by
-            # raw fieldwise recursion: real Mojo's implicit field copy
-            # invokes the field type's copy ctor, and that ctor is exactly
-            # where the counting side effect lives (the Observable copy
-            # ctor's `self._copies.value()[] += 1` — the raw recursion
-            # would copy the pointer word and skip the increment, leaving
-            # copy_b at 0). Structs with no copy ctor (the _ListIterOwned
-            # family) keep the raw recursion in the else.
-            _fcands = gen._struct_method_signatures.get(
-                _gmm_sms_key(_fsn, '__init__'))
-            _fch = None
-            if _fcands:
-                _fch = gen._resolve_overload(
-                    _fcands, [],
-                    [('copy', gimple_ctypes.IdentExpr(name=_fv))])
-            if _fch is not None:
-                init_fname = gen._struct_method_csym(
-                    _fsn, '__init__', _fch['overload_id'])
-                gen._rt_void(f"{init_fname}", [_sub, f"{_fv}"])
-            else:
-                _emit_fieldwise_copy_into(gen, _sub, _fv, _fsn, depth + 1)
-            _fv = _sub
-        gen._emit(f"  {dst}->{_fnm} = {_fv};")
-        # PART 6 (2026-10-22, family C): a TAGGED-Optional field's is_some
-        # side-band is a layout-only member (module_gen's typedef renderer
-        # adds it; it is NOT in struct_field_types), so this fieldwise loop
-        # never copies it — the fresh object's tag byte would be malloc
-        # garbage (its _alloc is a plain malloc) and every tag reader
-        # (`if self._f:` -> `f_is_some`) would act on uninitialized state.
-        # Measured: test_once's `it.copy()` copied the word, not the tag.
-        _tagged_f = gen._tagged_optional_fields.get(sname)
-        if _tagged_f and _as_str(_fn) in _tagged_f:
-            _sv = gen._new_temp('_Bool')
-            gen._emit(f"  {_sv} = {src_local}->{_fnm}_is_some;")
-            gen._emit(f"  {dst}->{_fnm}_is_some = {_sv};")
-    # The presence words are not in struct_field_types (see
-    # StructDef.presence_fields), so the loop above never copies them: a
-    # copy of an object that had a minted field set must keep answering
-    # hasattr True.
-    gimple_ctypes.presence_copy_emit(
-        gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
-
-
-def _lower_implicit_struct_copy(gen, csn, ot, ov):
-    """Allocate `csn` and fill it with a fieldwise copy of `ov`.
-
-    Returns `(ctype, value)` or None when this struct's layout was never
-    registered (a reflected/dylib-only struct has no fields to copy).
-    """
-    if not gen.struct_field_types.get(csn):
-        return None
-    t = gen._new_temp(f'{csn} *')
-    gen._struct_allocs_needed.add(csn)
-    gen._rt_into(t, f"_alloc_{csn}", [])
-    _recv_local = gen._ensure_local(ot, ov)
-    _emit_fieldwise_copy_into(gen, t, _recv_local, csn, 0)
-    return f'{csn} *', t
-
-
 def _lmc_copy(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[str, str]:
     """`x.copy()`.
 
@@ -2938,11 +2828,106 @@ def _lmc_copy(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[str, str]
             # _CycleIterator wrapper — note the latter DOES register
             # a fieldwise __init__, so the gate is "resolvable on
             # the copy kwarg", not "has any __init__"). Synthesize
-            # real Mojo's implicit fieldwise copy; see
-            # `_emit_fieldwise_copy_into`.
-            _implicit = _lower_implicit_struct_copy(gen, _csn, ot, ov)
-            if _implicit is not None:
-                return _implicit
+            # real Mojo's implicit fieldwise copy: alloc + one copy
+            # per source field (struct_field_types, the same table
+            # the ctor fallback writes), DEEP for fields that are
+            # pointers to other in-TU structs (a pointer alias
+            # shares the field's mutable state — measured: the
+            # cycle wrapper's aliased inner cursor, test_cycle_
+            # copyable). GIMPLE: a component_ref is not a valid
+            # store RHS (`invalid RHS for gimple memory store:
+            # 'component_ref'`, measured) — every field read and
+            # every deep-copied store goes through a local.
+            _cf = gen.struct_field_types.get(_csn)
+            if _cf:
+                t = gen._new_temp(f'{_csn} *')
+                gen._struct_allocs_needed.add(_csn)
+                gen._rt_into(t, f"_alloc_{_csn}", [])
+                _recv_local = gen._ensure_local(ot, ov)
+
+                def _emit_fw_copy(dst, src_local, sname, depth):
+                    for _fn in (gen.struct_field_types.get(sname)
+                                or {}):
+                        _fnm = gimple_ctypes._safe_field(_as_str(_fn))
+                        _ft = _as_str((gen.struct_field_types
+                                        .get(sname) or {})[_fn])
+                        _fv = gen._new_temp(_ft)
+                        gen._emit(f"  {_fv} = {src_local}->{_fnm};")
+                        _fsn = (gimple_exprtypes._struct_name_of(_ft)
+                                if _ft.endswith(' *') else None)
+                        if (_fsn and depth < 4
+                                and _fsn in getattr(
+                                    gen, '_intu_prereg_structs', ())):
+                            _sub = gen._new_temp(_ft)
+                            gen._struct_allocs_needed.add(_fsn)
+                            gen._rt_into(_sub, f"_alloc_{_fsn}", [])
+                            # PART 6 (2026-10-23, family D piece 2): a
+                            # field whose struct type registers an
+                            # EXPLICIT copy constructor (an __init__
+                            # resolvable on the `copy` kwarg —
+                            # Observable's, CopyCounter's) is copied
+                            # THROUGH that constructor, not by raw
+                            # fieldwise recursion: real Mojo's implicit
+                            # field copy invokes the field type's copy
+                            # ctor, and that ctor is exactly where the
+                            # counting side effect lives (the Observable
+                            # copy ctor's `self._copies.value()[] += 1`
+                            # — the raw recursion would copy the pointer
+                            # word and skip the increment, leaving
+                            # copy_b at 0). The (a)-branch above does
+                            # the same for the RECEIVER; this is the
+                            # field-level twin. Structs with no copy
+                            # ctor (the _ListIterOwned family) keep the
+                            # raw recursion in the else.
+                            _fcands = gen._struct_method_signatures.get(
+                                _gmm_sms_key(_fsn, '__init__'))
+                            _fch = None
+                            if _fcands:
+                                _fch = gen._resolve_overload(
+                                    _fcands, [],
+                                    [('copy', gimple_ctypes.IdentExpr(
+                                        name=_fv))])
+                            if _fch is not None:
+                                init_fname = gen._struct_method_csym(
+                                    _fsn, '__init__',
+                                    _fch['overload_id'])
+                                gen._rt_void(f"{init_fname}", [_sub, f"{_fv}"])
+                            else:
+                                _emit_fw_copy(
+                                    _sub, _fv, _fsn, depth + 1)
+                            _fv = _sub
+                        gen._emit(f"  {dst}->{_fnm} = {_fv};")
+                        # PART 6 (2026-10-22, family C): a TAGGED-
+                        # Optional field's is_some side-band is a
+                        # layout-only member (module_gen's typedef
+                        # renderer adds it; it is NOT in
+                        # struct_field_types), so this fieldwise loop
+                        # never copies it — the fresh object's tag
+                        # byte would be malloc garbage (its _alloc is
+                        # a plain malloc) and every tag reader
+                        # (`if self._f:` -> `f_is_some`) would act on
+                        # uninitialized state. Measured: test_once's
+                        # `it.copy()` copied the word, not the tag.
+                        # Propagate it with the same same-type
+                        # component-ref read + store the writers use.
+                        _tagged_f = gen._tagged_optional_fields.get(
+                            sname)
+                        if _tagged_f and _as_str(_fn) in _tagged_f:
+                            _sv = gen._new_temp('_Bool')
+                            gen._emit(
+                                f"  {_sv} = {src_local}->{_fnm}"
+                                f"_is_some;")
+                            gen._emit(
+                                f"  {dst}->{_fnm}_is_some = {_sv};")
+                    # The presence words are not in struct_field_types
+                    # (see StructDef.presence_fields), so the loop above
+                    # never copies them: a copy of an object that had a
+                    # minted field set must keep answering hasattr True.
+                    gimple_ctypes.presence_copy_emit(
+                        gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
+
+                _emit_fw_copy(t, _recv_local, _csn, 0)
+                return f'{_csn} *', t
     return ot, ov
 
 

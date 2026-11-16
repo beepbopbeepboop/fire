@@ -1624,20 +1624,11 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
     if gimple_ctypes.source_declares(text, ['struct'], name, '['):
         gen._imported_generic_structs.setdefault(sym, src_path)
         return True
-    # A declaration with a BRACKETED head (`def f[T]()`) makes this a generic;
-    # one with a bare head (`def f()`) does not. A name with BOTH -- Mojo's
-    # overloaded free functions routinely pair them (`is_apple_gpu()` and
-    # `is_apple_gpu[subarch: StaticString]()`) -- must be registered as an
-    # OVERLOAD too, or the call site has no overload set to match and emits
-    # the unsuffixed symbol, which no overload defines. The opener set is
-    # `'(['`, not `'('`: a bracketed head is a declaration of the same name.
-    _is_generic_fn = gimple_ctypes.source_declares(text, ['fn', 'def'], name, '[')
-    if _is_generic_fn:
+    if gimple_ctypes.source_declares(text, ['fn', 'def'], name, '['):
         gen._imported_generics.setdefault(sym, src_path)
-    if len(gimple_ctypes.source_decl_ends(text, ['fn', 'def'], name, '([')) > 1:
-        gen._imported_overloads.setdefault(sym, src_path)
         return True
-    if _is_generic_fn:
+    if len(gimple_ctypes.source_decl_ends(text, ['fn', 'def'], name, '(')) > 1:
+        gen._imported_overloads.setdefault(sym, src_path)
         return True
     # A struct DEFINITION (not a generic one): inline the whole module, which
     # brings the typedef, its `__init__`, its methods and its class
@@ -1955,7 +1946,7 @@ def _register_link_imports(gen, stmts: list) -> list:
                         except Exception:
                             _ov_src = ''
                         if len(gimple_ctypes.source_decl_ends(
-                                _ov_src, ['fn', 'def'], name, '([')) > 1:
+                                _ov_src, ['fn', 'def'], name, '(')) > 1:
                             gen._imported_overloads.setdefault(sym, source)
                     # Record the module source for any imported name, so a
                     # comptime call to it can be evaluated at compile time.
