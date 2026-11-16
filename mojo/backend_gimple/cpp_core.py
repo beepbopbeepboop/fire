@@ -11477,6 +11477,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                   else (gimple_ctypes.TypeLattice.join(
                                       _lit_etype, _lit_ect) or 'int64_t'))
                 _iter_elem = _lit_etype
+            elif isinstance(s.iterable, gimple_ctypes.StringLiteral):
+                # `for c in "abc":` -- a string LITERAL used directly as the
+                # loop iterable. It is the same string iteration as the
+                # string-local arm below, and without this arm it fell to the
+                # generic range-for, `for (auto c : "abc")`, which C++ runs
+                # over the literal's `char[4]` ARRAY: four `char`s including the
+                # terminating NUL, each yielded as an integer
+                # (`list(letters())` printed `[97, 98, 99, 0]` where CPython
+                # prints `['a', 'b', 'c']`;
+                # CODEGEN_str_iteration_link_mode_crash, package B).
+                _iter_list_expr = (f"mojo_str_chars((char *)({gen._cpp_expr(s.iterable)}))")
+                _iter_elem = 'char *'
             elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
                     and gen._cpp_declared.get(s.iterable.name) == 'char *'):
