@@ -1,9 +1,9 @@
-# Land: should finished branch bug-codegen-none-passed-to-a-parameter-i land?
+# Land: should finished branch fix-proof-bug-codegen-stdlib-dylib-lazy-undefined-r2 land?
 
-**Branch:** `work/bug-codegen-none-passed-to-a-parameter-i` (task `bug-codegen-none-passed-to-a-parameter-i`; its tip is also saved as `refs/archive/work/bug-codegen-none-passed-to-a-parameter-i`, so dropping it loses nothing).
-**Age:** last commit 2026-11-16, first unlanded commit 2026-11-16; 1 commit(s) ahead of master, 41 behind it; task started 2026-11-16 09:49:43
-**Original work:** Fix the bug in bugs/CODEGEN_none_passed_to_a_parameter_is_not_none.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning te
-**Original claims:** bug:CODEGEN_none_passed_to_a_parameter_is_not_none
+**Branch:** `work/fix-proof-bug-codegen-stdlib-dylib-lazy-undefined-r2` (task `fix-proof-bug-codegen-stdlib-dylib-lazy-undefined-r2`; its tip is also saved as `refs/archive/work/fix-proof-bug-codegen-stdlib-dylib-lazy-undefined-r2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 5 commit(s) ahead of master, 6 behind it; task started 2026-11-15 20:47:06
+**Original work:** Branch work/bug-codegen-stdlib-dylib-lazy-undefined-r2 (a finished worker branch; original task: You CONTINUE task 'bug-codegen-stdlib-dylib-lazy-undefined': the previous instance stopped (process dea
+**Original claims:** bug:CODEGEN_stdlib_dylib_lazy_undefined_refs-part4
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-16 16:05:45: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-16; 1 commit(s) ahead of master, 41 behind it; task started 2026-11-16 09:49:43)
-  Branch: work/bug-codegen-none-passed-to-a-parameter-i
-  Conflicting files: bugs/LAND-codegen-stdlib-dylib-lazy-undef-3.md, bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md, mojo/backend_gimple/emit_calls.py, mojo/backend_gimple/module_gen.py, test_gimple.py
+- 2026-11-15 21:24:27: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 5 commit(s) ahead of master, 6 behind it; task started 2026-11-15 20:47:06)
+  Branch: work/fix-proof-bug-codegen-stdlib-dylib-lazy-undefined-r2
+  Conflicting files: bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md

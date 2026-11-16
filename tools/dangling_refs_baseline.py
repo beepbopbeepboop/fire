@@ -39,12 +39,7 @@ BASELINE = {
     # spelled here on purpose: the count moves as the record is appended to,
     # and `--write-baseline` rewrites this file, so a comment that names them
     # would be lost on the next regeneration.)
-    # Raised 5 -> 6 and the erase-3 entry added when
-    # CODEGEN_simd_and_array_values_erase_to_int64.md was retired on 2026-11-16:
-    # both docs are historical LANDING RECORDS that legitimately name the doc
-    # they merged, so the citation is deliberate, not a dangling pointer.
-    'bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md': 6,
-    'bugs/mid/LAND-codegen-simd-and-array-values-erase-3.md': 1,
+    'bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md': 5,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 1,
@@ -197,10 +192,6 @@ BASELINE = {
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
-    # Synthetic fixture, not a citation: test_swarm_replan writes a throwaway
-    # `hard/Xcase.md` into its own temp dir and asserts SPLIT parsing on it, so
-    # the string is test data. Added when c2be80506 introduced the fixture.
-    'tools/test_swarm_replan.py': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'fire.py': 1,
     'formal/arm64_codegen.py': 1,

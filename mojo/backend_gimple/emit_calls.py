@@ -3013,6 +3013,14 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # above uses to keep the stub.
         if (isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.name in gen.func_return_types
+                # A name with a generic DECLARATION is not "owned" by the
+                # plain overload that happens to share it: a bracketed call
+                # really names the generic, and when that generic cannot be
+                # instantiated here the pre-existing disposition is the stub
+                # below, not a refusal (the generic itself was stripped from
+                # `func_return_types` before plain overloads were kept).
+                and node.func.obj.name not in getattr(
+                    gen, '_local_generic_func_names', ())
                 and node.func.obj.name not in gen.imported_symbols
                 and node.func.obj.name not in gen._imported_generic_structs):
             _base_name = node.func.obj.name
@@ -11053,6 +11061,117 @@ def _lnc_unknown(gen, fname_raw: str, fname: str) -> tuple[str, str] | None:
     return None
 
 
+def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr):
+    """The C symbol for a call to one of THIS module's own same-named free
+    functions, or None when the name is not an overload set.
+
+    A module may declare two overloads of one free function
+    (`def pick(x: Int)` / `def pick(x: Bool)`,
+    `std/bit/mask.mojo`'s `splat`, `std/memory/memory.mojo`'s `_free`).
+    Both definitions now emit, each under the symbol its own parameter
+    signature mangles to; the call must name ONE of them. The selection is
+    `_resolve_overload` — the same arity/keyword/argument-type scorer the
+    struct-method and imported-overload paths use — over candidate dicts
+    built from the defining nodes. A truly indistinguishable pair falls
+    back to the first in declaration order, which is also the canonical
+    cross-module signature (see emit_funcs._def_is_canonical), so the call
+    still names a definition that exists rather than a bare stub."""
+    over = getattr(gen, '_local_def_overloads', None) or {}
+    nodes = over.get(fname_raw)
+    if not nodes or len(nodes) < 2:
+        return None
+    cands = []
+    for n in nodes:
+        pnames = []
+        pts = [gimple_ctypes.c_client_callable_ctype(t)
+               for t in gen._signature_ctypes(n.params, n)]
+        star_idx = -1
+        for _ppn, _ppt in n.params:
+            pnames.append(_as_str(_ppn).lstrip('*'))
+            if star_idx < 0 and _ppn.startswith('*') and not _ppn.startswith('**'):
+                star_idx = len(pnames) - 1
+        defaults = getattr(n, 'param_has_default', None) or {}
+        _real = [(pn, pt) for pn, pt in n.params
+                 if not (pn.startswith('*') and not pn.startswith('**'))]
+        if star_idx >= 0:
+            _pre = n.params[:star_idx]
+            min_arity = 0
+            for _pn, _pt in _pre:
+                if _pn not in defaults:
+                    min_arity += 1
+            max_arity = float('inf')
+            pts = [c for c in pts if c != '...']
+        else:
+            min_arity = 0
+            for _pn, _pt in _real:
+                if _pn not in defaults and not _pn.startswith('**'):
+                    min_arity += 1
+            max_arity = len(_real)
+        cands.append({
+            'overload_id': '',
+            'param_names': pnames,
+            'param_ctypes': pts,
+            'min_arity': min_arity,
+            'max_arity': max_arity,
+            'has_varargs': star_idx >= 0,
+            'pre_star_count': star_idx if star_idx >= 0 else None,
+        })
+    # Prefer a candidate that is NOT the function currently being emitted.
+    # A source call to one's own name inside one's own body is normally a
+    # call to a DIFFERENT overload (`to_integer(...)` inside `to_integer`), and
+    # when type erasure cannot separate two overloads (`b64encode(span)`
+    # inside a sibling `b64encode`) choosing self would emit a self-recursive
+    # body with the wrong arity. Only when every surviving candidate is the
+    # enclosing function does this stay a genuine recursive call.
+    _cur_node = getattr(gen, '_current_func_node', None)
+    _nonself = []
+    _nonself_nodes = []
+    for _ci in range(len(cands)):
+        if nodes[_ci] is not _cur_node:
+            _nonself.append(cands[_ci])
+            _nonself_nodes.append(nodes[_ci])
+    chosen = None
+    if _nonself:
+        chosen = _resolve_overload(gen, _nonself, node.args,
+                                   getattr(node, 'kwargs', None))
+    if chosen is not None:
+        cands = _nonself
+        nodes = _nonself_nodes
+    else:
+        chosen = _resolve_overload(gen, cands, node.args,
+                                   getattr(node, 'kwargs', None))
+    # Recover the NODE by candidate identity. Never carry the FunctionDef
+    # inside the candidate dict: the self-hosted backend erases a dict's
+    # values to one boxed word, so a node stored there comes back as an
+    # opaque int and `_func_csym` would read its fields off that word.
+    _def = nodes[0]
+    for _ci in range(len(cands)):
+        if cands[_ci] is chosen:
+            _def = nodes[_ci]
+            break
+    _def_pts = [gimple_ctypes.c_client_callable_ctype(t)
+                for t in gen._signature_ctypes(_def.params, _def)]
+    _sym = (getattr(gen, '_def_sym_by_id', None) or {}).get(id(_def)) \
+        or gen._func_csym(fname_raw, _def_pts)
+    # The chosen overload's own parameter/return types, under its own symbol
+    # (the bare-name slots belong to whichever overload was registered last).
+    gen.func_param_types[_sym] = _def_pts
+    _ret_ann = getattr(_def, 'return_type', None)
+    if isinstance(_ret_ann, str):
+        gen.func_return_types[_sym] = gen._resolve_type(_ret_ann)
+    else:
+        # An unannotated overload (the `raises`-only validators here) is not
+        # the bare-name slot's `char *`/`int64_t` from a sibling; infer THIS
+        # body. Left at the sibling's type, a void callee was used as an
+        # expression ("invalid use of void expression").
+        try:
+            _rt = gen._infer_return_type(_def.body)
+        except Exception:
+            _rt = 'void'
+        gen.func_return_types[_sym] = _rt or 'void'
+    return _sym
+
+
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
@@ -11084,7 +11203,10 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # overload-suffix scheme the definition itself used), so route
     # straight to it, bypassing BUILTIN_VALUE_MAP entirely, whenever this
     # module locally binds the name.
-    if fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
+    _over_sym = _local_overload_call_symbol(gen, fname_raw, node)
+    if _over_sym:
+        fname = _over_sym
+    elif fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
         fname = gen._func_csym(fname_raw)
     # C reserved function renaming
     elif (fname_raw in gimple_ctypes._C_RESERVED_FUNCS and fname_raw not in gen.func_return_types
@@ -11365,7 +11487,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # arguments" GCC errors against the correctly-suffixed prototype.
     # Function-local import: gimple_gen_funcs already imports this module.
     import mojo.backend_gimple.emit_funcs as _ggf_eff
-    expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
+    # For a call this module resolved to ONE of its own same-named free
+    # functions, the arity/coercion contract is THAT overload's, not the
+    # canonical first declaration's: `_effective_param_types(fname_raw)` reads
+    # tier 1 (`_local_def_pts`) by bare name, so a 1-argument `b64encode(span)`
+    # was padded to the 2-argument sibling's arity ("too many arguments").
+    # `_local_overload_call_symbol` recorded the chosen overload's ctypes under
+    # the emitted `fname`; prefer it exactly when the name is an overload set.
+    _ov_nodes = (getattr(gen, '_local_def_overloads', None) or {}).get(fname_raw)
+    if _ov_nodes and len(_ov_nodes) >= 2:
+        expected_params = gen.func_param_types.get(fname) or []
+    else:
+        expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
     if not expected_params:
         expected_params = gen.func_param_types.get(fname_raw, [])
     if not expected_params and fname_raw in gen._KNOWN_SIGS:
@@ -11886,18 +12019,6 @@ def _lower_struct_constructor(gen, struct_name: str,
     # field-assignment branch for every no-__init__ struct kwarg ctor.
     _n_kw = len(kwargs) if kwargs else 0
     _n_args = len(args) if args else 0
-    # `T(copy=x)` is real Mojo's copy-constructor spelling. A struct that
-    # declares its own copy ctor registers an `__init__` candidate taking
-    # the `copy` keyword (resolved below). A fieldwise struct does not:
-    # `Copyable` synthesizes the copy, so the call is a fieldwise copy of
-    # `x`, NOT a call to any declared `__init__`. Without this arm the
-    # call fell through to the unsuffixed `__init__` (a symbol no overload
-    # defines, now that an overloaded dunder's bare declaration is
-    # suppressed) with the `copy` value dropped — `BinaryHeap[Int]
-    # (copy=heap)` compiled to a zero-capacity heap.
-    _copy_src = None
-    if not _n_args and _n_kw == 1 and _as_str(kwargs[0][0]) == 'copy':
-        _copy_src = kwargs[0][1]
 
     # Same-file overload resolution: if this struct's __init__ overloads
     # (including any @fieldwise_init-synthesized one) were registered from
@@ -11931,19 +12052,6 @@ def _lower_struct_constructor(gen, struct_name: str,
         # same-file resolution existed: fall straight through to the
         # single-signature path below (unsuffixed call if __init__ exists
         # at all, field-assignment otherwise) rather than returning here.
-
-    # No declared candidate accepted `copy=` (see `_copy_src`): the struct
-    # gets its implicit copy constructor from `Copyable`, so synthesize
-    # real Mojo's fieldwise copy into the storage already allocated above.
-    # This must come BEFORE the `_struct_has_init` fallback, whose
-    # unsuffixed `__init__` is not a symbol any overload defines.
-    if _copy_src is not None and gen.struct_field_types.get(struct_name):
-        _copy_t, _copy_v = gen.lower_expr(_copy_src)
-        if _copy_t == ctype:
-            _copy_local = gen._ensure_local(_copy_t, _copy_v)
-            gmp._emit_fieldwise_copy_into(
-                gen, t, _copy_local, struct_name, 0)
-            return ctype, t
 
     # If struct has __init__, call it with the provided arguments.
     # A plain `elif` after this (large) block is unreliable on the

@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-codegen-stdlib-dylib-lazy-undef-2 land?
+# Land: should finished branch fix-proof-bug-land-codegen-stdlib-dylib-lazy-undef-2 land?
 
-**Branch:** `work/bug-land-codegen-stdlib-dylib-lazy-undef-2` (task `bug-land-codegen-stdlib-dylib-lazy-undef-2`; its tip is also saved as `refs/archive/work/bug-land-codegen-stdlib-dylib-lazy-undef-2`, so dropping it loses nothing).
-**Age:** last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 61 behind it; task started 2026-11-16 09:32:59
-**Original work:** Fix the bug in bugs/LAND-codegen-stdlib-dylib-lazy-undef-6.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or r
-**Original claims:** bug:LAND-codegen-stdlib-dylib-lazy-undef-6
+**Branch:** `work/fix-proof-bug-land-codegen-stdlib-dylib-lazy-undef-2` (task `fix-proof-bug-land-codegen-stdlib-dylib-lazy-undef-2`; its tip is also saved as `refs/archive/work/fix-proof-bug-land-codegen-stdlib-dylib-lazy-undef-2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 7 commit(s) ahead of master, 8 behind it; task started 2026-11-16 01:20:01
+**Original work:** Branch work/bug-land-codegen-stdlib-dylib-lazy-undef-2 (a finished worker branch; original task: Fix the bug in bugs/LAND-codegen-stdlib-dylib-lazy-undefined-r2.md at its ROOT CAUSE. Read the doc's St
+**Original claims:** bug:LAND-codegen-stdlib-dylib-lazy-undefined-r2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-16 16:05:44: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 61 behind it; task started 2026-11-16 09:32:59)
-  Branch: work/bug-land-codegen-stdlib-dylib-lazy-undef-2
-  Conflicting files: bugs/LAND-codegen-stdlib-dylib-lazy-undef-3.md, bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md, mojo/backend_gimple/emit_calls.py, mojo/backend_gimple/module_gen.py, test_gimple.py
+- 2026-11-16 02:06:54: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 7 commit(s) ahead of master, 8 behind it; task started 2026-11-16 01:20:01)
+  Branch: work/fix-proof-bug-land-codegen-stdlib-dylib-lazy-undef-2
+  Conflicting files: bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md

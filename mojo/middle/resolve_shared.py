@@ -217,43 +217,6 @@ def _module_attr_call_return_type(gen, node):
     return None
 
 
-# String methods that answer a `bool` whatever their arguments are.
-_STR_PREDICATE_METHODS: dict[str, bool] = {
-    'startswith': True, 'endswith': True, 'isdigit': True, 'isalpha': True,
-    'isalnum': True, 'isspace': True, 'isupper': True, 'islower': True,
-    'isidentifier': True, 'isnumeric': True, 'isdecimal': True,
-}
-
-
-def _and_or_operand_type(gen, node) -> str:
-    """The C type the RIGHT operand of an `and` / `or` will lower to, asked
-    before it is lowered: `_quick_type`, except that two call shapes whose
-    result is certainly a `bool` say `_Bool`.
-
-        args and hasattr(args[-1], 'op')
-        lines and lines[-1].endswith(':')
-
-    `_quick_type` calls both an unknown word. The `and` / `or` lowering then
-    kept the LEFT operand's pointer type for the result and stored the bool
-    into it -- `(MojoList *)1` when the test was true, and the next truth
-    test ran `mojo_list_len` on that address. With `_Bool` here the lowering
-    takes its bool-merge path. Both the lowering (`_lower_BinaryOp`) and
-    `_quick_type`'s own `and` / `or` rule ask this, so they agree."""
-    qt: str = _as_str(gen._quick_type(node))
-    if qt == '_Bool':
-        return qt
-    if isinstance(node, gimple_ctypes.CallExpr):
-        fn = node.func
-        if (isinstance(fn, gimple_ctypes.IdentExpr) and _as_str(fn.name) == 'hasattr'
-                and not gen._locally_binds_name('hasattr')):
-            return '_Bool'
-        if (isinstance(fn, gimple_ctypes.MemberExpr)
-                and _as_str(fn.member) in _STR_PREDICATE_METHODS
-                and _as_str(gen._quick_type(fn.obj)) == 'char *'):
-            return '_Bool'
-    return qt
-
-
 def _quick_type(gen, node) -> str:
     """Estimate C type of an expression without emitting code."""
     if isinstance(node, gimple_ctypes.IntLiteral):    return 'int64_t'
@@ -420,7 +383,7 @@ def _quick_type(gen, node) -> str:
         # 'cas')) dereferenced it as a pointer — a real crash at address 0x1.
         if node.op in ('and', 'or'):
             lt = gen._quick_type(node.left)
-            rt = _and_or_operand_type(gen, node.right)
+            rt = gen._quick_type(node.right)
             # A string and a word of unknown kind: the value may be either,
             # so it is the word -- the lowering (`_lower_BinaryOp`'s and/or
             # arm) types the result the same way, and the two must agree.

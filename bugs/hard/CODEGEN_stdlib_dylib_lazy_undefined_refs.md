@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part8, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part4, CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
@@ -7,9 +7,9 @@ that the dylib LOADS (a data/class-table reference to an undefined symbol is fat
 `tools/stdlib_dylib_ratchet.py`). These 50 are lazy CALL references: they do not stop the load, but a
 client that reaches one through the dylib aborts at that call unless another image happens to define it.
 
-## Replan (2026-11-15): the live parts are 5-6, 8 and 9
+## Replan (2026-11-15): the live parts are 4-6 and 9
 
-Parts 1-3, 4 and 7 landed and their docs were deleted when they landed:
+Parts 1-3, 7 and 8 landed and their docs were deleted when they landed:
 
 - part 1: a re-exported free function's reference carries the DEFINING module's
   qualifier (`_reexported_defining_qualifier`).
@@ -19,13 +19,6 @@ Parts 1-3, 4 and 7 landed and their docs were deleted when they landed:
   dispatch and the comparison lowering); the suffix-less forward declaration
   for an overloaded dunder is gone. The total was 50 -> 43 -> 32 by
   2026-11-14, with 0 modules falling back to source.
-- part 4: a `comptime if` chain over `CompilationTarget` predicates emitted
-  every target's bodies. `eval_const` / `eval_const_int` / `_const_foldable`
-  now fold `CompilationTarget.<pred>()` to the host constant, so the lowering
-  keeps only the host branch, and `_drop_unreferenced_extern_decls` strips the
-  extern declaration blocks left for the folded-away targets. The four
-  `std_os__linux_{aarch64,x86}__{lstat,stat}` references from
-  `std/os/path/path.mojo` are gone; none new.
 - part 7: a parameter typed with a struct private to the DEFINING module
   (`benchmark._run_impl(opts: _RunOptions)`) is `Name *` there but `int64_t`
   in the importer's text scan, so the two hashed different overload suffixes.
@@ -35,6 +28,15 @@ Parts 1-3, 4 and 7 landed and their docs were deleted when they landed:
   `Name` there makes the importer lower `.field` as a typed `->` against a
   struct it never defines. 32 -> 31 undefined `_std_` names, the one that went
   being `_std_benchmark_benchmark__run_impl_9f63a2`; none new.
+- part 8: two same-name free functions in one module each get a definition
+  under their own mangled symbol, and a call names one of them — by
+  arity/argument types inside the module, by the defining unit's first
+  non-generic declaration across modules. Two overloads that erase to the
+  same C signature get `_<n>` disambiguation rather than one being dropped.
+  The generic half of a mixed plain+generic name is instantiated in-TU
+  (`splat[.int]`), and overloads whose bodies cannot be emitted correctly
+  because of an unrelated platform/external-call typing bug keep the
+  historical "not emitted" disposition instead of failing the module.
 
 The title's "50" is the 2026-11-12 measurement and is stale; the live
 residual is the table below. Measured 2026-11-15 in this worktree by compiling
@@ -46,9 +48,9 @@ build, no link), then confirming the end-to-end shape with two-module
 
 | part | doc | class | example symbols |
 |---|---|---|---|
+| 4 | `bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part4.md` | a `comptime if` chain emits the other TARGET's bodies; only the host's `_linux`/`_macos` variant is built | 4 x `std_os__linux_{aarch64,x86}__{lstat,stat}` from `std/os/path/path.mojo` |
 | 5 | `...-part5.md` | a body the backend cannot lower vanishes, so the caller's qualified name has no definition (its own calls get a BARE weak stub) | `std_sys_info_is_{apple,nvidia,amd}_gpu`, `std_python__cpython_CPython_as_imm` |
 | 6 | `...-part6.md` | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
-| 8 | `...-part8.md` | two same-name free functions in one module are neither defined nor callable; the call becomes a bare `(void)` stub | `std_bit_mask_splat`, `std_memory_memory__free`, `..._unsafe_memset_zero`, `..._to_integer` |
 | 9 | `...-part9.md` | a generic free function instantiated only by another module is never emitted | `..._forget_deinit`, `..._unsafe_destroy_n`, `..._dealloc`, `std_time_time_time_function` |
 
 Not a part:
@@ -72,8 +74,7 @@ Not a part:
 
 **Working the parts:** each part's `## Done when` names one probe in
 `test_stdlib_dylib_lazy_undefined_refs_probes.py`; run it red first, fix, run
-it green. The probe file is deliberately not a registered gate job. Part 4's
-probe (`p4_target`) now passes.
+it green. The probe file is deliberately not a registered gate job.
 
 
 **This section is the 2026-11-12 snapshot**, kept for the measurements'
@@ -138,220 +139,8 @@ test: run `nm -u` against `nm -gU` and require the `_std_` difference to *shrink
 `stdlib-dylib` fail on it until the count is zero: all 50 exist before the fix and the job's documented
 contract is that the dylib need not be complete.
 
-**Exact next step:** work parts 5-6, 8 and 9, in the order of the table above. Each
+**Exact next step:** work parts 4-6 and 9, in the order of the table above. Each
 part's `## Done when` names the probe that is red today and green when the
 part lands. The old advice to take "the arity-only overload choice" is part 3,
 which landed; the remaining classes are the replan table's, not this
 section's.
-
-## Re-measured 2026-11-15: the JOB is green; 32 references remain
-
-The job this doc was filed against now PASSES:
-
-    python3 tools/stdlib_dylib_ratchet.py
-    -> stdlib-dylib: 0 module(s) fell back to source (0 expected)
-    -> exit 0
-
-and `tools/control.py gate list` no longer turns `stdlib-dylib` off. The count
-is **32**, down from the 50 the Symptom above records (43 after part 1, 32
-after part 3). Of the 32, **12 carry no overload suffix** — `_std_sys_info_
-is_apple_gpu`, `_std_sys_info_is_nvidia_gpu`, `_std_random_random_seed`,
-`_std_time_time_sleep`, `_std_memory_memory__free`, `_std_bit_mask_splat`,
-`_std_collections_string_string__calc_initial_buffer_size`,
-`_std_python__cpython_CPython_as_imm`, `_std_sys_info_is_amd_gpu`,
-`_std_sys_info_has_nvidia_gpu_accelerator`, `_std_time_time_time_function`,
-`_std_memory_memory_unsafe_memset_zero` — and the other 20 carry a suffix that
-is not the defining unit's.
-
-All 12 unsuffixed ones were calls to an OVERLOADED free function from a module
-that did not define it (`std/sys/info.mojo`'s `is_apple_gpu()` has both a
-`()` and a `[subarch: StaticString]()` overload). **Fixed 2026-11-15
-(`ddc086d41`)**: a MIXED overload set (one plain head + one bracketed head) was
-caught by the generic-import registration and returned early, so it never
-reached the overload registration, and the opener set `'('` could not even see
-a bracketed head; `_elaborate_overload_call` also mangled from the BARE name,
-dropping the defining module's qualifier. The references are now correct --
-`_std_sys_info_is_apple_gpu__void`, `_std_pwd__macos__getpw_macos__1_0_6_
-String` / `__1_0_6_UInt32`.
-
-**The count went 32 -> 38, and that is an honest regression in the metric,
-not a fix.** The names are right now, and being right exposes references the
-dylib never defined: both `getpw_macos` overloads are referenced where before
-only the one the ABI scan happened to pick was, and two `_gpu_intrinsics_`
-entries appeared. The job still PASSES (0 modules fall back to source, ratchet
-exit 0) because these are lazy call references a client falls back from, but
-the definers are still absent from the dylib -- that, not the naming, is now
-the visible remaining work.
-
-## 2026-11-15 (later): the next layer -- `external_call` bodies are dropped
-
-The 38 references are not one class. Naming is now right; what remains is that
-some DEFINERS contribute no body at all. Measured on
-`std/pwd/_macos.mojo` through `build_stdlib_dylib.compile_module_to_c`:
-
-* the module's generated C contains `extern int64_t external_call (...);
-  /* from std.ffi */` -- `std.ffi.external_call` was never compiled, only
-  declared;
-* `_getpw_macos` (both overloads) and `_stat_macos` appear ONLY as guarded
-  forward declarations (`#ifndef _MOJO_STUB__getpw_macos` /
-  `int64_t _getpw_macos (...);`), with zero occurrences of `getpwuid` /
-  `getpwnam` in the whole file -- their bodies are gone;
-* `_build_pw_struct` from the SAME module IS defined
-  (`_std_pwd__macos__build_pw_struct_9f63a2`), and it is the one that does not
-  call `external_call`.
-
-So the correlation is exact: a function whose body calls `external_call` loses
-that body. `external_call` is an ordinary generic function in
-`std/ffi/__init__.mojo` -- `def external_call[callee: StaticString,
-return_type: RegisterPassable, *types: AnyType,
-num_fixed_args: Optional[Int] = None](*args: *types) -> return_type` -- so the
-gap is the VARIADIC generic call (`*args: *types` captured and forwarded), not
-the FFI lowering itself. This is a different and deeper defect than the naming
-one above; filing it here rather than half-fixing it.
-
-## 2026-11-15 (wakeups 24/27): a definer emits NOTHING for an overload family
-## -- and it is DOCUMENTED POLICY, not a silent defect
-
-**Correction (wakeup 27).** An earlier revision of this section called the
-absence "silent". It is not: `module_gen.py`'s duplicate-def pre-pass
-(`BUG-2026-021`, around line 5551) classifies a same-name multi-def group and
-deliberately drops it --
-
-* REDEFINITIONS (identical signature key): keep the LAST copy, interpreter
-  semantics;
-* GENUINE OVERLOADS (differing signature key): drop EVERY copy, on the premise
-  that "the elaborator selects and instantiates the right overload per call
-  site (slice 4), so no single C definition exists to emit".
-
-Isolated with a cold single-module compile, so the branch is not in doubt:
-
-| module | contents | `splat` in emitted C |
-|---|---|---|
-| a | two same-name defs, different params | **0** |
-| b | one def | 3 |
-| c | two DIFFERENT names, one calls the other | 3 |
-| d | generic + plain same-name pair | **0** |
-| e | two same-name defs, different arity | **0** |
-
-So the trigger is purely the name collision, and `splat` / `unsafe_memset_zero`
-/ `is_apple_gpu` are absent for this reason. Reverting all three of the
-iteration-19 commits still gives 0, so none of them is implicated.
-
-**What is actually open** is the premise, not the drop: the policy is sound for
-a SAME-module caller (slice 4 resolves and inlines), but a library module built
-into the dylib has cross-module callers that emit an extern reference to a
-symbol the defining module deliberately never emits. That is the whole
-remaining population of this table. Measured on `std/memory/memory.mojo`:
-
-* the dylib references `_std_memory_memory_unsafe_memset_zero` (undefined) and
-  defines `std_memory_memory_unsafe_memset_37bd8e`;
-* compiling that module through `compile_module_to_c` yields a C file in which
-  the literal string `unsafe_memset_zero` occurs **zero** times -- both
-  declarations (the plain `def unsafe_memset_zero(ptr, count)` at line 381 and
-  the generic `def unsafe_memset_zero[dtype: DType, //, *, count: Int]` at 397)
-  contribute nothing, and `compile_module_to_c` prints no diagnostic at all.
-
-Ruled out, by temporarily reverting the iteration-19 opener-set change in
-`module_gen.py`: the count is still 0, so this is NOT a regression from that
-commit (and the file was restored byte-identical -- tree clean afterwards).
-
-The distinguishing feature of the dropped pair: the generic declaration's body
-contains a **recursive same-name call with a different arity** --
-`comptime if count > 128: return unsafe_memset_zero(ptr, count)` -- where the
-compiler has to pick the 2-arg plain declaration over the enclosing generic one.
-That is the next concrete thing to instrument: whether overload resolution
-inside the body binds to the enclosing generic (self-recursion) and the failure
-is swallowed rather than diagnosed. Not fixed here; recorded with the
-measurements rather than guessed at.
-
-**Probe caveat, stated rather than glossed.** `compile_module_to_c` on that
-module with the correct `module_name_for_path` name yields only 6 distinct
-`std_memory_memory_*` symbols, while the built dylib carries 10 (it additionally
-defines `std_memory_memory__free`, `..._forget_deinit_9f63a2`,
-`..._unsafe_destroy_n_2dbb98`). So the dylib's contents are not exactly
-reproducible from a cold single-module compile -- the CAS is serving C the cold
-path does not produce. The `unsafe_memset_zero` finding is unaffected (0 in
-both), but anyone re-measuring the whole table should recompile rather than
-trust either number blind.
-
-## 2026-11-16 (wakeup 28): the unsuffixed half has a precise root cause
-
-The remaining unsuffixed references are not a naming policy, they are a
-SWALLOWED EXCEPTION. Instrumented on `std/collections/span.mojo` (which calls
-`splat(<Bool>)` from `std.bit.mask`):
-
-1. `splat` IS registered for the importer -- probed at
-   `module_gen.py`'s registration site: `sym='splat'` with
-   `path=.../std/bit/mask.mojo`, so the overload set is visible.
-2. `_elaborate_overload_call` then calls
-   `elaborate.Elaborator().elaborate_overload_call(module_src, 'splat', ...)`
-   to compile the defining module, and that compile RAISES:
-   `RuntimeError: cannot compile module: a bracketed call splat[...]() needs
-   link-mode specialisation, which this build does not do`
-   (emit_calls.py's `SubscriptExpr` arm, ~line 3014).
-3. The `except Exception` around it sets `info = None` and only
-   `_debug_note`s, so the call site falls back to the unsuffixed extern
-   `std_bit_mask_splat`.
-
-The refusal is deliberate and correct for a single-TU program (its own comment
-pins `test_comptime_bracket_params.py::test_paramless_function_bracket_refused_
-in_single_tu`), but it is ownership-scoped by `func_return_types` /
-`imported_symbols` only -- it does not know it is compiling a module on the
-IMPORTER's behalf, where the refusal's premise (no specialisation) does not
-apply: the importer only wants the family's signatures.
-
-**Proof that the refusal is the blocker:** with the `raise` temporarily
-replaced by `pass`, the same compile emits BOTH `std_bit_mask_splat` and the
-correctly suffixed `std_bit_mask_splat__1_0_4_Bool`; restored, only the
-unsuffixed one. So one call site gains a real suffix.
-
-**First fix attempt failed, and the measurement is the finding.** Exempting
-overload-family names (publishing the dup pre-pass's `_dup_defs` as
-`gen._overloaded_fn_names` and testing it in the refusal condition) changed
-nothing: probed at the refusal site, `_overloaded_fn_names` is EMPTY there
-(`in_frt=True ovl=[] imp=False`). The generator instance that compiles the
-imported module is not the one the `module_gen.py` pre-pass populates, so the
-exemption never fires. Both edits were reverted (tree clean, the iteration-19
-changes verified still present); recorded rather than shipped as a no-op.
-
-**FIXED 2026-11-16 (`a00f40d02`).** The symbol and the signature come from
-`mangle_signature`, not from the object, and `_emit_generic_instantiation`
-already tolerates `object=None` (a recursive-cycle instantiation returns it).
-So `elaborate_overload_call` now keeps them and drops only the link object when
-the standalone snippet cannot compile. Measured: `std/collections/span.mojo`
-emits only `std_bit_mask_splat__1_0_4_Bool` (was the unsuffixed
-`std_bit_mask_splat`); the dylib's undefined `_std_` population falls
-**37 -> 31**, and `_std_pwd__linux__getpw_linux__*` now resolves outright.
-
-Of the 31, 16 do not end in a 6-hex overload hash (the other 15 are
-already correctly suffixed). Those 16 are now the OTHER half only:
-correctly-named references to symbols the definer never emits, because
-BUG-2026-021 drops a genuine overload family whole. That policy is the single
-remaining cause of this table.
-
-## 2026-11-16 (wakeup 38): the part-1 probe is RED, and it is a real dropped call
-
-`test_stdlib_dylib_lazy_undefined_refs_probes.py` fails:
-
-    AssertionError: std/itertools/itertools.mojo emits no forget_deinit
-    reference; probe is stale
-
-Measured, and narrowed:
-
-* `std/itertools/itertools.mojo:30` imports `forget_deinit` from `std.memory`
-  and `:259` calls `forget_deinit(arg^)`, inside the generic `_flatten`
-  (`:222`).
-* compiling that module yields **zero** occurrences of both `forget_deinit` and
-  `_flatten`.
-* `_flatten` has exactly one definition, so this is NOT the BUG-2026-021
-  overload-family drop.
-* its two call sites (`:321`, `:452`) are inside `__next__` methods of iterator
-  structs, and those `__next__` symbols ARE emitted -- so the enclosing methods
-  exist while the `_flatten(...)` call inside them resolves to nothing.
-
-Ruled out as the cause: the iteration-19/31 commits (re-running with them
-reverted still gives 0) and Mike Stump's part 7 (`emit_funcs.py` at
-`f766bb314~1` also gives 0). So a generic call inside an emitted struct method
-is being dropped, which is a different defect from every item above. The
-probe's message says "stale"; the measurement says the call is gone, so the
-probe is right and the tree is wrong.
