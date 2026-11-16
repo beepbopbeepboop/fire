@@ -3541,7 +3541,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if ltype == 'int64_t' and gen._is_dyn_word(node.left, lval):
             gen._dyn_word_vals.add(lval)
         cond = gen._ensure_bool_cond(ltype, lval)
-        _rq = gen._quick_type(node.right)
+        _rq = gen._and_or_operand_type(node.right)
         res_type = gimple_ctypes.TypeLattice.join(ltype, _rq)
         # MIXED POINTER/SCALAR OPERANDS: `TypeLattice.join` always prefers
         # the POINTER side (join('MojoList *', '_Bool') == 'MojoList *'),

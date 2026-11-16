@@ -15414,6 +15414,13 @@ def gen_module_impl(self, stmts: list):
             # a set parameter has to dispatch on `it_type == 'MojoSet *'` or
             # it iterates the hash table through the list accessors.
             _e = self._infer_list_elem_type(a.elements)
+            # An EMPTY literal (`f([])`) has no elements to observe: its
+            # `int64_t` is only the default, so it is no evidence at all.
+            # Recording it made a `list[str]` parameter kind-mixed as soon as
+            # one caller passed `[]`, and `lines[-1].endswith(':')` then read
+            # the element as a boxed word cast to `char *` (always False).
+            if not a.elements:
+                return None, None
             if _e == 'int64_t':
                 _static_arg_int[0] = True
                 return None, None
