@@ -212,7 +212,7 @@ def test_gate_wiring() -> None:
     a red job is fixed or declared with a live bug doc, never switched off
     with a silent `disabled=` marker.
     """
-    print("gate wiring: the gimple-lint job stays on, and its red-gate doc stays deleted")
+    print("gate wiring: the gimple-lint job stays on")
     import re
     with open(os.path.join(ROOT, 'tools', 'suite.py'), encoding='utf-8') as f:
         suite = f.read()
@@ -220,9 +220,11 @@ def test_gate_wiring() -> None:
     check(m is not None, 'gimple-lint is registered in tools/suite.py')
     check(m is not None and 'disabled=' not in m.group(0),
           'gimple-lint is enabled (no disabled= marker)')
-    doc = os.path.join(ROOT, 'bugs', 'gate-gimple-lint.md')
-    check(not os.path.exists(doc),
-          'the gate-gimple-lint doc is deleted (its presence means the job is red)')
+    # NOT checked here: that bugs/gate-gimple-lint.md is absent. The
+    # integrator writes that doc when a WORK BRANCH turns this job red; a
+    # check on its absence then failed master for the doc's existence alone,
+    # which is the doc keeping itself alive (it came back three times in
+    # November 2026 with every other check here green).
 
 
 def test_rt_sigs() -> None:
