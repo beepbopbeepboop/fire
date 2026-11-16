@@ -72,38 +72,3 @@ string `"0"`, which is exactly what `repr` printed).
 3. Regression: a compiled-vs-CPython test next to the ordinary codegen tests
    (`test_gimple.py`) over the four lines in the table, plus `f(None)` returning
    `None` from a `str`-annotated parameter.
-
-## Status 2026-11-16: one attempt was tried and REVERTED. Do not repeat it.
-
-Branch `work/bug-codegen-none-passed-to-a-parameter-i` (commit `db6b4f640`)
-was landed and then reverted the same day. It passed its own test and broke
-six cases of `test_gimple_runner.py` that passed before:
-
-    gimple_int_in_mixed_str_int_list
-    gimple_str_window_matches_cpython
-    gimple_percent_format_star_width_and_precision
-    gimple_erase_slot_holding_a_string
-    gimple_namedtuple_literal_runs          (crashed, exit -11)
-    gimple_none_local_needle_in_membership
-
-What it did wrong. It decided "None is the word 0 everywhere" and then made
-the rest of the compiler agree with that:
-
-- `x == None` on a plain integer became `x == 0`. So `0 == None` is True.
-  In Python it is False. The code it deleted in `_lbt_none_eq`
-  (`mojo/backend_gimple/emit_exprs.py`) was the earlier fix for exactly that.
-- membership in a mixed list matched a None slot against the integer 0.
-- a NULL `char *` printed as `None`, including where it is an empty/absent
-  string that must not print at all.
-
-Rule for the next attempt. The integer 0 and None must stay different
-values. A fix may change how None is PASSED to a parameter (the boxed None
-word, or a typed null for a pointer parameter) and how the callee tests it.
-It must not change what `== None`, `in`, `str()` or `repr()` answer for the
-integer 0 or for an empty string.
-
-Run before calling it done (about 30 minutes, and required for this bug):
-
-    python3 test_gimple_runner.py
-
-The six names above must pass, together with this doc's own test.

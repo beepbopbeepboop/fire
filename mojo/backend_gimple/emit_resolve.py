@@ -59,7 +59,7 @@ from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
     _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _and_or_operand_type, _module_attr_call_return_type, _record_closure_alias,
+    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _module_attr_call_return_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
 from mojo.middle.calls_shared import user_dunder_repr_call
@@ -966,6 +966,13 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 temp_gen._regex_patterns = gen._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                 temp_gen._regex_progs = gen._regex_progs        # share: bubble compiled regex data up to root preamble
                 temp_gen._regex_progs_defined = gen._regex_progs_defined  # share: avoid duplicate emission across recursive paths
+                temp_gen._virt_dispatch_helpers = gen._virt_dispatch_helpers  # share: `_mojo_virt_` helper registrations made while lowering THIS imported module's bodies must reach the ROOT's _emit_reflection_dispatch (the only gen that emits definitions)
+                temp_gen._getattr_method_arms = gen._getattr_method_arms  # share: bound-method getattr arms recorded by THIS imported module's prototype walk must reach the ROOT's _emit_reflection_dispatch (the only gen that emits the `_mojo_getattr_<S>` definitions) — an unshared dict left every imported struct's arm table empty there
+                temp_gen._getattr_property_arms = gen._getattr_property_arms  # share: same, for the property (getter-call) arms — the erased-receiver `node.tokens` read must get the getter's RESULT on imported dataclasses, not an AttributeError
+                temp_gen._getattr_decorated_arms = gen._getattr_decorated_arms  # share: decorated-method getattr arms — the ROOT's _mojo_getattr_<S> must answer the WRAPPED value for structs defined in any module of the closure
+                temp_gen._decorated_method_wrapped = gen._decorated_method_wrapped  # share: call-site routing table (emit_methods' _lower_struct_method_call reads it while lowering THIS module's bodies; a sibling module's early pre-pass may have populated it first — first-wins, same getter name either way)
+                temp_gen._decorated_method_dec_csym = gen._decorated_method_dec_csym  # share: the decorator symbol the getter definition's guarded declaration names
+                temp_gen._emitted_decorated_getters = gen._emitted_decorated_getters  # share: one `_wrapped_<S>_<m>` DEFINITION per TU — the closure's sections all splice into the ROOT's unit, so per-gen dedup would double-define
                 temp_gen._const_str_locals = gen._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                 temp_gen.struct_field_types = gen.struct_field_types
                 # share: a struct's home-module qualifier (_struct_method_qualifier)
@@ -1624,20 +1631,11 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
     if gimple_ctypes.source_declares(text, ['struct'], name, '['):
         gen._imported_generic_structs.setdefault(sym, src_path)
         return True
-    # A declaration with a BRACKETED head (`def f[T]()`) makes this a generic;
-    # one with a bare head (`def f()`) does not. A name with BOTH -- Mojo's
-    # overloaded free functions routinely pair them (`is_apple_gpu()` and
-    # `is_apple_gpu[subarch: StaticString]()`) -- must be registered as an
-    # OVERLOAD too, or the call site has no overload set to match and emits
-    # the unsuffixed symbol, which no overload defines. The opener set is
-    # `'(['`, not `'('`: a bracketed head is a declaration of the same name.
-    _is_generic_fn = gimple_ctypes.source_declares(text, ['fn', 'def'], name, '[')
-    if _is_generic_fn:
+    if gimple_ctypes.source_declares(text, ['fn', 'def'], name, '['):
         gen._imported_generics.setdefault(sym, src_path)
-    if len(gimple_ctypes.source_decl_ends(text, ['fn', 'def'], name, '([')) > 1:
-        gen._imported_overloads.setdefault(sym, src_path)
         return True
-    if _is_generic_fn:
+    if len(gimple_ctypes.source_decl_ends(text, ['fn', 'def'], name, '(')) > 1:
+        gen._imported_overloads.setdefault(sym, src_path)
         return True
     # A struct DEFINITION (not a generic one): inline the whole module, which
     # brings the typedef, its `__init__`, its methods and its class
@@ -1955,7 +1953,7 @@ def _register_link_imports(gen, stmts: list) -> list:
                         except Exception:
                             _ov_src = ''
                         if len(gimple_ctypes.source_decl_ends(
-                                _ov_src, ['fn', 'def'], name, '([')) > 1:
+                                _ov_src, ['fn', 'def'], name, '(')) > 1:
                             gen._imported_overloads.setdefault(sym, source)
                     # Record the module source for any imported name, so a
                     # comptime call to it can be evaluated at compile time.
@@ -3543,17 +3541,15 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             raise RuntimeError(
                 f'cannot compile module: self recursive call to {_rec!r} will '
                 f'cause an infinite loop')
-    # A BARE call (`log(y)` inside an instantiation of `log`) has no bracket
-    # to inspect. It is a self-recursion only when it resolves to the SAME
-    # instantiation, or to none at all; `log(x.cast[.float32]())` inside
-    # `log[.float64, 1]` names a different one and is an ordinary call. So
-    # the name match is only remembered here, and the decision is taken
-    # below, once the type arguments have been inferred.
-    _bare_in_own_instance = False
-    if not explicit:
+    else:
+        # A bare call has no bracket to inspect, so the name test stands: the
+        # enclosing function is either the bare base or its mangled instance
+        # (`self_recursion_1_i_1_3`).
         _cfn = getattr(gen, 'current_func_name', None)
         if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
-            _bare_in_own_instance = True
+            raise RuntimeError(
+                f'cannot compile module: self recursive call to {g!r} will '
+                f'cause an infinite loop')
     source = gen._imported_generics.get(g)
     if not source:
         return None
@@ -3798,13 +3794,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 f"note: {type(_elab_e).__name__}: {_elab_e}")
         gimple_ctypes._debug_note('generic call elaboration failed')
         info = None
-    if _bare_in_own_instance and (
-            not info or info['symbol'] == getattr(gen, 'current_func_name', None)):
-        # No instantiation to call (the call would reach the generated C as
-        # a declared-never-defined extern), or the one being compiled.
-        raise RuntimeError(
-            f'cannot compile module: self recursive call to {g!r} will '
-            f'cause an infinite loop')
     if not info:
         return None
     return gen._emit_generic_instantiation(info, arg_pairs)

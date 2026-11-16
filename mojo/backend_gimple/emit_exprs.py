@@ -816,6 +816,10 @@ def _lie_global_window(gen, _global_owner_mod, _imp_field, _imp_fields, _imp_hom
     if (_read_key in gen._global_generator_api
             and _read_key not in gen._global_generator_api_poisoned):
         gen._generator_var_api[t] = gen._global_generator_api[_read_key]
+        # A read-back of a module global: the global may be read again
+        # (or rebound), so a drain of this temp must not destroy the
+        # handle (see _generator_value_owned).
+        gen._generator_value_owned[t] = False
     # …and "this global holds a plain integer" (`gen._int_word_vals`), the
     # same hop and the same reason for the same reason-as-the-three-above:
     # reading a global mints a FRESH temp, and the dict-key decision is
@@ -984,6 +988,10 @@ def _lie_imported_global_accessor(gen, name: str) -> tuple[str, str]:
         t = gen._call_expr(_acc_ctype, _acc_csym, [])
     if _gen_api_known:
         gen._generator_var_api[t] = gen._global_generator_api[_gen_key]
+        # A read-back of a module global: the global may be read again
+        # (or rebound), so a drain of this temp must not destroy the
+        # handle (see _generator_value_owned).
+        gen._generator_value_owned[t] = False
     return _acc_ctype, t
 
 
@@ -1112,8 +1120,26 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # mismatch as a "non-trivial conversion in 'integer_cst'".
         gen._emit(f'  {t} = (int64_t)0;  /* class ref {name} as value */')
         return 'int64_t', t
-    # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
-    if name in gen.BUILTIN_VALUE_MAP and name not in gen.var_types:
+    # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer.
+    # Python shadowing: a module-level binding of the same name (or a from-import of
+    # it) shadows the builtin in this namespace, so the bare read must load the
+    # module global below instead — the exact question `bare_global_read_plan`
+    # answers at its own arm, and the one THIS arm used to override. Measured on
+    # Tools/cases_generator/analyzer's lexer.py, where `hex = '([0-9a-fA-F]+)'`
+    # and `float = r'(...)'` are module globals shadowing the same-named
+    # builtins: `number_re = choice(octal, hex, float, decimal)` packed
+    # `_funcptr_mojo_hex` / `_funcptr_mojo_make_float` pointer words into the
+    # varargs list instead of the string globals, the "hex" alternative became
+    # machine-code bytes, and `0xFF` tokenized as `NUMBER('0')` +
+    # `IDENTIFIER('xFF')`. `octal`/`decimal` were immune (not Python builtins,
+    # so they already fell through to the module-global arm).
+    # `bare_global_read_plan` is pure (reads only), and its `_wins` gate
+    # answers per-module ownership, NOT the shared whole-closure
+    # `_global_var_types` superset: a sibling module's same-named global must
+    # not disable this module's real builtin, so the superset test (a plain
+    # `name in gen._global_var_types`) is deliberately NOT the gate here.
+    if (name in gen.BUILTIN_VALUE_MAP and name not in gen.var_types
+            and not bare_global_read_plan(gen, name)[0]):
         c_name = gen.BUILTIN_VALUE_MAP[name]
         # Use a pre-declared static void* (emitted in non-GIMPLE context) to avoid
         # the invalid `&func_name` syntax that GIMPLE strict mode rejects.
@@ -3541,7 +3567,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if ltype == 'int64_t' and gen._is_dyn_word(node.left, lval):
             gen._dyn_word_vals.add(lval)
         cond = gen._ensure_bool_cond(ltype, lval)
-        _rq = gen._and_or_operand_type(node.right)
+        _rq = gen._quick_type(node.right)
         res_type = gimple_ctypes.TypeLattice.join(ltype, _rq)
         # MIXED POINTER/SCALAR OPERANDS: `TypeLattice.join` always prefers
         # the POINTER side (join('MojoList *', '_Bool') == 'MojoList *'),
@@ -3606,14 +3632,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # pointer slot, and the truth test then ran `mojo_dict_len` on the
         # address 1 (the self-hosted compiler's own crash in
         # `_gmi_specialize_literal_kind_clones`).
-        # The mirror image (`fn.is_generator or getattr(fn, 'is_async', False)`,
-        # an untyped field against a bool) is the same word: without it the
-        # chain's result was a plain `int64_t`, and a following
-        # `... or fn.some_dict` took the container-pointer join below for a
-        # word that may hold the bool 1.
         _bool_word = (not _bool_merge and not _mixed_word
                       and ((ltype == '_Bool' and _rq == 'int64_t')
-                           or (ltype == 'int64_t' and _rq == '_Bool')
                            or (ltype == 'int64_t' and _rq in ('MojoDict *', 'MojoList *', 'MojoSet *')
                                and gen._is_dyn_word(node.left, lval))))
         if _bool_word:
@@ -3664,12 +3684,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # constant: `and` only takes it on a FALSY left, `or` only on a
             # TRUTHY one.
             gen._cast_into(result, '_Bool', f"{'0' if node.op == 'and' else '1'}")
-        elif node.op == 'and' and ltype == '_Bool' and res_type.endswith(' *'):
-            # `flag and ptr`, short-circuit edge: the left operand is known
-            # false here, so the value is the null pointer. Written as the
-            # constant, not as a cast of the `_Bool`: a pointer is never made
-            # from a 1-bit value (gimple-lint's cast-narrow-int-to-ptr).
-            gen._cast_into(result, res_type, '0')
         else:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._goto(bb_merge)
@@ -3702,14 +3716,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if (res_type == 'int64_t' and not _mixed_word
                 and (gen._is_dyn_word(node.left, lval)
                      or gen._is_dyn_word(node.right, rval))):
-            gen._dyn_word_vals.add(result)
-        # The right operand LOWERED to a `_Bool` although its quick type was
-        # a word (`x.flag or getattr(x, 'is_async', False)`): the merged word
-        # holds the left word or that bare bool, so it is a word of unknown
-        # kind. A following `... or x.some_dict` must not read it as the
-        # dict pointer (it ran `mojo_dict_len` on the address 1).
-        if (res_type == 'int64_t' and not _mixed_word
-                and rtype == '_Bool' and ltype == 'int64_t'):
             gen._dyn_word_vals.add(result)
         gen._goto(bb_merge)
         gen._emit_label(bb_merge)
@@ -4347,11 +4353,9 @@ def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
     # Select by box kind
     _a = lv if _tag_l else '0'
     _b = rv if _tag_r else '0'
-    # The runtime function returns `int`; the `_Bool` is made from it by a
-    # comparison (an `int` call result stored straight into a `_Bool` is
-    # rejected by GCC in a `__GIMPLE` function).
-    _sel = gen._rt_call('int', 'mojo_float_cmp_select', [_a, _b, _ires, _dres])
-    return '_Bool', gen._cmp(_sel, '!=', '0')
+    _t = gen._call_expr('_Bool', 'mojo_float_cmp_select', [
+        ('int64_t', _a), ('int64_t', _b), ('int', _ires), ('int', _dres)])
+    return '_Bool', _t
 
 
 def _lbt_dict_union(gen, lt: str, lv: str, rt: str, rv: str) -> tuple[str, str]:
@@ -8512,6 +8516,10 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
                 gen._nested_elem_types[it_val] = gen._nested_elem_types[_old_it_val]
             if _old_it_val in gen._generator_var_api:
                 gen._generator_var_api[it_val] = gen._generator_var_api[_old_it_val]
+                # Ownership follows the value onto the cast temp: the drain
+                # below keys _generator_value_owned on the NEW name.
+                if _old_it_val in gen._generator_value_owned:
+                    gen._generator_value_owned[it_val] = gen._generator_value_owned[_old_it_val]
         it_type = _resolved_type
 
     # Park the remaining `for` clauses for `_gen_compr_append` to consume from

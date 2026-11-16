@@ -267,32 +267,10 @@ that is meant to be behaviour-preserving:
   byte-identical `.ci`; the new parameters have the C types the parent's
   locals had in the compiler's own output, the one exception being
   `_ls_pointer_arith`'s `ot`, which the parent casts at the call site
-  (`MojoList *`) because that arm uses it as a container.
-- **Stage 6, passes of `gen_module_impl` (started 2026-11-16).**
-  `module_gen.py` now compiles in single-file `--dump` mode (one
-  `any(<generator expression>)` was in the way) and is in gimple-lint's
-  corpus. `tools/extract_arm.py --phase` moves a WHOLE top-level statement
-  (a pass: a `for`, an `if` with its test) into a function that returns
-  nothing; it refuses a statement that returns, that binds a name the
-  parent or one of its nested functions reads afterwards, or that calls a
-  nested function. 18 passes were moved (`_gmp_*`, 3,731 lines):
-  `gen_module_impl` is 15,554 -> 11,841 lines. Generated output for the
-  corpus is byte-identical. In the compiler's own output the new
-  parameters have the C types the locals had; a list or dict parameter
-  whose elements are strings is annotated `list[str]` so element reads
-  stay typed. About 100 of 54,000 runtime calls in `module_gen.ci` differ,
-  most of them boxing calls that are gone because a local no longer
-  shares its name with a differently-typed local of another pass.
-  Second round (2026-11-16): `tools/hoist_nested.py` lifts a nested
-  function to module level when the only names of the parent it reads are
-  the parent's parameters and other liftable nested functions; those
-  become its first parameters and every call passes them. 30 of the 59
-  nested functions were lifted (`_gmh_*`, 1,074 lines), which freed 18 more
-  passes to move. `gen_module_impl` is 9,416 lines.
-  NOT moved: 29 nested functions that read a local of `gen_module_impl`
-  (lifting one needs a typed parameter per captured local), the passes
-  that call them, and the passes that bind a name read later (those need
-  to return a value).
+  (`MojoList *`) because that arm uses it as a container. `gen_module_impl`
+  (15,491 lines) is NOT started: its file does not compile in single-file
+  `--dump` mode, so the parameter types of an extracted phase cannot be
+  checked the same way.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.

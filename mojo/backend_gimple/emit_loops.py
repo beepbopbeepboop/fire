@@ -37,7 +37,6 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_is_tuple, for_target_names, target_slots
 import mojo.middle.iter_factory as iter_factory
-import mojo.middle.coro as coro_mod
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -755,6 +754,13 @@ def _lower_int_dict_items(gen, recv) -> tuple:
     t = gen._rt_call('MojoList *', 'mojo_dict_items_int', [dv])
     gen._dict_items_val_elems[t] = gen._dict_val_of(_as_str(recv.name))
     gen._dict_items_int_keys.add(t)
+    # The pair's value slot carries its RUNTIME kind in the pair's kinds row
+    # (mojo_dict_items sets it from the dict slot's setter): a loop that
+    # unpacks the pair must read the value slot through the kind-aware
+    # accessor, or a bool/None/double value prints as its raw int word.
+    # Pairs are container slots, so the pair ITSELF still reads raw (a
+    # container is never boxed by mojo_list_get_boxed).
+    gen._maybe_kinds_vals.add(t)
     return 'MojoList *', t
 
 
@@ -1441,6 +1447,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     # never typed) — int64_t matches how mojo_dict_items
                     # boxes the value slot.
                     gen._dict_items_val_elems[_pairs] = 'int64_t'
+                    # Same kinds-row rule as the typed `.items()` sites: the
+                    # unpacked VALUE slot is read through the kind-aware
+                    # accessor (a container pair reads raw either way).
+                    gen._maybe_kinds_vals.add(_as_str(_pairs))
                     gen._gen_for_list(var, _pairs, node.body, share_var_with_sibling_arm=True)
                 else:
                     gen._gen_for_dict(var, dp, node.body, split_key=False)
@@ -1449,8 +1459,11 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
                 if _it_is_items:
                     # An already-materialized items list: its elements are
-                    # the same [key, value] pairs.
+                    # the same [key, value] pairs, with the same kinds-row
+                    # rule on the value slot (the kind-aware accessor below
+                    # reads a container pair raw).
                     gen._dict_items_val_elems[lp] = 'int64_t'
+                    gen._maybe_kinds_vals.add(_as_str(lp))
                 elif not for_target_is_tuple(var):
                     # A SINGLE-name target over a word of unknown type: nothing
                     # says what the elements are, and `mojo_list_get_int`
@@ -2618,8 +2631,21 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # _tuple_slot_types / _nested_elem_types inputs — one computation
         # shared with the declarations there).
         pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
+        # A registered `.items()` list carries it in ANY case: mojo_dict_items
+        # (and _int) set the pair's per-slot kinds row from the dict slot's
+        # setter, so the VALUE slot's word is only a true int when the slot
+        # says kind 0 — a bool/None/double value read through the plain
+        # accessor prints as its raw word (1/0 instead of True/None, a
+        # double's IEEE bits instead of its decimal). `mojo_list_get_boxed`
+        # answers 'i' slots with the identical raw word, so registering every
+        # dict-items list here costs nothing for the int/struct/str cases.
+        # (The `_maybe_kinds_vals` half covers the non-items mixed-kind
+        # lists; checking BOTH keeps each site's registration meaningful for
+        # the consumers that read only that set.)
         _tuple_boxed_slots = (it_val in getattr(gen, '_maybe_kinds_vals', ())
-                              or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
+                              or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ())
+                              or it_val in gen._dict_items_val_elems
+                              or _as_str(it_val) in gen._dict_items_val_elems)
 
         def _emit_target_assign(ptr, vn, i, slot_elem, boxed_slots):
             """Assign slot `i` of the tuple at `ptr` to target name `vn` —
@@ -4010,11 +4036,12 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
             # name, which is not C (`gcc: expected ')' before ',' token`).
             # Refuse by name rather than emit that, matching this project's
             # "fall back to interpreting the module from source" convention.
-            # The message lives in mojo/middle/coro.py beside the pipeline
-            # pre-pass that raises the same refusal earlier (before the
-            # unknown-declaration pass can answer with a less-specific
-            # diagnostic for the same program): one builder, one wording.
-            raise coro_mod.multi_slot_for_refusal(var, api.get('base'))
+            raise RuntimeError(
+                "cannot compile a multi-slot `for` target over a generator "
+                f"whose yield arity is not a tuple (`for {var} in "
+                f"{api.get('base')}(...)`): the generator yields one value per "
+                "resume, and unpacking that value needs a runtime iterator "
+                "protocol this scalar generator model does not have")
         # Retype a name a sibling loop already declared with another kind
         # (see the docstring); `force` mints a fresh C name and rebinds every
         # later read of `var` in this body to it. Same rule as the list arm

@@ -711,6 +711,20 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
     return 'MojoBoundMethod *', t
 
 
+# (receiver ctype, method) -> the fire_runtime.c function that serves as
+# the bound-method `fn` when the value is boxed (see
+# _lower_builtin_method_value). The shim receives the receiver as `self`
+# (the bound-method calling convention: `bm->fn(bm->self, args)`) and must
+# perform the same container-method call a direct spelling lowers to —
+# `mojo_list_append_int` pushes the argument as the same raw slot word a
+# direct `l.append(item)` call writes (int, struct-pointer and string
+# elements all store their word verbatim). Extend this table, one runtime
+# shim per (container, method) pair, as new escaped-value shapes appear.
+_BUILTIN_METHOD_VALUE_SHIMS = {
+    ('MojoList *', 'append'): 'mojo_builtin_list_append',
+}
+
+
 def _lower_builtin_method_value(gen, ot: str, ov: str, method: str) -> tuple[str, str]:
     """Lower a BUILTIN-CONTAINER method referenced as a plain value —
     `append = l.append` (python_mapdef_code's accumulator idiom in
@@ -725,12 +739,22 @@ def _lower_builtin_method_value(gen, ot: str, ov: str, method: str) -> tuple[str
     a function pointer of. A builtin container (MojoList*/MojoDict*/
     MojoSet*/MojoBytes*/MojoMemoryView*) has NO per-method C function at all — its methods are
     lowered inline at each direct call site (`mojo_list_append_int` vs
-    `mojo_list_append_str` chosen by the ARGUMENT's type at that call),
-    so there is nothing for a MojoBoundMethod*'s fn pointer to point at.
-    Binding one therefore can't reuse the fn+self representation.
+    `mojo_list_append_str` chosen by the ARGUMENT's type at that call).
 
-    What it CAN do is record the binding and lower every call THROUGH
-    the value as a direct container-method call on the receiver:
+    For a (container, method) pair that has a runtime shim in
+    _BUILTIN_METHOD_VALUE_SHIMS the value is a REAL `MojoBoundMethod *`
+    box (`mojo_bound_method_new(<shim fnptr>, <receiver>)`): the registered
+    box stays callable when it ESCAPES the creating function (passed as a
+    callback argument, returned, stored) — the generic dispatch at the
+    call site (`mojo_fnptr_call_N` / `mojo_maybe_bound_call_N`) recognizes
+    it and calls the shim with the receiver as `self`. Before the box,
+    the value kept the container POINTER as its "callable" and the
+    dispatch's bare-fnptr arm jumped into the container's heap allocation
+    (SIGBUS — analyzer.py's `find_stores_in_tokens(stmt.contents,
+    res.append)`, root cause #6 of
+    COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fix).
+
+    For pairs without a shim the legacy binding is kept:
     - the receiver pointer is materialized into its own hidden void*
       local ONCE here, so the bound value keeps pointing at the ORIGINAL
       list even if the source variable is rebound afterwards (Python
@@ -747,15 +771,33 @@ def _lower_builtin_method_value(gen, ot: str, ov: str, method: str) -> tuple[str
       _lower_set_method verbatim — identical behavior and element-type
       tracking to spelling the call directly on the container.
 
-    Uses of the value OTHER than calling it in the same function
-    (returning it, storing it in a container, passing cross-function)
-    keep today's opaque-handle behavior — unsupported there before,
-    unchanged now."""
+    Uses of the value OTHER than calling it in the same function keep
+    that opaque-handle behavior — unsupported there (same pre-existing
+    gap as before the box), unchanged."""
     recv = gen._cast('void *', ov)
-    t = gen._new_temp('int64_t')
-    gen._cast_into(t, 'int64_t', recv)
+    shim = _BUILTIN_METHOD_VALUE_SHIMS.get((ot, method))
+    if shim is None:
+        t = gen._new_temp('int64_t')
+        gen._cast_into(t, 'int64_t', recv)
+        gen._builtin_method_values[t] = (ot, recv, method)
+        return 'int64_t', t
+    # Boxed bound method: the shim is the runtime function the dispatch
+    # calls with the receiver as `self`; `_funcptr_<shim>` is the same
+    # pre-declared-static-void* mechanism every other function value uses
+    # (the shim is a fire_runtime.c function, so the static's initializer
+    # resolves at link). `append` returns None -> int 0 through the
+    # bound-method dispatch.
+    gen._funcptr_builtins_needed.add(shim)
+    fp = gen._new_val('void *', f'_funcptr_{shim}')
+    t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
+                       [('void *', fp), ('void *', recv)])
+    gen._bound_method_ret_types[t] = 'int64_t'
+    # In-function calls through the value still prefer the direct
+    # container-method dispatch (identical semantics, keeps element-type
+    # tracking at the call site); the entry is keyed by the box temp, so
+    # the legacy carry-through and lookup are unchanged.
     gen._builtin_method_values[t] = (ot, recv, method)
-    return 'int64_t', t
+    return 'MojoBoundMethod *', t
 
 
 def _lower_builtin_bound_method_call(gen, fname_raw: str,
@@ -937,17 +979,6 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
             # of this dispatch scores the same way in `_resolve_overload`.
             chosen = _pick_overload_by_ctype(
                 matching, [p[0] for p in arg_pairs])
-            if chosen is None:
-                # No ctype signal at all. Every survivor already has this
-                # call's arity, and `_emit_call` coerces each argument to
-                # the chosen overload's declared C parameter type, so any
-                # survivor is ABI-valid; naming one is strictly better than
-                # the bare symbol no overload defines. Deterministic first,
-                # the same tie-break `_pick_overload_by_ctype` itself uses
-                # when two candidates score equally. Measured:
-                # `StringDict[StringSpan, Int][StringSpan("fruit")]` — both
-                # `__getitem__` overloads erase to `(self, int64_t)`.
-                chosen = matching[0]
     overload_id = (chosen or {}).get('overload_id', '') or ''
     mangled = _gmm_as_str(_ggf._struct_method_csym(gen, sn, method, overload_id))
     ret_type = (chosen or {}).get('ret_type') or gen.func_return_types.get(
@@ -2536,6 +2567,39 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
     # lower them a second time here — a "type it as an integer" copy at this
     # point is unreachable (the earlier arm returns first) and, when the
     # float case went through a widen-to-double, answered the WRONG bits.
+    # A method call on a word whose kind only the runtime knows (a
+    # TypeVar-annotated parameter, a generic-call result): resolve the
+    # method at run time through the per-type getattr dispatch and call
+    # the binding, instead of the silent identity stub below. The stub
+    # answered the RECEIVER — for `self.getpos()` in
+    # Tools/cases_generator/parsing.py's contextual_wrapper (the
+    # `self: P` TypeVar parameter) that bound begin/end to the PARSER
+    # POINTER and the stubbed `self.setpos(begin)` was a no-op, so
+    # every node the wrapper wrapped carried a context whose .begin /
+    # .owner were the parser (COMPILE_FAIL_Tools_cases_generator_
+    # analyzer-part3-part2). The runtime's per-type getattr arms
+    # answer a real object's methods (a Parser/PLexer receiver gets
+    # `mojo_bound_method_new(<S>_getpos, obj)`); a word that is no
+    # object raises the same AttributeError CPython does. `.py` only:
+    # a Mojo `Int`'s methods are real scalar methods the arms above
+    # already answered, and this file's own field-name coincidence must
+    # not redirect them (the callable-field arm's own gate).
+    if (ot in ('int', 'int64_t') and len(node.args) <= 8 and not node.kwargs
+            and _as_str(getattr(gen, '_current_filename', '') or '').endswith('.py')
+            and gen._is_dyn_word(node.func.obj, ov)):
+        _dynm_obj = gen._to_int64(ot, ov)
+        _dynm_vp = gen._new_val('void *', f'(void *){_dynm_obj}')
+        _dynm_fn = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                  [('void *', _dynm_vp), ('char *', f'"{method}"')])
+        _dynm_fp = gen._new_val('void *', f'(void *){_dynm_fn}')
+        _dynm_args = [('void *', _dynm_fp)]
+        for _dynm_a in node.args:
+            _dynm_at, _dynm_av = gen.lower_expr(_dynm_a)
+            _dynm_args.append(('int64_t', gen._to_int64(_dynm_at, _dynm_av)))
+        _dynm_res = gen._call_expr('int64_t',
+                                   f'mojo_maybe_bound_call_{len(node.args)}', _dynm_args)
+        gen._dyn_word_vals.add(_dynm_res)
+        return 'int64_t', _dynm_res
     # Other scalar methods: pass the receiver through unchanged
     for ea in node.args[1:]: gen.lower_expr(ea)
     return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
@@ -2768,105 +2832,6 @@ def _lmc_tagged_word_receiver(gen, node: gimple_ctypes.CallExpr, method: str, ot
     return None
 
 
-_IMPLICIT_COPY_RUNTIME = {
-    'MojoList *': 'mojo_list_copy',
-    'MojoDict *': 'mojo_dict_copy',
-    'MojoSet *': 'mojo_set_copy',
-    'MojoBytes *': 'mojo_bytes_copy',
-}
-
-
-def _emit_fieldwise_copy_into(gen, dst, src_local, sname, depth):
-    """Copy every registered field of `sname` from `src_local` into `dst`.
-
-    This is real Mojo's implicit copy for a fieldwise struct: one copy per
-    field (struct_field_types, the same table the ctor fallback writes),
-    DEEP for runtime CONTAINER fields (`MojoList`/`MojoDict`/`MojoSet`/
-    `MojoBytes` have their own `*_copy`) and for in-TU struct-pointer
-    fields. A raw word copy would alias the source's mutable state —
-    measured: the cycle wrapper's aliased inner cursor (test_cycle_copyable),
-    and `BinaryHeap[Int](copy=heap)` sharing `_data` so popping one heap
-    drained the other. GIMPLE: a component_ref is not a valid store RHS
-    (`invalid RHS for gimple memory store: 'component_ref'`, measured) —
-    every field read and every copied store goes through a local.
-    """
-    for _fn in (gen.struct_field_types.get(sname) or {}):
-        _fnm = gimple_ctypes._safe_field(_as_str(_fn))
-        _ft = _as_str((gen.struct_field_types.get(sname) or {})[_fn])
-        _fv = gen._new_temp(_ft)
-        gen._emit(f"  {_fv} = {src_local}->{_fnm};")
-        _cpy = _IMPLICIT_COPY_RUNTIME.get(_ft)
-        if _cpy is not None:
-            _fv = gen._call_expr(_ft, _cpy, [(_ft, _fv)])
-        _fsn = (gimple_exprtypes._struct_name_of(_ft)
-                if _ft.endswith(' *') else None)
-        if (_fsn and depth < 4
-                and _fsn in getattr(gen, '_intu_prereg_structs', ())):
-            _sub = gen._new_temp(_ft)
-            gen._struct_allocs_needed.add(_fsn)
-            gen._rt_into(_sub, f"_alloc_{_fsn}", [])
-            # PART 6 (2026-10-23, family D piece 2): a field whose
-            # struct type registers an EXPLICIT copy constructor (an
-            # __init__ resolvable on the `copy` kwarg — Observable's,
-            # CopyCounter's) is copied THROUGH that constructor, not by
-            # raw fieldwise recursion: real Mojo's implicit field copy
-            # invokes the field type's copy ctor, and that ctor is exactly
-            # where the counting side effect lives (the Observable copy
-            # ctor's `self._copies.value()[] += 1` — the raw recursion
-            # would copy the pointer word and skip the increment, leaving
-            # copy_b at 0). Structs with no copy ctor (the _ListIterOwned
-            # family) keep the raw recursion in the else.
-            _fcands = gen._struct_method_signatures.get(
-                _gmm_sms_key(_fsn, '__init__'))
-            _fch = None
-            if _fcands:
-                _fch = gen._resolve_overload(
-                    _fcands, [],
-                    [('copy', gimple_ctypes.IdentExpr(name=_fv))])
-            if _fch is not None:
-                init_fname = gen._struct_method_csym(
-                    _fsn, '__init__', _fch['overload_id'])
-                gen._rt_void(f"{init_fname}", [_sub, f"{_fv}"])
-            else:
-                _emit_fieldwise_copy_into(gen, _sub, _fv, _fsn, depth + 1)
-            _fv = _sub
-        gen._emit(f"  {dst}->{_fnm} = {_fv};")
-        # PART 6 (2026-10-22, family C): a TAGGED-Optional field's is_some
-        # side-band is a layout-only member (module_gen's typedef renderer
-        # adds it; it is NOT in struct_field_types), so this fieldwise loop
-        # never copies it — the fresh object's tag byte would be malloc
-        # garbage (its _alloc is a plain malloc) and every tag reader
-        # (`if self._f:` -> `f_is_some`) would act on uninitialized state.
-        # Measured: test_once's `it.copy()` copied the word, not the tag.
-        _tagged_f = gen._tagged_optional_fields.get(sname)
-        if _tagged_f and _as_str(_fn) in _tagged_f:
-            _sv = gen._new_temp('_Bool')
-            gen._emit(f"  {_sv} = {src_local}->{_fnm}_is_some;")
-            gen._emit(f"  {dst}->{_fnm}_is_some = {_sv};")
-    # The presence words are not in struct_field_types (see
-    # StructDef.presence_fields), so the loop above never copies them: a
-    # copy of an object that had a minted field set must keep answering
-    # hasattr True.
-    gimple_ctypes.presence_copy_emit(
-        gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
-
-
-def _lower_implicit_struct_copy(gen, csn, ot, ov):
-    """Allocate `csn` and fill it with a fieldwise copy of `ov`.
-
-    Returns `(ctype, value)` or None when this struct's layout was never
-    registered (a reflected/dylib-only struct has no fields to copy).
-    """
-    if not gen.struct_field_types.get(csn):
-        return None
-    t = gen._new_temp(f'{csn} *')
-    gen._struct_allocs_needed.add(csn)
-    gen._rt_into(t, f"_alloc_{csn}", [])
-    _recv_local = gen._ensure_local(ot, ov)
-    _emit_fieldwise_copy_into(gen, t, _recv_local, csn, 0)
-    return f'{csn} *', t
-
-
 def _lmc_copy(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[str, str]:
     """`x.copy()`.
 
@@ -2938,11 +2903,106 @@ def _lmc_copy(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[str, str]
             # _CycleIterator wrapper — note the latter DOES register
             # a fieldwise __init__, so the gate is "resolvable on
             # the copy kwarg", not "has any __init__"). Synthesize
-            # real Mojo's implicit fieldwise copy; see
-            # `_emit_fieldwise_copy_into`.
-            _implicit = _lower_implicit_struct_copy(gen, _csn, ot, ov)
-            if _implicit is not None:
-                return _implicit
+            # real Mojo's implicit fieldwise copy: alloc + one copy
+            # per source field (struct_field_types, the same table
+            # the ctor fallback writes), DEEP for fields that are
+            # pointers to other in-TU structs (a pointer alias
+            # shares the field's mutable state — measured: the
+            # cycle wrapper's aliased inner cursor, test_cycle_
+            # copyable). GIMPLE: a component_ref is not a valid
+            # store RHS (`invalid RHS for gimple memory store:
+            # 'component_ref'`, measured) — every field read and
+            # every deep-copied store goes through a local.
+            _cf = gen.struct_field_types.get(_csn)
+            if _cf:
+                t = gen._new_temp(f'{_csn} *')
+                gen._struct_allocs_needed.add(_csn)
+                gen._rt_into(t, f"_alloc_{_csn}", [])
+                _recv_local = gen._ensure_local(ot, ov)
+
+                def _emit_fw_copy(dst, src_local, sname, depth):
+                    for _fn in (gen.struct_field_types.get(sname)
+                                or {}):
+                        _fnm = gimple_ctypes._safe_field(_as_str(_fn))
+                        _ft = _as_str((gen.struct_field_types
+                                        .get(sname) or {})[_fn])
+                        _fv = gen._new_temp(_ft)
+                        gen._emit(f"  {_fv} = {src_local}->{_fnm};")
+                        _fsn = (gimple_exprtypes._struct_name_of(_ft)
+                                if _ft.endswith(' *') else None)
+                        if (_fsn and depth < 4
+                                and _fsn in getattr(
+                                    gen, '_intu_prereg_structs', ())):
+                            _sub = gen._new_temp(_ft)
+                            gen._struct_allocs_needed.add(_fsn)
+                            gen._rt_into(_sub, f"_alloc_{_fsn}", [])
+                            # PART 6 (2026-10-23, family D piece 2): a
+                            # field whose struct type registers an
+                            # EXPLICIT copy constructor (an __init__
+                            # resolvable on the `copy` kwarg —
+                            # Observable's, CopyCounter's) is copied
+                            # THROUGH that constructor, not by raw
+                            # fieldwise recursion: real Mojo's implicit
+                            # field copy invokes the field type's copy
+                            # ctor, and that ctor is exactly where the
+                            # counting side effect lives (the Observable
+                            # copy ctor's `self._copies.value()[] += 1`
+                            # — the raw recursion would copy the pointer
+                            # word and skip the increment, leaving
+                            # copy_b at 0). The (a)-branch above does
+                            # the same for the RECEIVER; this is the
+                            # field-level twin. Structs with no copy
+                            # ctor (the _ListIterOwned family) keep the
+                            # raw recursion in the else.
+                            _fcands = gen._struct_method_signatures.get(
+                                _gmm_sms_key(_fsn, '__init__'))
+                            _fch = None
+                            if _fcands:
+                                _fch = gen._resolve_overload(
+                                    _fcands, [],
+                                    [('copy', gimple_ctypes.IdentExpr(
+                                        name=_fv))])
+                            if _fch is not None:
+                                init_fname = gen._struct_method_csym(
+                                    _fsn, '__init__',
+                                    _fch['overload_id'])
+                                gen._rt_void(f"{init_fname}", [_sub, f"{_fv}"])
+                            else:
+                                _emit_fw_copy(
+                                    _sub, _fv, _fsn, depth + 1)
+                            _fv = _sub
+                        gen._emit(f"  {dst}->{_fnm} = {_fv};")
+                        # PART 6 (2026-10-22, family C): a TAGGED-
+                        # Optional field's is_some side-band is a
+                        # layout-only member (module_gen's typedef
+                        # renderer adds it; it is NOT in
+                        # struct_field_types), so this fieldwise loop
+                        # never copies it — the fresh object's tag
+                        # byte would be malloc garbage (its _alloc is
+                        # a plain malloc) and every tag reader
+                        # (`if self._f:` -> `f_is_some`) would act on
+                        # uninitialized state. Measured: test_once's
+                        # `it.copy()` copied the word, not the tag.
+                        # Propagate it with the same same-type
+                        # component-ref read + store the writers use.
+                        _tagged_f = gen._tagged_optional_fields.get(
+                            sname)
+                        if _tagged_f and _as_str(_fn) in _tagged_f:
+                            _sv = gen._new_temp('_Bool')
+                            gen._emit(
+                                f"  {_sv} = {src_local}->{_fnm}"
+                                f"_is_some;")
+                            gen._emit(
+                                f"  {dst}->{_fnm}_is_some = {_sv};")
+                    # The presence words are not in struct_field_types
+                    # (see StructDef.presence_fields), so the loop above
+                    # never copies them: a copy of an object that had a
+                    # minted field set must keep answering hasattr True.
+                    gimple_ctypes.presence_copy_emit(
+                        gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
+
+                _emit_fw_copy(t, _recv_local, _csn, 0)
+                return f'{_csn} *', t
     return ot, ov
 
 
@@ -3011,6 +3071,10 @@ def _lmc_unbound_class_receiver(gen, node: gimple_ctypes.CallExpr, func, method:
     if _mret_api is not None:
         gen._generator_var_api[t] = _mret_api
         gen._actual_types[t] = 'MojoGenerator *'
+        # The method returned a freshly constructed generator: own it, so a
+        # direct consumer of the result destroys it after draining (see
+        # _generator_value_owned).
+        gen._generator_value_owned[t] = True
     return ret_type, t
 
 
@@ -3120,6 +3184,9 @@ def _lmc_generator_method(gen, node: gimple_ctypes.CallExpr, _gm_api, _recv_ot_r
         all_args = gen._pack_generator_star_args(all_args, _gm_star)
     t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
     gen._generator_var_api[t] = _gm_api
+    # Fresh construction: own the handle, so a direct consumer destroys it
+    # after draining (see _generator_value_owned).
+    gen._generator_value_owned[t] = True
     return 'MojoGenerator *', t
 
 
@@ -6579,6 +6646,14 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # right accessor — the key slot is always a string (see
         # _dict_items_val_elems's docstring).
         gen._dict_items_val_elems[t] = gen._dict_val_of(ov)
+        # The pair's value slot carries its RUNTIME kind in the pair's kinds
+        # row (mojo_dict_items sets it from the dict slot's setter): a loop
+        # that unpacks the pair must read the value slot through the
+        # kind-aware accessor, or a bool/None/double value prints as its raw
+        # int word (True printed as 1, None as 0). Pairs are container slots,
+        # so the pair ITSELF still reads raw (a container is never boxed by
+        # mojo_list_get_boxed).
+        gen._maybe_kinds_vals.add(t)
         return 'MojoList *', t
     if method == 'fromkeys' and args:
         return _ldm_fromkeys(gen, ov, args)
@@ -8450,24 +8525,7 @@ def _lsmc_autostub(gen, method: str, mangled: str, struct_name: str) -> tuple | 
             _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
                       f'int64_t {mangled} (int64_t);\n#endif')
         else:
-            # A declaration-only extern here leaves an UNDEFINED symbol
-            # whenever no unit in the program defines the method at all:
-            # std/python/python.mojo's `Pointer(to=...).as_imm()` is
-            # lowered against the receiver's boxed CPython* type, so the
-            # call site named `std_python__cpython_CPython_as_imm` while
-            # nothing defines it and `_cpython.mojo` never could (the
-            # method belongs to `Pointer`, not `CPython`). A weak
-            # DEFINITION under the caller-visible name is the existing
-            # convention for a body this backend cannot lower (see
-            # `_lower_named_call`'s "unavailable in compiled mode" stub),
-            # and a strong definition elsewhere in the program still wins
-            # over it at link time — so the ordinary "sibling method
-            # emitted later in another unit" case is unaffected.
-            _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
-                      f'__attribute__((weak)) int64_t {mangled} (...) '
-                      f'{{ mojo_print ((char *)'
-                      f'"{struct_name}.{method}: unavailable in compiled mode"); '
-                      f'return (int64_t)0; }}\n#endif')
+            _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
     if _stub not in gen._elaborated_externs:
         gen._elaborated_externs.append(_stub)
     gen._auto_stubbed.add(mangled)
@@ -8511,6 +8569,147 @@ def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pai
         else:
             arg_pairs.append(('int', '0'))
     return None
+
+
+def _virt_dispatch_plan(gen, struct_name, method, overload_id):
+    """Virtual dispatch for a method call on a receiver whose DECLARED
+    struct type is a base class. Returns {'helper': cname, 'ret': ctype}
+    for the tag-switch helper `_mojo_virt_<base_csym>` (defined in
+    module_gen._emit_reflection_dispatch, prototyped right after
+    _emit_struct_method_prototypes), or None when dispatch is inapplicable
+    or impossible, in which case the caller keeps the static binding.
+
+    Why: CPython resolves `obj.method(...)` on the runtime object's class.
+    This codegen statically binds the call to the method registered on the
+    receiver's DECLARED struct, so a `Stmt *` receiver (a `list[Stmt]`
+    element) calls `Stmt.tokens` — the base's `raise NotImplementedError`
+    — even when the runtime object is a BlockStmt whose own `tokens`
+    generator is what should run. Measured on Tools/cases_generator:
+    parsing.py's BlockStmt.tokens does `yield from stmt.tokens()` over its
+    `list[Stmt]` body, so every compiled analyzer died with an unhandled
+    NotImplementedError before yielding a single token.
+
+    The helper switches on the receiver's stamped `__mojo_type_id` (the
+    same tag `_mojo_dispatch_getattr` switches on — see module_gen's
+    `_emit_reflection_dispatch`) and forwards to the concrete subclass's
+    method: the generator trampoline `__mgco_<C>_<m>_start` when
+    `C.method` is a compiled generator (its `MojoGenerator *` handle is
+    exactly what the `yield from` / for-loop consumer already knows how
+    to drive through `mojo_iter_gen_handle`), else the ordinary
+    `{qualifier_}C_m` symbol. Objects whose type never defines the method
+    fall through to the base's own definition — CPython's MRO fallback
+    for a flat hierarchy (Stmt -> {IfStmt, BlockStmt, ...}).
+
+    Self-host-safe: explicit loops, no f-strings, `_gmm_as_str` on every
+    table read (the `_gmm_as_str` pattern — boxed dict reads erase to
+    int64_t and would miss the str-keyed table)."""
+    struct_name = _gmm_as_str(struct_name)
+    method = _gmm_as_str(method)
+    overload_id = _gmm_as_str(overload_id)
+    if not struct_name:
+        return None
+    if struct_name not in (gen.struct_field_types or {}):
+        return None
+    base_csym = _gmm_as_str(_ggf._struct_method_csym(
+        gen, struct_name, method, overload_id))
+    if base_csym not in (gen.func_return_types or {}):
+        return None
+    base_ret = _gmm_as_str(gen.func_return_types[base_csym])
+    base_p = (gen.func_param_types or {}).get(base_csym)
+    if base_p is None:
+        base_p = (gen.func_param_types or {}).get(
+            struct_name + '_' + method + overload_id)
+    if not base_p:
+        return None
+    self_ctype = _gmm_as_str(base_p[0])
+    if not self_ctype.endswith(' *'):
+        return None
+    # Transitive subclasses from `gen._struct_bases` (bare name -> base
+    # names, module_gen): invert to child -> [parents], then DFS the
+    # child edges from the receiver's declared type.
+    children = {}
+    for _cn, _bn in (gen._struct_bases or {}).items():
+        _cn = _gmm_as_str(_cn)
+        for _b in (_bn or []):
+            _b = _gmm_as_str(_b)
+            if _b in children:
+                children[_b].append(_cn)
+            else:
+                children[_b] = [_cn]
+    sub = []
+    seen = set()
+    stack = [struct_name]
+    while stack:
+        _c = stack.pop()
+        for _ch in children.get(_c, ()):
+            if _ch in seen:
+                continue
+            seen.add(_ch)
+            sub.append(_ch)
+            stack.append(_ch)
+    cases = []
+    for _c in sorted(sub):
+        if _c not in (gen.struct_field_types or {}):
+            continue
+        _api = (gen._generator_method_api or {}).get((_c, method))
+        if _api is not None:
+            # Compiled generator: the trampoline returns a MojoGenerator *
+            # handle boxed to an int64_t word — only admissible when the
+            # base's own result is that same word (the consumer drives
+            # the handle via mojo_iter_gen_handle). The handle must be
+            # REGISTERED before returning: `__mgco_` trampolines have no
+            # runtime signature of their own (see emit_calls'
+            # _finish_generator_start comment), so the registration is the
+            # vkind-classified `mojo_gen_note_a3` (the same mapping the
+            # itertools.chain lowering uses — an int64_t word is vkind 0,
+            # which the runtime reclassifies per element, the case for a
+            # struct-pointer yield like parsing.py's tokens()).
+            if base_ret != 'int64_t':
+                continue
+            _vkt = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}
+            _vk = _vkt.get(_gmm_as_str(_api.get('value_ctype') or ''))
+            if _vk is None:
+                continue
+            _callee = _gmm_as_str(_api['base']) + '_start'
+            _p = (gen.func_param_types or {}).get(_callee)
+            _ret = 'int64_t'
+        else:
+            _callee = _gmm_as_str(_ggf._struct_method_csym(
+                gen, _c, method, overload_id))
+            if _callee not in (gen.func_return_types or {}):
+                continue
+            _p = (gen.func_param_types or {}).get(_callee)
+            if _p is None:
+                _p = (gen.func_param_types or {}).get(
+                    _c + '_' + method + overload_id)
+            _ret = _gmm_as_str(gen.func_return_types[_callee])
+        if not _p:
+            continue
+        if len(_p) != len(base_p):
+            continue
+        if _ret != base_ret:
+            continue
+        cases.append((_c, _callee, _gmm_as_str(_p[0]),
+                      _vk if _api is not None else None))
+    if not cases:
+        return None
+    helpers = getattr(gen, '_virt_dispatch_helpers', None)
+    if helpers is None:
+        helpers = {}
+        gen._virt_dispatch_helpers = helpers
+    helper = '_mojo_virt_' + base_csym
+    if helper not in helpers:
+        _pct = [self_ctype]
+        for _x in base_p[1:]:
+            _pct.append(_gmm_as_str(_x))
+        helpers[helper] = {
+            'self_ctype': self_ctype,
+            'param_ctypes': _pct,
+            'ret': base_ret,
+            'cases': cases,
+            'default_callee': base_csym,
+        }
+    return {'helper': helper, 'ret': base_ret}
 
 
 def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple:
@@ -8619,6 +8818,49 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
                 if func.obj.obj.name == 'self':
                     if method == 'set' and func.obj.member == 'parent':
                         struct_name = 'Scope'
+    # Decorated method: the class attribute is the DECORATOR'S RESULT, not
+    # the raw function — `@contextual def inst_def(self)` installs
+    # `contextual(inst_def)`, a closure holding the raw function, and the
+    # call must run that wrapper (which sets the parsed node's `context`;
+    # the raw call left it None and `Node.first_token`'s
+    # `assert context is not None` trapped). The wrapper value is built
+    # lazily by the per-(struct, method) getter module_gen's
+    # `_emit_struct_method_prototypes` emitted beside the raw prototype;
+    # it is a compiled closure (a bound method whose self slot is the
+    # capturing env), so the call is `mojo_maybe_bound_call_N` with the
+    # receiver in the FIRST argument slot (the wrapper's own `self`
+    # parameter) plus the call's arguments. Only a bare instance receiver
+    # reaches this: a class reference (`Cls.m(...)`) has no object, and a
+    # method a subclass redefines unwrapped shadows the inherited wrapper
+    # (the virtual plan below keeps answering those statically — the
+    # analyzer's Parser/PLexer pair has no such override). Python-mode
+    # only, like the dyn-word dispatch arm: a `.mojo` struct's methods
+    # have no decorators in this subset.
+    _mrt0 = getattr(gen, '_method_returns_generator', None)
+    _dw_gen_meth = (_mrt0 is not None) and (_mrt0.get((struct_name, method)) is not None)
+    if (not is_class_ref and isinstance(ot, str) and ot.endswith(' *')
+            and struct_name in (gen.struct_field_types or {})
+            and not node.kwargs and not _dw_gen_meth):
+        _dw_dec = (getattr(gen, '_decorated_method_wrapped', None) or {}).get((struct_name, method))
+        if _dw_dec is None:
+            _dw_bases = (gen._struct_bases or {}).get(struct_name)
+            if _dw_bases:
+                for _dw_b0 in _dw_bases:
+                    _dw_dec = (getattr(gen, '_decorated_method_wrapped', None) or {}).get((_as_str(_dw_b0), method))
+                    if _dw_dec is not None:
+                        break
+        if _dw_dec is not None:
+            _dw_w = gen._new_temp('int64_t')
+            gen._emit(f'  {_dw_w} = {_as_str(_dw_dec)} ();')
+            _dw_wv = gen._new_val('void *', f'(void *){_dw_w}')
+            _dw_args = [('void *', _dw_wv), ('int64_t', gen._to_int64(ot, ov))]
+            for _dw_a in node.args:
+                _dw_at, _dw_av = gen.lower_expr(_dw_a)
+                _dw_args.append(('int64_t', gen._to_int64(_dw_at, _dw_av)))
+            _dw_t = gen._call_expr('int64_t',
+                                   f'mojo_maybe_bound_call_{1 + len(node.args)}', _dw_args)
+            gen._dyn_word_vals.add(_dw_t)
+            return 'int64_t', _dw_t
     # Same-file overload resolution: if this method's overloads were
     # registered from the CURRENT file's own AST (Pass 2b-bis), pick the
     # one matching this call site's arity/types instead of always
@@ -8696,6 +8938,21 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # `func_return_types` / `_KNOWN_SIGS` lookup by mangled name then
     # missed. Re-tag as `str`.
     mangled = _gmm_as_str(_ggf._struct_method_csym(gen, struct_name, method, _method_overload_suffix))
+    # Virtual dispatch: when the declared receiver type is a base class
+    # that subclasses override `method` with, the static binding would run
+    # the base's definition (its `raise NotImplementedError`) on objects
+    # whose runtime type defines the real method — see
+    # _virt_dispatch_plan's docstring for the measured
+    # Tools/cases_generator BlockStmt.tokens failure. Class references
+    # (`Cls.method(...)` — the receiver is the class marker, not an
+    # instance) and `cls.method(...)` classmethod receivers keep the
+    # static binding: there is no object tag to switch on.
+    _vdp = None
+    if not is_class_ref and not (isinstance(func.obj, gimple_ctypes.IdentExpr)
+                                 and _gmm_as_str(func.obj.name) == 'cls'):
+        _vdp = _virt_dispatch_plan(gen, struct_name, method, _method_overload_suffix)
+    if _vdp is not None:
+        mangled = _vdp['helper']
     # Prefer the candidate's own precomputed return type (Pass 2b-bis) over
     # func_return_types[suffixed_key], which is only populated once THAT
     # overload's own body is emitted (Phase 2a, declaration order) — a call
@@ -8728,6 +8985,12 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             ret_type = 'int64_t'
         else:
             ret_type = 'int64_t'
+    # The virtual-dispatch helper RETURNS exactly the base method's result
+    # (the plan refused to build one on any ret-type disagreement), so the
+    # heuristic lookups above — which key on the helper name and would miss
+    # — must not stand: force the planned type.
+    if _vdp is not None:
+        ret_type = _vdp['ret']
     # Bind keyword args to the resolved overload's parameter positions,
     # and (when the overload has a `*args` pack, e.g. DeviceGraphBuilder.
     # add_function's *Ts-typed variadic overloads) box the pack-matched
@@ -8905,6 +9168,11 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     if _mret_api is not None:
         gen._generator_var_api[t] = _mret_api
         gen._actual_types[t] = 'MojoGenerator *'
+        # The method returned a freshly constructed generator: own it, so a
+        # direct consumer of the result destroys it after draining (see
+        # _generator_value_owned). This is the `obj.method()` generator the
+        # comprehension drain used to leak per call.
+        gen._generator_value_owned[t] = True
 
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]

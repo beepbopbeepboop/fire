@@ -1315,9 +1315,12 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # three are the overflow-trapping hole-count rows in
                      # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
-     # `gimplerunner` left this census 2026-11-16: re-measured at 628 passed /
-     # 0 failed, so its `expect=` marker was removed and the census entry with
-     # it (an expect= that passes is reported as a failure).
+     # `gimplerunner` at 1 (was 20): its 2026-11-13 re-run on master reports
+     # `626 passed, 1 failed` of 627, and the registry marker states that 1.
+     # The census had gone stale against the marker, which is the drift this
+     # check exists to catch (bug:SUITE_self_test_red). The remaining failure
+     # is `c_accessor_helpers_emitted_once_across_modules`.
+                     'gimplerunner': 1,
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
      # deleted with the work and the marker was retired with it (2026-11-13).
@@ -2203,14 +2206,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_python315_sentinel.py': 1,
     'test_regress_gpu_offload_validation_modular_part1.py': 1,
     'test_regress_gpu_offload_validation_modular_part4.py': 1,
-    # Four regression pins gained a literal `timeout=` on 2026-11-15 (a
-    # subprocess of the compiler under test). Recorded rather than converted:
-    # each is one child process with a real wall-clock bound, which is what a
-    # residue row is for.
-    'test_regress_generator_keyword_arg_binding.py': 3,
-    'test_regress_scriptutil_generator_closure.py': 3,
-    'test_regress_yield_from_module_generator.py': 2,
-    'test_regress_yield_from_word_iterator.py': 3,
     'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2769,10 +2764,8 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
     # `formal-read-before-store` are no longer disabled either. This list is the
     # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    expected_disabled = []
+    # rather than freezing it.
+    expected_disabled = ['gimple', 'metalgpu']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2914,10 +2907,8 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
     # `formal-read-before-store` are no longer disabled either. This list is the
     # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    expected_disabled = []
+    # rather than freezing it.
+    expected_disabled = ['gimple', 'metalgpu']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
@@ -4228,7 +4219,6 @@ UNREGISTERED = {
     'test_runtime_class_creation.py': _STANDALONE_TEST_REASON,
     'test_runtime_cstr_region.py': _STANDALONE_TEST_REASON,
     'test_stdlib_dylib_ratchet.py': _STANDALONE_TEST_REASON,
-    'test_stdlib_syntax_dunder_overloads.py': _STANDALONE_TEST_REASON,
     'test_str_slice_tuple_return.py': _STANDALONE_TEST_REASON,
     'test_untyped_closure_str_return.py': _STANDALONE_TEST_REASON,
     'tools/test_control_pool.py': _STANDALONE_TEST_REASON,
@@ -6333,7 +6323,7 @@ def test_the_formal_doc_index_is_current():
     # is DELETED and the block is not regenerated. The NEW-document check above
     # exercises the same comparison, but only in the direction that was never
     # the failure — d3ec70ee7 deleted
-    # the arm64 extend-option census (part 1) and merged a block that had
+    # `FORMAL_arm64_instruction_coverage-part1.md` and merged a block that had
     # lost the ROW but kept the counts ("4 documents" over three rows, "5
     # documents" over four), so `python3 tools/formal_doc_index.py --check` was
     # red on master and `test_suite.py` with it. Pinned on a planted tree in
