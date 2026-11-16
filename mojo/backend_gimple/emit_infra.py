@@ -435,16 +435,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # 'inst'. A method call or `isinstance` on them goes to the class table, never to the
     # container/struct method guesses an untyped word otherwise gets.
     gen._rtobj_kinds: dict = {}
-    # Facts about a VALUE, keyed by the name that holds it. Names restart in
-    # every function (`_t1`, and locals such as `g`), so each of these starts
-    # empty: until 2026-11-16 these four were created once per module and
-    # never reset, and a later function's `_t7` or `g` inherited what an
-    # earlier function's had been (`test_gimple_lint.py` checks that every
-    # table `carry_value_info` copies is reset here).
-    gen._struct_formats = {}
-    gen._generator_var_api = {}
-    gen._async_var_api = {}
-    gen._taskgroup_var_api = {}
     # A parameter ANNOTATED `object` is such a word by declaration: whatever
     # the call sites pass, the function's own code may not assume a kind.
     if params is not None:
@@ -960,10 +950,6 @@ class FuncState:
         self.fs_dyn_word_locals: set = set()
         self.fs_dict_slot_reads: dict = {}
         self.fs_rtobj_kinds: dict = {}
-        self.fs_struct_formats: dict = {}
-        self.fs_generator_var_api: dict = {}
-        self.fs_async_var_api: dict = {}
-        self.fs_taskgroup_var_api: dict = {}
         self.fs_tagged_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
         self.fs_nested_mixed_names: set = set()
@@ -1075,10 +1061,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_dyn_word_locals = gen._dyn_word_locals
     st.fs_dict_slot_reads = gen._dict_slot_reads
     st.fs_rtobj_kinds = gen._rtobj_kinds
-    st.fs_struct_formats = gen._struct_formats
-    st.fs_generator_var_api = gen._generator_var_api
-    st.fs_async_var_api = gen._async_var_api
-    st.fs_taskgroup_var_api = gen._taskgroup_var_api
     st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fs_nested_mixed_names = gen._nested_mixed_names
@@ -1201,10 +1183,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._dyn_word_locals = st.fs_dyn_word_locals
     gen._dict_slot_reads = st.fs_dict_slot_reads
     gen._rtobj_kinds = st.fs_rtobj_kinds
-    gen._struct_formats = st.fs_struct_formats
-    gen._generator_var_api = st.fs_generator_var_api
-    gen._async_var_api = st.fs_async_var_api
-    gen._taskgroup_var_api = st.fs_taskgroup_var_api
     gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen._nested_mixed_names = st.fs_nested_mixed_names
@@ -6243,13 +6221,6 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
         info = None
     if not info:
         return None
-    # The overload symbol is mangled from the BARE name, so an IMPORTED
-    # overloaded function lost the defining module's qualifier and every call
-    # site emitted a symbol nothing defines (`pick__void` for
-    # `from m1 import pick`). Same composition `_func_csym` uses.
-    _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
-    if _q:
-        info['symbol'] = _q + '_' + info['symbol']
     return gen._emit_generic_instantiation(info, arg_pairs)
 
 

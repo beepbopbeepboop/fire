@@ -12027,31 +12027,13 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  have hguard_{bi} : {_condtxt} := by")
                 if m_run > 0 and cert_name is not None:
                     A(f"{IND}    rw [hsid_{bi}]")
-                # The guard's state is a CHAIN: `hsid_{bi}` names `s_{bi}` in
-                # terms of the previous block's state, which `hsid_{prev}`
-                # names in turn, back to `Arm64State.init`.  Unfolding only
-                # this block's own defs leaves the earlier `s_k` as free
-                # variables, and `native_decide` refuses a goal that has any
-                # ("Expected type must not contain free variables") -- so the
-                # path-scoped hsids and block defs go in, exactly as the
-                # taken-dead `cbz` arm's `hne` does above.
-                _unfold = list(reversed(ctx.get("flow_hsid") or [])) + list(
-                    ctx.get("flow_defs") or []) + list(def_names) + [
+                _unfold = list(def_names) + [
                     'arm64_reg', 'arm64_set_reg', 'Arm64State.init',
                     'arm64_subs_flags', 'arm64_matches_condition',
                     'mem_read_u64', 'mem_write_u64', 'mem_write_u32',
                     'mem_write_u16', 'mem_write_u8']
                 A(f"{IND}    simp only [{', '.join(_unfold)}]")
-                # The prologue stored the free input (`n`, a callee-saved
-                # register's value) on the stack, so the floor-word read still
-                # MENTIONS it under the write chain even though the answer does
-                # not depend on it; `native_decide` takes only a closed goal.
-                # The address facts are decidable, so resolve the reads first
-                # (the taken-dead `cbz` arm's `hne` does the same), then
-                # decide what is left.
-                A(f"{IND}    try simp (disch := decide) [mem_read_after_write_u64, "
-                  f"mem_read_after_write_u64_ne, mem_read_two_writes_same]")
-                A(f"{IND}    all_goals native_decide")
+                A(f"{IND}    native_decide")
                 A(f"{IND}  exact absurd hguard_{bi} hc_{bi}")
                 return
             if _is_sc_self:

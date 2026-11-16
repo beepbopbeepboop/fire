@@ -59,7 +59,7 @@ from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
     _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _and_or_operand_type, _module_attr_call_return_type, _record_closure_alias,
+    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _module_attr_call_return_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
 from mojo.middle.calls_shared import user_dunder_repr_call
@@ -1624,20 +1624,11 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
     if gimple_ctypes.source_declares(text, ['struct'], name, '['):
         gen._imported_generic_structs.setdefault(sym, src_path)
         return True
-    # A declaration with a BRACKETED head (`def f[T]()`) makes this a generic;
-    # one with a bare head (`def f()`) does not. A name with BOTH -- Mojo's
-    # overloaded free functions routinely pair them (`is_apple_gpu()` and
-    # `is_apple_gpu[subarch: StaticString]()`) -- must be registered as an
-    # OVERLOAD too, or the call site has no overload set to match and emits
-    # the unsuffixed symbol, which no overload defines. The opener set is
-    # `'(['`, not `'('`: a bracketed head is a declaration of the same name.
-    _is_generic_fn = gimple_ctypes.source_declares(text, ['fn', 'def'], name, '[')
-    if _is_generic_fn:
+    if gimple_ctypes.source_declares(text, ['fn', 'def'], name, '['):
         gen._imported_generics.setdefault(sym, src_path)
-    if len(gimple_ctypes.source_decl_ends(text, ['fn', 'def'], name, '([')) > 1:
-        gen._imported_overloads.setdefault(sym, src_path)
         return True
-    if _is_generic_fn:
+    if len(gimple_ctypes.source_decl_ends(text, ['fn', 'def'], name, '(')) > 1:
+        gen._imported_overloads.setdefault(sym, src_path)
         return True
     # A struct DEFINITION (not a generic one): inline the whole module, which
     # brings the typedef, its `__init__`, its methods and its class
@@ -1955,7 +1946,7 @@ def _register_link_imports(gen, stmts: list) -> list:
                         except Exception:
                             _ov_src = ''
                         if len(gimple_ctypes.source_decl_ends(
-                                _ov_src, ['fn', 'def'], name, '([')) > 1:
+                                _ov_src, ['fn', 'def'], name, '(')) > 1:
                             gen._imported_overloads.setdefault(sym, source)
                     # Record the module source for any imported name, so a
                     # comptime call to it can be evaluated at compile time.

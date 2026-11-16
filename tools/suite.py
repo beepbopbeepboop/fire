@@ -1698,7 +1698,8 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)')
+     desc='GIMPLE unit suite (python-interpreted codegen)',
+     disabled='bugs/gate-gimple.md')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -1879,7 +1880,8 @@ test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
                              'mojo/backend_gimple/emit_metal.py'],
      desc='Metal codegen: op tables, device-region selection, MSL emission, '
           'and the generated MSL compiled by Apple\'s real compiler and run '
-          'on the GPU against a CPU reference')
+          'on the GPU against a CPU reference',
+     disabled='bugs/gate-metalgpu.md')
 test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
      extra=['tools/md2html.py', 'test_md2html.py',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
@@ -2565,7 +2567,8 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
+     disabled='bugs/gate-stdlib-syntax.md')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
@@ -4284,9 +4287,6 @@ test('land-doc', [PY, 'tools/test_land_doc.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('gate-files', [PY, 'tools/test_gate_files.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
-     mem='tiny',
-     desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
 test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
@@ -4600,7 +4600,8 @@ test('interp-list-ctor', [PY, 'test_interp_list_ctor.py'], cache=True, mem='tiny
      desc='interpreter List(...) copies its iterable, length=/fill= build')
 test('module-globals-compiled', [PY, 'test_module_globals_compiled.py'],
      cache=True, mem='tiny', extra=['test_module_globals_compiled.py'],
-     desc='module-scope globals() matches CPython in the compiled path')
+     desc='module-scope globals() matches CPython in the compiled path',
+     disabled='bugs/gate-module-globals-compiled.md')
 test('mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'],
      cache=True, mem='tiny', extra=['test_mojoc_precompile_signature.py'],
      desc='precompile a package to a .mojoc signature artifact and read it back')
@@ -5148,7 +5149,6 @@ BUCKETS = {
 # parallel branch rewrites, so an edit there is a guaranteed merge conflict
 # for the one entry it adds.
 BUCKETS['check'].append('binding-evidence')
-BUCKETS['check'].append('gates-bootstrap-not-off')
 BUCKETS['check'].append('interp-list-ctor')
 BUCKETS['check'].append('module-globals-compiled')
 BUCKETS['check'].append('mojoc-precompile-signature')

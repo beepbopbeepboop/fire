@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-codegen-stdlib-dylib-lazy-undef-5 land?
+# Land: should finished branch bug-suite-gimplegenerators-multi-slot-fo land?
 
-**Branch:** `work/bug-land-codegen-stdlib-dylib-lazy-undef-5` (task `bug-land-codegen-stdlib-dylib-lazy-undef-5`; its tip is also saved as `refs/archive/work/bug-land-codegen-stdlib-dylib-lazy-undef-5`, so dropping it loses nothing).
-**Age:** last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 14 behind it; task started 2026-11-16 08:39:54
-**Original work:** Fix the bug in bugs/LAND-codegen-stdlib-dylib-lazy-undef-3.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or r
-**Original claims:** bug:LAND-codegen-stdlib-dylib-lazy-undef-3
+**Branch:** `work/bug-suite-gimplegenerators-multi-slot-fo` (task `bug-suite-gimplegenerators-multi-slot-fo`; its tip is also saved as `refs/archive/work/bug-suite-gimplegenerators-multi-slot-fo`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 110 behind it; task started 2026-11-15 15:19:38
+**Original work:** CONTINUATION: this branch holds a finished fix (commit 820aa4fc1, 'coro: refuse a multi-slot for target over a non-tuple generator') that the integrator wrongly held on 2026-11-15 12:21 (its culprit s
+**Original claims:** bug:SUITE_gimplegenerators_multi_slot_for_unknown_body
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-16 09:39:47: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 14 behind it; task started 2026-11-16 08:39:54)
-  Branch: work/bug-land-codegen-stdlib-dylib-lazy-undef-5
-  Conflicting files: bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md
+- 2026-11-15 16:22:57: DONE, but its worktree /Users/mrs/net/chatgpt/claude/work-7405 has uncommitted work (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 110 behind it; task started 2026-11-15 15:19:38)
+  Branch: work/bug-suite-gimplegenerators-multi-slot-fo
+  Uncommitted entries: regress_nested_gen. Commit what belongs to the change, discard the rest.

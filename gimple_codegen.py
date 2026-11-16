@@ -3196,7 +3196,6 @@ class GimpleGen:
         # the suffix and the qualifier halves of one mangled symbol can
         # never disagree about which entry they mean.
         self._imported_home_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
-        self._private_struct_pts_cache: dict[str, list] = {}  # '<home module>\x00<fn name>' -> home-private-struct param ctypes, or [] (see _imported_private_struct_pts)
         # _pair_key(sanitized home-module qualifier, fn name) -> [param ctypes] —
         # the WHOLE-PROGRAM-SHARED definition-side truth for free-function
         # signatures, written ONLY by a unit that actually defines the name
@@ -5017,8 +5016,8 @@ class GimpleGen:
         return gfn._locally_binds_name(self, bare_name)
     def _func_mangleable(self, name: str) -> bool:
         return gfn._func_mangleable(self, name)
-    def _func_csym(self, bare_name: str) -> str:
-        return gfn._func_csym(self, bare_name)
+    def _func_csym(self, bare_name: str, def_pts: list | None = None) -> str:
+        return gfn._func_csym(self, bare_name, def_pts)
     def _c_sizeof_helper(self, struct_name: str) -> str:
         """Name of a `static int64_t` accessor returning `sizeof(struct_name)`,
         registering it for emission into the non-GIMPLE prelude.
@@ -5119,8 +5118,6 @@ class GimpleGen:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):
         return gfn._parsed_import(self, module)
-    def _home_signature_ctypes(self, module: str, fs) -> list:
-        return gfn._home_signature_ctypes(self, module, fs)
     def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
         return gfn._note_struct_import_alias(self, module, alias, orig_name)
     def _note_struct_attr_alias(self, module: str, alias: str, member: str):
@@ -5953,8 +5950,6 @@ class GimpleGen:
         return grsl._closure_value_locals(self, body)
     def _quick_type(self, node) -> str:
         return grsl._quick_type(self, node)
-    def _and_or_operand_type(self, node) -> str:
-        return grsl._and_or_operand_type(self, node)
     def _module_attr_call_return_type(self, node):
         return grsl._module_attr_call_return_type(self, node)
     def _infer_list_elem_type(self, elements: list) -> str:
@@ -6502,14 +6497,15 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
-    # The multi-slot comprehension/`for` refusals ride BEFORE the unknown-
-    # declaration pass for the same reason the ownership check does: they are
-    # structural refusals that know the program cannot compile, and the
+    # The multi-slot comprehension refusal rides BEFORE the unknown-
+    # declaration pass for the same reason the ownership check does: it is a
+    # structural refusal that knows the program cannot compile, and the
     # unknown-decl pass would otherwise answer its own, less specific
-    # question first: `print([x for a, b in g()])` or `for a, b in g():
-    # print(x)` reports the undeclared `x` instead of the arity mismatch that
-    # makes the whole consumer uncompilable.
-    gimple_gen_coro.refuse_multi_slot_target_over_nontuple_generator(stmts)
+    # question first (`print([x for a, b in g()])` reports the element's
+    # undeclared `x` instead of the arity mismatch that makes the whole
+    # comprehension uncompilable — bug:
+    # SUITE_gimplegenerators_multi_slot_comprehension).
+    gimple_gen_coro.refuse_multi_slot_comprehension_over_nontuple_generator(stmts)
     unknown_decl_check.check_module(stmts, mojo_src, filename)
     # Early diagnostics: trait method requirement evidence (part 2).
     try:

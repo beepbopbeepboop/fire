@@ -3541,7 +3541,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if ltype == 'int64_t' and gen._is_dyn_word(node.left, lval):
             gen._dyn_word_vals.add(lval)
         cond = gen._ensure_bool_cond(ltype, lval)
-        _rq = gen._and_or_operand_type(node.right)
+        _rq = gen._quick_type(node.right)
         res_type = gimple_ctypes.TypeLattice.join(ltype, _rq)
         # MIXED POINTER/SCALAR OPERANDS: `TypeLattice.join` always prefers
         # the POINTER side (join('MojoList *', '_Bool') == 'MojoList *'),
@@ -3606,14 +3606,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # pointer slot, and the truth test then ran `mojo_dict_len` on the
         # address 1 (the self-hosted compiler's own crash in
         # `_gmi_specialize_literal_kind_clones`).
-        # The mirror image (`fn.is_generator or getattr(fn, 'is_async', False)`,
-        # an untyped field against a bool) is the same word: without it the
-        # chain's result was a plain `int64_t`, and a following
-        # `... or fn.some_dict` took the container-pointer join below for a
-        # word that may hold the bool 1.
         _bool_word = (not _bool_merge and not _mixed_word
                       and ((ltype == '_Bool' and _rq == 'int64_t')
-                           or (ltype == 'int64_t' and _rq == '_Bool')
                            or (ltype == 'int64_t' and _rq in ('MojoDict *', 'MojoList *', 'MojoSet *')
                                and gen._is_dyn_word(node.left, lval))))
         if _bool_word:
@@ -3664,12 +3658,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # constant: `and` only takes it on a FALSY left, `or` only on a
             # TRUTHY one.
             gen._cast_into(result, '_Bool', f"{'0' if node.op == 'and' else '1'}")
-        elif node.op == 'and' and ltype == '_Bool' and res_type.endswith(' *'):
-            # `flag and ptr`, short-circuit edge: the left operand is known
-            # false here, so the value is the null pointer. Written as the
-            # constant, not as a cast of the `_Bool`: a pointer is never made
-            # from a 1-bit value (gimple-lint's cast-narrow-int-to-ptr).
-            gen._cast_into(result, res_type, '0')
         else:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._goto(bb_merge)
@@ -3702,14 +3690,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if (res_type == 'int64_t' and not _mixed_word
                 and (gen._is_dyn_word(node.left, lval)
                      or gen._is_dyn_word(node.right, rval))):
-            gen._dyn_word_vals.add(result)
-        # The right operand LOWERED to a `_Bool` although its quick type was
-        # a word (`x.flag or getattr(x, 'is_async', False)`): the merged word
-        # holds the left word or that bare bool, so it is a word of unknown
-        # kind. A following `... or x.some_dict` must not read it as the
-        # dict pointer (it ran `mojo_dict_len` on the address 1).
-        if (res_type == 'int64_t' and not _mixed_word
-                and rtype == '_Bool' and ltype == 'int64_t'):
             gen._dyn_word_vals.add(result)
         gen._goto(bb_merge)
         gen._emit_label(bb_merge)
@@ -4347,11 +4327,9 @@ def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
     # Select by box kind
     _a = lv if _tag_l else '0'
     _b = rv if _tag_r else '0'
-    # The runtime function returns `int`; the `_Bool` is made from it by a
-    # comparison (an `int` call result stored straight into a `_Bool` is
-    # rejected by GCC in a `__GIMPLE` function).
-    _sel = gen._rt_call('int', 'mojo_float_cmp_select', [_a, _b, _ires, _dres])
-    return '_Bool', gen._cmp(_sel, '!=', '0')
+    _t = gen._call_expr('_Bool', 'mojo_float_cmp_select', [
+        ('int64_t', _a), ('int64_t', _b), ('int', _ires), ('int', _dres)])
+    return '_Bool', _t
 
 
 def _lbt_dict_union(gen, lt: str, lv: str, rt: str, rv: str) -> tuple[str, str]:

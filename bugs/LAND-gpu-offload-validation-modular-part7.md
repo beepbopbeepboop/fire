@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-gpu-offload-validation-modular land?
+# Land: should finished branch bug-gpu-offload-validation-modular-part7 land?
 
-**Branch:** `work/bug-land-gpu-offload-validation-modular` (task `bug-land-gpu-offload-validation-modular`; its tip is also saved as `refs/archive/work/bug-land-gpu-offload-validation-modular`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-15 20:16:08
-**Original work:** Fix the bug in bugs/LAND-gpu-offload-validation-modular-part6.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, o
-**Original claims:** bug:LAND-gpu-offload-validation-modular-part6
+**Branch:** `work/bug-gpu-offload-validation-modular-part7` (task `bug-gpu-offload-validation-modular-part7`; its tip is also saved as `refs/archive/work/bug-gpu-offload-validation-modular-part7`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 14 behind it; task started 2026-11-15 14:32:19
+**Original work:** Fix the bug in bugs/GPU_offload_validation_modular-part7.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
+**Original claims:** bug:GPU_offload_validation_modular-part7
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 20:47:11: DONE, but its worktree /Users/mrs/net/chatgpt/claude/work-7429 has uncommitted work (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-15 20:16:08)
-  Branch: work/bug-land-gpu-offload-validation-modular
-  Uncommitted entries: bugs/hard/GPU_offload_validation_modular.md, mojo/backend_gimple/emit_resolve.py, test_regress_gpu_offload_validation_modular_part6.py. Commit what belongs to the change, discard the rest.
+- 2026-11-15 15:26:00: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 14 behind it; task started 2026-11-15 14:32:19)
+  Branch: work/bug-gpu-offload-validation-modular-part7
+  Conflicting files: myinterpreter.py
