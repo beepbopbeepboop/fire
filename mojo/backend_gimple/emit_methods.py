@@ -2588,10 +2588,10 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
             and _as_str(getattr(gen, '_current_filename', '') or '').endswith('.py')
             and gen._is_dyn_word(node.func.obj, ov)):
         _dynm_obj = gen._to_int64(ot, ov)
-        _dynm_vp = gen._new_val('void *', f'(void *){_dynm_obj}')
+        _dynm_vp = gen._cast('void *', _dynm_obj)
         _dynm_fn = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                                   [('void *', _dynm_vp), ('char *', f'"{method}"')])
-        _dynm_fp = gen._new_val('void *', f'(void *){_dynm_fn}')
+        _dynm_fp = gen._cast('void *', _dynm_fn)
         _dynm_args = [('void *', _dynm_fp)]
         for _dynm_a in node.args:
             _dynm_at, _dynm_av = gen.lower_expr(_dynm_a)
@@ -8851,8 +8851,8 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
                         break
         if _dw_dec is not None:
             _dw_w = gen._new_temp('int64_t')
-            gen._emit(f'  {_dw_w} = {_as_str(_dw_dec)} ();')
-            _dw_wv = gen._new_val('void *', f'(void *){_dw_w}')
+            gen._rt_into(_dw_w, _as_str(_dw_dec), [])
+            _dw_wv = gen._cast('void *', _dw_w)
             _dw_args = [('void *', _dw_wv), ('int64_t', gen._to_int64(ot, ov))]
             for _dw_a in node.args:
                 _dw_at, _dw_av = gen.lower_expr(_dw_a)

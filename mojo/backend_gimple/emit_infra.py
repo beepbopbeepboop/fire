@@ -5249,7 +5249,7 @@ def _generator_to_list(gen, value: str) -> str:
     # exactly like CPython, and destroying it here made that second pass a
     # real use-after-free.
     if gen._generator_value_owned.get(_iv):
-        gen._emit(f"  {base}_destroy ({_iv});")
+        gen._rt_void(f"{base}_destroy", [_iv])
     return res
 
 
@@ -6015,7 +6015,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             if _rcall is not None:
                 return _rcall
             if _rsn in gen.struct_field_types:
-                _vp = gen._new_val('void *', f'(void *){ev}')
+                _vp = gen._cast('void *', ev)
                 return gen._call_expr('char *', '_mojo_dispatch_repr',
                                       [('void *', _vp)])
     return gen._call_expr('char *', 'mojo_str', [(et, ev)])
@@ -7003,7 +7003,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     # `g = f(); sum(g); sum(g)` must still see a valid, exhausted generator
     # on the second pass, never a freed one.
     if gen._generator_value_owned.get(_iv):
-        gen._emit(f"  {base}_destroy ({_iv});")
+        gen._rt_void(f"{base}_destroy", [_iv])
 
 
 def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -8986,7 +8986,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 gen._rt_void('free', [t])
         if i < len(parts) - 1:
             if sep_var is not None:
-                gen._emit(f'  {print_fn} ({sep_var});')
+                gen._rt_void(print_fn, [sep_var])
             else:
                 _emit_literal_print(' ', print_fn)
     # `_repr_boxed_container` borrows a boxed str but allocates every other
