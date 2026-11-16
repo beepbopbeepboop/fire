@@ -1,9 +1,9 @@
-# Land: should finished branch bug-codegen-call-site-double-star-spread land?
+# Land: should finished branch bug-land-compile-fail-tools-c-analyzer-c land?
 
-**Branch:** `work/bug-codegen-call-site-double-star-spread` (task `bug-codegen-call-site-double-star-spread`; its tip is also saved as `refs/archive/work/bug-codegen-call-site-double-star-spread`, so dropping it loses nothing).
-**Age:** last commit 2026-11-16, first unlanded commit 2026-11-16; 1 commit(s) ahead of master, 65 behind it; task started 2026-11-16 09:33:01
-**Original work:** Fix the bug in bugs/CODEGEN_call_site_double_star_spread_miscompiles.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning 
-**Original claims:** bug:CODEGEN_call_site_double_star_spread_miscompiles
+**Branch:** `work/bug-land-compile-fail-tools-c-analyzer-c` (task `bug-land-compile-fail-tools-c-analyzer-c`; its tip is also saved as `refs/archive/work/bug-land-compile-fail-tools-c-analyzer-c`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 1 behind it; task started 2026-11-15 21:14:01
+**Original work:** Fix the bug in bugs/LAND-compile-fail-tools-c-analyzer-c-comm.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, o
+**Original claims:** bug:LAND-compile-fail-tools-c-analyzer-c-comm
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-16 16:05:44: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-16; 1 commit(s) ahead of master, 65 behind it; task started 2026-11-16 09:33:01)
-  Branch: work/bug-codegen-call-site-double-star-spread
-  Conflicting files: bugs/LAND-codegen-stdlib-dylib-lazy-undef-3.md, bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md, mojo/backend_gimple/emit_calls.py, mojo/backend_gimple/module_gen.py, test_gimple.py
+- 2026-11-15 22:08:41: DONE, but its worktree /Users/mrs/net/chatgpt/claude/work-7440 has uncommitted work (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 1 behind it; task started 2026-11-15 21:14:01)
+  Branch: work/bug-land-compile-fail-tools-c-analyzer-c
+  Uncommitted entries: report.txt. Commit what belongs to the change, discard the rest.

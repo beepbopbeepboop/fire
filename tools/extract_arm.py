@@ -4,19 +4,8 @@
     python3 tools/extract_arm.py FILE PARENT LINE NEWNAME "DOC" [name:ann ...]
     python3 tools/extract_arm.py --list FILE PARENT [MINLINES]
 
-    python3 tools/extract_arm.py --phase FILE PARENT LINE NEWNAME "DOC" [name:ann ...]
-    python3 tools/extract_arm.py --list-phases FILE PARENT [MINLINES]
-
 `--list` prints every top-level `if` arm of PARENT that this tool can move,
 with the names the arm reads from PARENT. Run it first.
-
-`--phase` moves a WHOLE top-level statement of PARENT (a `for`, an `if`
-with its test, a `while`, a `try`) into a new function that returns nothing,
-and leaves `NEWNAME(args)` in its place. It is for a function that is a
-sequence of passes, such as `gen_module_impl`. The statement must not
-`return`, and must bind no name that PARENT (or a nested function of
-PARENT) reads afterwards: its whole effect has to be on objects it was
-handed. `--list-phases` prints the statements that qualify.
 
 The other form rewrites FILE in place. LINE is the line of an `if` statement
 that is a direct child of PARENT's body and has no `else`. The arm's body
@@ -314,122 +303,6 @@ class Arm:
         return ins, tail, why
 
 
-def phase_problems(a, i: int) -> tuple:
-    """(inputs, why_not) for moving the whole of body statement `i`."""
-    s = a.fn.body[i]
-    r = Reads(a.locals)
-    r.stmt(s, set())
-    earlier = set(a.params)
-    for t in a.fn.body[:i]:
-        earlier |= bound_names(t)
-    ins = sorted(r.ue & earlier)
-    why = []
-    have = Reads(a.locals).stmts(a.fn.body[:i], set(a.params))
-    maybe = [x for x in ins if x not in have and x not in a.nested]
-    if maybe:
-        why.append('reads name(s) not bound on every path: ' + ', '.join(maybe))
-    clos = [x for x in ins if x in a.nested]
-    if clos:
-        why.append('calls nested function(s) ' + ', '.join(clos))
-    for n in own_nodes(s):
-        if isinstance(n, (ast.Nonlocal, ast.Global, ast.Yield, ast.YieldFrom, ast.Return)):
-            why.append('has ' + type(n).__name__.lower())
-            break
-    later = set()
-    for t in a.fn.body[i + 1:]:
-        one = Reads(a.locals)
-        one.stmt(t, set())
-        later |= one.ue
-    # A nested function of PARENT defined anywhere reads PARENT's variables
-    # when it is CALLED, so a name it reads must stay PARENT's.
-    for t in a.fn.body:
-        if isinstance(t, ast.FunctionDef):
-            later |= Reads(a.locals).free_reads(t)
-    outs = sorted(bound_names(s) & later)
-    if outs:
-        why.append('binds name(s) read later: ' + ', '.join(outs[:8]))
-    return ins, why
-
-
-def list_phases(path: str, parent: str, minlines: int) -> None:
-    a = Arm(open(path).read(), parent)
-    total = 0
-    for i, s in enumerate(a.fn.body):
-        if isinstance(s, ast.FunctionDef):
-            continue
-        n = s.end_lineno - s.lineno + 1
-        if n < minlines:
-            continue
-        ins, why = phase_problems(a, i)
-        extra = [x for x in ins if x not in a.params]
-        if why:
-            print(f"{s.lineno}: {n} lines  NO ({'; '.join(why)})")
-            continue
-        total += n
-        print(f"{s.lineno}: {n} lines  {type(s).__name__}"
-              f"  extra inputs: {', '.join(extra) or 'none'}")
-    print(f"{total} lines can be moved")
-
-
-def extract_phase(path: str, parent: str, line: int, newname: str, doc: str,
-                  anns: dict) -> None:
-    src = open(path).read()
-    a = Arm(src, parent)
-    idx = [i for i, s in enumerate(a.fn.body) if s.lineno == line]
-    if not idx:
-        raise SystemExit(f"line {line}: no statement directly in {parent} starts there")
-    i = idx[0]
-    s = a.fn.body[i]
-    ins, why = phase_problems(a, i)
-    if why:
-        raise SystemExit(f"line {line}: cannot move: {'; '.join(why)}")
-    for n in a.tree.body:
-        if getattr(n, 'name', None) == newname:
-            raise SystemExit(f"{newname} is already defined in {path}")
-    lines = src.split('\n')
-    seg = {}
-    for p in a.fn.args.args:
-        seg[p.arg] = ast.get_source_segment(src, p)
-    params = []
-    args = []
-    for p in a.params:
-        if p in ins or p == a.params[0]:
-            params.append(seg[p])
-            args.append(p)
-    for x in ins:
-        if x in a.params:
-            continue
-        if x not in anns:
-            raise SystemExit(f"line {line}: the statement reads `{x}`; pass `{x}:<annotation>`")
-        params.append(f"{x}: {anns[x]}" if anns[x] else x)
-        args.append(x)
-    ind = s.col_offset
-    new_body = []
-    for bl in lines[s.lineno - 1:s.end_lineno]:
-        if bl.strip() == '':
-            new_body.append('')
-            continue
-        if not bl.startswith(' ' * ind):
-            raise SystemExit(f"cannot dedent: {bl!r}")
-        new_body.append('    ' + bl[ind:])
-    func = [f"def {newname}({', '.join(params)}) -> None:", f'    """{doc}', '',
-            f"    One pass of `{parent}`, which calls this once.\"\"\""]
-    func += new_body + ['', '']
-    top = a.fn.lineno - 1
-    if a.fn.decorator_list:
-        top = a.fn.decorator_list[0].lineno - 1
-    site = [' ' * ind + f"{newname}({', '.join(args)})"]
-    out = lines[:top] + func + lines[top:s.lineno - 1] + site + lines[s.end_lineno:]
-    new_src = '\n'.join(out)
-    nt = ast.parse(new_src)
-    nf = [n for n in nt.body if isinstance(n, ast.FunctionDef) and n.name == newname][0]
-    if ast.dump(ast.Module(body=nf.body[1:], type_ignores=[])) != \
-            ast.dump(ast.Module(body=[s], type_ignores=[])):
-        raise SystemExit("internal error: the moved statement is not the same tree")
-    open(path, 'w').write(new_src)
-    print(f"{path}:{line}: {s.end_lineno - s.lineno + 1} lines -> {newname}({', '.join(args)})")
-
-
 def list_arms(path: str, parent: str, minlines: int) -> None:
     a = Arm(open(path).read(), parent)
     total = 0
@@ -537,16 +410,6 @@ def extract(path: str, parent: str, line: int, newname: str, doc: str,
 def main(argv: list) -> None:
     if len(argv) >= 3 and argv[0] == '--list':
         list_arms(argv[1], argv[2], int(argv[3]) if len(argv) > 3 else 30)
-        return
-    if len(argv) >= 3 and argv[0] == '--list-phases':
-        list_phases(argv[1], argv[2], int(argv[3]) if len(argv) > 3 else 30)
-        return
-    if len(argv) >= 6 and argv[0] == '--phase':
-        anns = {}
-        for p in argv[6:]:
-            k, _, v = p.partition(':')
-            anns[k] = v
-        extract_phase(argv[1], argv[2], int(argv[3]), argv[4], argv[5], anns)
         return
     if len(argv) < 5:
         raise SystemExit(__doc__)

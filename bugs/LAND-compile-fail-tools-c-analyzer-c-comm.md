@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-codegen-stdlib-dylib-lazy-undef-5 land?
+# Land: should finished branch bug-compile-fail-tools-c-analyzer-c-comm land?
 
-**Branch:** `work/bug-land-codegen-stdlib-dylib-lazy-undef-5` (task `bug-land-codegen-stdlib-dylib-lazy-undef-5`; its tip is also saved as `refs/archive/work/bug-land-codegen-stdlib-dylib-lazy-undef-5`, so dropping it loses nothing).
-**Age:** last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 14 behind it; task started 2026-11-16 08:39:54
-**Original work:** Fix the bug in bugs/LAND-codegen-stdlib-dylib-lazy-undef-3.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or r
-**Original claims:** bug:LAND-codegen-stdlib-dylib-lazy-undef-3
+**Branch:** `work/bug-compile-fail-tools-c-analyzer-c-comm` (task `bug-compile-fail-tools-c-analyzer-c-comm`; its tip is also saved as `refs/archive/work/bug-compile-fail-tools-c-analyzer-c-comm`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-14; 5 commit(s) ahead of master, 294 behind it; task started 2026-11-15 20:26:07
+**Original work:** An earlier attempt left 3 commit(s) on branch work/bug-compile-fail-tools-c-analyzer-c-comm-2, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted
+**Original claims:** bug:COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-16 09:39:47: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 14 behind it; task started 2026-11-16 08:39:54)
-  Branch: work/bug-land-codegen-stdlib-dylib-lazy-undef-5
-  Conflicting files: bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md
+- 2026-11-15 20:54:26: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-14; 5 commit(s) ahead of master, 294 behind it; task started 2026-11-15 20:26:07)
+  Branch: work/bug-compile-fail-tools-c-analyzer-c-comm
+  Conflicting files: mojo/backend_gimple/cpp_core.py, mojo/backend_gimple/emit_loops.py, test_link_mode.py

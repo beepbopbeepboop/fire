@@ -13873,17 +13873,12 @@ main()
               if ln.startswith('static int64_t _mojo_sizeof_')]
         fa = [ln for ln in c_code.splitlines()
               if ln.startswith('static void * _mojo_fnaddr_')]
-        # The two modules' lifted closures are now module-qualified
-        # (`xhelp_a_pick_lambda_1` / `xhelp_b_pick_lambda_1`), so each has
-        # its own accessor pair. The property is unchanged: no accessor NAME
-        # is defined twice in the one translation unit.
-        names = [ln.split('(')[0] for ln in sz + fa]
-        if sz and fa and len(names) == len(set(names)):
+        if len(sz) == 1 and len(fa) == 1:
             print(f"PASS  {name}")
             _PASS += 1
         else:
-            print(f"FAIL  {name}: expected every sizeof/fnaddr accessor to be "
-                  f"defined exactly once across the closure, got "
+            print(f"FAIL  {name}: expected exactly one definition of each "
+                  f"sizeof/fnaddr accessor across the closure, got "
                   f"{len(sz)} sizeof and {len(fa)} fnaddr: {sz + fa}")
             _FAIL += 1
 
@@ -15308,7 +15303,6 @@ def main():
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
-                  test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -15908,41 +15902,6 @@ def main():
     print(n in t)
     u = {None: 0}
     print(None in u, 0 in u, len(u))
-
-main()
-""")
-
-
-def test_and_chain_with_a_bool_call_and_an_empty_list_caller():
-    """Two defects, one shape. `args and hasattr(args[-1], 'op')` / `lines and
-    lines[-1].endswith(':')`: the right operand's type was estimated as an
-    unknown word, so the chain kept the list's pointer type and stored the
-    bool into it (`(MojoList *)1`). And `f([])` was recorded as a call site
-    passing a list of INTS, which made the `list[str]` parameter kind-mixed
-    and its element read a boxed word cast to `char *`: every answer came out
-    False (`plain` / `closed`) with exit 0."""
-    test_gimple_matches_cpython("gimple_and_chain_bool_call_empty_list_caller", """\
-class N:
-    def __init__(self, op):
-        self.op = op
-
-def last_is_star(args: list) -> str:
-    if args and hasattr(args[-1], 'op') and getattr(args[-1], 'op') == '**':
-        return "star"
-    return "plain"
-
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    print(last_is_star([]))
-    print(last_is_star([N('**')]))
-    print(last_is_star([N('+')]))
-    print(ends([]))
-    print(ends(["a", "b:"]))
-    print(ends(["a"]))
 
 main()
 """)

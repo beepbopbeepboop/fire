@@ -2693,7 +2693,7 @@ def _cpp_is_str_expr(gen, node) -> bool:
 
 
 def _cpp_str_compare(gen, op, left_node, right_node, ltxt: str, rtxt: str) -> str | None:
-    """`<left> <op> <right>` where at least one side is a `char *` string,
+    """`<left> == / != <right>` where at least one side is a `char *` string,
     lowered by CONTENT. Returns None when this is not a string comparison.
 
     The raw C++ `==` this emitter used to produce compared POINTERS, so two
@@ -2711,20 +2711,14 @@ def _cpp_str_compare(gen, op, left_node, right_node, ltxt: str, rtxt: str) -> st
     GIMPLE backend's `emit_exprs` string-equality arm) is lowered too, so
     the two backends agree.
 
-    The ORDERING operators (`<`, `<=`, `>`, `>=`) are lowered by content only
-    when BOTH sides are statically `char *`, using `mojo_cstr_cmp`'s `strcmp`
-    sign under a relational test. The raw C++ comparison this replaced
-    compared the two addresses, so `a < b` answered by allocation order
-    instead of lexicographically, disagreeing with CPython
-    non-deterministically. The one-`char *`-against-an-undecided-word shape
-    stays equality-only on purpose: `mojo_cstr_cmp_word` answers 0/1 ("equal"
-    / "not equal"), NOT `strcmp`'s sign, so an ordering test against it would
-    be meaningless (`< 0` could never be true). A `char *` against a
+    Deliberately `==`/`!=` only: `<`/`>` on strings are ordering comparisons
+    whose current pointer semantics are a separate (and much rarer) gap, and
+    widening this is not needed to make equality right. A `char *` against a
     non-word scalar (a double, a container pointer) is left to the caller's
     existing lowering; Python says those are never equal, but guessing here
     could turn a genuinely numeric comparison into a string one.
     """
-    if op not in ('==', '!=', '<', '<=', '>', '>='):
+    if op not in ('==', '!='):
         return None
 
     def _ctok(n):
@@ -2737,12 +2731,9 @@ def _cpp_str_compare(gen, op, left_node, right_node, ltxt: str, rtxt: str) -> st
     rt = _ctok(right_node)
     if lt != 'char *' and rt != 'char *':
         return None
-    if lt == 'char *' and rt == 'char *':
-        return (f"(mojo_cstr_cmp((char *)({ltxt}), (char *)({rtxt})) {op} 0)")
-    if op not in ('==', '!='):
-        # Ordering against an undecided word cannot use the 0/1 answer above.
-        return None
     _cmp = '!= 0' if op == '!=' else '== 0'
+    if lt == 'char *' and rt == 'char *':
+        return (f"(mojo_cstr_cmp((char *)({ltxt}), (char *)({rtxt})) {_cmp})")
     if lt == 'char *' and rt in ('int', 'int64_t', 'void *'):
         return (f"(mojo_cstr_cmp_word((char *)({ltxt}), "
                 f"(int64_t)({rtxt})) {_cmp})")
@@ -11477,18 +11468,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                   else (gimple_ctypes.TypeLattice.join(
                                       _lit_etype, _lit_ect) or 'int64_t'))
                 _iter_elem = _lit_etype
-            elif isinstance(s.iterable, gimple_ctypes.StringLiteral):
-                # `for c in "abc":` -- a string LITERAL used directly as the
-                # loop iterable. It is the same string iteration as the
-                # string-local arm below, and without this arm it fell to the
-                # generic range-for, `for (auto c : "abc")`, which C++ runs
-                # over the literal's `char[4]` ARRAY: four `char`s including the
-                # terminating NUL, each yielded as an integer
-                # (`list(letters())` printed `[97, 98, 99, 0]` where CPython
-                # prints `['a', 'b', 'c']`;
-                # CODEGEN_str_iteration_link_mode_crash, package B).
-                _iter_list_expr = (f"mojo_str_chars((char *)({gen._cpp_expr(s.iterable)}))")
-                _iter_elem = 'char *'
             elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
                     and gen._cpp_declared.get(s.iterable.name) == 'char *'):

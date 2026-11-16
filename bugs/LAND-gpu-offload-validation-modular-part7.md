@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-codegen-stdlib-dylib-lazy-undef-4 land?
+# Land: should finished branch bug-gpu-offload-validation-modular-part7 land?
 
-**Branch:** `work/bug-land-codegen-stdlib-dylib-lazy-undef-4` (task `bug-land-codegen-stdlib-dylib-lazy-undef-4`; its tip is also saved as `refs/archive/work/bug-land-codegen-stdlib-dylib-lazy-undef-4`, so dropping it loses nothing).
-**Age:** last commit 2026-11-16, first unlanded commit 2026-11-16; 2 commit(s) ahead of master, 62 behind it; task started 2026-11-16 09:33:00
-**Original work:** Fix the bug in bugs/LAND-codegen-stdlib-dylib-lazy-undef.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
-**Original claims:** bug:LAND-codegen-stdlib-dylib-lazy-undef
+**Branch:** `work/bug-gpu-offload-validation-modular-part7` (task `bug-gpu-offload-validation-modular-part7`; its tip is also saved as `refs/archive/work/bug-gpu-offload-validation-modular-part7`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 14 behind it; task started 2026-11-15 14:32:19
+**Original work:** Fix the bug in bugs/GPU_offload_validation_modular-part7.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
+**Original claims:** bug:GPU_offload_validation_modular-part7
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-16 16:05:44: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-16; 2 commit(s) ahead of master, 62 behind it; task started 2026-11-16 09:33:00)
-  Branch: work/bug-land-codegen-stdlib-dylib-lazy-undef-4
-  Conflicting files: bugs/LAND-codegen-stdlib-dylib-lazy-undef-3.md, bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md, mojo/backend_gimple/emit_calls.py, mojo/backend_gimple/module_gen.py, test_gimple.py
+- 2026-11-15 15:26:00: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 14 behind it; task started 2026-11-15 14:32:19)
+  Branch: work/bug-gpu-offload-validation-modular-part7
+  Conflicting files: myinterpreter.py
