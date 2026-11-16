@@ -11886,18 +11886,6 @@ def _lower_struct_constructor(gen, struct_name: str,
     # field-assignment branch for every no-__init__ struct kwarg ctor.
     _n_kw = len(kwargs) if kwargs else 0
     _n_args = len(args) if args else 0
-    # `T(copy=x)` is real Mojo's copy-constructor spelling. A struct that
-    # declares its own copy ctor registers an `__init__` candidate taking
-    # the `copy` keyword (resolved below). A fieldwise struct does not:
-    # `Copyable` synthesizes the copy, so the call is a fieldwise copy of
-    # `x`, NOT a call to any declared `__init__`. Without this arm the
-    # call fell through to the unsuffixed `__init__` (a symbol no overload
-    # defines, now that an overloaded dunder's bare declaration is
-    # suppressed) with the `copy` value dropped — `BinaryHeap[Int]
-    # (copy=heap)` compiled to a zero-capacity heap.
-    _copy_src = None
-    if not _n_args and _n_kw == 1 and _as_str(kwargs[0][0]) == 'copy':
-        _copy_src = kwargs[0][1]
 
     # Same-file overload resolution: if this struct's __init__ overloads
     # (including any @fieldwise_init-synthesized one) were registered from
@@ -11931,19 +11919,6 @@ def _lower_struct_constructor(gen, struct_name: str,
         # same-file resolution existed: fall straight through to the
         # single-signature path below (unsuffixed call if __init__ exists
         # at all, field-assignment otherwise) rather than returning here.
-
-    # No declared candidate accepted `copy=` (see `_copy_src`): the struct
-    # gets its implicit copy constructor from `Copyable`, so synthesize
-    # real Mojo's fieldwise copy into the storage already allocated above.
-    # This must come BEFORE the `_struct_has_init` fallback, whose
-    # unsuffixed `__init__` is not a symbol any overload defines.
-    if _copy_src is not None and gen.struct_field_types.get(struct_name):
-        _copy_t, _copy_v = gen.lower_expr(_copy_src)
-        if _copy_t == ctype:
-            _copy_local = gen._ensure_local(_copy_t, _copy_v)
-            gmp._emit_fieldwise_copy_into(
-                gen, t, _copy_local, struct_name, 0)
-            return ctype, t
 
     # If struct has __init__, call it with the provided arguments.
     # A plain `elif` after this (large) block is unreliable on the

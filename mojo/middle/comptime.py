@@ -39,6 +39,7 @@ backends resolve the name in their generic identifier path for that reason.
 
 
 import sys
+import platform
 
 import fire_compiler as _fc
 
@@ -773,6 +774,72 @@ def _eval_interpolated_string(node, bindings: dict, platform=None, conforms_to_p
         return None
 
 
+
+_HOST_IS_MACOS = (sys.platform == 'darwin')
+_HOST_IS_LINUX = sys.platform.startswith('linux')
+_HOST_MACHINE = (platform.machine() or '').lower() if 'platform' in globals() and platform is not None else __import__('platform').machine().lower()
+_HOST_IS_X86 = _HOST_MACHINE in ('x86_64', 'amd64', 'x86')
+_HOST_IS_ARM = _HOST_MACHINE in ('arm64', 'aarch64', 'armv8')
+_HOST_IS_32BIT = sys.maxsize <= 2**32
+
+
+def _eval_compilation_target_pred(node):
+    """Fold a zero-arg `CompilationTarget.<predicate>()` to a host bool/int,
+    or None. Only predicates that are compile-time constants for THIS host
+    build fold; anything else stays unknown so a runtime branch is kept."""
+    if not (isinstance(node, CallExpr) and isinstance(node.func, MemberExpr)
+            and not node.args and not node.kwargs):
+        return None
+    obj = node.func.obj
+    # `CompilationTarget.is_macos()` (name) or `sys.CompilationTarget...` not
+    # needed here; the stdlib spells it as a bare name.
+    if not (isinstance(obj, IdentExpr) and obj.name == 'CompilationTarget'):
+        return None
+    m = node.func.member
+    # OS
+    if m == 'is_macos':
+        return _HOST_IS_MACOS
+    if m == 'is_linux':
+        return _HOST_IS_LINUX
+    # Arch
+    if m == 'is_x86':
+        return _HOST_IS_X86
+    if m == 'is_x86_64' or m == 'is_amd64':
+        return _HOST_IS_X86 and not _HOST_IS_32BIT
+    if m == 'is_arm':
+        return _HOST_IS_ARM
+    if m == 'is_aarch64':
+        return _HOST_IS_ARM and not _HOST_IS_32BIT
+    if m in ('is_apple_silicon', 'is_apple_m'):
+        return _HOST_IS_MACOS and _HOST_IS_ARM
+    # ISA features (host)
+    if m == 'has_neon':
+        return _HOST_IS_ARM
+    if m in ('has_neon_int8_dotprod', 'has_neon_int8_matmul'):
+        # Conservative on generic ARM; Apple Silicon has these but detecting
+        # portably is non-trivial. Leave unknown rather than guess wrong?
+        # has_neon is the common gate used in path.mojo; keep others unknown.
+        return None
+    if m == 'has_sse4':
+        return _HOST_IS_X86
+    if m == 'has_avx':
+        # Not guaranteed on all x86_64 hosts; fold false only when clearly
+        # not x86. On x86 keep unknown unless we know - safer to not fold
+        # than fold wrong. But for macOS arm64 host this is false.
+        return False if not _HOST_IS_X86 else None
+    if m in ('has_avx2', 'has_avx512f', 'has_fma', 'has_vnni', 'has_intel_amx'):
+        return False if not _HOST_IS_X86 else None
+    if m == 'is_32bit':
+        return _HOST_IS_32BIT
+    if m == 'is_64bit':
+        return not _HOST_IS_32BIT
+    if m == 'is_little_endian':
+        return sys.byteorder == 'little'
+    if m == 'is_big_endian':
+        return sys.byteorder == 'big'
+    return None
+
+
 def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
@@ -1137,6 +1204,17 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
                 return sys.byteorder
             except AttributeError:
                 return None
+    # `CompilationTarget.<predicate>()` is a compile-time constant for the
+    # host this compiler is building for, the same way `sys.platform` is: a
+    # `comptime if CompilationTarget.is_macos(): ... elif
+    # CompilationTarget.has_neon(): ...` chain must keep only the branch the
+    # host can take, because every other branch names target-specific
+    # definitions that do not exist on this host and cannot be linked. See
+    # CODEGEN_stdlib_dylib_lazy_undefined_refs-part4: the fold was missing,
+    # so the lowering emitted a call (and an extern) into every arm.
+    _ctv = _eval_compilation_target_pred(node)
+    if _ctv is not None:
+        return _ctv
     return None
 
 
@@ -1216,6 +1294,9 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
         if isinstance(_sv, (int, bool)) and not isinstance(_sv, str):
             return int(_sv)
         return None
+    _ctv = _eval_compilation_target_pred(node)
+    if _ctv is not None:
+        return int(_ctv)
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
         argvals = [eval_const_int(a, bindings, call_hook, conforms_to_pred) for a in node.args]
@@ -1316,6 +1397,9 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
         # exposes no byteorder, the fold declines, and a shape-only "yes"
         # would then read as CONST_FALSE and drop the live branch.
         return eval_const(node, bindings) is not None
+    # CompilationTarget host predicates fold to constants for this host.
+    if _eval_compilation_target_pred(node) is not None:
+        return True
     # String/ord/len/scalar constructors and other 1-arg ident calls eval_const folds.
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and len(node.args) == 1 and not node.kwargs
