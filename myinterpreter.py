@@ -3985,8 +3985,38 @@ class BoundMethod:
         finally:
             self.interpreter.scope = old_scope
 
-    def __getitem__(self, key):
-        return self
+    def __getitem__(self, item):
+        """`obj.method[...]` at a call site: bind the bracket items to the
+        declared comptime parameters BY POSITION, the way
+        `MojoFunction.__getitem__` does for a free function, and answer a
+        receiver-bound callable that still takes the call-time arguments.
+
+        The receiver's declared parameters live on `self.bound_func`
+        (`comptime_params` / `comptime_param_defaults` / `_pd`), as the
+        keyword-bracket path (`_bind_bracket_comptime`) reads them. A
+        bracket item with no parameter to bind it is refused, and an omitted
+        parameter with no default is refused through the same helpers the
+        free-function path uses, so the subscript site renders the one
+        `failed to infer parameter ...` diagnostic. The bound value keeps
+        the receiver (`_MojoBoundComptimeReceiver`), as the keyword spelling
+        already does."""
+        decl = self.bound_func
+        values = item if isinstance(item, tuple) else (item,)
+        declared = len(getattr(decl, 'comptime_params', None) or [])
+        if len(values) > declared:
+            names = ', '.join(getattr(decl, 'comptime_params', None) or [])
+            if not names:
+                names = 'none'
+            raise TypeError(
+                f"{getattr(decl, 'name', '')}[...] supplies {len(values)} "
+                f"specialization argument(s) but "
+                f"{getattr(decl, 'name', '')} declares {declared} comptime "
+                f"parameter(s): {names}")
+        bindings = dict(zip(getattr(decl, 'comptime_params', None) or [], values))
+        unbound = _unbound_comptime_param(decl, bindings)
+        if unbound is not None:
+            _raise_unbound_comptime_error(decl, unbound)
+        return _MojoBoundComptimeReceiver(self, bindings)
 
 
 class _MojoBoundComptimeReceiver:
