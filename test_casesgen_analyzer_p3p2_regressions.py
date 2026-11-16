@@ -30,6 +30,12 @@ COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fi
       `choice(hex, float)` on a varargs function (lexer.py's `choice`
       shape), the only spelling that packed the value through a MojoList.
 
+  (d) `@decorator(args)` on a struct method (the stdlib's
+      `@always_inline("builtin")` shape). The decorated-method wrapper pass
+      must skip a CallExpr decorator (no lowering for it yet) instead of
+      handing the node to `re.fullmatch`, which degraded every stdlib module
+      in the dylib build. Pinned by `Decorated.read`.
+
 Run through test_casesgen_analyzer_p3p2_regressions_build.py: the compiled
 binary's stdout must be byte-identical to CPython's on this source.
 """
@@ -98,6 +104,32 @@ def section_shadow():
     print("float:", float)
 
 
+# A `@decorator(args)` spelling on a STRUCT METHOD (the stdlib's
+# `@always_inline("builtin")` / `@inline(.nodebug)` shape, bool.mojo line 123).
+# The decorated-method wrapper pass tests each decorator with a bare-name
+# regex; before its `isinstance(str)` guard the parser's CallExpr node reached
+# `re.fullmatch` and the whole module degraded ("expected string or
+# bytes-like object, got 'CallExpr'"), which emptied the stdlib dylib.
+def tagged(label):
+    def wrap(fn):
+        return fn
+    return wrap
+
+
+class Decorated:
+    def __init__(self):
+        self.value = 7
+
+    @tagged("builtin")
+    def read(self):
+        return self.value
+
+
+def section_decorator_args():
+    print("decorated:", Decorated().read())
+
+
 section_gen()
 section_repr()
 section_shadow()
+section_decorator_args()
