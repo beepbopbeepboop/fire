@@ -1404,7 +1404,7 @@ def _mojo_type(ann: str | type | None) -> str:
             # type, no separate fixed-size struct. `FixedSizeArray` used to be
             # missing here, so its annotation erased to `int64_t` and a
             # parameter declared `int64_t a` (then cast to `MojoList *` at
-            # the call) — see `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
+            # the call).
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
