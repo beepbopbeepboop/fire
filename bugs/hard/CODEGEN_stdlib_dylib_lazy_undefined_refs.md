@@ -148,8 +148,22 @@ is_apple_gpu`, `_std_sys_info_is_nvidia_gpu`, `_std_random_random_seed`,
 `_std_memory_memory_unsafe_memset_zero` — and the other 20 carry a suffix that
 is not the defining unit's.
 
-All 12 unsuffixed ones are calls to an OVERLOADED free function from a module
+All 12 unsuffixed ones were calls to an OVERLOADED free function from a module
 that did not define it (`std/sys/info.mojo`'s `is_apple_gpu()` has both a
-`()` and a `[subarch: StaticString]()` overload, and neither symbol is defined
-by the dylib at all), i.e. the imported-free-function half of part 2, not a new
-class. That is the remaining work; the doc stays open for it.
+`()` and a `[subarch: StaticString]()` overload). **Fixed 2026-11-15
+(`ddc086d41`)**: a MIXED overload set (one plain head + one bracketed head) was
+caught by the generic-import registration and returned early, so it never
+reached the overload registration, and the opener set `'('` could not even see
+a bracketed head; `_elaborate_overload_call` also mangled from the BARE name,
+dropping the defining module's qualifier. The references are now correct --
+`_std_sys_info_is_apple_gpu__void`, `_std_pwd__macos__getpw_macos__1_0_6_
+String` / `__1_0_6_UInt32`.
+
+**The count went 32 -> 38, and that is an honest regression in the metric,
+not a fix.** The names are right now, and being right exposes references the
+dylib never defined: both `getpw_macos` overloads are referenced where before
+only the one the ABI scan happened to pick was, and two `_gpu_intrinsics_`
+entries appeared. The job still PASSES (0 modules fall back to source, ratchet
+exit 0) because these are lazy call references a client falls back from, but
+the definers are still absent from the dylib -- that, not the naming, is now
+the visible remaining work.
