@@ -1635,6 +1635,97 @@ def _drop_unreferenced_unimpl_stubs(parts: list) -> list:
     return keep
 
 
+def _drop_unreferenced_extern_decls(text: str) -> str:
+    """Drop extern function declaration blocks whose declared symbol is never
+    referenced outside those declarations.
+
+    The codegen emits per-symbol extern stubs/forwards in guarded blocks (e.g.
+    `#ifndef SYM` / `extern ... SYM ...;` / `#endif`, and the
+    `_MOJO_STUB_<local>` form that declares an imported symbol's mangled name).
+    A module-level import that no live code path references (for example the
+    bodies of a folded `comptime if` branch) therefore leaves a declaration for
+    a symbol the object never needs. In generated C that declaration is a
+    spurious reference to the other-target body; removing a declaration whose
+    symbol is otherwise unused is semantics-preserving (no caller names it).
+    """
+    try:
+        lines = text.splitlines(keepends=True)
+    except Exception:
+        return text
+
+    def _decl_sym(line: str):
+        s = line.strip()
+        if not s.startswith('extern '):
+            return None
+        body = s.split('/*', 1)[0].strip()
+        if not body.endswith(';') or '(' not in body:
+            return None
+        before = body[:body.rfind('(')].strip()
+        if not before:
+            return None
+        name = before.split()[-1].lstrip('*')
+        if re.match(r'^[A-Za-z_]\w*$', name):
+            return name
+        return None
+
+    # Identify guarded extern-decl blocks: (#ifndef, [#define,] extern, #endif).
+    blocks = []  # (start, end_exclusive, sym)
+    i = 0
+    n = len(lines)
+    while i < n:
+        s = lines[i].lstrip()
+        if s.startswith('#ifndef '):
+            # 4-line form: ifndef / define / extern / endif
+            if i + 3 < n:
+                s1 = lines[i + 1].lstrip()
+                s2 = lines[i + 2].lstrip()
+                s3 = lines[i + 3].lstrip()
+                sym = _decl_sym(s2)
+                if (s1.startswith('#define ') and sym
+                        and s3.startswith('#endif')):
+                    blocks.append((i, i + 4, sym))
+                    i += 4
+                    continue
+            # 3-line form: ifndef / extern / endif
+            if i + 2 < n:
+                s1 = lines[i + 1].lstrip()
+                s2 = lines[i + 2].lstrip()
+                sym = _decl_sym(s1)
+                if sym and s2.startswith('#endif'):
+                    blocks.append((i, i + 3, sym))
+                    i += 3
+                    continue
+        i += 1
+
+    if not blocks:
+        return text
+
+    # Count symbol occurrences inside their own declaration blocks vs total.
+    sym_in_blocks = {}
+    for start, end, sym in blocks:
+        sym_in_blocks.setdefault(sym, 0)
+        for j in range(start, end):
+            sym_in_blocks[sym] += len(re.findall(r'\b' + re.escape(sym) + r'\b', lines[j]))
+
+    drop_syms = set()
+    for sym in sym_in_blocks:
+        total = len(re.findall(r'\b' + re.escape(sym) + r'\b', text))
+        if total > 0 and total == sym_in_blocks[sym]:
+            drop_syms.add(sym)
+
+    if not drop_syms:
+        return text
+
+    drop_idx = set()
+    for start, end, sym in blocks:
+        if sym in drop_syms:
+            for j in range(start, end):
+                drop_idx.add(j)
+    if not drop_idx:
+        return text
+    return ''.join(lines[j] for j in range(n) if j not in drop_idx)
+
+
 def _drop_unreachable_repr_cluster(parts: list) -> list:
     """`parts` without the generic-repr cluster when nothing reaches it.
 
@@ -20684,6 +20775,11 @@ def gen_module_impl(self, stmts: list):
         result = self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
     except Exception:
         result = None
+    if result is not None:
+        try:
+            result = _drop_unreferenced_extern_decls(result)
+        except Exception:
+            pass
     # Re-raise collected errors for error recovery (LSP/front-end) after building output
     try:
         if getattr(self, '_lsp_recovery_errors', None):
