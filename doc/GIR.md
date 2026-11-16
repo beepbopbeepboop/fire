@@ -283,9 +283,16 @@ that is meant to be behaviour-preserving:
   stay typed. About 100 of 54,000 runtime calls in `module_gen.ci` differ,
   most of them boxing calls that are gone because a local no longer
   shares its name with a differently-typed local of another pass.
-  NOT moved: the passes that call a nested function of `gen_module_impl`
-  (59 of them) or bind a name read later; those need the nested functions
-  lifted to module level first.
+  Second round (2026-11-16): `tools/hoist_nested.py` lifts a nested
+  function to module level when the only names of the parent it reads are
+  the parent's parameters and other liftable nested functions; those
+  become its first parameters and every call passes them. 30 of the 59
+  nested functions were lifted (`_gmh_*`, 1,074 lines), which freed 18 more
+  passes to move. `gen_module_impl` is 9,416 lines.
+  NOT moved: 29 nested functions that read a local of `gen_module_impl`
+  (lifting one needs a typed parameter per captured local), the passes
+  that call them, and the passes that bind a name read later (those need
+  to return a value).
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.

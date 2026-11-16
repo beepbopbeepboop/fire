@@ -85,6 +85,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_metal.py::MetalEmitter.__init__": "the MSL emitter's own dataclass",
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
+    "mojo/backend_gimple/module_gen.py::_gmp_solve_dispatch": "`_dt.methods` is a row list of the dispatch solver's own table (`self._dispatch_tables`), not an AST node",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
     "mojo/backend_gimple/module_gen.py::_gmi_rebind_stmt": "`copy.copy` of a def (rebound, or one whose body changed), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
     "mojo/backend_gimple/module_gen.py::_gmi_with_blocks": "`copy.copy` of a compound statement or its handler/case, whose child blocks are set on the copy before anything walks it",
