@@ -11350,6 +11350,22 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                     continue
                 if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
+                elif ((_xg_ct == 'char *'
+                       and _xg_tgt.get(_xg_pn) in ('MojoList *', 'MojoSet *', 'MojoDict *'))
+                      or (_xg_tgt.get(_xg_pn) == 'char *'
+                          and _xg_ct in ('MojoList *', 'MojoSet *', 'MojoDict *'))):
+                    # The str-vs-container ambiguity, settled by the callers
+                    # exactly as the same-module pass settles it
+                    # (`_gmi_apply_call_site_param_evidence`): the body only
+                    # said "iterable" (`for c in s`, `reversed(s)`), which `str`
+                    # and a container both satisfy, so a body-derived
+                    # container type is not evidence against UNANIMOUS literal
+                    # call sites of the other kind. Without this an imported
+                    # `def counter(s): for c in s: ...` called as
+                    # `counter("abc")` was declared `MojoList *` and the call
+                    # handed it a `char *` -- SIGSEGV in mojo_list_get_boxed
+                    # (CODEGEN_str_iteration_link_mode_crash, package A).
+                    _xg_tgt[_xg_pn] = _xg_ct
                 if _xg_ct == 'char *':
                     self._coro_str_params.setdefault(_xg_body, set()).add(_xg_pn)
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
