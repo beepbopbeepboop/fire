@@ -343,14 +343,29 @@ tree: exit 1, and the failure is no longer only the two coroutine refusals.
 
 * the same two `Unsupported shape(s)` lines for `fmt_summary` / `section` are
   still there;
-* the link step now also emits `link_inline_module.cpp` with **38 C++ compile
-  errors**, e.g. `invalid conversion from 'int64_t' to 'char*'`,
-  `request for member 'kind' in 'parent', which is of non-class type 'char*'`,
-  and `'KIND' was not declared in this scope` (lines 100, 163, 169, 170, 268
-  of that generated file);
+* the link step now also emits the per-module C++ generator units, and **6 of
+  the 10 captured units fail `g++ -std=c++20 -fsyntax-only`** (32 errors in
+  total; the build log's 38 includes the link-stage repeat). Two distinct
+  defects, both reproduced in `lm_003.cpp` (the `c_parser/info.py` unit):
+
+  - **The module's own `KIND` enum is never emitted.** `KIND` is declared at
+    `c_parser/info.py:22` (`class KIND(enum.Enum)`), in the SAME module the
+    unit is generated for, yet the unit has no declaration of it, so every
+    `KIND.FUNCTION` is `use of undeclared identifier 'KIND'`. The unit's
+    preamble forward-declares other structs (`struct DeclID;`,
+    `struct Declarations;`, `struct Enum;`) but not this one.
+  - **A local is typed `char *` where the source treats it as a struct value.**
+    Generated:
+    `char * parent; ... parent = mojo_getattr_any((void*)(intptr_t)(parsed),
+    (char*)"parent"); ... if ((parent.kind == KIND.FUNCTION)) ... parent.name`
+    -- so `parent` is assigned a boxed attribute value, then read as a struct
+    (`member reference base type 'char *' is not a structure or union`). The
+    `char *` comes from the earlier `parent = "";` string assignment; the
+    backend keeps one C type for a name the source reuses across kinds.
+
 * a third unresolved callee appears in the log, `anonymous_names(...)`.
 
-So the file's remaining work is not one capture-model defect: the C++ backend
-also mis-models at least one value as `char*` where a class instance is
-required, and `KIND` is emitted without its declaration. Recorded rather than
-folded into the coroutine item, because the two have different owners.
+So the file's remaining work is not one capture-model defect: the C++ unit
+generator drops a module's own enum and pins a reused local to its first
+assignment's type. Recorded separately from the coroutine item; different
+owners.
