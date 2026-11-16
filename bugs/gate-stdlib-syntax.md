@@ -5,6 +5,26 @@
 
 It is red on `master`: reproduce it there (`python3 tools/suite.py stdlib-syntax`), then fix the cause. Do not skip or mark the test.
 
+## Done when
+
+The red is three stdlib modules whose generated C called a suffix-less dunder
+symbol that no overload defines (`implicit declaration of function`), because
+`_emit_struct_method_prototypes` stopped declaring the bare dunder symbol for
+an overloaded method. The three call-site paths must name a concrete overload:
+
+- `BinaryHeap[Int](copy=heap)` — the implicit copy constructor;
+- `StringDict[StringSpan, Int][StringSpan("fruit")]` — two same-arity
+  `__getitem__` overloads that erase to the same C signature;
+- `with TempEnvWithCleanup(...)` — the one-argument `__exit__(error)`.
+
+Quick test:
+
+    python3 test_stdlib_syntax_dunder_overloads.py
+
+It transpiles exactly those three stdlib modules through `transpile_file` (the
+same stage `stdlib-syntax` runs) and fails before the fix with the gate's own
+`implicit declaration of function` errors.
+
 ## Gate ledger
 
 - **Last known working:** `46ef25daa9` integrate fix-replan-compile-fail-tools-c-analyzer-c-analyzer
