@@ -1698,8 +1698,7 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)',
-     disabled='bugs/gate-gimple.md')
+     desc='GIMPLE unit suite (python-interpreted codegen)')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -1880,8 +1879,7 @@ test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
                              'mojo/backend_gimple/emit_metal.py'],
      desc='Metal codegen: op tables, device-region selection, MSL emission, '
           'and the generated MSL compiled by Apple\'s real compiler and run '
-          'on the GPU against a CPU reference',
-     disabled='bugs/gate-metalgpu.md')
+          'on the GPU against a CPU reference')
 test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
      extra=['tools/md2html.py', 'test_md2html.py',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
@@ -4599,8 +4597,7 @@ test('interp-list-ctor', [PY, 'test_interp_list_ctor.py'], cache=True, mem='tiny
      desc='interpreter List(...) copies its iterable, length=/fill= build')
 test('module-globals-compiled', [PY, 'test_module_globals_compiled.py'],
      cache=True, mem='tiny', extra=['test_module_globals_compiled.py'],
-     desc='module-scope globals() matches CPython in the compiled path',
-     disabled='bugs/gate-module-globals-compiled.md')
+     desc='module-scope globals() matches CPython in the compiled path')
 test('mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'],
      cache=True, mem='tiny', extra=['test_mojoc_precompile_signature.py'],
      desc='precompile a package to a .mojoc signature artifact and read it back')
