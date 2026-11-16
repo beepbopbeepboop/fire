@@ -3985,8 +3985,38 @@ class BoundMethod:
         finally:
             self.interpreter.scope = old_scope
 
-    def __getitem__(self, key):
-        return self
+    def __getitem__(self, item):
+        """`obj.method[...]` at a call site: bind the bracket items to the
+        declared comptime parameters BY POSITION, the way
+        `MojoFunction.__getitem__` does for a free function, and answer a
+        receiver-bound callable that still takes the call-time arguments.
+
+        The receiver's declared parameters live on `self.bound_func`
+        (`comptime_params` / `comptime_param_defaults` / `_pd`), as the
+        keyword-bracket path (`_bind_bracket_comptime`) reads them. A
+        bracket item with no parameter to bind it is refused, and an omitted
+        parameter with no default is refused through the same helpers the
+        free-function path uses, so the subscript site renders the one
+        `failed to infer parameter ...` diagnostic. The bound value keeps
+        the receiver (`_MojoBoundComptimeReceiver`), as the keyword spelling
+        already does."""
+        decl = self.bound_func
+        values = item if isinstance(item, tuple) else (item,)
+        declared = len(getattr(decl, 'comptime_params', None) or [])
+        if len(values) > declared:
+            names = ', '.join(getattr(decl, 'comptime_params', None) or [])
+            if not names:
+                names = 'none'
+            raise TypeError(
+                f"{getattr(decl, 'name', '')}[...] supplies {len(values)} "
+                f"specialization argument(s) but "
+                f"{getattr(decl, 'name', '')} declares {declared} comptime "
+                f"parameter(s): {names}")
+        bindings = dict(zip(getattr(decl, 'comptime_params', None) or [], values))
+        unbound = _unbound_comptime_param(decl, bindings)
+        if unbound is not None:
+            _raise_unbound_comptime_error(decl, unbound)
+        return _MojoBoundComptimeReceiver(self, bindings)
 
 
 class _MojoBoundComptimeReceiver:
@@ -5633,6 +5663,32 @@ class _MojoTestSuiteFnAccessor:
         return _MojoTestSuiteFnCall(func, interpreter, run)
 
 
+class _MojoCompileInfoRequest:
+    """Callable result of `compile_info[...]` — stands in for a compile request."""
+    def __call__(self, *args, **kwargs):
+        return 0
+
+    def __bool__(self):
+        return True
+
+
+class _MojoCompileInfo:
+    """`std.compile.compile_info` shim.
+
+    Subscript syntax is validated in Interpreter.eval_SubscriptExpr (it must
+    inspect the bracket's AST, not the evaluated kernel value). __getitem__ is a
+    fallback that should not be reached for normal interpreter subscript eval.
+    """
+    def __init__(self, interpreter):
+        self.interpreter = interpreter
+
+    def __getitem__(self, item):
+        return _MojoCompileInfoRequest()
+
+    def __call__(self, *args, **kwargs):
+        return _MojoCompileInfoRequest()
+
+
 def _mojo_unary_math(fn):
     """Wrap a scalar math function so it also applies elementwise to a
     `_MojoSIMD` operand — matching how real Mojo's `std.math` functions are
@@ -6229,6 +6285,13 @@ class Interpreter:
                 get_defined_int=_MojoGetDefinedFn(),
                 MOJO_VERSION="0.0.0-interpreter",
             )
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name in ('std.compile',):
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(compile_info=_MojoCompileInfo(self))
             cache[module_name] = namespace
             return namespace
 
@@ -9681,6 +9744,13 @@ class Interpreter:
     def eval_SubscriptExpr(self, expr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
+        # `std.compile.compile_info[...]`: validate the kernel argument's
+        # syntax (it must be a bare identifier naming a module-level def)
+        # before evaluating it — a computed kernel like `get_fn[False]()`
+        # evaluates to the same function value as `scale`, so a value-level
+        # check cannot distinguish them.
+        if isinstance(obj, _MojoCompileInfo):
+            return self._eval_compile_info_subscript(expr)
         # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
         # linux=0x400]()`) keeps its elements in `attrs` as (name, value)
         # pairs and leaves `index` as the empty-subscript placeholder
@@ -9728,6 +9798,75 @@ class Interpreter:
         if rec is not None:
             setattr(exc, 'mojo_record', rec)
         raise exc
+
+    def _compile_info_kernel_arg_ast(self, expr):
+        """Return the AST node of compile_info's kernel argument (first arg)."""
+        attrs = getattr(expr, 'attrs', None)
+        if attrs:
+            for nm, val in attrs:
+                if nm is None:
+                    return val
+            # all keyword args: first is kernel
+            return attrs[0][1]
+        idx = getattr(expr, 'index', None)
+        if idx is None:
+            return None
+        # Mixed/positional brackets may parse as TupleExpr in index.
+        if type(idx).__name__ == 'TupleExpr':
+            elems = getattr(idx, 'elements', None) or []
+            if elems:
+                return elems[0]
+        return idx
+
+    def _compile_info_refused_name(self, kernel_ast):
+        """Best-effort symbol name for a refused compile_info kernel."""
+        # Prefer the evaluated result's name (e.g. get_fn[False]() -> scale).
+        try:
+            val = self.eval_expr(kernel_ast)
+            name = getattr(val, '__name__', None) or getattr(val, 'name', None)
+            if name:
+                return name
+        except Exception:
+            pass
+        # Fall back to the most relevant identifier mentioned in the AST.
+        stack = [kernel_ast]
+        ident = None
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
+            if type(node).__name__ == 'IdentExpr':
+                ident = getattr(node, 'name', ident)
+                continue
+            if type(node).__name__ == 'MemberExpr':
+                ident = getattr(node, 'member', ident)
+                stack.append(getattr(node, 'obj', None))
+                continue
+            for attr in ('func', 'obj', 'value', 'left', 'right', 'index'):
+                if hasattr(node, attr):
+                    stack.append(getattr(node, attr))
+            for attr in ('args', 'elements', 'keys', 'values'):
+                if hasattr(node, attr):
+                    v = getattr(node, attr)
+                    if isinstance(v, list):
+                        stack.extend(v)
+        return ident or '<unknown>'
+
+    def _eval_compile_info_subscript(self, expr):
+        kernel_ast = self._compile_info_kernel_arg_ast(expr)
+        ok = False
+        if kernel_ast is not None and type(kernel_ast).__name__ == 'IdentExpr':
+            name = getattr(kernel_ast, 'name', None)
+            if name:
+                val = self.scope.get(name)
+                if isinstance(val, MojoFunction):
+                    ok = True
+        if ok:
+            return _MojoCompileInfoRequest()
+        sym = self._compile_info_refused_name(kernel_ast)
+        loc = self._loc(expr)
+        print(f"{loc}error: cannot slice out exported symbol '{sym}'", file=sys.stderr)
+        raise SystemExit(1)
 
     def _bind_bracket_comptime(self, obj, attrs):
         """`f[...]` with keyword-bracket `attrs`: bind `obj`'s declared

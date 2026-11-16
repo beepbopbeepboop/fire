@@ -410,6 +410,81 @@ def test_generator_string_equality_compares_content() -> bool:
     return ok
 
 
+def test_generator_string_ordering_compares_content() -> bool:
+    """`<`/`>` (and `<=`/`>=`) on two strings inside a C++-generator body
+    compare the strings' CONTENT, not their pointers.
+
+    The cpp backend's `_cpp_str_compare` lowered only `==`/`!=` by content;
+    the ordering operators fell through to the raw C++ comparison, i.e. the
+    two `char *` values — heap/static addresses, so the answer depended on
+    allocation order and silently disagreed with CPython's lexicographic str
+    ordering. For two real string pointers `mojo_cstr_cmp` is `strcmp`, so
+    the ordering arms test its result against 0 (`< 0` / `<= 0` / `> 0` /
+    `>= 0`).
+
+    The `import csv` + `_get_reader=csv.reader` default is what makes this
+    module eligible for the C++ generator path (see `_read_table_like` in
+    cpp_core.py); without it the generator compiles on the A3 path, where
+    the comparison was already correct and this would pin nothing. Pairs are
+    chosen so a pointer comparison disagrees with CPython regardless of
+    which literal was allocated first (`"zebra"`/`"apple"`, `"a"`/`"A"`).
+    """
+    pkg = {
+        'ordmod/__init__.py': '',
+        'ordmod/mod.py': (
+            'import csv\n'
+            '\n'
+            'def order(a, b, *, sep=",", _get_reader=csv.reader):\n'
+            '    if a < b:\n'
+            '        yield "LT"\n'
+            '    elif a > b:\n'
+            '        yield "GT"\n'
+            '    else:\n'
+            '        yield "EQ"\n'
+            '\n'
+            'def le_ge(a, b, *, sep=",", _get_reader=csv.reader):\n'
+            '    if a <= b:\n'
+            '        yield "LE"\n'
+            '    else:\n'
+            '        yield "GT"\n'
+            '    if a >= b:\n'
+            '        yield "GE"\n'
+            '    else:\n'
+            '        yield "LT"\n'
+        ),
+        'ordmod/main.py': (
+            'from ordmod.mod import order, le_ge\n'
+            '\n'
+            'def main():\n'
+            '    print(list(order("abc", "abd")))\n'
+            '    print(list(order("abd", "abc")))\n'
+            '    print(list(order("abd", "abd")))\n'
+            '    print(list(order("zebra", "apple")))\n'
+            '    print(list(order("apple", "zebra")))\n'
+            '    print(list(order("a", "A")))\n'
+            '    print(list(le_ge("abc", "abd")))\n'
+            '    print(list(le_ge("abd", "abc")))\n'
+            '    print(list(le_ge("abd", "abd")))\n'
+            'main()\n'
+        ),
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='gen_str_order_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'ordmod/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'ordmod/main.py')
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout == "['LT']\n['GT']\n['EQ']\n['GT']\n['LT']\n['GT']\n"
+                         "['LE', 'LT']\n['GT', 'GE']\n['LE', 'GE']\n")
+    if not ok:
+        print(f"  ✗ generator_string_ordering_compares_content: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_generator_str_param_concat_is_string_concatenation() -> bool:
     """`root + str(k)` in a generator whose unannotated `root` is only ever
     passed a string literal is string concatenation, not integer addition.
@@ -2934,6 +3009,7 @@ CASES = [
     test_imported_callable_default_param_is_c_word_in_client,
     test_link_inline_cpp_unit_failure_reports_compiler_stderr,
     test_generator_string_equality_compares_content,
+    test_generator_string_ordering_compares_content,
 ]
 
 
