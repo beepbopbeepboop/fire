@@ -220,7 +220,7 @@ def test_gate_wiring() -> None:
     check(m is not None, 'gimple-lint is registered in tools/suite.py')
     check(m is not None and 'disabled=' not in m.group(0),
           'gimple-lint is enabled (no disabled= marker)')
-    # NOT checked here: that bugs/gate-gimple-lint.md is absent. The
+    # NOT checked here: that this job's red-gate doc in bugs/ is absent. The
     # integrator writes that doc when a WORK BRANCH turns this job red; a
     # check on its absence then failed master for the doc's existence alone,
     # which is the doc keeping itself alive (it came back three times in
