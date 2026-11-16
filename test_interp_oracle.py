@@ -567,6 +567,21 @@ class P:
 def main():
     P(3).go()
 ''', 'show 3\n'),
+    # A positional bracket on a bound method binds its comptime parameter by
+    # position, the way `f[3]()` does for a free function. The bracket used to
+    # answer the bound method itself (`BoundMethod.__getitem__`), so every
+    # positional bracket item was dropped and the body read None.
+    "method_positional_bracket_binds_comptime_params": ('''\
+class P:
+    def f[x: Int](self) -> Int:
+        return x
+
+    def go(self) -> Int:
+        return self.f[3]()
+
+def main():
+    print(P().go())
+''', '3\n'),
     # An unbindable comptime parameter is an honest error naming it. The
     # bracket is the only place such a parameter's value can come from, so
     # binding None (which is what an unbindable one used to do) is a wrong
