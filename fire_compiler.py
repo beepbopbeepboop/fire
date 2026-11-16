@@ -8430,6 +8430,14 @@ class Parser:
             self._pos = len(self._tok)
         if not _span:
             return None
+        # The span is a sub-stream: terminate it with an EOF token exactly as
+        # `py_tokenize` terminates every real stream. `_advance` never steps
+        # past the LAST token, so without one a span ending in a STRING (a
+        # default like `= "x"`) made the implicit-concatenation loop in
+        # `_parse_primary` spin forever, appending to its list until the
+        # machine ran out of memory.
+        _last = _span[-1]
+        _span.append(Token("EOF", "", line=_last.line, col=_last.col))
         return Parser(_span).with_filename(self._filename)._parse_expr(0)
 
     def _skip_fn_quals(self):
