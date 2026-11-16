@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for tools/procrun.py and tools/memcap.py (bug:UNTESTED §5).
 
-procrun owns the RSS measurement and the kill — the two things memcap exists to
+procrun owns the memory measurement (footprint, falling back to RSS) and the kill — the two things memcap exists to
 get right — and had no test at all. These pin the pure parts against injected
 process tables (no `ps` dependence), and the kill / ceiling paths against real
 short-lived processes.
@@ -197,6 +197,40 @@ def test_memcap_breach_kills_and_reports_resource_failure():
 
 def memcap_done(out):
     return "memcap: done" in out
+
+
+# ── footprint, not RSS ──────────────────────────────────────────────────────
+# macOS compresses/swaps cold dirty pages out of RSS: a runaway read 1-2 GB of
+# RSS at 35 GB real cost and no RSS ceiling fired (2026-11-15). The table's
+# `rss` slot carries phys_footprint (max with RSS) so ceilings see that cost.
+def test_footprint_kb_sees_a_live_allocation():
+    if procrun._proc_pid_rusage is None:
+        return  # non-darwin: documented fallback to ps RSS
+    base = procrun.footprint_kb(os.getpid())
+    buf = bytearray(300 * 1024 * 1024)   # zero-filled: touched, so dirty
+    after = procrun.footprint_kb(os.getpid())
+    assert base is not None and after is not None
+    assert after - base > 200 * 1024, (base, after)
+    del buf
+
+
+def test_footprint_kb_is_none_not_zero_when_unreadable():
+    # pid 1 is not ours (EPERM); a missing reading must never look healthy.
+    assert procrun.footprint_kb(1) is None or procrun._proc_pid_rusage is None
+    assert procrun.footprint_kb(2 ** 30) is None
+
+
+def test_ps_snapshot_rss_slot_carries_footprint_when_larger():
+    out = "  10     1  1000  0:01  10\n  11    10  2000  0:01  10\n"
+    fp = {10: 9_000_000, 11: None}          # 10: compressed pages RSS can't see
+    with mock.patch.object(procrun.subprocess, "run",
+                           return_value=mock.Mock(stdout=out)), \
+         mock.patch.object(procrun, "footprint_kb", side_effect=fp.get):
+        ppid, rss, _cpu, _pgid = procrun.ps_snapshot()
+    assert rss[10] == 9_000_000, rss        # footprint wins over RSS 1000
+    assert rss[11] == 2000, rss             # unreadable: falls back to RSS
+    _c, total, _n = procrun.tree_usage(10, ppid, rss)
+    assert total == (9_000_000 + 2000) * 1024
 
 
 TESTS = [v for k, v in sorted(globals().items())

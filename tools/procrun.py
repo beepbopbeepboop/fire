@@ -7,7 +7,8 @@ whose whole value is that its kill is aimed correctly:
 
   * `tools/suite.py` needs to kill a runaway job's whole tree on a timeout,
     and to read what the job printed.
-  * `tools/memcap.py` needs to measure a tree's RSS and kill it at a ceiling.
+  * `tools/memcap.py` needs to measure a tree's memory footprint and kill it at
+    a ceiling.
   * `tools/ab_run_one.py` and `tools/suite.py` need to read that ceiling run's
     verdict — the peak it saw, and whether it was the ceiling that stopped it —
     so a per-file A/B job and a whole suite test report a memory kill the same
@@ -35,7 +36,7 @@ Two facts about this platform shape the whole file:
   which the allocator may reserve without ever faulting, so it either never
   fires or fires on a reservation that costs nothing.
 - **`ps` is the only process table available here**, and it costs ~50-100ms.
-  That is why POLL_SECONDS is not smaller: RSS does not move meaningfully
+  That is why POLL_SECONDS is not smaller: memory does not move meaningfully
   between samples.
 
 Signals are SIGKILL, never SIGTERM. Every caller of the kill path is killing
@@ -46,6 +47,7 @@ that gets ignored is the same as no TERM at all.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import signal
@@ -57,12 +59,69 @@ import threading
 GB = 1024 ** 3
 
 
+# ── Footprint: the memory a process actually costs the machine ───────────────
+# RSS is the wrong gauge on macOS and it was the one every ceiling used. RSS is
+# RESIDENT pages only; the kernel compresses cold dirty pages and then swaps
+# them, and both leave RSS. A runaway that appends to one list forever reads a
+# steady 1-2 GB of RSS while its real cost climbs past 35 GB, so memcap's
+# ceiling and memslot's reservation never fired and the machine went to 90 GB
+# of swap (2026-11-15: an unbounded loop in `_parse_primary`).
+#
+# `phys_footprint` is the number Activity Monitor calls "Memory" and the one the
+# kernel uses when it decides whom to jetsam: resident + compressed + swapped
+# dirty. `proc_pid_rusage(RUSAGE_INFO_V2)` returns it for any process of OUR uid
+# in one syscall (no subprocess, microseconds a pid), which is why it replaces
+# the `footprint` CLI: that tool costs ~100 ms a call and a poll needs one per
+# process in the tree.
+_RUSAGE_INFO_V2 = 2
+
+
+class _RusageV2(ctypes.Structure):
+    _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [
+        (n, ctypes.c_uint64) for n in (
+            "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups",
+            "pageins", "wired_size", "resident_size", "phys_footprint",
+            "proc_start_abstime", "proc_exit_abstime", "child_user_time",
+            "child_system_time", "child_pkg_idle_wkups",
+            "child_interrupt_wkups", "child_pageins", "child_elapsed_abstime",
+            "diskio_bytesread", "diskio_byteswritten")]
+
+
+def _load_proc_pid_rusage():
+    if sys.platform != "darwin":
+        return None
+    try:
+        return ctypes.CDLL("/usr/lib/libproc.dylib").proc_pid_rusage
+    except (OSError, AttributeError):
+        return None
+
+
+_proc_pid_rusage = _load_proc_pid_rusage()
+
+
+def footprint_kb(pid):
+    """`phys_footprint` of one process in KB, or `None` when unavailable.
+
+    `None` (never 0) for a process that is not ours (EPERM), has exited, or on a
+    platform without libproc, so the caller falls back to `ps`'s RSS and a
+    missing reading can never look like a healthy one.
+    """
+    if _proc_pid_rusage is None:
+        return None
+    buf = _RusageV2()
+    if _proc_pid_rusage(pid, _RUSAGE_INFO_V2, ctypes.byref(buf)) != 0:
+        return None
+    return buf.phys_footprint // 1024
+
+
 # ── The process table ────────────────────────────────────────────────────────
 def ps_table():
     """`(ppid, rss)` dicts for every process — the two columns most callers want.
 
-    rss is in KB, as macOS `ps` reports it. See `ps_snapshot` for what is
-    returned when `ps` is unavailable, which is the same here.
+    rss is in KB and is really MEMORY FOOTPRINT (resident + compressed +
+    swapped; see "Footprint" above), falling back to `ps`'s RSS for a process
+    we cannot query. See `ps_snapshot` for what is returned when `ps` is
+    unavailable, which is the same here.
     """
     ppid, rss, _cpu, _pgid = ps_snapshot()
     return ppid, rss
@@ -102,7 +161,12 @@ def ps_snapshot():
         except ValueError:
             continue
         ppid[pid] = parent
-        rss[pid] = resident
+        # The table is still called `rss` (callers and tests key on it) but its
+        # value is the larger of RSS and footprint: footprint includes the
+        # compressed/swapped pages RSS leaves out, and never reads below RSS in
+        # practice. See "Footprint" above.
+        fp = footprint_kb(pid)
+        rss[pid] = resident if fp is None else max(resident, fp)
         cpu[pid] = spent
         pgid[pid] = group
     return ppid, rss, cpu, pgid

@@ -12,7 +12,7 @@ worktree work-7372, `git status --short` empty).
 ## What I saw
 
     ratchet: 1 file(s) cite MORE deleted docs than tools/dangling_refs_baseline.py allows:
-      bugs/LAND-codegen-nested-bracket-generic-call-4.md: 5 (baseline 0)
+      bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md: 5 (baseline 0)
 
 All 5 sit on ONE line (line 36), the auto-generated Status line of that doc, the
 "Uncommitted entries: ... Commit what belongs to the change, discard the rest." line.
@@ -36,7 +36,7 @@ The ratchet green on clean master, as it was when the `expect=` marker was dropp
 
 ## Why I did not fix it
 
-The offending line lives in `bugs/LAND-codegen-nested-bracket-generic-call-4.md`, claimed by
+The offending line lives in `bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md`, claimed by
 `bug:LAND-codegen-nested-bracket-generic-call-4` (a separate live worker per
 `tools/control.py claims`). Editing it is that lane's work, so this doc is filed per the
 one-doc-per-bug rule and its fix lands in that lane (or the next claim of the same area).

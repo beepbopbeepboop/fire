@@ -2764,8 +2764,10 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
     # `formal-read-before-store` are no longer disabled either. This list is the
     # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it.
-    expected_disabled = ['gimple', 'metalgpu']
+    # rather than freezing it. `stdlib-syntax` joined it 2026-11-15
+    # (`bugs/gate-stdlib-syntax.md`): the job is a whole-tree gcc
+    # -fsyntax-only pass whose remaining reds are tracked there.
+    expected_disabled = ['gimple', 'metalgpu', 'stdlib-syntax']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2907,8 +2909,10 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
     # `formal-read-before-store` are no longer disabled either. This list is the
     # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it.
-    expected_disabled = ['gimple', 'metalgpu']
+    # rather than freezing it. `stdlib-syntax` joined it 2026-11-15
+    # (`bugs/gate-stdlib-syntax.md`): the job is a whole-tree gcc
+    # -fsyntax-only pass whose remaining reds are tracked there.
+    expected_disabled = ['gimple', 'metalgpu', 'stdlib-syntax']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
