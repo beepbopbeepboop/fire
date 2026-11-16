@@ -9775,6 +9775,40 @@ def main():
 main()
 """, "multi-slot `for` target over a generator whose yield arity is not a tuple")
 
+    # The same refusal for the FOR-STATEMENT consumer, whose body need not bind
+    # the target at all: `print(x)` reads an undeclared name, and before the
+    # pipeline pre-pass (mojo/middle/coro.py's
+    # refuse_multi_slot_target_over_nontuple_generator) walked `ForStmt` too,
+    # `unknown_decl_check` answered first with its own, less specific message.
+    test_generator_refused("gen_multi_slot_for_target_unknown_body_refused", """\
+def g():
+    yield 1
+
+def main():
+    for a, b in g():
+        print(x)
+main()
+""", "multi-slot `for` target over a generator whose yield arity is not a tuple")
+
+    # The pre-pass must not refuse what codegen accepts: here the CALL reaches
+    # a nested `def g` that yields a real tuple, so the module-level one-value
+    # `g` is not the callee at all — for the `for` statement or for the
+    # comprehension. Counting the enclosing scope's bound names as shadows is
+    # what keeps both out of the refusal (before that, the comprehension
+    # spelling below was refused for a program codegen compiles).
+    test_generator_stdout("gen_multi_slot_target_nested_shadowing_generator_ok", """\
+def g():
+    yield 1
+
+def main():
+    def g():
+        yield 1, 2
+    for a, b in g():
+        print(a, b)
+    print([a for a, b in g()])
+main()
+""", "1 2\n[1]\n")
+
     # The same refusal for the COMPREHENSION consumer, which reaches
     # `_compr_generator_loop` rather than `_gen_for_generator_iter`.
     test_generator_refused("gen_multi_slot_comprehension_target_over_one_value_generator_refused", """\
@@ -9793,7 +9827,7 @@ main()
     # of the arity mismatch that makes this comprehension uncompilable.
     # The refusal is raised by a dedicated pipeline pre-pass
     # (mojo/middle/coro.py's
-    # refuse_multi_slot_comprehension_over_nontuple_generator) that shares
+    # refuse_multi_slot_target_over_nontuple_generator) that shares
     # one message builder with _compr_generator_loop's own raise — which of
     # the two stages noticed first no longer changes the diagnostic.
     test_generator_refused("gen_multi_slot_set_comprehension_target_over_one_value_generator_refused", """\
