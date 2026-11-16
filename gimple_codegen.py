@@ -5017,8 +5017,8 @@ class GimpleGen:
         return gfn._locally_binds_name(self, bare_name)
     def _func_mangleable(self, name: str) -> bool:
         return gfn._func_mangleable(self, name)
-    def _func_csym(self, bare_name: str) -> str:
-        return gfn._func_csym(self, bare_name)
+    def _func_csym(self, bare_name: str, def_pts: list | None = None) -> str:
+        return gfn._func_csym(self, bare_name, def_pts)
     def _c_sizeof_helper(self, struct_name: str) -> str:
         """Name of a `static int64_t` accessor returning `sizeof(struct_name)`,
         registering it for emission into the non-GIMPLE prelude.
@@ -5953,8 +5953,6 @@ class GimpleGen:
         return grsl._closure_value_locals(self, body)
     def _quick_type(self, node) -> str:
         return grsl._quick_type(self, node)
-    def _and_or_operand_type(self, node) -> str:
-        return grsl._and_or_operand_type(self, node)
     def _module_attr_call_return_type(self, node):
         return grsl._module_attr_call_return_type(self, node)
     def _infer_list_elem_type(self, elements: list) -> str:

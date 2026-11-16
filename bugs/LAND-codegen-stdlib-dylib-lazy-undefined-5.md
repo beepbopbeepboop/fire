@@ -2,7 +2,7 @@
 
 **Branch:** `work/bug-codegen-stdlib-dylib-lazy-undefined-5` (task `bug-codegen-stdlib-dylib-lazy-undefined-5`; its tip is also saved as `refs/archive/work/bug-codegen-stdlib-dylib-lazy-undefined-5`, so dropping it loses nothing).
 **Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 10 behind it; task started 2026-11-15 20:16:09
-**Original work:** Fix the bug in bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part8.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning te
+**Original work:** Fix the part 8 stdlib-dylib lazy-undefined-refs bug (two same-name free functions are neither defined nor callable) at its ROOT CAUSE; that bug's doc was deleted when the fix landed. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning te
 **Original claims:** bug:CODEGEN_stdlib_dylib_lazy_undefined_refs-part8
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:

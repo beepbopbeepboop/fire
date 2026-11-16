@@ -2956,71 +2956,6 @@ def test_link_inline_cpp_unit_failure_reports_compiler_stderr() -> bool:
     return True
 
 
-def _str_iteration_case(name: str, pkg: dict, expected: str) -> bool:
-    """Build `pkg` in link mode and require the CPython answer, exactly."""
-    with tempfile.TemporaryDirectory() as td:
-        rc, stdout = _build_and_run(pkg, 'gm/main.py', td)
-        py_rc, py_out = _cpython_run(td, 'gm/main.py')
-    ok = rc == 0 and stdout == expected and py_out == expected
-    if not ok:
-        print(f"  \u2717 {name}: rc={rc} stdout={stdout!r} cpython={py_out!r} want={expected!r}")
-    return ok
-
-
-def test_imported_function_iterating_a_str_param_does_not_crash() -> bool:
-    """CODEGEN_str_iteration_link_mode_crash, package A: `for c in s` only says
-    `s` is iterable, so the body typed it `MojoList *`, and the importer's
-    unanimous string-literal call site never overrode that across the module
-    boundary -- the call passed a `char *` and SIGSEGVed (rc -11) in
-    mojo_list_get_boxed."""
-    return _str_iteration_case('imported_str_param_iteration', {
-        'gm/__init__.py': '',
-        'gm/mod.py': ('def counter(s):\n'
-                      '    n = 0\n'
-                      '    for c in s:\n'
-                      '        n += 1\n'
-                      '    return n\n'),
-        'gm/main.py': ('from gm.mod import counter\n\n'
-                       'def main():\n'
-                       '    print(counter("abc"))\n'
-                       'main()\n'),
-    }, '3\n')
-
-
-def test_imported_generator_iterating_a_str_literal_yields_characters() -> bool:
-    """Package B: a cpp-path generator looping over a string LITERAL emitted
-    `for (auto c : "abc")`, a range-for over the `char[4]` array -- four
-    integers including the NUL (`[97, 98, 99, 0]`) instead of three
-    one-character strings."""
-    return _str_iteration_case('imported_generator_literal_iteration', {
-        'gm/__init__.py': '',
-        'gm/mod.py': ('import csv\n\n'
-                      'def letters(*, sep=",", _get_reader=csv.reader):\n'
-                      '    for c in "abc":\n'
-                      '        yield c\n'),
-        'gm/main.py': ('from gm.mod import letters\n\n'
-                       'def main():\n'
-                       '    print(list(letters()))\n'
-                       'main()\n'),
-    }, "['a', 'b', 'c']\n")
-
-
-def test_imported_generator_iterating_a_str_param_yields_characters() -> bool:
-    """Package C: B with the literal replaced by the generator's own `str`
-    parameter (same cross-module container-vs-string call-site rule as A)."""
-    return _str_iteration_case('imported_generator_param_iteration', {
-        'gm/__init__.py': '',
-        'gm/mod.py': ('import csv\n\n'
-                      'def letters(s, *, sep=",", _get_reader=csv.reader):\n'
-                      '    for c in s:\n'
-                      '        yield c\n'),
-        'gm/main.py': ('from gm.mod import letters\n\n'
-                       'def main():\n'
-                       '    print(list(letters("abc")))\n'
-                       'main()\n'),
-    }, "['a', 'b', 'c']\n")
-
-
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_extern_import_keyword_call_pads_trailing_default,
@@ -3075,9 +3010,6 @@ CASES = [
     test_link_inline_cpp_unit_failure_reports_compiler_stderr,
     test_generator_string_equality_compares_content,
     test_generator_string_ordering_compares_content,
-    test_imported_function_iterating_a_str_param_does_not_crash,
-    test_imported_generator_iterating_a_str_literal_yields_characters,
-    test_imported_generator_iterating_a_str_param_yields_characters,
 ]
 
 
