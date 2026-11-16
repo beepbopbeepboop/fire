@@ -7034,31 +7034,8 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
                 gen._emit_call('void', '', f"{_gbase}_destroy",
                                [('MojoGenerator *', _gval)])
             continue
-        # `__exit__` is commonly OVERLOADED (`def __exit__(self)` beside
-        # `def __exit__(self, error)`), in which case neither spelling of
-        # the bare name is defined and the call must name ONE concrete
-        # overload. Pick by the arity this statement passes: the greatest
-        # declared non-self parameter count up to the 3 Python exception
-        # info slots, and pass a zero for each.
-        _exit_cands = gmp._struct_method_candidates(gen, sn, '__exit__')
-        _exit_oid = ''
-        _exit_ret = None
-        _n_extra = 3
-        if _exit_cands:
-            _best_n = -1
-            for _ec in _exit_cands:
-                _en = len(_ec.get('param_ctypes') or [])
-                if _en <= 3 and _en > _best_n:
-                    _best_n = _en
-                    _exit_oid = _as_str(_ec.get('overload_id', '')) or ''
-                    _exit_ret = _ec.get('ret_type')
-            if _best_n < 0:
-                _best_n = 0
-            _n_extra = _best_n
-        exit_fn = gen._struct_method_csym(sn, '__exit__', _exit_oid)
-        if (exit_fn in gen.func_return_types
-                or f"{sn}___exit__" in gen.func_return_types
-                or _exit_cands):
+        exit_fn = gen._struct_method_csym(sn, '__exit__', '')
+        if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
             # __exit__(self, exc_type, exc_val, exc_tb) — real
             # Python's protocol always passes 3 exception-info
             # args (None/None/None on the normal-exit path). This
@@ -7079,14 +7056,12 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
             # that shape ("too many arguments... expected 1, have
             # 4") — pad only up to however many params THIS
             # exit_fn's own real signature actually declares.
-            if not _exit_cands:
-                _exit_params = gen.func_param_types.get(exit_fn)
-                if _exit_params is None:
-                    _exit_params = gen.func_param_types.get(f"{sn}___exit__")
-                _n_extra = max(len(_exit_params) - 1, 0) if _exit_params is not None else 3
+            _exit_params = gen.func_param_types.get(exit_fn)
+            if _exit_params is None:
+                _exit_params = gen.func_param_types.get(f"{sn}___exit__")
+            _n_extra = max(len(_exit_params) - 1, 0) if _exit_params is not None else 3
             _extra_args = [('int64_t', '0')] * min(_n_extra, 3)
-            ret_t = (_as_str(_exit_ret) if _exit_ret is not None
-                     else gen.func_return_types.get(exit_fn, '_Bool'))
+            ret_t = gen.func_return_types.get(exit_fn, '_Bool')
             gen._emit_call(ret_t, '', exit_fn, [(ct, cv)] + _extra_args)
         else:
             gen._emit(f"  /* with: __exit__ ({sn}) */")

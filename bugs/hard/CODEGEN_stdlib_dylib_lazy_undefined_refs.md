@@ -201,3 +201,31 @@ num_fixed_args: Optional[Int] = None](*args: *types) -> return_type` -- so the
 gap is the VARIADIC generic call (`*args: *types` captured and forwarded), not
 the FFI lowering itself. This is a different and deeper defect than the naming
 one above; filing it here rather than half-fixing it.
+
+## 2026-11-15 (wakeups 24/25): a definer that silently emits NOTHING
+
+The current 37 (down from 38; Mike Stump's part 7 landed the definer-side
+suffix hashing for a home-private struct parameter) contains a case where the
+reference is not merely mis-suffixed -- the defining module emits no symbol at
+all. Measured on `std/memory/memory.mojo`:
+
+* the dylib references `_std_memory_memory_unsafe_memset_zero` (undefined) and
+  defines `std_memory_memory_unsafe_memset_37bd8e`;
+* compiling that module through `compile_module_to_c` yields a C file in which
+  the literal string `unsafe_memset_zero` occurs **zero** times -- both
+  declarations (the plain `def unsafe_memset_zero(ptr, count)` at line 381 and
+  the generic `def unsafe_memset_zero[dtype: DType, //, *, count: Int]` at 397)
+  contribute nothing, and `compile_module_to_c` prints no diagnostic at all.
+
+Ruled out, by temporarily reverting the iteration-19 opener-set change in
+`module_gen.py`: the count is still 0, so this is NOT a regression from that
+commit (and the file was restored byte-identical -- tree clean afterwards).
+
+The distinguishing feature of the dropped pair: the generic declaration's body
+contains a **recursive same-name call with a different arity** --
+`comptime if count > 128: return unsafe_memset_zero(ptr, count)` -- where the
+compiler has to pick the 2-arg plain declaration over the enclosing generic one.
+That is the next concrete thing to instrument: whether overload resolution
+inside the body binds to the enclosing generic (self-recursion) and the failure
+is swallowed rather than diagnosed. Not fixed here; recorded with the
+measurements rather than guessed at.
