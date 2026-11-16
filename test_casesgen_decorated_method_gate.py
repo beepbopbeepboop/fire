@@ -22,8 +22,9 @@ shapes it must tell apart:
       raw behavior).
 
 On master the pass does not exist (it landed with the compiled-path fixes for
-bugs/LAND-compile-fail-tools-cases-generator-a.md); this test fails there and
-passes here. It is the unit-level companion to
+the `bug:LAND-compile-fail-tools-cases-generator-a` claim; that bug doc was
+deleted once this pin landed); this test fails there and passes here. It is the
+unit-level companion to
 test_casesgen_analyzer_p3p2_regressions.py's `Decorated.read` section, which
 drives the same gate through a full `fire.py build` + CPython comparison.
 
