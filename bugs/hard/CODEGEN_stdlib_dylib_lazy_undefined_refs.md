@@ -209,12 +209,39 @@ gap is the VARIADIC generic call (`*args: *types` captured and forwarded), not
 the FFI lowering itself. This is a different and deeper defect than the naming
 one above; filing it here rather than half-fixing it.
 
-## 2026-11-15 (wakeups 24/25): a definer that silently emits NOTHING
+## 2026-11-15 (wakeups 24/27): a definer emits NOTHING for an overload family
+## -- and it is DOCUMENTED POLICY, not a silent defect
 
-The current 37 (down from 38; Mike Stump's part 7 landed the definer-side
-suffix hashing for a home-private struct parameter) contains a case where the
-reference is not merely mis-suffixed -- the defining module emits no symbol at
-all. Measured on `std/memory/memory.mojo`:
+**Correction (wakeup 27).** An earlier revision of this section called the
+absence "silent". It is not: `module_gen.py`'s duplicate-def pre-pass
+(`BUG-2026-021`, around line 5551) classifies a same-name multi-def group and
+deliberately drops it --
+
+* REDEFINITIONS (identical signature key): keep the LAST copy, interpreter
+  semantics;
+* GENUINE OVERLOADS (differing signature key): drop EVERY copy, on the premise
+  that "the elaborator selects and instantiates the right overload per call
+  site (slice 4), so no single C definition exists to emit".
+
+Isolated with a cold single-module compile, so the branch is not in doubt:
+
+| module | contents | `splat` in emitted C |
+|---|---|---|
+| a | two same-name defs, different params | **0** |
+| b | one def | 3 |
+| c | two DIFFERENT names, one calls the other | 3 |
+| d | generic + plain same-name pair | **0** |
+| e | two same-name defs, different arity | **0** |
+
+So the trigger is purely the name collision, and `splat` / `unsafe_memset_zero`
+/ `is_apple_gpu` are absent for this reason. Reverting all three of the
+iteration-19 commits still gives 0, so none of them is implicated.
+
+**What is actually open** is the premise, not the drop: the policy is sound for
+a SAME-module caller (slice 4 resolves and inlines), but a library module built
+into the dylib has cross-module callers that emit an extern reference to a
+symbol the defining module deliberately never emits. That is the whole
+remaining population of this table. Measured on `std/memory/memory.mojo`:
 
 * the dylib references `_std_memory_memory_unsafe_memset_zero` (undefined) and
   defines `std_memory_memory_unsafe_memset_37bd8e`;
@@ -246,3 +273,46 @@ reproducible from a cold single-module compile -- the CAS is serving C the cold
 path does not produce. The `unsafe_memset_zero` finding is unaffected (0 in
 both), but anyone re-measuring the whole table should recompile rather than
 trust either number blind.
+
+## 2026-11-16 (wakeup 28): the unsuffixed half has a precise root cause
+
+The remaining unsuffixed references are not a naming policy, they are a
+SWALLOWED EXCEPTION. Instrumented on `std/collections/span.mojo` (which calls
+`splat(<Bool>)` from `std.bit.mask`):
+
+1. `splat` IS registered for the importer -- probed at
+   `module_gen.py`'s registration site: `sym='splat'` with
+   `path=.../std/bit/mask.mojo`, so the overload set is visible.
+2. `_elaborate_overload_call` then calls
+   `elaborate.Elaborator().elaborate_overload_call(module_src, 'splat', ...)`
+   to compile the defining module, and that compile RAISES:
+   `RuntimeError: cannot compile module: a bracketed call splat[...]() needs
+   link-mode specialisation, which this build does not do`
+   (emit_calls.py's `SubscriptExpr` arm, ~line 3014).
+3. The `except Exception` around it sets `info = None` and only
+   `_debug_note`s, so the call site falls back to the unsuffixed extern
+   `std_bit_mask_splat`.
+
+The refusal is deliberate and correct for a single-TU program (its own comment
+pins `test_comptime_bracket_params.py::test_paramless_function_bracket_refused_
+in_single_tu`), but it is ownership-scoped by `func_return_types` /
+`imported_symbols` only -- it does not know it is compiling a module on the
+IMPORTER's behalf, where the refusal's premise (no specialisation) does not
+apply: the importer only wants the family's signatures.
+
+**Proof that the refusal is the blocker:** with the `raise` temporarily
+replaced by `pass`, the same compile emits BOTH `std_bit_mask_splat` and the
+correctly suffixed `std_bit_mask_splat__1_0_4_Bool`; restored, only the
+unsuffixed one. So one call site gains a real suffix.
+
+**First fix attempt failed, and the measurement is the finding.** Exempting
+overload-family names (publishing the dup pre-pass's `_dup_defs` as
+`gen._overloaded_fn_names` and testing it in the refusal condition) changed
+nothing: probed at the refusal site, `_overloaded_fn_names` is EMPTY there
+(`in_frt=True ovl=[] imp=False`). The generator instance that compiles the
+imported module is not the one the `module_gen.py` pre-pass populates, so the
+exemption never fires. Both edits were reverted (tree clean, the iteration-19
+changes verified still present); recorded rather than shipped as a no-op.
+
+Next step is to find where THAT generator is built and publish the overload
+set there (or scope the refusal by "am I compiling an imported module").
