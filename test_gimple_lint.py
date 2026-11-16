@@ -48,9 +48,9 @@ BASELINE = {
     # empty since 2026-11-13: every call-argument finding in CORPUS was closed
     # by `_repr_fix_args` (emit_infra.py). Keep that class empty.
     # Rule added 2026-11-14: a pointer made by casting a `_Bool` or an `int`
-    # (GCC's -Wint-to-pointer-cast). The work is
-    # bugs/CODEGEN_bool_cast_to_pointer_in_and_or_chain.md.
-    'cast-narrow-int-to-ptr': 13,
+    # (GCC's -Wint-to-pointer-cast). The two left are
+    # bugs/CODEGEN_narrow_int_cast_to_pointer_two_inference_bugs.md.
+    'cast-narrow-int-to-ptr': 2,
 }
 
 _INJECTED = r'''

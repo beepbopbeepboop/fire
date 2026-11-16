@@ -3658,6 +3658,12 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # constant: `and` only takes it on a FALSY left, `or` only on a
             # TRUTHY one.
             gen._cast_into(result, '_Bool', f"{'0' if node.op == 'and' else '1'}")
+        elif node.op == 'and' and ltype == '_Bool' and res_type.endswith(' *'):
+            # `flag and ptr`, short-circuit edge: the left operand is known
+            # false here, so the value is the null pointer. Written as the
+            # constant, not as a cast of the `_Bool`: a pointer is never made
+            # from a 1-bit value (gimple-lint's cast-narrow-int-to-ptr).
+            gen._cast_into(result, res_type, '0')
         else:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._goto(bb_merge)
