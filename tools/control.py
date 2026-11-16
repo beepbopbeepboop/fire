@@ -81,37 +81,6 @@ def pool_slot(name):
     return sl
 
 
-def model_instructions(model):
-    """Extra rules a pool slot adds to every worker prompt that runs on MODEL (the slot's `instructions` list in
-    tools/pool.json), or [].
-
-    Keyed by MODEL, not by slot name, so a hand-run `--model` spawn of the same model gets the same rules as the
-    slot that normally runs it. The first use is the free OpenRouter router: a worker on it ran
-    `git config user.name openhands` in a linked worktree (2026-11-15), which writes the repository's shared
-    .git/config and so rewrote the author of every worktree's commits."""
-    out = []
-    for sl in load_pool()["slots"]:
-        if sl.get("model") == model:
-            for x in sl.get("instructions") or []:
-                if x not in out:
-                    out.append(x)
-    return out
-
-
-def with_model_rules(prompt, model):
-    """PROMPT with MODEL's extra rules added as their own section just before `## When you finish`, so they sit with
-    the rules and after `## Rules`: `_task_text` reads only what lies between `## The task` and `## Rules`, and must
-    keep reading the original task. Unchanged when the model has none."""
-    extra = model_instructions(model)
-    if not extra:
-        return prompt
-    block = "## Rules for this model\n\n" + "\n".join("- " + x for x in extra) + "\n\n"
-    marker = "## When you finish"
-    if marker in prompt:
-        return prompt.replace(marker, block + marker, 1)
-    return prompt.rstrip("\n") + "\n\n" + block.rstrip("\n") + "\n"
-
-
 GATES_FILE = os.path.join(MAIN, "tools", "gates.json")
 
 
@@ -393,7 +362,6 @@ def cmd_spawn(a):
         prompt = open(os.path.join(MAIN, "tools", "control_prompt.md")).read().format(
             name=a.name, worktree=wt, branch=branch, main=MAIN, task=task.strip(),
             claims=", ".join(a.claim), control=os.path.join(MAIN, "tools", "control.py"))
-        prompt = with_model_rules(prompt, a.model)
         for src in a.file:  # reference inputs the worker may read, copied inside its sandbox
             shutil.copy(src, os.path.join(wt, ".tmp", os.path.basename(src)))
         open(os.path.join(wt, "TASK.md"), "w").write(prompt)

@@ -3707,6 +3707,17 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
                     _dt_ctype = _DTYPE_CAST_CTYPES.get(str(_dt_name).replace('DType.', '').lstrip('.'))
             except Exception:
                 _dt_ctype = None
+        # The SCALAR TYPE NAME spelling (`SIMD[Float32, 4](1.5)`): the table
+        # above is keyed by the lowercase dtype spelling, and
+        # `_dtype_cast_ctype` only reads `DType.x`/`.x`. The shared resolver
+        # normalises every spelling to the one float table.
+        if _dt_ctype is None and _idxs:
+            try:
+                _dt_name = gen._type_expr_to_ann(_idxs[0]) if hasattr(gen, '_type_expr_to_ann') else None
+                if _dt_name:
+                    _dt_ctype = gimple_ctypes._dtype_token_ctype(str(_dt_name))
+            except Exception:
+                _dt_ctype = None
         # A `comptime dt = DType.float32` bound name: neither of the two
         # lookups above knows a bare `dt`, but the folded VALUE is in
         # `gen._comptime_vals`.  The shared resolver reads it (including
