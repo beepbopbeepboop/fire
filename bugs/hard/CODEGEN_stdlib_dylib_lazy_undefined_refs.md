@@ -266,3 +266,46 @@ reproducible from a cold single-module compile -- the CAS is serving C the cold
 path does not produce. The `unsafe_memset_zero` finding is unaffected (0 in
 both), but anyone re-measuring the whole table should recompile rather than
 trust either number blind.
+
+## 2026-11-16 (wakeup 28): the unsuffixed half has a precise root cause
+
+The remaining unsuffixed references are not a naming policy, they are a
+SWALLOWED EXCEPTION. Instrumented on `std/collections/span.mojo` (which calls
+`splat(<Bool>)` from `std.bit.mask`):
+
+1. `splat` IS registered for the importer -- probed at
+   `module_gen.py`'s registration site: `sym='splat'` with
+   `path=.../std/bit/mask.mojo`, so the overload set is visible.
+2. `_elaborate_overload_call` then calls
+   `elaborate.Elaborator().elaborate_overload_call(module_src, 'splat', ...)`
+   to compile the defining module, and that compile RAISES:
+   `RuntimeError: cannot compile module: a bracketed call splat[...]() needs
+   link-mode specialisation, which this build does not do`
+   (emit_calls.py's `SubscriptExpr` arm, ~line 3014).
+3. The `except Exception` around it sets `info = None` and only
+   `_debug_note`s, so the call site falls back to the unsuffixed extern
+   `std_bit_mask_splat`.
+
+The refusal is deliberate and correct for a single-TU program (its own comment
+pins `test_comptime_bracket_params.py::test_paramless_function_bracket_refused_
+in_single_tu`), but it is ownership-scoped by `func_return_types` /
+`imported_symbols` only -- it does not know it is compiling a module on the
+IMPORTER's behalf, where the refusal's premise (no specialisation) does not
+apply: the importer only wants the family's signatures.
+
+**Proof that the refusal is the blocker:** with the `raise` temporarily
+replaced by `pass`, the same compile emits BOTH `std_bit_mask_splat` and the
+correctly suffixed `std_bit_mask_splat__1_0_4_Bool`; restored, only the
+unsuffixed one. So one call site gains a real suffix.
+
+**First fix attempt failed, and the measurement is the finding.** Exempting
+overload-family names (publishing the dup pre-pass's `_dup_defs` as
+`gen._overloaded_fn_names` and testing it in the refusal condition) changed
+nothing: probed at the refusal site, `_overloaded_fn_names` is EMPTY there
+(`in_frt=True ovl=[] imp=False`). The generator instance that compiles the
+imported module is not the one the `module_gen.py` pre-pass populates, so the
+exemption never fires. Both edits were reverted (tree clean, the iteration-19
+changes verified still present); recorded rather than shipped as a no-op.
+
+Next step is to find where THAT generator is built and publish the overload
+set there (or scope the refusal by "am I compiling an imported module").
