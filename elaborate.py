@@ -3735,23 +3735,7 @@ class Elaborator:
         # with a lossy escape, so `['A_B']` and `['A', 'B']` named one symbol.
         mangled = mm.mangle_signature(fn_name, ptypes)
         renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
-        try:
-            obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
-        except Exception:
-            # The extracted single-function source can contain a bracketed call
-            # to a SIBLING overload of the same name -- `std/bit/mask.mojo`'s
-            # plain `splat` body is `Int(splat[.int](Scalar[.bool](value)))`,
-            # and the standalone snippet cannot define that sibling, so
-            # emit_calls' ownership-scoped refusal raises ("a bracketed call
-            # splat[...]() needs link-mode specialisation"). The SYMBOL and the
-            # SIGNATURE come from the mangling above, not from this object, and
-            # `_emit_generic_instantiation` already tolerates object=None (a
-            # recursive-cycle instantiation returns it). Declining here instead
-            # threw away the correctly-mangled symbol and left every importer
-            # call site on the unsuffixed name the definer never emits.
-            from mojo.middle import types as _mtypes
-            _mtypes._debug_note('overload object compile failed')
-            obj = None
+        obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
         return {'symbol': mangled, 'object': obj,
                 'ret': _mojo_type(ret) if ret else 'void',
                 'params': [_mojo_type(p) for p in ptypes]}

@@ -1,9 +1,9 @@
-# Land: should finished branch bug-codegen-stdlib-dylib-lazy-undefined-5 land?
+# Land: should finished branch bug-land-gimple-lint land?
 
-**Branch:** `work/bug-codegen-stdlib-dylib-lazy-undefined-5` (task `bug-codegen-stdlib-dylib-lazy-undefined-5`; its tip is also saved as `refs/archive/work/bug-codegen-stdlib-dylib-lazy-undefined-5`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 10 behind it; task started 2026-11-15 20:16:09
-**Original work:** Fix the bug in bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part8.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning te
-**Original claims:** bug:CODEGEN_stdlib_dylib_lazy_undefined_refs-part8
+**Branch:** `work/bug-land-gimple-lint` (task `bug-land-gimple-lint`; its tip is also saved as `refs/archive/work/bug-land-gimple-lint`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 22 behind it; task started 2026-11-15 14:12:40
+**Original work:** Fix the bug in bugs/LAND-gimple-lint.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report). QUICK tests on
+**Original claims:** bug:LAND-gimple-lint
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 23:23:59: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 10 behind it; task started 2026-11-15 20:16:09)
-  Branch: work/bug-codegen-stdlib-dylib-lazy-undefined-5
-  Conflicting files: bugs/hard/CODEGEN_stdlib_dylib_lazy_undefined_refs.md, mojo/backend_gimple/module_gen.py
+- 2026-11-15 15:26:00: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 22 behind it; task started 2026-11-15 14:12:40)
+  Branch: work/bug-land-gimple-lint
+  Conflicting files: myinterpreter.py
