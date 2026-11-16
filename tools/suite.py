@@ -4284,6 +4284,9 @@ test('land-doc', [PY, 'tools/test_land_doc.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('gate-files', [PY, 'tools/test_gate_files.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
+test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
+     mem='tiny',
+     desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
 test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
@@ -5145,6 +5148,7 @@ BUCKETS = {
 # parallel branch rewrites, so an edit there is a guaranteed merge conflict
 # for the one entry it adds.
 BUCKETS['check'].append('binding-evidence')
+BUCKETS['check'].append('gates-bootstrap-not-off')
 BUCKETS['check'].append('interp-list-ctor')
 BUCKETS['check'].append('module-globals-compiled')
 BUCKETS['check'].append('mojoc-precompile-signature')
