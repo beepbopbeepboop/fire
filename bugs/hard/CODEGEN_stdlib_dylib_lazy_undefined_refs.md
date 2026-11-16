@@ -323,7 +323,8 @@ emits only `std_bit_mask_splat__1_0_4_Bool` (was the unsuffixed
 `std_bit_mask_splat`); the dylib's undefined `_std_` population falls
 **37 -> 31**, and `_std_pwd__linux__getpw_linux__*` now resolves outright.
 
-The remaining 15 unsuffixed-or-undefined names are now the OTHER half only:
+Of the 31, 16 do not end in a 6-hex overload hash (the other 15 are
+already correctly suffixed). Those 16 are now the OTHER half only:
 correctly-named references to symbols the definer never emits, because
 BUG-2026-021 drops a genuine overload family whole. That policy is the single
 remaining cause of this table.
