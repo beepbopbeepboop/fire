@@ -424,8 +424,8 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from the '
-                'run log (--apply-peaks)')
+MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
+                'the run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -453,7 +453,7 @@ MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from 
 MEASURED_PEAK_GB = {
     'native-dumpfull':             (10.4, 'measured'),
     'ab-native':                   (20.5, 'measured'),
-    'selfhost':                    (4.4, 'measured'),
+    'selfhost':                    (7.9, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     'sqliteruntime':               (2.3, 'measured'),
@@ -461,7 +461,7 @@ MEASURED_PEAK_GB = {
     'bootstrap-stage2-cc':         (4.1, 'measured'),
     'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
-    'ptrreg-boxed-str':            (0.2,  'measured'),
+    'ptrreg-boxed-str':            (0.4, 'measured'),
     'runtimediff':                 (0.3,  'measured'),
     'interp-tokenizer-oracle':     (0.1,  'measured'),   # 67 texts, ~1 s
     'modcache':                    (0.3,  'measured'),
@@ -595,7 +595,7 @@ MEASURED_PEAK_GB = {
     # reason they are cheap to gate: a registration nobody runs cannot be
     # known to pass.
     'metalgpu':                (0.37, 'measured'),   # 117 s cold, GPU + clang
-    'x86-examples':            (0.05, 'measured'),   # 33 s, every formal/examples
+    'x86-examples':            (0.6, 'measured'),   # 33 s, every formal/examples
     'new-syntax-parse':        (0.02, 'measured'),   # 0.1 s, 87 parser cases
 
     # Two suites the estate check caught with no spec naming them, measured
@@ -736,11 +736,11 @@ MEASURED_PEAK_GB = {
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
     'linkmode':                               (0.1, 'measured'),
-    'nonlocal':                               (0.1, 'measured'),
+    'nonlocal':                               (0.4, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
     'runtimedylib':                           (0.4, 'measured'),
-    'silentnoop':                             (0.1, 'measured'),
+    'silentnoop':                             (0.4, 'measured'),
     'suite-self-test':                        (0.6, 'measured'),
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'comptime-parity':                        (0.3, 'measured'),
@@ -843,6 +843,20 @@ MEASURED_PEAK_GB = {
     # proof admits 1 hole(s)" and "a conditional value is not a branch" -- which
     # is a proof lane, not a memory finding, so neither is filed here as one.
     'formal-dylib':                           (2.2, 'measured'),   # 102 s, red on 2 proofs
+    # Added by --apply-peaks (see MEASURED_RUN for the run).
+    'ambiguous-import-diagnostic':            (0.1, 'measured'),
+    'attr-error-messages':                    (0.1, 'measured'),
+    'comptime-assert-diagnostic':             (0.1, 'measured'),
+    'comptime-dtype-diagnostic':              (0.1, 'measured'),
+    'dict-none-key':                          (0.1, 'measured'),
+    'enum-desugar':                           (0.1, 'measured'),
+    'formal-host-import-shapes':              (0.1, 'measured'),
+    'globcompiled':                           (0.7, 'measured'),
+    'implicit-string-concat':                 (0.4, 'measured'),
+    'linked-list-link-symbols':               (0.3, 'measured'),
+    'out-param-return-type-diagnostic':       (0.1, 'measured'),
+    'runtimere':                              (0.5, 'measured'),
+    'sys-utf8-default-encoding':              (0.1, 'measured'),
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -1813,13 +1827,13 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
 # `bootstrap-stage1-transitive` (the same python closure dump) reads 1.1 GB, so
 # the 55.8/96 numbers are not this workload's RSS on this tree. A build that
 # genuinely needs more says so: MEMLIMIT_GB=96.
-test('selfhost', [PY, 'test_selfhost.py'], mem='small', cache=True,
-     memwhy='measured 4.6 GB (2026-10-20 check; 4.4 on the 2026-10-07 gate, '
-            '4.3 on 2026-10-11): `fire.build_executable` of fire.py, the same '
-            'whole-closure self-compile as `mojoc` plus the link. `small` (8) '
-            'covers the measurement at 1.74x — the 1.5x standard rung; the '
-            'owner-asked `mid` (6) placement no longer covers it at 1.3x, so '
-            'the ratchet re-classed it on 2026-10-20. Over the 4 GB line and '
+test('selfhost', [PY, 'test_selfhost.py'], mem='module', cache=True,
+     memwhy='measured 7.9 GB FOOTPRINT (2026-11-15 check; it read 4.4-4.6 GB '
+            'while the ceiling measured RSS, because the compressed pages RSS '
+            'leaves out were not counted): `fire.build_executable` of '
+            'fire.py, the same whole-closure self-compile as `mojoc` plus the '
+            'link. `small` (8) no longer covers it (1.01x), so the ratchet '
+            're-classed it to `module` (24). Over the 4 GB line and '
             'therefore a debt, not a fact — see '
             + MEM_DEBT_DOC,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
@@ -2534,6 +2548,11 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
 # checks passing, both the `link` and `fallback` pipelines, all five
 # test_sqlite3*.mojo sources. No infinite loop reproduces on this tree
 # anymore -- it was the missing link, not the test.
+# 2026-11-15, memcap now measures FOOTPRINT: run ALONE this passes 66/66 in
+# ~240 s at a 2.4 GB peak, so `tiny` (4) is the class the ratchet assigns. In
+# the 17-job `check` run its footprint inflated to the 4.0 GB ceiling and it was
+# killed (a RESOURCE verdict, reported apart from FAIL), and a later 3-job run
+# timed out at 600 s: under heavy load this job is the one to look at first.
 test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
      deps=['preflight'], timeout=600,
      desc='optional-unit link mechanism: derivation, probe, and every '
@@ -4208,7 +4227,12 @@ test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
+test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='small',
+     memwhy='2026-11-15, memcap now measures FOOTPRINT: killed at the 4.1 GB '
+            '`tiny` ceiling in the `check` run, then 5.6 GB peak on a re-run '
+            '(that run FAILED on a Lean proof, so the peak is a floor, not a '
+            'verdict). `small` (8) covers it at 1.4x — see '
+            + MEM_DEBT_DOC,
      desc='registered by the estate audit (every test file runs)')
 test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
