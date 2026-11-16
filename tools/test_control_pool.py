@@ -137,5 +137,37 @@ for _k in _kids:
     except OSError: pass
 _tree.kill()
 
+# Per-model worker rules (a slot's `instructions` in pool.json): added to the prompt of a worker on that model only.
+import re
+RULE = "Do not use git config to change configuration data for git."
+_real_load_pool = C.load_pool
+C.load_pool = lambda: {"slots": [
+    {"name": "or", "model": "m/free", "instructions": [RULE]},
+    {"name": "or2", "model": "m/free", "instructions": [RULE, "second rule"]},   # same model, deduplicated
+    {"name": "plain", "model": "m/plain"}]}
+check("a model's slot instructions are returned, deduplicated, in order",
+      C.model_instructions("m/free") == [RULE, "second rule"])
+check("a model with no instructions gets none", C.model_instructions("m/plain") == [])
+check("an unknown model gets none", C.model_instructions("m/other") == [])
+
+_tpl = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "control_prompt.md")).read().format(
+    name="n", worktree="/w", branch="b", main="/m", task="THE TASK TEXT", claims="c", control="/c")
+_ruled = C.with_model_rules(_tpl, "m/free")
+check("the rule is in the prompt for that model", RULE in _ruled and "## Rules for this model" in _ruled)
+check("the rule is NOT in the prompt for another model", C.with_model_rules(_tpl, "m/plain") == _tpl)
+check("the rule sits after the rules and before the report section",
+      _ruled.index("## Rules") < _ruled.index(RULE) < _ruled.index("## When you finish"))
+check("the section is added once", _ruled.count("## Rules for this model") == 1)
+_m = re.search(r"## The task\n\n(.*?)\n\n## Rules", _ruled, re.S)      # what control._task_text does on a restart
+check("restart still recovers exactly the original task", _m is not None and _m.group(1) == "THE TASK TEXT")
+check("without a '## When you finish' heading the rules are appended",
+      RULE in C.with_model_rules("# x\n\n## The task\n\nT\n\n## Rules\n\nr\n", "m/free"))
+C.load_pool = _real_load_pool
+_real = {sl["name"]: sl for sl in C.load_pool()["slots"]}
+check("pool.json: the free OpenRouter slot forbids `git config` for its workers",
+      RULE in _real["openrouter-free"].get("instructions", []))
+check("pool.json: the model-keyed lookup finds it for the OpenRouter free router",
+      RULE in C.model_instructions("openrouter/openrouter/free"))
+
 print("%d passed, %d failed" % (len(PASSES), len(FAILS)))
 sys.exit(1 if FAILS else 0)
