@@ -202,12 +202,39 @@ gap is the VARIADIC generic call (`*args: *types` captured and forwarded), not
 the FFI lowering itself. This is a different and deeper defect than the naming
 one above; filing it here rather than half-fixing it.
 
-## 2026-11-15 (wakeups 24/25): a definer that silently emits NOTHING
+## 2026-11-15 (wakeups 24/27): a definer emits NOTHING for an overload family
+## -- and it is DOCUMENTED POLICY, not a silent defect
 
-The current 37 (down from 38; Mike Stump's part 7 landed the definer-side
-suffix hashing for a home-private struct parameter) contains a case where the
-reference is not merely mis-suffixed -- the defining module emits no symbol at
-all. Measured on `std/memory/memory.mojo`:
+**Correction (wakeup 27).** An earlier revision of this section called the
+absence "silent". It is not: `module_gen.py`'s duplicate-def pre-pass
+(`BUG-2026-021`, around line 5551) classifies a same-name multi-def group and
+deliberately drops it --
+
+* REDEFINITIONS (identical signature key): keep the LAST copy, interpreter
+  semantics;
+* GENUINE OVERLOADS (differing signature key): drop EVERY copy, on the premise
+  that "the elaborator selects and instantiates the right overload per call
+  site (slice 4), so no single C definition exists to emit".
+
+Isolated with a cold single-module compile, so the branch is not in doubt:
+
+| module | contents | `splat` in emitted C |
+|---|---|---|
+| a | two same-name defs, different params | **0** |
+| b | one def | 3 |
+| c | two DIFFERENT names, one calls the other | 3 |
+| d | generic + plain same-name pair | **0** |
+| e | two same-name defs, different arity | **0** |
+
+So the trigger is purely the name collision, and `splat` / `unsafe_memset_zero`
+/ `is_apple_gpu` are absent for this reason. Reverting all three of the
+iteration-19 commits still gives 0, so none of them is implicated.
+
+**What is actually open** is the premise, not the drop: the policy is sound for
+a SAME-module caller (slice 4 resolves and inlines), but a library module built
+into the dylib has cross-module callers that emit an extern reference to a
+symbol the defining module deliberately never emits. That is the whole
+remaining population of this table. Measured on `std/memory/memory.mojo`:
 
 * the dylib references `_std_memory_memory_unsafe_memset_zero` (undefined) and
   defines `std_memory_memory_unsafe_memset_37bd8e`;
