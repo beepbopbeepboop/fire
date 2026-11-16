@@ -229,3 +229,13 @@ That is the next concrete thing to instrument: whether overload resolution
 inside the body binds to the enclosing generic (self-recursion) and the failure
 is swallowed rather than diagnosed. Not fixed here; recorded with the
 measurements rather than guessed at.
+
+**Probe caveat, stated rather than glossed.** `compile_module_to_c` on that
+module with the correct `module_name_for_path` name yields only 6 distinct
+`std_memory_memory_*` symbols, while the built dylib carries 10 (it additionally
+defines `std_memory_memory__free`, `..._forget_deinit_9f63a2`,
+`..._unsafe_destroy_n_2dbb98`). So the dylib's contents are not exactly
+reproducible from a cold single-module compile -- the CAS is serving C the cold
+path does not produce. The `unsafe_memset_zero` finding is unaffected (0 in
+both), but anyone re-measuring the whole table should recompile rather than
+trust either number blind.
