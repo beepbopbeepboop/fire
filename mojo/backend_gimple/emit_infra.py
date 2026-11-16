@@ -6221,6 +6221,13 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
         info = None
     if not info:
         return None
+    # The overload symbol is mangled from the BARE name, so an IMPORTED
+    # overloaded function lost the defining module's qualifier and every call
+    # site emitted a symbol nothing defines (`pick__void` for
+    # `from m1 import pick`). Same composition `_func_csym` uses.
+    _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
+    if _q:
+        info['symbol'] = _q + '_' + info['symbol']
     return gen._emit_generic_instantiation(info, arg_pairs)
 
 

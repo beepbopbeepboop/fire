@@ -1,6 +1,6 @@
 # SUITE_silentnoop: make check failure
 
-SPLIT: SUITE_silentnoop-part2
+SPLIT: part 2 (landed 2026-11-14, doc deleted with the fix -- the case was `zip_nested_tuple_target`)
 
 **Status:** CLOSED 2026-11-14 — `python3 tools/suite.py silentnoop` reports
 **2 passed, 0 failed** (was 1 passed, 1 failed). Not a timeout: the job runs
@@ -36,6 +36,6 @@ Two separate defects, both fixed:
    converted the site from an f-string — which stringified `j` and hid the
    type error — to `_rt_call`.
 
-Left in place deliberately: `bugs/SUITE_silentnoop-part2.md`'s Acceptance says
-the parent is not deleted by that task — "if this closes the parent, say so in
+Left in place deliberately: part 2's own Acceptance said the parent is not
+deleted by that task — "if this closes the parent, say so in
 the commit rather than removing the doc" — so this record is that statement.

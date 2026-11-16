@@ -136,3 +136,68 @@ part's `## Done when` names the probe that is red today and green when the
 part lands. The old advice to take "the arity-only overload choice" is part 3,
 which landed; the remaining classes are the replan table's, not this
 section's.
+
+## Re-measured 2026-11-15: the JOB is green; 32 references remain
+
+The job this doc was filed against now PASSES:
+
+    python3 tools/stdlib_dylib_ratchet.py
+    -> stdlib-dylib: 0 module(s) fell back to source (0 expected)
+    -> exit 0
+
+and `tools/control.py gate list` no longer turns `stdlib-dylib` off. The count
+is **32**, down from the 50 the Symptom above records (43 after part 1, 32
+after part 3). Of the 32, **12 carry no overload suffix** — `_std_sys_info_
+is_apple_gpu`, `_std_sys_info_is_nvidia_gpu`, `_std_random_random_seed`,
+`_std_time_time_sleep`, `_std_memory_memory__free`, `_std_bit_mask_splat`,
+`_std_collections_string_string__calc_initial_buffer_size`,
+`_std_python__cpython_CPython_as_imm`, `_std_sys_info_is_amd_gpu`,
+`_std_sys_info_has_nvidia_gpu_accelerator`, `_std_time_time_time_function`,
+`_std_memory_memory_unsafe_memset_zero` — and the other 20 carry a suffix that
+is not the defining unit's.
+
+All 12 unsuffixed ones were calls to an OVERLOADED free function from a module
+that did not define it (`std/sys/info.mojo`'s `is_apple_gpu()` has both a
+`()` and a `[subarch: StaticString]()` overload). **Fixed 2026-11-15
+(`ddc086d41`)**: a MIXED overload set (one plain head + one bracketed head) was
+caught by the generic-import registration and returned early, so it never
+reached the overload registration, and the opener set `'('` could not even see
+a bracketed head; `_elaborate_overload_call` also mangled from the BARE name,
+dropping the defining module's qualifier. The references are now correct --
+`_std_sys_info_is_apple_gpu__void`, `_std_pwd__macos__getpw_macos__1_0_6_
+String` / `__1_0_6_UInt32`.
+
+**The count went 32 -> 38, and that is an honest regression in the metric,
+not a fix.** The names are right now, and being right exposes references the
+dylib never defined: both `getpw_macos` overloads are referenced where before
+only the one the ABI scan happened to pick was, and two `_gpu_intrinsics_`
+entries appeared. The job still PASSES (0 modules fall back to source, ratchet
+exit 0) because these are lazy call references a client falls back from, but
+the definers are still absent from the dylib -- that, not the naming, is now
+the visible remaining work.
+
+## 2026-11-15 (later): the next layer -- `external_call` bodies are dropped
+
+The 38 references are not one class. Naming is now right; what remains is that
+some DEFINERS contribute no body at all. Measured on
+`std/pwd/_macos.mojo` through `build_stdlib_dylib.compile_module_to_c`:
+
+* the module's generated C contains `extern int64_t external_call (...);
+  /* from std.ffi */` -- `std.ffi.external_call` was never compiled, only
+  declared;
+* `_getpw_macos` (both overloads) and `_stat_macos` appear ONLY as guarded
+  forward declarations (`#ifndef _MOJO_STUB__getpw_macos` /
+  `int64_t _getpw_macos (...);`), with zero occurrences of `getpwuid` /
+  `getpwnam` in the whole file -- their bodies are gone;
+* `_build_pw_struct` from the SAME module IS defined
+  (`_std_pwd__macos__build_pw_struct_9f63a2`), and it is the one that does not
+  call `external_call`.
+
+So the correlation is exact: a function whose body calls `external_call` loses
+that body. `external_call` is an ordinary generic function in
+`std/ffi/__init__.mojo` -- `def external_call[callee: StaticString,
+return_type: RegisterPassable, *types: AnyType,
+num_fixed_args: Optional[Int] = None](*args: *types) -> return_type` -- so the
+gap is the VARIADIC generic call (`*args: *types` captured and forwarded), not
+the FFI lowering itself. This is a different and deeper defect than the naming
+one above; filing it here rather than half-fixing it.

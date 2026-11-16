@@ -98,6 +98,41 @@ def test_negative_partially_applied_default_parameter():
     )
 
 
+# Negative, NON-COINCIDENTIAL spelling: the trait default method's own bracket
+# parameter is `mapper` while the conforming struct declares the same value
+# parameter as `mapFn`. The diagnostic must report the CONFORMING STRUCT's
+# spelling -- `'Map[mapFn]'` -- not the trait method's `'Map[mapper]'`. Every
+# other case here spells the parameter `mapFn` on BOTH sides, so it cannot
+# catch a regression to the trait's spelling (which is what shipped before
+# elaborate._respell_app_with_struct_value_params).
+NEG_DIFFERENT_SPELLING = r"""
+trait Strategy:
+    comptime Value: AnyType
+    def value(self) -> Self.Value: ...
+    def map[To: Copyable, //, mapper: def (Self.Value) thin -> To](self) -> Map[mapper]:
+        return Map[mapper]()
+
+struct Map[Strat: Strategy, Dest: Copyable, //, mapFn: def (Strat.Value) thin -> Dest](Strategy):
+    comptime Value = Dest
+    def __init__(out self):
+        pass
+    def value(self) -> Self.Value:
+        var x: Self.Value
+        return x
+
+def main():
+    pass
+"""
+
+
+def test_negative_partially_applied_default_respelled_with_struct_parameter():
+    _assert_err(
+        NEG_DIFFERENT_SPELLING,
+        "does not implement all requirements for 'Strategy'",
+        "'Map[mapFn]'",
+    )
+
+
 # Positive: default returns Self.
 POS_SELF = r'''
 trait Strategy:

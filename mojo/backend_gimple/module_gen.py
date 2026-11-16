@@ -9416,7 +9416,7 @@ def gen_module_impl(self, stmts: list):
                                     # ~800 MB on `--dump-full fire.py`).
                                     _ov_src = _as_str(_ov_pi[1])
                                     if len(gimple_ctypes.source_decl_ends(
-                                            _ov_src, ['fn', 'def'], _rs_nm, '(')) > 1:
+                                            _ov_src, ['fn', 'def'], _rs_nm, '([')) > 1:
                                         self._imported_overloads.setdefault(sym_name, _ov_path)
                             except Exception:
                                 pass
