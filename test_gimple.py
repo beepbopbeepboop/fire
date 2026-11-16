@@ -15168,6 +15168,81 @@ print("in:", None in (None, "a"))
     _run_isolated(_test_none_passed_to_parameter_is_none,
                   'none_passed_to_parameter_is_none')
 
+    def test_call_site_double_star_spread_binds_by_name():
+        """A `**dict` spread at an ordinary call site must bind by parameter
+        NAME, not be passed as the next positional argument (which miscompiled
+        to the dict's pointer/value and dropped every spread key). Also covers
+        a compiled-generator call through the ordinary path with the same spread.
+        (call-site **dict spread bound by parameter name; ordinary and generator paths)
+        """
+        global _PASS, _FAIL
+        name = "call_site_double_star_spread_binds_by_name"
+        src = r"""
+def f(a, b=2, c=3):
+    return a * 100 + b * 10 + c
+
+def marks(marks='.', *, group=5, groups=2):
+    while True:
+        yield groups
+
+def outer(items, groups=5, **kw):
+    m = marks(groups=groups, **kw)
+    for item in items:
+        print(next(m), item)
+
+def main():
+    print(f(5, b=4))
+    print(f(5, **{"b": 4, "c": 7}))
+    print(f(**{"a": 5, "b": 4, "c": 7}))
+    d = {"a": 5, "b": 4}
+    print(f(**d))
+    outer([1, 2], groups=3, group=7)
+
+main()
+"""
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'spread.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=RUN_TIMEOUT_S)
+            if py.returncode != 0:
+                print(f"FAIL  {name}: CPython reference failed: {py.stderr[:300]}")
+                _FAIL += 1
+                return
+            try:
+                c_src = gimple_codegen.compile_to_gimple(src, filename=entry)
+            except Exception as e:
+                print(f"FAIL  {name}: compile_to_gimple raised {type(e).__name__}: {e}")
+                _FAIL += 1
+                return
+            c_file = os.path.join(td, 'spread.c')
+            exe = os.path.join(td, 'spread.exe')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            # Generated C may contain __GIMPLE bodies; compile with -fgimple.
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c'), '-lm'],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc failed:\n" + "\n".join(errs[:8]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 cwd=td, timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(test_call_site_double_star_spread_binds_by_name,
+                  'call_site_double_star_spread_binds_by_name')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:
