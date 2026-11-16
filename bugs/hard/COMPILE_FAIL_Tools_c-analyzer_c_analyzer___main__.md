@@ -351,9 +351,15 @@ tree: exit 1, and the failure is no longer only the two coroutine refusals.
   - **The module's own `KIND` enum is never emitted.** `KIND` is declared at
     `c_parser/info.py:22` (`class KIND(enum.Enum)`), in the SAME module the
     unit is generated for, yet the unit has no declaration of it, so every
-    `KIND.FUNCTION` is `use of undeclared identifier 'KIND'`. The unit's
-    preamble forward-declares other structs (`struct DeclID;`,
-    `struct Declarations;`, `struct Enum;`) but not this one.
+    `KIND.FUNCTION` is `use of undeclared identifier 'KIND'`. Mechanism
+    located: the preamble block is built at `module_gen.py:5376-5394` from
+    FOUR name sets only -- `_supported_generator_methods`,
+    `_cpp_param_struct_names`, `_cpp_ctor_struct_names`,
+    `_cpp_value_struct_names` -- and it emits each as `struct <name>;`. An
+    ENUM class is in none of those four sets (they are all struct lists), so
+    `KIND` is the one module-level type the block cannot see. The fix is to
+    source the enum names too (and emit whatever an enum needs, not a struct
+    forward decl).
   - **A local is typed `char *` where the source treats it as a struct value.**
     Generated:
     `char * parent; ... parent = mojo_getattr_any((void*)(intptr_t)(parsed),
