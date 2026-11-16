@@ -3606,8 +3606,14 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # pointer slot, and the truth test then ran `mojo_dict_len` on the
         # address 1 (the self-hosted compiler's own crash in
         # `_gmi_specialize_literal_kind_clones`).
+        # The mirror image (`fn.is_generator or getattr(fn, 'is_async', False)`,
+        # an untyped field against a bool) is the same word: without it the
+        # chain's result was a plain `int64_t`, and a following
+        # `... or fn.some_dict` took the container-pointer join below for a
+        # word that may hold the bool 1.
         _bool_word = (not _bool_merge and not _mixed_word
                       and ((ltype == '_Bool' and _rq == 'int64_t')
+                           or (ltype == 'int64_t' and _rq == '_Bool')
                            or (ltype == 'int64_t' and _rq in ('MojoDict *', 'MojoList *', 'MojoSet *')
                                and gen._is_dyn_word(node.left, lval))))
         if _bool_word:
@@ -3696,6 +3702,14 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if (res_type == 'int64_t' and not _mixed_word
                 and (gen._is_dyn_word(node.left, lval)
                      or gen._is_dyn_word(node.right, rval))):
+            gen._dyn_word_vals.add(result)
+        # The right operand LOWERED to a `_Bool` although its quick type was
+        # a word (`x.flag or getattr(x, 'is_async', False)`): the merged word
+        # holds the left word or that bare bool, so it is a word of unknown
+        # kind. A following `... or x.some_dict` must not read it as the
+        # dict pointer (it ran `mojo_dict_len` on the address 1).
+        if (res_type == 'int64_t' and not _mixed_word
+                and rtype == '_Bool' and ltype == 'int64_t'):
             gen._dyn_word_vals.add(result)
         gen._goto(bb_merge)
         gen._emit_label(bb_merge)

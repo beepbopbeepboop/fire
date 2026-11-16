@@ -13873,12 +13873,17 @@ main()
               if ln.startswith('static int64_t _mojo_sizeof_')]
         fa = [ln for ln in c_code.splitlines()
               if ln.startswith('static void * _mojo_fnaddr_')]
-        if len(sz) == 1 and len(fa) == 1:
+        # The two modules' lifted closures are now module-qualified
+        # (`xhelp_a_pick_lambda_1` / `xhelp_b_pick_lambda_1`), so each has
+        # its own accessor pair. The property is unchanged: no accessor NAME
+        # is defined twice in the one translation unit.
+        names = [ln.split('(')[0] for ln in sz + fa]
+        if sz and fa and len(names) == len(set(names)):
             print(f"PASS  {name}")
             _PASS += 1
         else:
-            print(f"FAIL  {name}: expected exactly one definition of each "
-                  f"sizeof/fnaddr accessor across the closure, got "
+            print(f"FAIL  {name}: expected every sizeof/fnaddr accessor to be "
+                  f"defined exactly once across the closure, got "
                   f"{len(sz)} sizeof and {len(fa)} fnaddr: {sz + fa}")
             _FAIL += 1
 
