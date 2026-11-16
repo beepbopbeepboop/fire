@@ -24,4 +24,3 @@ deleted in the same commit, as for any bug.
 | `GATE_red_recover-land_2026-11-02.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |
 | `SUITE_gimplerunner_21_failing.md` | see doc | workers |
-| `SUITE_silentnoop.md` | see doc | workers |
