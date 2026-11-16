@@ -292,22 +292,10 @@ def test_p4_target_conditional_bodies_are_the_host_only():
             + want)
 
 
-# part 5 (landed): a function whose body this compiler cannot lower used to
-# be dropped with no definition, and the call site then emitted a BARE weak
-# stub; every caller elsewhere uses `std_<module>_<name>`.
-#
-# Two root causes, both name-vs-node conflation:
-#  * a module that declares a PLAIN function beside a same-named GENERIC
-#    template (`std/sys/info.mojo`'s `is_apple_gpu()` /
-#    `is_apple_gpu[subarch: StaticString]()`) had the plain sibling dropped
-#    by both the top-level duplicate-def pass (it looked like half of an
-#    overload pair) and the generic-template strip (which filtered by NAME).
-#  * an unknown struct method call emitted a declaration-only extern, so the
-#    caller named a symbol nothing in the program defined
-#    (`std_python_python.mojo`'s `CPython.as_imm`, a `Pointer` method the
-#    lowering attributed to the boxed `CPython *` receiver).
-# `emit_methods._lsmc_autostub` now emits a weak `unavailable in compiled
-# mode` DEFINITION at that call site, so the dylib resolves it.
+# part 5 (open): a function whose body this compiler cannot lower is dropped,
+# and the call site then emits a BARE weak stub; every caller elsewhere uses
+# `std_<module>_<name>`. `is_*_gpu` (sys/info.mojo) and `CPython.as_imm`
+# (python/_cpython.mojo) are the measured cases.
 def test_p5_unlowered_bodies_are_defined_under_the_caller_name():
     info = _defs(_compile_stdlib('std/sys/info.mojo'))
     want = ('std_sys_info_is_apple_gpu', 'std_sys_info_is_nvidia_gpu',
@@ -317,51 +305,11 @@ def test_p5_unlowered_bodies_are_defined_under_the_caller_name():
         'std/sys/info.mojo has no definition for %s; its own calls emit a '
         'bare-name stub that no cross-module caller can resolve'
         % ', '.join(missing))
-
-    # The synthetic shape, independent of stdlib drift: a plain def beside a
-    # same-named generic template keeps a REAL definition under its qualified
-    # symbol, and a call to it names that definition (not a bare stub).
-    synth = ('def pick(x: Int) -> Int:\n'
-             '    return x + 1\n'
-             '\n'
-             '\n'
-             'def pick[T: Int]() -> Int:\n'
-             '    return T\n'
-             '\n'
-             '\n'
-             'def use(x: Int) -> Int:\n'
-             '    return pick(x)\n')
-    sc = b.compile_module_to_c(synth, 'p5_sibling.mojo', 'p5_sibling',
-                               linkable=False)
-    sdefs = {s for s in _defs(sc) if s.startswith('p5_sibling_pick')}
-    assert sdefs, (
-        'the PLAIN def beside a same-named generic template got no '
-        'definition:\n' + '\n'.join(
-            l for l in sc.splitlines() if 'pick' in l))
-    calls = set(re.findall(r'= (p5_sibling_pick\w*) \(', sc))
-    assert calls and calls <= sdefs, (
-        'the call site must name the definition %s, not a bare stub; got %s'
-        % (sorted(sdefs), sorted(calls) or 'none'))
-
-    # The method case. `CPython.as_imm` does not exist in
-    # std/python/_cpython.mojo (the source chain is
-    # `Pointer(to=...).as_imm()`); the undefined reference lived in
-    # std/python/python.mojo's own C, so the fix is a weak definition THERE,
-    # under the same `std_python__cpython_CPython_as_imm` name the call site
-    # spells. Check the shape first, then the authoritative two-module dylib
-    # (`nm -u` vs `nm -gU`) that carried the unresolved symbol.
-    caller = _compile_stdlib('std/python/python.mojo')
-    assert 'std_python__cpython_CPython_as_imm' in _defs(caller), (
-        'std/python/python.mojo still only REFERENCES '
-        'std_python__cpython_CPython_as_imm with no body in its own C')
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix='p5_method_') as wd:
-        still = _unresolved_family(
-            'std/python/_cpython.mojo', 'std/python/python.mojo',
-            r'_std_python__cpython_CPython_as_imm', wd, 'p5_method')
-        assert not still, (
-            'the two-module dylib still leaves %s undefined'
-            % ', '.join(still))
+    cpython = _defs(_compile_stdlib('std/python/_cpython.mojo'))
+    assert 'std_python__cpython_CPython_as_imm' in cpython, (
+        'std/python/_cpython.mojo only DECLARES '
+        'std_python__cpython_CPython_as_imm (no body); every caller of it is '
+        'undefined at link time')
 
 
 # part 6 (open): a BRACKETED `StringSlice[...]`/`Span[...]` parameter lowers to
@@ -390,9 +338,9 @@ def test_p6_bracketed_slice_params_use_the_definers_suffix():
         amdgpu, 'std/sys/_amdgpu.mojo')
 
 
-# part 7 (closed): a parameter typed with a struct private to the defining
-# module is seen by the text scan as `int64_t`, while the defining unit emits
-# `_RunOptions *`; the importer must hash the definer's list. `benchmark._run_impl` is the measured
+# part 7 (open): a parameter or return type that is a struct private to the
+# defining module is seen by the text scan as `int64_t`, while the defining
+# unit emits `_RunOptions *` / `Report *`. `benchmark._run_impl` is the measured
 # case (bencher.mojo calls it).
 def test_p7_struct_param_and_return_use_the_definers_suffix():
     _require_resolved(
@@ -401,39 +349,6 @@ def test_p7_struct_param_and_return_use_the_definers_suffix():
         r'std_benchmark_benchmark__run_impl_[0-9a-f]{6}\b',
         _compile_stdlib('std/benchmark/benchmark.mojo'),
         'std/benchmark/benchmark.mojo')
-
-
-# part 7, synthetic (seconds, not minutes): the same shape without compiling
-# the benchmark closure. A struct private to the defining module is `Name *` in
-# the definition, so the importer's reference must hash the same suffix. The
-# importer still DECLARES the extern with the opaque `int64_t` word (it has no
-# `Name` typedef, and typing the extern would make it lower `.field` on the
-# result as a typed `->` against a struct it never defines).
-def test_p7_synthetic_private_struct_matches_definition_suffix():
-    import tempfile
-    definer = ('struct _Opts[T: Int]:\n    var n: Int\n\n\n'
-               'struct Report:\n    var k: Int\n\n'
-               '    def __init__(out self):\n        self.k = 0\n\n\n'
-               'def _impl(o: _Opts) raises -> Report:\n    return Report()\n')
-    caller = ('from p7s_def import _impl, _Opts\n\n\n'
-              'def pub(n: Int) raises:\n    _ = _impl(_Opts[1](n))\n')
-    with tempfile.TemporaryDirectory(prefix='p7_syn_') as wd:
-        out = {}
-        for name, src in (('p7s_def', definer), ('p7s_use', caller)):
-            path = os.path.join(wd, name + '.mojo')
-            with open(path, 'w') as f:
-                f.write(src)
-            out[name] = b.compile_module_to_c(src, path, name, linkable=False)
-    fam = r'p7s_def__impl_[0-9a-f]{6}\b'
-    _require_resolved(out['p7s_use'], 'p7s_use.mojo', fam,
-                      out['p7s_def'], 'p7s_def.mojo')
-    use = out['p7s_use']
-    m = re.search(r'extern [^;\n]*(p7s_def__impl_[0-9a-f]{6})\b[^;\n]*;', use)
-    assert m, 'the importer must declare the extern'
-    assert 'struct _Opts' not in m.group(0) and '_Opts *' not in m.group(0), (
-        'the extern must stay opaque, not name the private struct: ' + m.group(0))
-    assert not re.search(r'typedef struct _Opts _Opts;', use), (
-        'a typedef of the private struct collides with a constructor stub of the same name')
 
 
 # part 8 (open): two same-name free functions in one module are not registered

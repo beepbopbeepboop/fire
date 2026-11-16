@@ -642,11 +642,6 @@ def _gen_stmt_VarDecl(gen, node):
         # `.wait()` handling.
         if actual_dst == 'MojoGenerator *' and v in gen._generator_var_api:
             gen._generator_var_api[node.name] = gen._generator_var_api[v]
-            # A named local now holds the handle and may be read again
-            # (another consumption, or simply falling out of scope): the
-            # drains of this value must not destroy it (see
-            # _generator_value_owned).
-            gen._generator_value_owned[node.name] = False
         if actual_dst == 'MojoAsync *' and v in gen._async_var_api:
             gen._async_var_api[node.name] = gen._async_var_api[v]
         # `var f = <closure value>` / `var f = lambda: False` (see
@@ -1187,11 +1182,6 @@ def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
     api = None
     if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
         api = gen._generator_var_api[v]
-        # The handle is about to live in a module global: whatever drains
-        # it later does so through a fresh read-back temp (marked False at
-        # the read site), never through this one — so no consumer of this
-        # temp may destroy it either (see _generator_value_owned).
-        gen._generator_value_owned[v] = False
     if api is None:
         if key in gen._global_generator_api:
             gen._global_generator_api_poisoned.add(key)
@@ -2194,11 +2184,6 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # generator_not_first_class_value.md.
         if dst == 'MojoGenerator *' and v in gen._generator_var_api:
             gen._generator_var_api[tname] = gen._generator_var_api[v]
-            # A named local now holds the handle and may be read again
-            # (another consumption, or simply falling out of scope): the
-            # drains of this value must not destroy it (see
-            # _generator_value_owned).
-            gen._generator_value_owned[tname] = False
         # Step I: `var task = create_task(f())` -- mirrors the
         # MojoGenerator* carry-through immediately above exactly (see
         # self._async_var_api's own docstring for the identical "value
@@ -4963,26 +4948,6 @@ def _extract_match_args_from_structdef(gen, sd, n_given, cname):
                     if tname.startswith('__') and tname.endswith('__'):
                         continue
                     names.append(tname)
-        # CPython's __match_args__ is the __init__ signature: base-class
-        # attributes of a NON-dataclass base and `field(init=False, ...)`
-        # fields are not in it. The `sd.fields` walk above sees the merged
-        # layout (base attributes first — the `Node.context` shape), so
-        # filter against the same provenance table the constructor path
-        # uses (module_gen's `_struct_noninit_fields`), or `case
-        # parser.InstDef(name)` binds the base slot instead of the first
-        # real init field.
-        _nif = getattr(gen, '_struct_noninit_fields', None)
-        if _nif is not None and cname in _nif:
-            _excl = _nif[cname]
-            if _excl:
-                _excl_set = set()
-                for _en in _excl:
-                    _excl_set.add(_as_str(_en))
-                _names2 = []
-                for _nm in names:
-                    if _nm not in _excl_set:
-                        _names2.append(_nm)
-                names = _names2
         return names, 'dataclass'
     # No __match_args__ and not dataclass
     return None, 'missing'
@@ -5764,15 +5729,6 @@ def _gen_stmt_ExprStmt(gen, node):
         # `dealloc(ThinAllocation(unsafe_owned_ptr=p).unsafe_with_layout(..))`
         # as a statement: this fast path never reaches _lower_call.
         if raw_name == 'dealloc' and gen._lower_dealloc_thin_allocation(node.value) is not None:
-            return
-        # `typing.cast(type, value)` as a bare statement: CPython discards
-        # its result here too, so only the value argument is evaluated for
-        # its side effects — the statement-level twin of _lower_call's
-        # identical interception (this fast path never reaches _lower_call,
-        # so without this the call would still bind to the weak "unavailable
-        # in compiled mode" stub). See emit_infra.is_typing_cast_call.
-        if ginf.is_typing_cast_call(gen, node.value):
-            gen.lower_expr(node.value.args[1])
             return
         # `fut.add_done_callback(cb)` / `.remove_done_callback(cb)` as a
         # bare statement (the async-body hook in gimple_gen_coro lowers
@@ -7078,31 +7034,8 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
                 gen._emit_call('void', '', f"{_gbase}_destroy",
                                [('MojoGenerator *', _gval)])
             continue
-        # `__exit__` is commonly OVERLOADED (`def __exit__(self)` beside
-        # `def __exit__(self, error)`), in which case neither spelling of
-        # the bare name is defined and the call must name ONE concrete
-        # overload. Pick by the arity this statement passes: the greatest
-        # declared non-self parameter count up to the 3 Python exception
-        # info slots, and pass a zero for each.
-        _exit_cands = gmp._struct_method_candidates(gen, sn, '__exit__')
-        _exit_oid = ''
-        _exit_ret = None
-        _n_extra = 3
-        if _exit_cands:
-            _best_n = -1
-            for _ec in _exit_cands:
-                _en = len(_ec.get('param_ctypes') or [])
-                if _en <= 3 and _en > _best_n:
-                    _best_n = _en
-                    _exit_oid = _as_str(_ec.get('overload_id', '')) or ''
-                    _exit_ret = _ec.get('ret_type')
-            if _best_n < 0:
-                _best_n = 0
-            _n_extra = _best_n
-        exit_fn = gen._struct_method_csym(sn, '__exit__', _exit_oid)
-        if (exit_fn in gen.func_return_types
-                or f"{sn}___exit__" in gen.func_return_types
-                or _exit_cands):
+        exit_fn = gen._struct_method_csym(sn, '__exit__', '')
+        if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
             # __exit__(self, exc_type, exc_val, exc_tb) — real
             # Python's protocol always passes 3 exception-info
             # args (None/None/None on the normal-exit path). This
@@ -7123,14 +7056,12 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
             # that shape ("too many arguments... expected 1, have
             # 4") — pad only up to however many params THIS
             # exit_fn's own real signature actually declares.
-            if not _exit_cands:
-                _exit_params = gen.func_param_types.get(exit_fn)
-                if _exit_params is None:
-                    _exit_params = gen.func_param_types.get(f"{sn}___exit__")
-                _n_extra = max(len(_exit_params) - 1, 0) if _exit_params is not None else 3
+            _exit_params = gen.func_param_types.get(exit_fn)
+            if _exit_params is None:
+                _exit_params = gen.func_param_types.get(f"{sn}___exit__")
+            _n_extra = max(len(_exit_params) - 1, 0) if _exit_params is not None else 3
             _extra_args = [('int64_t', '0')] * min(_n_extra, 3)
-            ret_t = (_as_str(_exit_ret) if _exit_ret is not None
-                     else gen.func_return_types.get(exit_fn, '_Bool'))
+            ret_t = gen.func_return_types.get(exit_fn, '_Bool')
             gen._emit_call(ret_t, '', exit_fn, [(ct, cv)] + _extra_args)
         else:
             gen._emit(f"  /* with: __exit__ ({sn}) */")

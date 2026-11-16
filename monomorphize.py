@@ -14,7 +14,6 @@ engine is AST-driven and hooks the existing whole-program analysis in
 `DispatchSolver` (gimple_codegen.py); the *cache contract* it relies on is this
 module's `instantiate()`.
 """
-import json
 import os
 import re
 import tempfile
@@ -944,34 +943,10 @@ _IN_PROGRESS: set = set()
 ELAB_DEPTH: list = [0]
 
 
-def _sibling_fingerprints(template_src: str, generic_paths) -> list:
-    """(name, source digest) for each generic FUNCTION in `generic_paths` that
-    `template_src` calls with explicit type arguments (`ident[7](x)`), sorted
-    by name.
-
-    Such a call compiles to an extern call to that callee's own instantiation,
-    so the template's object depends on the callee's source. Only a bracketed
-    call counts, because only that one is resolved from `generic_paths` (see
-    emit_resolve._elaborate_generic_call): a bare `ident(x)` may name a
-    non-generic overload. A name that is merely mentioned (an attribute
-    `obj.ident[`, a string) is not a call; the template's OWN definition
-    (`def ident[...]`) is not either, which the `(?<!def )` lookbehind excludes
-    — without it every template would depend on itself."""
-    if not generic_paths:
-        return []
-    out = []
-    for name in sorted(generic_paths):
-        pat = r'(?<![\w.])(?<!def )(?<!fn )' + re.escape(name) + r'\['
-        if re.search(pat, template_src):
-            out.append((name, cas.file_digest(generic_paths[name])))
-    return out
-
-
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 gcc: str = None, nested_defs: list = None,
                 renames: list = None, conformance_bases: dict = None,
-                origin_module: str = None, generic_paths: dict = None,
-                links_out: list = None) -> tuple:
+                origin_module: str = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.
     Returns (mangled_name, object_path_or_None, hit, cpp_object_path_or_None)
     — both object results are PATHS into the CAS (cas.get_or_build's own
@@ -994,16 +969,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     `origin_module` (optional) is the name of the module that declares the
     template's structs; it names them in diagnostics only and is not part of
     the CAS key, since a diagnostic never produces an artifact.
-
-    `generic_paths` is the {name: source path} map of the generic functions
-    visible to the CALLER. A template that calls one of them cannot be built
-    without it: the isolated translation unit has no definition of the callee,
-    so the nested call would stub to 0. With it, that call is elaborated in the
-    isolated unit, and the callee's own object (which it links against) is
-    reported through `links_out`, which the caller must link in. Each such
-    callee's source digest is folded into the key (`_sibling_fingerprints`);
-    a template with no such call keeps its exact key and builds exactly as
-    before, with nothing reported.
 
     `cpp_object_path` is non-None exactly when the instantiated template
     contains a nested `async def`/generator this codegen compiles to a real
@@ -1100,14 +1065,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
             _conf_extra = ('conforms_to_v1',)
     if _conf_extra is not None:
         _nested_extra = (_nested_extra, _conf_extra) if _nested_extra is not None else _conf_extra
-    # The sibling generics this template calls (see `_sibling_fingerprints`).
-    # Folded only when there ARE such calls, so every other instantiation keeps
-    # its exact key and its cached object.
-    _sib = _sibling_fingerprints(template_src, generic_paths)
-    if _sib:
-        _sib_extra = ('siblings_v1', tuple(_sib))
-        _nested_extra = ((_nested_extra, _sib_extra) if _nested_extra is not None
-                         else _sib_extra)
     key = cas.instantiation_key(template_src, type_args, comptime_args, gcc,
                                 _OBJ_FLAGS, extra=_nested_extra)
 
@@ -1133,7 +1090,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     # for this one caller).
     _cpp_bytes: dict = {}
     _ret_bytes: dict = {}
-    _links_data: dict = {}
 
     def build():
         # The instantiated function is already uniquely named (mangled); don't
@@ -1205,20 +1161,12 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         # declares the template's structs, so a diagnostic names `mod::Struct`
         # rather than the instantiation's own mangled file name.
         gen._diag_module_name = origin_module
-        if _sib:
-            # The caller's generic templates, so a bracketed call to one of them
-            # inside this body is elaborated here rather than stubbed to 0.
-            gen._sibling_generic_paths = dict(generic_paths)
         c = gen.gen_module(Parser(py_tokenize(concrete)).with_filename(mfile).parse_module())
         # The defining unit's OWN return decision for the instantiated
         # function (an annotation, or the body's inferred type when the
         # template has none). Recorded so the caller declares the call site
         # with the same type the definition has — see `defined_return_ctype`.
         _ret_bytes['data'] = (gen.func_return_types.get(mangled) or '').encode()
-        if _sib:
-            # Every object this body's nested instantiations produced: the caller
-            # links them, because this `.o` only declares the callees.
-            _links_data['links'] = json.dumps(list(gen._link_objects)).encode()
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')
         with open(cfile, 'w') as f:
             f.write(c)
@@ -1284,17 +1232,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 f'elaborator expansion is {ELAB_DEPTH[0]} levels deep - '
                 f'infinite recursion?')
         obj, hit = cas.get_or_build(key, '.o', build)
-        if _sib:
-            if hit and cas.lookup(key, '.links') is None:
-                # A `.o` with no link record (a crash between the two publishes,
-                # or an entry from before the record existed): the object alone
-                # cannot say what it must link against, so build it again.
-                obj = cas.publish(key, '.o', build())
-            if 'links' in _links_data:
-                cas.publish(key, '.links', _links_data['links'])
-            if links_out is not None:
-                with open(cas.lookup(key, '.links'), 'rb') as f:
-                    links_out.extend(json.loads(f.read().decode()))
         if not hit:
             # First build of this instantiation, and it genuinely needed a
             # coroutine unit: publish it now (build() already ran above).

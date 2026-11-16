@@ -13,25 +13,12 @@ Make a generator that stays on the C++20-coroutine path able to delegate to a
 Today the nested generator is compiled and registered, but the delegating
 call cannot see it, so the whole module is refused.
 
-**Correction 2026-11-16: the claim below was FALSE and is the reason this doc
-stayed open.** Measured directly:
-
-* `python3 test_nested_generator_yield_from_in_coroutine.py` printed PASS, but
-  its `_DEFAULT_CASES` was `['minimal', 'tagged']` -- the `main` / `main-shape`
-  case (the parent file's own shape) was EXCLUDED, so the green run never
-  exercised the blocker it was filed for.
-* Running that case (`... main`) FAILS: the exact `MAIN_SHAPE_SRC` fixture is
-  refused with `fmt_summary: a call to unresolved callee 'section(...)'` and
-  `section: ... no capture model`, which is the parent's remaining pair.
-* `python3 fire.py build c_analyzer/__main__.py` still refuses with the same
-  two reasons (re-measured this tree, exit 1).
-
-So part 4's fix landed for a WEAKER shape than the file's, and the acceptance
-below was never met. The test file now pins the refusal in its DEFAULT run
-(`negative` group, `main-shape` case), and `main` stays selectable for whoever
-lands the capture model.
-
----
+After this part, the two fixtures in
+`test_nested_generator_yield_from_in_coroutine.py` compile, run, and print
+exactly what CPython prints. This clears the two `__main__.py`-local shapes
+that the parent doc still lists (`fmt_summary: unresolved callee
+'section(...)'` and the follow-on `section: ... no capture model`), which is
+the file's last file-local blocker.
 
 ## Measured current state (2026-11-12, this tree)
 

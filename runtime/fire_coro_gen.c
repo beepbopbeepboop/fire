@@ -48,7 +48,6 @@ extern int     _mojo_exc_top;
 
 /* Layer 2 also needs a way to hand a body its stashed args: */
 extern void *__mojo_coro_env(MojoCoro *c);   /* defined in mojo_coro.c (added) */
-extern void  mojo_cleanup_pad_checkpoint(int lvl, int nc);  /* fire_runtime.c */
 
 #define MOJO_GEN_MAX_ARGS 12
 
@@ -618,10 +617,6 @@ __mojo_gen_close(int64_t gen, int64_t ge_type)
     int saved_top = _mojo_exc_top;
     if (saved_top + 1 >= MOJO_EXC_STACK_MAX) return 0;
     _mojo_exc_top = saved_top + 1;
-    /* Like every other level, the pad must own a CURRENT checkpoint, or a
-       raise landing here would unwind with a stale one (the trampoline's
-       pad records its own; see mojo_cleanup_pad_checkpoint). */
-    mojo_cleanup_pad_checkpoint(_mojo_exc_top, 0);
     volatile int64_t ignored = 0;
     if (setjmp(_mojo_exc_stack[_mojo_exc_top]) == 0) {
         int64_t out = 0;

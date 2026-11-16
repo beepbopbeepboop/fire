@@ -61,7 +61,7 @@ import re
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.iter_factory as iter_factory
-from mojo.middle.exprtypes import _walk_ast_invalidate, _walk_ast
+from mojo.middle.exprtypes import _walk_ast_invalidate
 from mojo.middle.closures import closure_lifted_name
 from mojo.middle.funcs_shared import _scan_from_imports_flat
 from fire_compiler import (
@@ -303,11 +303,6 @@ class _Work:
         # `monomorphize_source`'s part-4 parameters): the queue key is the
         # only identity that survives between the seed and `_materialize`.
         self.variadic_meta: dict = {}
-        # (fn base, type args) -> the CALL's runtime argument count, so
-        # `_materialize` picks the same same-named generic overload
-        # `extract_fn_source(..., arg_count=...)` picked during the seed
-        # (`exit()` vs `exit[intable](code)`).
-        self.fn_arg_count: dict = {}
 
     def enqueue(self, key, depth, queue):
         if key not in self.alias:
@@ -338,22 +333,10 @@ def _callee_kind(gen, name):
     return None
 
 
-def _type_expr_arg_ann(gen, e):
-    """`_type_expr_to_ann` plus the DottedLiteral value argument (`.int`,
-    `.float32`) that the in-TU seed renders and the `.o` route deliberately
-    does not. See `_bracket_args`."""
-    ann = gen._type_expr_to_ann(e)
-    if not ann and type(e).__name__ == 'DottedLiteral':
-        _p = getattr(e, 'path', '')
-        if isinstance(_p, str) and _p:
-            ann = '.' + _p
-    return ann
-
-
 def _bracket_args(gen, sub):
     idx = sub.index
     elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
-    return [_type_expr_arg_ann(gen, e) for e in elems]
+    return [gen._type_expr_to_ann(e) for e in elems]
 
 
 def _live_aliases(work):
@@ -464,172 +447,6 @@ def _fn_bracket_kinds(module_src, base):
     return kinds
 
 
-def _fn_arg_mojo_mention(gen, expr):
-    """The Mojo type a `Scalar[...]`/`SIMD[...]` constructor expression names,
-    or None. `Scalar[X](v)` IS `SIMD[X, 1]` — the fact that lets a callee's
-    `SIMD[.bool, size]` annotation bind `size` when the call omits it, which
-    is how `splat[.int](...)` (whose `size` is inferred, not passed) is
-    instantiated."""
-    if not isinstance(expr, CallExpr):
-        return None
-    if not (isinstance(expr.func, SubscriptExpr)
-            and isinstance(expr.func.obj, IdentExpr)):
-        return None
-    base = expr.func.obj.name
-    if base not in ('Scalar', 'SIMD'):
-        return None
-    idx = expr.func.index
-    elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
-    anns = [_type_expr_arg_ann(gen, e) for e in elems]
-    if not anns or not anns[0]:
-        return None
-    if base == 'Scalar':
-        return 'SIMD[%s, 1]' % anns[0]
-    return 'SIMD[%s]' % ', '.join(anns)
-
-
-def _fn_template_has_comptime_control(tmpl) -> bool:
-    """Whether a generic function template uses `comptime if/for` in its body.
-
-    A value bracket argument can be substituted textually only when nothing in
-    the body DISPATCHES on it; a `comptime if` over a freshly substituted
-    value is exactly the shape `_fn_args_are_types` refuses value parameters
-    for. Absence of that control flow is what makes the substitution in
-    `_materialize` a faithful instantiation."""
-    try:
-        for s in Parser(py_tokenize(tmpl)).parse_module():
-            if not isinstance(s, FunctionDef):
-                continue
-            for n in _walk_ast(s.body):
-                if type(n).__name__ in ('ComptimeIfStmt', 'ComptimeForStmt',
-                                        'ComptimeVarStmt', 'ComptimeBranch'):
-                    return True
-    except Exception:
-        return True
-    return False
-
-
-def _bind_simd_mentions(tmpl, mojos):
-    """`{bracket_param: value}` inferred from arguments whose Mojo type the
-    call site spells as a `Scalar[X]`/`SIMD[X, N]` constructor mention.
-
-    Deliberately local to the omitted-leading-parameter path: the global
-    `elaborate._unify_param_ann` must NOT widen for this, because the `.o`
-    route also calls it and a wider binding there re-instantiates templates
-    that used to decline (measured: a `max_finite[.float64]` whose
-    monomorphized body fails gcc, and a bfloat16 SIMD instantiation that
-    trips a comptime assertion — both surfaced as stdlib dylib skips)."""
-    params = None
-    for s in Parser(py_tokenize(tmpl)).parse_module():
-        if isinstance(s, FunctionDef):
-            params = [p[0] for p in (s.params or [])]
-            anns = [p[1] for p in (s.params or [])]
-            break
-    if not params:
-        return {}
-    import elaborate as el
-    pnames = set(el.type_param_names(tmpl))
-    out = {}
-    for i in range(len(params)):
-        if i >= len(mojos):
-            break
-        am = mojos[i]
-        if not isinstance(am, str):
-            continue
-        _am = re.match(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$',
-                       am.strip())
-        if _am is None:
-            continue
-        _a0 = _am.group(1).strip()
-        _a1 = (_am.group(2) or '1').strip()
-        _ann = anns[i] if isinstance(anns[i], str) else ''
-        _ann = _ann.strip()
-        _ms = re.match(r'^Scalar\[\s*([^,\[\]]+)\s*\]$', _ann)
-        _mv = re.match(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$', _ann)
-        if _ms is not None:
-            if _ms.group(1) in pnames:
-                out.setdefault(_ms.group(1), _a0)
-        elif _mv is not None:
-            if _mv.group(1) in pnames:
-                out.setdefault(_mv.group(1), _a0)
-            if _mv.group(2) is not None and _mv.group(2) in pnames:
-                out.setdefault(_mv.group(2), _a1)
-    return out
-
-
-def _merged_fn_args(work, base, n):
-    """The bracket arguments for a generic FUNCTION call that omits leading
-    parameters, or None. Explicit arguments bind to the TRAILING parameters
-    (Mojo infers a leading parameter that appears in the signature's own
-    parameter types); the prefix is inferred from the call's argument
-    annotations. Returns None when the call is not that shape, so its old path
-    is untouched."""
-    if not (isinstance(n.func, SubscriptExpr) and isinstance(n.func.obj, IdentExpr)):
-        return None
-    explicit = _bracket_args(work.gen, n.func)
-    if not explicit or not all(_is_concrete(a) for a in explicit):
-        return None
-    import elaborate as el
-    module_src = _module_src(work.gen, base, 'fn')
-    if module_src is None:
-        return None
-    tmpl = el.extract_fn_source(module_src, base, arg_count=len(n.args or []))
-    if tmpl is None:
-        return None
-    params = el.type_param_names(tmpl)
-    if not params or len(explicit) >= len(params):
-        return None
-    skip = len(params) - len(explicit)
-    mojos = []
-    for a in (n.args or []):
-        mojos.append(_fn_arg_mojo_mention(work.gen, a))
-    inferred = _bind_simd_mentions(tmpl, mojos)
-    merged = []
-    for i in range(len(params)):
-        if i < skip:
-            v = inferred.get(params[i])
-            if v is None:
-                return None
-            merged.append(v)
-        else:
-            merged.append(explicit[i - skip])
-    return merged
-
-
-def _fn_args_bindable(work, base, args, merged_from_omission,
-                      literal_inference=False, arg_count=None) -> bool:
-    """Whether the in-TU materializer may instantiate this call's args.
-    Type parameters only, as before — except for an OMITTED-LEADING-PARAMETER
-    call whose inferred arguments include value parameters (`splat[.int]`'s
-    `dtype`): those are textually substituted and are safe only when the
-    template body has no comptime dispatch to fold (see
-    `_fn_template_has_comptime_control`).
-
-    `literal_inference` marks args that came from `_infer_fn_args`, which binds
-    a bracket parameter ONLY through an annotation that IS that parameter
-    (`code: intable`). Such a binding is a genuine type argument even when the
-    bound trait name is not visible to `_fn_bracket_kinds` (e.g. `Intable`
-    imported from std.traits), which is why the trait-shaped test below cannot
-    answer for it."""
-    if literal_inference:
-        for _a in args:
-            if not _is_concrete(_a):
-                return False
-        return True
-    if _fn_args_are_types(work, base, args):
-        return True
-    if not merged_from_omission:
-        return False
-    import elaborate as el
-    module_src = _module_src(work.gen, base, 'fn')
-    if module_src is None:
-        return False
-    tmpl = el.extract_fn_source(module_src, base, arg_count=arg_count)
-    if tmpl is None:
-        return False
-    return not _fn_template_has_comptime_control(tmpl)
-
-
 def _fn_args_are_types(work, base, args) -> bool:
     """Whether every type argument `args` binds for the generic function `base`
     lands on a TYPE parameter. A value argument (`check_bounds`' `cpu_default`
@@ -725,7 +542,7 @@ def _infer_fn_args(work, base, node):
     c_ctys = [_LITERAL_C_TYPES.get(t) for t in lits]
     if any(c is None for c in c_ctys):
         return None
-    tmpl = elaborate.extract_fn_source(module_src, base, arg_count=len(node.args))
+    tmpl = elaborate.extract_fn_source(module_src, base)
     if not tmpl:
         return None
     try:
@@ -4053,10 +3870,8 @@ def _materialize(work, key):
     if module_src is None:
         work.refuse(f'no source for {base!r}')
         return None
-    tmpl = (elaborate.extract_fn_source(
-        module_src, base, arg_count=work.fn_arg_count.get((base, tuple(args))))
-        if kind == 'fn'
-        else elaborate.extract_struct_source(module_src, base))
+    tmpl = (elaborate.extract_fn_source(module_src, base) if kind == 'fn'
+            else elaborate.extract_struct_source(module_src, base))
     src_path = (work.gen._imported_generic_structs if kind == 'struct'
                 else work.gen._imported_generics).get(base)
     if not tmpl:
@@ -4264,20 +4079,6 @@ def run(gen, stmts: list):
             if _fn_returns_unbuildable_struct(work, base):
                 args = _concrete_args(work, kind, base, n, scope)
                 if args is not None:
-                    _merged = _merged_fn_args(work, base, n)
-                    if _merged is not None:
-                        args = _merged
-                    # The same bindability gate the other fn root applies.
-                    # Without it, `_type_expr_to_ann` now rendering a DType
-                    # value (`.float64`) made an unbuildable-return generic
-                    # like `max_finite[dtype]` newly concrete and materialized
-                    # in-TU, where its monomorphized body failed to gcc —
-                    # measured as std/benchmark and std/random dylib skips.
-                    if not _fn_args_bindable(work, base, args, _merged is not None,
-                                             not isinstance(n.func, SubscriptExpr),
-                                             arg_count=len(n.args or [])):
-                        return
-                    work.fn_arg_count[(base, tuple(args))] = len(n.args or [])
                     work.enqueue((kind, base, tuple(args)), 0, queue)
                 return
             # NEW (bug-codegen-dylib-generic-inline-copies-370): enqueue
@@ -4287,38 +4088,19 @@ def run(gen, stmts: list):
             module_src = _module_src(work.gen, base, 'fn')
             if module_src is None:
                 return
-            tmpl = el.extract_fn_source(module_src, base,
-                                        arg_count=len(n.args or []))
+            tmpl = el.extract_fn_source(module_src, base)
             if tmpl is None:
                 return
             params = el.type_param_names(tmpl) if hasattr(el, 'type_param_names') else []
             if not params:
                 return
-            _lit_inferred = False
             args = _concrete_args(work, kind, base, n, scope)
-            if args is not None and not isinstance(n.func, SubscriptExpr):
-                # `_concrete_args` infers a bare call's args from its literals
-                # (`exit(0)` -> `['Int']`); that inference binds only an
-                # annotation that IS the bracket parameter, so the result is a
-                # genuine type argument even when `_fn_bracket_kinds` cannot
-                # see the bound trait (`Intable`, imported from std.traits).
-                _lit_inferred = True
-            _omitted = False
-            if args is not None:
-                _merged = _merged_fn_args(work, base, n)
-                if _merged is not None:
-                    _omitted = len(_merged) > len(args)
-                    args = _merged
             if args is None:
                 args = _infer_fn_args(work, base, n)
-                _lit_inferred = args is not None
             if args is None:
                 return
-            if not _fn_args_bindable(work, base, args, _omitted,
-                                     _lit_inferred,
-                                     arg_count=len(n.args or [])):
+            if not _fn_args_are_types(work, base, args):
                 return
-            work.fn_arg_count[(base, tuple(args))] = len(n.args or [])
             work.enqueue((kind, base, tuple(args)), 0, queue)
             return
         else:
@@ -4689,10 +4471,6 @@ def _rewrite_callees(work, stmts: list):
         if kind is None:
             return
         args = _concrete_args(work, kind, base, n)
-        if args is not None and kind == 'fn':
-            _merged = _merged_fn_args(work, base, n)
-            if _merged is not None:
-                args = _merged
         mangled = work.alias.get((kind, base, tuple(args))) if args is not None else None
         if mangled is None and kind == 'struct':
             # PART 6 (2026-10-23, family D piece 2): the D2 ctor shapes. A

@@ -1404,7 +1404,7 @@ def _mojo_type(ann: str | type | None) -> str:
             # type, no separate fixed-size struct. `FixedSizeArray` used to be
             # missing here, so its annotation erased to `int64_t` and a
             # parameter declared `int64_t a` (then cast to `MojoList *` at
-            # the call).
+            # the call) — see `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1459,34 +1459,6 @@ def _mojo_type(ann: str | type | None) -> str:
             dt = _simd_float_dtype_ctype(inner)
             if dt is not None:
                 return dt
-        if base in ('Literal', 'typing.Literal'):
-            # `Literal["a", "b"]` (typing.Literal over string literals):
-            # the value IS one of the spelled-out constants, so the slot
-            # holds a str exactly as a plain `str` annotation would.
-            # Measured (CPython Tools/cases_generator/parsing.py, `kind:
-            # Literal["inst", "op"]` on the InstHeader/InstDef dataclasses):
-            # the annotation fell through to the `ann = base` tail and
-            # `_TYPE_MAP`'s int64_t default, so the struct declared
-            # `int64_t kind` while the constructor stored the token-text
-            # pointer and every read compared the boxed word against a
-            # string. All string-literal elements -> the str type; any
-            # other element keeps the old int64_t fallback (early return
-            # either way: `Literal` is in no other branch's table).
-            _lit_elems = []
-            for _le in _split_top_level_commas(inner):
-                _le = _le.strip()
-                if _le:
-                    _lit_elems.append(_le)
-            if _lit_elems:
-                _all_str = True
-                for _le in _lit_elems:
-                    if (len(_le) < 2 or _le[0] != _le[-1]
-                            or (_le[0] != '"' and _le[0] != "'")):
-                        _all_str = False
-                        break
-                if _all_str:
-                    return 'char *'
-            return 'int64_t'
         ann = base
     if isinstance(ann, str) and len(ann) > 1 and (ann[0] == '*') and (ann[1] != '*'):
         inner = ann[1:].strip()

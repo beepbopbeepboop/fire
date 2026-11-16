@@ -76,44 +76,6 @@ class _ConstraintViolation(RuntimeError):
     comptime parameters. May carry a `mojo_record` (see mojo_diagnostic)."""
 
 
-class _UnboundComptimeParameter(TypeError):
-    """A bracket supplied too FEW comptime parameters: one it omitted is
-    declared without a default, so `_invoke` would bind it to None and the body
-    would run on a value that is not there (the reported symptom:
-    `unsupported operand type(s) for +: 'int' and 'NoneType'`).
-
-    Deliberately carries NO fields. The callee and the parameter name travel
-    through `_UNBOUND_FUNC`/`_UNBOUND_PARAM` instead: this file self-hosts, and
-    the self-hosted compiler types an `except X as e:` binding as a known
-    struct pointer or a plain message string, so an exception's own attributes
-    are not a shape it can read back (same reason `MojoRaisedException` is
-    fieldless). The subscript site reads those slots back and renders the
-    modular compiler's `failed to infer parameter 'y' of 'f'` diagnostic (via
-    `_unbound_comptime_record` / `mojo_diagnostic`) instead of a traceback. A
-    TypeError subclass because an under-supplied specialization is a program
-    error, and because that is what the interpreter's other bracket refusals
-    are."""
-
-
-# What the `_UnboundComptimeParameter` now being raised is about, set by
-# `_raise_unbound_comptime_error` and consumed by the subscript site that
-# renders the diagnostic (`Interpreter._raise_unbound_comptime`). Module slots,
-# like `_CALL_SITE`, not fields on the exception — see the class docstring.
-_UNBOUND_FUNC = [None]
-_UNBOUND_PARAM = ['']
-
-
-def _raise_unbound_comptime_error(func, param: str):
-    """Record the callee/parameter and raise `_UnboundComptimeParameter` with
-    the canonical message. The caller that owns the subscript turns it into a
-    bracket-located diagnostic record."""
-    _UNBOUND_FUNC[0] = func
-    _UNBOUND_PARAM[0] = param
-    raise _UnboundComptimeParameter(
-        f"failed to infer parameter '{param}' of "
-        f"'{getattr(func, 'name', '')}'")
-
-
 def _unwrap_dataclass_field(value):
     """The default a declared field takes, given the value its initializer
     evaluated to. `field(default=...)` and `field(default_factory=...)` are
@@ -1350,76 +1312,6 @@ def _bracket_arg_kinds(source, call_func):
         m = re.match(r'^\s*([A-Za-z_]\w*)\s*=(?!=)', part)
         out.append((True, m.group(1)) if m else (False, None))
     return out
-
-
-def _comptime_default_names(func):
-    """The declared comptime parameters of `func` that have a default, and may
-    therefore be omitted from the bracket. Both default sources `_invoke`
-    consults are read here — `comptime_param_defaults` (the bracket's own
-    `def f[T, y=0]`) and the `_pd` entries (a runtime parameter must never
-    shadow one, but `_invoke` looks there too) — so there is one answer to
-    "may this parameter be omitted?"."""
-    names = set((getattr(func, 'comptime_param_defaults', None) or {}).keys())
-    for name, _value in getattr(func, '_pd', None) or []:
-        names.add(name)
-    return names
-
-
-def _unbound_comptime_param(func, bound_names):
-    """The first declared comptime parameter of `func` that `bound_names` does
-    not bind and that declares no default, or None when every one is either
-    supplied or defaulted. The bracket is the only place such a parameter's
-    value can come from, so omitting it is an error at the bracket — `_invoke`
-    binding it to None is what made the body run on a value that is not
-    there (`int + None`)."""
-    defaults = _comptime_default_names(func)
-    for name in getattr(func, 'comptime_params', None) or []:
-        if name not in bound_names and name not in defaults:
-            return name
-    return None
-
-
-def _bracket_caret(node):
-    """(line, col) of the `[` in the SubscriptExpr `node`, from the callee's
-    own position. Neither bracket spelling records the bracket: the keyword
-    branch copies the CALLEE's position onto the node, and the positional
-    branch leaves the dataclass defaults (`0:0`). The bracket is the token
-    just past the callee, which for `f` is `col + len(name)` and for `p.f` is
-    past the `.member` (`MemberExpr.col` is the dot)."""
-    obj = getattr(node, 'obj', None)
-    line = getattr(obj, 'line', 0) or getattr(node, 'line', 0)
-    col = getattr(obj, 'col', 0)
-    if col > 0 and hasattr(obj, 'member'):
-        col = col + 1 + len(obj.member)
-    elif col > 0 and hasattr(obj, 'name'):
-        col = col + len(obj.name)
-    else:
-        return 0, 0
-    return (line, col) if line > 0 else (0, 0)
-
-
-def _unbound_comptime_record(filename, node, func, param):
-    """The modular-format record for an `_UnboundComptimeParameter`:
-    `failed to infer parameter 'y' of 'f'`, caret on the bracket that omitted
-    it, and a note at the declaration when its location is known. None when
-    the bracket has no usable position; the caller then keeps the plain
-    TypeError."""
-    bl, bc = _bracket_caret(node)
-    cl, cc = _callee_start(getattr(node, 'obj', node))
-    if bl < 1 or bc < 1:
-        bl, bc = cl, cc
-    if bl < 1 or bc < 1:
-        return None
-    notes = []
-    loc = _FUNC_DEF_LOCS.get(id(func))
-    if loc is not None and loc[1] > 0:
-        notes.append(_note(file=loc[0], line=loc[1], name=func.name,
-                           message='function declared here'))
-    return _rec(file=filename, line=bl, caret=bc,
-                tilde_from=cc if cl == bl and 0 < cc < bc else 0,
-                message=f"failed to infer parameter '{param}' of "
-                        f"'{func.name}'",
-                notes=notes)
 
 
 def _fieldwise_init_record(filename, source, n, sub, st, sfile):
@@ -2789,21 +2681,6 @@ class MojoFunction:
         how many comptime parameters it declares, because "too many" is a
         different mistake from "too few" and the caller can only fix it if it
         is told which.
-
-        **A parameter the bracket omits and the declaration does not default is
-        refused too, and it used to bind `None`.** `_invoke` binds every
-        still-unbound comptime parameter to `None`, which is right for one that
-        a later pass will infer from the call's argument types but wrong for one
-        the bracket was supposed to supply: `param_fn[2](1)` on
-        `def param_fn[x: Int, y: Int](a)` ran the body with `y = None` and died
-        with `unsupported operand type(s) for +: 'int' and 'NoneType'`, an
-        interpreter traceback one call away from the mistake. The canonical
-        case (`compile_offload_unbound_param_error.mojo`) wants
-        `failed to infer parameter 'y' of 'param_fn'`, so that is what
-        `_UnboundComptimeParameter` carries to `eval_SubscriptExpr`, which
-        renders it as a diagnostic record at the bracket. A call with no
-        bracket at all does not pass through here and keeps `_invoke`'s
-        inference-friendly `None`.
         """
         values = item if isinstance(item, tuple) else (item,)
         declared = len(self.comptime_params)
@@ -2816,9 +2693,6 @@ class MojoFunction:
                 f"argument(s) but {self.name} declares {declared} comptime "
                 f"parameter(s): {names}")
         bindings = dict(zip(self.comptime_params, values))
-        unbound = _unbound_comptime_param(self, bindings)
-        if unbound is not None:
-            _raise_unbound_comptime_error(self, unbound)
         return _MojoBoundComptimeFunction(self, bindings)
 
     def _invoke(self, interpreter, comptime_bindings, args, kwargs):
@@ -3985,38 +3859,8 @@ class BoundMethod:
         finally:
             self.interpreter.scope = old_scope
 
-    def __getitem__(self, item):
-        """`obj.method[...]` at a call site: bind the bracket items to the
-        declared comptime parameters BY POSITION, the way
-        `MojoFunction.__getitem__` does for a free function, and answer a
-        receiver-bound callable that still takes the call-time arguments.
-
-        The receiver's declared parameters live on `self.bound_func`
-        (`comptime_params` / `comptime_param_defaults` / `_pd`), as the
-        keyword-bracket path (`_bind_bracket_comptime`) reads them. A
-        bracket item with no parameter to bind it is refused, and an omitted
-        parameter with no default is refused through the same helpers the
-        free-function path uses, so the subscript site renders the one
-        `failed to infer parameter ...` diagnostic. The bound value keeps
-        the receiver (`_MojoBoundComptimeReceiver`), as the keyword spelling
-        already does."""
-        decl = self.bound_func
-        values = item if isinstance(item, tuple) else (item,)
-        declared = len(getattr(decl, 'comptime_params', None) or [])
-        if len(values) > declared:
-            names = ', '.join(getattr(decl, 'comptime_params', None) or [])
-            if not names:
-                names = 'none'
-            raise TypeError(
-                f"{getattr(decl, 'name', '')}[...] supplies {len(values)} "
-                f"specialization argument(s) but "
-                f"{getattr(decl, 'name', '')} declares {declared} comptime "
-                f"parameter(s): {names}")
-        bindings = dict(zip(getattr(decl, 'comptime_params', None) or [], values))
-        unbound = _unbound_comptime_param(decl, bindings)
-        if unbound is not None:
-            _raise_unbound_comptime_error(decl, unbound)
-        return _MojoBoundComptimeReceiver(self, bindings)
+    def __getitem__(self, key):
+        return self
 
 
 class _MojoBoundComptimeReceiver:
@@ -4251,7 +4095,7 @@ class MojoClass:
                         continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 value = _unwrap_dataclass_field(value)
-                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
+                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None), f)
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
                 # AssignStmt has a single `.target`, not a `.targets` list
@@ -4944,12 +4788,18 @@ class _MojoScalarType:
     int/float already behave like the value side of these types; this only
     carries the `.size_bytes` metadata that `size_of[T]()`/`align_of[T]()`/
     `bit_width_of[T]()` read off the type itself."""
-    def __init__(self, name, size_bytes, is_float=False):
+    def __init__(self, name, size_bytes, is_float=False, spelling=None):
         self.name = name
         self.size_bytes = size_bytes
         self._is_float = is_float
+        self._spelling = spelling
 
     def __call__(self, x=0):
+        if self._spelling is not None:
+            # A value of an unimplemented float8 dtype carries its spelling,
+            # so a later use of it is refused (see _MojoFloat8Value) instead
+            # of silently computing on a dtype with no rule behind it.
+            return _MojoFloat8Value(self._spelling, x)
         return float(x) if self._is_float else int(x)
 
     def __repr__(self):
@@ -4975,6 +4825,66 @@ class _MojoScalarType:
 
     def is_double_float(self):
         return self.name == 'Float64'
+
+
+# The float8 scalar family, one byte each: the names exist in the type table
+# (a `Float8_e3m4` annotation resolves and `size_of[DType.float8_e3m4]()`
+# answers 1) but this interpreter has no conversion or arithmetic rule for
+# the dtype — a coercion from a value of one to any other declared type, and
+# a binary operation with one, are refused with Modular's own diagnostic
+# instead of silently computing on a type with no rule behind it (the float8
+# dtype legality fix for `op_with_unsupported_type_error.mojo`, host half;
+# pinned by test_regress_gpu_offload_validation_modular_part8.py). The
+# family is enumerated ONCE here, the interpreter's copy of the closed list
+# the other paths carry (formal/model/types.py's NARROW_FLOAT_TYPE_NAMES is
+# the formal path's).
+_FLOAT8_TYPE_NAMES = (
+    'Float8_e3m4', 'Float8_e4m3fn', 'Float8_e4m3fnuz',
+    'Float8_e5m2', 'Float8_e5m2fnuz', 'Float8_e8m0fnu',
+)
+
+# The lowered spellings of the scalar types in the interpreter's type table,
+# the IR names Modular's diagnostics word the types in (`conversion from
+# 'f8e3m4' to 'f32' is not implemented`); a declared type outside the table
+# falls back to its raw spelling at the refusal site.
+_SCALAR_TYPE_SPELLINGS = {
+    'Int': 'i64', 'Int8': 'i8', 'Int16': 'i16', 'Int32': 'i32', 'Int64': 'i64',
+    'UInt': 'u64', 'UInt8': 'u8', 'UInt16': 'u16', 'UInt32': 'u32', 'UInt64': 'u64',
+    'Float': 'f64', 'Float16': 'f16', 'Float32': 'f32', 'Float64': 'f64',
+    'BFloat16': 'bf16', 'Bool': 'bool',
+    'Float8_e3m4': 'f8e3m4', 'Float8_e4m3fn': 'f8e4m3fn',
+    'Float8_e4m3fnuz': 'f8e4m3fnuz', 'Float8_e5m2': 'f8e5m2',
+    'Float8_e5m2fnuz': 'f8e5m2fnuz', 'Float8_e8m0fnu': 'f8e8m0fnu',
+}
+
+
+class _MojoFloat8Value(float):
+    """A value of an unimplemented float8 dtype: a plain float carrying its
+    dtype's lowered spelling (`f8e3m4`, ...). The dtype is in the type table
+    (its name resolves, `size_of` answers one byte) but there is no
+    conversion or arithmetic rule for it here, so a coercion to a different
+    declared type and a binary operation with one are refused with Modular's
+    diagnostic instead of silently computing (see _FLOAT8_TYPE_NAMES). A
+    float subclass so the value plumbing that is dynamic in this interpreter
+    (`float` checks, `print`) still behaves numerically on an untouched
+    value, the way _AutoStubValue subclasses int. `float.__new__` is called
+    directly rather than via super(): the self-hosting compiler compiles
+    this file and has no super() (see MojoError)."""
+    def __new__(cls, spelling, value=0.0):
+        instance = float.__new__(cls, value)
+        instance.spelling = spelling
+        return instance
+
+
+def _float8_operand_spelling(left, right):
+    """The lowered spelling of the first float8 operand in a pair of
+    already-evaluated operands, or None when neither is one (see
+    _MojoFloat8Value)."""
+    if isinstance(left, _MojoFloat8Value):
+        return left.spelling
+    if isinstance(right, _MojoFloat8Value):
+        return right.spelling
+    return None
 
 
 class _MojoTypeInfoCall:
@@ -5663,32 +5573,6 @@ class _MojoTestSuiteFnAccessor:
         return _MojoTestSuiteFnCall(func, interpreter, run)
 
 
-class _MojoCompileInfoRequest:
-    """Callable result of `compile_info[...]` — stands in for a compile request."""
-    def __call__(self, *args, **kwargs):
-        return 0
-
-    def __bool__(self):
-        return True
-
-
-class _MojoCompileInfo:
-    """`std.compile.compile_info` shim.
-
-    Subscript syntax is validated in Interpreter.eval_SubscriptExpr (it must
-    inspect the bracket's AST, not the evaluated kernel value). __getitem__ is a
-    fallback that should not be reached for normal interpreter subscript eval.
-    """
-    def __init__(self, interpreter):
-        self.interpreter = interpreter
-
-    def __getitem__(self, item):
-        return _MojoCompileInfoRequest()
-
-    def __call__(self, *args, **kwargs):
-        return _MojoCompileInfoRequest()
-
-
 def _mojo_unary_math(fn):
     """Wrap a scalar math function so it also applies elementwise to a
     `_MojoSIMD` operand — matching how real Mojo's `std.math` functions are
@@ -6288,13 +6172,6 @@ class Interpreter:
             cache[module_name] = namespace
             return namespace
 
-        if module_name in ('std.compile',):
-            if module_name in cache:
-                return cache[module_name]
-            namespace = types.SimpleNamespace(compile_info=_MojoCompileInfo(self))
-            cache[module_name] = namespace
-            return namespace
-
         if module_name in ('std.sys', 'std.sys.arg', 'std.sys.info'):
             if module_name in cache:
                 return cache[module_name]
@@ -6728,6 +6605,16 @@ class Interpreter:
         float32 = _MojoScalarType('Float32', 4, is_float=True)
         float64 = _MojoScalarType('Float64', 8, is_float=True)
         bfloat16 = _MojoScalarType('BFloat16', 2, is_float=True)
+        # The float8 family: one byte, a float, and no conversion or
+        # arithmetic rule in this interpreter — a value of one carries its
+        # lowered spelling and a use of it is refused (see
+        # _FLOAT8_TYPE_NAMES / _MojoFloat8Value).
+        float8 = {}
+        for _f8_name in _FLOAT8_TYPE_NAMES:
+            _f8_type = _MojoScalarType(_f8_name, 1, is_float=True,
+                                       spelling=_SCALAR_TYPE_SPELLINGS[_f8_name])
+            float8[_f8_name] = _f8_type
+            self.scope.define(_f8_name, _f8_type)
         self.scope.define('Int8', int8)
         self.scope.define('Int16', int16)
         self.scope.define('Int32', int32)
@@ -6740,12 +6627,17 @@ class Interpreter:
         self.scope.define('Float32', float32)
         self.scope.define('Float64', float64)
         self.scope.define('BFloat16', bfloat16)
-        self.scope.define('DType', types.SimpleNamespace(
+        dtype = types.SimpleNamespace(
             int8=int8, int16=int16, int32=int32, int64=int64, index=int64, int=int64,
             uint8=uint8, uint16=uint16, uint32=uint32, uint64=uint64,
             float16=float16, float32=float32, float64=float64, bfloat16=bfloat16,
             bool=_MojoScalarType('Bool', 1),
-        ))
+        )
+        # Expose the float8 family on `DType` (`DType.float8_e3m4`) the way
+        # the other scalars are; the attribute is the lowercase type name.
+        for _f8_name, _f8_type in float8.items():
+            setattr(dtype, _f8_name.lower(), _f8_type)
+        self.scope.define('DType', dtype)
         self.scope.define('size_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('align_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('bit_width_of', _MojoTypeInfoFn(_mojo_bit_width_of))
@@ -7709,11 +7601,68 @@ class Interpreter:
             return None
         return ctor()
 
-    def _coerce_to_declared_type(self, value, type_ann):
+    def _refuse_unsupported_float8(self, node, message):
+        """Refuse a use of an unimplemented float8 dtype (see
+        _FLOAT8_TYPE_NAMES) with a modular-format diagnostic: a RuntimeError
+        carrying a `mojo_record` (see mojo_diagnostic), so `fire.py run`
+        prints `file:line:col: error: <message>` and exits non-zero with no
+        Python traceback."""
+        err = RuntimeError(message)
+        line, col = self._expr_loc(node)
+        setattr(err, 'mojo_record', _rec(self.filename, line, col, message, []))
+        raise err
+
+    def _expr_loc(self, node):
+        """The (line, col) to diagnose a runtime error at `node`: the node's
+        own position when the parser recorded one, else the first operand's
+        — the parser leaves internal operator nodes (a BinaryOp, a
+        CompareChain) at 0,0 while their operands carry the real position,
+        and a diagnostic at 0,0 has no source line to point at."""
+        line = getattr(node, 'line', 0) if node is not None else 0
+        col = getattr(node, 'col', 0) if node is not None else 0
+        if line or col:
+            return line, col
+        for attr in ('left', 'right', 'target', 'value', 'operand'):
+            child = getattr(node, attr, None) if node is not None else None
+            if child is None:
+                continue
+            child_line = getattr(child, 'line', 0)
+            if child_line:
+                return child_line, getattr(child, 'col', 0)
+        operands = getattr(node, 'operands', None) if node is not None else None
+        if operands:
+            first = operands[0]
+            return getattr(first, 'line', 0), getattr(first, 'col', 0)
+        return line, col
+
+    def _coerce_to_declared_type(self, value, type_ann, node=None):
         """Coerce a var's initializer to its declared scalar type, mirroring
         real Mojo's implicit-constructor conversion (e.g. `var x: Int = 84 / 2`
-        truncates the Float64 division result to an Int, it doesn't stay a float)."""
+        truncates the Float64 division result to an Int, it doesn't stay a float).
+
+        An unimplemented float8 dtype (see _FLOAT8_TYPE_NAMES) is refused
+        rather than coerced: a value of one coerced to any other declared
+        type is the conversion Modular reports as not implemented (raised
+        with `node`'s location for a modular-format diagnostic), and a
+        declared float8 takes a value of the declared dtype — its zero when
+        there is no initializer, a copy when the value is already of the same
+        dtype, a fresh value otherwise."""
         if not isinstance(type_ann, str):
+            return value
+        if isinstance(value, _MojoFloat8Value):
+            if (type_ann in _FLOAT8_TYPE_NAMES
+                    and _SCALAR_TYPE_SPELLINGS[type_ann] == value.spelling):
+                return value
+            self._refuse_unsupported_float8(
+                node, "conversion from '" + value.spelling + "' to '"
+                + _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)
+                + "' is not implemented")
+        if type_ann in _FLOAT8_TYPE_NAMES:
+            if value is None:
+                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], 0.0)
+            if isinstance(value, (int, float)):
+                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann],
+                                        float(value))
             return value
         if value is None:
             # A declared scalar with no initializer (`var x: Int`, or a struct
@@ -7761,7 +7710,7 @@ class Interpreter:
             for name, v in zip(names, values):
                 self.scope.define(name, v)
             return value
-        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None))
+        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None), node)
         self.scope.define(node.name, value)
         return value
 
@@ -7777,6 +7726,13 @@ class Interpreter:
         """Compute the new value for `target OP= value` given already-
         evaluated `current`/`rhs`. Factored out of execute_AugAssignStmt as
         its own named step for clarity."""
+        # `a += 1` is a binary operation: a float8 operand is refused with
+        # Modular's diagnostic (see _apply_binary_op).
+        f8_spelling = _float8_operand_spelling(current, rhs)
+        if f8_spelling is not None:
+            self._refuse_unsupported_float8(
+                node, "operation with a type '" + f8_spelling
+                + "' is not implemented")
         op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
         if op == '+':
             return current + rhs
@@ -9486,6 +9442,14 @@ class Interpreter:
         operands (everything except the short-circuiting 'and'/'or'/'as',
         handled directly in eval_BinaryOp before operands are evaluated).
         Factored out of eval_BinaryOp as its own named step for clarity."""
+        # A float8 operand has no arithmetic rule in this interpreter:
+        # refuse with Modular's diagnostic (see _FLOAT8_TYPE_NAMES) instead
+        # of computing silently on a dtype with no rule behind it.
+        f8_spelling = _float8_operand_spelling(left, right)
+        if f8_spelling is not None:
+            self._refuse_unsupported_float8(
+                expr, "operation with a type '" + f8_spelling
+                + "' is not implemented")
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -9566,6 +9530,14 @@ class Interpreter:
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)
+            # A chained comparison is a binary operation too: a float8
+            # operand is refused with Modular's diagnostic (see
+            # _apply_binary_op).
+            f8_spelling = _float8_operand_spelling(left, right)
+            if f8_spelling is not None:
+                self._refuse_unsupported_float8(
+                    expr, "operation with a type '" + f8_spelling
+                    + "' is not implemented")
             if not self._apply_compare_op(op, left, right):
                 return False
             left = right
@@ -9744,13 +9716,6 @@ class Interpreter:
     def eval_SubscriptExpr(self, expr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
-        # `std.compile.compile_info[...]`: validate the kernel argument's
-        # syntax (it must be a bare identifier naming a module-level def)
-        # before evaluating it — a computed kernel like `get_fn[False]()`
-        # evaluates to the same function value as `scale`, so a value-level
-        # check cannot distinguish them.
-        if isinstance(obj, _MojoCompileInfo):
-            return self._eval_compile_info_subscript(expr)
         # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
         # linux=0x400]()`) keeps its elements in `attrs` as (name, value)
         # pairs and leaves `index` as the empty-subscript placeholder
@@ -9765,10 +9730,7 @@ class Interpreter:
         # uses for the compiled path, so both engines answer alike.
         _attrs = getattr(expr, 'attrs', None)
         if _attrs:
-            try:
-                _bound = self._bind_bracket_comptime(obj, _attrs)
-            except _UnboundComptimeParameter as exc:
-                self._raise_unbound_comptime(expr, exc)
+            _bound = self._bind_bracket_comptime(obj, _attrs, expr)
             if _bound is not None:
                 return _bound
         idx = self.eval_expr(expr.index)
@@ -9776,99 +9738,9 @@ class Interpreter:
             if hasattr(obj, '__call__'):
                 return obj
             raise TypeError(f"{type(obj).__name__} object is not subscriptable")
-        try:
-            return obj[idx]
-        except _UnboundComptimeParameter as exc:
-            self._raise_unbound_comptime(expr, exc)
+        return obj[idx]
 
-    def _raise_unbound_comptime(self, node, exc):
-        """Attach the bracket-located diagnostic record to `exc` and re-raise
-        it. Both bracket spellings (`f[2]`'s positional tuple and
-        `f[T=Int]`'s keyword attrs) land here, so the caret and the message
-        are chosen once (see `_unbound_comptime_record`). When the bracket
-        has no usable source position the plain TypeError is kept.
-
-        The callee and parameter are read from `_UNBOUND_FUNC`/`_UNBOUND_PARAM`
-        rather than off `exc` (a fieldless exception; see its docstring)."""
-        func = _UNBOUND_FUNC[0]
-        param = _UNBOUND_PARAM[0]
-        _UNBOUND_FUNC[0] = None
-        _UNBOUND_PARAM[0] = ''
-        rec = _unbound_comptime_record(self.filename, node, func, param)
-        if rec is not None:
-            setattr(exc, 'mojo_record', rec)
-        raise exc
-
-    def _compile_info_kernel_arg_ast(self, expr):
-        """Return the AST node of compile_info's kernel argument (first arg)."""
-        attrs = getattr(expr, 'attrs', None)
-        if attrs:
-            for nm, val in attrs:
-                if nm is None:
-                    return val
-            # all keyword args: first is kernel
-            return attrs[0][1]
-        idx = getattr(expr, 'index', None)
-        if idx is None:
-            return None
-        # Mixed/positional brackets may parse as TupleExpr in index.
-        if type(idx).__name__ == 'TupleExpr':
-            elems = getattr(idx, 'elements', None) or []
-            if elems:
-                return elems[0]
-        return idx
-
-    def _compile_info_refused_name(self, kernel_ast):
-        """Best-effort symbol name for a refused compile_info kernel."""
-        # Prefer the evaluated result's name (e.g. get_fn[False]() -> scale).
-        try:
-            val = self.eval_expr(kernel_ast)
-            name = getattr(val, '__name__', None) or getattr(val, 'name', None)
-            if name:
-                return name
-        except Exception:
-            pass
-        # Fall back to the most relevant identifier mentioned in the AST.
-        stack = [kernel_ast]
-        ident = None
-        while stack:
-            node = stack.pop()
-            if node is None:
-                continue
-            if type(node).__name__ == 'IdentExpr':
-                ident = getattr(node, 'name', ident)
-                continue
-            if type(node).__name__ == 'MemberExpr':
-                ident = getattr(node, 'member', ident)
-                stack.append(getattr(node, 'obj', None))
-                continue
-            for attr in ('func', 'obj', 'value', 'left', 'right', 'index'):
-                if hasattr(node, attr):
-                    stack.append(getattr(node, attr))
-            for attr in ('args', 'elements', 'keys', 'values'):
-                if hasattr(node, attr):
-                    v = getattr(node, attr)
-                    if isinstance(v, list):
-                        stack.extend(v)
-        return ident or '<unknown>'
-
-    def _eval_compile_info_subscript(self, expr):
-        kernel_ast = self._compile_info_kernel_arg_ast(expr)
-        ok = False
-        if kernel_ast is not None and type(kernel_ast).__name__ == 'IdentExpr':
-            name = getattr(kernel_ast, 'name', None)
-            if name:
-                val = self.scope.get(name)
-                if isinstance(val, MojoFunction):
-                    ok = True
-        if ok:
-            return _MojoCompileInfoRequest()
-        sym = self._compile_info_refused_name(kernel_ast)
-        loc = self._loc(expr)
-        print(f"{loc}error: cannot slice out exported symbol '{sym}'", file=sys.stderr)
-        raise SystemExit(1)
-
-    def _bind_bracket_comptime(self, obj, attrs):
+    def _bind_bracket_comptime(self, obj, attrs, node):
         """`f[...]` with keyword-bracket `attrs`: bind `obj`'s declared
         comptime parameters and return the callable, or None when `obj` has
         no comptime parameter list to bind (the caller then keeps its own
@@ -9888,9 +9760,8 @@ class Interpreter:
         `operation`.
 
         A parameter with neither a supplied value nor a declared default is
-        an `_UnboundComptimeParameter` naming it, not a silent None: the
-        bracket is the ONLY place its value can come from, and the subscript
-        site renders the modular `failed to infer parameter ...` diagnostic.
+        an honest TypeError naming it, not a silent None: the bracket is
+        the ONLY place its value can come from.
 
         `obj` is the callee VALUE, so it is also a method receiver
         (`obj.body[f_key=show_k]()`); its declared parameters live on
@@ -9911,7 +9782,7 @@ class Interpreter:
                 poss.append(pair[1])
             else:
                 kws[nm] = pair[1]
-        defaults = _comptime_default_names(decl)
+        dflts = getattr(decl, 'comptime_param_defaults', None) or {}
         bindings = {}
         pos_i = 0
         for cp in cps:
@@ -9923,8 +9794,10 @@ class Interpreter:
                 pos_i += 1
             if given is not None:
                 bindings[cp] = self.eval_expr(given)
-            elif cp not in defaults:
-                _raise_unbound_comptime_error(decl, cp)
+            elif cp not in dflts:
+                raise TypeError(
+                    f"{self._loc(node)}comptime parameter '{cp}' is neither "
+                    f"given in the bracket nor has a default")
         if decl is not obj:
             return _MojoBoundComptimeReceiver(obj, bindings)
         return _MojoBoundComptimeFunction(obj, bindings)

@@ -1,4 +1,4 @@
-SPLIT: GPU_offload_validation_modular-part5 (fixed 2026-11-15, doc deleted), GPU_offload_validation_modular-part6 (fixed 2026-11-16, doc deleted), GPU_offload_validation_modular-part7 (fixed 2026-11-16, doc deleted), GPU_offload_validation_modular-part8
+SPLIT: GPU_offload_validation_modular-part5, GPU_offload_validation_modular-part6, GPU_offload_validation_modular-part7, GPU_offload_validation_modular-part8
 # GPU: offload validation for modular test cases (category C)
 
 ## Symptom
@@ -42,9 +42,9 @@ done at the easy class is filed as four parts; each one names one quick test.
 
 | part | doc | covers | pinned by |
 |---|---|---|---|
-| 5 | fixed 2026-11-15, doc deleted | `compile_offload_unbound_param_error.mojo`, interpreted half: an under-supplied specialization is a diagnostic, not `None` | `test_regress_gpu_offload_validation_modular_part5.py` |
-| 6 | fixed 2026-11-16, doc deleted | the same case, compiled half: the build must refuse it instead of answering `0` | `test_regress_gpu_offload_validation_modular_part6.py` |
-| 7 | fixed 2026-11-16, doc deleted | `compile_offload_missing_symbol_error.mojo`: `std.compile.compile_info` refuses an unsliceable runtime-pointer kernel with `cannot slice out exported symbol` | `test_regress_gpu_offload_validation_modular_part7.py` |
+| 5 | `bugs/GPU_offload_validation_modular-part5.md` | `compile_offload_unbound_param_error.mojo`, interpreted half: an under-supplied specialization is a diagnostic, not `None` | `test_regress_gpu_offload_validation_modular_part5.py` |
+| 6 | `bugs/GPU_offload_validation_modular-part6.md` | the same case, compiled half: the build must refuse it instead of answering `0` | `test_regress_gpu_offload_validation_modular_part6.py` |
+| 7 | `bugs/GPU_offload_validation_modular-part7.md` | `compile_offload_missing_symbol_error.mojo`: a real `std.compile.compile_info` and the exported-symbol slicing check | `test_regress_gpu_offload_validation_modular_part7.py` |
 | 8 | `bugs/GPU_offload_validation_modular-part8.md` | `op_with_unsupported_type_error.mojo`, host half: the float8 dtype family and the conversion/operation refusal | `test_regress_gpu_offload_validation_modular_part8.py` |
 
 The old mid-class part 2 is superseded by parts 5-7 and is deleted in the

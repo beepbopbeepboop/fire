@@ -8,9 +8,6 @@
       "model": "openrouter/openrouter/free",
       "count": 1,
       "kind": "opencode",
-      "instructions": [
-        "Do not use git config to change configuration data for git."
-      ],
       "recover_hours": 24,
       "class": "easy",
       "replenish": {

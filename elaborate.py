@@ -454,97 +454,6 @@ def _default_type_arg(default: str):
     return m.group(1) if m else None
 
 
-def _first_unbound_type_param(params, supplied, defaults):
-    """The first bracket parameter `supplied` leaves unbound with no provable
-    default, or None when every omitted parameter can be filled.
-
-    One implementation, two readers: `bind_type_args` uses it to decide the
-    instantiation is impossible, and `unbound_type_parameter` exposes the SAME
-    answer so a call site can name the parameter in its diagnostic. Splitting
-    this rule in two is how a refusal and its message drift apart."""
-    for i, p in enumerate(params):
-        if p.startswith('*'):
-            # A variadic parameter binds whatever is left, and an EMPTY pack is
-            # a valid binding (`_get_kgen_string[name]()` has no `*extra`
-            # argument and means the empty pack), so it is never unbound.
-            return None
-        if i >= len(supplied) and _default_type_arg(defaults.get(p, '')) is None:
-            return p
-    return None
-
-
-def unbound_type_parameter(template_src: str, type_args):
-    """The first bracket parameter a call's EXPLICIT `type_args` leaves
-    unbound and cannot fill from a default, or None when the bracket is
-    complete enough to instantiate.
-
-    This is `bind_type_args`'s "missing and no provable default" answer, named
-    so a caller can report which parameter it is (`failed to infer parameter
-    'y' of 'param_fn'`) instead of silently declining the instantiation. See
-    `_first_unbound_type_param` for the shared rule."""
-    params = type_param_names(template_src)
-    if not params:
-        return None
-    supplied = list(type_args or ())
-    if not any(p.startswith('*') for p in params) and len(supplied) > len(params):
-        supplied = supplied[:len(params)]
-    defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
-    return _first_unbound_type_param(params, supplied, defaults)
-
-
-def _argument_list_text(template_src: str) -> str:
-    """The text between the parentheses of the template's `def` argument list,
-    skipping the bracket parameter list (which may itself nest brackets)."""
-    i = template_src.find('def ')
-    if i < 0:
-        return ''
-    j = i
-    while j < len(template_src) and template_src[j] not in '[(':
-        j += 1
-    if j < len(template_src) and template_src[j] == '[':
-        depth = 0
-        while j < len(template_src):
-            ch = template_src[j]
-            j += 1
-            if ch == '[':
-                depth += 1
-            elif ch == ']':
-                depth -= 1
-                if depth == 0:
-                    break
-        while j < len(template_src) and template_src[j] != '(':
-            j += 1
-    if j >= len(template_src) or template_src[j] != '(':
-        return ''
-    start, depth = j, 0
-    while j < len(template_src):
-        ch = template_src[j]
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-            if depth == 0:
-                return template_src[start + 1:j]
-        j += 1
-    return template_src[start + 1:]
-
-
-def unbound_param_is_inferable(template_src: str, name: str) -> bool:
-    """True when the bracket parameter `name` appears in the template's ARGUMENT
-    list (`def f[T](x: SIMD[T, 4])`). Such a parameter is filled from the call's
-    argument types, so an explicit bracket that leaves it out is not a program
-    error: the inference path binds it. A parameter with a DEFAULT expression
-    (even one `type_param_defaults` cannot evaluate to a literal, such as a
-    named constant) is fillable too. Only a parameter that neither an argument
-    nor a default can supply (`def param_fn[x: Int, y: Int](x: Int)` leaves `y`
-    nowhere to come from) is refused by the caller."""
-    if name in type_param_defaults(template_src):
-        return True
-    name = name.lstrip('*')  # a variadic `*types` is named by its bare name in the arguments
-    return re.search(r'\b%s\b' % re.escape(name),
-                     _argument_list_text(template_src)) is not None
-
-
 def bind_type_args(template_src: str, type_args):
     """{param: concrete} for a template's bracket parameters, filling any the
     caller did not supply from their DEFAULT (`type_param_defaults`). None when
@@ -570,8 +479,6 @@ def bind_type_args(template_src: str, type_args):
         if len(supplied) > len(params):
             supplied = supplied[:len(params)]
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
-    if _first_unbound_type_param(params, supplied, defaults) is not None:
-        return None
     targs = {}
     for i, p in enumerate(params):
         if p.startswith('*'):
@@ -580,9 +487,17 @@ def bind_type_args(template_src: str, type_args):
             # position), and it needs at least one argument (an empty
             # `chain()` has no measured lifting shape — the seed's
             # container gate already requires >= 1 argument).
+            if len(supplied) <= i:
+                return None
             targs[p] = list(supplied[i:])
             break
-        targs[p] = supplied[i] if i < len(supplied) else _default_type_arg(defaults.get(p, ''))
+        if i < len(supplied):
+            targs[p] = supplied[i]
+            continue
+        dflt = _default_type_arg(defaults.get(p, ''))
+        if dflt is None:
+            return None
+        targs[p] = dflt
     return targs
 
 
@@ -2891,11 +2806,6 @@ def _bound_trait_evidence(struct_src, arg, trait, fn_bounds, seen):
         # (The declared DEFAULT of a bounded parameter is already stripped
         # from the map before it gets here; see
         # `check_signature_param_bound_evidence`.)
-        # `comptime_param_annotations` records an annotation TOGETHER with its
-        # default (`'DType = Self.dtype'`), so the trait list is what precedes
-        # the first `=`; comparing the whole string made every defaulted
-        # parameter read as unproven (the stdlib-syntax red at simd.mojo:2247).
-        b = re.split(r'\s*=\s*', b, 1)[0]
         if not _TRAIT_LIST_RE.fullmatch(b):
             return 'proven'
         traits = [t.strip() for t in b.split('&') if t.strip()]
@@ -3045,11 +2955,6 @@ _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
 
 
-#: The dtype a literal of a proven Mojo scalar type binds. `Int` is the 64-bit
-#: integer, so `Int64`; a literal's Mojo type comes from its syntax alone.
-_LITERAL_DTYPE = {'Int': 'Int64', 'UInt': 'UInt64', 'Float64': 'Float64'}
-
-
 def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     """{type-param: concrete value} from unifying ONE parameter's declared type
     annotation against ONE argument's actual C type, or `{}` when the shape is
@@ -3111,14 +3016,9 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
     # nothing. Any other scalar C type (`double`, `float`, `int32_t`) cannot be
     # an erased SIMD, so the argument IS that scalar, which is `SIMD[dtype, 1]`.
-    # A literal the CALLER proves (`104` is an `Int`, `2.0` a `Float64`) names
-    # its dtype from its own syntax, so the erasure ambiguity does not arise:
-    # `arg_mojo` carries that type, and it binds `dtype` exactly as a scalar C
-    # type does, with width 1.
-    lit = _LITERAL_DTYPE.get(arg_mojo) if arg_mojo else None
-    if lit is None and arg_ctype == 'int64_t':
+    if arg_ctype == 'int64_t':
         return {}
-    dtype = lit if lit is not None else c_to_mojo(arg_ctype)
+    dtype = c_to_mojo(arg_ctype)
     if dtype is None:
         return {}
     m = _SCALAR_ANN_RE.match(ann)
@@ -3402,33 +3302,15 @@ def _fill_erased_params(template_src, params, binding) -> dict:
     return binding
 
 
-def deduced_param_count(template_src: str) -> int:
-    """How many bracket parameters come BEFORE a `//` separator. Those are
-    DEDUCED: the call's argument types bind them, and an explicit bracket on
-    the call fills only the parameters after the `//`. `bitcast[dtype, width]`
-    is `def bitcast[src_dtype, src_width, //, dtype, width](val: SIMD[src_dtype,
-    src_width])`: the explicit `[dtype, width]` names the destination, and the
-    source is deduced from `val`. Zero when the head has no `//`."""
-    m = mm.head_match(template_src)
-    if not m:
-        return 0
-    count = 0
-    for p in split_top_level_commas(m.params):
-        p = p.strip()
-        if not p:
-            continue
-        if p == '//':
-            return count
-        if _is_param_marker(p):
-            continue
-        count += 1
-    return 0
-
-
-def _infer_binding(template_src: str, arg_ctypes, arg_mojo_types=None) -> dict:
-    """{param: Mojo type} for every bracket parameter an argument binds, or a
-    template default fills. Parameters nothing binds are absent."""
+def infer_type_args(template_src: str, arg_ctypes, arg_mojo_types=None):
+    """Infer a generic's type args from the C types of its call arguments. For
+    each type parameter that appears in a parameter's type ANNOTATION, bind it
+    to the Mojo type of the matching argument (`_unify_param_ann` says which
+    annotation shapes that covers). Returns the ordered list of Mojo type
+    names, or None if any parameter is unbound."""
     params = type_param_names(template_src)
+    if not params:
+        return None
     fn = None
     for s in Parser(py_tokenize(template_src)).parse_module():
         if isinstance(s, FunctionDef):
@@ -3460,56 +3342,9 @@ def _infer_binding(template_src: str, arg_ctypes, arg_mojo_types=None) -> dict:
             _d = _default_type_arg(_defaults.get(p, ''))
             if _d is not None:
                 binding[p] = _d
-    return binding
-
-
-def infer_type_args(template_src: str, arg_ctypes, arg_mojo_types=None):
-    """Infer a generic's type args from the C types of its call arguments. For
-    each type parameter that appears in a parameter's type ANNOTATION, bind it
-    to the Mojo type of the matching argument (`_unify_param_ann` says which
-    annotation shapes that covers). Returns the ordered list of Mojo type
-    names, or None if any parameter is unbound."""
-    params = type_param_names(template_src)
-    if not params:
-        return None
-    binding = _infer_binding(template_src, arg_ctypes, arg_mojo_types)
     if any(p not in binding for p in params):
         return None
     return [binding[p] for p in params]
-
-
-def complete_explicit_type_args(template_src: str, explicit_args, arg_ctypes,
-                                arg_mojo_types=None):
-    """The full ordered type args for a call that writes an EXPLICIT bracket.
-
-    Without a `//` separator the explicit list is the whole list, and it is
-    returned unchanged. With one, the explicit list fills the parameters after
-    the `//` (left to right, a default covering any the caller omitted), and
-    the parameters before it are deduced from the argument types exactly as
-    `infer_type_args` does. Explicit arguments are never overridden by a
-    deduction. None when a deduced parameter cannot be bound, or when the
-    explicit list does not fit the parameters after the `//`."""
-    k = deduced_param_count(template_src)
-    if k == 0:
-        return list(explicit_args)
-    params = type_param_names(template_src)
-    deduced, rest = params[:k], params[k:]
-    if len(explicit_args) > len(rest):
-        return None
-    binding = _infer_binding(template_src, arg_ctypes, arg_mojo_types)
-    if any(p not in binding for p in deduced):
-        return None
-    defaults = type_param_defaults(template_src)
-    out = [binding[p] for p in deduced]
-    for i, p in enumerate(rest):
-        if i < len(explicit_args):
-            out.append(explicit_args[i])
-            continue
-        d = _default_type_arg(defaults.get(p, ''))
-        if d is None:
-            return None
-        out.append(d)
-    return out
 
 
 def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes,
@@ -3753,20 +3588,13 @@ class Elaborator:
         self.gcc = gcc
 
     def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None,
-                               arg_ctypes=None, origin_module: str | None = None,
-                               generic_paths: dict | None = None) -> dict:
+                               arg_ctypes=None, origin_module: str | None = None) -> dict:
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
-        via the CAS. Returns a dict {symbol, object, ret, params, nested_objects}
-        or None.
+        via the CAS. Returns a dict {symbol, object, ret, params} or None.
 
         `arg_count` (the call's actual argument count, when known) disambiguates
         same-named generic overloads distinguished only by arity (e.g.
         itertools.product's 2/3/4-iterable versions) — see extract_fn_source.
-
-        `generic_paths` ({name: source path}) are the generic functions the
-        caller can see. A body that calls one of them is elaborated too, and the
-        objects that call needs are returned in `nested_objects`, which the
-        caller must link in beside `object` (see monomorphize.instantiate).
 
         Elaborate-once-ever: the instantiation is content-addressed, so a repeat
         (here or in another program) is a cache hit."""
@@ -3792,18 +3620,15 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        nested_objects: list = []
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      conformance_bases=_where_conformance_bases(module_src),
-                                                     origin_module=origin_module,
-                                                     generic_paths=generic_paths,
-                                                     links_out=nested_objects)
+                                                     origin_module=origin_module)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
         if ret is None:
             ret = mm.defined_return_ctype(mangled) or 'void'
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
-                'nested_objects': nested_objects, 'ret': ret, 'params': ptypes}
+                'ret': ret, 'params': ptypes}
 
     def elaborate_generic_struct(self, module_src: str, struct_name: str,
                                  type_args, nested=None) -> dict:
@@ -3905,31 +3730,14 @@ class Elaborator:
         # with a lossy escape, so `['A_B']` and `['A', 'B']` named one symbol.
         mangled = mm.mangle_signature(fn_name, ptypes)
         renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
-        try:
-            obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
-        except Exception:
-            # The extracted single-function source can contain a bracketed call
-            # to a SIBLING overload of the same name -- `std/bit/mask.mojo`'s
-            # plain `splat` body is `Int(splat[.int](Scalar[.bool](value)))`,
-            # and the standalone snippet cannot define that sibling, so
-            # emit_calls' ownership-scoped refusal raises ("a bracketed call
-            # splat[...]() needs link-mode specialisation"). The SYMBOL and the
-            # SIGNATURE come from the mangling above, not from this object, and
-            # `_emit_generic_instantiation` already tolerates object=None (a
-            # recursive-cycle instantiation returns it). Declining here instead
-            # threw away the correctly-mangled symbol and left every importer
-            # call site on the unsuffixed name the definer never emits.
-            from mojo.middle import types as _mtypes
-            _mtypes._debug_note('overload object compile failed')
-            obj = None
+        obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
         return {'symbol': mangled, 'object': obj,
                 'ret': _mojo_type(ret) if ret else 'void',
                 'params': [_mojo_type(p) for p in ptypes]}
 
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes,
                                         origin_module: str | None = None,
-                                        arg_mojo_types=None,
-                                        generic_paths: dict | None = None) -> dict:
+                                        arg_mojo_types=None) -> dict:
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
         tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
@@ -3943,8 +3751,7 @@ class Elaborator:
             return self.elaborate_generic_call(module_src, fn_name, type_args,
                                                arg_count=len(arg_ctypes),
                                                arg_ctypes=arg_ctypes,
-                                               origin_module=origin_module,
-                                               generic_paths=generic_paths)
+                                               origin_module=origin_module)
         except ConformanceError:
             # A conformance failure inferred from an ERASED argument type is
             # a fact about this codegen's C representation, not about the

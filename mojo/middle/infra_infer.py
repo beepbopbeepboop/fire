@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from __future__ import annotations
 import dataclasses
+import os
 import re
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _sms_key
 import regex_compile
@@ -80,20 +81,6 @@ def _resolve_type(gen, ann: str | None) -> str:
                 if not _ann_s:
                     break
             ann = _ann_s
-    # Cross-module collision, local-first: when THIS module defines a struct
-    # under `ann`'s bare name and that struct is the collision LOSER (its C
-    # name is qualified — recorded in `_local_cname_map`), a bare annotation
-    # in this module's source means the LOCAL class, not the winner that
-    # holds the bare name in the shared `struct_field_types` (measured:
-    # analyzer.py's `families: dict[str, Family]` / `-> StackEffect` resolved
-    # to parsing.py's `Family(Node)` / `StackEffect(Node)` layouts, so the
-    # root-side constructor wrote into the wrong fields and the wrong method
-    # table answered the dispatch). A dotted annotation is an explicit module
-    # reference (`op: parser.InstDef`) and never remaps.
-    if isinstance(ann, str) and '.' not in ann:
-        _lcm_r = getattr(gen, '_local_cname_map', None)
-        if _lcm_r and ann in _lcm_r:
-            return f"{_lcm_r[ann]} *"
     if ann in gen.struct_field_types:
         return f"{ann} *"
     # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —
@@ -114,32 +101,7 @@ def _resolve_type(gen, ann: str | None) -> str:
     if isinstance(ann, str) and '.' in ann:
         _bare = ann.rsplit('.', 1)[-1]
         if _bare in gen.struct_field_types:
-            if ' | ' not in ann:
-                return f"{_bare} *"
-            # A union annotation is NOT one dotted name — the `_bare` above
-            # is the LAST member's bare name (measured: CPython
-            # Tools/cases_generator's analyzer.py `op: parser.InstDef |
-            # parser.Pseudo` resolved to `Pseudo *`, and the body's field
-            # reads used Pseudo's offsets on InstDef objects: `op->inputs`
-            # answered `kind`, a string, and iterating it segfaulted).
-            # When TWO OR MORE non-None members name known structs, no
-            # single pointer type has every member's layout, so skip the
-            # fast path: the `_mojo_type` union branch below boxes the
-            # value to int64_t and every member access lowers to the
-            # runtime tag dispatch (`_mojo_dispatch_getattr`), which reads
-            # each concrete type's field at its own offsets (the shape
-            # analyze_forest's boxed `node` already runs on). A one-struct
-            # union (`parser.Node | None`) keeps the fast path — the one
-            # struct IS the layout.
-            _nsm = 0
-            for _up in ann.split(' | '):
-                _up = _up.strip()
-                if _up == 'None':
-                    continue
-                if _up.rsplit('.', 1)[-1] in gen.struct_field_types:
-                    _nsm += 1
-            if _nsm < 2:
-                return f"{_bare} *"
+            return f"{_bare} *"
     # _mojo_type is a stateless module-level function with no access to
     # struct_field_types, so a pointer-to-a-known-struct annotation like
     # `UnsafePointer[MoveOnly_Int, MutExternalOrigin]` would otherwise
@@ -2491,25 +2453,15 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
     conflicting: set = set()
 
     def note(n):
-        if isinstance(n, gimple_ctypes.AssignStmt):
-            if not isinstance(n.target, gimple_ctypes.IdentExpr):
-                return
-            name = _as_str(n.target.name)
-            _val = n.value
-        elif isinstance(n, gimple_ctypes.VarDecl):
-            # `var v = ...` is a VarDecl, not an AssignStmt -- same binding
-            # shape (one name, one value), same hazard: a float SIMD
-            # constructor's local erased to int64_t across the return.
-            name = _as_str(getattr(n, 'name', '') or '')
-            if not name:
-                return
-            _val = n.value
-        else:
+        if not isinstance(n, gimple_ctypes.AssignStmt):
             return
+        if not isinstance(n.target, gimple_ctypes.IdentExpr):
+            return
+        name = _as_str(n.target.name)
         if name in conflicting:
             return
         cand = None
-        if isinstance(_val, gimple_ctypes.StringLiteral):
+        if isinstance(n.value, gimple_ctypes.StringLiteral):
             # A string/bytes literal is the SAME hazard a container literal
             # is, not the "genuine scalar" this function's own docstring
             # excludes: it is a real POINTER, so a caller-side int64_t
@@ -2518,8 +2470,8 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if getattr(_val, 'is_bytes', False) else 'char *'
-        elif isinstance(_val, gimple_ctypes.FloatLiteral):
+            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
+        elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
             # "not included, they are what the int64_t default is for" — and
@@ -2543,8 +2495,8 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # conservative answer for a name rebound to two kinds.
             cand = 'double'
         else:
-            t = (_container_literal_ctype(_val)
-                 or _builtin_container_ctor_ctype(_val))
+            t = (_container_literal_ctype(n.value)
+                 or _builtin_container_ctor_ctype(n.value))
             if t:
                 cand = t
             else:
@@ -2571,7 +2523,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                 # result.md. `_quick_type` is the SAME estimator that call
                 # site uses, so the two agree by construction rather than by
                 # a second hand-written rule.
-                _v = _val
+                _v = n.value
                 if isinstance(_v, gimple_ctypes.CallExpr):
                     _vt = gen._quick_type(_v)
                     if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
@@ -2611,27 +2563,6 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                             _nv = gen._generator_value_ctype_for_next(_nargs[0])
                         if _nv:
                             cand = _nv
-                    elif (isinstance(_v.func, gimple_ctypes.SubscriptExpr)
-                          and isinstance(_v.func.obj, gimple_ctypes.IdentExpr)
-                          and _as_str(_v.func.obj.name) in ('SIMD', 'Scalar')):
-                        # A float `SIMD[dtype, N](...)` / `Scalar[dtype](...)`
-                        # constructor is scalar-erased to its dtype's C type,
-                        # and the body already declares `float v;` for it -- so
-                        # a `return v` must infer `float`, not the int64_t
-                        # default (the caller would read the float's bit
-                        # pattern as an integer). Same resolver the constructor
-                        # arm and `_resolve_type` use.
-                        _idx = getattr(_v.func, 'index', None)
-                        _els = getattr(_idx, 'elements', None)
-                        if _els is None:
-                            _els = [_idx]
-                        if _els and _els[0] is not None:
-                            _dt = ''
-                            if hasattr(gen, '_type_expr_to_ann'):
-                                _dt = gen._type_expr_to_ann(_els[0])
-                            _sct = gimple_ctypes._dtype_token_ctype(str(_dt))
-                            if _sct in ('float', 'double', '__fp16'):
-                                cand = _sct
                 if cand is None and not isinstance(_v, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
                     # A STRING-valued expression bound to a local: `a = str(n)`,
                     # `a = d + "x"`, `a = d.strip()`, `a = os.path.join(d, f)`.
@@ -3184,60 +3115,9 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
             elem[v] = 'MojoList *'
             nested[v] = gen._infer_list_elem_type(lit.elements[0].elements)
 
-    def _note_ctor_elem(v, val):
-        """`v = List[T]()` / `Set[T]()` / `Array[T, N]()` -> element type of `v`.
-
-        The cross-call element contract is fed from this pre-pass, but it only
-        replayed LITERALS and `.append(...)`: a container built by a TYPED
-        CONSTRUCTOR carried no element type, so a caller of a function
-        returning `List[Float32]` read `a[0]` with `mojo_list_get_int` and
-        printed the double's bit pattern. One shape, and the element type comes
-        from the same helper the VarDecl/AssignStmt paths use.
-        """
-        if not isinstance(val, CallExpr):
-            return
-        f = val.func
-        _els = None
-        if isinstance(f, SubscriptExpr) and isinstance(f.obj, IdentExpr):
-            if _as_str(f.obj.name) not in ('List', 'list', 'Set', 'set',
-                                           'Array', 'FixedSizeArray'):
-                return
-            _idx = getattr(f, 'index', None)
-            _els = getattr(_idx, 'elements', None)
-            if _els is None and _idx is not None:
-                _els = [_idx]
-        elif isinstance(f, IdentExpr):
-            if _as_str(f.name) not in ('List', 'list', 'Set', 'set'):
-                return
-        else:
-            return
-        if not _els:
-            return
-        _ann = gen._type_expr_to_ann(_els[0]) if hasattr(gen, '_type_expr_to_ann') else ''
-        if not _ann:
-            return
-        try:
-            from mojo.middle.stmts_shared import _annotation_container_elem_type
-        except Exception:
-            return
-        _base = (_as_str(f.obj.name) if isinstance(f, SubscriptExpr)
-                 else _as_str(f.name))
-        _ct = _annotation_container_elem_type(
-            gen, '%s[%s]' % (_base, _ann),
-            'MojoList *' if _base in ('List', 'list', 'Array', 'FixedSizeArray')
-            else 'MojoSet *')
-        if _ct:
-            elem[_as_str(v)] = _ct
-
     def walk(stmts):
         for n in stmts:
-            if isinstance(n, VarDecl):
-                # `var l = List[Float32]()` -- a VarDecl, not an AssignStmt;
-                # same one-name/one-value binding shape.
-                _note_ctor_elem(getattr(n, 'name', ''), getattr(n, 'value', None))
-                continue
-            if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
-                _note_ctor_elem(n.target.name, n.value)
+            if isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
                 v, val = n.target.name, n.value
                 if isinstance(val, gimple_ctypes.ListExpr):
                     note_list_literal(v, val)

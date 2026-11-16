@@ -247,52 +247,20 @@ that is meant to be behaviour-preserving:
   target, the increment at the end of the body block); 7 more copies use
   that. NOT converted: the cursor loops with no increment, and three loops
   whose increment is not the last thing in the body.
-- **Stage 6, arms of the giant functions (2026-11-14, finished
-  2026-11-15).** `tools/extract_arm.py` moves one top-level `if` arm of a
-  function into its own function and replaces it with a call. It computes what
-  the arm reads from the parent, refuses an arm whose inputs are not bound on
-  every path, that binds a name the parent reads later, or that calls a nested
-  function, and checks that the moved body is the same syntax tree. 35 arms
-  were moved on 2026-11-14: `_lower_call` 3,261 -> 2,060 lines (`_lc_*`),
-  `_lower_method_call` 3,951 -> 1,423 (`_lmc_*`). 26 more followed out of the
-  eight remaining functions, so `--list FILE PARENT 25` now prints `0 lines
-  can be moved` for every one of them and only the tool's own refusals
-  (`NO (...)`) remain: `_lower_dict_method` 557 -> 101 (`_ldm_*`),
-  `_lower_subscript` 724 -> 291 (`_ls_*`), `_lower_IdentExpr` 679 -> 303
-  (`_lie_*`), `_lower_call` 2,084 -> 1,708 (`_lcx_*`), `_lower_named_call` 983
-  -> 757 (`_lnc_*`), `_lower_MemberExpr` 1,728 -> 1,533 (`_lme_*`),
-  `_lower_binary_tail` 1,421 -> 1,274 (`_lbt_*`), `_lower_struct_method_call`
-  482 -> 410 (`_lsmc_*`). `test_gimple_arms_extracted.py` pins that state.
-  Every other compiler source and test program in the dump corpus emits a
-  byte-identical `.ci`; the new parameters have the C types the parent's
-  locals had in the compiler's own output, the one exception being
-  `_ls_pointer_arith`'s `ot`, which the parent casts at the call site
-  (`MojoList *`) because that arm uses it as a container.
-- **Stage 6, passes of `gen_module_impl` (started 2026-11-16).**
-  `module_gen.py` now compiles in single-file `--dump` mode (one
-  `any(<generator expression>)` was in the way) and is in gimple-lint's
-  corpus. `tools/extract_arm.py --phase` moves a WHOLE top-level statement
-  (a pass: a `for`, an `if` with its test) into a function that returns
-  nothing; it refuses a statement that returns, that binds a name the
-  parent or one of its nested functions reads afterwards, or that calls a
-  nested function. 18 passes were moved (`_gmp_*`, 3,731 lines):
-  `gen_module_impl` is 15,554 -> 11,841 lines. Generated output for the
-  corpus is byte-identical. In the compiler's own output the new
-  parameters have the C types the locals had; a list or dict parameter
-  whose elements are strings is annotated `list[str]` so element reads
-  stay typed. About 100 of 54,000 runtime calls in `module_gen.ci` differ,
-  most of them boxing calls that are gone because a local no longer
-  shares its name with a differently-typed local of another pass.
-  Second round (2026-11-16): `tools/hoist_nested.py` lifts a nested
-  function to module level when the only names of the parent it reads are
-  the parent's parameters and other liftable nested functions; those
-  become its first parameters and every call passes them. 30 of the 59
-  nested functions were lifted (`_gmh_*`, 1,074 lines), which freed 18 more
-  passes to move. `gen_module_impl` is 9,416 lines.
-  NOT moved: 29 nested functions that read a local of `gen_module_impl`
-  (lifting one needs a typed parameter per captured local), the passes
-  that call them, and the passes that bind a name read later (those need
-  to return a value).
+- **Stage 6, arms of the giant functions (started 2026-11-14).**
+  `tools/extract_arm.py` moves one top-level `if` arm of a function into its
+  own function and replaces it with a call. It computes what the arm reads
+  from the parent, refuses an arm whose inputs are not bound on every path,
+  that binds a name the parent reads later, or that calls a nested function,
+  and checks that the moved body is the same syntax tree. 35 arms were
+  moved: `_lower_call` 3,261 -> 2,060 lines (`_lc_*`), `_lower_method_call`
+  3,951 -> 1,423 (`_lmc_*`). Generated output is byte-identical; the new
+  parameters have the C types the parent's locals had in the compiler's own
+  self-compiled output. The remaining ~2,400 movable lines in eight other
+  functions are `bugs/CODEGEN_giant_lowering_functions_split_by_arm.md`.
+  `gen_module_impl` (15,491 lines) is NOT started: its file does not compile
+  in single-file `--dump` mode, so the parameter types of an extracted phase
+  cannot be checked the same way.
 - **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
   loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
   functions are split along their `isinstance` arms.
