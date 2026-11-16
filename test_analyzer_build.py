@@ -11,7 +11,9 @@ must build and behave like CPython's):
 SKIP (exit 0) when the CPython source tree is absent. Locate it with
 $PYTHON_SRC, default /Users/mrs/net/Python-3.14.6.
 
-Run: `python3 test_analyzer_build.py`   (~20 s, < 1 GB)
+Run: `python3 test_analyzer_build.py`   (~20 s warm; the compiled analyzer
+itself peaks at ~8.6 GB of RSS on bytecodes.c — see
+bugs/CODEGEN_casesgen_analyzer_runtime_footprint.md)
 """
 import os
 import shutil
