@@ -2775,7 +2775,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
     # bare overloaded-dunder call sites it reddened on are fixed and the job is
     # back on.
-    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled']
+    expected_disabled = ['metalgpu']
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -2920,7 +2920,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
     # bare overloaded-dunder call sites it reddened on are fixed and the job is
     # back on.
-    expected_disabled = ['gimple', 'metalgpu', 'module-globals-compiled']
+    expected_disabled = ['metalgpu']
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
