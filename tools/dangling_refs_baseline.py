@@ -39,7 +39,7 @@ BASELINE = {
     # spelled here on purpose: the count moves as the record is appended to,
     # and `--write-baseline` rewrites this file, so a comment that names them
     # would be lost on the next regeneration.)
-    'bugs/LAND-codegen-nested-bracket-generic-call-4.md': 5,
+    'bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md': 5,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 1,
