@@ -128,3 +128,28 @@ part's `## Done when` names the probe that is red today and green when the
 part lands. The old advice to take "the arity-only overload choice" is part 3,
 which landed; the remaining classes are the replan table's, not this
 section's.
+
+## Re-measured 2026-11-15: the JOB is green; 32 references remain
+
+The job this doc was filed against now PASSES:
+
+    python3 tools/stdlib_dylib_ratchet.py
+    -> stdlib-dylib: 0 module(s) fell back to source (0 expected)
+    -> exit 0
+
+and `tools/control.py gate list` no longer turns `stdlib-dylib` off. The count
+is **32**, down from the 50 the Symptom above records (43 after part 1, 32
+after part 3). Of the 32, **12 carry no overload suffix** — `_std_sys_info_
+is_apple_gpu`, `_std_sys_info_is_nvidia_gpu`, `_std_random_random_seed`,
+`_std_time_time_sleep`, `_std_memory_memory__free`, `_std_bit_mask_splat`,
+`_std_collections_string_string__calc_initial_buffer_size`,
+`_std_python__cpython_CPython_as_imm`, `_std_sys_info_is_amd_gpu`,
+`_std_sys_info_has_nvidia_gpu_accelerator`, `_std_time_time_time_function`,
+`_std_memory_memory_unsafe_memset_zero` — and the other 20 carry a suffix that
+is not the defining unit's.
+
+All 12 unsuffixed ones are calls to an OVERLOADED free function from a module
+that did not define it (`std/sys/info.mojo`'s `is_apple_gpu()` has both a
+`()` and a `[subarch: StaticString]()` overload, and neither symbol is defined
+by the dylib at all), i.e. the imported-free-function half of part 2, not a new
+class. That is the remaining work; the doc stays open for it.
