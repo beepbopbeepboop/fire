@@ -17,9 +17,117 @@ Reproduce on master (`python3 tools/suite.py stdlib-dylib`), then fix the cause.
 The job is green on a tree with the `disabled=` argument removed from `tools/suite.py`, AND both quick tests below pass:
 
 1. `python3 test_stdlib_dylib_ratchet.py` (the ratchet's own synthetic-dylib test).
-2. The import-suffix agreement test named in the plan below (not yet written; it must fail on master first).
+2. `python3 test_stdlib_import_suffix.py` (written 2026-11-15; red before that round's fix, green after). It compiles `string_span.mojo` and `_unicode.mojo` with `compile_module_to_c` and requires every `_unicode` call in `string_span` to name the symbol `_unicode` emits, and pins the export record's parameter ctypes (`Span *` for `StringSlice[_]`, `char *` for bare `StringSlice`).
 
 The job itself is the integrator's to run (`python3 tools/suite.py stdlib-dylib`); a worker does not run it.
+
+## Status (2026-11-15): the 21 suffix mismatches' root cause fixed (scan-side type drift); the job is still red on the 29
+
+**What landed.** The 21 "overload/instance-suffix mismatches" were not a cross-process
+inference problem at all: the importer's suffix never came from the definer's
+signature. `module_loader._mojo_type_to_c` — the export text scan the importer
+reads (`_emit_stdlib_import_externs` sets `func_param_types[sym]` from its
+`c_parameters`) — boxed every `Span`/`StringSlice` parameter to `int64_t *`, to
+avoid naming a `Span` typedef an importing TU "might not have". Every generated
+TU has carried `typedef struct Span Span;` in its prelude since that workaround
+became stale, and the box is a DIFFERENT C type from the one the defining
+module emits (`_param_ctype`):
+
+    string_span.mojo calls   ..._is_lowercase_55072c (int64_t * s)
+    _unicode.mojo defines    ..._is_lowercase_fa3cf4 (Span * s)
+
+The bare spelling was the same bug in its other shape: `_atof(x: StringSlice)`
+is emitted with `char *` (`_d719e0`) and was called with `int64_t *`
+(`_55072c`), i.e. `atof` from this doc's list. One symbol, two independent
+type resolvers — the CLAUDE.md "no duplicated implementations" failure.
+
+**Two corrections to the mechanism note below.** A fresh gen's
+`_signature_ctypes([('s', 'StringSlice[_]')], fn)` resolves `Span *`, not
+`int64_t *` (measured), and `module_shared.py`'s snapshot block is inside the
+`if _sib_qualifier and sym_info:` arm, so a STDLIB import never reaches it. The
+importer's `int64_t *` comes from `func_param_types[sym]`, which
+`_emit_stdlib_import_externs` fills from the export scan — i.e. the second
+resolver in `module_loader.py`, not cross-process inference and not
+`_signature_ctypes`.
+
+The fix states the parameter-annotation rule ONCE, in
+`mojo/middle/types.param_annotation_ctype` (bare string wrappers → `char *`;
+everything else → `_mojo_type`, whose bracket branch already gives `Span *` for
+`StringSlice[_]`/`Span[...]`), and makes the three existing readers use it:
+
+- `mojo/middle/funcs_shared._param_ctype` — the definer's own parameter
+  resolver (its `char *` branch is now the shared predicate);
+- `module_loader.ModuleLoader._mojo_type_to_c(..., param=True)` — the importer's
+  export text scan (the Span/StringSlice box is deleted; `param=True` is now
+  passed at both parameter sites, return types keep `_mojo_type`'s rule);
+- `reflect.py::_param_mt` — the AST signature emitter whose `export_csym`
+  advertises the dylib's reflection entries (its advertised symbol for a bare
+  `StringSlice` parameter was also hashed from `int64_t`).
+
+Measured on this tree (each compile under `tools/memslot.py --gb 8`):
+
+- `string_span.mojo`: the four `_unicode` references are now
+  `is_lowercase/is_uppercase/to_lowercase/to_uppercase_fa3cf4`, matching
+  `_unicode.mojo`'s definitions (were `_55072c`).
+- `string.mojo`'s `_atof` call is now `..._atof_d719e0 (char * x)`, matching
+  `parsing_floats.mojo`'s definition (was `_55072c (int64_t * x)`).
+- 151 parameter entries across the stdlib change to the type their defining
+  module emits; no other annotation does (the shared rule differs from
+  `_mojo_type` only for those four bare names).
+- New regression test `test_stdlib_import_suffix.py`: RED before the fix with
+  exactly the ten failures the pre-fix resolver produces (four call-vs-definition
+  mismatches, their four general-rule twins, and the two export-record checks),
+  GREEN after. Also `test_stdlib_dylib_ratchet.py` and `test_module_cache.py`'s
+  cross-module / reflect cases (24 checks) pass.
+
+**This supersedes the (a)/(b) decision for the 21, not for everything.** Option
+(a) (the definer publishing committed signatures) is still the answer for a
+signature whose ctypes come from BODY inference (an unannotated parameter
+refined at emit time) — the scan cannot re-derive those, and this round did not
+touch that class. But the measured 21 were all annotated parameters whose types
+the two resolvers disagreed about; no manifest was needed for them.
+
+**Master's `4ac31ae95` fixed only the bare half, and its p6 probe proves the
+other half is still red.** That commit (2026-11-14, `_parsing_numbers` part 2)
+replaced the `int64_t *` box with `char *` for BOTH spellings. `char *` is what
+a BARE `StringSlice` parameter emits (`_atof` -> `_d719e0`, so
+`p2_imported_suffix_matches_the_defining_unit` is green), but a bracketed
+`StringSlice[_]` parameter emits `Span *` (`fa3cf4`), so the same commit still
+leaves `is_lowercase`/`is_uppercase`/`to_lowercase`/`to_uppercase` hashing
+`_d719e0` against `_fa3cf4`. Measured this round with master's own probe file
+run against a scan forced back to `4ac31ae95`'s rule:
+
+    p6 under master 4ac31ae95 scan: FAIL -> string_span references
+      ..._is_lowercase_d719e0 but _unicode defines ..._is_lowercase_fa3cf4
+
+With this round's rule both probes pass (`p2_imported` and `p6_bracketed` in
+`test_stdlib_dylib_lazy_undefined_refs_probes.py`, master's file, run against
+this tree). So when landing, resolve the `module_loader._mojo_type_to_c` hunk in
+favour of this change (it deletes the box and splits parameter from return
+type), NOT by keeping `4ac31ae95`'s `char *` for both. That commit's part-6 doc
+in the CODEGEN_stdlib_dylib_lazy_undefined_refs family is then resolved too:
+p6 is its Done-when probe, so delete that doc (and run
+`dangling_doc_refs.py --ratchet`) in the landing commit — the doc is not on this
+branch's base, which is why it could not be deleted here.
+
+p7 of that family (a parameter/return type that is a struct PRIVATE to the
+defining module is seen by the scan as `int64_t`) is a different class: its
+type is not an annotation the shared rule can resolve without the definer's
+struct table, so it stays open. It is claimed by another lane
+(`claude-lazy-refs-part7`).
+
+**What is still red, so this doc stays and `disabled=` stays.** The 29 "no
+definition under any suffix" symbols — the other half of the original 50 — are a
+different mechanism, filed as parts 8 and 9 of the
+CODEGEN_stdlib_dylib_lazy_undefined_refs family (part 8: same-name free-function
+overloads neither emitted nor callable; part 9: a generic free function
+instantiated only by another module is never emitted; both open on master).
+The Array/Deque `__getitem__` instance-suffix mismatches are in the same
+generic-instance family. None of them were reproduced or changed here. So the
+job is NOT green: the integrator must not remove `disabled=` or delete this doc
+until parts 8/9 (and the method-instance half) land. The open question about
+the 150 symbol-collision exclusions below is also unchanged (it needs a full
+build with `MOJO_DEDUP_LOG`, which a light worker does not run).
 
 ## Status (2026-11-12): planning round — root cause narrowed, fix not landed
 

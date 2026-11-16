@@ -876,7 +876,7 @@ class ModuleLoader:
                                 else:
                                     bare_type = ptype
                                 try:
-                                    c_type = self._mojo_type_to_c(bare_type)
+                                    c_type = self._mojo_type_to_c(bare_type, param=True)
                                 except Exception:
                                     c_type = 'int64_t'
                                 if c_type == 'void':
@@ -891,7 +891,7 @@ class ModuleLoader:
                                 else:
                                     bare_type = ptype
                                 try:
-                                    c_type = self._mojo_type_to_c(bare_type)
+                                    c_type = self._mojo_type_to_c(bare_type, param=True)
                                 except Exception:
                                     c_type = 'int64_t'
                                 # A named parameter can never be typed 'void' in C
@@ -1325,7 +1325,7 @@ class ModuleLoader:
             return {}
 
     @staticmethod
-    def _mojo_type_to_c(mojo_type: str) -> str:
+    def _mojo_type_to_c(mojo_type: str, param: bool = False) -> str:
         """Convert Mojo type annotation to C type.
 
         This used to maintain its own small type_map (a second, independent
@@ -1365,8 +1365,17 @@ class ModuleLoader:
         top level, so a top-level import here would be a circular partial-
         init failure; by the time `load_module` is actually called at
         runtime both modules are fully loaded.
-        """
+
+        `param=True` asks for a PARAMETER's type instead of a general/return
+        one. The two differ for the string wrappers only, and that difference
+        is the whole point: a bare `StringSlice` parameter is `char *` in the
+        definition while `_mojo_type` (the return-type rule) boxes it to
+        int64_t, and `StringSlice[_]` is the fat-pointer `Span *`. The
+        parameter rule is `param_annotation_ctype`, the ONE statement of it
+        that `funcs_shared._param_ctype` also uses — see its docstring for
+        the stdlib-dylib undefined-reference this drift used to cause."""
         from gimple_codegen import _mojo_type
+        from mojo.middle.types import param_annotation_ctype
         mojo_type = mojo_type.strip()
 
         # A few shapes this text-only extractor can hand in that aren't a
@@ -1376,6 +1385,11 @@ class ModuleLoader:
         # Pass everything else straight through to the canonical resolver.
         if mojo_type.endswith('*'):
             base_type = mojo_type[:-1].strip()
+            # A trailing '*' means this string is already a C type (a prior
+            # signature re-parse), not a Mojo annotation: the string-wrapper
+            # parameter rule must NOT run here (it would spell a bare
+            # `StringSlice *` as `char * *`). Only the un-starred branch below
+            # is an annotation.
             c_base = _mojo_type(base_type)
             return f"{c_base} *"
         if mojo_type.startswith('MojoList'):
@@ -1390,23 +1404,19 @@ class ModuleLoader:
         # default instead of a pointer type.
         if mojo_type == 'UnsafePointer':
             return 'int64_t *'
-        # Span/StringSlice: _mojo_type correctly resolves these to 'Span *'
-        # (the fat-pointer struct GimpleGen seeds into struct_field_types
-        # and typedefs into the preamble of a module IT is compiling), but
-        # this call site emits a bare `extern <type> sym(...);` declaration
-        # into a DIFFERENT file's translation unit that has no reason to
-        # have that typedef too -- "unknown type name 'Span'". Unlike
-        # MojoList/MojoDict/MojoSet (always available via fire_runtime.h,
-        # included everywhere), Span has no globally-available typedef, so
-        # box it to the same opaque-handle convention every other
-        # not-locally-declared struct type already uses in this codebase
-        # (see gimple_codegen.py's _lower_UnaryOp: "Struct types: return
-        # int64_t (opaque handle) -- can't cast struct to int64_t in
-        # GIMPLE"). Found via build_stdlib_dylib.py regressing to 12 skipped
-        # modules ("unknown type name 'Span'") the same day this method
-        # started delegating to _mojo_type.
-        if mojo_type.split('[', 1)[0].strip() in ('Span', 'StringSlice'):
-            return 'int64_t *'
+        # Span/StringSlice used to be boxed HERE to `int64_t *`, to avoid
+        # naming a `Span` typedef the importing translation unit might not
+        # have. Every generated TU now emits `typedef struct Span Span;` in
+        # its prelude (module_gen's preamble), and `_mojo_type` already
+        # resolves both the bracketed `StringSlice[_]`/`Span[...]` (to
+        # `Span *`) and the bare string wrappers (via
+        # `param_annotation_ctype` when `param=True`) exactly as the defining
+        # module's own `_signature_ctypes` does. The box was a SECOND answer
+        # to that question, and it hashed a different overload suffix for
+        # every StringSlice parameter — a call to a `_std_*_<hex>` symbol the
+        # dylib never defines (the `stdlib-dylib` undefined-reference red).
+        if param:
+            return param_annotation_ctype(mojo_type)
         return _mojo_type(mojo_type)
 
     def get_symbol_type(self, module_name: str, symbol_name: str) -> str:
