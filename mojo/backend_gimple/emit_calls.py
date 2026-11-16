@@ -226,26 +226,7 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                 _gen_kwarg_values = []
                 continue
             # A keyword argument binds to the slot of its own NAME, not to the
-<<<<<<< HEAD
             # next free slot in sequence.
-||||||| 990245242
-            # next free slot in sequence.
-            _gen_pnames = list(gen._func_param_names.get(fname_raw) or [])
-=======
-            # next free slot in sequence. The table lookup misses a lowered
-            # generator: gen_module's `_func_param_names` pass ran after
-            # coro.py's rewrite renamed the def to `__mgco_<g>_body` (whose
-            # only param is `__c`), so the ORIGINAL name is absent and the
-            # fallback is the api entry's own `param_names` snapshot (the
-            # DEFINING module's, for a cross-module import) -- the same
-            # order `c_params`/`func_param_types[f"{base}_start"]` use.
-            # Without it, `tokenize(src, filename=filename)` against
-            # `def tokenize(src, line=1, filename="")` popped the filename
-            # word into the `line` slot (the "class b" garbage in
-            # COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fix).
-            _gen_pnames = (list(gen._func_param_names.get(fname_raw) or [])
-                           or list(api.get('param_names') or []))
->>>>>>> work/bug-compile-fail-tools-cases-generator-a
             if (_gen_kwarg_dict and len(_gen_pnames) == len(_gen_expected)
                     and _pos < len(_gen_pnames)
                     and _gen_pnames[_pos] in _gen_kwarg_dict):
@@ -10865,15 +10846,24 @@ def _lnc_int(gen, arg_pairs: list) -> tuple[str, str] | None:
         return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
     if at == 'double':
         return 'int64_t', gen._cast('int64_t', f"{av}")
-    # A tagged/boxed word (a double box holds the double's bits, not a
-    # numeric int64_t) must be read by kind: `mojo_box_int` returns the
-    # double box truncated toward zero (Python's `int(float)`), and the
-    # raw word for a non-double box or a plain int. Without this, int(x)
-    # of a boxed 2.5 returned the box or its bits instead of 2.
-    if at in ('int64_t', 'int', '_Bool') and av in getattr(gen, '_boxed_vals', ()):
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', av)])
+    # A word of UNKNOWN KIND in an int64_t slot: the old pass-through
+    # (`return av`) assumed every int64_t word is a plain integer, so a
+    # string slice (`mojo_word_slice`), a kind-mixed list slot, or a
+    # boxed double handed straight on: `result.replicated =
+    # int(anno[10:-1])` in Tools/cases_generator/analyzer.py's make_uop
+    # stored the string's ADDRESS, and the following
+    # `for oparg in range(result.replicated):` loop spun forever
+    # (bugs/COMPILE_FAIL_Tools_cases_generator_analyzer: a 170K-
+    # generator/sec BlockStmt.tokens drain instead of CPython's 55ms).
+    # `mojo_int_of_word` is the kind-aware read (its runtime comment
+    # names the cases): identity for a genuinely numeric word, digit
+    # parse for a bare or boxed string, truncation for a double box —
+    # it also subsumes the former `av in _boxed_vals` special case
+    # (mojo_box_int answered a boxed string with the pointer, the same
+    # defect, and a None box with 0 where CPython raises).
     if at == 'int64_t':
-        return 'int64_t', av
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_int_of_word',
+                                         [('int64_t', gen._ensure_local('int64_t', av))])
     if at in ('int', '_Bool'):
         return 'int64_t', gen._cast('int64_t', f"{av}")
     return None
@@ -11666,82 +11656,9 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # straight cast is correct here — mirrors the analogous `float(x)`
     # direct-cast special case immediately below.
     if fname_raw == 'int' and len(arg_pairs) == 1:
-<<<<<<< HEAD
         _arm_r = _lnc_int(gen, arg_pairs)
         if _arm_r is not None:
             return _arm_r
-||||||| 990245242
-        at, av = arg_pairs[0]
-        # A var statically declared int64_t but _actual_types-tracked as
-        # 'char *' holds a BOXED STRING (e.g. a tuple-unpack slot typed by
-        # the loop machinery's int64_t convention while the runtime value
-        # came from `line.split(":")`). Python `int(x)` on it must PARSE
-        # the digits — returning x unchanged leaked that same
-        # _actual_types['char *'] entry into the enclosing expression,
-        # where binary '+' then dispatched to string concatenation
-        # (`mojo_str_from_int(old) + str_cat(...)`) instead of integer
-        # addition; even type-correct consumers read the pointer bits as
-        # the "int". Route through mojo_make_int, exactly like the
-        # statically-char* `int("42")` case this special case already
-        # handles. Real repro: Tools/scripts/summarize_stats.py's
-        # load_raw_data: `stats[key.strip()] += int(value)`.
-        if at in ('int', 'int64_t', '_Bool') and gen._actual_types.get(av) == 'char *':
-            cp = gen._new_val('char *', f'(char *){av}')
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
-        if at == 'double':
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
-        # A tagged/boxed word (a double box holds the double's bits, not a
-        # numeric int64_t) must be read by kind: `mojo_box_int` returns the
-        # double box truncated toward zero (Python's `int(float)`), and the
-        # raw word for a non-double box or a plain int. Without this, int(x)
-        # of a boxed 2.5 returned the box or its bits instead of 2.
-        if at in ('int64_t', 'int', '_Bool') and av in getattr(gen, '_boxed_vals', ()):
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', av)])
-        if at == 'int64_t':
-            return 'int64_t', av
-        if at in ('int', '_Bool'):
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
-=======
-        at, av = arg_pairs[0]
-        # A var statically declared int64_t but _actual_types-tracked as
-        # 'char *' holds a BOXED STRING (e.g. a tuple-unpack slot typed by
-        # the loop machinery's int64_t convention while the runtime value
-        # came from `line.split(":")`). Python `int(x)` on it must PARSE
-        # the digits — returning x unchanged leaked that same
-        # _actual_types['char *'] entry into the enclosing expression,
-        # where binary '+' then dispatched to string concatenation
-        # (`mojo_str_from_int(old) + str_cat(...)`) instead of integer
-        # addition; even type-correct consumers read the pointer bits as
-        # the "int". Route through mojo_make_int, exactly like the
-        # statically-char* `int("42")` case this special case already
-        # handles. Real repro: Tools/scripts/summarize_stats.py's
-        # load_raw_data: `stats[key.strip()] += int(value)`.
-        if at in ('int', 'int64_t', '_Bool') and gen._actual_types.get(av) == 'char *':
-            cp = gen._new_val('char *', f'(char *){av}')
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
-        if at == 'double':
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
-        # A word of UNKNOWN KIND in an int64_t slot: the old pass-through
-        # (`return av`) assumed every int64_t word is a plain integer, so a
-        # string slice (`mojo_word_slice`), a kind-mixed list slot, or a
-        # boxed double handed straight on: `result.replicated =
-        # int(anno[10:-1])` in Tools/cases_generator/analyzer.py's make_uop
-        # stored the string's ADDRESS, and the following
-        # `for oparg in range(result.replicated):` loop spun forever
-        # (bugs/COMPILE_FAIL_Tools_cases_generator_analyzer: a 170K-
-        # generator/sec BlockStmt.tokens drain instead of CPython's 55ms).
-        # `mojo_int_of_word` is the kind-aware read (its runtime comment
-        # names the cases): identity for a genuinely numeric word, digit
-        # parse for a bare or boxed string, truncation for a double box —
-        # it also subsumes the former `av in _boxed_vals` special case
-        # (mojo_box_int answered a boxed string with the pointer, the same
-        # defect, and a None box with 0 where CPython raises).
-        if at == 'int64_t':
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_int_of_word',
-                                             [('int64_t', gen._ensure_local('int64_t', av))])
-        if at in ('int', '_Bool'):
-            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
->>>>>>> work/bug-compile-fail-tools-cases-generator-a
 
     # float(x) — direct cast for numeric types
     if fname_raw == 'float' and arg_pairs:
@@ -12808,7 +12725,7 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
             _skd = _sk[_si]
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             if _skd == 'double':
-                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
+                return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
             if _skd == 'bytes':
                 return _list_slot_bytes(gen, ov, idx64)
             if _skd == 'str':
@@ -12820,8 +12737,8 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
                 # always a heterogeneous list LITERAL, including one that
                 # came back through a `return`
                 # (`gen._return_value_slot_kinds`).
-                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
-            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
+            return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
     # A tuple (or any list with per-slot C types recorded) subscripted at
     # a compile-time constant index: the slot's own C type is the answer.
     # This must run BEFORE the generic `_maybe_kinds_vals` boxed read,
@@ -12840,16 +12757,16 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
             _sct = _as_str(_ts[_si])
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             if _sct == 'double':
-                return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
+                return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
             if _sct == 'char *':
-                return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
+                return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
             if _sct == 'MojoBytes *':
                 return _list_slot_bytes(gen, ov, idx64)
             if _sct == '_Bool':
                 return '_Bool', gen._cast(
                     '_Bool',
-                    gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64]))
-            t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
+                    gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64]))
+            t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
             if _sct and _sct.endswith(' *'):
                 gen._actual_types[t] = _sct
                 cast_t = gen._cast(_sct, t)
@@ -12890,12 +12807,12 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
         gen._boxed_vals.add(t)
         return 'int64_t', t
     if suf == 'double':
-        t = gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
+        t = gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
         return 'double', t
     if suf == 'str':
-        t = gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
+        t = gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
         return 'char *', t
-    t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
+    t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
     # Return the actual pointer type for pointer elements (MojoDict*,
     # MojoList*, MojoSet*) so downstream consumers (subscript, method
     # dispatch) see the real type instead of raw int64_t.  Without this,
@@ -13146,289 +13063,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         return 'int64_t', gen._rt_call('int64_t', 'mojo_bytes_get_checked', [bp, idx64])
 
     if ot == 'MojoList *':
-<<<<<<< HEAD
         return _ls_list(gen, node, iv, ov)
-||||||| 990245242
-        elem = gen._elem_of(ov)
-        # A `struct.unpack(...)` result has ONE container ctype but a
-        # per-slot real kind, known statically from the format. Prefer it
-        # over the uniform element type so a format mixing ints and floats
-        # reads each slot correctly instead of handing back a float's raw
-        # IEEE bits. Needs a literal index (the overwhelmingly common shape:
-        # `a, b = struct.unpack('<if', buf)` then `a`/`b`); a computed
-        # index genuinely has no static answer, so it keeps the uniform
-        # fallback rather than guessing.
-        _sk = gen._struct_slot_kinds.get(ov)
-        if isinstance(_sk, ginf._RuntimeKinded):
-            _sk = None      # kinds only known at run time: the boxed read below
-        if _sk and isinstance(node.index, gimple_ctypes.IntLiteral):
-            _si = node.index.value
-            if 0 <= _si < len(_sk):
-                _skd = _sk[_si]
-                idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-                if _skd == 'double':
-                    return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
-                if _skd == 'bytes':
-                    return _list_slot_bytes(gen, ov, idx64)
-                if _skd == 'str':
-                    # A `char *` slot, held in the raw int64_t slot (see
-                    # fire_runtime.h's MojoList comment), so this is the
-                    # string accessor and NOT a coercion: the word IS the
-                    # pointer. `'str'` reaches this table two ways — a
-                    # `struct.unpack` format can never produce it, so it is
-                    # always a heterogeneous list LITERAL, including one that
-                    # came back through a `return`
-                    # (`gen._return_value_slot_kinds`).
-                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
-                return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
-        # A tuple (or any list with per-slot C types recorded) subscripted at
-        # a compile-time constant index: the slot's own C type is the answer.
-        # This must run BEFORE the generic `_maybe_kinds_vals` boxed read,
-        # because `mojo_list_get_boxed` returns a raw container pointer for a
-        # nested-list slot (MOJO_KIND_LIST is "its own answer") while the
-        # lowering would still type it as a boxed int64_t — so `print(t[0])`
-        # on `t = ([1, 2], 3)` printed the list's address as a decimal instead
-        # of `[1, 2]` (`test_runtime_diff.py::tuple_with_a_nested_container_
-        # slot`). `_tuple_slot_types` carries the static C type; use it and
-        # propagate the slot value's nested tracking the same way the uniform
-        # pointer-element path does below.
-        _ts = getattr(gen, '_tuple_slot_types', {}).get(ov)
-        if _ts and isinstance(node.index, gimple_ctypes.IntLiteral):
-            _si = node.index.value
-            if 0 <= _si < len(_ts):
-                _sct = _as_str(_ts[_si])
-                idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-                if _sct == 'double':
-                    return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
-                if _sct == 'char *':
-                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
-                if _sct == 'MojoBytes *':
-                    return _list_slot_bytes(gen, ov, idx64)
-                if _sct == '_Bool':
-                    return '_Bool', gen._new_val(
-                        '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")
-                t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
-                if _sct and _sct.endswith(' *'):
-                    gen._actual_types[t] = _sct
-                    cast_t = gen._new_val(_sct, f'({_sct}){t}')
-                    gen._actual_types[cast_t] = _sct
-                    if _sct == 'MojoList *':
-                        if ov in gen._tuple_slot_types:
-                            gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                            gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
-                        if ov in gen._nested_elem_types:
-                            gen._elem_types[cast_t] = gen._nested_elem_types[ov]
-                            gen._elem_types[t] = gen._nested_elem_types[ov]
-                        else:
-                            gen._elem_types[t] = gen._elem_types.get(ov, 'int64_t')
-                            if gen._elem_types[t] in ('int64_t',) and ov in gen._elem_types:
-                                gen._elem_types[cast_t] = gen._elem_types[ov]
-                    if _sct == 'MojoDict *' and ov in gen._dict_val_types:
-                        gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
-                    return _sct, cast_t
-                _mark_unknown_list_elem(gen, ov, t)
-                return 'int64_t', t
-        suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
-        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        # A list that records its OWN per-slot kinds, read at an index that is
-        # not a compile-time constant, is the one read with no static answer:
-        # the loop variable of `for x in struct.unpack('<if', buf)` and the
-        # value of `struct.unpack('<if', buf)[i]` both used to come out of
-        # one accessor, which hands back a float slot's raw IEEE-754 bits.
-        # The runtime knows the kind, so read it there and let the box carry
-        # it out of the slot; the consumer resolves it (see gen._boxed_vals).
-        # Checked BEFORE the uniform-suffix branches, because a heterogeneous
-        # list's tracked element type is its PROMOTED one — 'double' for
-        # `[1, 2.5]` — which is exactly the answer that is wrong for its int
-        # slot. A list with no kinds of its own is unaffected: a set
-        # membership test at compile time, and the identical accessor
-        # otherwise.
-        if ov in getattr(gen, '_maybe_kinds_vals', ()):
-            t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{ov}", idx64])
-            gen._boxed_vals.add(t)
-            return 'int64_t', t
-        if suf == 'double':
-            t = gen._rt_call('double', 'mojo_list_get_double', [f"{ov}", idx64])
-            return 'double', t
-        if suf == 'str':
-            t = gen._rt_call('char *', 'mojo_list_get_str', [f"{ov}", idx64])
-            return 'char *', t
-        t = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{ov}", idx64])
-        # Return the actual pointer type for pointer elements (MojoDict*,
-        # MojoList*, MojoSet*) so downstream consumers (subscript, method
-        # dispatch) see the real type instead of raw int64_t.  Without this,
-        # x = lst[0]; x["key"] on a list-of-dicts field fails because
-        # var_types[x] is int64_t and x["key"] dispatches on int64_t instead
-        # of MojoDict* — see BUG-2026-044.
-        if elem and elem.endswith(' *'):
-            gen._actual_types[t] = elem
-            cast_t = gen._new_val(elem, f'({elem}){t}')
-            gen._actual_types[cast_t] = elem
-            # Propagate nested element types for MojoList* (list-of-lists)
-            if elem == 'MojoList *':
-                # A list of HETEROGENEOUS tuples (`[(body, 0)]`): the container
-                # carries each inner slot's own type, so the element read
-                # inherits them and `body, idx = stack[-1]` reads `idx` as an
-                # int, not as the joined list element type.
-                if ov in gen._tuple_slot_types:
-                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
-                if ov in gen._nested_elem_types:
-                    gen._elem_types[cast_t] = gen._nested_elem_types[ov]
-                    gen._elem_types[t] = gen._nested_elem_types[ov]
-                else:
-                    gen._elem_types[t] = gen._elem_types.get(ov, 'int64_t')
-                    if gen._elem_types[t] in ('int64_t',) and ov in gen._elem_types:
-                        gen._elem_types[cast_t] = gen._elem_types[ov]
-            # For MojoDict* elements, propagate dict value type from the
-            # container (list variable) so subsequent ["key"] subscript
-            # dispatches to mojo_dict_get_str instead of mojo_dict_get_int.
-            if elem == 'MojoDict *' and ov in gen._dict_val_types:
-                gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
-            return elem, cast_t
-        _mark_unknown_list_elem(gen, ov, t)
-        return 'int64_t', t
-=======
-        elem = gen._elem_of(ov)
-        # A `struct.unpack(...)` result has ONE container ctype but a
-        # per-slot real kind, known statically from the format. Prefer it
-        # over the uniform element type so a format mixing ints and floats
-        # reads each slot correctly instead of handing back a float's raw
-        # IEEE bits. Needs a literal index (the overwhelmingly common shape:
-        # `a, b = struct.unpack('<if', buf)` then `a`/`b`); a computed
-        # index genuinely has no static answer, so it keeps the uniform
-        # fallback rather than guessing.
-        _sk = gen._struct_slot_kinds.get(ov)
-        if isinstance(_sk, ginf._RuntimeKinded):
-            _sk = None      # kinds only known at run time: the boxed read below
-        if _sk and isinstance(node.index, gimple_ctypes.IntLiteral):
-            _si = node.index.value
-            if 0 <= _si < len(_sk):
-                _skd = _sk[_si]
-                idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-                if _skd == 'double':
-                    return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
-                if _skd == 'bytes':
-                    return _list_slot_bytes(gen, ov, idx64)
-                if _skd == 'str':
-                    # A `char *` slot, held in the raw int64_t slot (see
-                    # fire_runtime.h's MojoList comment), so this is the
-                    # string accessor and NOT a coercion: the word IS the
-                    # pointer. `'str'` reaches this table two ways — a
-                    # `struct.unpack` format can never produce it, so it is
-                    # always a heterogeneous list LITERAL, including one that
-                    # came back through a `return`
-                    # (`gen._return_value_slot_kinds`).
-                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
-                return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
-        # A tuple (or any list with per-slot C types recorded) subscripted at
-        # a compile-time constant index: the slot's own C type is the answer.
-        # This must run BEFORE the generic `_maybe_kinds_vals` boxed read,
-        # because `mojo_list_get_boxed` returns a raw container pointer for a
-        # nested-list slot (MOJO_KIND_LIST is "its own answer") while the
-        # lowering would still type it as a boxed int64_t — so `print(t[0])`
-        # on `t = ([1, 2], 3)` printed the list's address as a decimal instead
-        # of `[1, 2]` (`test_runtime_diff.py::tuple_with_a_nested_container_
-        # slot`). `_tuple_slot_types` carries the static C type; use it and
-        # propagate the slot value's nested tracking the same way the uniform
-        # pointer-element path does below.
-        _ts = getattr(gen, '_tuple_slot_types', {}).get(ov)
-        if _ts and isinstance(node.index, gimple_ctypes.IntLiteral):
-            _si = node.index.value
-            if 0 <= _si < len(_ts):
-                _sct = _as_str(_ts[_si])
-                idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-                if _sct == 'double':
-                    return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
-                if _sct == 'char *':
-                    return 'char *', gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
-                if _sct == 'MojoBytes *':
-                    return _list_slot_bytes(gen, ov, idx64)
-                if _sct == '_Bool':
-                    return '_Bool', gen._new_val(
-                        '_Bool', f"(_Bool) mojo_list_get_int_checked ({ov}, {idx64})")
-                t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
-                if _sct and _sct.endswith(' *'):
-                    gen._actual_types[t] = _sct
-                    cast_t = gen._new_val(_sct, f'({_sct}){t}')
-                    gen._actual_types[cast_t] = _sct
-                    if _sct == 'MojoList *':
-                        if ov in gen._tuple_slot_types:
-                            gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                            gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
-                        if ov in gen._nested_elem_types:
-                            gen._elem_types[cast_t] = gen._nested_elem_types[ov]
-                            gen._elem_types[t] = gen._nested_elem_types[ov]
-                        else:
-                            gen._elem_types[t] = gen._elem_types.get(ov, 'int64_t')
-                            if gen._elem_types[t] in ('int64_t',) and ov in gen._elem_types:
-                                gen._elem_types[cast_t] = gen._elem_types[ov]
-                    if _sct == 'MojoDict *' and ov in gen._dict_val_types:
-                        gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
-                    return _sct, cast_t
-                _mark_unknown_list_elem(gen, ov, t)
-                return 'int64_t', t
-        suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
-        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        # A list that records its OWN per-slot kinds, read at an index that is
-        # not a compile-time constant, is the one read with no static answer:
-        # the loop variable of `for x in struct.unpack('<if', buf)` and the
-        # value of `struct.unpack('<if', buf)[i]` both used to come out of
-        # one accessor, which hands back a float slot's raw IEEE-754 bits.
-        # The runtime knows the kind, so read it there and let the box carry
-        # it out of the slot; the consumer resolves it (see gen._boxed_vals).
-        # Checked BEFORE the uniform-suffix branches, because a heterogeneous
-        # list's tracked element type is its PROMOTED one — 'double' for
-        # `[1, 2.5]` — which is exactly the answer that is wrong for its int
-        # slot. A list with no kinds of its own is unaffected: a set
-        # membership test at compile time, and the identical accessor
-        # otherwise.
-        if ov in getattr(gen, '_maybe_kinds_vals', ()):
-            t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{ov}", idx64])
-            gen._boxed_vals.add(t)
-            return 'int64_t', t
-        if suf == 'double':
-            t = gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
-            return 'double', t
-        if suf == 'str':
-            t = gen._rt_call('char *', 'mojo_list_get_str_checked', [f"{ov}", idx64])
-            return 'char *', t
-        t = gen._rt_call('int64_t', 'mojo_list_get_int_checked', [f"{ov}", idx64])
-        # Return the actual pointer type for pointer elements (MojoDict*,
-        # MojoList*, MojoSet*) so downstream consumers (subscript, method
-        # dispatch) see the real type instead of raw int64_t.  Without this,
-        # x = lst[0]; x["key"] on a list-of-dicts field fails because
-        # var_types[x] is int64_t and x["key"] dispatches on int64_t instead
-        # of MojoDict* — see BUG-2026-044.
-        if elem and elem.endswith(' *'):
-            gen._actual_types[t] = elem
-            cast_t = gen._new_val(elem, f'({elem}){t}')
-            gen._actual_types[cast_t] = elem
-            # Propagate nested element types for MojoList* (list-of-lists)
-            if elem == 'MojoList *':
-                # A list of HETEROGENEOUS tuples (`[(body, 0)]`): the container
-                # carries each inner slot's own type, so the element read
-                # inherits them and `body, idx = stack[-1]` reads `idx` as an
-                # int, not as the joined list element type.
-                if ov in gen._tuple_slot_types:
-                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
-                if ov in gen._nested_elem_types:
-                    gen._elem_types[cast_t] = gen._nested_elem_types[ov]
-                    gen._elem_types[t] = gen._nested_elem_types[ov]
-                else:
-                    gen._elem_types[t] = gen._elem_types.get(ov, 'int64_t')
-                    if gen._elem_types[t] in ('int64_t',) and ov in gen._elem_types:
-                        gen._elem_types[cast_t] = gen._elem_types[ov]
-            # For MojoDict* elements, propagate dict value type from the
-            # container (list variable) so subsequent ["key"] subscript
-            # dispatches to mojo_dict_get_str instead of mojo_dict_get_int.
-            if elem == 'MojoDict *' and ov in gen._dict_val_types:
-                gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
-            return elem, cast_t
-        _mark_unknown_list_elem(gen, ov, t)
-        return 'int64_t', t
->>>>>>> work/bug-compile-fail-tools-cases-generator-a
 
     if ot == 'MojoStr *':
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
