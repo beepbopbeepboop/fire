@@ -1201,6 +1201,39 @@ def _resolve_test_relative_module(gen, module: str) -> str | None:
         d = parent
     return None
 
+def _home_signature_ctypes(gen, module: str, fs) -> list:
+    """`_signature_ctypes` of an IMPORTED function's own FunctionDef `fs`
+    (defined in `module`), as the DEFINING unit would type it.
+
+    The importer's resolver knows only the structs it has itself registered, so
+    a parameter typed with a struct PRIVATE to `module` (never imported here:
+    `benchmark._run_impl(opts: _RunOptions)`) falls to the `int64_t` word. The
+    definition emits `_RunOptions *`, and the overload suffix is a hash of that
+    list, so the caller named a symbol (`..._run_impl_<hash of int64_t>`) the
+    definer never defines. A parameter whose annotation names a `struct`
+    declared in the home module's own source is therefore `struct Name *` here
+    (the tag spelling of the definer's `Name *`; `overload_suffix_for` hashes
+    them alike, and an importer has no `Name` typedef to spell).
+    """
+    pts = gen._signature_ctypes(fs.params, fs)
+    params = fs.params or []
+    if len(pts) != len(params):
+        return pts
+    structs = set()
+    for _hs in (gen._parsed_import(module)[2] or []):
+        if isinstance(_hs, StructDef) and _hs.name:
+            structs.add(_as_str(_hs.name))
+    if not structs:
+        return pts
+    out = list(pts)
+    for _i, (_pn, _pt) in enumerate(params):
+        if out[_i] == 'int64_t' and isinstance(_pt, str):
+            _base = _pt.split('[', 1)[0].strip()
+            if _base in structs:
+                out[_i] = 'struct ' + _base + ' *'
+    return out
+
+
 def _parsed_import(gen, module: str):
     """(path, source_text, stmts) for an imported module, parsed once and
     cached. (None, '', None) on failure."""

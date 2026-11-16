@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part4, CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part7, CODEGEN_stdlib_dylib_lazy_undefined_refs-part8, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part4, CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part8, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
@@ -7,9 +7,9 @@ that the dylib LOADS (a data/class-table reference to an undefined symbol is fat
 `tools/stdlib_dylib_ratchet.py`). These 50 are lazy CALL references: they do not stop the load, but a
 client that reaches one through the dylib aborts at that call unless another image happens to define it.
 
-## Replan (2026-11-15): the live parts are 4-9
+## Replan (2026-11-15): the live parts are 4-6, 8 and 9
 
-Parts 1-3 landed and their docs were deleted when they landed:
+Parts 1-3 and 7 landed and their docs were deleted when they landed:
 
 - part 1: a re-exported free function's reference carries the DEFINING module's
   qualifier (`_reexported_defining_qualifier`).
@@ -19,6 +19,15 @@ Parts 1-3 landed and their docs were deleted when they landed:
   dispatch and the comparison lowering); the suffix-less forward declaration
   for an overloaded dunder is gone. The total was 50 -> 43 -> 32 by
   2026-11-14, with 0 modules falling back to source.
+- part 7: a parameter typed with a struct private to the DEFINING module
+  (`benchmark._run_impl(opts: _RunOptions)`) is `Name *` there but `int64_t`
+  in the importer's text scan, so the two hashed different overload suffixes.
+  The importer now hashes the definer's list (`_home_signature_ctypes`, ranked
+  ahead of the shared slot by `_imported_private_struct_pts`) while still
+  DECLARING and CALLING the extern with the opaque `int64_t` word: naming
+  `Name` there makes the importer lower `.field` as a typed `->` against a
+  struct it never defines. 32 -> 31 undefined `_std_` names, the one that went
+  being `_std_benchmark_benchmark__run_impl_9f63a2`; none new.
 
 The title's "50" is the 2026-11-12 measurement and is stale; the live
 residual is the table below. Measured 2026-11-15 in this worktree by compiling
@@ -33,7 +42,6 @@ build, no link), then confirming the end-to-end shape with two-module
 | 4 | `bugs/CODEGEN_stdlib_dylib_lazy_undefined_refs-part4.md` | a `comptime if` chain emits the other TARGET's bodies; only the host's `_linux`/`_macos` variant is built | 4 x `std_os__linux_{aarch64,x86}__{lstat,stat}` from `std/os/path/path.mojo` |
 | 5 | `...-part5.md` | a body the backend cannot lower vanishes, so the caller's qualified name has no definition (its own calls get a BARE weak stub) | `std_sys_info_is_{apple,nvidia,amd}_gpu`, `std_python__cpython_CPython_as_imm` |
 | 6 | `...-part6.md` | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
-| 7 | `...-part7.md` | a struct type private to the defining module becomes `int64_t` on the caller side | `std_benchmark_benchmark__run_impl` |
 | 8 | `...-part8.md` | two same-name free functions in one module are neither defined nor callable; the call becomes a bare `(void)` stub | `std_bit_mask_splat`, `std_memory_memory__free`, `..._unsafe_memset_zero`, `..._to_integer` |
 | 9 | `...-part9.md` | a generic free function instantiated only by another module is never emitted | `..._forget_deinit`, `..._unsafe_destroy_n`, `..._dealloc`, `std_time_time_time_function` |
 
@@ -123,7 +131,7 @@ test: run `nm -u` against `nm -gU` and require the `_std_` difference to *shrink
 `stdlib-dylib` fail on it until the count is zero: all 50 exist before the fix and the job's documented
 contract is that the dylib need not be complete.
 
-**Exact next step:** work parts 4-9, in the order of the table above. Each
+**Exact next step:** work parts 4-6, 8 and 9, in the order of the table above. Each
 part's `## Done when` names the probe that is red today and green when the
 part lands. The old advice to take "the arity-only overload choice" is part 3,
 which landed; the remaining classes are the replan table's, not this
