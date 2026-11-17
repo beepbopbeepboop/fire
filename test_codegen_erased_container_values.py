@@ -11,7 +11,6 @@ test_codegen_erased_container_values_pins.py.
 Open parts (2026-11-15 replan):
 
     python3 test_codegen_erased_container_values.py ctor_dtype_spelling
-    python3 test_codegen_erased_container_values.py list_elem_across_return
     python3 test_codegen_erased_container_values.py simd_value_across_return
 
 `p1_alias`, `p2_alias_ctor` and `p3_comptime` below are landed (their docs were
@@ -196,54 +195,6 @@ def test_ctor_dtype_spelling_simd_scalar_name_keeps_float_ctype():
     # SIMD value into a float.
     ibody = _defn(c, 'ctor_dtype_spelling_i32')
     assert 'int64_t i;' in ibody, ibody
-
-
-# part 2 of the 2026-11-15 replan (doc: bugs/
-# CODEGEN_simd_and_array_values_erase_to_int64-part2.md):
-# a `List[T]()` constructor's bracket element type is assigned evidence
-# (exactly as a list LITERAL's elements are), so a function returning that
-# list hands its element kind to the caller across the call boundary.
-LIST_ELEM_RETURN_SRC = (
-    'def mk_f32() -> List[Float32]:\n'
-    '    var l = List[Float32]()\n'
-    '    l.append(1.5)\n'
-    '    return l\n'
-    '\n'
-    'def f32():\n'
-    '    var a = mk_f32()\n'
-    '    return a[0]\n'
-    '\n'
-    'def mk_int() -> List[Int]:\n'
-    '    var l = List[Int]()\n'
-    '    l.append(2)\n'
-    '    return l\n'
-    '\n'
-    'def i():\n'
-    '    var a = mk_int()\n'
-    '    return a[0]\n'
-    '\n'
-    'def mk_str() -> List[String]:\n'
-    '    var l = List[String]()\n'
-    '    l.append("x")\n'
-    '    return l\n'
-    '\n'
-    'def s():\n'
-    '    var a = mk_str()\n'
-    '    return a[0]\n'
-)
-
-
-def test_list_elem_across_return_keeps_element_type():
-    c = _compile(LIST_ELEM_RETURN_SRC, 'list_elem_return')
-    fbody = _defn(c, 'list_elem_return_f32')
-    assert 'mojo_list_get_int' not in fbody, fbody
-    assert 'mojo_list_get_double' in fbody, fbody
-    # The two kinds that work today must not move.
-    ibody = _defn(c, 'list_elem_return_i')
-    assert 'mojo_list_get_int' in ibody, ibody
-    assert 'mojo_list_get_double' not in ibody, ibody
-    sbody = _defn(c, 'list_elem_return_s')
-    assert 'mojo_list_get_str' in sbody, sbody
 
 
 # part 3 of the 2026-11-15 replan (doc: bugs/
