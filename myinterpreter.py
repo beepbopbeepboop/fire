@@ -27,6 +27,9 @@ from mojo.middle.float8_dtype import FLOAT8_TYPE_NAMES as _FLOAT8_DTYPE_NAMES
 from mojo.middle.float8_dtype import SCALAR_TYPE_SPELLINGS as _SCALAR_DTYPE_SPELLINGS
 from mojo.middle.float8_dtype import conversion_message as _float8_conversion_message
 from mojo.middle.float8_dtype import operation_message as _float8_operation_message
+from mojo.middle.float8_dtype import round_float8 as _float8_round
+from mojo.middle.float8_dtype import has_arithmetic as _float8_has_arithmetic
+from mojo.middle.float8_dtype import has_float_conversion as _float8_has_conversion
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -5094,7 +5097,9 @@ class _MojoFloat8Value(float):
     directly rather than via super(): the self-hosting compiler compiles
     this file and has no super() (see MojoError)."""
     def __new__(cls, spelling, value=0.0):
-        instance = float.__new__(cls, value)
+        # Every float8 value is its format's nearest value (ties to even): the
+        # format is the one place the rounding rule is read from.
+        instance = float.__new__(cls, _float8_round(float(value), spelling))
         instance.spelling = spelling
         return instance
 
@@ -5104,10 +5109,46 @@ def _float8_operand_spelling(left, right):
     already-evaluated operands, or None when neither is one (see
     _MojoFloat8Value)."""
     if isinstance(left, _MojoFloat8Value):
-        return left.spelling
+        return _float8_spelling_of(left)
     if isinstance(right, _MojoFloat8Value):
-        return right.spelling
+        return _float8_spelling_of(right)
     return None
+
+
+def _float8_spelling_of(value):
+    """The lowered dtype spelling a float8 value carries (its box's kind,
+    compiled; its attribute, interpreted)."""
+    return value.spelling
+
+
+_F8_PASS = object()
+
+
+def _float8_binary(interp, node, op, left, right):
+    """A binary operation with a float8 operand, under the rules Modular's own
+    compiler enforces (mojo.middle.float8_dtype): comparisons are allowed on
+    every format; `+ - * /` are allowed on every format except e3m4; the result
+    is rounded to the operand's format. Returns the result, or _F8_PASS when no
+    float8 operand is involved (the caller computes as usual)."""
+    sp = _float8_operand_spelling(left, right)
+    if sp is None or op in ('==', '!=', '<', '<=', '>', '>=', 'is', 'is not'):
+        return _F8_PASS
+    if op in ('+', '-', '*', '/') and _float8_has_arithmetic(sp):
+        a, b = float(left), float(right)
+        if op == '+':
+            r = a + b
+        elif op == '-':
+            r = a - b
+        elif op == '*':
+            r = a * b
+        elif b != 0.0:
+            r = a / b
+        elif a != a or a == 0.0:
+            r = float('nan')
+        else:
+            r = math.copysign(float('inf'), a) * math.copysign(1.0, b)
+        return _MojoFloat8Value(sp, r)
+    interp._refuse_unsupported_float8(node, _float8_operation_message(sp))
 
 
 class _MojoTypeInfoCall:
@@ -7937,13 +7978,18 @@ class Interpreter:
         if not isinstance(type_ann, str):
             return value
         if isinstance(value, _MojoFloat8Value):
-            if (type_ann in _FLOAT8_TYPE_NAMES
-                    and _SCALAR_TYPE_SPELLINGS[type_ann] == value.spelling):
-                return value
-            self._refuse_unsupported_float8(
-                node, _float8_conversion_message(
-                    value.spelling,
-                    _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)))
+            src_sp = _float8_spelling_of(value)
+            if type_ann in _FLOAT8_TYPE_NAMES:
+                # float8 -> float8: rounds to the target format (a same-format
+                # value is returned unchanged by the constructor's rounding).
+                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], float(value))
+            target_sp = _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)
+            if not _float8_has_conversion(src_sp, target_sp):
+                self._refuse_unsupported_float8(
+                    node, _float8_conversion_message(src_sp, target_sp))
+            if isinstance(type_ann, str) and type_ann.startswith(('Int', 'UInt')):
+                return int(value)
+            return float(value)
         if type_ann in _FLOAT8_TYPE_NAMES:
             if value is None:
                 return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], 0.0)
@@ -8064,11 +8110,10 @@ class Interpreter:
         its own named step for clarity."""
         # `a += 1` is a binary operation: a float8 operand is refused with
         # Modular's diagnostic (see _apply_binary_op).
-        f8_spelling = _float8_operand_spelling(current, rhs)
-        if f8_spelling is not None:
-            self._refuse_unsupported_float8(
-                node, _float8_operation_message(f8_spelling))
         op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
+        f8 = _float8_binary(self, node, op, current, rhs)
+        if f8 is not _F8_PASS:
+            return f8
         if op == '+':
             return current + rhs
         elif op == '-':
@@ -9785,10 +9830,9 @@ class Interpreter:
         # A float8 operand has no arithmetic rule in this interpreter:
         # refuse with Modular's diagnostic (see _FLOAT8_TYPE_NAMES) instead
         # of computing silently on a dtype with no rule behind it.
-        f8_spelling = _float8_operand_spelling(left, right)
-        if f8_spelling is not None:
-            self._refuse_unsupported_float8(
-                expr, _float8_operation_message(f8_spelling))
+        f8 = _float8_binary(self, expr, op, left, right)
+        if f8 is not _F8_PASS:
+            return f8
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -9869,13 +9913,7 @@ class Interpreter:
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)
-            # A chained comparison is a binary operation too: a float8
-            # operand is refused with Modular's diagnostic (see
-            # _apply_binary_op).
-            f8_spelling = _float8_operand_spelling(left, right)
-            if f8_spelling is not None:
-                self._refuse_unsupported_float8(
-                    expr, _float8_operation_message(f8_spelling))
+            # A float8 comparison is allowed on every format (see _float8_binary).
             if not self._apply_compare_op(op, left, right):
                 return False
             left = right

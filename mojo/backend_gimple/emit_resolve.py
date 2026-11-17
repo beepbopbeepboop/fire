@@ -2811,8 +2811,21 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     # a copy of a value of the same dtype is `src == dst`, also allowed.
     _f8_src = _float8_dtype.float8_spelling_of_ctype(src)
     if _f8_src is not None and src != dst:
-        raise RuntimeError(_float8_dtype.conversion_diagnostic(
-            _f8_src, _float8_dtype.spelling_of_ctype(dst)))
+        if not _float8_dtype.has_float_conversion(
+                _f8_src, _float8_dtype.spelling_of_ctype(dst)):
+            raise RuntimeError(_float8_dtype.conversion_diagnostic(
+                _f8_src, _float8_dtype.spelling_of_ctype(dst)))
+    # A store INTO a float8 dtype rounds the value to that format (ties to
+    # even, overflow per the format), as Modular's conversion does. The value
+    # is then held as the exact double of the rounded result.
+    _f8_dst = _float8_dtype.float8_spelling_of_ctype(dst)
+    if _f8_dst is not None and src != dst:
+        _eb, _mb, _bias, _kind = _float8_dtype.float8_format(_f8_dst)
+        _kc = {'ieee': 0, 'fn': 1, 'fnuz': 2, 'ue8m0': 3}[_kind]
+        _rt = gen._new_temp('double')
+        gen._rt_into(_rt, 'mojo_f8_round', [f'(double){val}', str(_eb), str(_mb), str(_bias), str(_kc)])
+        val = _rt
+        src = 'double'
 
     # A BOXED word stored into a pointer-typed slot. `mojo_list_get_boxed` hands
     # back a box (a heap cell, kind 'l'/'p'/...) for every slot kind but a plain

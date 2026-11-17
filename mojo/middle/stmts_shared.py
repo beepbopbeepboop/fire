@@ -493,7 +493,12 @@ def _collect_isinstance_narrowings(gen, cond, out: list) -> None:
         key = gen._narrow_key_for_expr(cond.args[0])
         sn = gen._isinstance_narrow_struct(cond.args[1])
         if key and sn:
-            out.append((key, sn + ' *', cond.args[0]))
+            # `_MojoFloat8Value` is a float8 box word, not a struct pointer: the
+            # narrowed value is the word (emit_calls._lower_float8_value_box).
+            if sn == '_MojoFloat8Value':
+                out.append((key, 'int64_t', cond.args[0]))
+            else:
+                out.append((key, sn + ' *', cond.args[0]))
 
 def _handler_exc_name(gen, h) -> str:
     if h.exc_type is None:

@@ -467,6 +467,10 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.IdentExpr):
         fname: str
         fname = node.func.name
+        # `_MojoFloat8Value(spelling, value)` is a float8 box word, not a struct
+        # pointer (emit_calls._lower_float8_value_box lowers it so).
+        if fname == '_MojoFloat8Value' and not gen._locally_binds_name(fname):
+            return 'int64_t'
         # `getattr(x, 'field', default)` on a receiver of a known struct type
         # and a field that struct declares: the field's own C type (a CONTAINER
         # field is a container whatever the default is). Without this the

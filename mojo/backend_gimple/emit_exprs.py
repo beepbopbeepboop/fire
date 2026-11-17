@@ -4572,6 +4572,35 @@ def _lbt_same_type_eq(gen, op: str, lt: str, lv: str, rt: str, rv: str) -> tuple
     return None
 
 
+def _lower_float8_binary(gen, op, left_node, lt, lv, right_node, rt, rv,
+                         f8_left, f8_right):
+    """A binary operation with a float8 operand (`mojo.middle.float8_dtype`).
+
+    The rules are the ones Modular's compiler enforces, measured on the real
+    compiler: comparisons are allowed on every float8 format; arithmetic
+    (`+ - * /`) is allowed on every format except e3m4, whose arithmetic
+    converts through f32 and has no rule; anything else is refused. An
+    allowed operation computes in double (a float8 value is held as its exact
+    double) and the result is rounded to the format, so `1.0 + 0.0625` in
+    e4m3fn is 1.0, as in Modular.
+    """
+    f8 = f8_left if f8_left is not None else f8_right
+    if op in ('<', '<=', '>', '>=', '==', '!='):
+        return gen._lower_binary_tail(
+            op, left_node, 'double' if f8_left else lt, lv,
+            right_node, 'double' if f8_right else rt, rv)
+    if op in ('+', '-', '*', '/') and _float8_dtype.has_arithmetic(f8):
+        ct, val = gen._lower_binary_tail(
+            op, left_node, 'double' if f8_left else lt, lv,
+            right_node, 'double' if f8_right else rt, rv)
+        eb, mb, bias, kind = _float8_dtype.float8_format(f8)
+        kc = {'ieee': 0, 'fn': 1, 'fnuz': 2, 'ue8m0': 3}[kind]
+        t = gen._new_temp('double')
+        gen._rt_into(t, 'mojo_f8_round', [f'(double){val}', str(eb), str(mb), str(bias), str(kc)])
+        return _float8_dtype._FLOAT8_CTYPE_PREFIX + f8, t
+    raise RuntimeError(_float8_dtype.operation_diagnostic(f8))
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -4591,10 +4620,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # BinaryOp (`a + b`, any comparison) and a chained comparison, which
     # calls this per link — and AugAssign lowers through a synthetic BinaryOp,
     # so `a += b` is refused by the same rule.
-    _f8_op = (_float8_dtype.float8_spelling_of_ctype(lt)
-              or _float8_dtype.float8_spelling_of_ctype(rt))
-    if _f8_op is not None:
-        raise RuntimeError(_float8_dtype.operation_diagnostic(_f8_op))
+    _f8_l = _float8_dtype.float8_spelling_of_ctype(lt)
+    _f8_r = _float8_dtype.float8_spelling_of_ctype(rt)
+    if _f8_l is not None or _f8_r is not None:
+        return _lower_float8_binary(gen, op, left_node, lt, lv, right_node, rt, rv,
+                                    _f8_l, _f8_r)
     # `x == None` / `x != None` on a BOXED name (a tagged-generator value, or
     # any slot read kept as a box). This must be decided BEFORE the boxed
     # operand conversion below, which unwraps the box to its word: a None

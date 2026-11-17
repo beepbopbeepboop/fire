@@ -5403,6 +5403,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         res = gen._new_val('double', f'floor({dv})')
         return 'int64_t', gen._cast('int64_t', f"{res}")
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
+    # The interpreter's float8 scalar (`myinterpreter._MojoFloat8Value`): a
+    # float that carries its dtype's spelling. Compiled, it is a float8 BOX in
+    # the tagged word (runtime mojo_box_from_f8), so a value returned beside a
+    # float is a word of one kind, not a pointer the boxing refuses.
+    if fname_raw == '_MojoFloat8Value' and len(node.args) == 2:
+        return _lower_float8_value_box(gen, node)
+    if fname_raw == '_float8_spelling_of' and len(node.args) == 1:
+        vt, vv = gen.lower_expr(node.args[0])
+        return 'char *', gen._call_expr('char *', 'mojo_f8_spelling',
+                                        [('int64_t', gen._to_int64(vt, vv))])
     if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
     # `callable(x)` — does the word denote a function at run time? The runtime's
     # `mojo_is_callable_word` answers from the function/bound-method/variadic-
@@ -6319,6 +6329,11 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                                [('int64_t', gen._to_int64(obj_type, obj_val))])
             return gen._cast('_Bool', r)
         return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
+    if type_name == '_MojoFloat8Value':
+        # A float8 scalar is a float8 box in the tagged word (mojo_box_from_f8).
+        r = gen._call_expr('int', 'mojo_is_f8_box',
+                           [('int64_t', gen._to_int64(obj_type, obj_val))])
+        return gen._cast('_Bool', r)
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
         # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
@@ -6560,6 +6575,17 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     return gen._cast('_Bool', res)
 
 
+
+
+def _lower_float8_value_box(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`_MojoFloat8Value(spelling, value)` in compiled code: a float8 box word."""
+    st, sv = gen.lower_expr(node.args[0])
+    if st != 'char *':
+        sv = gen._cast('char *', f"{sv}")
+    vt, vv = gen.lower_expr(node.args[1])
+    dv = vv if vt == 'double' else gen._cast('double', f"{vv}")
+    return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_f8',
+                                     [('double', dv), ('char *', sv)])
 
 
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
