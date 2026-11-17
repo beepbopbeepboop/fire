@@ -428,13 +428,10 @@ int mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64
     return 1;
 }
 
-/* Re-push a snapshot above the current depths and free it. Returns the
-   number of cleanup records re-pushed (the caller that resumes a parked
-   coroutine uses it to record the pad's cleanup checkpoint; see
-   mojo_cleanup_pad_checkpoint). */
-int mojo_coro_slice_restore(void *snap)
+/* Re-push a snapshot above the current depths and free it. */
+void mojo_coro_slice_restore(void *snap)
 {
-    if (!snap) return 0;
+    if (!snap) return;
     MojoCoroSlice *sl = (MojoCoroSlice *)snap;
     int base = _mojo_frame_depth;
     for (int i = 0; i < sl->nsaved && base + i < MOJO_FRAME_MAX; i++)
@@ -448,7 +445,6 @@ int mojo_coro_slice_restore(void *snap)
             _mojo_cleanup_aux[_mojo_cleanup_top] = cr[i].aux;
     }
     free(sl);
-    return nc;
 }
 
 void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
@@ -668,29 +664,6 @@ void mojo_cleanup_checkpoint_save(void)
 {
     if (_mojo_exc_top >= 0 && _mojo_exc_top < MOJO_EXC_STACK_MAX)
         _mojo_cleanup_checkpoint[_mojo_exc_top] = _mojo_cleanup_top;
-}
-
-/* Record the cleanup checkpoint for exception level `lvl` so that a later
-   `mojo_raise` unwinding to it runs exactly the `nc` cleanup records that
-   sit ABOVE the caller's own depth right now -- the owning frame's records
-   are at/below that depth and must survive.
-  
-   `mojo_cleanup_checkpoint_save` records the WHOLE current depth, which is
-   right for generated try/except entries (they run on the frame that owns
-   the locals about to be pushed). It is WRONG for a runtime coroutine pad:
-   the pad is pushed by the trampoline from the RESUMER's context, and the
-   records the pad must own (the body's, re-pushed from the parked slice on
-   every resume) land on top of the resumer's records AFTER the pad is
-   pushed. Leaving the pad's slot stale -- whatever an earlier try at the
-   same array index left there -- makes the GeneratorExit unwind of a
-   destroyed generator run _mojo_cleanup_unwind_to(stale), freeing live
-   owned locals of OUTER frames (measured: the analyzer's `uops.values()`
-   list, freed from inside __mojo_gen_destroy of the uop's tokens()
-   generator, corrupting the analyze_forest loop). */
-void mojo_cleanup_pad_checkpoint(int lvl, int nc)
-{
-    if (lvl < 0 || lvl >= MOJO_EXC_STACK_MAX) return;
-    _mojo_cleanup_checkpoint[lvl] = _mojo_cleanup_top - nc;
 }
 
 /* Run every cleanup thunk pushed since the checkpoint recorded for the
@@ -1959,53 +1932,8 @@ double mojo_box_double(int64_t v)
 {
     if (!mojo_is_boxed(v)) return (double)v;
     MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind != 'd' && !(bx->kind >= 'A' && bx->kind <= 'G'))
-        return (double)bx->bits;
+    if (bx->kind != 'd') return (double)bx->bits;
     return mojo_double_from_bits(bx->bits);
-}
-
-/* float8 boxes: kind letters, in float8_dtype.FLOAT8_FORMATS order. */
-static const char *const _f8_names[] = {
-    "f8e3m4", "f8e4m3fn", "f8e4m3fnuz", "f8e5m2", "f8e5m2fnuz", "f8e8m0fnu"
-};
-
-/* The four numbers per format, in _f8_names order (float8_dtype.FLOAT8_FORMATS):
- * exponent bits, mantissa bits, bias, kind (0 ieee, 1 fn, 2 fnuz, 3 ue8m0). */
-static const int _f8_params[6][4] = {
-    {3, 4, 3, 0}, {4, 3, 7, 1}, {4, 3, 8, 2}, {5, 2, 15, 0}, {5, 2, 16, 2}, {8, 0, 127, 3}
-};
-
-int64_t mojo_box_from_f8(double v, const char *spelling)
-{
-    char kind = 'G';
-    for (int i = 0; i < 6; i++)
-        if (spelling && strcmp(spelling, _f8_names[i]) == 0) { kind = (char)('A' + i); break; }
-    if (kind != 'G') {
-        const int *p = _f8_params[kind - 'A'];
-        v = mojo_f8_round(v, p[0], p[1], p[2], p[3]);   /* a value is its format's */
-    }
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    if (!bx) return mojo_double_to_bits(v);
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = mojo_double_to_bits(v);
-    bx->kind = kind;
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    return (int64_t)(uintptr_t)bx;
-}
-
-int mojo_is_f8_box(int64_t v)
-{
-    if (!mojo_is_boxed(v)) return 0;
-    char k = ((MojoBox *)(intptr_t)v)->kind;
-    return k >= 'A' && k <= 'G';
-}
-
-const char *mojo_f8_spelling(int64_t v)
-{
-    if (!mojo_is_f8_box(v)) return "";
-    char k = ((MojoBox *)(intptr_t)v)->kind;
-    if (k == 'G') return "f8?";
-    return _f8_names[k - 'A'];
 }
 
 /* A double passed where an unannotated parameter's call sites ALSO pass an
@@ -2014,118 +1942,6 @@ const char *mojo_f8_spelling(int64_t v)
  * Not cached: there is no (list, slot) to key it on. Each call site boxes its
  * own argument once, and the box is never freed, the same lifetime a list's
  * cached box has. */
-/* Round to a float8 format; see mojo_f8_round in fire_runtime.h. The algorithm
- * is float8_dtype.round_float8's: the quantum of the binade a value lies in,
- * nearbyint (round-half-even under the default mode), then the overflow rule. */
-double mojo_f8_round(double x, int ebits, int mbits, int bias, int kind)
-{
-    if (isnan(x)) return x;
-    if (kind == 3) {                       /* ue8m0: powers of two, no zero */
-        if (x <= 0.0) return ldexp(1.0, -bias);   /* nearest is the minimum */
-        int e;
-        double f = frexp(x, &e);           /* x = f * 2^e, f in [0.5, 1) */
-        int ex = e - 1;                    /* x in [2^ex, 2^(ex+1)) */
-        double lo = ldexp(1.0, ex), hi = ldexp(1.0, ex + 1);
-        int code_max = 254 - bias;         /* largest biased exponent is 254 */
-        if (ex >= code_max) return ldexp(1.0, code_max);
-        if (x - lo < hi - x) return lo;
-        if (hi - x < x - lo) return hi;
-        return (ex + bias) % 2 == 0 ? lo : hi;   /* tie: even biased code */
-    }
-    int top_e = (1 << ebits) - 1;          /* all-ones exponent field */
-    int emin = 1 - bias;                   /* smallest normal exponent */
-    double sign = x < 0.0 ? -1.0 : 1.0;
-    double a = fabs(x);
-    if (a == 0.0) return kind == 2 ? 0.0 : sign * 0.0;
-    int E;
-    frexp(a, &E);
-    E -= 1;                                /* a in [2^E, 2^(E+1)) */
-    if (E < emin) E = emin;                /* subnormal binade shares emin's quantum */
-    double q = ldexp(1.0, E - mbits);
-    double r = nearbyint(a / q) * q;
-    /* Largest finite value: ieee reserves the top exponent for inf/NaN,
-     * fn reserves only the all-ones pattern, fnuz reserves none. */
-    int emax_field = (kind == 0) ? top_e - 1 : top_e;
-    int emax = emax_field - bias;
-    double mant_max = (kind == 1) ? 2.0 - 2.0 / (1 << mbits) * 1.0
-                                  : 2.0 - ldexp(1.0, -mbits);
-    double maxv = ldexp(mant_max, emax);
-    if (r > maxv) {
-        if (kind == 0) return sign * INFINITY;
-        return NAN;
-    }
-    return sign * r;
-}
-
-/* llvm_intrinsic integer bit operations at width w (see fire_runtime.h). */
-static uint64_t _ibits_mask(int64_t w)
-{
-    return w >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << w) - 1);
-}
-
-int64_t mojo_fshl(int64_t a, int64_t b, int64_t s, int64_t w)
-{
-    uint64_t m = _ibits_mask(w), ua = (uint64_t)a & m, ub = (uint64_t)b & m;
-    int64_t k = ((s % w) + w) % w;
-    if (k == 0) return (int64_t)ua;
-    return (int64_t)(((ua << k) | (ub >> (w - k))) & m);
-}
-
-int64_t mojo_fshr(int64_t a, int64_t b, int64_t s, int64_t w)
-{
-    uint64_t m = _ibits_mask(w), ua = (uint64_t)a & m, ub = (uint64_t)b & m;
-    int64_t k = ((s % w) + w) % w;
-    if (k == 0) return (int64_t)ub;
-    return (int64_t)(((ub >> k) | (ua << (w - k))) & m);
-}
-
-int64_t mojo_ctpop(int64_t x, int64_t w)
-{
-    uint64_t u = (uint64_t)x & _ibits_mask(w);
-    int64_t n = 0;
-    while (u) { n += (int64_t)(u & 1); u >>= 1; }
-    return n;
-}
-
-int64_t mojo_ctlz(int64_t x, int64_t w)
-{
-    uint64_t u = (uint64_t)x & _ibits_mask(w);
-    int64_t n = 0;
-    for (int64_t i = w - 1; i >= 0; i--, n++)
-        if ((u >> i) & 1) return n;
-    return w;
-}
-
-int64_t mojo_cttz(int64_t x, int64_t w)
-{
-    uint64_t u = (uint64_t)x & _ibits_mask(w);
-    for (int64_t i = 0; i < w; i++)
-        if ((u >> i) & 1) return i;
-    return w;
-}
-
-int64_t mojo_bswap(int64_t x, int64_t w)
-{
-    uint64_t u = (uint64_t)x & _ibits_mask(w), r = 0;
-    for (int64_t i = 0; i < w / 8; i++) {
-        r = (r << 8) | ((u >> (8 * i)) & 0xFF);
-    }
-    return (int64_t)(r & _ibits_mask(w));
-}
-
-void mojo_unsupported_intrinsic(const char *name)
-{
-    fprintf(stderr, "error: llvm_intrinsic '%s' has no CPU lowering in the compiled path\n",
-            name ? name : "?");
-    exit(1);
-}
-
-int64_t mojo_usub_sat(int64_t a, int64_t b, int64_t w)
-{
-    uint64_t m = _ibits_mask(w), ua = (uint64_t)a & m, ub = (uint64_t)b & m;
-    return (int64_t)(ua > ub ? ua - ub : 0);
-}
-
 int64_t mojo_box_from_double(double v)
 {
     MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
@@ -2341,35 +2157,6 @@ int64_t mojo_box_int(int64_t v)
     if (!bx || !mojo_is_boxed(v)) return v;
     if (bx->kind != 'd') return bx->bits;
     return (int64_t)mojo_box_double(v);
-}
-
-/* Python's `int(x)` for a WORD of unknown kind — the one read `int(x)` must
- * perform when `x` lands in an int64_t slot whose kind is only known at run
- * time (a `mojo_word_slice` / `mojo_word_subscript` result, a kind-mixed
- * list slot, a forwarded parameter): a plain int word stays; a BARE or
- * BOXED string PARSES its digits; a double box truncates toward zero like
- * CPython's `int(float)`; a bool word is its 0/1; a None or container word
- * raises the TypeError CPython raises. `mojo_box_int` alone cannot be used
- * here: it answers a non-boxed string pointer with ITS OWN ADDRESS, so
- * `int(anno[10:-1])` in Tools/cases_generator/analyzer.py's `make_uop`
- * bound a string pointer to the `replicate(N)` count and the compiled
- * analyzer's `for oparg in range(result.replicated):` loop never terminated
- * (the 170K-generator/sec `BlockStmt.tokens` drain of
- * bugs/COMPILE_FAIL_Tools_cases_generator_analyzer). */
-int64_t mojo_int_of_word(int64_t w)
-{
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'd') return (int64_t)mojo_box_double(w);
-        if (bx->kind == 's' || bx->kind == 'p')
-            return mojo_make_int((char *)(intptr_t)bx->bits);
-        if (bx->kind == 'n')
-            mojo_raise_type_error((char *)"int() argument must be a string, a bytes-like object or a real, not 'NoneType'");
-        return bx->bits;
-    }
-    if (mojo_boxed_is_str(w))
-        return mojo_make_int((char *)(intptr_t)w);
-    return w;
 }
 
 /* See the header: unwrap every box that has a word of its own, keep a float
@@ -2930,15 +2717,6 @@ int mojo_is_bound_method(void *p) {
     return _pr_has(&_reg_bound_method, (uint64_t)v);
 }
 
-/* See fire_runtime.h: the bound-method `fn` for a builtin list's `append`
- * taken as a value. `self` is the receiver list, `item` the argument word.
- * Returns 0 — `append` is a None-returning mutation, and the bound-method
- * dispatch hands back a single int64_t. */
-int64_t mojo_builtin_list_append(void *self, int64_t item) {
-    mojo_list_append_int((MojoList *)(intptr_t)self, item);
-    return 0;
-}
-
 /* ── Variadic callables ──────────────────────────────────────────────────
  * A sibling of the bound-method registry above, for the same reason and
  * with the same shape: a variadic callable's VALUE is not a bare function
@@ -3213,31 +2991,9 @@ int64_t mojo_gen_default_word(void *start, int64_t idx)
 }
 /* A stack-switch (A3) generator handle returned out of a function as a word: the
  * generic coroutine entry points (`__mojo_gen_resume` / `_value` / `_destroy`,
- * fire_coro_gen.c) drive it, found by name so this file does not depend on them.
- *
- * Resolved ONCE and cached: `dlsym(RTLD_DEFAULT, ...)` takes dyld's global
- * loaders read-lock and walks every loaded image's export trie — measured
- * tens of microseconds per call, and these entry points run once per
- * resume/value/destroy of every generator that travels as a word (the
- * `mojo_iter_gen_handle` drain path). Per-call dlsym made the compiled
- * Tools/cases_generator analyzer spend >95% of its time inside dyld
- * (`_a3_value -> dlsym -> ExportsTrie::hasExportedSymbol`, sampled), hanging
- * a 55ms CPython run for 10+ minutes. The symbols live in the main
- * executable and are stable for the process's life, so a one-shot lookup is
- * sound; if the symbol is genuinely absent the old per-call dlsym behaviour
- * is retained (the pointer stays 0 and each call retries). */
+ * fire_coro_gen.c) drive it, found by name so this file does not depend on them. */
 #include <dlfcn.h>
-static int64_t (*_a3_gen_resume)(int64_t, int64_t) = 0;
-static int64_t (*_a3_gen_value)(int64_t) = 0;
-static int64_t (*_a3_gen_destroy)(int64_t) = 0;
-static void _a3_resolve(void) {
-    if (!_a3_gen_resume)
-        _a3_gen_resume = (int64_t (*)(int64_t, int64_t))dlsym(RTLD_DEFAULT, "__mojo_gen_resume");
-    if (!_a3_gen_value)
-        _a3_gen_value = (int64_t (*)(int64_t))dlsym(RTLD_DEFAULT, "__mojo_gen_value");
-    if (!_a3_gen_destroy)
-        _a3_gen_destroy = (int64_t (*)(int64_t))dlsym(RTLD_DEFAULT, "__mojo_gen_destroy");
-}
+static void *_a3_sym(const char *n) { return dlsym(RTLD_DEFAULT, n); }
 /* A plain resume sends Python's None, which an int-valued generator's
  * `x = yield` receives as the shared None BOX -- `mojo_box_none()` -- not a
  * raw 0. Since fire_coro_gen.c's `__mojo_gen_resume` refuses a non-None send
@@ -3250,17 +3006,17 @@ static void _a3_resolve(void) {
  * `mojo_box_none` is defined in THIS translation unit, so it is called
  * directly rather than looked up by name. */
 static bool _a3_resume(void *h) {
-    _a3_resolve();
-    return _a3_gen_resume && _a3_gen_resume((int64_t)(intptr_t)h, mojo_box_none()) != 0;
+    int64_t (*f)(int64_t, int64_t) = (int64_t (*)(int64_t, int64_t))_a3_sym("__mojo_gen_resume");
+    return f && f((int64_t)(intptr_t)h, mojo_box_none()) != 0;
 }
 static int64_t _a3_value(void *h) {
-    _a3_resolve();
-    return _a3_gen_value ? _a3_gen_value((int64_t)(intptr_t)h) : 0;
+    int64_t (*f)(int64_t) = (int64_t (*)(int64_t))_a3_sym("__mojo_gen_value");
+    return f ? f((int64_t)(intptr_t)h) : 0;
 }
 static double _a3_value_d(void *h) { int64_t w = _a3_value(h); double d; memcpy(&d, &w, sizeof d); return d; }
 static void _a3_destroy(void *h) {
-    _a3_resolve();
-    if (_a3_gen_destroy) _a3_gen_destroy((int64_t)(intptr_t)h);
+    int64_t (*f)(int64_t) = (int64_t (*)(int64_t))_a3_sym("__mojo_gen_destroy");
+    if (f) f((int64_t)(intptr_t)h);
 }
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind)
 {
@@ -3699,43 +3455,9 @@ static int64_t _norm_idx(MojoList *l, int64_t i) {
 
 int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || l->len == 0) return 0; return l->data[_norm_idx(l, i)]; }
 
-/* `lst[i]` at an EXPLICIT subscript — the same read as mojo_list_get_int
- * above, but an out-of-range index RAISES a catchable IndexError instead of
- * answering 0. The lenient form stays for the loop-internal read sites,
- * exactly the split documented on mojo_bytes_get_checked: 0 is a real list
- * word, so a silent OOB answer corrupts the computation, and the Python
- * idiom `try: next_t = tokens[i+1] except IndexError: break` (the
- * standard one-token-peek) depends on the raise actually happening.
- * Mirror of mojo_bytes_get_checked, including the negative-index
- * normalization: Python clamps `lst[-len]`..`lst[-1]` to the tail, and
- * anything more negative is out of range. */
-int64_t mojo_list_get_int_checked(MojoList *l, int64_t i)
-{
-    int64_t n = l ? l->len : 0;
-    int64_t j = i < 0 ? i + n : i;
-    if (j < 0 || j >= n) {
-        char detail[96];
-        snprintf(detail, sizeof detail, "list index out of range");
-        mojo_raise_index_error(detail);
-    }
-    return l->data[j];
-}
-
 double mojo_list_get_double(MojoList *l, int64_t i)
 {
     return mojo_double_from_bits(l->data[_norm_idx(l, i)]);
-}
-
-double mojo_list_get_double_checked(MojoList *l, int64_t i)
-{
-    int64_t n = l ? l->len : 0;
-    int64_t j = i < 0 ? i + n : i;
-    if (j < 0 || j >= n) {
-        char detail[96];
-        snprintf(detail, sizeof detail, "list index out of range");
-        mojo_raise_index_error(detail);
-    }
-    return mojo_double_from_bits(l->data[j]);
 }
 
 
@@ -3980,18 +3702,6 @@ char *mojo_list_get_str(MojoList *l, int64_t i)
 {
     if (!l || l->len == 0) return "";
     return (char *)(uintptr_t)l->data[_norm_idx(l, i)];
-}
-
-char *mojo_list_get_str_checked(MojoList *l, int64_t i)
-{
-    int64_t n = l ? l->len : 0;
-    int64_t j = i < 0 ? i + n : i;
-    if (j < 0 || j >= n) {
-        char detail[96];
-        snprintf(detail, sizeof detail, "list index out of range");
-        mojo_raise_index_error(detail);
-    }
-    return (char *)(uintptr_t)l->data[j];
 }
 
 MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
@@ -8061,24 +7771,6 @@ void mojo_dict_set_bool(MojoDict *d, char *key, int v)
 void mojo_dict_set_none(MojoDict *d, char *key)
 {
     _dict_set_raw(d, key, 0, 4);
-}
-
-/* An `int | None` field read back off a struct: in this word model the
- * None value IS the zero word, the same slot the integer 0 stores (see
- * `mojo_dict_set_none` above), so a plain `mojo_dict_set_int` would tag it
- * kind 0 and the value's display spelling (an f-string through the pair's
- * kinds row) would print `0` where CPython prints `None` (measured,
- * Tools/cases_generator/analyzer.py's `Properties.tier: int | None` —
- * `tier: None` printed `tier: 0`). The caller knows the field's ANNOTATION
- * says the zero may be a None; the slot records kind 4 exactly when the
- * word is zero. The reverse misreading (a genuine 0 in an Optional field
- * printing `None`) is the word model's standing bound for scalar
- * Optional fields — the two values are already indistinguishable
- * everywhere else in this runtime, and the call sites that need the real
- * int (analyzer.py's `tier_variable`) answer 1/2, never 0. */
-void mojo_dict_set_opt_int(MojoDict *d, char *key, int64_t v)
-{
-    _dict_set_raw(d, key, v, v == 0 ? 4 : 0);
 }
 
 static void _dict_set_none_key_raw(MojoDict *d, int64_t v, int64_t kind)

@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-compile-fail-tools-cases-genera-4 land?
+# Land: should finished branch bug-gate-formal-doc-truth-2 land?
 
-**Branch:** `work/bug-land-compile-fail-tools-cases-genera-4` (task `bug-land-compile-fail-tools-cases-genera-4`; its tip is also saved as `refs/archive/work/bug-land-compile-fail-tools-cases-genera-4`, so dropping it loses nothing).
-**Age:** last commit 2026-11-17, first unlanded commit 2026-11-13; 17 commit(s) ahead of master, 20 behind it; task started 2026-11-17 04:36:11
-**Original work:** An earlier attempt left 16 commit(s) on branch work/bug-land-compile-fail-tools-cases-genera-3, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch delete
-**Original claims:** bug:LAND-compile-fail-tools-cases-genera-2
+**Branch:** `work/bug-gate-formal-doc-truth-2` (task `bug-gate-formal-doc-truth-2`; its tip is also saved as `refs/archive/work/bug-gate-formal-doc-truth-2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 1195 behind it; task started 2026-11-16 22:17:36
+**Original work:** An earlier attempt left 2 commit(s) on branch work/bug-gate-formal-doc-truth, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/gate-formal-doc-
+**Original claims:** bug:gate-formal-doc-truth
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-17 10:55:37: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-13; 17 commit(s) ahead of master, 20 behind it; task started 2026-11-17 04:36:11)
-  Branch: work/bug-land-compile-fail-tools-cases-genera-4
-  Conflicting files: see `git merge master`
+- 2026-11-17 04:32:45: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-15; 3 commit(s) ahead of master, 1195 behind it; task started 2026-11-16 22:17:36)
+  Branch: work/bug-gate-formal-doc-truth-2
+  Conflicting files: FORMAL.md, build_stdlib_dylib.py, formal/build.py, formal/model/builtins.py, test_runtime_header_scan.py

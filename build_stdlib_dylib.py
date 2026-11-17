@@ -14,7 +14,6 @@ Usage (manual):
   python build_stdlib_dylib.py [-o build/libmojostdlib.dylib]
 """
 import os
-import re
 import sys
 import shutil
 import platform
@@ -1306,11 +1305,29 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         all_defs = set()
         for o in objs:
             all_defs |= _defined_symbols(gcc, o, include_weak=True)
-        # One shared classifier for the three-way kept/misresolved/undefined
-        # split (see classify_export_entries): an entry whose body exists under
-        # a differently-hashed overload suffix is misresolved — and the report
-        # names the definition — not "declared with no definition".
-        _kept, _misresolved, _undefined = classify_export_entries(all_exports, all_defs)
+        _kept = []
+        _misresolved, _undefined = [], []
+        for e in all_exports:
+            if e['kind'] == reflect.SYM_TYPE:
+                _kept.append(e)
+                continue
+            sym = reflect.export_csym(e)
+            if ('_' + sym) in all_defs:
+                _kept.append(e)
+            elif ('_' + e['name']) in all_defs:
+                # The entry names a symbol the dylib really defines, but the
+                # export-csym rule resolved it to a different one — see
+                # runtime_export_entries' report on why almost all of
+                # fire_runtime.h's 565 entry points are measured as misresolved on
+                # this tree, and why the fix is in reflect.export_csym rather than
+                # here. The exact figure is not written down here on purpose: it is
+                # printed by the report below on every build, so this comment cannot
+                # carry a second copy of a number the build measures for itself. A separate class from the
+                # genuinely-orphaned entry below because nothing is missing here:
+                # the definition is present and the table just is not naming it.
+                _misresolved.append(f"{e['name']} -> {sym}")
+            else:
+                _undefined.append(e['name'])
         all_exports = _kept
         for line in format_export_report(len(_kept) + len(_misresolved) + len(_undefined),
                                          _misresolved, _undefined):
@@ -1696,7 +1713,17 @@ def optional_runtime_dylib(unit: str, arch: str = None) -> str:
         defined = set()
         for obj in objs:
             defined |= _defined_symbols(cc, obj, include_weak=True)
-        kept, misresolved, undefined = classify_export_entries(entries, defined)
+        kept = []
+        misresolved = []
+        undefined = []
+        for e in entries:
+            sym = reflect.export_csym(e)
+            if ('_' + sym) in defined:
+                kept.append(e)
+            elif ('_' + e['name']) in defined:
+                misresolved.append(f"{e['name']} -> {sym}")
+            else:
+                undefined.append(e['name'])
         report = format_export_report(len(entries), misresolved, undefined)
         for line in report:
             print(f"  optional runtime {unit}: {line}", file=sys.stderr)
@@ -1797,7 +1824,16 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
     defined = set()
     for o in objs:
         defined |= _defined_symbols(gcc, o, include_weak=True)
-    kept, misresolved, undefined = classify_export_entries(exports, defined)
+    kept = []
+    misresolved, undefined = [], []
+    for e in exports:
+        sym = reflect.export_csym(e)
+        if ('_' + sym) in defined:
+            kept.append(e)
+        elif ('_' + e['name']) in defined:
+            misresolved.append(f"{e['name']} -> {sym}")
+        else:
+            undefined.append(e['name'])
     report = format_export_report(len(exports), misresolved, undefined)
     # Printed HERE, and that placement is load-bearing for the self-hosted
     # build rather than a matter of taste. This module is compiled into `mojoc`,
@@ -1826,87 +1862,6 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
     for line in report:
         print(f"  runtime dylib: {line}", file=sys.stderr)
     return kept, report
-
-
-# A Mojo overload suffix: `overload_suffix_for` (mojo/backend_gimple/emit_funcs)
-# emits `_` + 6 hex digits (a 24-bit polynomial hash over the joined C
-# param-type list), or nothing at all for a zero/variadic param list. The
-# cross-check below must recognise that tail to tell a SUFFIX disagreement
-# (the body exists, hashed a different way) from a genuinely missing body.
-_OVERLOAD_SUFFIX_RE = re.compile(r'_[0-9a-f]{6}$')
-
-
-def classify_export_entries(entries: list, defined: set) -> tuple:
-    """Split export entries into (kept, misresolved, undefined) against
-    `defined`, the arch-prefixed C symbols the object set really defines (as
-    `_defined_symbols` returns them).
-
-    This is the ONE three-way check behind the export table's `nm` cross-check.
-    It used to be copy-pasted three times (build()'s all_exports,
-    runtime_export_entries' header exports, and the optional-unit builds), and
-    the copies had already drifted from the truth in the way that matters:
-
-    * kept — the entry's expected symbol is defined: the table can name it.
-    * misresolved — the dylib defines the function, but under a DIFFERENT symbol
-      than the entry computed. Two shapes, both "defined but not advertised":
-      (a) the RAW name is defined but the entry's mangling rule resolved to a
-      different spelling, and (b) the SAME name is defined with a DIFFERENT
-      overload suffix — the entry's source-scan param types hash to a different
-      24-bit suffix than codegen's live-inferred ones (the `ord`/`ascii`/
-      `atol`/`standardize_string_slice` case: the body exists as
-      `..._ord_d719e0` while the entry names `..._ord_9f63a2`). For shape (b)
-      the report NAMES the definition that exists, because a bare "declared
-      with no definition" sends the next reader hunting for a missing body
-      that is in fact present.
-    * undefined — no definition under any spelling: genuinely absent from the
-      dylib (a header declaration satisfied by whoever links against it, e.g.
-      `py_tokenize`, which the self-hosted compiler image defines, not the
-      runtime).
-
-    A suffix sibling is only accepted when the EXPECTED symbol itself carries a
-    suffix: a C-prototype entry (whose `csym` is the raw header name) has none,
-    and matching one against a coincidental `_deadbeef` tail would invent a
-    definition that is not there. SYM_TYPE entries are layout descriptors with
-    no runtime symbol, so they are always kept (the table stores a NULL for
-    them and never forward-declares them — see reflect.emit_table_c)."""
-    kept, misresolved, undefined = [], [], []
-    # defined-symbol -> its stem (everything before the overload suffix), so a
-    # miss on the exact symbol can be re-checked against the same function's
-    # other overload hashes in O(1) instead of scanning `defined` per entry.
-    suffix_by_stem = {}
-    for d in defined:
-        m = _OVERLOAD_SUFFIX_RE.search(d)
-        if m:
-            suffix_by_stem.setdefault(d[:m.start()], set()).add(d)
-    for e in entries:
-        if e['kind'] == reflect.SYM_TYPE:
-            kept.append(e)
-            continue
-        sym = reflect.export_csym(e)
-        expect = '_' + sym
-        if expect in defined:
-            kept.append(e)
-            continue
-        m = _OVERLOAD_SUFFIX_RE.search(expect)
-        if m:
-            siblings = sorted(d for d in suffix_by_stem.get(expect[:m.start()], ())
-                              if d != expect)
-            if siblings:
-                # `sym` is spelled without the arch's leading underscore;
-                # `defined` carries it — strip it so both halves of the line
-                # read as the same kind of name.
-                spelled = [s[1:] if s.startswith('_') else s for s in siblings]
-                # Pre-joined, not nested inside the f-string: this module
-                # compiles into mojoc, and the self-hosted backend's f-string
-                # lowering does not take nested same-quote f-expression parts.
-                joined = ', '.join(spelled)
-                misresolved.append(f"{e['name']} -> {sym} (defined as {joined})")
-                continue
-        if ('_' + e['name']) in defined:
-            misresolved.append(f"{e['name']} -> {sym}")
-        else:
-            undefined.append(e['name'])
-    return kept, misresolved, undefined
 
 
 def format_export_report(total: int, misresolved: list, undefined: list) -> list:
