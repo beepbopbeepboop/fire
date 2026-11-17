@@ -3518,6 +3518,16 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
     return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
 
 
+def _literal_mojo_type(arg):
+    """The Mojo type of a call argument that is a plain numeric literal, read
+    from its syntax alone (`104` is `Int`, `2.5` is `Float64`), or None."""
+    if isinstance(arg, gimple_ctypes.IntLiteral):
+        return 'Int'
+    if isinstance(arg, gimple_ctypes.FloatLiteral):
+        return 'Float64'
+    return None
+
+
 def _constructed_struct_type(gen, arg, ctype):
     """The Mojo type of a call argument that is a direct constructor call of a
     concrete struct of this module (`Foo()` -> `Foo`), or None. The C type
@@ -3703,6 +3713,22 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 else:
                     new_type_args.append(ta)
             type_args = new_type_args
+            # A `//` in the callee's bracket head: the explicit list names only
+            # the parameters after it, and the ones before it are deduced from
+            # the argument types (`bitcast[dtype, width](x)` binds `src_dtype`
+            # and `src_width` from `x`). Complete the list here so the
+            # elaborator sees one argument per parameter. A deduction that
+            # cannot be bound declines the instantiation, as an unbound
+            # argument always has.
+            _tmpl_dd = elaborate.extract_fn_source(
+                module_src, g, arg_count=len(arg_pairs))
+            if _tmpl_dd and elaborate.deduced_param_count(_tmpl_dd):
+                type_args = elaborate.complete_explicit_type_args(
+                    _tmpl_dd, type_args, [ct for ct, _ in arg_pairs],
+                    arg_mojo_types=[_literal_mojo_type(a) or _constructed_struct_type(gen, a, ct)
+                                    for a, (ct, _) in zip(node.args, arg_pairs)])
+                if type_args is None:
+                    return None
             info = el.elaborate_generic_call(
                 module_src, g, type_args, arg_count=len(arg_pairs),
                 origin_module=elaborate.declaring_module_name(gen, module_src),

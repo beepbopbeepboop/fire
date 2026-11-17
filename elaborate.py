@@ -464,9 +464,10 @@ def _first_unbound_type_param(params, supplied, defaults):
     this rule in two is how a refusal and its message drift apart."""
     for i, p in enumerate(params):
         if p.startswith('*'):
-            # A trailing variadic parameter needs at least one supplied
-            # argument; an empty expansion has no lifting shape.
-            return p if len(supplied) <= i else None
+            # A variadic parameter binds whatever is left, and an EMPTY pack is
+            # a valid binding (`_get_kgen_string[name]()` has no `*extra`
+            # argument and means the empty pack), so it is never unbound.
+            return None
         if i >= len(supplied) and _default_type_arg(defaults.get(p, '')) is None:
             return p
     return None
@@ -539,6 +540,7 @@ def unbound_param_is_inferable(template_src: str, name: str) -> bool:
     nowhere to come from) is refused by the caller."""
     if name in type_param_defaults(template_src):
         return True
+    name = name.lstrip('*')  # a variadic `*types` is named by its bare name in the arguments
     return re.search(r'\b%s\b' % re.escape(name),
                      _argument_list_text(template_src)) is not None
 
@@ -3043,6 +3045,11 @@ _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
 
 
+#: The dtype a literal of a proven Mojo scalar type binds. `Int` is the 64-bit
+#: integer, so `Int64`; a literal's Mojo type comes from its syntax alone.
+_LITERAL_DTYPE = {'Int': 'Int64', 'UInt': 'UInt64', 'Float64': 'Float64'}
+
+
 def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     """{type-param: concrete value} from unifying ONE parameter's declared type
     annotation against ONE argument's actual C type, or `{}` when the shape is
@@ -3104,9 +3111,14 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
     # nothing. Any other scalar C type (`double`, `float`, `int32_t`) cannot be
     # an erased SIMD, so the argument IS that scalar, which is `SIMD[dtype, 1]`.
-    if arg_ctype == 'int64_t':
+    # A literal the CALLER proves (`104` is an `Int`, `2.0` a `Float64`) names
+    # its dtype from its own syntax, so the erasure ambiguity does not arise:
+    # `arg_mojo` carries that type, and it binds `dtype` exactly as a scalar C
+    # type does, with width 1.
+    lit = _LITERAL_DTYPE.get(arg_mojo) if arg_mojo else None
+    if lit is None and arg_ctype == 'int64_t':
         return {}
-    dtype = c_to_mojo(arg_ctype)
+    dtype = lit if lit is not None else c_to_mojo(arg_ctype)
     if dtype is None:
         return {}
     m = _SCALAR_ANN_RE.match(ann)
@@ -3390,15 +3402,33 @@ def _fill_erased_params(template_src, params, binding) -> dict:
     return binding
 
 
-def infer_type_args(template_src: str, arg_ctypes, arg_mojo_types=None):
-    """Infer a generic's type args from the C types of its call arguments. For
-    each type parameter that appears in a parameter's type ANNOTATION, bind it
-    to the Mojo type of the matching argument (`_unify_param_ann` says which
-    annotation shapes that covers). Returns the ordered list of Mojo type
-    names, or None if any parameter is unbound."""
+def deduced_param_count(template_src: str) -> int:
+    """How many bracket parameters come BEFORE a `//` separator. Those are
+    DEDUCED: the call's argument types bind them, and an explicit bracket on
+    the call fills only the parameters after the `//`. `bitcast[dtype, width]`
+    is `def bitcast[src_dtype, src_width, //, dtype, width](val: SIMD[src_dtype,
+    src_width])`: the explicit `[dtype, width]` names the destination, and the
+    source is deduced from `val`. Zero when the head has no `//`."""
+    m = mm.head_match(template_src)
+    if not m:
+        return 0
+    count = 0
+    for p in split_top_level_commas(m.params):
+        p = p.strip()
+        if not p:
+            continue
+        if p == '//':
+            return count
+        if _is_param_marker(p):
+            continue
+        count += 1
+    return 0
+
+
+def _infer_binding(template_src: str, arg_ctypes, arg_mojo_types=None) -> dict:
+    """{param: Mojo type} for every bracket parameter an argument binds, or a
+    template default fills. Parameters nothing binds are absent."""
     params = type_param_names(template_src)
-    if not params:
-        return None
     fn = None
     for s in Parser(py_tokenize(template_src)).parse_module():
         if isinstance(s, FunctionDef):
@@ -3430,9 +3460,56 @@ def infer_type_args(template_src: str, arg_ctypes, arg_mojo_types=None):
             _d = _default_type_arg(_defaults.get(p, ''))
             if _d is not None:
                 binding[p] = _d
+    return binding
+
+
+def infer_type_args(template_src: str, arg_ctypes, arg_mojo_types=None):
+    """Infer a generic's type args from the C types of its call arguments. For
+    each type parameter that appears in a parameter's type ANNOTATION, bind it
+    to the Mojo type of the matching argument (`_unify_param_ann` says which
+    annotation shapes that covers). Returns the ordered list of Mojo type
+    names, or None if any parameter is unbound."""
+    params = type_param_names(template_src)
+    if not params:
+        return None
+    binding = _infer_binding(template_src, arg_ctypes, arg_mojo_types)
     if any(p not in binding for p in params):
         return None
     return [binding[p] for p in params]
+
+
+def complete_explicit_type_args(template_src: str, explicit_args, arg_ctypes,
+                                arg_mojo_types=None):
+    """The full ordered type args for a call that writes an EXPLICIT bracket.
+
+    Without a `//` separator the explicit list is the whole list, and it is
+    returned unchanged. With one, the explicit list fills the parameters after
+    the `//` (left to right, a default covering any the caller omitted), and
+    the parameters before it are deduced from the argument types exactly as
+    `infer_type_args` does. Explicit arguments are never overridden by a
+    deduction. None when a deduced parameter cannot be bound, or when the
+    explicit list does not fit the parameters after the `//`."""
+    k = deduced_param_count(template_src)
+    if k == 0:
+        return list(explicit_args)
+    params = type_param_names(template_src)
+    deduced, rest = params[:k], params[k:]
+    if len(explicit_args) > len(rest):
+        return None
+    binding = _infer_binding(template_src, arg_ctypes, arg_mojo_types)
+    if any(p not in binding for p in deduced):
+        return None
+    defaults = type_param_defaults(template_src)
+    out = [binding[p] for p in deduced]
+    for i, p in enumerate(rest):
+        if i < len(explicit_args):
+            out.append(explicit_args[i])
+            continue
+        d = _default_type_arg(defaults.get(p, ''))
+        if d is None:
+            return None
+        out.append(d)
+    return out
 
 
 def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes,
