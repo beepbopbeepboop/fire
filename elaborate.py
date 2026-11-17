@@ -3593,13 +3593,20 @@ class Elaborator:
         self.gcc = gcc
 
     def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None,
-                               arg_ctypes=None, origin_module: str | None = None) -> dict:
+                               arg_ctypes=None, origin_module: str | None = None,
+                               generic_paths: dict | None = None) -> dict:
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
-        via the CAS. Returns a dict {symbol, object, ret, params} or None.
+        via the CAS. Returns a dict {symbol, object, ret, params, nested_objects}
+        or None.
 
         `arg_count` (the call's actual argument count, when known) disambiguates
         same-named generic overloads distinguished only by arity (e.g.
         itertools.product's 2/3/4-iterable versions) — see extract_fn_source.
+
+        `generic_paths` ({name: source path}) are the generic functions the
+        caller can see. A body that calls one of them is elaborated too, and the
+        objects that call needs are returned in `nested_objects`, which the
+        caller must link in beside `object` (see monomorphize.instantiate).
 
         Elaborate-once-ever: the instantiation is content-addressed, so a repeat
         (here or in another program) is a cache hit."""
@@ -3625,15 +3632,18 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
+        nested_objects: list = []
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      conformance_bases=_where_conformance_bases(module_src),
-                                                     origin_module=origin_module)
+                                                     origin_module=origin_module,
+                                                     generic_paths=generic_paths,
+                                                     links_out=nested_objects)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
         if ret is None:
             ret = mm.defined_return_ctype(mangled) or 'void'
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
-                'ret': ret, 'params': ptypes}
+                'nested_objects': nested_objects, 'ret': ret, 'params': ptypes}
 
     def elaborate_generic_struct(self, module_src: str, struct_name: str,
                                  type_args, nested=None) -> dict:
@@ -3758,7 +3768,8 @@ class Elaborator:
 
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes,
                                         origin_module: str | None = None,
-                                        arg_mojo_types=None) -> dict:
+                                        arg_mojo_types=None,
+                                        generic_paths: dict | None = None) -> dict:
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
         tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
@@ -3772,7 +3783,8 @@ class Elaborator:
             return self.elaborate_generic_call(module_src, fn_name, type_args,
                                                arg_count=len(arg_ctypes),
                                                arg_ctypes=arg_ctypes,
-                                               origin_module=origin_module)
+                                               origin_module=origin_module,
+                                               generic_paths=generic_paths)
         except ConformanceError:
             # A conformance failure inferred from an ERASED argument type is
             # a fact about this codegen's C representation, not about the
