@@ -318,3 +318,29 @@ must be rejected. Measured the same day: `enum_exhaustive_errors`,
 `moco_4400_no_crash_on_bind_parameter` and `tuple_first_of_error` all still
 exit 0; `align_decorator_parametric_error` exits 1 (a diagnostic, delta
 uncompared).
+
+### Why the build never triggers it (wakeup 42)
+
+`foo`'s body emits a **bare** call -- `_t9 = needs_iterator (s);` -- with no
+mangled suffix and no instantiation. The reason is one line:
+
+```python
+# mojo/backend_gimple/emit_resolve.py:3555, in _elaborate_generic_call
+source = gen._imported_generics.get(g)
+if not source:
+    return None
+```
+
+`_elaborate_generic_call` is gated on the callee being an **imported** generic.
+`needs_iterator` is defined in the SAME module, so `source` is None and the
+function declines before lowering anything. Every later arm -- the explicit
+bracket path, the inferred path, and the `except` that turns a
+`ConformanceError` into `error: invalid call to '<fn>': violated constraint`
+(line 3789) -- is unreachable for a same-module generic. That is exactly why
+the unit test passes (it calls `elaborate_generic_call` directly, past the
+gate) while `fire.py build` exits 0.
+
+Two consequences, not one: the missing MOCO-4400 diagnostic, and a bare call to
+a symbol nothing defines. Same-module generic calls are elaborated by the
+in-TU pre-pass (`elab_intu`), which is also where the conformance check would
+have to be wired for this case.
