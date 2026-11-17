@@ -5017,8 +5017,8 @@ class GimpleGen:
         return gfn._locally_binds_name(self, bare_name)
     def _func_mangleable(self, name: str) -> bool:
         return gfn._func_mangleable(self, name)
-    def _func_csym(self, bare_name: str) -> str:
-        return gfn._func_csym(self, bare_name)
+    def _func_csym(self, bare_name: str, def_pts: list | None = None) -> str:
+        return gfn._func_csym(self, bare_name, def_pts)
     def _c_sizeof_helper(self, struct_name: str) -> str:
         """Name of a `static int64_t` accessor returning `sizeof(struct_name)`,
         registering it for emission into the non-GIMPLE prelude.

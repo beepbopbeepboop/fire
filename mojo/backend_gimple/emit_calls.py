@@ -140,6 +140,43 @@ def _call_has_double_star_spread(node) -> bool:
     return False
 
 
+def _callee_expected_params(gen, fname, fname_raw):
+    """The C parameter types the callee `fname_raw` (emitted as `fname`)
+    expects, or an empty list when nothing is known about it."""
+    # Function-local import: gimple_gen_funcs already imports this module.
+    import mojo.backend_gimple.emit_funcs as _ggf_eff
+    # For a call this module resolved to ONE of its own same-named free
+    # functions, the arity/coercion contract is THAT overload's, not the
+    # canonical first declaration's: `_effective_param_types(fname_raw)` reads
+    # tier 1 (`_local_def_pts`) by bare name, so a 1-argument `b64encode(span)`
+    # was padded to the 2-argument sibling's arity ("too many arguments").
+    # `_local_overload_call_symbol` recorded the chosen overload's ctypes under
+    # the emitted `fname`; prefer it exactly when the name is an overload set.
+    _ov_nodes = (getattr(gen, '_local_def_overloads', None) or {}).get(fname_raw)
+    if _ov_nodes and len(_ov_nodes) >= 2:
+        expected_params = gen.func_param_types.get(fname) or []
+    else:
+        expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
+    if not expected_params:
+        expected_params = gen.func_param_types.get(fname_raw, [])
+    if not expected_params and fname_raw in gen._KNOWN_SIGS:
+        expected_params = gen._KNOWN_SIGS[fname_raw][1]
+    elif not expected_params and fname in gen._KNOWN_SIGS:
+        # `fname_raw` (the ORIGINAL Python name, e.g. 'eval') is never
+        # itself a _KNOWN_SIGS key — only its BUILTIN_VALUE_MAP-renamed
+        # C symbol ('mojo_eval') is. Python's 1-arg `eval(expr)` (the
+        # overwhelmingly common form; globals/locals default to the
+        # caller's own scope) called this renamed 3-arg C function with
+        # only 1 argument, a hard "too few arguments" compile error —
+        # found via Tools/build/generate_token.py's own `eval(string)`.
+        # mojo_eval's own globals/locals params are unused anyway (a
+        # documented eval() stub — real eval() can't run in a compiled
+        # C bootstrap), so padding with NULL below is exactly right,
+        # not just "doesn't crash."
+        expected_params = gen._KNOWN_SIGS[fname][1]
+    return expected_params
+
+
 def _try_lower_call_with_dict_spreads(gen, node, fname, fname_raw,
                                       expected_params, defaults,
                                       param_names, kwslot=-1,
@@ -166,18 +203,27 @@ def _try_lower_call_with_dict_spreads(gen, node, fname, fname_raw,
             pos_nodes.append(_a)
     if not spread_args:
         return None
-    # Multiple ** spreads or mixed with * spreads: refuse rather than guess.
+    # Shapes this helper does not bind are left to the ordinary call path
+    # (return None), exactly as before this helper existed. They must not be
+    # a compile error: the compiler's own interpreter forwards
+    # `_mojo_minmax(True, *args, **kwargs)`, and a refusal here made
+    # myinterpreter.py uncompilable. The decision is taken BEFORE anything is
+    # lowered, so the fallback evaluates each argument once.
+    #   - several `**` spreads, or `*` mixed with `**`;
+    #   - a callee whose parameter names are not known statically;
+    #   - more positional arguments than named slots;
+    #   - a `double` parameter (no runtime pop for it yet).
     if len(spread_args) != 1 or has_star_spread:
-        raise RuntimeError(
-            f"cannot compile module: call to {fname_raw!r} uses an "
-            f"unsupported * /** spread combination; only a single **dict "
-            f"spread is supported on the ordinary call path")
-    # Need parameter names to bind by name.
+        return None
     if not param_names or not expected_params or len(param_names) != len(expected_params):
-        raise RuntimeError(
-            f"cannot compile module: call to {fname_raw!r} with **dict "
-            f"spread requires a statically-resolved callee with known "
-            f"parameter names")
+        return None
+    _named_slots = len(expected_params)
+    if kwslot is not None and 0 <= kwslot < _named_slots:
+        _named_slots -= 1
+    if len(pos_nodes) > _named_slots:
+        return None
+    if 'double' in expected_params:
+        return None
     # Disallow duplicate explicit keyword names (should not parse, but be safe).
     seen_kw = set()
     for _kn, _ in kwargs:
@@ -3207,6 +3253,14 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # above uses to keep the stub.
         if (isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.name in gen.func_return_types
+                # A name with a generic DECLARATION is not "owned" by the
+                # plain overload that happens to share it: a bracketed call
+                # really names the generic, and when that generic cannot be
+                # instantiated here the pre-existing disposition is the stub
+                # below, not a refusal (the generic itself was stripped from
+                # `func_return_types` before plain overloads were kept).
+                and node.func.obj.name not in getattr(
+                    gen, '_local_generic_func_names', ())
                 and node.func.obj.name not in gen.imported_symbols
                 and node.func.obj.name not in gen._imported_generic_structs
                 # ...but only when the callee really IS this TU's generic
@@ -10916,6 +10970,59 @@ static gs_stat_result * stat_8_PathLike_6_String (char * path)
 """
 
 
+class _NamedSlotFill:
+    """Result of `_fill_named_slots_before_kwargs`: the argument pairs for the
+    named parameters, and the keyword arguments left for `**kwargs`."""
+
+    def __init__(self, pairs: list, rest: dict):
+        self.slot_pairs = pairs
+        self.left_kwargs = rest
+
+
+def _fill_named_slots_before_kwargs(gen, fname, fname_raw, fixed_pairs: list,
+                                    n_fixed: int, kwarg_dict: dict):
+    """Bind the named parameters `len(fixed_pairs) .. n_fixed-1` of a callee
+    that also takes `**kwargs`: from the call's keyword of that name, else
+    from the parameter's default. Returns a `_NamedSlotFill`, or None when the
+    callee's parameter names are not known or a parameter has neither (the
+    caller then keeps what it had)."""
+    _names = (gen._func_param_names.get(fname_raw)
+              or gen._func_param_names.get(fname) or [])
+    _ptypes = _callee_expected_params(gen, fname, fname_raw)
+    if len(_names) < n_fixed:
+        return None
+    _dflt_by_name = {}
+    for _d in (gen._func_param_defaults.get(fname)
+               or gen._func_param_defaults.get(fname_raw) or []):
+        if isinstance(_d, tuple) and len(_d) == 2:
+            _dflt_by_name[_as_str(_d[0])] = _d[1]
+    _taken = set()
+    _plan = []
+    _i = len(fixed_pairs)
+    while _i < n_fixed:
+        _pn = _as_str(_names[_i])
+        if _pn in kwarg_dict:
+            _taken.add(_pn)
+        elif _pn not in _dflt_by_name:
+            return None
+        _plan.append(_pn)
+        _i += 1
+    _pairs = list(fixed_pairs)
+    _i = len(fixed_pairs)
+    for _pn in _plan:
+        if _pn in _taken:
+            _pairs.append(kwarg_dict[_pn])
+        else:
+            _pct = _ptypes[_i] if _i < len(_ptypes) else 'int64_t'
+            _pairs.append(gen._default_expr_to_pair(_dflt_by_name[_pn], param_ctype=_pct))
+        _i += 1
+    _rest = {}
+    for _k in kwarg_dict:
+        if _as_str(_k) not in _taken:
+            _rest[_k] = kwarg_dict[_k]
+    return _NamedSlotFill(_pairs, _rest)
+
+
 def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
                            call_has_spread=False):
     """Pack a call's LITERAL keyword arguments into the callee's own `**kwargs`
@@ -10952,6 +11059,18 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
         _n_fixed = max(0, _kwslot_for_pack - 1) if _has_vararg else _kwslot_for_pack
         _fixed_pairs = arg_pairs[:_n_fixed]
         _vararg_pairs = arg_pairs[_n_fixed:]
+        # Fewer positionals than named parameters before the `*args`/`**kw`
+        # slots: each missing one is bound by its keyword if the call names
+        # it, else by its default. Without this the packed dict was passed
+        # in the first missing slot and that parameter's default landed in
+        # the `**kw` slot (`def outer(items, groups=5, **kw)` called as
+        # `outer(x, group=7)` received `kw == 5` and crashed on first use).
+        if len(_fixed_pairs) < _n_fixed:
+            _fill = _fill_named_slots_before_kwargs(
+                gen, fname, fname_raw, _fixed_pairs, _n_fixed, kwarg_dict)
+            if _fill is not None:
+                _fixed_pairs = _fill.slot_pairs
+                kwarg_dict = _fill.left_kwargs
         _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
         if _has_vararg:
             _lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
@@ -11260,6 +11379,129 @@ def _lnc_unknown(gen, fname_raw: str, fname: str) -> tuple[str, str] | None:
     return None
 
 
+def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr):
+    """The C symbol for a call to one of THIS module's own same-named free
+    functions, or None when the name is not an overload set.
+
+    A module may declare two overloads of one free function
+    (`def pick(x: Int)` / `def pick(x: Bool)`,
+    `std/bit/mask.mojo`'s `splat`, `std/memory/memory.mojo`'s `_free`).
+    Both definitions now emit, each under the symbol its own parameter
+    signature mangles to; the call must name ONE of them. The selection is
+    `_resolve_overload` — the same arity/keyword/argument-type scorer the
+    struct-method and imported-overload paths use — over candidate dicts
+    built from the defining nodes. A truly indistinguishable pair falls
+    back to the first in declaration order, which is also the canonical
+    cross-module signature (see emit_funcs._def_is_canonical), so the call
+    still names a definition that exists rather than a bare stub."""
+    over = getattr(gen, '_local_def_overloads', None) or {}
+    nodes = over.get(fname_raw)
+    if not nodes or len(nodes) < 2:
+        return None
+    cands = []
+    for n in nodes:
+        pnames = []
+        pts = [gimple_ctypes.c_client_callable_ctype(t)
+               for t in gen._signature_ctypes(n.params, n)]
+        star_idx = -1
+        for _ppn, _ppt in n.params:
+            pnames.append(_as_str(_ppn).lstrip('*'))
+            if star_idx < 0 and _ppn.startswith('*') and not _ppn.startswith('**'):
+                star_idx = len(pnames) - 1
+        defaults = getattr(n, 'param_has_default', None) or {}
+        _real = [(pn, pt) for pn, pt in n.params
+                 if not (pn.startswith('*') and not pn.startswith('**'))]
+        if star_idx >= 0:
+            _pre = n.params[:star_idx]
+            min_arity = 0
+            for _pn, _pt in _pre:
+                if _pn not in defaults:
+                    min_arity += 1
+            max_arity = float('inf')
+            pts = [c for c in pts if c != '...']
+        else:
+            min_arity = 0
+            for _pn, _pt in _real:
+                if _pn not in defaults and not _pn.startswith('**'):
+                    min_arity += 1
+            max_arity = len(_real)
+        cands.append({
+            'overload_id': '',
+            'param_names': pnames,
+            'param_ctypes': pts,
+            'min_arity': min_arity,
+            'max_arity': max_arity,
+            'has_varargs': star_idx >= 0,
+            'pre_star_count': star_idx if star_idx >= 0 else None,
+        })
+    # Prefer a candidate that is NOT the function currently being emitted.
+    # A source call to one's own name inside one's own body is normally a
+    # call to a DIFFERENT overload (`to_integer(...)` inside `to_integer`), and
+    # when type erasure cannot separate two overloads (`b64encode(span)`
+    # inside a sibling `b64encode`) choosing self would emit a self-recursive
+    # body with the wrong arity. Only when every surviving candidate is the
+    # enclosing function does this stay a genuine recursive call.
+    _cur_node = getattr(gen, '_current_func_node', None)
+    _nonself = []
+    _nonself_nodes = []
+    for _ci in range(len(cands)):
+        if nodes[_ci] is not _cur_node:
+            _nonself.append(cands[_ci])
+            _nonself_nodes.append(nodes[_ci])
+    chosen = None
+    if _nonself:
+        chosen = _resolve_overload(gen, _nonself, node.args,
+                                   getattr(node, 'kwargs', None))
+    if chosen is not None:
+        cands = _nonself
+        nodes = _nonself_nodes
+    else:
+        chosen = _resolve_overload(gen, cands, node.args,
+                                   getattr(node, 'kwargs', None))
+    # Recover the NODE by candidate identity. Never carry the FunctionDef
+    # inside the candidate dict: the self-hosted backend erases a dict's
+    # values to one boxed word, so a node stored there comes back as an
+    # opaque int and `_func_csym` would read its fields off that word.
+    _def = nodes[0]
+    for _ci in range(len(cands)):
+        if cands[_ci] is chosen:
+            _def = nodes[_ci]
+            break
+    _def_pts = [gimple_ctypes.c_client_callable_ctype(t)
+                for t in gen._signature_ctypes(_def.params, _def)]
+    _sym = (getattr(gen, '_def_sym_by_id', None) or {}).get(id(_def)) \
+        or gen._func_csym(fname_raw, _def_pts)
+    # The chosen overload's own parameter/return types, under its own symbol
+    # (the bare-name slots belong to whichever overload was registered last).
+    gen.func_param_types[_sym] = _def_pts
+    _ret_ann = getattr(_def, 'return_type', None)
+    if _ret_ann is not None:
+        # The same rule the definition applies (`gen_func`): the annotation
+        # decides, whatever node type the parser gave it. Testing for a
+        # plain string skipped every Mojo annotation (`-> Float32` is a type
+        # node), so an annotated overload was inferred from its body as
+        # `void` and its prototype contradicted its definition
+        # (stdlib test/benchmark/test_quick_bench.mojo, "conflicting types").
+        import mojo.backend_gimple.emit_funcs as _ggf_ret
+        _rt_ann = gen._resolve_type(_ret_ann)
+        if (isinstance(_rt_ann, str) and _rt_ann.startswith('MojoTuple_')
+                and not _ggf_ret._body_builds_struct_tuple(
+                    getattr(_def, 'body', None))):
+            _rt_ann = 'MojoList *'
+        gen.func_return_types[_sym] = _rt_ann
+    else:
+        # An unannotated overload (the `raises`-only validators here) is not
+        # the bare-name slot's `char *`/`int64_t` from a sibling; infer THIS
+        # body. Left at the sibling's type, a void callee was used as an
+        # expression ("invalid use of void expression").
+        try:
+            _rt = gen._infer_return_type(_def.body)
+        except Exception:
+            _rt = 'void'
+        gen.func_return_types[_sym] = _rt or 'void'
+    return _sym
+
+
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
@@ -11291,7 +11533,10 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # overload-suffix scheme the definition itself used), so route
     # straight to it, bypassing BUILTIN_VALUE_MAP entirely, whenever this
     # module locally binds the name.
-    if fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
+    _over_sym = _local_overload_call_symbol(gen, fname_raw, node)
+    if _over_sym:
+        fname = _over_sym
+    elif fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
         fname = gen._func_csym(fname_raw)
     # C reserved function renaming
     elif (fname_raw in gimple_ctypes._C_RESERVED_FUNCS and fname_raw not in gen.func_return_types
@@ -11446,7 +11691,28 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     if (fname_raw == 'bool' and len(_args) == 1 and not node.kwargs
             and not gen._locally_binds_name('bool')):
         _args = [_truthy_operand(_args[0])]
-    arg_pairs = lower_call_args(gen, _args)
+    # A call-site `**dict` spread binds by parameter NAME with runtime
+    # lookups; passing the dict as the next positional argument is wrong.
+    # Decided HERE, before any argument is lowered: the binder lowers the
+    # arguments itself, so lowering them first evaluated every argument
+    # twice (`f(g(), **d)` called `g` twice).
+    _spread_bound = None
+    if _call_has_double_star_spread(node):
+        _sb_kwslot = gen._func_kwargs_slot.get(fname)
+        if _sb_kwslot is None:
+            _sb_kwslot = gen._func_kwargs_slot.get(fname_raw, -1)
+        _spread_bound = _try_lower_call_with_dict_spreads(
+            gen, node, fname, fname_raw,
+            _callee_expected_params(gen, fname, fname_raw),
+            (gen._func_param_defaults.get(fname)
+             or gen._func_param_defaults.get(fname_raw) or []),
+            (gen._func_param_names.get(fname_raw)
+             or gen._func_param_names.get(fname) or []),
+            kwslot=_sb_kwslot, for_generator_start=False)
+    if _spread_bound is not None:
+        arg_pairs = _spread_bound
+    else:
+        arg_pairs = lower_call_args(gen, _args)
     if fname_raw in ('min', 'max', 'iter') and not gen._locally_binds_name(fname_raw):
         for _at, _ in arg_pairs:
             _refuse_namedtuple_tuple_use(gen, _at, f'calling {fname_raw} on')
@@ -11511,7 +11777,9 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # `gimple_codegen.compile_to_gimple(src, do_imports=True,
     # filename=input_file)` compiled natively to `(src, 0, "")` instead of
     # `(src, 1, input_file)`. The `-> str` re-view restores the real key.
-    kwarg_dict = {_ggc_as_str(kname): gen.lower_expr(kexpr) for kname, kexpr in kwargs}
+    kwarg_dict = {}
+    if _spread_bound is None:
+        kwarg_dict = {_ggc_as_str(kname): gen.lower_expr(kexpr) for kname, kexpr in kwargs}
 
     # Disambiguate a call to a `(*args, **kwargs)`-declared callee by
     # the CALL SITE's own shape, not the callee's signature alone (see
@@ -11537,65 +11805,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # unresolved/imported names with no recorded signature.
     _call_has_spread = any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
                            for _a in node.args)
-    arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
-        fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
+    if _spread_bound is not None:
+        _call_has_spread = False
+    else:
+        arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
+            fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
     # `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
     # followed by more (keyword-only) params but no `**kwargs`; see
     # `_pack_vararg_trailing_params`'s own docstring for the full
     # rationale (shared with `_gen_stmt_ExprStmt`'s statement-level
     # twin call path below).
-    arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
-        fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
+    if _spread_bound is None:
+        arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
+            fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
-    # Determine the callee's expected C parameter types/names/defaults.
-    # Needed both for **dict spread binding and for general padding.
-    import mojo.backend_gimple.emit_funcs as _ggf_eff
-    expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
-    if not expected_params:
-        expected_params = gen.func_param_types.get(fname_raw, [])
-    if not expected_params and fname_raw in gen._KNOWN_SIGS:
-        expected_params = gen._KNOWN_SIGS[fname_raw][1]
-    elif not expected_params and fname in gen._KNOWN_SIGS:
-        # `fname_raw` (the ORIGINAL Python name, e.g. 'eval') is never
-        # itself a _KNOWN_SIGS key — only its BUILTIN_VALUE_MAP-renamed
-        # C symbol ('mojo_eval') is. Python's 1-arg `eval(expr)` (the
-        # overwhelmingly common form; globals/locals default to the
-        # caller's own scope) called this renamed 3-arg C function with
-        # only 1 argument, a hard "too few arguments" compile error —
-        # found via Tools/build/generate_token.py's own `eval(string)`.
-        # mojo_eval's own globals/locals params are unused anyway (a
-        # documented eval() stub — real eval() can't run in a compiled
-        # C bootstrap), so padding with NULL below is exactly right,
-        # not just "doesn't crash."
-        expected_params = gen._KNOWN_SIGS[fname][1]
-
-    # A call-site `**dict` spread in the argument list must bind by parameter
-    # NAME with runtime lookups; treating the dict as the next positional
-    # argument silently miscompiles (see CODEGEN_call_site_double_star_spread_miscompiles).
-    if any(isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '**'
-           for _a in (getattr(node, 'args', None) or [])):
-        _pnames = (gen._func_param_names.get(fname_raw)
-                   or gen._func_param_names.get(fname) or [])
-        _dflts = (gen._func_param_defaults.get(fname)
-                  or gen._func_param_defaults.get(fname_raw) or [])
-        _kwslot = gen._func_kwargs_slot.get(fname)
-        if _kwslot is None:
-            _kwslot = gen._func_kwargs_slot.get(fname_raw, -1)
-        _spread_pairs = _try_lower_call_with_dict_spreads(
-            gen, node, fname, fname_raw,
-            expected_params, _dflts, _pnames,
-            kwslot=_kwslot, for_generator_start=False)
-        if _spread_pairs is not None:
-            arg_pairs = _spread_pairs
-            kwarg_dict = {}
-            _call_has_spread = False
-        else:
-            # If helper declined but there is still a ** spread, refuse: a
-            # positional guess is never correct.
-            raise RuntimeError(
-                f"cannot compile module: call to {fname_raw!r} with **dict "
-                f"spread could not be lowered safely on the ordinary call path")
+    expected_params = _callee_expected_params(gen, fname, fname_raw)
 
     # General kwarg padding when expected param count is known. A call
     # compiled in isolation (e.g. monomorphize.py's instantiate(), which

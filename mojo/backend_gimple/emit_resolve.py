@@ -3545,15 +3545,17 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             raise RuntimeError(
                 f'cannot compile module: self recursive call to {_rec!r} will '
                 f'cause an infinite loop')
-    else:
-        # A bare call has no bracket to inspect, so the name test stands: the
-        # enclosing function is either the bare base or its mangled instance
-        # (`self_recursion_1_i_1_3`).
+    # A BARE call (`log(y)` inside an instantiation of `log`) has no bracket
+    # to inspect. It is a self-recursion only when it resolves to the SAME
+    # instantiation, or to none at all; `log(x.cast[.float32]())` inside
+    # `log[.float64, 1]` names a different one and is an ordinary call. So
+    # the name match is only remembered here, and the decision is taken
+    # below, once the type arguments have been inferred.
+    _bare_in_own_instance = False
+    if not explicit:
         _cfn = getattr(gen, 'current_func_name', None)
         if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {g!r} will '
-                f'cause an infinite loop')
+            _bare_in_own_instance = True
     source = gen._imported_generics.get(g)
     if not source:
         return None
@@ -3798,6 +3800,13 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 f"note: {type(_elab_e).__name__}: {_elab_e}")
         gimple_ctypes._debug_note('generic call elaboration failed')
         info = None
+    if _bare_in_own_instance and (
+            not info or info['symbol'] == getattr(gen, 'current_func_name', None)):
+        # No instantiation to call (the call would reach the generated C as
+        # a declared-never-defined extern), or the one being compiled.
+        raise RuntimeError(
+            f'cannot compile module: self recursive call to {g!r} will '
+            f'cause an infinite loop')
     if not info:
         return None
     return gen._emit_generic_instantiation(info, arg_pairs)

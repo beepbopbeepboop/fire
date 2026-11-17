@@ -1008,7 +1008,7 @@ def land():
         for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
                 log("conflict %s: filing its LAND doc" % c)
-                I.hand_to_land_doc(c, tasks[c], out)
+                I.hand_to_land_doc(c, tasks[c], I.conflict_section(out, c))
                 batch.remove(c)
         if verdict == "BUSY":
             log("integrator busy (another integrator round holds the lock); landing waits for the next pass")

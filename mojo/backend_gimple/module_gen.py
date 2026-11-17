@@ -5222,7 +5222,10 @@ def _check_signature_binding_violations(gen, stmts):
         # Generic function declarations may have been stripped from `stmts`
         # earlier (kept in `_stripped_generic_fns`) but still need the same
         # declaration-time signature binding check.
-        for s in (getattr(gen, '_stripped_generic_fns', None) or []):
+        _scgf = getattr(gen, '_signature_check_generic_fns', None)
+        if _scgf is None:
+            _scgf = getattr(gen, '_stripped_generic_fns', None) or []
+        for s in _scgf:
             if isinstance(s, FunctionDef):
                 _check_fn_signature_binding_violations(gen, s, module_src)
     except RuntimeError:
@@ -5779,7 +5782,7 @@ def _gmp_emit_funcptr_builtins(self, parts: list[str]) -> None:
             parts.append('')
 
 
-def _gmp_emit_func_prototypes(self, func_defs: list, parts: list[str]) -> None:
+def _gmp_emit_func_prototypes(self, func_defs: list, parts: list[str], _multi_def_names: set) -> None:
     """Emit a prototype for every top-level function this module defines.
 
     One pass of `gen_module_impl`, which calls this once."""
@@ -5801,6 +5804,25 @@ def _gmp_emit_func_prototypes(self, func_defs: list, parts: list[str]) -> None:
         if _as_str(fdef.name) in getattr(self, '_device_kernels', ()):
             continue
         ret    = self.func_return_types.get(fdef.name, 'int64_t')
+        # Per-DEFINITION return type, for the same reason as the symbol below:
+        # the bare-name entry is whichever overload's inference pass wrote
+        # last, so two same-named free functions with DIFFERENT return types
+        # got one overload's prototype return against the other's definition
+        # ("conflicting types for '<sym>'"). Only a MULTI-definition name needs
+        # the override: for a single definition the bare entry already carries
+        # the body-sensitive decision (a `-> Tuple[...]` built as a runtime
+        # tuple is `MojoList *`, not the synthesized struct, and the raw
+        # annotation would re-declare it as the struct).
+        if fdef.name in _multi_def_names:
+            _dsym_ret = (getattr(self, '_def_sym_by_id', None) or {}).get(id(fdef))
+            if _dsym_ret and _dsym_ret in self.func_return_types:
+                # The definition already ran and published THIS overload's
+                # return type (annotation, body inference, or `void` for an
+                # unannotated `mut`-out function); the bare-name slot is the
+                # wrong sibling's.
+                ret = self.func_return_types[_dsym_ret]
+            elif getattr(fdef, 'return_type', None) is not None:
+                ret = self._resolve_type(fdef.return_type)
         # This SECOND, later computation of `param_ctypes`/
         # `func_param_types` OVERWRITES the earlier forward-declaration
         # pass's result, so leaving it on a broken pattern silently
@@ -5844,7 +5866,11 @@ def _gmp_emit_func_prototypes(self, func_defs: list, parts: list[str]) -> None:
                     param_ctypes.append(self._param_ctype(pn, pt, fdef))
             self.func_param_types[fdef.name] = param_ctypes
         ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
-        _c_fn_name = self._func_csym(fdef.name)
+        # Per-DEFINITION symbol from the up-front map, so this prototype and
+        # the body gen_func emits agree one-for-one (including the `_<n>`
+        # disambiguation of two overloads that erase to one C signature).
+        _c_fn_name = (getattr(self, '_def_sym_by_id', None) or {}).get(id(fdef)) \
+            or self._func_csym(fdef.name, _ggf_dup._def_param_ctypes(self, fdef))
         _guard_name = _c_fn_name
         stub_guard = _stub_guard_name(_guard_name)
         parts.append(f'#ifndef {stub_guard}')
@@ -12080,9 +12106,13 @@ def gen_module_impl(self, stmts: list):
     #
     # - GENUINE OVERLOADS — same name, DIFFERENT parameter signatures
     #   (`can_craft(t: Tuff, ...)` vs `can_craft(t: TuffBricks, ...)` in two
-    #   copies of a mod family). Still dropped entirely here: the elaborator
-    #   selects and instantiates the right overload per call site (slice 4),
-    #   so no single C definition exists to emit.
+    #   copies of a mod family, or two overloads of one free function in one
+    #   module). KEPT: each is emitted once, under the symbol its own
+    #   parameter signature mangles to (see `_func_csym`'s `def_pts`). A
+    #   call site picks the overload by arity/argument types
+    #   (emit_calls._local_overload_call_symbol), and an importer that
+    #   cannot type-dispatch uses the FIRST non-generic declaration, which
+    #   is the signature its import snapshot records.
     # - REDEFINITIONS — identical signature, e.g. test suites whose tail was
     #   accidentally pasted twice (`def main():` twice). myinterpreter.py's
     #   module dict binding means the INTERPRETER silently runs the LAST
@@ -12097,20 +12127,7 @@ def gen_module_impl(self, stmts: list):
     # every downstream loop collision-free. No-op otherwise.
     _dup_defs: dict = {}
     for _s in stmts:
-        # A GENERIC TEMPLATE is not a C definition and never was: the
-        # bracket-instantiation pass strips it (a few dozen lines below) and
-        # emits each concrete instantiation separately. Counting it as a
-        # same-name definition is what made the plain sibling beside it look
-        # like one half of a "genuine overload" pair, so BOTH were dropped —
-        # std/sys/info.mojo's `def is_apple_gpu()` next to
-        # `def is_apple_gpu[subarch: StaticString]()` lost its only real
-        # definition, and every in-module call to it fell through to the
-        # unknown-name path's BARE weak stub while cross-module callers named
-        # `std_sys_info_is_apple_gpu`: undefined at link time. A pair of
-        # PLAIN defs is still the overload/redefinition case handled below.
-        if (isinstance(_s, FunctionDef)
-                and not getattr(_s, 'comptime_params', None)
-                and not getattr(_s, 'variadic_bracket_params', None)):
+        if isinstance(_s, FunctionDef):
             _dup_defs.setdefault(_s.name, []).append(_s)
     _dup_drop_ids: set = set()
     for _dup_list in _dup_defs.values():
@@ -12118,8 +12135,16 @@ def gen_module_impl(self, stmts: list):
             continue
         if len({_ggf_dup.dup_def_signature_key(_d) for _d in _dup_list}) == 1:
             _dup_drop_ids.update(id(_d) for _d in _dup_list[:-1])
-        else:
-            _dup_drop_ids.update(id(_d) for _d in _dup_list)
+        # GENUINE OVERLOADS are KEPT, one definition per signature: each is
+        # emitted under its own `_func_csym` symbol (the definition pass
+        # hashes THAT node's own parameter ctypes, not the bare name), and
+        # a call site resolves one of them by arity and argument types. The
+        # previous rule dropped every copy, which left an overloaded free
+        # function with no definition at all: a call inside its own module
+        # emitted a bare `(void)` weak stub named without qualifier or
+        # suffix, and every importer's qualified reference was undefined at
+        # link time (the stdlib-dylib lazy-undefined-refs overload class, fixed
+        # 2026-11-15).
     if _dup_drop_ids:
         stmts = [s for s in stmts if id(s) not in _dup_drop_ids]
     # BUG-2026-019 seeding: THIS compile unit's own surviving top-level
@@ -12134,7 +12159,6 @@ def gen_module_impl(self, stmts: list):
     # parameter annotations need the struct registration passes further down
     # gen_module to have run before _signature_ctypes can resolve them, and
     # the first suffix computation happens during body emission, long after.
-    self._local_def_nodes = {s.name: s for s in stmts if isinstance(s, FunctionDef)}
     self._local_def_param_types: dict = {}
     self._prepare_analysis_funcs(stmts)
 
@@ -12261,40 +12285,127 @@ def gen_module_impl(self, stmts: list):
         except Exception:
             _debug_note('cannot read source for generics scan', self._current_filename)
             _gsrc = ''
+    self._local_generic_func_names = set()
+    self._stripped_generic_fns = []
+    self._signature_check_generic_fns = []
+    # A generic struct defined in THIS file: a plain overload that constructs
+    # one (`std/iter/__init__.mojo`'s `enumerate` building a bare
+    # `_Enumerate(...)`) makes the in-TU materializer instantiate it here,
+    # which changes that file's own struct-method emission
+    # (`_Enumerate.__next__` became prototype-only, so the dylib referenced
+    # `_std_iter___init____Enumerate___next__` and never defined it). Such
+    # plain overloads keep the historical disposition — not emitted.
+    _local_generic_structs = {
+        _lgs.name for _lgs in stmts
+        if isinstance(_lgs, StructDef)
+        and (getattr(_lgs, 'type_param_names', None) or [])
+    }
     if _gsrc:
-        _local_generics = {
-            s.name for s in stmts
+        # A name is generic per-DECLARATION, not per-name: `std/bit/mask.mojo`
+        # declares `splat[size, dtype](SIMD[.bool, size])` AND
+        # `splat(value: Bool)`, and `std/memory/memory.mojo` does the same
+        # for `unsafe_memset_zero`. Stripping every declaration of such a
+        # name left the NON-generic overload with no definition at all —
+        # callers then referenced a symbol nothing emitted. Only a node with
+        # its own bracket parameters is instantiated by the elaborator and
+        # stripped here; the plain overload stays and is emitted normally.
+        _local_generic_ids = {
+            id(s) for s in stmts
             if isinstance(s, FunctionDef)
             and s.name not in self._NO_OVERLOAD_MANGLE
-            and gimple_ctypes.source_declares(_gsrc, ['fn', 'def'], s.name, '[')
+            and (getattr(s, 'comptime_params', None) or [])
         }
+        _local_generics = {
+            s.name for s in stmts
+            if isinstance(s, FunctionDef) and id(s) in _local_generic_ids
+        }
+        # A generic that DISPATCHES on its bracket value in the body
+        # (`comptime if`/`comptime for`) cannot be instantiated here — the
+        # elab_intu materializer refuses it by design (see
+        # `_fn_template_has_comptime_control`). A PLAIN overload that shares
+        # the name and calls such a sibling with brackets was never emitted
+        # before this change (the whole name used to be stripped); keep it
+        # that way rather than turning its call into a module-level refusal.
+        # Measured: std/sys/info.mojo's `is_*_gpu[subarch]` overloads call
+        # `_has_nvidia_gpu_any[archs]()`, whose body is a comptime if/for.
+        _generic_uninstantiable = set()
+        for _g_us in stmts:
+            if not isinstance(_g_us, FunctionDef) or id(_g_us) not in _local_generic_ids:
+                continue
+            for _g_un in _walk_ast(_g_us.body):
+                if isinstance(_g_un, (ComptimeIfStmt, ComptimeForStmt,
+                                      ComptimeVarStmt)):
+                    _generic_uninstantiable.add(_g_us.name)
+                    break
+        if _generic_uninstantiable:
+            for _g_ps in stmts:
+                if (not isinstance(_g_ps, FunctionDef)
+                        or id(_g_ps) in _local_generic_ids
+                        or _g_ps.name not in _local_generics):
+                    continue
+                for _g_pn in _walk_ast(_g_ps.body):
+                    if (isinstance(_g_pn, CallExpr)
+                            and isinstance(_g_pn.func, SubscriptExpr)
+                            and isinstance(_g_pn.func.obj, IdentExpr)
+                            and _as_str(_g_pn.func.obj.name) in _generic_uninstantiable):
+                        _local_generic_ids.add(id(_g_ps))
+                        break
+        # A plain overload that calls its own name BARE (`exit()`'s body is
+        # `exit(0)`, meaning the generic arity overload) cannot be emitted:
+        # the call resolves to the plain symbol's zero-arity signature and
+        # gcc refuses the argument. The overload-by-arity pair was stripped
+        # together before this change; keep that disposition for the plain
+        # half rather than emitting a body that cannot name its callee.
+        for _g_self in stmts:
+            if (not isinstance(_g_self, FunctionDef)
+                    or id(_g_self) in _local_generic_ids
+                    or _g_self.name not in _local_generics):
+                continue
+            for _g_sn in _walk_ast(_g_self.body):
+                if (isinstance(_g_sn, CallExpr)
+                        and isinstance(_g_sn.func, IdentExpr)
+                        and _as_str(_g_sn.func.name) == _g_self.name):
+                    _local_generic_ids.add(id(_g_self))
+                    break
+        if _local_generic_structs:
+            for _g_ls in stmts:
+                if (not isinstance(_g_ls, FunctionDef)
+                        or id(_g_ls) in _local_generic_ids
+                        or _g_ls.name not in _local_generics):
+                    continue
+                for _g_ln in _walk_ast(_g_ls.body):
+                    if not isinstance(_g_ln, CallExpr):
+                        continue
+                    _g_lf = _g_ln.func
+                    _g_lb = (_g_lf.name if isinstance(_g_lf, IdentExpr) else
+                             _g_lf.obj.name if (isinstance(_g_lf, SubscriptExpr)
+                                                and isinstance(_g_lf.obj, IdentExpr))
+                             else None)
+                    if _g_lb is not None and _as_str(_g_lb) in _local_generic_structs:
+                        _local_generic_ids.add(id(_g_ls))
+                        break
         for _gn in _local_generics:
             self._imported_generics.setdefault(_gn, self._current_filename)
-        if _local_generics:
-            # Strip the GENERIC declarations only, never every def that
-            # shares their name. `_local_generics` is a NAME set (that is
-            # what `_imported_generics` and the bracket-instantiation
-            # scan need), but a module may legitimately declare a plain
-            # `def f()` BESIDE a generic `def f[T]()` — std/sys/info.mojo's
-            # `is_apple_gpu` (and `is_nvidia_gpu`/`is_amd_gpu`) is exactly
-            # that shape. Filtering by name dropped the plain overload with
-            # the template: it lost its definition AND its `_mangled_funcs`
-            # registration, so every call to it in this module fell through
-            # to the unknown-name path and emitted a BARE weak stub, while
-            # cross-module callers named `std_sys_info_is_apple_gpu` — an
-            # undefined symbol at link time. The AST already answers this
-            # per node: a bracketed declaration carries its binders in
-            # `comptime_params` (and `variadic_bracket_params` for `[*Ts]`),
-            # an unbracketed sibling carries neither.
-            _stripped_generic_fns = [
-                s for s in stmts
-                if (isinstance(s, FunctionDef) and s.name in _local_generics
-                    and (getattr(s, 'comptime_params', None)
-                         or getattr(s, 'variadic_bracket_params', None)))]
+        self._local_generic_func_names = set(_local_generics)
+        if _local_generic_ids:
+            _stripped_generic_fns = [s for s in stmts
+                                      if isinstance(s, FunctionDef) and id(s) in _local_generic_ids]
+            # The CHECKER below only ever saw a generic whose name was the SOLE
+            # definition: a name with several declarations was dropped wholesale
+            # by the duplicate-def pass before this point, so its generic was
+            # never checked. Keep that disposition for the checker — a stdlib
+            # generic with a pre-existing "lacking evidence" diagnostic
+            # (`std/builtin/reversed.mojo`'s `_ArrayIter[T, size,
+            # origin_of(value), False]` return) must not turn a module that
+            # compiles into a hard failure merely because its plain/generic
+            # siblings are now kept. The ANALYSIS pass still sees every
+            # stripped generic, exactly as it did before.
             self._stripped_generic_fns = list(_stripped_generic_fns)
-            _stripped_ids = {id(s) for s in _stripped_generic_fns}
+            self._signature_check_generic_fns = [
+                s for s in _stripped_generic_fns
+                if len(_dup_defs.get(s.name, ())) <= 1]
             stmts = [s for s in stmts
-                     if not (isinstance(s, FunctionDef) and id(s) in _stripped_ids)]
+                     if not (isinstance(s, FunctionDef) and id(s) in _local_generic_ids)]
             for _sgf in _stripped_generic_fns:
                 for _n in _walk_ast(_sgf.body):
                     if isinstance(_n, FunctionDef):
@@ -12302,6 +12413,79 @@ def gen_module_impl(self, stmts: list):
                         _generator_fns.pop(id(_n), None)
         else:
             self._stripped_generic_fns = []
+            self._signature_check_generic_fns = []
+            self._local_generic_func_names = set()
+
+    # A name with two or more PLAIN definitions is emitted as one definition
+    # per signature — but only when every body is something this build can
+    # lower without tripping an unrelated type bug. A body that uses
+    # `external_call[...]` (whose declaration is typed from the call's own
+    # annotations and can collide with the platform header, e.g.
+    # `nanosleep`'s `struct timespec *`), or that constructs a generic struct
+    # DEFINED IN THIS FILE (the in-TU materializer would instantiate it here
+    # and change this file's own struct-method emission), cannot be emitted
+    # correctly here. Those names keep the historical disposition — none of
+    # their overloads is emitted — rather than turning an unrelated type bug
+    # into a module refusal. The stdlib-dylib overload rows (`_free`,
+    # `unsafe_memset_zero`, `splat`, `to_integer`) and the synthetic probe
+    # have neither shape.
+    _plain_groups: dict = {}
+    for _pog_s in stmts:
+        if (isinstance(_pog_s, FunctionDef)
+                and not getattr(_pog_s, 'comptime_params', None)):
+            _plain_groups.setdefault(_pog_s.name, []).append(_pog_s)
+    _unsafe_overload_ids: set = set()
+    for _pog_name in _plain_groups:
+        _pog_nodes = _plain_groups[_pog_name]
+        if len(_pog_nodes) < 2:
+            continue
+        for _pog_n in _pog_nodes:
+            for _pog_x in _walk_ast(_pog_n.body):
+                if not isinstance(_pog_x, CallExpr):
+                    continue
+                _pog_f = _pog_x.func
+                if (isinstance(_pog_f, IdentExpr)
+                        and _as_str(_pog_f.name) in _local_generic_structs):
+                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
+                    break
+                if (isinstance(_pog_f, SubscriptExpr)
+                        and isinstance(_pog_f.obj, IdentExpr)
+                        and (_as_str(_pog_f.obj.name) == 'external_call'
+                             or _as_str(_pog_f.obj.name) in _local_generic_structs)):
+                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
+                    break
+            if id(_pog_n) in _unsafe_overload_ids:
+                break
+    if _unsafe_overload_ids:
+        stmts = [s for s in stmts if id(s) not in _unsafe_overload_ids]
+    _multi_def_names = set()
+    for _mdn in _plain_groups:
+        if len(_plain_groups[_mdn]) >= 2 and id(_plain_groups[_mdn][0]) not in _unsafe_overload_ids:
+            _multi_def_names.add(_mdn)
+
+    self._local_def_nodes = {}
+    self._local_def_overloads: dict = {}
+    for _ldn_s in stmts:
+        if not isinstance(_ldn_s, FunctionDef):
+            continue
+        # A generic declaration is instantiated by the elaborator, not called
+        # through a fixed name-keyed signature; it is stripped from `stmts`
+        # further down and must not become the canonical `_local_def_nodes`
+        # entry (or an overload candidate) for a name that also has a plain
+        # sibling — `splat`'s generic declaration comes FIRST in mask.mojo.
+        if getattr(_ldn_s, 'comptime_params', None):
+            continue
+        _ldn_list = self._local_def_overloads.setdefault(_ldn_s.name, [])
+        _ldn_list.append(_ldn_s)
+        # FIRST declaration wins for every name-keyed reader (call-site
+        # suffix tier 1, the shared definition stores, forward declarations).
+        # The caller-side import snapshot records the first non-generic
+        # declaration, so a module that cannot type-dispatch names the
+        # overload this unit emits first; the two halves agree by
+        # construction. Per-node emitters pass the node's own signature
+        # explicitly instead of reading this.
+        if _ldn_s.name not in self._local_def_nodes:
+            self._local_def_nodes[_ldn_s.name] = _ldn_s
 
     if _gsrc:
         for _s in stmts:
@@ -18602,6 +18786,53 @@ def gen_module_impl(self, stmts: list):
     # 'BigEndianStructure'`) and would have been a silent miscompile after
     # it. An UNRESOLVABLE condition falls through unchanged (the flatten
     # keeps the IfStmt and the runtime-branch path below emits it as before).
+    # ONE symbol per emitted top-level function DEFINITION, decided up front.
+    # Two source overloads of one name can erase to the SAME C parameter list
+    # (`std/base64`'s `b64encode(StringSlice[_])` / `b64encode(ImmSpan[Byte,_])`
+    # are both `Span *`; `std/memory`'s two `_free` are both `int64_t`), so
+    # `_func_csym`'s suffix cannot tell them apart. Append `_<n>` to the later
+    # one: both bodies are emitted (nothing is silently dropped), a call site
+    # names the concrete overload it resolved, and a same-name self-call can
+    # resolve to the OTHER overload instead of recursing into itself.
+    # Computed HERE — after every inference/struct-registration pass, before
+    # the first body — so the definition, the forward declaration and every
+    # call site read one map.
+    self._def_sym_by_id: dict = {}
+    # Name-keyed default/kwargs tables cannot describe an overload set: a
+    # call that resolved to one concrete overload must NOT be padded from a
+    # DIFFERENT overload's trailing parameters (`b64encode(span)` became
+    # `b64encode(span, 0)` from the 2-arg sibling's `mut result` slot). Drop
+    # the bare-name entries; the per-symbol ones written by each definition
+    # remain and are what a real defaulted overload needs.
+    for _mdn2 in _multi_def_names:
+        self._func_param_defaults.pop(_mdn2, None)
+        self._func_kwargs_slot.pop(_mdn2, None)
+        self._func_kwargs_has_vararg.pop(_mdn2, None)
+        self._vararg_trailing_param_types.pop(_mdn2, None)
+    _def_sym_used: set = set()
+    for _ds_pre in _flatten_resolved_conditionals(stmts):
+        if not isinstance(_ds_pre, FunctionDef):
+            continue
+        if _as_str(_ds_pre.name) == 'main':
+            continue
+        if (_ds_pre.name in self._supported_generators
+                or _ds_pre.name in self._supported_async
+                or _ds_pre.name in self._supported_async_gen):
+            continue
+        if _ds_pre.name in self._unsupported_generator_names:
+            continue
+        if _as_str(_ds_pre.name) in getattr(self, '_device_kernels', ()):
+            continue
+        _ds_sym = self._func_csym(
+            _ds_pre.name, _ggf_dup._def_param_ctypes(self, _ds_pre))
+        _ds_base = _ds_sym
+        _ds_k = 2
+        while _ds_sym in _def_sym_used:
+            _ds_sym = f"{_ds_base}_{_ds_k}"
+            _ds_k += 1
+        _def_sym_used.add(_ds_sym)
+        self._def_sym_by_id[id(_ds_pre)] = _ds_sym
+
     for stmt in _flatten_resolved_conditionals(stmts):
         try:
             if isinstance(stmt, FunctionDef):
@@ -20693,7 +20924,7 @@ def gen_module_impl(self, stmts: list):
             parts.append(f"extern void {_base}_destroy (MojoAsync *);")
             parts.append(f"extern void {_base}_translate_pending_exc (MojoAsync *);")
         parts.append('')
-    _gmp_emit_func_prototypes(self, func_defs, parts)
+    _gmp_emit_func_prototypes(self, func_defs, parts, _multi_def_names)
 
     # `struct_defs` (and the method prototypes + `_getattr_method_arms` table
     # that walk produces) moved UP, to just before `_emit_reflection_dispatch`:
