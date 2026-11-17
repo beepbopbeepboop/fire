@@ -34,6 +34,7 @@ import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.simd_width as _simd_width
+import mojo.middle.float8_dtype as _float8_dtype
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.stmts_shared import _annotation_container_elem_type
@@ -2092,14 +2093,22 @@ def _dtype_arg_name(e):
 def _dtype_cast_ctype(e):
     """C type named by a dtype bracket argument — `DType.int32` or the
     dot-relative `.int32` — or None when it is anything else (a parameter, an
-    expression)."""
+    expression). A float8 dtype (`mojo.middle.float8_dtype`) answers that
+    module's private C type, so a `SIMD`/`Scalar` constructor of one carries
+    the dtype rather than erasing to an integer."""
+    s = ''
     if isinstance(e, gimple_ctypes.DottedLiteral):
-        return _DTYPE_CAST_CTYPES.get(_as_str(e.path))
-    if (isinstance(e, gimple_ctypes.MemberExpr)
+        s = _as_str(e.path)
+    elif (isinstance(e, gimple_ctypes.MemberExpr)
             and isinstance(e.obj, gimple_ctypes.IdentExpr)
             and _as_str(e.obj.name) == 'DType'):
-        return _DTYPE_CAST_CTYPES.get(_as_str(e.member))
-    return None
+        s = _as_str(e.member)
+    else:
+        return None
+    _f8 = _float8_dtype.float8_ctype(s)
+    if _f8 is not None:
+        return _f8
+    return _DTYPE_CAST_CTYPES.get(s)
 
 
 def _comptime_conforms_to_pred(gen):
@@ -4009,7 +4018,12 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
                 if _cv:
                     _dt_ctype = gimple_ctypes._dtype_token_ctype(
                         _cv.get(_as_str(_e0.name)))
-        if _dt_ctype in ('float', 'double', '__fp16'):
+        if (_dt_ctype in ('float', 'double', '__fp16')
+                or _float8_dtype.float8_spelling_of_ctype(_dt_ctype) is not None):
+            # A float8 dtype's private C type arrives here from
+            # `_dtype_token_ctype`; a conversion INTO the dtype is allowed,
+            # and the two uses with no rule are refused at the coercion
+            # and binary-operation chokepoints (mojo.middle.float8_dtype).
             _target = _dt_ctype
         else:
             _target = 'int64_t'

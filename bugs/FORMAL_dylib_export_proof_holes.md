@@ -54,47 +54,6 @@ overflow-trapping exports' termination obligations. What was wrong was only the
 pointer (the svc doc does not describe them). Re-pointed to this doc for the
 names; the subject matter is the same.
 
-## Why the walk refuses (the generator's own words)
-
-`{ident}_semantics_total` is PROVED "where the export's CFG allows it", by a
-constant-fuel CFG walk in halt-only mode, and left as one named obligation
-otherwise (`formal/arm64_proof_gen.py:16945`). The emitted comment on the
-`csetval` hole says which side of that line it fell on:
-
-    OBLIGATION, not proved: this export's run terminates for every argument.
-    The constant-fuel CFG walk does not cover it: its [overflow trap] is such a
-    path, so termination for every argument is not a fact of the model.
-    The walk's refusal, so the reason is not swallowed:
-    universal theorem: CFG decomposition unsupported for this function shape,
-    and every instruction in its own code has a step, so the cause is not an
-    unmodelled word: the walk returns None for a shape with no `RET`, an empty
-    block runs certificate, or a constant-fuel caller whose budget is below the
-    instruction count
-
-So the two `Total` holes are the walk returning `None` for these two shapes --
-the `cset` makes `csetval`'s CFG a shape the constant-fuel walk does not cover.
-The fix is in the WALK's coverage (or in spelling the refusal as a stated
-assumption the way `svc_write_assumed` is), not in the two theorems.
-
-### The refusal message does not name the site, though it says it does
-
-`_cfg_decomposition_refusal`'s docstring promises "this names the one site in
-THIS export ... so 'no proof because a dynamic svc at 0x...' is distinguishable
-from 'no proof because a loop'". Called directly on both exports, it returns
-the SAME generic sentence for each:
-
-    universal theorem: CFG decomposition unsupported for this function shape,
-    and every instruction in its own code has a step, so the cause is not an
-    unmodelled word: the walk returns None for a shape with no `RET`, an empty
-    block runs certificate, or a constant-fuel caller whose budget is below the
-    instruction count
-
-So neither of its specific branches (an unmodelled word, or a classified `svc`)
-fires for these two, and the reader is left with three candidate classes and no
-way to pick. Naming the actual `None` return needs the walk itself
-instrumented -- which of the three it is for `csetval` (the `cset` suggests the
-block partition, not the fuel) is unmeasured.
-
 **Reproduced in isolation, and the instrument's limit.** Rebuilding just the
 `csetval` program and running `formal.lean.proof_census` on the generated proof
 gives `n_sorries = 3`, `lib_sorries = 0` -- the count is exact and the library

@@ -3,7 +3,7 @@
 Part 1 was a documentation-only triage of the 10 Modular cases in
 `bugs/hard/GPU_offload_validation_modular.md`.  Its doc was deleted when the
 matrix was folded into that parent (`## Triage (part 1)`), which is now where
-the live parts (5-8) are told to look.  This test keeps the matrix from rotting
+the live parts (5-7) are told to look.  This test keeps the matrix from rotting
 and pins the two classifications that are checkable from the tree:
 
 - the `max.gpu`-import cases (bundle order, both enqueue/device-passable
@@ -14,7 +14,7 @@ and pins the two classifications that are checkable from the tree:
   widths 0/-1/3, and the compiled path now rejects them too (shared rule in
   `mojo/middle/simd_width.py`, pinned by `test_regress_gpu_offload_validation_modular_part4.py`).
 
-If the parent doc is deleted because parts 5-8 have landed, this test should be
+If the parent doc is deleted because parts 5-7 have landed, this test should be
 deleted with it: what it pins is the triage record, not a compiler behaviour
 that outlives the record.
 

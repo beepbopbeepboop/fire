@@ -44,6 +44,7 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 import mojo.middle.rt_call as rt_call
 import mojo.backend_gimple.emit_methods as gmp
@@ -2798,6 +2799,20 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
         src = 'int64_t'
     if not dst:
         dst = 'int64_t'
+
+    # A store OUT of a float8 dtype this compiler has no conversion rule for
+    # (`mojo.middle.float8_dtype`) is Modular's "not implemented" diagnostic,
+    # not a silent cast. The dtype's C type is the module's private token, so
+    # this one chokepoint sees every conversion site that reaches C: var
+    # initialisers, plain assignments, struct fields, return slots and call
+    # arguments (the last through `_coerce_to_type`, which delegates to
+    # `_safe_coerce_emit`). A store INTO the dtype is allowed — the value is
+    # converted FROM its own natural type, which Modular does implement — and
+    # a copy of a value of the same dtype is `src == dst`, also allowed.
+    _f8_src = _float8_dtype.float8_spelling_of_ctype(src)
+    if _f8_src is not None and src != dst:
+        raise RuntimeError(_float8_dtype.conversion_diagnostic(
+            _f8_src, _float8_dtype.spelling_of_ctype(dst)))
 
     # A BOXED word stored into a pointer-typed slot. `mojo_list_get_boxed` hands
     # back a box (a heap cell, kind 'l'/'p'/...) for every slot kind but a plain

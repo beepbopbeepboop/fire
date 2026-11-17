@@ -42,6 +42,7 @@ from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.float8_dtype as _float8_dtype
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -4583,6 +4584,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # A binary operation with an unimplemented float8 operand has no
+    # arithmetic rule here (`mojo.middle.float8_dtype`): refuse with
+    # Modular's diagnostic instead of computing on the dtype's `double`
+    # representation. This is the one place both spellings arrive — a plain
+    # BinaryOp (`a + b`, any comparison) and a chained comparison, which
+    # calls this per link — and AugAssign lowers through a synthetic BinaryOp,
+    # so `a += b` is refused by the same rule.
+    _f8_op = (_float8_dtype.float8_spelling_of_ctype(lt)
+              or _float8_dtype.float8_spelling_of_ctype(rt))
+    if _f8_op is not None:
+        raise RuntimeError(_float8_dtype.operation_diagnostic(_f8_op))
     # `x == None` / `x != None` on a BOXED name (a tagged-generator value, or
     # any slot read kept as a box). This must be decided BEFORE the boxed
     # operand conversion below, which unwraps the box to its word: a None
