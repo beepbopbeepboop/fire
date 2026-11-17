@@ -10,6 +10,20 @@ declarations where the test requires a proved contract:
 | `an export that binds a local still gets a proved contract` | "the proof admits 3 hole(s); both contracts should be proved, not named" |
 | `a conditional value is not a branch` | "the proof admits 3 hole(s); the cset-bearing contract should be proved, so the only hole left is the branching export's named `_spec`" |
 
+Each check asserts an exact hole COUNT, so the delta is not "some holes" but a
+specific number:
+
+* `a conditional value is not a branch` asserts `n == 1` -- "the cset-bearing
+  contract should be proved, so the only hole left is the branching export's
+  named `_spec`" -- and gets **3**. Its own docstring says the cset block must
+  now get a PROVED contract (`Block` + `BlockCert` + `agrees_of_body`) and that
+  a real `b.cond` block still gets the named `_spec`, so the two extra holes are
+  the finding.
+* `an export that binds a local still gets a proved contract` -- "both
+  contracts should be proved, not named", 3 holes.
+* `several exports, and one with no derivable spec` -- "every export with a
+  derived spec should have a PROVED contract", 2 holes.
+
 Measured 2026-11-16 on the uncapped run (`/usr/bin/time -l`, peak RSS 4.58 GB,
 263 s). The `lib/` holes this job's `expect=` used to describe are GONE --
 `no module under lib/ admits a sorry or an admit` PASSES, and the remaining
