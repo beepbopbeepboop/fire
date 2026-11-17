@@ -43,11 +43,7 @@ BASELINE = {
     # CODEGEN_simd_and_array_values_erase_to_int64.md was retired on 2026-11-16:
     # both docs are historical LANDING RECORDS that legitimately name the doc
     # they merged, so the citation is deliberate, not a dangling pointer.
-    # Historical LANDING RECORD: names the part8-2 doc it attempted to land,
-    # which is not in the tree. Raised rather than rewound.
-    'bugs/LAND-gpu-offload-validation-modular-3.md': 1,
-    # Historical LANDING RECORD naming a part doc that is not in the tree.
-    'bugs/LAND-formal-arm64-instruction-covera.md': 1,
+    'bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md': 6,
     'bugs/mid/LAND-codegen-simd-and-array-values-erase-3.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
@@ -205,6 +201,7 @@ BARE_BASELINE = {
     # `hard/Xcase.md` into its own temp dir and asserts SPLIT parsing on it, so
     # the string is test data. Added when c2be80506 introduced the fixture.
     'tools/test_swarm_replan.py': 1,
+    'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'fire.py': 1,
     'formal/arm64_codegen.py': 1,
     'formal/arm64_proof_gen.py': 1,

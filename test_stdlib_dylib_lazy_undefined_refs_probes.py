@@ -485,12 +485,11 @@ def test_p8_overload_same_name_free_functions_get_their_own_symbols():
                 'resolve' % (caller, ', '.join(still), definer))
 
 
-# part 9 (fixed by build_stdlib_dylib._generic_instance_requests): a generic
-# free function instantiated only by a DIFFERENT module was never emitted by its
-# defining module (a module is compiled alone, so nothing there asks for the
-# concrete instance). Measured: memory.forget_deinit and memory.unsafe_destroy_n
-# (array.mojo), memory.alloc.dealloc (list.mojo), time.time_function
-# (benchmark.mojo).
+# part 9 (open): a generic free function instantiated only by a DIFFERENT
+# module is never emitted by its defining module (a module is compiled alone,
+# so nothing there asks for the concrete instance). Measured: memory.forget_deinit
+# and memory.unsafe_destroy_n (array.mojo), memory.alloc.dealloc (list.mojo),
+# time.time_function (benchmark.mojo).
 def test_p9_generic_cross_module_instantiations_are_emitted():
     import tempfile
     from tools.stdlib_dylib_ratchet import unresolved_stdlib_refs

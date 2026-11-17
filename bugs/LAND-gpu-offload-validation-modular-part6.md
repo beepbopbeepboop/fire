@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gate-stdlib-dylib-3 land?
+# Land: should finished branch bug-gpu-offload-validation-modular-part6 land?
 
-**Branch:** `work/bug-gate-stdlib-dylib-3` (task `bug-gate-stdlib-dylib-3`; its tip is also saved as `refs/archive/work/bug-gate-stdlib-dylib-3`, so dropping it loses nothing).
-**Age:** last commit 2026-11-17, first unlanded commit 2026-11-12; 5 commit(s) ahead of master, 1372 behind it; task started 2026-11-17 07:47:38
-**Original work:** An earlier attempt left 4 commit(s) on branch work/bug-gate-stdlib-dylib, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/gate-stdlib-dylib.md
-**Original claims:** bug:gate-stdlib-dylib
+**Branch:** `work/bug-gpu-offload-validation-modular-part6` (task `bug-gpu-offload-validation-modular-part6`; its tip is also saved as `refs/archive/work/bug-gpu-offload-validation-modular-part6`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 15 behind it; task started 2026-11-15 14:12:43
+**Original work:** Fix the bug in bugs/GPU_offload_validation_modular-part6.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
+**Original claims:** bug:GPU_offload_validation_modular-part6
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-17 21:06:11: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-12; 5 commit(s) ahead of master, 1372 behind it; task started 2026-11-17 07:47:38)
-  Branch: work/bug-gate-stdlib-dylib-3
-  Conflicting files: bugs/gate-stdlib-dylib.md, module_loader.py
+- 2026-11-15 14:52:51: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-15; 1 commit(s) ahead of master, 15 behind it; task started 2026-11-15 14:12:43)
+  Branch: work/bug-gpu-offload-validation-modular-part6
+  Conflicting files: bugs/hard/GPU_offload_validation_modular.md, test_analyzer_build.py, tools/dangling_refs_baseline.py

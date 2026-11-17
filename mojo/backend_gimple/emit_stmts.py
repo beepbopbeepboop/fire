@@ -642,11 +642,6 @@ def _gen_stmt_VarDecl(gen, node):
         # `.wait()` handling.
         if actual_dst == 'MojoGenerator *' and v in gen._generator_var_api:
             gen._generator_var_api[node.name] = gen._generator_var_api[v]
-            # A named local now holds the handle and may be read again
-            # (another consumption, or simply falling out of scope): the
-            # drains of this value must not destroy it (see
-            # _generator_value_owned).
-            gen._generator_value_owned[node.name] = False
         if actual_dst == 'MojoAsync *' and v in gen._async_var_api:
             gen._async_var_api[node.name] = gen._async_var_api[v]
         # `var f = <closure value>` / `var f = lambda: False` (see
@@ -1187,11 +1182,6 @@ def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
     api = None
     if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
         api = gen._generator_var_api[v]
-        # The handle is about to live in a module global: whatever drains
-        # it later does so through a fresh read-back temp (marked False at
-        # the read site), never through this one — so no consumer of this
-        # temp may destroy it either (see _generator_value_owned).
-        gen._generator_value_owned[v] = False
     if api is None:
         if key in gen._global_generator_api:
             gen._global_generator_api_poisoned.add(key)
@@ -1255,43 +1245,7 @@ def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
     return '1'
 
 
-def _lower_out_param_store(gen, node) -> bool:
-    """`r = value` where `r` is an `out` parameter of the function being
-    emitted: the caller owns the object, so copy the value's contents into it
-    rather than rebinding the local pointer (which the caller never sees).
-    Struct results only (`Name *`); returns False for anything else."""
-    _cur = getattr(gen, '_current_func_node', None)
-    if _cur is None or not isinstance(node.target, gimple_ctypes.IdentExpr):
-        return False
-    _tn = _as_str(node.target.name)
-    # `out self` (a constructor or method result) is not a free-function out
-    # parameter; leave it on the path it already has.
-    if _tn == 'self' or (getattr(_cur, 'param_convs', None) or {}).get(_tn) != 'out':
-        return False
-    # Free functions only: a method's own `out` results are not handled here.
-    if not any(st is _cur for st in (getattr(gen, '_current_module_stmts', None) or [])):
-        return False
-    _vct, _vav = gen.lower_expr(node.value)
-    _vb = _as_str(_vct)
-    if not _vb.endswith(' *') or _vb[:-2].strip() not in gen.struct_field_types:
-        return False
-    # The parameter must itself be declared as that struct: a generic result
-    # (`out task: Task[...]`) whose C slot is a word is not a pointer to it.
-    _ann = None
-    for _p in (getattr(_cur, 'params', None) or []):
-        if _as_str(_p[0]) == _tn and len(_p) > 1 and _p[1] is not None:
-            _ann_full = _as_str(_p[1]).strip()
-            # A generic annotation (`Task[...]`) elaborates to a word, not a pointer.
-            _ann = None if '[' in _ann_full else _ann_full
-    if _ann != _vb[:-2].strip():
-        return False
-    gen._emit(f"  *{gen._c_names.get(_tn, _tn)} = *{_vav};")
-    return True
-
-
 def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
-    if _lower_out_param_store(gen, node):
-        return
     # `globals()[key] = value` at module scope: a store through the module's
     # namespace dict, which in the compiled path IS the `_<mod>_globals`
     # struct. Lowered to a name dispatch over the statically-known module
@@ -1676,7 +1630,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                         and isinstance(node.value, gimple_ctypes.CallExpr)
                         and isinstance(node.value.func, gimple_ctypes.IdentExpr)
                         and _as_str(node.value.func.name) in getattr(
-                            gen, '_ret_may_hold_mixed', ()))
+                            gen, '_ret_may_hold_float', ()))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
@@ -2230,11 +2184,6 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # generator_not_first_class_value.md.
         if dst == 'MojoGenerator *' and v in gen._generator_var_api:
             gen._generator_var_api[tname] = gen._generator_var_api[v]
-            # A named local now holds the handle and may be read again
-            # (another consumption, or simply falling out of scope): the
-            # drains of this value must not destroy it (see
-            # _generator_value_owned).
-            gen._generator_value_owned[tname] = False
         # Step I: `var task = create_task(f())` -- mirrors the
         # MojoGenerator* carry-through immediately above exactly (see
         # self._async_var_api's own docstring for the identical "value
@@ -3496,12 +3445,11 @@ def _redecl_upgrade_default(gen, name: str, ctype: str) -> None:
             return
 
 
-def _is_mixed_return(gen) -> bool:
+def _is_float_mixed_return(gen) -> bool:
     """Is the body being emitted one whose return type inference widened to
-    the TAGGED WORD because its arms mix a pointer with a value no pointer can
-    hold (a float, a `_Bool`, or an unambiguous scalar arm)?
+    the TAGGED WORD because its arms mix a float with a pointer?
 
-    The answer comes from `_mixed_return_bodies`, the set
+    The answer comes from `_float_mixed_return_bodies`, the set
     `infra_infer._infer_return_type_core` records against the SAME body object,
     so this emitter cannot disagree with the declared return type: the body is
     only in the set because inference widened it to `int64_t`, and `func_ret_type`
@@ -3511,29 +3459,23 @@ def _is_mixed_return(gen) -> bool:
         return False
     _body = getattr(gen, '_cur_func_body', None)
     return _body is not None and id(_body) in getattr(
-        gen, '_mixed_return_bodies', ())
+        gen, '_float_mixed_return_bodies', ())
 
 
-def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
-    """Box one return arm of a mixed-return function into the tagged word.
+def _box_float_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
+    """Box one return arm of a float+pointer function into the tagged word.
 
     Every arm that has no `int64_t` spelling is boxed by its own kind, so a
     consumer that only sees the word (`mojo_repr_boxed`, the list kind
-    reader) still renders the value: `_Bool` -> 'b', `double` -> 'd',
-    `char *` -> 'p', `MojoList *` (tuple or list) -> 'l', `MojoBytes *` ->
-    's'. An `int`/`int64_t` arm is already a plain word and passes through
-    unchanged.
+    reader) still renders the value: `double` -> kind 'd', `char *` -> 'p',
+    `MojoList *` (tuple or list) -> 'l', `MojoBytes *` -> 's'. An `int`/`_Bool`
+    arm is already a plain word and passes through unchanged.
 
-    Any OTHER pointer kind — a dict, a set, a struct — has no box kind that
-    renders it (a box's "container" kind renders through the LIST repr, so
-    reading a dict pointer out of it would walk dict memory as a slot array).
-    It travels as its RAW word instead: `mojo_repr_boxed` falls back to the
-    integer rendering for a word it does not recognise, and every unboxing
-    consumer (`mojo_box_word`) passes it through unchanged, so a raw pointer
-    is never reinterpreted. That is the only answer an inferred mix can give
-    when one of its arms is a class the runtime has no box for — the shape
-    this compiler's own `_apply_binary_op` has, mixing `MojoString *` with
-    int/bool/float arms."""
+    Any OTHER pointer kind — a dict, a set, a struct — is refused rather than
+    guessed: a box's "container" kind renders through the LIST repr, so
+    reading a dict pointer out of it would walk dict memory as a slot array.
+    A diagnostic naming the function is the only honest answer; the shapes
+    that matter today (`comptime.eval_const`) return str/list/None/float."""
     vt = _as_str(vtype)
     if vt in ('int', 'int64_t'):
         # A plain integer has an int64_t spelling, so it IS the word.
@@ -3557,7 +3499,11 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
     if vt == 'MojoBytes *':
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_bytes',
                                          [('void *', v)])
-    return 'int64_t', gen._coerce_to_type(vt, 'int64_t', v)
+    raise TypeError(
+        f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
+        f"returns a float beside a {vt!r}; a tagged word can carry a float "
+        f"beside an int/str/list/tuple/bytes/None, but not beside this pointer "
+        f"kind (a box of it would be rendered by the wrong repr)")
 
 
 _NON_POINTER_SCALAR_ARM_CTYPES = ('double', 'float', 'int', 'int64_t', '_Bool')
@@ -3599,11 +3545,31 @@ def _annotation_scalar_family(ann: str) -> str | None:
 def _scalar_shape_arm_kind(node) -> str | None:
     """The scalar family a return arm is BY ITS SOURCE SHAPE, or None.
 
-    ONE definition, in `mojo.middle.exprtypes`, because the inference side
-    needs the same answer when it decides whether an inferred pointer join is
-    a real pointer/scalar mix (`infra_infer._return_arms_need_boxed_word`).
-    See that function for the rule and why the C type cannot answer it."""
-    return gimple_exprtypes.scalar_shape_arm_kind(node)
+    The C type cannot answer this question, and that is the whole reason this
+    function exists: a String or container value is an erased `int64_t` box,
+    `None` is `int 0`, and a `Bool` value is `_Bool`, so on the C side a
+    legitimate pointer arm and a mistyped scalar arm are the same word. Only
+    shapes whose static Mojo type is a scalar in every context are named here
+    — literals, comparisons, `not`, and a sign applied to a literal. An
+    IdentExpr or a call is deliberately NOT named: `return result^` returning
+    a String is an `int64_t` on the C side and must stay legal.
+    """
+    while isinstance(node, gimple_ctypes.UnaryOp) and node.op in ('-', '+'):
+        node = node.operand
+    if isinstance(node, gimple_ctypes.IntLiteral):
+        return 'int'
+    if isinstance(node, gimple_ctypes.FloatLiteral):
+        return 'float'
+    if isinstance(node, gimple_ctypes.BoolLiteral):
+        return 'bool'
+    if isinstance(node, gimple_ctypes.CompareChain):
+        return 'bool'
+    if (isinstance(node, gimple_ctypes.BinaryOp)
+            and node.op in ('==', '!=', '<', '<=', '>', '>=')):
+        return 'bool'
+    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == 'not':
+        return 'bool'
+    return None
 
 
 def _check_float_arm_into_annotated_pointer(gen, vtype, node=None) -> None:
@@ -3611,7 +3577,7 @@ def _check_float_arm_into_annotated_pointer(gen, vtype, node=None) -> None:
 
     A pointer C return type reaches this emitter only from an ANNOTATION
     (`-> String`, `-> MojoList *`, ...): an inferred scalar+pointer join is
-    widened to the tagged word before we get here (`_is_mixed_return`).
+    widened to the tagged word before we get here (`_is_float_mixed_return`).
     So a scalar arm is a contradiction of a static type, and Mojo rejects it
     as a type error. The old spelling, `(char *)<scalar>` cast into the
     pointer, compiled (gcc warns, not errors) and silently handed the caller
@@ -3683,7 +3649,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         # A bare `return` is `return None`, and in a tagged function a None is
         # the shared None box, not the NULL word (which `mojo_repr_boxed` would
         # read as the integer 0).
-        if _is_mixed_return(gen):
+        if _is_float_mixed_return(gen):
             _nv = gen._call_expr('int64_t', 'mojo_box_none', [])
             gen._ret(_nv)
             return
@@ -3917,12 +3883,12 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]
-        # A mixed-return function returns the TAGGED WORD: box this arm by
+        # A float+pointer function returns the TAGGED WORD: box this arm by
         # its kind so the declared `int64_t` return carries the value instead
         # of truncating it into the pointer the old join chose. AFTER the
         # bookkeeping above, which is about the value's own container shape and
         # still wants the unboxed `v`.
-        if _is_mixed_return(gen):
+        if _is_float_mixed_return(gen):
             if isinstance(node.value, gimple_ctypes.NoneLiteral) or (
                     isinstance(node.value, gimple_ctypes.IdentExpr)
                     and _as_str(node.value.name) == 'None'):
@@ -3940,7 +3906,7 @@ def _gen_stmt_ReturnStmt(gen, node):
                     'int64_t', 'mojo_box_from_bool',
                     [('int64_t', gen._to_int64(vtype, v))])
             else:
-                vtype, v = _box_mixed_return_arm(gen, vtype, v)
+                vtype, v = _box_float_mixed_return_arm(gen, vtype, v)
         ret = gen.func_ret_type
         if ret == 'void':
             gen._ret_void()
@@ -4982,26 +4948,6 @@ def _extract_match_args_from_structdef(gen, sd, n_given, cname):
                     if tname.startswith('__') and tname.endswith('__'):
                         continue
                     names.append(tname)
-        # CPython's __match_args__ is the __init__ signature: base-class
-        # attributes of a NON-dataclass base and `field(init=False, ...)`
-        # fields are not in it. The `sd.fields` walk above sees the merged
-        # layout (base attributes first — the `Node.context` shape), so
-        # filter against the same provenance table the constructor path
-        # uses (module_gen's `_struct_noninit_fields`), or `case
-        # parser.InstDef(name)` binds the base slot instead of the first
-        # real init field.
-        _nif = getattr(gen, '_struct_noninit_fields', None)
-        if _nif is not None and cname in _nif:
-            _excl = _nif[cname]
-            if _excl:
-                _excl_set = set()
-                for _en in _excl:
-                    _excl_set.add(_as_str(_en))
-                _names2 = []
-                for _nm in names:
-                    if _nm not in _excl_set:
-                        _names2.append(_nm)
-                names = _names2
         return names, 'dataclass'
     # No __match_args__ and not dataclass
     return None, 'missing'
@@ -5784,15 +5730,6 @@ def _gen_stmt_ExprStmt(gen, node):
         # as a statement: this fast path never reaches _lower_call.
         if raw_name == 'dealloc' and gen._lower_dealloc_thin_allocation(node.value) is not None:
             return
-        # `typing.cast(type, value)` as a bare statement: CPython discards
-        # its result here too, so only the value argument is evaluated for
-        # its side effects — the statement-level twin of _lower_call's
-        # identical interception (this fast path never reaches _lower_call,
-        # so without this the call would still bind to the weak "unavailable
-        # in compiled mode" stub). See emit_infra.is_typing_cast_call.
-        if ginf.is_typing_cast_call(gen, node.value):
-            gen.lower_expr(node.value.args[1])
-            return
         # `fut.add_done_callback(cb)` / `.remove_done_callback(cb)` as a
         # bare statement (the async-body hook in gimple_gen_coro lowers
         # the method call to this 2-arg `__mojo_future_*` shim call). The
@@ -6101,14 +6038,6 @@ def _gen_stmt_ExprStmt(gen, node):
         # call stayed an implicit declaration.
         ggc._ensure_libc_self_extern(gen, raw_name)
         arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
-        # An imported name its home module defines more than once: name the overload
-        # the call selects, by the argument C types just lowered (the same chooser
-        # `_lower_named_call` uses).
-        import mojo.backend_gimple.emit_calls as _ec_stmt
-        _imp_ov = _ec_stmt._imported_overload_call_symbol(
-            gen, raw_name, node.value, [_t for _t, _v in arg_pairs])
-        if _imp_ov is not None:
-            fname = _imp_ov
 
         # exit(msg)/quit(msg) as a bare statement — see _lower_named_
         # call's identical check (this is that fix's statement-level
