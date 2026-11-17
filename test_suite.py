@@ -6333,7 +6333,7 @@ def test_the_formal_doc_index_is_current():
     # is DELETED and the block is not regenerated. The NEW-document check above
     # exercises the same comparison, but only in the direction that was never
     # the failure — d3ec70ee7 deleted
-    # `FORMAL_arm64_instruction_coverage-part1.md` and merged a block that had
+    # the arm64 extend-option census (part 1) and merged a block that had
     # lost the ROW but kept the counts ("4 documents" over three rows, "5
     # documents" over four), so `python3 tools/formal_doc_index.py --check` was
     # red on master and `test_suite.py` with it. Pinned on a planted tree in
