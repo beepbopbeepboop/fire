@@ -42,6 +42,7 @@ from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.float8_dtype as _float8_dtype
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -816,10 +817,6 @@ def _lie_global_window(gen, _global_owner_mod, _imp_field, _imp_fields, _imp_hom
     if (_read_key in gen._global_generator_api
             and _read_key not in gen._global_generator_api_poisoned):
         gen._generator_var_api[t] = gen._global_generator_api[_read_key]
-        # A read-back of a module global: the global may be read again
-        # (or rebound), so a drain of this temp must not destroy the
-        # handle (see _generator_value_owned).
-        gen._generator_value_owned[t] = False
     # …and "this global holds a plain integer" (`gen._int_word_vals`), the
     # same hop and the same reason for the same reason-as-the-three-above:
     # reading a global mints a FRESH temp, and the dict-key decision is
@@ -988,10 +985,6 @@ def _lie_imported_global_accessor(gen, name: str) -> tuple[str, str]:
         t = gen._call_expr(_acc_ctype, _acc_csym, [])
     if _gen_api_known:
         gen._generator_var_api[t] = gen._global_generator_api[_gen_key]
-        # A read-back of a module global: the global may be read again
-        # (or rebound), so a drain of this temp must not destroy the
-        # handle (see _generator_value_owned).
-        gen._generator_value_owned[t] = False
     return _acc_ctype, t
 
 
@@ -1120,26 +1113,8 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # mismatch as a "non-trivial conversion in 'integer_cst'".
         gen._emit(f'  {t} = (int64_t)0;  /* class ref {name} as value */')
         return 'int64_t', t
-    # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer.
-    # Python shadowing: a module-level binding of the same name (or a from-import of
-    # it) shadows the builtin in this namespace, so the bare read must load the
-    # module global below instead — the exact question `bare_global_read_plan`
-    # answers at its own arm, and the one THIS arm used to override. Measured on
-    # Tools/cases_generator/analyzer's lexer.py, where `hex = '([0-9a-fA-F]+)'`
-    # and `float = r'(...)'` are module globals shadowing the same-named
-    # builtins: `number_re = choice(octal, hex, float, decimal)` packed
-    # `_funcptr_mojo_hex` / `_funcptr_mojo_make_float` pointer words into the
-    # varargs list instead of the string globals, the "hex" alternative became
-    # machine-code bytes, and `0xFF` tokenized as `NUMBER('0')` +
-    # `IDENTIFIER('xFF')`. `octal`/`decimal` were immune (not Python builtins,
-    # so they already fell through to the module-global arm).
-    # `bare_global_read_plan` is pure (reads only), and its `_wins` gate
-    # answers per-module ownership, NOT the shared whole-closure
-    # `_global_var_types` superset: a sibling module's same-named global must
-    # not disable this module's real builtin, so the superset test (a plain
-    # `name in gen._global_var_types`) is deliberately NOT the gate here.
-    if (name in gen.BUILTIN_VALUE_MAP and name not in gen.var_types
-            and not bare_global_read_plan(gen, name)[0]):
+    # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
+    if name in gen.BUILTIN_VALUE_MAP and name not in gen.var_types:
         c_name = gen.BUILTIN_VALUE_MAP[name]
         # Use a pre-declared static void* (emitted in non-GIMPLE context) to avoid
         # the invalid `&func_name` syntax that GIMPLE strict mode rejects.
@@ -4583,6 +4558,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # A binary operation with an unimplemented float8 operand has no
+    # arithmetic rule here (`mojo.middle.float8_dtype`): refuse with
+    # Modular's diagnostic instead of computing on the dtype's `double`
+    # representation. This is the one place both spellings arrive — a plain
+    # BinaryOp (`a + b`, any comparison) and a chained comparison, which
+    # calls this per link — and AugAssign lowers through a synthetic BinaryOp,
+    # so `a += b` is refused by the same rule.
+    _f8_op = (_float8_dtype.float8_spelling_of_ctype(lt)
+              or _float8_dtype.float8_spelling_of_ctype(rt))
+    if _f8_op is not None:
+        raise RuntimeError(_float8_dtype.operation_diagnostic(_f8_op))
     # `x == None` / `x != None` on a BOXED name (a tagged-generator value, or
     # any slot read kept as a box). This must be decided BEFORE the boxed
     # operand conversion below, which unwraps the box to its word: a None
@@ -8538,10 +8524,6 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
                 gen._nested_elem_types[it_val] = gen._nested_elem_types[_old_it_val]
             if _old_it_val in gen._generator_var_api:
                 gen._generator_var_api[it_val] = gen._generator_var_api[_old_it_val]
-                # Ownership follows the value onto the cast temp: the drain
-                # below keys _generator_value_owned on the NEW name.
-                if _old_it_val in gen._generator_value_owned:
-                    gen._generator_value_owned[it_val] = gen._generator_value_owned[_old_it_val]
         it_type = _resolved_type
 
     # Park the remaining `for` clauses for `_gen_compr_append` to consume from

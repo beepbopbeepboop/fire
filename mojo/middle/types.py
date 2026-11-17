@@ -29,6 +29,7 @@ import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
 import mojo.middle.simd_width as _simd_width
+import mojo.middle.float8_dtype as _float8_dtype
 
 def _debug_note(where: str, detail: object='') -> None:
     """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
@@ -1316,7 +1317,8 @@ _SIMD_FLOAT_DTYPE_CTYPE = {
 
 
 def _dtype_token_ctype(tok):
-    """Scalar C type for a dtype TOKEN, or None when it is not a float dtype.
+    """Scalar C type for a dtype TOKEN, or None when the token names no dtype
+    this resolver knows.
 
     One resolver for every spelling a dtype can reach these lookups in: a
     `('DType', 'float32')` TUPLE, the REPR of that tuple as a string
@@ -1326,6 +1328,12 @@ def _dtype_token_ctype(tok):
     table `_SIMD_FLOAT_DTYPE_CTYPE`, so the annotation resolver
     (`infra_infer._resolve_type`) and the constructor lowerer
     (`emit_calls`' `SIMD`/`Scalar` arm) cannot drift apart.
+
+    A float8 dtype the compiler has no rule for (`mojo.middle.float8_dtype`'s
+    family) answers that module's private C type, not None: the annotation
+    must not be erased to an integer, because that is what let a conversion
+    out of the dtype and an operation with it compute silently. The refusals
+    themselves are in `_safe_coerce_emit`/`_lower_binary_tail`.
     """
     if tok is None:
         return None
@@ -1337,6 +1345,9 @@ def _dtype_token_ctype(tok):
     s = str(tok).strip()
     if not s:
         return None
+    _f8 = _float8_dtype.float8_spelling(s)
+    if _f8 is not None:
+        return _float8_dtype.float8_ctype(_f8)
     if s.startswith('DType.'):
         s = s[len('DType.'):]
     elif s.startswith('dtype.'):
@@ -1361,7 +1372,10 @@ def _simd_float_dtype_ctype(inner: str) -> str | None:
     parts = _split_top_level_commas(inner)
     if not parts:
         return None
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
+    dt = _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
+    if dt is not None:
+        return dt
+    return _float8_dtype.float8_ctype(parts[0].strip())
 
 
 def _mojo_type(ann: str | type | None) -> str:
@@ -1459,39 +1473,18 @@ def _mojo_type(ann: str | type | None) -> str:
             dt = _simd_float_dtype_ctype(inner)
             if dt is not None:
                 return dt
-        if base in ('Literal', 'typing.Literal'):
-            # `Literal["a", "b"]` (typing.Literal over string literals):
-            # the value IS one of the spelled-out constants, so the slot
-            # holds a str exactly as a plain `str` annotation would.
-            # Measured (CPython Tools/cases_generator/parsing.py, `kind:
-            # Literal["inst", "op"]` on the InstHeader/InstDef dataclasses):
-            # the annotation fell through to the `ann = base` tail and
-            # `_TYPE_MAP`'s int64_t default, so the struct declared
-            # `int64_t kind` while the constructor stored the token-text
-            # pointer and every read compared the boxed word against a
-            # string. All string-literal elements -> the str type; any
-            # other element keeps the old int64_t fallback (early return
-            # either way: `Literal` is in no other branch's table).
-            _lit_elems = []
-            for _le in _split_top_level_commas(inner):
-                _le = _le.strip()
-                if _le:
-                    _lit_elems.append(_le)
-            if _lit_elems:
-                _all_str = True
-                for _le in _lit_elems:
-                    if (len(_le) < 2 or _le[0] != _le[-1]
-                            or (_le[0] != '"' and _le[0] != "'")):
-                        _all_str = False
-                        break
-                if _all_str:
-                    return 'char *'
-            return 'int64_t'
         ann = base
     if isinstance(ann, str) and len(ann) > 1 and (ann[0] == '*') and (ann[1] != '*'):
         inner = ann[1:].strip()
         if inner in _TYPE_MAP:
             return f'{_TYPE_MAP[inner]} *'
+    # A float8 dtype the compiler has no conversion/arithmetic rule for is a
+    # real scalar type for the resolver (see mojo.middle.float8_dtype); it
+    # lowers to that module's private C type rather than the int64_t default,
+    # so the annotation is not silently erased to an integer.
+    _f8 = _float8_dtype.float8_ctype(ann)
+    if _f8 is not None:
+        return _f8
     t = _TYPE_MAP.get(ann)
     return t if t is not None else 'int64_t'
 

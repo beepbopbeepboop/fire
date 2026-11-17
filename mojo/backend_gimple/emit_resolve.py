@@ -44,6 +44,7 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 import mojo.middle.rt_call as rt_call
 import mojo.backend_gimple.emit_methods as gmp
@@ -966,13 +967,6 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 temp_gen._regex_patterns = gen._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                 temp_gen._regex_progs = gen._regex_progs        # share: bubble compiled regex data up to root preamble
                 temp_gen._regex_progs_defined = gen._regex_progs_defined  # share: avoid duplicate emission across recursive paths
-                temp_gen._virt_dispatch_helpers = gen._virt_dispatch_helpers  # share: `_mojo_virt_` helper registrations made while lowering THIS imported module's bodies must reach the ROOT's _emit_reflection_dispatch (the only gen that emits definitions)
-                temp_gen._getattr_method_arms = gen._getattr_method_arms  # share: bound-method getattr arms recorded by THIS imported module's prototype walk must reach the ROOT's _emit_reflection_dispatch (the only gen that emits the `_mojo_getattr_<S>` definitions) — an unshared dict left every imported struct's arm table empty there
-                temp_gen._getattr_property_arms = gen._getattr_property_arms  # share: same, for the property (getter-call) arms — the erased-receiver `node.tokens` read must get the getter's RESULT on imported dataclasses, not an AttributeError
-                temp_gen._getattr_decorated_arms = gen._getattr_decorated_arms  # share: decorated-method getattr arms — the ROOT's _mojo_getattr_<S> must answer the WRAPPED value for structs defined in any module of the closure
-                temp_gen._decorated_method_wrapped = gen._decorated_method_wrapped  # share: call-site routing table (emit_methods' _lower_struct_method_call reads it while lowering THIS module's bodies; a sibling module's early pre-pass may have populated it first — first-wins, same getter name either way)
-                temp_gen._decorated_method_dec_csym = gen._decorated_method_dec_csym  # share: the decorator symbol the getter definition's guarded declaration names
-                temp_gen._emitted_decorated_getters = gen._emitted_decorated_getters  # share: one `_wrapped_<S>_<m>` DEFINITION per TU — the closure's sections all splice into the ROOT's unit, so per-gen dedup would double-define
                 temp_gen._const_str_locals = gen._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                 temp_gen.struct_field_types = gen.struct_field_types
                 # share: a struct's home-module qualifier (_struct_method_qualifier)
@@ -2799,6 +2793,20 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     if not dst:
         dst = 'int64_t'
 
+    # A store OUT of a float8 dtype this compiler has no conversion rule for
+    # (`mojo.middle.float8_dtype`) is Modular's "not implemented" diagnostic,
+    # not a silent cast. The dtype's C type is the module's private token, so
+    # this one chokepoint sees every conversion site that reaches C: var
+    # initialisers, plain assignments, struct fields, return slots and call
+    # arguments (the last through `_coerce_to_type`, which delegates to
+    # `_safe_coerce_emit`). A store INTO the dtype is allowed — the value is
+    # converted FROM its own natural type, which Modular does implement — and
+    # a copy of a value of the same dtype is `src == dst`, also allowed.
+    _f8_src = _float8_dtype.float8_spelling_of_ctype(src)
+    if _f8_src is not None and src != dst:
+        raise RuntimeError(_float8_dtype.conversion_diagnostic(
+            _f8_src, _float8_dtype.spelling_of_ctype(dst)))
+
     # A BOXED word stored into a pointer-typed slot. `mojo_list_get_boxed` hands
     # back a box (a heap cell, kind 'l'/'p'/...) for every slot kind but a plain
     # int, and the tuple-unpack reader tags the word as such (`_boxed_vals`).
@@ -3518,16 +3526,6 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
     return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
 
 
-def _literal_mojo_type(arg):
-    """The Mojo type of a call argument that is a plain numeric literal, read
-    from its syntax alone (`104` is `Int`, `2.5` is `Float64`), or None."""
-    if isinstance(arg, gimple_ctypes.IntLiteral):
-        return 'Int'
-    if isinstance(arg, gimple_ctypes.FloatLiteral):
-        return 'Float64'
-    return None
-
-
 def _constructed_struct_type(gen, arg, ctype):
     """The Mojo type of a call argument that is a direct constructor call of a
     concrete struct of this module (`Foo()` -> `Foo`), or None. The C type
@@ -3539,17 +3537,6 @@ def _constructed_struct_type(gen, arg, ctype):
             and ctype == f'{arg.func.name} *'):
         return arg.func.name
     return None
-
-
-def _generic_paths_for(gen) -> dict:
-    """The {name: source path} generic functions a call made from `gen` may
-    elaborate: this unit's own imported generics, plus — inside an elaborated
-    instantiation — the sibling generics its caller handed down. A nested
-    instantiation needs the whole chain (`mid` calls `ident` while `top` is the
-    unit that elaborated `mid`), so the sibling map is forwarded as well."""
-    out = dict(getattr(gen, '_sibling_generic_paths', None) or {})
-    out.update(gen._imported_generics)
-    return out
 
 
 def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
@@ -3583,12 +3570,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
         if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
             _bare_in_own_instance = True
     source = gen._imported_generics.get(g)
-    if not source and explicit:
-        # A sibling generic of the instantiation this unit is compiling
-        # (monomorphize.instantiate's `generic_paths`). Explicit calls only: a
-        # bare `g(x)` can name a NON-generic overload of the same name, as
-        # `log(x)` inside math's `log[...]` does, and must keep its meaning.
-        source = (getattr(gen, '_sibling_generic_paths', None) or {}).get(g)
     if not source:
         return None
     # An instantiation the in-TU pre-pass ALREADY DEFINED in this translation
@@ -3613,8 +3594,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
-    module_src = None
-    type_args = None
     try:
         module_src = gen._generic_source_text(source)
         import elaborate
@@ -3713,26 +3692,9 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 else:
                     new_type_args.append(ta)
             type_args = new_type_args
-            # A `//` in the callee's bracket head: the explicit list names only
-            # the parameters after it, and the ones before it are deduced from
-            # the argument types (`bitcast[dtype, width](x)` binds `src_dtype`
-            # and `src_width` from `x`). Complete the list here so the
-            # elaborator sees one argument per parameter. A deduction that
-            # cannot be bound declines the instantiation, as an unbound
-            # argument always has.
-            _tmpl_dd = elaborate.extract_fn_source(
-                module_src, g, arg_count=len(arg_pairs))
-            if _tmpl_dd and elaborate.deduced_param_count(_tmpl_dd):
-                type_args = elaborate.complete_explicit_type_args(
-                    _tmpl_dd, type_args, [ct for ct, _ in arg_pairs],
-                    arg_mojo_types=[_literal_mojo_type(a) or _constructed_struct_type(gen, a, ct)
-                                    for a, (ct, _) in zip(node.args, arg_pairs)])
-                if type_args is None:
-                    return None
             info = el.elaborate_generic_call(
                 module_src, g, type_args, arg_count=len(arg_pairs),
-                origin_module=elaborate.declaring_module_name(gen, module_src),
-                generic_paths=_generic_paths_for(gen))
+                origin_module=elaborate.declaring_module_name(gen, module_src))
             if info:
                 gen._refine_generic_return_type(
                     info, module_src, g, type_args, len(node.args),
@@ -3825,8 +3787,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 module_src, g, [ct for ct, _ in arg_pairs],
                 origin_module=elaborate.declaring_module_name(gen, module_src),
                 arg_mojo_types=[_constructed_struct_type(gen, a, ct)
-                                for a, (ct, _) in zip(node.args, arg_pairs)],
-                generic_paths=_generic_paths_for(gen))
+                                for a, (ct, _) in zip(node.args, arg_pairs)])
     except RuntimeError:
         # The nested-async-in-a-generic guard above raises RuntimeError
         # deliberately — an honest refusal, not a "try something else"
@@ -3860,39 +3821,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             f'cannot compile module: self recursive call to {g!r} will '
             f'cause an infinite loop')
     if not info:
-        # An EXPLICIT bracket that supplies fewer CONCRETE arguments than the
-        # callee's non-defaulted comptime parameters is a program error, not
-        # an elaboration gap. `bind_type_args` declines it, and declining here
-        # lets the call fall through `_lower_call`'s stub path, which emits 0
-        # at exit 0 — a silent wrong answer (measured 2026-11-16:
-        # `param_fn[2](1)` with `def param_fn[x: Int, y: Int]` built and
-        # printed 0). The interpreter already names the mistake
-        # (`myinterpreter._raise_unbound_comptime_error`: "failed to infer
-        # parameter 'y' of 'param_fn'"); `test_interp_oracle.py`'s premise is
-        # that the two engines agree, so this path renders the same words as a
-        # user diagnostic. The check runs only when elaboration DECLINED and
-        # the type args were all concrete, so a still-generic body
-        # (`Self.T`, `U`) keeps declining exactly as before. `type_args` is
-        # only assigned INSIDE the try (the explicit arm), so a failure before
-        # its assignment keeps master's plain decline — the None init above
-        # makes the guard total instead of raising UnboundLocalError.
-        if explicit and module_src and type_args is not None:
-            import elaborate  # the try above may have failed before its own import
-            try:
-                _tmpl = elaborate.extract_fn_source(
-                    module_src, g, arg_count=len(arg_pairs))
-            except Exception:
-                _tmpl = None
-            _unbound = (elaborate.unbound_type_parameter(_tmpl, type_args)
-                        if _tmpl else None)
-            if _unbound and not elaborate.unbound_param_is_inferable(_tmpl, _unbound):
-                _cfn = getattr(gen, '_current_filename', '') or ''
-                _cln = getattr(node, 'line', 0) or 0
-                _clc = getattr(node, 'col', 0) or 0
-                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
-                raise RuntimeError(
-                    f"{_cat}error: failed to infer parameter "
-                    f"'{_unbound}' of '{g}'")
         return None
     return gen._emit_generic_instantiation(info, arg_pairs)
 
@@ -4359,13 +4287,6 @@ def _emit_generic_instantiation(gen, info, arg_pairs):
     if _cpp_obj is not None and _cpp_obj not in gen._link_objects:
         gen._link_objects.append(_cpp_obj)
         gen._link_needs_cxx = True
-    # The callees this instantiation's body calls (see elaborate_generic_call's
-    # `generic_paths`): its object only declares them, so they link here too.
-    for _nobj in info.get('nested_objects') or ():
-        if _nobj not in gen._link_objects:
-            gen._link_objects.append(_nobj)
-            if _nobj.endswith('.cpp.o'):
-                gen._link_needs_cxx = True
     gen.func_return_types[sym] = info['ret']
     gen.func_param_types[sym] = info['params']
     # The template may have trailing params with a default value (e.g.

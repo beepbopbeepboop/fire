@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gpu-offload-validation-modular-part8-2 land?
+# Land: should finished branch bug-compile-fail-tools-cases-generator-a land?
 
-**Branch:** `work/bug-gpu-offload-validation-modular-part8-2` (task `bug-gpu-offload-validation-modular-part8-2`; its tip is also saved as `refs/archive/work/bug-gpu-offload-validation-modular-part8-2`, so dropping it loses nothing).
-**Age:** last commit 2026-11-16, first unlanded commit 2026-11-15; 5 commit(s) ahead of master, 177 behind it; task started 2026-11-16 12:58:40
-**Original work:** An earlier attempt left 1 commit(s) on branch work/bug-gpu-offload-validation-modular-part8, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/G
-**Original claims:** bug:GPU_offload_validation_modular-part8
+**Branch:** `work/bug-compile-fail-tools-cases-generator-a` (task `bug-compile-fail-tools-cases-generator-a`; its tip is also saved as `refs/archive/work/bug-compile-fail-tools-cases-generator-a`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-13; 6 commit(s) ahead of master, 545 behind it; task started 2026-11-15 14:12:41
+**Original work:** An earlier attempt left 5 commit(s) on branch work/fix-merge-bug-mid-compile-fail-tools-cases-generat-4, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That bran
+**Original claims:** bug:COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-17 01:24:47: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-15; 5 commit(s) ahead of master, 177 behind it; task started 2026-11-16 12:58:40)
-  Branch: work/bug-gpu-offload-validation-modular-part8-2
-  Conflicting files: bugs/hard/GPU_offload_validation_modular.md, mojo/backend_gimple/emit_calls.py, mojo/backend_gimple/module_gen.py
+- 2026-11-15 14:52:51: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-13; 6 commit(s) ahead of master, 545 behind it; task started 2026-11-15 14:12:41)
+  Branch: work/bug-compile-fail-tools-cases-generator-a
+  Conflicting files: bugs/hard/GPU_offload_validation_modular.md, test_analyzer_build.py, tools/dangling_refs_baseline.py

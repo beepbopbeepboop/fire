@@ -23,6 +23,10 @@ import threading
 from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
 from mojo.middle.simd_width import is_valid_width as _simd_width_is_valid
+from mojo.middle.float8_dtype import FLOAT8_TYPE_NAMES as _FLOAT8_DTYPE_NAMES
+from mojo.middle.float8_dtype import SCALAR_TYPE_SPELLINGS as _SCALAR_DTYPE_SPELLINGS
+from mojo.middle.float8_dtype import conversion_message as _float8_conversion_message
+from mojo.middle.float8_dtype import operation_message as _float8_operation_message
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -4251,7 +4255,7 @@ class MojoClass:
                         continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 value = _unwrap_dataclass_field(value)
-                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
+                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None), f)
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
                 # AssignStmt has a single `.target`, not a `.targets` list
@@ -4944,12 +4948,18 @@ class _MojoScalarType:
     int/float already behave like the value side of these types; this only
     carries the `.size_bytes` metadata that `size_of[T]()`/`align_of[T]()`/
     `bit_width_of[T]()` read off the type itself."""
-    def __init__(self, name, size_bytes, is_float=False):
+    def __init__(self, name, size_bytes, is_float=False, spelling=None):
         self.name = name
         self.size_bytes = size_bytes
         self._is_float = is_float
+        self._spelling = spelling
 
     def __call__(self, x=0):
+        if self._spelling is not None:
+            # A value of an unimplemented float8 dtype carries its spelling,
+            # so a later use of it is refused (see _MojoFloat8Value) instead
+            # of silently computing on a dtype with no rule behind it.
+            return _MojoFloat8Value(self._spelling, x)
         return float(x) if self._is_float else int(x)
 
     def __repr__(self):
@@ -4975,6 +4985,55 @@ class _MojoScalarType:
 
     def is_double_float(self):
         return self.name == 'Float64'
+
+
+# The float8 scalar family, one byte each: the names exist in the type table
+# (a `Float8_e3m4` annotation resolves and `size_of[DType.float8_e3m4]()`
+# answers 1) but this interpreter has no conversion or arithmetic rule for
+# the dtype — a coercion from a value of one to any other declared type, and
+# a binary operation with one, are refused with Modular's own diagnostic
+# instead of silently computing on a type with no rule behind it (the float8
+# dtype legality fix for `op_with_unsupported_type_error.mojo`, host half;
+# pinned by test_regress_gpu_offload_validation_modular_part8.py). The family
+# and its lowered spellings are `mojo.middle.float8_dtype`'s one table, read
+# by the compiled path's resolver and refusals too — not a second copy here;
+# formal/model/types.py's NARROW_FLOAT_TYPE_NAMES is the formal path's.
+_FLOAT8_TYPE_NAMES = _FLOAT8_DTYPE_NAMES
+
+# The lowered spellings of the scalar types in the type table, the IR names
+# Modular's diagnostics word the types in (`conversion from 'f8e3m4' to 'f32'
+# is not implemented`); a declared type outside the table falls back to its
+# raw spelling at the refusal site.
+_SCALAR_TYPE_SPELLINGS = _SCALAR_DTYPE_SPELLINGS
+
+
+class _MojoFloat8Value(float):
+    """A value of an unimplemented float8 dtype: a plain float carrying its
+    dtype's lowered spelling (`f8e3m4`, ...). The dtype is in the type table
+    (its name resolves, `size_of` answers one byte) but there is no
+    conversion or arithmetic rule for it here, so a coercion to a different
+    declared type and a binary operation with one are refused with Modular's
+    diagnostic instead of silently computing (see _FLOAT8_TYPE_NAMES). A
+    float subclass so the value plumbing that is dynamic in this interpreter
+    (`float` checks, `print`) still behaves numerically on an untouched
+    value, the way _AutoStubValue subclasses int. `float.__new__` is called
+    directly rather than via super(): the self-hosting compiler compiles
+    this file and has no super() (see MojoError)."""
+    def __new__(cls, spelling, value=0.0):
+        instance = float.__new__(cls, value)
+        instance.spelling = spelling
+        return instance
+
+
+def _float8_operand_spelling(left, right):
+    """The lowered spelling of the first float8 operand in a pair of
+    already-evaluated operands, or None when neither is one (see
+    _MojoFloat8Value)."""
+    if isinstance(left, _MojoFloat8Value):
+        return left.spelling
+    if isinstance(right, _MojoFloat8Value):
+        return right.spelling
+    return None
 
 
 class _MojoTypeInfoCall:
@@ -6728,6 +6787,16 @@ class Interpreter:
         float32 = _MojoScalarType('Float32', 4, is_float=True)
         float64 = _MojoScalarType('Float64', 8, is_float=True)
         bfloat16 = _MojoScalarType('BFloat16', 2, is_float=True)
+        # The float8 family: one byte, a float, and no conversion or
+        # arithmetic rule in this interpreter — a value of one carries its
+        # lowered spelling and a use of it is refused (see
+        # _FLOAT8_TYPE_NAMES / _MojoFloat8Value).
+        float8 = {}
+        for _f8_name in _FLOAT8_TYPE_NAMES:
+            _f8_type = _MojoScalarType(_f8_name, 1, is_float=True,
+                                       spelling=_SCALAR_TYPE_SPELLINGS[_f8_name])
+            float8[_f8_name] = _f8_type
+            self.scope.define(_f8_name, _f8_type)
         self.scope.define('Int8', int8)
         self.scope.define('Int16', int16)
         self.scope.define('Int32', int32)
@@ -6740,12 +6809,17 @@ class Interpreter:
         self.scope.define('Float32', float32)
         self.scope.define('Float64', float64)
         self.scope.define('BFloat16', bfloat16)
-        self.scope.define('DType', types.SimpleNamespace(
+        dtype = types.SimpleNamespace(
             int8=int8, int16=int16, int32=int32, int64=int64, index=int64, int=int64,
             uint8=uint8, uint16=uint16, uint32=uint32, uint64=uint64,
             float16=float16, float32=float32, float64=float64, bfloat16=bfloat16,
             bool=_MojoScalarType('Bool', 1),
-        ))
+        )
+        # Expose the float8 family on `DType` (`DType.float8_e3m4`) the way
+        # the other scalars are; the attribute is the lowercase type name.
+        for _f8_name, _f8_type in float8.items():
+            setattr(dtype, _f8_name.lower(), _f8_type)
+        self.scope.define('DType', dtype)
         self.scope.define('size_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('align_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('bit_width_of', _MojoTypeInfoFn(_mojo_bit_width_of))
@@ -7709,11 +7783,68 @@ class Interpreter:
             return None
         return ctor()
 
-    def _coerce_to_declared_type(self, value, type_ann):
+    def _refuse_unsupported_float8(self, node, message):
+        """Refuse a use of an unimplemented float8 dtype (see
+        _FLOAT8_TYPE_NAMES) with a modular-format diagnostic: a RuntimeError
+        carrying a `mojo_record` (see mojo_diagnostic), so `fire.py run`
+        prints `file:line:col: error: <message>` and exits non-zero with no
+        Python traceback."""
+        err = RuntimeError(message)
+        line, col = self._expr_loc(node)
+        setattr(err, 'mojo_record', _rec(self.filename, line, col, message, []))
+        raise err
+
+    def _expr_loc(self, node):
+        """The (line, col) to diagnose a runtime error at `node`: the node's
+        own position when the parser recorded one, else the first operand's
+        — the parser leaves internal operator nodes (a BinaryOp, a
+        CompareChain) at 0,0 while their operands carry the real position,
+        and a diagnostic at 0,0 has no source line to point at."""
+        line = getattr(node, 'line', 0) if node is not None else 0
+        col = getattr(node, 'col', 0) if node is not None else 0
+        if line or col:
+            return line, col
+        for attr in ('left', 'right', 'target', 'value', 'operand'):
+            child = getattr(node, attr, None) if node is not None else None
+            if child is None:
+                continue
+            child_line = getattr(child, 'line', 0)
+            if child_line:
+                return child_line, getattr(child, 'col', 0)
+        operands = getattr(node, 'operands', None) if node is not None else None
+        if operands:
+            first = operands[0]
+            return getattr(first, 'line', 0), getattr(first, 'col', 0)
+        return line, col
+
+    def _coerce_to_declared_type(self, value, type_ann, node=None):
         """Coerce a var's initializer to its declared scalar type, mirroring
         real Mojo's implicit-constructor conversion (e.g. `var x: Int = 84 / 2`
-        truncates the Float64 division result to an Int, it doesn't stay a float)."""
+        truncates the Float64 division result to an Int, it doesn't stay a float).
+
+        An unimplemented float8 dtype (see _FLOAT8_TYPE_NAMES) is refused
+        rather than coerced: a value of one coerced to any other declared
+        type is the conversion Modular reports as not implemented (raised
+        with `node`'s location for a modular-format diagnostic), and a
+        declared float8 takes a value of the declared dtype — its zero when
+        there is no initializer, a copy when the value is already of the same
+        dtype, a fresh value otherwise."""
         if not isinstance(type_ann, str):
+            return value
+        if isinstance(value, _MojoFloat8Value):
+            if (type_ann in _FLOAT8_TYPE_NAMES
+                    and _SCALAR_TYPE_SPELLINGS[type_ann] == value.spelling):
+                return value
+            self._refuse_unsupported_float8(
+                node, _float8_conversion_message(
+                    value.spelling,
+                    _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)))
+        if type_ann in _FLOAT8_TYPE_NAMES:
+            if value is None:
+                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], 0.0)
+            if isinstance(value, (int, float)):
+                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann],
+                                        float(value))
             return value
         if value is None:
             # A declared scalar with no initializer (`var x: Int`, or a struct
@@ -7761,7 +7892,7 @@ class Interpreter:
             for name, v in zip(names, values):
                 self.scope.define(name, v)
             return value
-        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None))
+        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None), node)
         self.scope.define(node.name, value)
         return value
 
@@ -7777,6 +7908,12 @@ class Interpreter:
         """Compute the new value for `target OP= value` given already-
         evaluated `current`/`rhs`. Factored out of execute_AugAssignStmt as
         its own named step for clarity."""
+        # `a += 1` is a binary operation: a float8 operand is refused with
+        # Modular's diagnostic (see _apply_binary_op).
+        f8_spelling = _float8_operand_spelling(current, rhs)
+        if f8_spelling is not None:
+            self._refuse_unsupported_float8(
+                node, _float8_operation_message(f8_spelling))
         op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
         if op == '+':
             return current + rhs
@@ -9486,6 +9623,13 @@ class Interpreter:
         operands (everything except the short-circuiting 'and'/'or'/'as',
         handled directly in eval_BinaryOp before operands are evaluated).
         Factored out of eval_BinaryOp as its own named step for clarity."""
+        # A float8 operand has no arithmetic rule in this interpreter:
+        # refuse with Modular's diagnostic (see _FLOAT8_TYPE_NAMES) instead
+        # of computing silently on a dtype with no rule behind it.
+        f8_spelling = _float8_operand_spelling(left, right)
+        if f8_spelling is not None:
+            self._refuse_unsupported_float8(
+                expr, _float8_operation_message(f8_spelling))
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -9566,6 +9710,13 @@ class Interpreter:
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)
+            # A chained comparison is a binary operation too: a float8
+            # operand is refused with Modular's diagnostic (see
+            # _apply_binary_op).
+            f8_spelling = _float8_operand_spelling(left, right)
+            if f8_spelling is not None:
+                self._refuse_unsupported_float8(
+                    expr, _float8_operation_message(f8_spelling))
             if not self._apply_compare_op(op, left, right):
                 return False
             left = right

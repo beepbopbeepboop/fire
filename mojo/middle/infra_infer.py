@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from __future__ import annotations
 import dataclasses
+import os
 import re
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _sms_key
 import regex_compile
@@ -80,20 +81,6 @@ def _resolve_type(gen, ann: str | None) -> str:
                 if not _ann_s:
                     break
             ann = _ann_s
-    # Cross-module collision, local-first: when THIS module defines a struct
-    # under `ann`'s bare name and that struct is the collision LOSER (its C
-    # name is qualified — recorded in `_local_cname_map`), a bare annotation
-    # in this module's source means the LOCAL class, not the winner that
-    # holds the bare name in the shared `struct_field_types` (measured:
-    # analyzer.py's `families: dict[str, Family]` / `-> StackEffect` resolved
-    # to parsing.py's `Family(Node)` / `StackEffect(Node)` layouts, so the
-    # root-side constructor wrote into the wrong fields and the wrong method
-    # table answered the dispatch). A dotted annotation is an explicit module
-    # reference (`op: parser.InstDef`) and never remaps.
-    if isinstance(ann, str) and '.' not in ann:
-        _lcm_r = getattr(gen, '_local_cname_map', None)
-        if _lcm_r and ann in _lcm_r:
-            return f"{_lcm_r[ann]} *"
     if ann in gen.struct_field_types:
         return f"{ann} *"
     # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —
@@ -114,32 +101,7 @@ def _resolve_type(gen, ann: str | None) -> str:
     if isinstance(ann, str) and '.' in ann:
         _bare = ann.rsplit('.', 1)[-1]
         if _bare in gen.struct_field_types:
-            if ' | ' not in ann:
-                return f"{_bare} *"
-            # A union annotation is NOT one dotted name — the `_bare` above
-            # is the LAST member's bare name (measured: CPython
-            # Tools/cases_generator's analyzer.py `op: parser.InstDef |
-            # parser.Pseudo` resolved to `Pseudo *`, and the body's field
-            # reads used Pseudo's offsets on InstDef objects: `op->inputs`
-            # answered `kind`, a string, and iterating it segfaulted).
-            # When TWO OR MORE non-None members name known structs, no
-            # single pointer type has every member's layout, so skip the
-            # fast path: the `_mojo_type` union branch below boxes the
-            # value to int64_t and every member access lowers to the
-            # runtime tag dispatch (`_mojo_dispatch_getattr`), which reads
-            # each concrete type's field at its own offsets (the shape
-            # analyze_forest's boxed `node` already runs on). A one-struct
-            # union (`parser.Node | None`) keeps the fast path — the one
-            # struct IS the layout.
-            _nsm = 0
-            for _up in ann.split(' | '):
-                _up = _up.strip()
-                if _up == 'None':
-                    continue
-                if _up.rsplit('.', 1)[-1] in gen.struct_field_types:
-                    _nsm += 1
-            if _nsm < 2:
-                return f"{_bare} *"
+            return f"{_bare} *"
     # _mojo_type is a stateless module-level function with no access to
     # struct_field_types, so a pointer-to-a-known-struct annotation like
     # `UnsafePointer[MoveOnly_Int, MutExternalOrigin]` would otherwise
