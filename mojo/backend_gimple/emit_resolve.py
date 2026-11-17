@@ -3518,6 +3518,16 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
     return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
 
 
+def _literal_mojo_type(arg):
+    """The Mojo type of a call argument that is a plain numeric literal, read
+    from its syntax alone (`104` is `Int`, `2.5` is `Float64`), or None."""
+    if isinstance(arg, gimple_ctypes.IntLiteral):
+        return 'Int'
+    if isinstance(arg, gimple_ctypes.FloatLiteral):
+        return 'Float64'
+    return None
+
+
 def _constructed_struct_type(gen, arg, ctype):
     """The Mojo type of a call argument that is a direct constructor call of a
     concrete struct of this module (`Foo()` -> `Foo`), or None. The C type
@@ -3603,6 +3613,8 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
+    module_src = None
+    type_args = None
     try:
         module_src = gen._generic_source_text(source)
         import elaborate
@@ -3701,6 +3713,22 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 else:
                     new_type_args.append(ta)
             type_args = new_type_args
+            # A `//` in the callee's bracket head: the explicit list names only
+            # the parameters after it, and the ones before it are deduced from
+            # the argument types (`bitcast[dtype, width](x)` binds `src_dtype`
+            # and `src_width` from `x`). Complete the list here so the
+            # elaborator sees one argument per parameter. A deduction that
+            # cannot be bound declines the instantiation, as an unbound
+            # argument always has.
+            _tmpl_dd = elaborate.extract_fn_source(
+                module_src, g, arg_count=len(arg_pairs))
+            if _tmpl_dd and elaborate.deduced_param_count(_tmpl_dd):
+                type_args = elaborate.complete_explicit_type_args(
+                    _tmpl_dd, type_args, [ct for ct, _ in arg_pairs],
+                    arg_mojo_types=[_literal_mojo_type(a) or _constructed_struct_type(gen, a, ct)
+                                    for a, (ct, _) in zip(node.args, arg_pairs)])
+                if type_args is None:
+                    return None
             info = el.elaborate_generic_call(
                 module_src, g, type_args, arg_count=len(arg_pairs),
                 origin_module=elaborate.declaring_module_name(gen, module_src),
@@ -3832,6 +3860,39 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             f'cannot compile module: self recursive call to {g!r} will '
             f'cause an infinite loop')
     if not info:
+        # An EXPLICIT bracket that supplies fewer CONCRETE arguments than the
+        # callee's non-defaulted comptime parameters is a program error, not
+        # an elaboration gap. `bind_type_args` declines it, and declining here
+        # lets the call fall through `_lower_call`'s stub path, which emits 0
+        # at exit 0 — a silent wrong answer (measured 2026-11-16:
+        # `param_fn[2](1)` with `def param_fn[x: Int, y: Int]` built and
+        # printed 0). The interpreter already names the mistake
+        # (`myinterpreter._raise_unbound_comptime_error`: "failed to infer
+        # parameter 'y' of 'param_fn'"); `test_interp_oracle.py`'s premise is
+        # that the two engines agree, so this path renders the same words as a
+        # user diagnostic. The check runs only when elaboration DECLINED and
+        # the type args were all concrete, so a still-generic body
+        # (`Self.T`, `U`) keeps declining exactly as before. `type_args` is
+        # only assigned INSIDE the try (the explicit arm), so a failure before
+        # its assignment keeps master's plain decline — the None init above
+        # makes the guard total instead of raising UnboundLocalError.
+        if explicit and module_src and type_args is not None:
+            import elaborate  # the try above may have failed before its own import
+            try:
+                _tmpl = elaborate.extract_fn_source(
+                    module_src, g, arg_count=len(arg_pairs))
+            except Exception:
+                _tmpl = None
+            _unbound = (elaborate.unbound_type_parameter(_tmpl, type_args)
+                        if _tmpl else None)
+            if _unbound and not elaborate.unbound_param_is_inferable(_tmpl, _unbound):
+                _cfn = getattr(gen, '_current_filename', '') or ''
+                _cln = getattr(node, 'line', 0) or 0
+                _clc = getattr(node, 'col', 0) or 0
+                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                raise RuntimeError(
+                    f"{_cat}error: failed to infer parameter "
+                    f"'{_unbound}' of '{g}'")
         return None
     return gen._emit_generic_instantiation(info, arg_pairs)
 

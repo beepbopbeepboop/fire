@@ -1967,6 +1967,19 @@ def test_type_param_markers_and_simd_unification(wd):
           el.infer_type_args(
               'def f[T, U: AnyType = make_default()](a: T) -> T:\n    return a\n',
               ['int64_t']) is None)
+    # The same "missing and no provable default" answer, named: the compiled
+    # link-mode call site renders it as `failed to infer parameter 'y' of
+    # 'param_fn'` instead of letting the call stub to 0. One rule, two
+    # readers (`bind_type_args` declines; the call site names the parameter).
+    _two = 'def param_fn[x: Int, y: Int](a: Int) -> Int:\n    return a + x + y\n'
+    _dflt = 'def param_fn[x: Int, y: Int = 4](a: Int) -> Int:\n    return a + x + y\n'
+    check("unify#9: an omitted bracket param with no default is named",
+          el.unbound_type_parameter(_two, ['2']) == 'y'
+          and el.unbound_type_parameter(_two, ['2', '3']) is None
+          and el.bind_type_args(_two, ['2']) is None)
+    check("unify#10: a provable default is not reported as unbound",
+          el.unbound_type_parameter(_dflt, ['2']) is None
+          and el.bind_type_args(_dflt, ['2']) == {'x': '2', 'y': '4'})
 
 
 def test_generic_instantiation_symbol_agreement(wd):
