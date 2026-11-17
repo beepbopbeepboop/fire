@@ -277,3 +277,44 @@ ours and fix the delta, as was done for diagnostics_in_missing_locs), then the
 rc=0 ones that are declaration-level (`enum_exhaustive_errors`,
 `align_decorator_parametric_error`, `moco_4400`), leaving the type-checker ones
 (`tuple_*`) for last.
+
+## 2026-11-16 (wakeup 41): `moco_4400` re-measured, with a 30-line repro
+
+`fire.py build` on the Modular file exits **0** (still a miss). The gap is not
+the message -- `does not implement all requirements for 'Iterable'` is produced
+by the elaborator, and `test_trait_requirement_evidence_diagnostic.py` pins it
+by calling `elaborate.Elaborator().elaborate_generic_call(src, 'needs_iterator',
+['S[NotMovable]'])` DIRECTLY. So the machinery works when triggered; the
+whole-program path never triggers it for this call.
+
+Minimal repro (30 lines, `fire.py build` exit 0, no diagnostic):
+
+```mojo
+struct S[T: AnyType](
+    Copyable where conforms_to(T, Copyable),
+    Iterable where conforms_to(T, Movable),
+    Movable,
+):
+    var _v: Self.T
+    def __iter__(ref self) -> Self where conforms_to(Self.T, Copyable):
+        return self.copy()
+    def __next__(mut self) raises StopIteration -> Self.T where conforms_to(Self.T, Movable):
+        raise StopIteration()
+
+struct NotMovable:
+    var x: Int
+
+def needs_iterator[I: Iterator](x: I):
+    pass
+
+def foo():
+    var s = S(NotMovable(1))
+    needs_iterator(s)
+```
+
+`S[NotMovable]` does not conform to `Iterator` (its conformance is conditional
+on `T: Movable`, and `NotMovable` is not `Movable`), so `needs_iterator(s)`
+must be rejected. Measured the same day: `enum_exhaustive_errors`,
+`moco_4400_no_crash_on_bind_parameter` and `tuple_first_of_error` all still
+exit 0; `align_decorator_parametric_error` exits 1 (a diagnostic, delta
+uncompared).
