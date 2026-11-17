@@ -47,7 +47,7 @@ doc, then assert `dangling_doc_refs --ratchet` stays green.
 
 ## Workaround used by this round
 
-`bugs/LAND-codegen-nested-bracket-generic-call-4.md` had quoted the same kind
+`bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md` had quoted the same kind
 of status line, including the two cases-generator analyzer docs deleted by the
 compiled-analyzer landing; that line now names the bugs instead of the paths,
 which is the fix `--ratchet` asks for.
