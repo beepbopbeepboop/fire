@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression pin for the DROP decision on bugs/LAND-gate-formal-doc-truth-2.md.
+"""Regression pin for the DROP decision on the LAND gate-formal-doc-truth-2 bug (its doc was deleted).
 
 The doc asked whether the finished branch `work/bug-gate-formal-doc-truth-2`
 (tip 73cbb4d6f, 3 commits, 1195 behind master) should land. Assessed
@@ -33,7 +33,7 @@ Landing the tip would REGRESS the census (947 -> 932), re-add the stale
 822 ladder rung and the pre-932 quoted figures, and lose 1195 commits of
 master's other work in tools/suite.py and fire_compiler.py (5 files
 conflict). The branch's own deletions of the gate docs are stale:
-bugs/gate-rthdrscan.md is retired on master (6cd1368ca), and
+the rthdrscan gate bug is retired on master (6cd1368ca), and
 bugs/gate-formal-doc-truth.md was re-filed (b3fe558b2) when the gate went
 red again on another branch — that red is tracked in its own doc, which
 this decision leaves alone. The branch tip stays in
@@ -77,7 +77,7 @@ def _read(relpath):
 
 
 def test_land_doc_is_deleted():
-    doc = os.path.join(HERE, 'bugs', 'LAND-gate-formal-doc-truth-2.md')
+    doc = os.path.join(HERE, 'bugs', 'LAND-gate-formal-doc-truth-2.md')  # deliberate: pins that this doc stays deleted
     assert not os.path.exists(doc), (
         'the land doc exists — the DROP decision for '
         'work/bug-gate-formal-doc-truth-2 is undone. The branch is '
