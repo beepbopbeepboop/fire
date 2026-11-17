@@ -1959,8 +1959,53 @@ double mojo_box_double(int64_t v)
 {
     if (!mojo_is_boxed(v)) return (double)v;
     MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind != 'd') return (double)bx->bits;
+    if (bx->kind != 'd' && !(bx->kind >= 'A' && bx->kind <= 'G'))
+        return (double)bx->bits;
     return mojo_double_from_bits(bx->bits);
+}
+
+/* float8 boxes: kind letters, in float8_dtype.FLOAT8_FORMATS order. */
+static const char *const _f8_names[] = {
+    "f8e3m4", "f8e4m3fn", "f8e4m3fnuz", "f8e5m2", "f8e5m2fnuz", "f8e8m0fnu"
+};
+
+/* The four numbers per format, in _f8_names order (float8_dtype.FLOAT8_FORMATS):
+ * exponent bits, mantissa bits, bias, kind (0 ieee, 1 fn, 2 fnuz, 3 ue8m0). */
+static const int _f8_params[6][4] = {
+    {3, 4, 3, 0}, {4, 3, 7, 1}, {4, 3, 8, 2}, {5, 2, 15, 0}, {5, 2, 16, 2}, {8, 0, 127, 3}
+};
+
+int64_t mojo_box_from_f8(double v, const char *spelling)
+{
+    char kind = 'G';
+    for (int i = 0; i < 6; i++)
+        if (spelling && strcmp(spelling, _f8_names[i]) == 0) { kind = (char)('A' + i); break; }
+    if (kind != 'G') {
+        const int *p = _f8_params[kind - 'A'];
+        v = mojo_f8_round(v, p[0], p[1], p[2], p[3]);   /* a value is its format's */
+    }
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return mojo_double_to_bits(v);
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = mojo_double_to_bits(v);
+    bx->kind = kind;
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    return (int64_t)(uintptr_t)bx;
+}
+
+int mojo_is_f8_box(int64_t v)
+{
+    if (!mojo_is_boxed(v)) return 0;
+    char k = ((MojoBox *)(intptr_t)v)->kind;
+    return k >= 'A' && k <= 'G';
+}
+
+const char *mojo_f8_spelling(int64_t v)
+{
+    if (!mojo_is_f8_box(v)) return "";
+    char k = ((MojoBox *)(intptr_t)v)->kind;
+    if (k == 'G') return "f8?";
+    return _f8_names[k - 'A'];
 }
 
 /* A double passed where an unannotated parameter's call sites ALSO pass an
@@ -1969,6 +2014,49 @@ double mojo_box_double(int64_t v)
  * Not cached: there is no (list, slot) to key it on. Each call site boxes its
  * own argument once, and the box is never freed, the same lifetime a list's
  * cached box has. */
+/* Round to a float8 format; see mojo_f8_round in fire_runtime.h. The algorithm
+ * is float8_dtype.round_float8's: the quantum of the binade a value lies in,
+ * nearbyint (round-half-even under the default mode), then the overflow rule. */
+double mojo_f8_round(double x, int ebits, int mbits, int bias, int kind)
+{
+    if (isnan(x)) return x;
+    if (kind == 3) {                       /* ue8m0: powers of two, no zero */
+        if (x <= 0.0) return ldexp(1.0, -bias);   /* nearest is the minimum */
+        int e;
+        double f = frexp(x, &e);           /* x = f * 2^e, f in [0.5, 1) */
+        int ex = e - 1;                    /* x in [2^ex, 2^(ex+1)) */
+        double lo = ldexp(1.0, ex), hi = ldexp(1.0, ex + 1);
+        int code_max = 254 - bias;         /* largest biased exponent is 254 */
+        if (ex >= code_max) return ldexp(1.0, code_max);
+        if (x - lo < hi - x) return lo;
+        if (hi - x < x - lo) return hi;
+        return (ex + bias) % 2 == 0 ? lo : hi;   /* tie: even biased code */
+    }
+    int top_e = (1 << ebits) - 1;          /* all-ones exponent field */
+    int emin = 1 - bias;                   /* smallest normal exponent */
+    double sign = x < 0.0 ? -1.0 : 1.0;
+    double a = fabs(x);
+    if (a == 0.0) return kind == 2 ? 0.0 : sign * 0.0;
+    int E;
+    frexp(a, &E);
+    E -= 1;                                /* a in [2^E, 2^(E+1)) */
+    if (E < emin) E = emin;                /* subnormal binade shares emin's quantum */
+    double q = ldexp(1.0, E - mbits);
+    double r = nearbyint(a / q) * q;
+    /* Largest finite value: ieee reserves the top exponent for inf/NaN,
+     * fn reserves only the all-ones pattern, fnuz reserves none. */
+    int emax_field = (kind == 0) ? top_e - 1 : top_e;
+    int emax = emax_field - bias;
+    double mant_max = (kind == 1) ? 2.0 - 2.0 / (1 << mbits) * 1.0
+                                  : 2.0 - ldexp(1.0, -mbits);
+    double maxv = ldexp(mant_max, emax);
+    if (r > maxv) {
+        if (kind == 0) return sign * INFINITY;
+        return NAN;
+    }
+    return sign * r;
+}
+
 int64_t mojo_box_from_double(double v)
 {
     MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));

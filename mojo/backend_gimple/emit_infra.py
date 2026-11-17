@@ -44,6 +44,7 @@ import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.coro as coro_mod
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
 import mojo.backend_gimple.emit_methods as gmp
@@ -8876,6 +8877,14 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._rt_void(print_fn, [f"{rv}"])
         elif atype in ('double', 'float', '__fp16'):
             dv = aval if atype == 'double' else gen._cast('double', f"{aval}")
+            rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
+            gen._rt_void(print_fn, [f"{rv}"])
+        elif _float8_dtype.float8_spelling_of_ctype(atype) is not None:
+            # A scalar of a float8 dtype has no rule for anything but being
+            # held (mojo.middle.float8_dtype); its representation IS a
+            # double, so print it as a float rather than falling through to
+            # the generic integer formatter and reading the bits as an int.
+            dv = gen._cast('double', f"{aval}")
             rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
             gen._rt_void(print_fn, [f"{rv}"])
         elif atype == 'MojoList *':
