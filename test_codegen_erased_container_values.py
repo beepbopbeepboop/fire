@@ -198,9 +198,6 @@ def test_ctor_dtype_spelling_simd_scalar_name_keeps_float_ctype():
 
 
 # part 3 of the 2026-11-15 replan (doc: bugs/
-
-
-# part 3 of the 2026-11-15 replan (doc: bugs/
 # CODEGEN_simd_and_array_values_erase_to_int64-part3.md):
 # an unannotated function whose return value is a local bound to a float SIMD
 # constructor keeps the float's scalar C type (a SIMD value is scalar-erased,

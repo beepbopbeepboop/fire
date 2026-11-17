@@ -6,9 +6,9 @@ doc is deleted and the assertion is now a standing pin. This is the registered
 `reg-codegen-erased-container-values` job, so it must stay green.
 
 The per-part Done-when probes of the still-open parts (the 2026-11-15 replan:
-`ctor_dtype_spelling`, `simd_value_across_return`)
-live in test_codegen_erased_container_values.py and run by their bug docs'
-commands; a probe moves here, in the same commit that lands its part.
+`ctor_dtype_spelling`, `simd_value_across_return`) live in
+test_codegen_erased_container_values.py and run by their bug docs' commands; a
+probe moves here, in the same commit that lands its part.
 
 They assert on the C of one generated function body, not on the whole module:
 the module header already contains `double` and `float` (`extern double
@@ -164,9 +164,11 @@ def test_part2_span_over_array_inherits_element_type():
     assert '_mojo_at_char' not in body, body
 
 
-# part2: List[T]() constructor's bracket element type is assigned evidence
-# (exactly as a list LITERAL's elements are), so a function returning that list
-# hands its element kind to the caller across the call boundary.
+# part2 of the 2026-11-15 replan (its doc was deleted with the fix; the
+# Done-when probe moved here from the open-probe harness): a `List[T]()`
+# constructor's bracket element type is assigned evidence (exactly as a list
+# LITERAL's elements are), so a function returning that list hands its element
+# kind to the caller across the call boundary.
 LIST_ELEM_RETURN_SRC = (
     'def mk_f32() -> List[Float32]:\n'
     '    var l = List[Float32]()\n'
