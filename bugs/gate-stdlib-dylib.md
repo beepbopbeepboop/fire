@@ -21,6 +21,67 @@ The job is green on a tree with the `disabled=` argument removed from `tools/sui
 
 The job itself is the integrator's to run (`python3 tools/suite.py stdlib-dylib`); a worker does not run it.
 
+## Status (2026-11-17): part 6 is measured complete; the red this doc was re-filed for is the UNEXPECTED-SKIPS class, owned by another lane
+
+**This branch's root cause is fixed and now pinned for all of part 6.** The
+shared parameter rule landed in `5b1f033a5`
+(`mojo/middle/types.param_annotation_ctype`, used by
+`funcs_shared._param_ctype`, `module_loader._mojo_type_to_c(..., param=True)`
+and `reflect._param_mt`). This round extended the Done-when test to the rest
+of part 6's acceptance, all three pairs measured on this tree:
+
+| importer call | definition | caller suffix before -> after |
+|---|---|---|
+| `_unicode.is_lowercase(StringSlice[_])` | `_fa3cf4` | `_55072c` -> `_fa3cf4` |
+| `_utf8._count_utf8_continuation_bytes(Span[UInt8, _])` | `_fa3cf4` | `_55072c` -> `_fa3cf4` |
+| `_amdgpu.printf_append_string_n(..., Span[UInt8, _], ...)` | `_bdbef0` | `_f5e74a` -> `_bdbef0` |
+| `parsing_floats._atof(StringSlice)` (bare) | `_d719e0` | `_55072c` -> `_d719e0` |
+
+RED-before is proved, not asserted: running `test_stdlib_import_suffix.py`
+with `mojo.middle.types.param_annotation_ctype` monkeypatched back to the old
+`Span`/`StringSlice` -> `int64_t *` box (which is the branch base's
+`module_loader` rule; `funcs_shared` binds the rule at import, so the
+importer is reverted) fails every call/export check it contains (17 FAIL
+lines in that run, the reflection pin included because `reflect` imports the
+patched name) — the four `_unicode` mismatch pairs,
+`_count_utf8_continuation_bytes`, `printf_append_string_n`, and the four
+export-record ctype checks. With `reflect._param_mt` reset to the old `_mt`
+(the field/return resolver) the new reflection pin fails too
+(`probe_bare(StringSlice)`: codegen `_d719e0` vs reflect `_9f63a2`). With the
+tree's rule both are green. The export record now also pins `Span * span` for
+`_count_utf8_continuation_bytes` and `Span * data` for
+`printf_append_string_n`, and the reflection pin covers both spellings, i.e.
+the third reader of the rule.
+
+**Correction to the 2026-11-15 Status below: it measured the job against the
+SUPERSEDED ratchet contract.** Master's `tools/stdlib_dylib_ratchet.py` no
+longer fails on a `_std_` reference with no definition — `942bc269c`
+(2026-11-12, "gate the dylib on LOADING, not on a complete export set") made
+the contract `dlopen(..., RTLD_LAZY)`; the residual lazy references are
+printed as a note. This branch's base predates that commit, so the "29 make
+the job red" reading is true only of the old `nm -u`-vs-`nm -g -U` check, not
+of the job as it now gates.
+
+**What the job's red at the re-filing actually is.** The gate round that
+re-filed this doc (`fa105c747`, 2026-11-15) names no cause; the lane holding
+`gate:stdlib-dylib` found and fixed it in `56470f49b` ("gate: fix
+stdlib-dylib unexpected skips"): emit variadic `(...)` externs for an
+overloaded imported stdlib function whose export signature has no concrete
+parameters (so `time.sleep(...)` in `std.testing.assert_aborts` compiles),
+and add the three modules that fail elaboration (`std/compile/compile.mojo`,
+`std/ffi/__init__.mojo`, `std/simd.mojo`) to `EXPECTED_FAILURES`. That commit
+deletes this doc, which is the right landing for it. Its files
+(`mojo/backend_gimple/emit_infra.py`, `compile_stdlib.py`) are another lane's
+claim, so this branch does not touch them, and it does not delete the doc
+either: deleting it here would declare green a job whose red this branch does
+not fix, on a base that cannot observe master's load contract.
+
+**Next step.** Land `work/fix-proof-fix-gate-stdlib-dylib` (56470f49b) together
+with this branch's `5b1f033a5`; on that merged tree the job's Done-when holds
+and this doc goes with 56470f49b. Until then both Done-when quick tests pass
+on this tree: `python3 test_stdlib_dylib_ratchet.py` (PASS) and
+`python3 test_stdlib_import_suffix.py` (PASS, now 3 pairs / 4 export records).
+
 ## Status (2026-11-15): the 21 suffix mismatches' root cause fixed (scan-side type drift); the job is still red on the 29
 
 **What landed.** The 21 "overload/instance-suffix mismatches" were not a cross-process
