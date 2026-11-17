@@ -363,3 +363,42 @@ reverted still gives 0) and Mike Stump's part 7 (`emit_funcs.py` at
 is being dropped, which is a different defect from every item above. The
 probe's message says "stale"; the measurement says the call is gone, so the
 probe is right and the tree is wrong.
+
+## 2026-11-16 (wakeup 40): why the call is dropped -- a silent 0, and the guard
+## that should have caught it is on a different code path
+
+The emitted body is the answer:
+
+```c
+__GIMPLE int64_t std_itertools_itertools__Product3___next__ (_Product3 * self)
+{
+  int64_t _t1;
+bb_2:
+#line 321 ".../std/itertools/itertools.mojo"
+  _t1 = (int64_t)0;  /* indirect call via SubscriptExpr */
+#line 321 ".../std/itertools/itertools.mojo"
+  return _t1;
+}
+```
+
+`itertools.mojo:321` is `return rebind_var[Self.Element](_flatten(next(self._inner)))`.
+The callee is a **bracketed call whose base is `rebind_var`** -- a builtin, not
+imported (the module's only import is `forget_deinit`), and not a function this
+TU defines. So it misses every arm of `emit_calls._lower_call`'s
+`SubscriptExpr` branch: not the ownership-scoped refusal (that needs
+`name in func_return_types and name not in imported_symbols`), not a struct
+constructor dispatch, not an imported-symbol stub. It falls to the
+`indirect call via SubscriptExpr` fallback, which returns integer `0` -- and the
+inner `_flatten(...)` call is discarded with it. That is a SILENT WRONG ANSWER:
+`__next__` returns 0 rather than the flattened tuple.
+
+There IS a guard for exactly this shape: `elab_intu._FLAT_NEXT_RE` /
+`_rewrite_product_next` (with a comment naming this very line). It never runs.
+Probed: instrumenting `_rewrite_product_next` to print every call while
+compiling this module produced **no output at all** -- `monomorphize_source` is
+not on the `compile_module_to_c` path that builds the stdlib dylib, so the
+rewrite is dead code here and the `rebind_var[...]` shape has no guard on the
+path that matters. (Probe removed; tree clean.)
+
+So the probe's red is two facts: a wrong-answer fallback that is unguarded on
+this path, and a guard that exists but is wired to a different entry point.

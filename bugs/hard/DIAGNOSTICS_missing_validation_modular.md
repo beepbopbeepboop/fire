@@ -277,3 +277,133 @@ ours and fix the delta, as was done for diagnostics_in_missing_locs), then the
 rc=0 ones that are declaration-level (`enum_exhaustive_errors`,
 `align_decorator_parametric_error`, `moco_4400`), leaving the type-checker ones
 (`tuple_*`) for last.
+
+## 2026-11-16 (wakeup 41): `moco_4400` re-measured, with a 30-line repro
+
+`fire.py build` on the Modular file exits **0** (still a miss). The gap is not
+the message -- `does not implement all requirements for 'Iterable'` is produced
+by the elaborator, and `test_trait_requirement_evidence_diagnostic.py` pins it
+by calling `elaborate.Elaborator().elaborate_generic_call(src, 'needs_iterator',
+['S[NotMovable]'])` DIRECTLY. So the machinery works when triggered; the
+whole-program path never triggers it for this call.
+
+Minimal repro (30 lines, `fire.py build` exit 0, no diagnostic):
+
+```mojo
+struct S[T: AnyType](
+    Copyable where conforms_to(T, Copyable),
+    Iterable where conforms_to(T, Movable),
+    Movable,
+):
+    var _v: Self.T
+    def __iter__(ref self) -> Self where conforms_to(Self.T, Copyable):
+        return self.copy()
+    def __next__(mut self) raises StopIteration -> Self.T where conforms_to(Self.T, Movable):
+        raise StopIteration()
+
+struct NotMovable:
+    var x: Int
+
+def needs_iterator[I: Iterator](x: I):
+    pass
+
+def foo():
+    var s = S(NotMovable(1))
+    needs_iterator(s)
+```
+
+`S[NotMovable]` does not conform to `Iterator` (its conformance is conditional
+on `T: Movable`, and `NotMovable` is not `Movable`), so `needs_iterator(s)`
+must be rejected. Measured the same day: `enum_exhaustive_errors`,
+`moco_4400_no_crash_on_bind_parameter` and `tuple_first_of_error` all still
+exit 0; `align_decorator_parametric_error` exits 1 (a diagnostic, delta
+uncompared).
+
+### Why the build never triggers it (wakeup 42)
+
+`foo`'s body emits a **bare** call -- `_t9 = needs_iterator (s);` -- with no
+mangled suffix and no instantiation. The reason is one line:
+
+```python
+# mojo/backend_gimple/emit_resolve.py:3555, in _elaborate_generic_call
+source = gen._imported_generics.get(g)
+if not source:
+    return None
+```
+
+`_elaborate_generic_call` is gated on the callee being an **imported** generic.
+`needs_iterator` is defined in the SAME module, so `source` is None and the
+function declines before lowering anything. Every later arm -- the explicit
+bracket path, the inferred path, and the `except` that turns a
+`ConformanceError` into `error: invalid call to '<fn>': violated constraint`
+(line 3789) -- is unreachable for a same-module generic. That is exactly why
+the unit test passes (it calls `elaborate_generic_call` directly, past the
+gate) while `fire.py build` exits 0.
+
+Two consequences, not one: the missing MOCO-4400 diagnostic, and a bare call to
+a symbol nothing defines. Same-module generic calls are elaborated by the
+in-TU pre-pass (`elab_intu`), which is also where the conformance check would
+have to be wired for this case.
+
+### The full chain (wakeup 44) -- a discriminator blind spot, not a missing check
+
+Probed end to end on the 30-line repro:
+
+1. `needs_iterator` IS registered for the same module -- `module_gen.py:12246`
+   puts every local generic into `_imported_generics` under
+   `_current_filename`, and `_generic_source_text` (:5137) resolves that back to
+   the in-memory text. Probed: `_elaborate_generic_call` is entered with
+   `explicit=False source='.../m.mojo'`.
+2. So the inferred branch runs and calls `elaborate_generic_call_inferred`,
+   which infers `S[NotMovable]` and calls `elaborate_generic_call` -- which
+   raises `ConformanceError` for the violated `Iterator` bound.
+3. **`elaborate.py:3776` swallows it.** The handler's own discriminator is
+   `if any(not inferred_ctype_is_specific(ct) for ct in arg_ctypes): return None`
+   -- i.e. decline when an argument's C type is a placeholder. Measured:
+   `inferred_ctype_is_specific('S *')` is **False**, along with `int64_t`,
+   `char`, `int`, `MojoList *`, `NotMovable *`; only `double` is True.
+4. So a REAL struct pointer is indistinguishable, to that predicate, from an
+   erased `int64_t`/`char` -- which is exactly the case the swallow exists to
+   protect (the six stdlib files listed in its comment). The caller's real Mojo
+   type is not available to disambiguate: `_constructed_struct_type`
+   (emit_resolve.py:3514) recovers a type only for a direct constructor call
+   (`Foo()`), and here the argument is the IdentExpr `s`.
+
+The fix is therefore in the discriminator, not in the check: it needs the
+argument's real Mojo type (from the local's declared type) rather than the C
+type, so a genuine `S[NotMovable]` is distinguished from an erased scalar.
+
+## 2026-11-16 (wakeup 45): the rc=1 table is stale, and the real delta is the
+## source-range prefix
+
+Ran `tools/modular_filecheck.py` over the rc=1/rc=0 candidates. Note first that
+the tool's `FIRE` is hardcoded to `/Users/mrs/net/chatgpt/claude/mojo-reference/
+fire.py` -- the OTHER checkout, not this tree -- so these verdicts describe that
+tree; the two PASSes are still meaningful as "the delta is closed there".
+
+| file | verdict |
+|---|---|
+| `defaulted_trait_method_bad_conformance.mojo` | **PASS** (rc=1) |
+| `align_decorator_parametric_error.mojo` | **PASS** (rc=1) |
+| `autoparam_dependency_errors.mojo` | FAIL rc=1 -- `CHECK: expected string not found in input` |
+| `failed_binding_deferrals.mojo` | FAIL rc=1 -- same |
+| `identifier_source_range.mojo` | FAIL rc=0 |
+| `moco_4400_no_crash_on_bind_parameter.mojo` | TIMEOUT |
+| `enum_exhaustive_errors.mojo` | TIMEOUT |
+
+So the umbrella's table is stale in both directions: two of its `rc=1` rows now
+PASS, and `align_decorator_parametric_error` has moved off the `rc=0` list
+(verified directly: our output is `function instantiation failed` / `struct
+alignment must be a positive power of 2, got 69`, both CHECK lines present).
+
+The two FAILs share one concrete delta. Their CHECK lines are written as
+
+    # CHECK: [[@LINE+3]]:{{[0-9]+}}: error: violated constraint
+    # CHECK: [[@LINE+2]]:{{[0-9]+}}: error: inferred parameter of type ...
+
+i.e. they require a `line:col:` SOURCE-RANGE prefix on the diagnostic. Our
+output for the same files is `error: violated constraint` and
+`error: inferred parameter of type 'Pair[c, c]' cannot depend on ...` with no
+prefix, so FileCheck cannot match. That is the same theme as
+`identifier_source_range.mojo`, and it is a narrower, more tractable target
+than "the type checker ones" the umbrella lists last.
