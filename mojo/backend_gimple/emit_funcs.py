@@ -3732,10 +3732,9 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         # Python.dict(tuples: Span[Tuple[...], _]) body, which only became
         # visible once that overload's signature was correct).
         # `Array[T, N]` and `FixedSizeArray[T, N]` carry the count SECOND, so
-        # they take their element from the first bracket argument too — see
-        # `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`. Without this
-        # their two-arg bracket fails the `len(_pin) != 1` gate below and the
-        # parameter's element type was never seeded.
+        # they take their element from the first bracket argument too. Without
+        # this their two-arg bracket fails the `len(_pin) != 1` gate below and
+        # the parameter's element type was never seeded.
         if _pbase in ('Span', 'Array', 'FixedSizeArray'):
             if not _pin or not _pin[0].strip():
                 continue
@@ -3772,8 +3771,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 # param-seeded element stayed `float`, so `a[0]` read
                 # `mojo_list_get_float` and `Span(a)` read `_mojo_at_float`,
                 # while the same value built by a constructor read
-                # `mojo_list_get_double`/`_mojo_at_double` — see
-                # `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
+                # `mojo_list_get_double`/`_mojo_at_double`.
                 _ec = 'double'
             if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)
