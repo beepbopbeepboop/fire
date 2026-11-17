@@ -21,4 +21,3 @@ deleted in the same commit, as for any bug.
 | `FORMAL_svc_exit_handling_incomplete.md` | see doc | workers |
 | `GATE_red_recover-land_2026-11-02.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |
-| `SUITE_gimplerunner_21_failing.md` | see doc | workers |
