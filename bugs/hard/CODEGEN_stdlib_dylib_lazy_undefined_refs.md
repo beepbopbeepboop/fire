@@ -328,3 +328,30 @@ already correctly suffixed). Those 16 are now the OTHER half only:
 correctly-named references to symbols the definer never emits, because
 BUG-2026-021 drops a genuine overload family whole. That policy is the single
 remaining cause of this table.
+
+## 2026-11-16 (wakeup 38): the part-1 probe is RED, and it is a real dropped call
+
+`test_stdlib_dylib_lazy_undefined_refs_probes.py` fails:
+
+    AssertionError: std/itertools/itertools.mojo emits no forget_deinit
+    reference; probe is stale
+
+Measured, and narrowed:
+
+* `std/itertools/itertools.mojo:30` imports `forget_deinit` from `std.memory`
+  and `:259` calls `forget_deinit(arg^)`, inside the generic `_flatten`
+  (`:222`).
+* compiling that module yields **zero** occurrences of both `forget_deinit` and
+  `_flatten`.
+* `_flatten` has exactly one definition, so this is NOT the BUG-2026-021
+  overload-family drop.
+* its two call sites (`:321`, `:452`) are inside `__next__` methods of iterator
+  structs, and those `__next__` symbols ARE emitted -- so the enclosing methods
+  exist while the `_flatten(...)` call inside them resolves to nothing.
+
+Ruled out as the cause: the iteration-19/31 commits (re-running with them
+reverted still gives 0) and Mike Stump's part 7 (`emit_funcs.py` at
+`f766bb314~1` also gives 0). So a generic call inside an emitted struct method
+is being dropped, which is a different defect from every item above. The
+probe's message says "stale"; the measurement says the call is gone, so the
+probe is right and the tree is wrong.
