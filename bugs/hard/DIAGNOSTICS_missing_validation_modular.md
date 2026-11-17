@@ -372,3 +372,38 @@ Probed end to end on the 30-line repro:
 The fix is therefore in the discriminator, not in the check: it needs the
 argument's real Mojo type (from the local's declared type) rather than the C
 type, so a genuine `S[NotMovable]` is distinguished from an erased scalar.
+
+## 2026-11-16 (wakeup 45): the rc=1 table is stale, and the real delta is the
+## source-range prefix
+
+Ran `tools/modular_filecheck.py` over the rc=1/rc=0 candidates. Note first that
+the tool's `FIRE` is hardcoded to `/Users/mrs/net/chatgpt/claude/mojo-reference/
+fire.py` -- the OTHER checkout, not this tree -- so these verdicts describe that
+tree; the two PASSes are still meaningful as "the delta is closed there".
+
+| file | verdict |
+|---|---|
+| `defaulted_trait_method_bad_conformance.mojo` | **PASS** (rc=1) |
+| `align_decorator_parametric_error.mojo` | **PASS** (rc=1) |
+| `autoparam_dependency_errors.mojo` | FAIL rc=1 -- `CHECK: expected string not found in input` |
+| `failed_binding_deferrals.mojo` | FAIL rc=1 -- same |
+| `identifier_source_range.mojo` | FAIL rc=0 |
+| `moco_4400_no_crash_on_bind_parameter.mojo` | TIMEOUT |
+| `enum_exhaustive_errors.mojo` | TIMEOUT |
+
+So the umbrella's table is stale in both directions: two of its `rc=1` rows now
+PASS, and `align_decorator_parametric_error` has moved off the `rc=0` list
+(verified directly: our output is `function instantiation failed` / `struct
+alignment must be a positive power of 2, got 69`, both CHECK lines present).
+
+The two FAILs share one concrete delta. Their CHECK lines are written as
+
+    # CHECK: [[@LINE+3]]:{{[0-9]+}}: error: violated constraint
+    # CHECK: [[@LINE+2]]:{{[0-9]+}}: error: inferred parameter of type ...
+
+i.e. they require a `line:col:` SOURCE-RANGE prefix on the diagnostic. Our
+output for the same files is `error: violated constraint` and
+`error: inferred parameter of type 'Pair[c, c]' cannot depend on ...` with no
+prefix, so FileCheck cannot match. That is the same theme as
+`identifier_source_range.mojo`, and it is a narrower, more tractable target
+than "the type checker ones" the umbrella lists last.
