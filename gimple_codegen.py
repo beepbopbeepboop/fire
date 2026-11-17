@@ -1138,30 +1138,6 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
-        # Per-value ownership, keyed by the SAME C temp-var name as
-        # _generator_var_api: True where the 'MojoGenerator *' value was
-        # produced at this very site by a fresh construction (a
-        # `<base>_start` call, a generator-returning call) and no other
-        # code path holds a named reference to it. The consumer that
-        # drains an owned value must destroy the coroutine after the
-        # drain — the exact ownership verdict _gen_for_iter reaches for a
-        # `for` whose iterable IS the construction call (emit_loops.py's
-        # `destroy_after = isinstance(node.iterable, CallExpr)`), extended
-        # to the two consumers that used to leave every unnamed temporary
-        # leaking one 256KB coro stack plus one live-handle-registry entry
-        # per drain (quadratic registry growth — the analyzer hang in
-        # COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc
-        # deleted with the fix).
-        # False or absent = the value may be read again (a named local, a
-        # module global, a function parameter) and the drain must leave it
-        # alive: CPython leaves an exhausted generator valid in the hand
-        # that still holds it (`g = counter(3); sum(g); sum(g)`), and
-        # destroying there made that second pass a real use-after-free
-        # (test_gimple_runner.py's gimple_genexp_local_consumed_twice).
-        # The absent default is the safe side: an unmarked value keeps
-        # today's leak-rather-than-crash behaviour, so no shape this table
-        # does not mark can regress into a UAF.
-        self._generator_value_owned: dict[str, bool] = {}
         # Module-GLOBAL analogue of `_generator_var_api`: global name -> the api
         # of the generator/coroutine its toplevel store bound to it. A global
         # lives in the `_<mod>_globals` struct, so reading it mints a FRESH
@@ -2057,15 +2033,10 @@ class GimpleGen:
         self._struct_qualified_cnames: set = set()
         self._struct_home_by_id: dict = {}
         # Compiler-pre-seeded AST/runtime layouts (e.g. IfStmt, Parser) that
-        # register their C name for the compiler's home even without a
-        # StructDef node in this compile unit. If a sibling module's StructDef
-        # claims one of these bare names, the bare-name first-wins rule makes
-        # the claimant OWN the bare C name: its real layout replaces the
-        # pre-seeded phantom table (the collision pass clears
-        # struct_field_types and the preseed block is skipped once any
-        # preseed name is claimed) instead of minting a module-qualified
-        # cname — the ctor, methods, importer and trampoline all keep
-        # spelling the bare name, so the single layout stays consistent.
+        # own their bare C name for the compiler's home even without a
+        # StructDef node in this compile unit. A sibling module's StructDef of
+        # the same bare name is a genuine cross-module collision and must get a
+        # module-qualified cname instead of reusing the pre-seeded layout.
         self._compiler_preseed_struct_home: dict = {
             _astn: 'fire_compiler' for _astn in (
                 'CallExpr', 'BinaryOp', 'CompareChain', 'UnaryOp', 'TernaryExpr',
@@ -2622,15 +2593,6 @@ class GimpleGen:
         # Populated from the CURRENT file's own AST only (same-file resolution);
         # a struct imported from elsewhere without local source has no entry here.
         self._struct_method_signatures: dict[str, list] = {}  # _sms_key(struct, method) -> [candidate-overload dicts]
-        # helper cname -> spec dict for the `_mojo_virt_<base_csym>` tag-
-        # switch helpers (emit_methods._virt_dispatch_plan registers them
-        # during the lower phase; module_gen emits prototype + definition).
-        # Shared across the root gen and every imported module's temp_gen
-        # (the `temp_gen._virt_dispatch_helpers = gen._virt_dispatch_helpers`
-        # alias in emit_resolve) so a helper registered while lowering an
-        # IMPORTED module's body is visible to the ROOT's
-        # _emit_reflection_dispatch, the only gen that emits definitions.
-        self._virt_dispatch_helpers: dict = {}
         # struct name -> {method name -> that method's mangled C symbol}, the
         # METHOD half of a generated `_mojo_getattr_<Struct>` (its FIELD half
         # is `struct_field_types`). Written by module_gen's
@@ -2642,51 +2604,6 @@ class GimpleGen:
         # `_lower_bound_method_value`), for the one receiver spelling it
         # cannot reach, a value erased to int64_t.
         self._getattr_method_arms: dict = {}
-        # struct name -> {property name -> the getter's mangled C symbol}: the
-        # PROPERTY half of a generated `_mojo_getattr_<Struct>`. Written by
-        # module_gen's `_emit_struct_method_prototypes` beside the same walk
-        # that fills `_getattr_method_arms` (one walk, one symbol per method
-        # name, so an arm can only ever name a symbol that walk declared), and
-        # read by `_emit_reflection_dispatch`, which emits a call to the
-        # getter: a `@property` read is the getter's RESULT, not a bound
-        # method (the typed-receiver read lowers to a call of the getter), so
-        # an erased receiver's dynamic getattr must answer the same value.
-        # The inherited copy of a base property already has its own mangled
-        # symbol per subclass (`_merge_struct_inheritance`'s merged method
-        # view materializes it), so the arm calls the struct's own copy.
-        self._getattr_property_arms: dict = {}
-        # (struct name, method name) -> the lazy wrapper-getter C name, for a
-        # method whose decorator is a SAME-MODULE FUNCTION (`@contextual` in
-        # Tools/cases_generator/parsing.py): the class attribute is the
-        # decorator's RESULT, a compiled closure, and every call must run it
-        # (it sets the parsed node's `context`; a raw call left it None and
-        # `Node.first_token`'s `assert context is not None` trapped — see
-        # COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc
-        # deleted with the fix).
-        # Written EARLY by module_gen's `_populate_decorated_method_wrapped`
-        # pre-pass (before the body loop that lowers call sites — the
-        # prototype walk that used to detect these runs AFTER the bodies, so
-        # a call site could never see the table it needed to route through
-        # the wrapper), read by emit_methods' `_lower_struct_method_call`.
-        # SHARED by reference into every temp_gen (emit_resolve's share
-        # block), first-occurrence-wins, exactly like the two arm tables
-        # above.
-        self._getattr_decorated_arms: dict = {}
-        self._decorated_method_wrapped: dict = {}
-        # (struct name, method name) -> the DECORATOR's mangled C symbol:
-        # the guarded declaration + the one-argument call the wrapper getter
-        # definition emits (the getter applies the decorator to the raw
-        # method symbol on first use). Written by the same pre-pass.
-        self._decorated_method_dec_csym: dict = {}
-        # getter C name -> None: one wrapper-getter DEFINITION per TU.
-        # SHARED by reference into every temp_gen (the whole do_imports
-        # closure splices into ONE translation unit): each module's
-        # prototype walk sees every struct in the closure's own-section
-        # walk plus, in link mode, the imported sections, so without a
-        # shared "I emitted it" set two sections would define the same
-        # `_wrapped_<S>_<m>` symbol and gcc would refuse the unit. Same
-        # reference-sharing pattern as `_emitted_ptr_helpers`.
-        self._emitted_decorated_getters: set = set()
         # mangled C symbol -> full param C-type list (incl. self), for a
         # not-yet-emitted overload's forward-referenced call to be coerced
         # correctly by _emit_call. Deliberately kept separate from the shared
@@ -3600,7 +3517,6 @@ class GimpleGen:
         'mojo_list_get_boxed':       ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_box_double':           ('double',    ['int64_t']),
         'mojo_box_int':              ('int64_t',   ['int64_t']),
-        'mojo_int_of_word':          ('int64_t',   ['int64_t']),
         'mojo_box_word':             ('int64_t',   ['int64_t']),
         'mojo_truthy_word':          ('int',       ['int64_t']),
         'mojo_list_set_kinds':       ('void',      ['MojoList *', 'const char *']),
