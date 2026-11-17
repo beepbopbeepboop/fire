@@ -42,7 +42,6 @@ from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.float8_dtype as _float8_dtype
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -120,8 +119,8 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
         _rt, _rv = gen._lower_call(node)
-        # The result of calling a mixed-return function is a TAGGED WORD
-        # (`module_gen._ret_may_hold_mixed`, filled from the same per-body
+        # The result of calling a float+pointer function is a TAGGED WORD
+        # (`module_gen._ret_may_hold_float`, filled from the same per-body
         # inference decision that boxed its arms). Mark it so every consumer
         # dispatches by kind instead of reading the word as an integer or
         # casting it to the pointer the old join chose: `print` ->
@@ -131,7 +130,7 @@ def lower_expr(gen, node) -> tuple[str, str]:
         if (_rt == 'int64_t' and isinstance(_rv, str)
                 and isinstance(node.func, gimple_ctypes.IdentExpr)
                 and _as_str(node.func.name) in getattr(
-                    gen, '_ret_may_hold_mixed', ())):
+                    gen, '_ret_may_hold_float', ())):
             gen._boxed_vals.add(_rv)
             gen._tagged_word_vals.add(_rv)
         # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
@@ -4572,35 +4571,6 @@ def _lbt_same_type_eq(gen, op: str, lt: str, lv: str, rt: str, rv: str) -> tuple
     return None
 
 
-def _lower_float8_binary(gen, op, left_node, lt, lv, right_node, rt, rv,
-                         f8_left, f8_right):
-    """A binary operation with a float8 operand (`mojo.middle.float8_dtype`).
-
-    The rules are the ones Modular's compiler enforces, measured on the real
-    compiler: comparisons are allowed on every float8 format; arithmetic
-    (`+ - * /`) is allowed on every format except e3m4, whose arithmetic
-    converts through f32 and has no rule; anything else is refused. An
-    allowed operation computes in double (a float8 value is held as its exact
-    double) and the result is rounded to the format, so `1.0 + 0.0625` in
-    e4m3fn is 1.0, as in Modular.
-    """
-    f8 = f8_left if f8_left is not None else f8_right
-    if op in ('<', '<=', '>', '>=', '==', '!='):
-        return gen._lower_binary_tail(
-            op, left_node, 'double' if f8_left else lt, lv,
-            right_node, 'double' if f8_right else rt, rv)
-    if op in ('+', '-', '*', '/') and _float8_dtype.has_arithmetic(f8):
-        ct, val = gen._lower_binary_tail(
-            op, left_node, 'double' if f8_left else lt, lv,
-            right_node, 'double' if f8_right else rt, rv)
-        eb, mb, bias, kind = _float8_dtype.float8_format(f8)
-        kc = {'ieee': 0, 'fn': 1, 'fnuz': 2, 'ue8m0': 3}[kind]
-        t = gen._new_temp('double')
-        gen._rt_into(t, 'mojo_f8_round', [f'(double){val}', str(eb), str(mb), str(bias), str(kc)])
-        return _float8_dtype._FLOAT8_CTYPE_PREFIX + f8, t
-    raise RuntimeError(_float8_dtype.operation_diagnostic(f8))
-
-
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -4613,18 +4583,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
-    # A binary operation with an unimplemented float8 operand has no
-    # arithmetic rule here (`mojo.middle.float8_dtype`): refuse with
-    # Modular's diagnostic instead of computing on the dtype's `double`
-    # representation. This is the one place both spellings arrive — a plain
-    # BinaryOp (`a + b`, any comparison) and a chained comparison, which
-    # calls this per link — and AugAssign lowers through a synthetic BinaryOp,
-    # so `a += b` is refused by the same rule.
-    _f8_l = _float8_dtype.float8_spelling_of_ctype(lt)
-    _f8_r = _float8_dtype.float8_spelling_of_ctype(rt)
-    if _f8_l is not None or _f8_r is not None:
-        return _lower_float8_binary(gen, op, left_node, lt, lv, right_node, rt, rv,
-                                    _f8_l, _f8_r)
     # `x == None` / `x != None` on a BOXED name (a tagged-generator value, or
     # any slot read kept as a box). This must be decided BEFORE the boxed
     # operand conversion below, which unwraps the box to its word: a None
@@ -7129,25 +7087,6 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _sig_params = gen._LIBC_SIGS[cname][1]
         while len(arg_pairs) < len(_sig_params):
             arg_pairs.append((_sig_params[len(arg_pairs)], '0'))
-        # Type arguments from the callee's known C signature when one exists, so
-        # (for example) an int64_t null passed for a `struct timespec *` parameter
-        # becomes a pointer rather than a word, and the call matches the platform
-        # prototype the headers provide.
-        _coerced_pairs = []
-        _i = 0
-        while _i < len(arg_pairs):
-            _at, _av = _as_str(arg_pairs[_i][0]), _as_str(arg_pairs[_i][1])
-            if _i < len(_sig_params):
-                _dst = _as_str(_sig_params[_i])
-                if _dst != _at and _dst != '...':
-                    try:
-                        _av = gen._coerce_to_type(_at, _dst, _av)
-                        _at = _dst
-                    except Exception:
-                        pass
-            _coerced_pairs.append((_at, _av))
-            _i += 1
-        arg_pairs = _coerced_pairs
     # First use wins: pin the prototype's parameter types and coerce later calls to match.
     # Never register LIBC functions - let system headers provide them
     if cname not in gen._external_protos and (

@@ -208,30 +208,6 @@ def _binds_from_args(template_src: str, arg_ctypes) -> bool:
     return all(p in bound for p in params)
 
 
-def extract_fn_sources(module_src: str, fn_name: str) -> list:
-    """Every same-named `fn`/`def` block in `module_src`, in source order, by
-    indentation — the candidates `extract_fn_source` selects ONE of.
-
-    Factored out of `extract_fn_source` so a caller that must account for
-    EVERY overload (not just the first by arity) enumerates them through the
-    same block reader instead of a second one. A name may be declared as a
-    free function and as a method, so a returned block can be indented."""
-    lines = module_src.splitlines(keepends=True)
-    pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*[\[\(]')
-    depths = _bracket_depth_by_line(module_src)
-    out = []
-    i = 0
-    while i < len(lines):
-        if pat.match(lines[i]):
-            base = len(lines[i]) - len(lines[i].lstrip())
-            end = _find_block_end(lines, depths, i, base)
-            out.append(''.join(lines[i:end]))
-            i = end
-        else:
-            i += 1
-    return out
-
-
 def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None,
                       arg_ctypes: list | None = None):
     """Pull the source text of a single `fn fn_name[...](...): body` from a
@@ -245,7 +221,19 @@ def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = Non
     get one via `extract_overloads`). When `arg_count` is given and more than
     one candidate matches by name, pick the one whose non-self, non-variadic
     parameter count equals it; otherwise fall back to the first match."""
-    candidates = extract_fn_sources(module_src, fn_name)
+    lines = module_src.splitlines(keepends=True)
+    pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*[\[\(]')
+    depths = _bracket_depth_by_line(module_src)
+    candidates = []
+    i = 0
+    while i < len(lines):
+        if pat.match(lines[i]):
+            base = len(lines[i]) - len(lines[i].lstrip())
+            end = _find_block_end(lines, depths, i, base)
+            candidates.append(''.join(lines[i:end]))
+            i = end
+        else:
+            i += 1
     if not candidates:
         return None
     if arg_count is None or len(candidates) == 1:
@@ -3128,19 +3116,6 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     # `arg_mojo` carries that type, and it binds `dtype` exactly as a scalar C
     # type does, with width 1.
     lit = _LITERAL_DTYPE.get(arg_mojo) if arg_mojo else None
-    # A parameter the enclosing function declares as `SIMD[D, N]` (after
-    # monomorphization) proves both the dtype and the width.
-    _sm = re.fullmatch(r'\s*SIMD\[\s*([\w.]+)\s*,\s*(\d+)\s*\]\s*', arg_mojo or '')
-    if _sm:
-        m = _SIMD_ANN_RE.match(ann)
-        if m and m.group(1) in pnames:
-            out = {m.group(1): _sm.group(1)}
-            if m.group(2) is not None:
-                if m.group(2) not in pnames:
-                    return {}
-                out[m.group(2)] = _sm.group(2)
-            return out
-        return {}
     if lit is None and arg_ctype == 'int64_t':
         return {}
     dtype = lit if lit is not None else c_to_mojo(arg_ctype)
@@ -3873,17 +3848,12 @@ class Elaborator:
             nested_defs.append(n_concrete)
             renames.append((mention, n_mangled))
 
-        _, concrete = mm.monomorphize_source(tmpl, targs)
-        # The instance is its own compilation unit: it sees the names its home module
-        # imports, or a call to one of them (`mulhi` from std.gpu.intrinsics in a
-        # method body) would bind to a weak stub that fails at run time.
-        _imports = _instance_import_text(module_src, concrete)
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      nested_defs=nested_defs,
                                                      renames=renames,
-                                                     conformance_bases=_where_conformance_bases(module_src),
-                                                     import_text=_imports)
-        fields, methods, anns = _struct_layout_anns(_imports + concrete, mangled)
+                                                     conformance_bases=_where_conformance_bases(module_src))
+        _, concrete = mm.monomorphize_source(tmpl, targs)
+        fields, methods, anns = _struct_layout_anns(concrete, mangled)
         # `symbols`: what the TU ACTUALLY defined (`nm`). The caller registers
         # its externs and its `func_return_types` keys from this rather than
         # from a re-derived name, so a declaration and its definition cannot
@@ -3920,14 +3890,6 @@ class Elaborator:
         arg_mojo = [c_to_mojo(ct) for ct in arg_ctypes]
         chosen = None
         for src, ptypes, ret in overloads:
-            # A candidate with bracket parameters is a GENERIC template: a plain
-            # call cannot select it (it needs `name[...]()`), so it never matches
-            # here. Matching it on an empty parameter list named `is_amd_gpu()`
-            # after the generic overload `is_amd_gpu[subarch]()` (both have no
-            # value parameters), and its instance was emitted under a symbol
-            # nothing defines.
-            if type_param_names(src):
-                continue
             if ptypes == arg_mojo:
                 chosen = (src, ptypes, ret)
                 break
@@ -3941,12 +3903,7 @@ class Elaborator:
         # INJECTIVELY, via the same length-prefixed encoding `mangle` uses. The
         # previous `safe_suffix('_'.join(ptypes))` was ambiguous segmentation
         # with a lossy escape, so `['A_B']` and `['A', 'B']` named one symbol.
-        # An overload with NO parameters is named as the definer names it: an
-        # overloaded free function's definition takes the bare name when its
-        # parameter list is empty (codegen's overload suffix of [] is ''), so the
-        # call names the bare symbol too. `mangle_signature`'s `__void` names
-        # nothing.
-        mangled = mm.mangle_signature(fn_name, ptypes) if ptypes else fn_name
+        mangled = mm.mangle_signature(fn_name, ptypes)
         renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
         try:
             obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
@@ -4514,88 +4471,3 @@ def type_arg_bound_evidence(module_src, template_src, param, arg, fn_bounds):
     if all(v == 'proven' for v in verdicts):
         return 'proven'
     return 'unknown'
-
-
-def _instance_import_text(module_src: str, body_src: str) -> str:
-    """The home module's absolute imports, narrowed to the names the instance body
-    CALLS PLAIN (`name(...)`): a non-generic function the body needs, which would
-    otherwise bind to a weak stub. A generic call is written with brackets
-    (`bitcast[...]`), and that call already resolves through the path it always
-    took; importing its generic definition changes that resolution, so it is left
-    out."""
-    plain = set(re.findall(r'(?<![.\w])([A-Za-z_]\w*)\s*\(', body_src))
-    out = []
-    for stmt in _module_import_lines(module_src):
-        m = re.match(r'^from\s+([\w.]+)\s+import\s+\(?([^)]*)\)?\s*$', stmt.replace('\n', ' '))
-        if not m:
-            continue
-        keep = []
-        for part in m.group(2).split(','):
-            part = part.strip()
-            if not part:
-                continue
-            name = part.split(' as ')[0].strip()
-            if name in plain:
-                keep.append(part)
-        if keep:
-            out.append('from %s import %s' % (m.group(1), ', '.join(keep)))
-    return ('\n'.join(out) + '\n\n') if out else ''
-
-
-def _module_import_lines(module_src: str) -> list:
-    """The module's top-level import statements (see `_module_import_text`)."""
-    out = []
-    lines = module_src.splitlines()
-    in_doc = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.count('"""') % 2 == 1:
-            in_doc = not in_doc
-            i += 1
-            continue
-        if in_doc:
-            i += 1
-            continue
-        if re.match(r'^(from|import)\s', line):
-            stmt = [line]
-            if '(' in line and ')' not in line:
-                while i + 1 < len(lines) and ')' not in lines[i]:
-                    i += 1
-                    stmt.append(lines[i])
-            text = '\n'.join(stmt)
-            if not re.match(r'^from\s+\.', text):
-                out.append(text)
-        i += 1
-    return out
-
-
-def _module_import_text(module_src: str) -> str:
-    """The module's top-level ABSOLUTE import statements, as source text (a
-    parenthesised import spanning lines is kept whole). Relative imports are left
-    out: an instance is compiled without a file path, so they cannot resolve.
-    Lines inside a triple-quoted string (a docstring) are not statements."""
-    out = []
-    lines = module_src.splitlines()
-    in_doc = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.count('"""') % 2 == 1:
-            in_doc = not in_doc
-            i += 1
-            continue
-        if in_doc:
-            i += 1
-            continue
-        if re.match(r'^(from|import)\s', line):
-            stmt = [line]
-            if '(' in line and ')' not in line:
-                while i + 1 < len(lines) and ')' not in lines[i]:
-                    i += 1
-                    stmt.append(lines[i])
-            text = '\n'.join(stmt)
-            if not re.match(r'^from\s+\.', text):
-                out.append(text)
-        i += 1
-    return ('\n'.join(out) + '\n\n') if out else ''

@@ -44,7 +44,6 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 import mojo.middle.rt_call as rt_call
 import mojo.backend_gimple.emit_methods as gmp
@@ -2800,33 +2799,6 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     if not dst:
         dst = 'int64_t'
 
-    # A store OUT of a float8 dtype this compiler has no conversion rule for
-    # (`mojo.middle.float8_dtype`) is Modular's "not implemented" diagnostic,
-    # not a silent cast. The dtype's C type is the module's private token, so
-    # this one chokepoint sees every conversion site that reaches C: var
-    # initialisers, plain assignments, struct fields, return slots and call
-    # arguments (the last through `_coerce_to_type`, which delegates to
-    # `_safe_coerce_emit`). A store INTO the dtype is allowed — the value is
-    # converted FROM its own natural type, which Modular does implement — and
-    # a copy of a value of the same dtype is `src == dst`, also allowed.
-    _f8_src = _float8_dtype.float8_spelling_of_ctype(src)
-    if _f8_src is not None and src != dst:
-        if not _float8_dtype.has_float_conversion(
-                _f8_src, _float8_dtype.spelling_of_ctype(dst)):
-            raise RuntimeError(_float8_dtype.conversion_diagnostic(
-                _f8_src, _float8_dtype.spelling_of_ctype(dst)))
-    # A store INTO a float8 dtype rounds the value to that format (ties to
-    # even, overflow per the format), as Modular's conversion does. The value
-    # is then held as the exact double of the rounded result.
-    _f8_dst = _float8_dtype.float8_spelling_of_ctype(dst)
-    if _f8_dst is not None and src != dst:
-        _eb, _mb, _bias, _kind = _float8_dtype.float8_format(_f8_dst)
-        _kc = {'ieee': 0, 'fn': 1, 'fnuz': 2, 'ue8m0': 3}[_kind]
-        _rt = gen._new_temp('double')
-        gen._rt_into(_rt, 'mojo_f8_round', [f'(double){val}', str(_eb), str(_mb), str(_bias), str(_kc)])
-        val = _rt
-        src = 'double'
-
     # A BOXED word stored into a pointer-typed slot. `mojo_list_get_boxed` hands
     # back a box (a heap cell, kind 'l'/'p'/...) for every slot kind but a plain
     # int, and the tuple-unpack reader tags the word as such (`_boxed_vals`).
@@ -3556,26 +3528,6 @@ def _literal_mojo_type(arg):
     return None
 
 
-def _proven_arg_mojo_type(gen, arg, ctype):
-    """The Mojo type of a call argument when the syntax (or the enclosing
-    function's own declaration) proves it, else None: a numeric literal, a
-    direct constructor call, or a parameter of the function being compiled
-    whose annotation names the type after monomorphization (`x: SIMD[Int64, 1]`).
-    The C type of an erased SIMD value is `int64_t`, which cannot say which
-    dtype it is; the declaration can."""
-    lit = _literal_mojo_type(arg)
-    if lit is not None:
-        return lit
-    if isinstance(arg, gimple_ctypes.IdentExpr):
-        fn = getattr(gen, '_current_func_node', None)
-        for _pname, _pann in (getattr(fn, 'params', None) or []):
-            if _as_str(_pname).lstrip('*') == _as_str(arg.name):
-                ann = _as_str(_pann).strip()
-                return ann or None
-        return None
-    return _constructed_struct_type(gen, arg, ctype)
-
-
 def _constructed_struct_type(gen, arg, ctype):
     """The Mojo type of a call argument that is a direct constructor call of a
     concrete struct of this module (`Foo()` -> `Foo`), or None. The C type
@@ -3597,18 +3549,6 @@ def _generic_paths_for(gen) -> dict:
     unit that elaborated `mid`), so the sibling map is forwarded as well."""
     out = dict(getattr(gen, '_sibling_generic_paths', None) or {})
     out.update(gen._imported_generics)
-    return out
-
-
-def _generic_paths_with_module(gen, source, module_src) -> dict:
-    """`_generic_paths_for(gen)` plus every generic function defined in the
-    CALLEE's own source file. A generic body calling a sibling generic of its own
-    module (`rotate_bits_right[-shift]` calling `rotate_bits_left` in bit.mojo)
-    needs that sibling to elaborate; the caller's imports do not name it, and a
-    missing sibling declined the call into a silent 0."""
-    out = _generic_paths_for(gen)
-    for _m in re.finditer(r'^def ([A-Za-z_]\w*)\s*\[', module_src or '', re.M):
-        out.setdefault(_m.group(1), source)
     return out
 
 
@@ -3785,14 +3725,14 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             if _tmpl_dd and elaborate.deduced_param_count(_tmpl_dd):
                 type_args = elaborate.complete_explicit_type_args(
                     _tmpl_dd, type_args, [ct for ct, _ in arg_pairs],
-                    arg_mojo_types=[_proven_arg_mojo_type(gen, a, ct)
+                    arg_mojo_types=[_literal_mojo_type(a) or _constructed_struct_type(gen, a, ct)
                                     for a, (ct, _) in zip(node.args, arg_pairs)])
                 if type_args is None:
                     return None
             info = el.elaborate_generic_call(
                 module_src, g, type_args, arg_count=len(arg_pairs),
                 origin_module=elaborate.declaring_module_name(gen, module_src),
-                generic_paths=_generic_paths_with_module(gen, source, module_src))
+                generic_paths=_generic_paths_for(gen))
             if info:
                 gen._refine_generic_return_type(
                     info, module_src, g, type_args, len(node.args),

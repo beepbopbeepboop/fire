@@ -12,8 +12,8 @@ holds regardless of algorithmic shape.
 its symbol is never referenced outside its own declaration block. Its counts
 are one `\\w+` tokenisation of the whole text, never one regex per symbol: the
 whole-closure `--dump-full` of `fire.py` has tens of thousands of guarded
-externs over a ~40 MB translation unit, and the per-symbol scan made that dump
-run for tens of minutes (`bootstrap-stage1-transitive`'s 3600 s ceiling).
+externs over ~40 MB, and the per-symbol scan made that dump run for tens of
+minutes (`bootstrap-stage1-transitive`).
 """
 
 import sys
@@ -99,6 +99,9 @@ def test_no_refs_all_dropped_when_only_defs():
     assert result == []
 
 
+# ── _drop_unreferenced_extern_decls ─────────────────────────────────────────
+
+
 def extern_block(name):
     """One guarded extern declaration block, the shape the codegen emits."""
     return (f"#ifndef _MOJO_STUB_{name}\n"
@@ -130,10 +133,9 @@ def test_extern_one_whole_text_scan():
     """The whole-text count is ONE pass, not a regex per symbol.
 
     This is the algorithmic half of the fix. Before it, each of the 2,000
-    symbols here got its own `re.findall` over the ~400 KB text (seconds
-    measured; the real 40 MB closure ran for tens of minutes and could not
-    finish inside the suite's 3600 s ceiling). A regression to that shape
-    fails here without depending on a wall-clock threshold.
+    symbols here got its own `re.findall` over the ~400 KB text (3.9 s
+    measured; the real 40 MB closure took tens of minutes). A regression to
+    that shape fails here without depending on a wall-clock threshold.
     """
     n = 2000
     body = ''.join(extern_block(f'f{i}') for i in range(n))

@@ -34,7 +34,6 @@ import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.simd_width as _simd_width
-import mojo.middle.float8_dtype as _float8_dtype
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.stmts_shared import _annotation_container_elem_type
@@ -55,7 +54,6 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
-from mojo.middle.funcs_shared import _find_symbol_home_module
 from mojo.middle.calls_shared import (
     _is_pointer_ctype, _null_default_pair,
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
@@ -2094,22 +2092,14 @@ def _dtype_arg_name(e):
 def _dtype_cast_ctype(e):
     """C type named by a dtype bracket argument — `DType.int32` or the
     dot-relative `.int32` — or None when it is anything else (a parameter, an
-    expression). A float8 dtype (`mojo.middle.float8_dtype`) answers that
-    module's private C type, so a `SIMD`/`Scalar` constructor of one carries
-    the dtype rather than erasing to an integer."""
-    s = ''
+    expression)."""
     if isinstance(e, gimple_ctypes.DottedLiteral):
-        s = _as_str(e.path)
-    elif (isinstance(e, gimple_ctypes.MemberExpr)
+        return _DTYPE_CAST_CTYPES.get(_as_str(e.path))
+    if (isinstance(e, gimple_ctypes.MemberExpr)
             and isinstance(e.obj, gimple_ctypes.IdentExpr)
             and _as_str(e.obj.name) == 'DType'):
-        s = _as_str(e.member)
-    else:
-        return None
-    _f8 = _float8_dtype.float8_ctype(s)
-    if _f8 is not None:
-        return _f8
-    return _DTYPE_CAST_CTYPES.get(s)
+        return _DTYPE_CAST_CTYPES.get(_as_str(e.member))
+    return None
 
 
 def _comptime_conforms_to_pred(gen):
@@ -3091,87 +3081,6 @@ def _lc_next_with_default(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
     return None
 
 
-#: Bit width of the scalar Mojo types an llvm_intrinsic's type argument may name.
-_INTRINSIC_TYPE_WIDTH = {
-    'Int8': 8, 'UInt8': 8, 'Int16': 16, 'UInt16': 16, 'Int32': 32, 'UInt32': 32,
-    'Int64': 64, 'UInt64': 64, 'Int': 64, 'UInt': 64,
-    'int8_t': 8, 'uint8_t': 8, 'int16_t': 16, 'uint16_t': 16,
-    'int32_t': 32, 'uint32_t': 32, 'int64_t': 64, 'uint64_t': 64,
-}
-#: The C-type width used when the type argument does not name a scalar.
-_CTYPE_WIDTH = _INTRINSIC_TYPE_WIDTH
-
-
-def _intrinsic_width(gen, type_expr, arg_ctype) -> int | None:
-    """The bit width an integer intrinsic works at: from its type argument when
-    that names a scalar (`Int32`, `DType.int32` is not a width and is refused),
-    else from the first argument's C type. None when neither is known."""
-    try:
-        ann = _as_str(gen._type_expr_to_ann(type_expr))
-    except Exception:
-        ann = ''
-    if ann in _INTRINSIC_TYPE_WIDTH:
-        return _INTRINSIC_TYPE_WIDTH[ann]
-    return _CTYPE_WIDTH.get(_as_str(arg_ctype))
-
-
-def _lower_llvm_intrinsic(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`llvm_intrinsic["llvm.name", Type, ...](args)` on the CPU.
-
-    The stdlib writes its bit and math primitives this way, and this path used to
-    fall through to the generic indirect-call stub, which emitted 0: a silent wrong
-    answer (`rotate_bits_right[2](104)` printed 0, not 26). Each intrinsic that has a
-    CPU lowering here is implemented; any other name is REFUSED with a diagnostic, so
-    no call can compute 0 silently. The GPU-only intrinsics are refused the same way.
-    """
-    idx = node.func.index
-    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
-    if not elems or not isinstance(elems[0], gimple_ctypes.StringLiteral):
-        return _trap_unsupported_intrinsic(gen, "<non-literal name>")
-    name = _as_str(elems[0].value)
-    pairs = [gen.lower_expr(a) for a in node.args]
-    if name in ('llvm.fshl', 'llvm.fshr', 'llvm.ctpop', 'llvm.ctlz', 'llvm.cttz',
-                'llvm.bswap', 'llvm.usub.sat'):
-        if not pairs:
-            raise RuntimeError(f"{name}: no operands")
-        width = _intrinsic_width(gen, elems[1] if len(elems) > 1 else None, pairs[0][0])
-        if width is None:
-            return _trap_unsupported_intrinsic(gen, name + " (bit width unknown)")
-        ops = [('int64_t', gen._to_int64(t, v)) for t, v in pairs]
-        if name in ('llvm.fshl', 'llvm.fshr'):
-            if len(ops) != 3:
-                raise RuntimeError(f"{name}: expects three operands")
-            fn = 'mojo_fshl' if name == 'llvm.fshl' else 'mojo_fshr'
-            return 'int64_t', gen._call_expr('int64_t', fn, ops + [('int64_t', str(width))])
-        if name == 'llvm.usub.sat':
-            if len(ops) != 2:
-                raise RuntimeError(f"{name}: expects two operands")
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_usub_sat',
-                                             ops + [('int64_t', str(width))])
-        fn = {'llvm.ctpop': 'mojo_ctpop', 'llvm.ctlz': 'mojo_ctlz',
-              'llvm.cttz': 'mojo_cttz', 'llvm.bswap': 'mojo_bswap'}[name]
-        return 'int64_t', gen._call_expr('int64_t', fn, ops[:1] + [('int64_t', str(width))])
-    if name == 'llvm.expect' and pairs:
-        return pairs[0]
-    if name == 'llvm.assume':
-        return 'int64_t', '0'
-    return _trap_unsupported_intrinsic(gen, name)
-
-
-def _trap_unsupported_intrinsic(gen, name: str) -> tuple[str, str]:
-    """An intrinsic with no CPU lowering. The call TRAPS when it is reached (a
-    message naming it, exit nonzero) instead of yielding a value: the compiled
-    stdlib contains GPU intrinsics in code the CPU never runs, so this cannot be
-    a compile-time refusal, and it cannot be a silent 0 either. The value after
-    the trap is the integer word the call has always produced, which is what the
-    surrounding C was written against (a struct- or pointer-typed result here
-    breaks the callers that take the word)."""
-    gen._rt_void('mojo_unsupported_intrinsic', ['"' + name.replace('"', '') + '"'])
-    t = gen._new_temp('int64_t')
-    gen._emit(f'  {t} = (int64_t)0;')
-    return 'int64_t', t
-
-
 def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """A callee that is not a plain name: the result of a call, a subscript, a lambda, ...
 
@@ -4100,12 +4009,7 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
                 if _cv:
                     _dt_ctype = gimple_ctypes._dtype_token_ctype(
                         _cv.get(_as_str(_e0.name)))
-        if (_dt_ctype in ('float', 'double', '__fp16')
-                or _float8_dtype.float8_spelling_of_ctype(_dt_ctype) is not None):
-            # A float8 dtype's private C type arrives here from
-            # `_dtype_token_ctype`; a conversion INTO the dtype is allowed,
-            # and the two uses with no rule are refused at the coercion
-            # and binary-operation chokepoints (mojo.middle.float8_dtype).
+        if _dt_ctype in ('float', 'double', '__fp16'):
             _target = _dt_ctype
         else:
             _target = 'int64_t'
@@ -4424,85 +4328,7 @@ def _lcx_subscript_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
     return None
 
 
-def _root_function_def(gen, name: str):
-    """The one top-level FunctionDef a call to NAME reaches, or None.
-
-    A name this module defines is read from its own top-level statements; an
-    imported name from its home module's parsed statements (under the name it
-    has THERE). Only a plain (non-generic, non-overloaded) free function
-    qualifies: an overload set or a generic is resolved by the normal path."""
-    def _scan(stmts, want):
-        hits = []
-        for st in stmts or []:
-            if (type(st).__name__ == 'FunctionDef' and _as_str(st.name) == want
-                    and not getattr(st, 'comptime_params', None)):
-                hits.append(st)
-        return hits
-    found = _scan(getattr(gen, '_current_module_stmts', None) or [], name)
-    if not found:
-        _info = (getattr(gen, 'imported_symbols', None) or {}).get(name) or {}
-        _mod = _as_str(_info.get('module')) if _info else ''
-        # An import entry names its home function `original_name` only when it
-        # was renamed on import; otherwise the local name is the home name.
-        _orig = (_as_str(_info.get('original_name')) if _info else '') or name
-        if _mod and _orig:
-            found = _scan(gen._parsed_import(_mod)[2] or [], _orig)
-    return found[0] if len(found) == 1 else None
-
-
-def _lower_out_param_call(gen, node):
-    """A call to a free function with an `out` parameter, which the caller
-    does not pass: the callee writes its result through a pointer to an object
-    the caller owns, so allocate that object here and pass it.
-
-    Rewritten to the same call with the temp in the out slot, then the temp is
-    the call's value (`def make(out r: Box)`; `var b = make()`). Only a struct
-    result is supported (`Name *` in C, `_alloc_Name()` to create it); anything
-    else returns None and takes the normal path."""
-    if not isinstance(node.func, gimple_ctypes.IdentExpr) or getattr(node, 'kwargs', None):
-        return None
-    _name = _as_str(node.func.name)
-    _fs = _root_function_def(gen, _name)
-    if _fs is None:
-        return None
-    _convs = getattr(_fs, 'param_convs', None) or {}
-    _params = _fs.params or []
-    if not any(_convs.get(_as_str(_p[0])) == 'out' for _p in _params):
-        return None
-    _outs = [_as_str(_p[0]) for _p in _params if _convs.get(_as_str(_p[0])) == 'out']
-    if len(node.args) != len(_params) - len(_outs):
-        return None
-    _seq = getattr(gen, '_out_param_seq', 0)
-    gen._out_param_seq = _seq + 1
-    _args = []
-    _pos = iter(node.args)
-    _first_tmp = None
-    for _p in _params:
-        _pn = _as_str(_p[0])
-        _pt = _as_str(_p[1]) if len(_p) > 1 and _p[1] is not None else ''
-        if _convs.get(_pn) != 'out':
-            _args.append(next(_pos))
-            continue
-        if _pn == 'self' or _pt not in gen.struct_field_types:
-            return None
-        _tmp = f"__out_{_seq}_{len(_args)}"
-        gen._declare_var(_tmp, f"{_pt} *")
-        _ct, _av = gen.lower_expr(gimple_ctypes.CallExpr(
-            func=gimple_ctypes.IdentExpr(_pt), args=[]))
-        gen._emit(f"  {gen._c_names.get(_tmp, _tmp)} = {_av};")
-        _args.append(gimple_ctypes.IdentExpr(_tmp))
-        if _first_tmp is None:
-            _first_tmp = _tmp
-    _call = gimple_ctypes.CallExpr(func=node.func, args=_args, kwargs=[],
-                                   line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-    gen.lower_expr(_call)
-    return gen.lower_expr(gimple_ctypes.IdentExpr(_first_tmp))
-
-
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    _out_call = _lower_out_param_call(gen, node)
-    if _out_call is not None:
-        return _out_call
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and re.match(r'^__mojo_tuple_box_\d+$', _as_str(node.func.name))):
         return _lower_tuple_box_call(gen, node)
@@ -5063,21 +4889,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             t = gen._rt_call('MojoSet *', 'mojo_set_copy', [f"{av}"])
             gen._note_fresh_result(t)
             return 'MojoSet *', t
-    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
-            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-            and node.func.obj.name == 'llvm_intrinsic'):
-        return _lower_llvm_intrinsic(gen, node)
-    # `type_of(x)(v)`: the value `v` converted to the type of `x` (the stdlib's
-    # idiom for the element type of a SIMD operand). Lowered directly; a runtime
-    # `type_of` symbol does not exist.
-    if (isinstance(node.func, gimple_ctypes.CallExpr)
-            and isinstance(node.func.func, gimple_ctypes.IdentExpr)
-            and node.func.func.name == 'type_of'
-            and len(node.func.args) == 1 and len(node.args) == 1
-            and not gen._locally_binds_name('type_of')):
-        ot, _ov = gen.lower_expr(node.func.args[0])
-        vt, vv = gen.lower_expr(node.args[0])
-        return ot, gen._cast(ot, f"{vv}")
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
         return _lc_non_ident_callee(gen, node)
 
@@ -5578,16 +5389,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         res = gen._new_val('double', f'floor({dv})')
         return 'int64_t', gen._cast('int64_t', f"{res}")
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
-    # The interpreter's float8 scalar (`myinterpreter._MojoFloat8Value`): a
-    # float that carries its dtype's spelling. Compiled, it is a float8 BOX in
-    # the tagged word (runtime mojo_box_from_f8), so a value returned beside a
-    # float is a word of one kind, not a pointer the boxing refuses.
-    if fname_raw == '_MojoFloat8Value' and len(node.args) == 2:
-        return _lower_float8_value_box(gen, node)
-    if fname_raw == '_float8_spelling_of' and len(node.args) == 1:
-        vt, vv = gen.lower_expr(node.args[0])
-        return 'char *', gen._call_expr('char *', 'mojo_f8_spelling',
-                                        [('int64_t', gen._to_int64(vt, vv))])
     if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
     # `callable(x)` — does the word denote a function at run time? The runtime's
     # `mojo_is_callable_word` answers from the function/bound-method/variadic-
@@ -6504,11 +6305,6 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                                [('int64_t', gen._to_int64(obj_type, obj_val))])
             return gen._cast('_Bool', r)
         return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
-    if type_name == '_MojoFloat8Value':
-        # A float8 scalar is a float8 box in the tagged word (mojo_box_from_f8).
-        r = gen._call_expr('int', 'mojo_is_f8_box',
-                           [('int64_t', gen._to_int64(obj_type, obj_val))])
-        return gen._cast('_Bool', r)
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
         # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
@@ -6750,17 +6546,6 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     return gen._cast('_Bool', res)
 
 
-
-
-def _lower_float8_value_box(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`_MojoFloat8Value(spelling, value)` in compiled code: a float8 box word."""
-    st, sv = gen.lower_expr(node.args[0])
-    if st != 'char *':
-        sv = gen._cast('char *', f"{sv}")
-    vt, vv = gen.lower_expr(node.args[1])
-    dv = vv if vt == 'double' else gen._cast('double', f"{vv}")
-    return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_f8',
-                                     [('double', dv), ('char *', sv)])
 
 
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -11659,84 +11444,6 @@ def _lnc_unknown(gen, fname_raw: str, fname: str) -> tuple[str, str] | None:
 
 
 def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr):
-    over = getattr(gen, '_local_def_overloads', None) or {}
-    nodes = over.get(fname_raw)
-    if not nodes or len(nodes) < 2:
-        return None
-    return _choose_overload_symbol(gen, fname_raw, node, nodes, None)
-
-
-def _imported_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr, arg_ctypes=None):
-    """The C symbol for a call to an IMPORTED free function that its home module
-    defines more than once, or None when the name is not such an overload set.
-
-    The import scan keeps one entry per name, and a name defined more than once
-    is recorded as a variadic `name(...)` stub, so the caller had no signature to
-    name the overload by (`stdlib/std/collections/bitset.mojo` calls
-    `unsafe_memset_zero(ptr, count)` and got the bare stub). The overloads are
-    read from the home module's own parsed statements instead. A generic template
-    (`comptime_params`) is not a plain callee, so it is left out of the choice; a
-    name with a single plain overload and a generic one still chooses the plain
-    one, since the generic cannot be called without its brackets."""
-    # Only where the import scan gave up on the name and emitted the variadic stub
-    # (that is the case that leaves the call with no overload to name), and never
-    # for a name with a builtin mapping (`abort`, `print`): those keep their builtin.
-    _ent = (getattr(gen, 'imported_symbols', None) or {}).get(fname_raw) or {}
-    if not str(_ent.get('signature') or '').endswith('(...)') or fname_raw in gen.BUILTIN_VALUE_MAP:
-        return None
-    _mod = None
-    for _st in getattr(gen, '_current_module_stmts', None) or []:
-        if type(_st).__name__ == 'FromImportStmt' and not _st.wildcard:
-            if any(str(_n) == fname_raw for _n, _a in (_st.names or [])):
-                _mod = str(_st.module)
-                break
-    if _mod is None:
-        return None
-    # The named module may only re-export the name (a package `__init__.mojo`); the
-    # overloads live in the module that DEFINES it.
-    _home_name = _find_symbol_home_module(gen, _mod, fname_raw, 'fn', want_abs=True) or _mod
-    _mod = _home_name
-    _home = gen._parsed_import(_mod)[2] or []
-    _all = [h for h in _home if type(h).__name__ == 'FunctionDef' and str(h.name) == fname_raw]
-    _plain = [h for h in _all if not getattr(h, 'comptime_params', None)]
-    if not _plain or len(_all) < 2:
-        return None
-    _fit = [h for h in _plain if len(h.params) == len(node.args)]
-    if arg_ctypes is None:
-        # Without the argument C types only a single arity match is decided: two
-        # plain overloads of one arity differ only in argument types, which are not
-        # known yet (`b64encode("a")`: a string and a byte span both take one
-        # argument), so the call keeps the stub rather than a guess.
-        if len(_fit) != 1:
-            return None
-        return _choose_overload_symbol(gen, fname_raw, node, _fit, _mod)
-    # With the lowered argument C types, the choice is the one arity match whose
-    # parameter C types are exactly the arguments': `time.sleep(1.5)` against
-    # `(Float64)` and `(Int)`. Anything else (none, or two) keeps the stub.
-    if len(_fit) == 1:
-        return _choose_overload_symbol(gen, fname_raw, node, _fit, _mod)
-    def _norm(t):
-        # A literal lowers to C `int`; Mojo's Int (and every integer parameter) is
-        # the 64-bit word. Both are the same argument for this choice.
-        _c = gimple_ctypes.c_client_callable_ctype(t)
-        return 'int64_t' if _c == 'int' else _c
-    _want = [_norm(t) for t in arg_ctypes]
-    _exact = []
-    for h in _fit:
-        _pts = [_norm(t) for t in gen._home_signature_ctypes(_mod, h)]
-        if _pts == _want:
-            _exact.append(h)
-    if len(_exact) != 1:
-        return None
-    return _choose_overload_symbol(gen, fname_raw, node, _exact, _mod)
-
-
-def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
-    """Choose one overload of FNAME_RAW for NODE among NODES and return its C
-    symbol. HOME is the defining module for an imported overload set (its nodes'
-    parameter types are read as the home unit types them, and the chosen overload
-    is declared here, since its definition lives in another unit), or None for a
-    module's own overloads (defined in this translation unit)."""
     """The C symbol for a call to one of THIS module's own same-named free
     functions, or None when the name is not an overload set.
 
@@ -11751,12 +11458,15 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
     back to the first in declaration order, which is also the canonical
     cross-module signature (see emit_funcs._def_is_canonical), so the call
     still names a definition that exists rather than a bare stub."""
+    over = getattr(gen, '_local_def_overloads', None) or {}
+    nodes = over.get(fname_raw)
+    if not nodes or len(nodes) < 2:
+        return None
     cands = []
     for n in nodes:
         pnames = []
-        _raw_pts = (gen._home_signature_ctypes(home, n) if home is not None
-                    else gen._signature_ctypes(n.params, n))
-        pts = [gimple_ctypes.c_client_callable_ctype(t) for t in _raw_pts]
+        pts = [gimple_ctypes.c_client_callable_ctype(t)
+               for t in gen._signature_ctypes(n.params, n)]
         star_idx = -1
         for _ppn, _ppt in n.params:
             pnames.append(_as_str(_ppn).lstrip('*'))
@@ -11821,24 +11531,8 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
         if cands[_ci] is chosen:
             _def = nodes[_ci]
             break
-    if home is not None:
-        # An imported choice must fit the call's arity. `_resolve_overload` picks a
-        # best candidate even when none fits, and a wrong pick here would emit a
-        # prototype the call cannot satisfy ("too few arguments"); decline instead,
-        # and the call keeps the variadic stub it had.
-        # The imported call path does not fill a chosen overload's defaults, so the
-        # call must supply every parameter itself: a defaulted or keyword-only
-        # overload is declined (`assert_equal(a, b)` against `(lhs, rhs, msg="",
-        # *, location=None)` would be emitted with two of four arguments).
-        _plain_params = [pn for pn, _pt in _def.params]
-        if any(str(pn).startswith('*') for pn in _plain_params) or len(node.args) != len(_plain_params) \
-                or (getattr(node, 'kwargs', None) or []):
-            return None
-        if any(_def.param_has_default.get(pn) for pn in _plain_params) if getattr(_def, 'param_has_default', None) else False:
-            return None
-    _raw_def_pts = (gen._home_signature_ctypes(home, _def) if home is not None
-                    else gen._signature_ctypes(_def.params, _def))
-    _def_pts = [gimple_ctypes.c_client_callable_ctype(t) for t in _raw_def_pts]
+    _def_pts = [gimple_ctypes.c_client_callable_ctype(t)
+                for t in gen._signature_ctypes(_def.params, _def)]
     _sym = (getattr(gen, '_def_sym_by_id', None) or {}).get(id(_def)) \
         or gen._func_csym(fname_raw, _def_pts)
     # The chosen overload's own parameter/return types, under its own symbol
@@ -11869,20 +11563,6 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
         except Exception:
             _rt = 'void'
         gen.func_return_types[_sym] = _rt or 'void'
-    if home is not None:
-        # The definition is in the home unit: declare the chosen overload here, with
-        # the return type this file already uses for it (the same record the call
-        # reads), so the prototype and every other declaration of the symbol agree.
-        # The same return type the import scan records for the name (the declaration
-        # the importer already emits for it), so the two prototypes cannot conflict.
-        # The scan takes the return type from the last overload, so for an overload
-        # set this can differ from the definer's; a statement call discards it.
-        _dret = str((getattr(gen, 'imported_symbols', None) or {}).get(fname_raw, {}).get('c_return_type')
-                    or gen.func_return_types.get(_sym) or 'void')
-        _dguard = gimple_ctypes._stub_guard_name(_sym)
-        gen._link_import_decl_list.append(
-            f"#ifndef {_dguard}\n#define {_dguard}\n"
-            f"extern {_dret} {_sym} ({', '.join(_def_pts) if _def_pts else 'void'});\n#endif")
     return _sym
 
 
@@ -11918,8 +11598,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # straight to it, bypassing BUILTIN_VALUE_MAP entirely, whenever this
     # module locally binds the name.
     _over_sym = _local_overload_call_symbol(gen, fname_raw, node)
-    if _over_sym is None:
-        _over_sym = _imported_overload_call_symbol(gen, fname_raw, node)
     if _over_sym:
         fname = _over_sym
     elif fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
@@ -12509,14 +12187,14 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # `node.args` positionally, so an argument coercion can tell what each
     # argument MEANT (see `_emit_call`'s `arg_nodes`).
     t = gen._call_expr(ret_type, fname, arg_pairs, node.args)
-    # A mixed-return callee returns the TAGGED WORD
-    # (`module_gen._ret_may_hold_mixed`). Every piece of bookkeeping below is
+    # A float+pointer callee returns the TAGGED WORD
+    # (`module_gen._ret_may_hold_float`). Every piece of bookkeeping below is
     # about ONE container shape, and this result has none: it may be a float
-    # box, a bool box, a str/list/tuple box or a plain int. Recording one of
-    # those shapes would make a consumer cast the box's own address to a
-    # container (`f(1)[0:1]` sliced the box cell as a list). The word is marked
-    # as tagged for the consumers that dispatch by kind instead.
-    if fname_raw in getattr(gen, '_ret_may_hold_mixed', ()):
+    # box, a str/list/tuple box or a plain int. Recording one of those shapes
+    # would make a consumer cast the box's own address to a container (`f(1)
+    # [0:1]` sliced the box cell as a list). The word is marked as tagged for
+    # the consumers that dispatch by kind instead.
+    if fname_raw in getattr(gen, '_ret_may_hold_float', ()):
         gen._boxed_vals.add(t)
         gen._tagged_word_vals.add(t)
         return ret_type, t

@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gate-stdlib-dylib-3 land?
+# Land: should finished branch bug-land-compile-fail-tools-cases-genera-4 land?
 
-**Branch:** `work/bug-gate-stdlib-dylib-3` (task `bug-gate-stdlib-dylib-3`; its tip is also saved as `refs/archive/work/bug-gate-stdlib-dylib-3`, so dropping it loses nothing).
-**Age:** last commit 2026-11-17, first unlanded commit 2026-11-12; 5 commit(s) ahead of master, 1372 behind it; task started 2026-11-17 07:47:38
-**Original work:** An earlier attempt left 4 commit(s) on branch work/bug-gate-stdlib-dylib, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/gate-stdlib-dylib.md
-**Original claims:** bug:gate-stdlib-dylib
+**Branch:** `work/bug-land-compile-fail-tools-cases-genera-4` (task `bug-land-compile-fail-tools-cases-genera-4`; its tip is also saved as `refs/archive/work/bug-land-compile-fail-tools-cases-genera-4`, so dropping it loses nothing).
+**Age:** last commit 2026-11-17, first unlanded commit 2026-11-13; 17 commit(s) ahead of master, 20 behind it; task started 2026-11-17 04:36:11
+**Original work:** An earlier attempt left 16 commit(s) on branch work/bug-land-compile-fail-tools-cases-genera-3, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch delete
+**Original claims:** bug:LAND-compile-fail-tools-cases-genera-2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-17 21:06:11: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-12; 5 commit(s) ahead of master, 1372 behind it; task started 2026-11-17 07:47:38)
-  Branch: work/bug-gate-stdlib-dylib-3
-  Conflicting files: bugs/gate-stdlib-dylib.md, module_loader.py
+- 2026-11-17 10:55:37: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-13; 17 commit(s) ahead of master, 20 behind it; task started 2026-11-17 04:36:11)
+  Branch: work/bug-land-compile-fail-tools-cases-genera-4
+  Conflicting files: see `git merge master`

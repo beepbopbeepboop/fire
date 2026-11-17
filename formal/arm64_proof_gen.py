@@ -9769,37 +9769,6 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
                 f"that value, so the fall-through must rewrite x0 before any "
                 f"instruction reads it; this one does not, or it crosses a "
                 f"branch the walk cannot see through.")
-    # A CALL. Measured 2026-11-16 on the dylib export proofs: this is the cause
-    # for both `csetval` and `branched`, and the generic sentence below does not
-    # mention it -- so a reader was left with three candidate classes and no way
-    # to pick, while the walk's own condition (`any(b["kind"] == "bl" ...)`)
-    # refused on the call. Named here so the message keeps its promise.
-    _bl_pc = next((pc for pc in sorted(p for p in words
-                                       if func_entry <= p < func_end)
-                    if (words[pc] >> 26) == 0x25), None)
-    if _bl_pc is not None:
-        _w = words[_bl_pc]
-        _imm = _w & 0x3ffffff
-        if _imm & 0x2000000:
-            _imm -= 0x4000000
-        _tgt = _bl_pc + _imm * 4
-        _where = ("inside this export's own range"
-                  if func_entry <= _tgt < func_end else
-                  "OUTSIDE this export's own range "
-                  f"[#{func_entry:#x}, #{func_end:#x})")
-        return (
-            f"universal theorem: CFG decomposition unsupported for this "
-            f"function shape, and every instruction in its own code has a "
-            f"step, so the cause is not an unmodelled word: it is the call at "
-            f"{_bl_pc:#x} in {name}'s own code, targeting {_tgt:#x} "
-            f"({_where}). The walk's CFG is the export's OWN range and it "
-            f"refuses any block of kind `bl`; the callee may well be in the "
-            f"image (measured: both csetval and branched call the same "
-            f"helper, outside either export's extent) but it is outside the "
-            f"range this walk certificates. The other reasons this walk "
-            f"returns None are a shape with no `RET`, a block whose runs "
-            f"certificate is empty, and a fixed-fuel caller whose budget is "
-            f"below the instruction count.")
     return ("universal theorem: CFG decomposition unsupported for this function "
             "shape, and every instruction in its own code has a step, so the "
             "cause is not an unmodelled word: the walk returns None for a shape "

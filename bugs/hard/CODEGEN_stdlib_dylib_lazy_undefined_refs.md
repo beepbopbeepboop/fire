@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part5 (part 6 fixed 2026-11-17, doc deleted)
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
@@ -7,9 +7,9 @@ that the dylib LOADS (a data/class-table reference to an undefined symbol is fat
 `tools/stdlib_dylib_ratchet.py`). These 50 are lazy CALL references: they do not stop the load, but a
 client that reaches one through the dylib aborts at that call unless another image happens to define it.
 
-## Replan (2026-11-15): the live parts are 5-6 (part 9 landed)
+## Replan (2026-11-15): the live parts are 5-6 and 9
 
-Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
+Parts 1-3, 4, 7 and 8 landed and their docs were deleted when they landed:
 
 - part 1: a re-exported free function's reference carries the DEFINING module's
   qualifier (`_reexported_defining_qualifier`).
@@ -35,149 +35,6 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   `Name` there makes the importer lower `.field` as a typed `->` against a
   struct it never defines. 32 -> 31 undefined `_std_` names, the one that went
   being `_std_benchmark_benchmark__run_impl_9f63a2`; none new.
-  Follow-up 2026-11-17: the same rule missed a home struct spelled BARE
-  (`_GraphemeBreakState *` in `_grapheme_break.mojo`, not the tag form
-  `struct N *`). The private-struct test now accepts both spellings, skipping
-  generic home structs (`SIMD`, whose call sites are elaborated per instance
-  and must keep the scanned hash). The definer list is recorded once, in the
-  early import pass (`emit_infra`, `_home_private_pts_by_name`), because call
-  sites are generated before the import block is written. Grapheme pair
-  `..._is_grapheme_break_c427b8` and `..._reset_grapheme_state_to_other_9f63a2`
-  now resolve to the definer's `5d88b0` / `de8baa`. 10 -> 8 undefined.
-  Still open: `_std_random__rng__get_global_random_state_55072c`. The definer
-  is `void f(_RandomState *)` (an `out` parameter) and the importer declares
-  `int64_t f(int64_t *)`; hashing the definer's list alone creates a
-  conflicting-types error at the call site, so the out-parameter calling
-  convention must be fixed together with the hash, not one or the other.
-
-  **Planning guide (2026-11-17), the `out` parameter convention.** Measured
-  this round, not inferred:
-  - A local `out` parameter is not implemented at all. For
-    `def make(out r: Box): r = Box(7)` the definition is
-    `void m (Box * r)` with body `r = _t1` (it assigns the pointer, it does not
-    write through it), and the caller emits `m (0);` then `b = 0`. So a local
-    call loses the result too; this is not specific to the cross-module case.
-  - `mut` parameters already work end to end: `setv(mut r: Box)` is
-    `void setv (Box * r)` and the caller passes `b`, and the body writes through
-    `r.v`. That is the convention `out` should reuse.
-  - Scope: 110 stdlib files use `out`. Most are `out self` (constructors, a
-    different path) and `out result: ...` returns. The random failure is
-    `std.random._rng.get_global_random_state(out result: Pointer[_RandomState,
-    ...])`, one of the few free functions with an `out` result.
-  Plan, in order:
-  1. Definition side: in the function emitter, a parameter with `out`
-     convention is bound like a `mut` parameter (pointer, reads and writes
-     through `*r`), and the function returns `void`. Files: the param binding
-     in `emit_funcs.py` (where `mut` is recognised), `module_gen.py`.
-  2. Call side: `make()` with an `out` parameter is elaborated to a fresh local
-     of the out type whose address is the argument; the call expression's value
-     is that local. Files: `elaborate.py` (call elaboration, where the argument
-     list is built) so both local and imported calls get the same rewrite.
-  3. Import side: the import scan records the out parameter's pointee type and
-     the `void` return, so the extern declares `void f (T *)` and the hash uses
-     the definer's list (the part-7 path, already in place).
-  Status 2026-11-17 (landed): steps 1 and 2 for LOCAL free functions. A
-  caller that omits an `out` struct argument allocates the object
-  (`emit_calls._lower_out_param_call`, at the top of `_lower_call`) and the
-  call's value is that object; an assignment to the `out` name in the body
-  copies into it (`emit_stmts._lower_out_param_store`: `*r = *value`). Scope is
-  deliberately narrow: `out self` is excluded, methods are excluded, and a
-  generic annotation (`out task: Task[...]`) is excluded because its C slot is
-  a word. A first version without those limits broke 15 stdlib files and 47
-  build errors; the restriction is what the gates measured. Test:
-  `test_out_param_local.py` (compiles the module and runs it, expects 7).
-  Status 2026-11-17 (step 3 landed): the cross-module case. The import scan
-  declares an `out` function `void` when its annotation is plain (no `[`), and
-  the caller rewrite finds the callee in its home module's parsed statements
-  (`emit_calls._root_function_def`). `test_out_param_local.py` now also runs a
-  two-module round trip (expects 7). Still open: the random name is NOT this
-  convention. Its `out result: Pointer[_RandomState, ...]` is a pointer RESULT,
-  not an object the caller fills; the right fix is to return the pointer
-  (`_RandomState * f(void)`), a separate change to the definer's signature and
-  the caller's use of the value.
-  Status 2026-11-17 (overload selection for an imported name): the import scan
-  records a name defined more than once as a variadic `name(...)` stub, which
-  names no overload, so `bitset.mojo`'s `unsafe_memset_zero(ptr, count)` bound
-  to the bare stub. `emit_calls._imported_overload_call_symbol` now picks the
-  overload from the HOME module's own statements (following a package
-  re-export to the defining module), and declares it. It decides ONLY when
-  exactly one plain (non-generic) overload fits the call's arity and the call
-  supplies every parameter; anything else keeps the stub. Both call paths use
-  it (`_lower_named_call` and the statement path in `emit_stmts`).
-  `test_import_overload_choice.py` fails on the committed code and passes here.
-  Undefined `_std_` names: 8 -> 7 (`unsafe_memset_zero` resolved).
-  Not done, found while doing it: (a) a defaulted or ambiguous overload set
-  (`assert_equal`, `b64encode`, `time.sleep`) still falls back: the imported
-  call path does not fill defaults, and the chooser does not see argument types;
-  (b) `std.time.time` emits NO `sleep` symbol at all, so `_std_time_time_sleep`
-  stays undefined whatever the caller names; (c) the scan takes an overload
-  set's return type from its LAST overload, so the declaration can differ from
-  the definer's (`unsafe_memset_zero` is `void` there, `int64_t` in the import).
-  Gates: stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple
-  465/0, lint and ratchet clean.
-  Status 2026-11-17 (time.sleep, landed): two causes, both fixed. (1)
-  `module_gen`'s overload guard dropped EVERY overload of a name whose plain
-  overloads include an `external_call[...]` body. The stdlib builds clean with
-  those overloads emitted, so that branch is removed; the generic-struct branch
-  stays. `time.sleep`'s two overloads were both missing. (2) The import choice
-  now also uses the lowered argument C types (`emit_stmts` moves the hook after
-  the arguments are lowered): when exactly one plain overload fits the arity it
-  is taken as before; when several fit, the one whose parameter types equal the
-  arguments' is taken (an integer literal's `int` matches Mojo's 64-bit `Int`).
-  `time.sleep(1)` and `time.sleep(1.5)` now name `_9f63a2` and `_f77bd1`.
-  `test_import_overload_choice.py` gained two cases: argument-type selection
-  (fails on the committed code) and external_call overload emission.
-  Undefined `_std_` names: 7 -> 6. Still open: `random` (its `Pointer`-result
-  change is parked in stash@{0}) and the `_std__gpu_intrinsics` / `bit_mask` /
-  `getpw` generic instances.
-  Status 2026-11-17 (random, landed): `out result: Pointer[T]` is a pointer
-  RETURN, not a value the caller fills. `mojo/middle/out_result.py` lowers it
-  (the definer and the import parse both apply it), and the import scan mirrors
-  the rule, including the same "body reads the name" bail. `_struct_name_of`
-  strips the `struct ` tag so a struct private to another unit names its method
-  `<home>_<Struct>_<method>`. `test_out_param_local.py` gained a cross-module
-  pointer-result case (expects 9). Undefined `_std_` names: 6 -> 5 (random gone).
-  Still open: the gpu `mulhi`/`mulwide` instances. Found: `fast_div`'s
-  `mulhi(self._mprime.cast[.uint32](), ...)` inside a generic struct reaches the
-  Int64 overload, because `.cast[.uint32]()` lowers to a 64-bit word and loses
-  its type. That is a wrong-result bug, not only a link gap. The elaborator
-  route to the definer's symbol was tried and reverted: choosing on erased
-  argument types picked the wrong overload.
-  Status 2026-11-17 (bit.mask splat and pwd getpw, landed): an elaborated
-  call to an imported PLAIN overload compiled a private copy under the mangled
-  name nothing defines. `emit_infra._elaborate_overload_call` now calls the home
-  symbol when the arity matches exactly one plain overload, and, in an
-  erasure-free caller (no generic function or struct around the call;
-  `_erasure_free_context`), when the lowered argument C types pick one. Inside a
-  generic the typed choice is not made: `Scalar[dtype].cast[.uint32]()` lowers to
-  an int64 word there, so the choice would be a guess. Also: the import scan maps
-  a return annotation naming a struct the module IMPORTS to `struct X *` (the
-  pwd getpw externs had `int64_t`), and `module_loader` imports `re`.
-  Undefined `_std_` names: 5 -> 1 (only `mulhi(Int64, Int64)` remains; it is the
-  generic-struct cast typing above, not a link gap).
-  Previously open (now done): step 3, the cross-module import. Gates:
-  stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
-  Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
-  - Callee chosen: `mojo/backend_gimple/emit_calls.py` ~11650-11676, where
-    `_def` (the FunctionDef) and `_sym` are resolved. `_def.param_convs` gives
-    the `out` names. The argument list is built after this point from
-    `node.args`, so the synthetic temp must be threaded in there.
-  - Temp: a struct result is allocated with `_alloc_<Struct>()` (seen in
-    emitted C); `gen._emit_call(ret, tmp, fname, arg_pairs)` emits a call from
-    pre-lowered `(ctype, value)` pairs (`emit_resolve.py:2445` `_call_expr`).
-  - Callee writes: an assignment to an `out` name must copy into the caller's
-    object (`*r = *value`), not rebind the pointer. Struct locals are heap
-    pointers and today's `b = Box(9)` only rebinds (`emit_stmts`, the Assign
-    lowering).
-  - Local-only first: `_closure_call_stmts` (emit_calls.py ~70) gives the
-    module's root FunctionDefs; the cross-module case needs the import entry.
-  Decision needed: do steps 1-2 for ALL `out` free functions (the general fix,
-  large: the 110-file population) or only `out result` free functions
-  (sufficient for the 1 remaining dylib name, but leaves `out` broken elsewhere).
-  Tests: a local `out` round-trip (`var b = make(); b.v == 7`), the same across
-  two modules (cross-module import of `out`), and the stdlib-syntax and
-  dylib counts. Do not land the import hash alone: it creates a conflicting
-  type at the call site (shown above).
 - part 8: two same-name free functions in one module each get a definition
   under their own mangled symbol, and a call names one of them — by
   arity/argument types inside the module, by the defining unit's first
@@ -187,15 +44,6 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   (`splat[.int]`), and overloads whose bodies cannot be emitted correctly
   because of an unrelated platform/external-call typing bug keep the
   historical "not emitted" disposition instead of failing the module.
-- part 9 (landed 2026-11-16, doc deleted): a generic free function
-  instantiated only by ANOTHER module is now emitted by its defining module.
-  `build_stdlib_dylib._generic_instance_requests` reads each caller object's
-  references (`nm -u`), matches an erased signature to a top-level
-  `def <name>[` in the module that owns the symbol's qualifier, and recompiles
-  that module once with the monomorphized instance appended, emitted under the
-  caller's exact symbol (the caller's own `_func_csym` spelling) in the
-  defining module's own translation unit. Pinned by
-  `test_dylib_generic_instances.py` and the `p9_generic` probe.
 
 The title's "50" is the 2026-11-12 measurement and is stale; the live
 residual is the table below. Measured 2026-11-15 in this worktree by compiling
@@ -208,7 +56,8 @@ build, no link), then confirming the end-to-end shape with two-module
 | part | doc | class | example symbols |
 |---|---|---|---|
 | 5 | `...-part5.md` | a body the backend cannot lower vanishes, so the caller's qualified name has no definition (its own calls get a BARE weak stub) | `std_sys_info_is_{apple,nvidia,amd}_gpu`, `std_python__cpython_CPython_as_imm` |
-| 6 | fixed 2026-11-17, doc deleted (its probe `p6_bracketed` passes) | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
+| 6 | `...-part6.md` | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
+| 9 | `...-part9.md` | a generic free function instantiated only by another module is never emitted | `..._forget_deinit`, `..._unsafe_destroy_n`, `..._dealloc`, `std_time_time_time_function` |
 
 Not a part:
 
@@ -297,7 +146,7 @@ test: run `nm -u` against `nm -gU` and require the `_std_` difference to *shrink
 `stdlib-dylib` fail on it until the count is zero: all 50 exist before the fix and the job's documented
 contract is that the dylib need not be complete.
 
-**Exact next step:** work parts 5-6, in the order of the table above. Each
+**Exact next step:** work parts 5-6 and 9, in the order of the table above. Each
 part's `## Done when` names the probe that is red today and green when the
 part lands. The old advice to take "the arity-only overload choice" is part 3,
 which landed; the remaining classes are the replan table's, not this

@@ -23,13 +23,6 @@ import threading
 from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
 from mojo.middle.simd_width import is_valid_width as _simd_width_is_valid
-from mojo.middle.float8_dtype import FLOAT8_TYPE_NAMES as _FLOAT8_DTYPE_NAMES
-from mojo.middle.float8_dtype import SCALAR_TYPE_SPELLINGS as _SCALAR_DTYPE_SPELLINGS
-from mojo.middle.float8_dtype import conversion_message as _float8_conversion_message
-from mojo.middle.float8_dtype import operation_message as _float8_operation_message
-from mojo.middle.float8_dtype import round_float8 as _float8_round
-from mojo.middle.float8_dtype import has_arithmetic as _float8_has_arithmetic
-from mojo.middle.float8_dtype import has_float_conversion as _float8_has_conversion
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -2381,11 +2374,8 @@ def error_suggestion_suffix(e):
 
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
-    def __init__(self, value=None, node=None):
+    def __init__(self, value=None):
         self.value = value
-        # The ReturnStmt, kept so a return type's conversion diagnostic can
-        # point at the statement (`_invoke`'s declared return type).
-        self.node = node
 
 
 class BreakException(Exception):
@@ -2583,15 +2573,6 @@ class Scope:
     def __init__(self, parent=None):
         self.parent = parent
         self.vars = {}
-        # Declared type annotations (`var x: Float32`, `def f(x: Float32)`)
-        # for this scope's bindings, name -> annotation text. Only the
-        # unimplemented float8 refusals read it (see
-        # Interpreter._declared_conversion): an assignment to an already
-        # declared name is a conversion to its declared type, the same one a
-        # `var` initialiser performs, and a dynamically typed engine cannot
-        # know the type without recording it here. A name with no annotation
-        # is simply absent.
-        self.declared_types = {}
         # Names this scope's function declared `nonlocal`. A declaration
         # changes no value, so it belongs on the scope rather than in a
         # side table: a plain `x = ...` in a nested function is LOCAL by
@@ -2606,16 +2587,6 @@ class Scope:
 
     def is_nonlocal(self, name: str) -> bool:
         return name in self.nonlocals
-
-    def declared_type(self, name: str):
-        """The declared type annotation recorded for `name` by the nearest
-        scope that binds it, or None when no such declaration was recorded
-        (an unannotated `var`/parameter, an import, a builtin)."""
-        if name in self.vars:
-            return self.declared_types.get(name)
-        if self.parent:
-            return self.parent.declared_type(name)
-        return None
 
     def define(self, name: str, value):
         self.vars[name] = value
@@ -2725,7 +2696,7 @@ class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
                  is_generator=False, is_async=False, interpreter=None,
-                 comptime_param_defaults=None, param_types=None, return_type=None):
+                 comptime_param_defaults=None):
         self.name = name
         self.params = params
         self.body = body
@@ -2749,16 +2720,6 @@ class MojoFunction:
         # default's offset. Read in `_invoke` below, next to the `_pd` read,
         # so there is exactly one place a declared default is applied.
         self.comptime_param_defaults = comptime_param_defaults or {}
-        # Declared RUNTIME parameter annotations (`def f(x: Float32)`), name ->
-        # annotation text, and the declared `-> T` return annotation. Both are
-        # conversion sites: a parameter binding and a returned value convert
-        # to the DECLARED type exactly like a `var` initialiser does, which is
-        # where the unimplemented float8 dtypes are refused (see
-        # _coerce_to_declared_type and test_regress_gpu_offload_validation_
-        # modular_part8.py). Only the float8 refusal reads them, so a function
-        # with no annotation is untouched (`{}` / None).
-        self.param_types = param_types or {}
-        self.return_type = return_type
         if param_defaults:
             self._pd = param_defaults
         # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
@@ -2980,28 +2941,6 @@ class MojoFunction:
                     _rest_kw[_kk] = kwargs[_kk]
             func_scope.define(_var_kw_name, _rest_kw)
 
-        # A parameter binding converts to the DECLARED parameter type, exactly
-        # like a `var` initialiser (see _coerce_to_declared_type). Only an
-        # unimplemented float8 dtype changes here, in either direction: a
-        # float8 argument passed to a parameter of another scalar dtype is the
-        # conversion Modular refuses ("conversion from 'f8e3m4' to 'f32' is
-        # not implemented"), and an argument passed to a parameter DECLARED as
-        # a float8 dtype becomes a value of that dtype, so a later operation on
-        # it is refused rather than computed. A parameter whose annotation
-        # names no scalar this engine knows (`T`, `Self`, a struct) is left
-        # untouched — there is no conversion to refuse. The compiled path
-        # refuses both at `_safe_coerce_emit`'s call-argument arm; this is the
-        # interpreter half of that parity.
-        if self.param_types:
-            _bind_node = _CALL_SITE[0]
-            for _pt_name in self.param_types:
-                _pt_ann = self.param_types[_pt_name]
-                func_scope.declared_types[_pt_name] = _pt_ann
-                if not func_scope.has(_pt_name):
-                    continue
-                func_scope.define(_pt_name, interpreter._declared_conversion(
-                    func_scope.get(_pt_name), _pt_ann, _bind_node))
-
         if self.is_generator and self.is_async:
             # `async def f(): yield x` — a real async generator. Python's
             # actual protocol for these (`__aiter__`/`__anext__`, driven by
@@ -3060,18 +2999,6 @@ class MojoFunction:
                 result = None
             except ReturnValue as ret:
                 result = ret.value
-                # A returned value converts to the DECLARED return type, the
-                # same conversion site a `var` initialiser is (see
-                # _declared_conversion): a float8 value returned as another
-                # scalar dtype is refused, and a numeric value returned as a
-                # float8 dtype is held as one so a later use is refused. The
-                # compiled path refuses both at _safe_coerce_emit's return
-                # slot; this is the interpreter half.
-                if (isinstance(result, _MojoFloat8Value)
-                        or (isinstance(self.return_type, str)
-                            and self.return_type in _FLOAT8_TYPE_NAMES)):
-                    result = interpreter._declared_conversion(
-                        result, self.return_type, getattr(ret, 'node', None))
             finally:
                 interpreter.scope = old_scope
 
@@ -4324,7 +4251,7 @@ class MojoClass:
                         continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 value = _unwrap_dataclass_field(value)
-                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None), f)
+                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
                 # AssignStmt has a single `.target`, not a `.targets` list
@@ -4357,23 +4284,15 @@ class MojoClass:
             # and real Mojo). Previously the interpreter ignored the args,
             # leaving every field None ("unsupported operand +: None + None").
             field_names = []
-            field_anns = []
-            field_nodes = []
             for f in self.fields:
                 if self.interpreter._is_instance(f, 'VarDecl'):
                     field_names.append(f.name)
-                    field_anns.append(getattr(f, 'type_ann', None))
-                    field_nodes.append(f)
                 elif self.interpreter._is_instance(f, 'AssignStmt') \
                         and self.interpreter._is_instance(f.target, 'IdentExpr'):
                     field_names.append(f.target.name)
-                    field_anns.append(getattr(f, 'type_ann', None))
-                    field_nodes.append(f.target)
             for i, a in enumerate(args):
                 if i < len(field_names):
                     fname = field_names[i]
-                    a = self.interpreter._declared_conversion(
-                        a, field_anns[i], field_nodes[i])
                     setattr(instance, fname, a)
         return instance
 
@@ -5025,18 +4944,12 @@ class _MojoScalarType:
     int/float already behave like the value side of these types; this only
     carries the `.size_bytes` metadata that `size_of[T]()`/`align_of[T]()`/
     `bit_width_of[T]()` read off the type itself."""
-    def __init__(self, name, size_bytes, is_float=False, spelling=None):
+    def __init__(self, name, size_bytes, is_float=False):
         self.name = name
         self.size_bytes = size_bytes
         self._is_float = is_float
-        self._spelling = spelling
 
     def __call__(self, x=0):
-        if self._spelling is not None:
-            # A value of an unimplemented float8 dtype carries its spelling,
-            # so a later use of it is refused (see _MojoFloat8Value) instead
-            # of silently computing on a dtype with no rule behind it.
-            return _MojoFloat8Value(self._spelling, x)
         return float(x) if self._is_float else int(x)
 
     def __repr__(self):
@@ -5062,93 +4975,6 @@ class _MojoScalarType:
 
     def is_double_float(self):
         return self.name == 'Float64'
-
-
-# The float8 scalar family, one byte each: the names exist in the type table
-# (a `Float8_e3m4` annotation resolves and `size_of[DType.float8_e3m4]()`
-# answers 1) but this interpreter has no conversion or arithmetic rule for
-# the dtype — a coercion from a value of one to any other declared type, and
-# a binary operation with one, are refused with Modular's own diagnostic
-# instead of silently computing on a type with no rule behind it (the float8
-# dtype legality fix for `op_with_unsupported_type_error.mojo`, host half;
-# pinned by test_regress_gpu_offload_validation_modular_part8.py). The family
-# and its lowered spellings are `mojo.middle.float8_dtype`'s one table, read
-# by the compiled path's resolver and refusals too — not a second copy here;
-# formal/model/types.py's NARROW_FLOAT_TYPE_NAMES is the formal path's.
-_FLOAT8_TYPE_NAMES = _FLOAT8_DTYPE_NAMES
-
-# The lowered spellings of the scalar types in the type table, the IR names
-# Modular's diagnostics word the types in (`conversion from 'f8e3m4' to 'f32'
-# is not implemented`); a declared type outside the table falls back to its
-# raw spelling at the refusal site.
-_SCALAR_TYPE_SPELLINGS = _SCALAR_DTYPE_SPELLINGS
-
-
-class _MojoFloat8Value(float):
-    """A value of an unimplemented float8 dtype: a plain float carrying its
-    dtype's lowered spelling (`f8e3m4`, ...). The dtype is in the type table
-    (its name resolves, `size_of` answers one byte) but there is no
-    conversion or arithmetic rule for it here, so a coercion to a different
-    declared type and a binary operation with one are refused with Modular's
-    diagnostic instead of silently computing (see _FLOAT8_TYPE_NAMES). A
-    float subclass so the value plumbing that is dynamic in this interpreter
-    (`float` checks, `print`) still behaves numerically on an untouched
-    value, the way _AutoStubValue subclasses int. `float.__new__` is called
-    directly rather than via super(): the self-hosting compiler compiles
-    this file and has no super() (see MojoError)."""
-    def __new__(cls, spelling, value=0.0):
-        # Every float8 value is its format's nearest value (ties to even): the
-        # format is the one place the rounding rule is read from.
-        instance = float.__new__(cls, _float8_round(float(value), spelling))
-        instance.spelling = spelling
-        return instance
-
-
-def _float8_operand_spelling(left, right):
-    """The lowered spelling of the first float8 operand in a pair of
-    already-evaluated operands, or None when neither is one (see
-    _MojoFloat8Value)."""
-    if isinstance(left, _MojoFloat8Value):
-        return _float8_spelling_of(left)
-    if isinstance(right, _MojoFloat8Value):
-        return _float8_spelling_of(right)
-    return None
-
-
-def _float8_spelling_of(value):
-    """The lowered dtype spelling a float8 value carries (its box's kind,
-    compiled; its attribute, interpreted)."""
-    return value.spelling
-
-
-_F8_PASS = object()
-
-
-def _float8_binary(interp, node, op, left, right):
-    """A binary operation with a float8 operand, under the rules Modular's own
-    compiler enforces (mojo.middle.float8_dtype): comparisons are allowed on
-    every format; `+ - * /` are allowed on every format except e3m4; the result
-    is rounded to the operand's format. Returns the result, or _F8_PASS when no
-    float8 operand is involved (the caller computes as usual)."""
-    sp = _float8_operand_spelling(left, right)
-    if sp is None or op in ('==', '!=', '<', '<=', '>', '>=', 'is', 'is not'):
-        return _F8_PASS
-    if op in ('+', '-', '*', '/') and _float8_has_arithmetic(sp):
-        a, b = float(left), float(right)
-        if op == '+':
-            r = a + b
-        elif op == '-':
-            r = a - b
-        elif op == '*':
-            r = a * b
-        elif b != 0.0:
-            r = a / b
-        elif a != a or a == 0.0:
-            r = float('nan')
-        else:
-            r = math.copysign(float('inf'), a) * math.copysign(1.0, b)
-        return _MojoFloat8Value(sp, r)
-    interp._refuse_unsupported_float8(node, _float8_operation_message(sp))
 
 
 class _MojoTypeInfoCall:
@@ -6902,16 +6728,6 @@ class Interpreter:
         float32 = _MojoScalarType('Float32', 4, is_float=True)
         float64 = _MojoScalarType('Float64', 8, is_float=True)
         bfloat16 = _MojoScalarType('BFloat16', 2, is_float=True)
-        # The float8 family: one byte, a float, and no conversion or
-        # arithmetic rule in this interpreter — a value of one carries its
-        # lowered spelling and a use of it is refused (see
-        # _FLOAT8_TYPE_NAMES / _MojoFloat8Value).
-        float8 = {}
-        for _f8_name in _FLOAT8_TYPE_NAMES:
-            _f8_type = _MojoScalarType(_f8_name, 1, is_float=True,
-                                       spelling=_SCALAR_TYPE_SPELLINGS[_f8_name])
-            float8[_f8_name] = _f8_type
-            self.scope.define(_f8_name, _f8_type)
         self.scope.define('Int8', int8)
         self.scope.define('Int16', int16)
         self.scope.define('Int32', int32)
@@ -6924,17 +6740,12 @@ class Interpreter:
         self.scope.define('Float32', float32)
         self.scope.define('Float64', float64)
         self.scope.define('BFloat16', bfloat16)
-        dtype = types.SimpleNamespace(
+        self.scope.define('DType', types.SimpleNamespace(
             int8=int8, int16=int16, int32=int32, int64=int64, index=int64, int=int64,
             uint8=uint8, uint16=uint16, uint32=uint32, uint64=uint64,
             float16=float16, float32=float32, float64=float64, bfloat16=bfloat16,
             bool=_MojoScalarType('Bool', 1),
-        )
-        # Expose the float8 family on `DType` (`DType.float8_e3m4`) the way
-        # the other scalars are; the attribute is the lowercase type name.
-        for _f8_name, _f8_type in float8.items():
-            setattr(dtype, _f8_name.lower(), _f8_type)
-        self.scope.define('DType', dtype)
+        ))
         self.scope.define('size_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('align_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('bit_width_of', _MojoTypeInfoFn(_mojo_bit_width_of))
@@ -7104,31 +6915,6 @@ class Interpreter:
         return params
 
     @staticmethod
-    def _extract_param_types(node):
-        """The declared type annotation of each named parameter (`def f(x:
-        Float32)`), name -> annotation, stars stripped like `_extract_param_names`
-        so the two agree about a `*args`/`**kwargs` parameter's name. A
-        parameter with no annotation, and every non-tuple param shape this
-        parser no longer emits, is simply absent — `MojoFunction._invoke` reads
-        only what is here, so an absent entry is "no declared type", not a
-        default type."""
-        types = {}
-        if not hasattr(node, 'params') or not node.params:
-            return types
-        for p in node.params:
-            if not isinstance(p, tuple) or len(p) < 2:
-                continue
-            if not isinstance(p[1], str) or not p[1]:
-                continue
-            name = p[0]
-            if not isinstance(name, str) or not name:
-                continue
-            name = name.lstrip('*')
-            if name:
-                types[name] = p[1]
-        return types
-
-    @staticmethod
     def _classify_params(node):
         """Classify a FunctionDef's parameters for overload-signature
         matching: (required positional names, optional/defaulted positional
@@ -7197,9 +6983,7 @@ class Interpreter:
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
                              is_async=getattr(node, 'is_async', False), interpreter=self,
-                             comptime_param_defaults=_cpd,
-                             param_types=self._extract_param_types(node),
-                             return_type=getattr(node, 'return_type', None))
+                             comptime_param_defaults=_cpd)
         spec = self._classify_params(node)
         _FUNC_DEF_LOCS[id(func)] = (self.filename, getattr(node, 'line', 0))
         if getattr(node, 'where_clause', None) is not None:
@@ -7378,9 +7162,7 @@ class Interpreter:
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                        is_generator=getattr(m, 'is_generator', False),
                                        is_async=getattr(m, 'is_async', False), interpreter=self,
-                                       comptime_param_defaults=_cpd,
-                                       param_types=self._extract_param_types(m),
-                                       return_type=getattr(m, 'return_type', None))
+                                       comptime_param_defaults=_cpd)
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -7525,9 +7307,7 @@ class Interpreter:
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                            is_generator=getattr(m, 'is_generator', False),
                                            is_async=getattr(m, 'is_async', False), interpreter=self,
-                                           comptime_param_defaults=_cpd,
-                                           param_types=self._extract_param_types(m),
-                                           return_type=getattr(m, 'return_type', None))
+                                           comptime_param_defaults=_cpd)
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -7929,73 +7709,11 @@ class Interpreter:
             return None
         return ctor()
 
-    def _refuse_unsupported_float8(self, node, message):
-        """Refuse a use of an unimplemented float8 dtype (see
-        _FLOAT8_TYPE_NAMES) with a modular-format diagnostic: a RuntimeError
-        carrying a `mojo_record` (see mojo_diagnostic), so `fire.py run`
-        prints `file:line:col: error: <message>` and exits non-zero with no
-        Python traceback."""
-        err = RuntimeError(message)
-        line, col = self._expr_loc(node)
-        setattr(err, 'mojo_record', _rec(self.filename, line, col, message, []))
-        raise err
-
-    def _expr_loc(self, node):
-        """The (line, col) to diagnose a runtime error at `node`: the node's
-        own position when the parser recorded one, else the first operand's
-        — the parser leaves internal operator nodes (a BinaryOp, a
-        CompareChain) at 0,0 while their operands carry the real position,
-        and a diagnostic at 0,0 has no source line to point at."""
-        line = getattr(node, 'line', 0) if node is not None else 0
-        col = getattr(node, 'col', 0) if node is not None else 0
-        if line or col:
-            return line, col
-        for attr in ('left', 'right', 'target', 'value', 'operand'):
-            child = getattr(node, attr, None) if node is not None else None
-            if child is None:
-                continue
-            child_line = getattr(child, 'line', 0)
-            if child_line:
-                return child_line, getattr(child, 'col', 0)
-        operands = getattr(node, 'operands', None) if node is not None else None
-        if operands:
-            first = operands[0]
-            return getattr(first, 'line', 0), getattr(first, 'col', 0)
-        return line, col
-
-    def _coerce_to_declared_type(self, value, type_ann, node=None):
+    def _coerce_to_declared_type(self, value, type_ann):
         """Coerce a var's initializer to its declared scalar type, mirroring
         real Mojo's implicit-constructor conversion (e.g. `var x: Int = 84 / 2`
-        truncates the Float64 division result to an Int, it doesn't stay a float).
-
-        An unimplemented float8 dtype (see _FLOAT8_TYPE_NAMES) is refused
-        rather than coerced: a value of one coerced to any other declared
-        type is the conversion Modular reports as not implemented (raised
-        with `node`'s location for a modular-format diagnostic), and a
-        declared float8 takes a value of the declared dtype — its zero when
-        there is no initializer, a copy when the value is already of the same
-        dtype, a fresh value otherwise."""
+        truncates the Float64 division result to an Int, it doesn't stay a float)."""
         if not isinstance(type_ann, str):
-            return value
-        if isinstance(value, _MojoFloat8Value):
-            src_sp = _float8_spelling_of(value)
-            if type_ann in _FLOAT8_TYPE_NAMES:
-                # float8 -> float8: rounds to the target format (a same-format
-                # value is returned unchanged by the constructor's rounding).
-                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], float(value))
-            target_sp = _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)
-            if not _float8_has_conversion(src_sp, target_sp):
-                self._refuse_unsupported_float8(
-                    node, _float8_conversion_message(src_sp, target_sp))
-            if isinstance(type_ann, str) and type_ann.startswith(('Int', 'UInt')):
-                return int(value)
-            return float(value)
-        if type_ann in _FLOAT8_TYPE_NAMES:
-            if value is None:
-                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], 0.0)
-            if isinstance(value, (int, float)):
-                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann],
-                                        float(value))
             return value
         if value is None:
             # A declared scalar with no initializer (`var x: Int`, or a struct
@@ -8019,51 +7737,6 @@ class Interpreter:
             return bool(value)
         return value
 
-    def _declared_conversion(self, value, type_ann, node=None):
-        """Apply the DECLARED-type conversion of an unimplemented float8 dtype
-        at a site whose conversion this engine deliberately does not model
-        generally (a parameter binding, a return slot, an assignment to a
-        declared name, a field store).
-
-        A `var` initialiser goes through `_coerce_to_declared_type` directly;
-        those sites already have the declaration in hand. These sites are
-        dynamically typed here (a plain Python rebinding has no declared type,
-        and a parameter list is a list of names), so only the float8 family is
-        converted/refused — the one family with a legality rule to enforce —
-        and every other value is returned exactly as it was, keeping this
-        engine's existing coercion behaviour. `type_ann` naming no scalar the
-        table knows (`T`, `Self`, a struct) is likewise untouched: there is no
-        conversion rule to refuse.
-        """
-        if not isinstance(type_ann, str):
-            return value
-        if not (isinstance(value, _MojoFloat8Value) or type_ann in _FLOAT8_TYPE_NAMES):
-            return value
-        if (isinstance(value, _MojoFloat8Value)
-                and type_ann not in _FLOAT8_TYPE_NAMES
-                and _SCALAR_TYPE_SPELLINGS.get(type_ann) is None):
-            return value
-        return self._coerce_to_declared_type(value, type_ann, node)
-
-    def _field_declared_type(self, obj, name):
-        """The declared type annotation of `obj`'s struct/class field `name`,
-        or None when `obj` is not a Mojo instance or the field has none.
-
-        A field store (`self.x = value`) converts to the field's declared type
-        in the compiled path (`_safe_coerce_emit`'s struct-field arm); the
-        interpreter sets the attribute directly, so the declaration has to be
-        read back from the class's field list to see the same conversion."""
-        if not isinstance(obj, MojoInstance):
-            return None
-        for f in obj._mojo_class.fields:
-            if self._is_instance(f, 'VarDecl') and f.name == name:
-                return getattr(f, 'type_ann', None)
-            if (self._is_instance(f, 'AssignStmt')
-                    and self._is_instance(f.target, 'IdentExpr')
-                    and f.target.name == name):
-                return getattr(f, 'type_ann', None)
-        return None
-
     def execute_VarDecl(self, node):
         """Execute variable declaration."""
         if node.value is None and ',' not in node.name:
@@ -8075,8 +7748,6 @@ class Interpreter:
             # its own path below, where one value feeds both names.
             container_default = self._container_field_default(getattr(node, 'type_ann', None))
             if container_default is not None:
-                if isinstance(getattr(node, 'type_ann', None), str):
-                    self.scope.declared_types[node.name] = node.type_ann
                 self.scope.define(node.name, container_default)
                 return container_default
         value = self.eval_expr(node.value)
@@ -8090,9 +7761,7 @@ class Interpreter:
             for name, v in zip(names, values):
                 self.scope.define(name, v)
             return value
-        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None), node)
-        if isinstance(getattr(node, 'type_ann', None), str):
-            self.scope.declared_types[node.name] = node.type_ann
+        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None))
         self.scope.define(node.name, value)
         return value
 
@@ -8108,12 +7777,7 @@ class Interpreter:
         """Compute the new value for `target OP= value` given already-
         evaluated `current`/`rhs`. Factored out of execute_AugAssignStmt as
         its own named step for clarity."""
-        # `a += 1` is a binary operation: a float8 operand is refused with
-        # Modular's diagnostic (see _apply_binary_op).
         op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
-        f8 = _float8_binary(self, node, op, current, rhs)
-        if f8 is not _F8_PASS:
-            return f8
         if op == '+':
             return current + rhs
         elif op == '-':
@@ -8166,9 +7830,6 @@ class Interpreter:
         it updates that local in place, identical to `define`'s prior
         behavior for anyone not intending nonlocal effects."""
         if self._is_instance(target, 'IdentExpr'):
-            _decl_ann = self.scope.declared_type(target.name)
-            if _decl_ann is not None:
-                value = self._declared_conversion(value, _decl_ann, target)
             # Check if this is a global variable
             global_vars = getattr(self, 'global_vars', set())
             if target.name in global_vars:
@@ -8189,8 +7850,6 @@ class Interpreter:
                 self.scope.define(target.name, value)
         elif self._is_instance(target, 'MemberExpr'):
             obj = self.eval_expr(target.obj)
-            value = self._declared_conversion(
-                value, self._field_declared_type(obj, target.member), target)
             setattr(obj, target.member, value)
         elif self._is_instance(target, 'SubscriptExpr'):
             obj = self.eval_expr(target.obj)
@@ -8251,7 +7910,7 @@ class Interpreter:
     def execute_ReturnStmt(self, node):
         """Execute return statement."""
         value = self.eval_expr(node.value) if hasattr(node, 'value') and node.value is not None else None
-        raise ReturnValue(value, node)
+        raise ReturnValue(value)
 
     def execute_IfStmt(self, node):
         """Execute if statement."""
@@ -9822,17 +9481,11 @@ class Interpreter:
         right = self.eval_expr(expr.right)
         return self._apply_binary_op(expr, op, left, right)
 
-    def _apply_binary_op(self, expr, op, left, right) -> object:
+    def _apply_binary_op(self, expr, op, left, right):
         """Compute a binary operator's result from already-evaluated
         operands (everything except the short-circuiting 'and'/'or'/'as',
         handled directly in eval_BinaryOp before operands are evaluated).
         Factored out of eval_BinaryOp as its own named step for clarity."""
-        # A float8 operand has no arithmetic rule in this interpreter:
-        # refuse with Modular's diagnostic (see _FLOAT8_TYPE_NAMES) instead
-        # of computing silently on a dtype with no rule behind it.
-        f8 = _float8_binary(self, expr, op, left, right)
-        if f8 is not _F8_PASS:
-            return f8
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -9913,7 +9566,6 @@ class Interpreter:
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)
-            # A float8 comparison is allowed on every format (see _float8_binary).
             if not self._apply_compare_op(op, left, right):
                 return False
             left = right
@@ -10055,7 +9707,7 @@ class Interpreter:
         obj = self.eval_expr(expr.obj)
         return self._eval_member_of(expr, obj)
 
-    def _eval_member_of(self, expr: N.MemberExpr, obj) -> object:
+    def _eval_member_of(self, expr, obj):
         """Resolve `expr.member` against an already-evaluated `obj`.
         Factored out of eval_MemberExpr as its own named step."""
         if isinstance(obj, MojoInstance):
