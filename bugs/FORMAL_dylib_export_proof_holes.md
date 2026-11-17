@@ -27,6 +27,33 @@ specific number:
 Measured 2026-11-16 on the uncapped run (`/usr/bin/time -l`, peak RSS 4.58 GB,
 263 s).
 
+## The three declarations, named (wakeup 57)
+
+Ran `lean` directly on the generated proof (the census only counts; `_run_lean`
+returns `detail=""` on success, so the names are not captured anywhere). Three
+warnings, and the declarations they attach to:
+
+| line | declaration |
+|---|---|
+| 3652 | `theorem dylib_export_0_csetval_semantics_total : DylibExport.Total dylib_image dylib_export_0_csetval` |
+| 6203 | `theorem dylib_export_1_branched_semantics_total : DylibExport.Total dylib_image dylib_export_1_branched` |
+| 6222 | `theorem dylib_export_1_branched_spec : Refine.export_result_spec_under ...` |
+
+So exactly ONE of the three is the obligation the test EXPECTS
+(`branched_spec` -- "the only hole left is the branching export's named
+`_spec`"), and the two extras are the **`DylibExport.Total` termination
+theorems** for both exports. The generated comment above them says why:
+"the overflow trap is such a path, so termination for every argument is not a
+fact of the model" -- i.e. the `Total` predicate cannot be discharged while an
+overflow-trapping path has no step.
+
+**Correction to the marker re-point.** The original `expect=` reason -- "the
+hole-count checks on the overflow-trapping exports, whose termination
+obligations an exit svc keeps named" -- was substantially RIGHT: these ARE the
+overflow-trapping exports' termination obligations. What was wrong was only the
+pointer (the svc doc does not describe them). Re-pointed to this doc for the
+names; the subject matter is the same.
+
 **Reproduced in isolation, and the instrument's limit.** Rebuilding just the
 `csetval` program and running `formal.lean.proof_census` on the generated proof
 gives `n_sorries = 3`, `lib_sorries = 0` -- the count is exact and the library
