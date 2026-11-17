@@ -13,7 +13,7 @@ python3 tools/dangling_doc_refs.py --ratchet
 
 ```
 ratchet: 1 file(s) cite MORE deleted docs than tools/dangling_refs_baseline.py allows:
-  bugs/LAND-codegen-simd-and-array-values-erase-2.md: 1 (baseline 0) — <the simd part-2 doc, deleted>
+  the LAND simd-and-array-values-erase-2 bug (its doc, deleted): 1 (baseline 0) — <the simd part-2 doc, deleted>
 ```
 
 A brand-new file (baseline 0) citing a deleted doc, so this is a GAIN and the
@@ -47,7 +47,7 @@ doc, then assert `dangling_doc_refs --ratchet` stays green.
 
 ## Workaround used by this round
 
-`bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md` had quoted the same kind
+the LAND nested-bracket-generic-call-4 bug (its doc, deleted) had quoted the same kind
 of status line, including the two cases-generator analyzer docs deleted by the
 compiled-analyzer landing; that line now names the bugs instead of the paths,
 which is the fix `--ratchet` asks for.
