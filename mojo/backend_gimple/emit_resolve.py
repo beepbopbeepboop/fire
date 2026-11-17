@@ -966,6 +966,13 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 temp_gen._regex_patterns = gen._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                 temp_gen._regex_progs = gen._regex_progs        # share: bubble compiled regex data up to root preamble
                 temp_gen._regex_progs_defined = gen._regex_progs_defined  # share: avoid duplicate emission across recursive paths
+                temp_gen._virt_dispatch_helpers = gen._virt_dispatch_helpers  # share: `_mojo_virt_` helper registrations made while lowering THIS imported module's bodies must reach the ROOT's _emit_reflection_dispatch (the only gen that emits definitions)
+                temp_gen._getattr_method_arms = gen._getattr_method_arms  # share: bound-method getattr arms recorded by THIS imported module's prototype walk must reach the ROOT's _emit_reflection_dispatch (the only gen that emits the `_mojo_getattr_<S>` definitions) — an unshared dict left every imported struct's arm table empty there
+                temp_gen._getattr_property_arms = gen._getattr_property_arms  # share: same, for the property (getter-call) arms — the erased-receiver `node.tokens` read must get the getter's RESULT on imported dataclasses, not an AttributeError
+                temp_gen._getattr_decorated_arms = gen._getattr_decorated_arms  # share: decorated-method getattr arms — the ROOT's _mojo_getattr_<S> must answer the WRAPPED value for structs defined in any module of the closure
+                temp_gen._decorated_method_wrapped = gen._decorated_method_wrapped  # share: call-site routing table (emit_methods' _lower_struct_method_call reads it while lowering THIS module's bodies; a sibling module's early pre-pass may have populated it first — first-wins, same getter name either way)
+                temp_gen._decorated_method_dec_csym = gen._decorated_method_dec_csym  # share: the decorator symbol the getter definition's guarded declaration names
+                temp_gen._emitted_decorated_getters = gen._emitted_decorated_getters  # share: one `_wrapped_<S>_<m>` DEFINITION per TU — the closure's sections all splice into the ROOT's unit, so per-gen dedup would double-define
                 temp_gen._const_str_locals = gen._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                 temp_gen.struct_field_types = gen.struct_field_types
                 # share: a struct's home-module qualifier (_struct_method_qualifier)

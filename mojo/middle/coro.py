@@ -5098,6 +5098,10 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
+        # SOURCE parameter names in C-slot order -- see `_lower_one`'s
+        # identical entry for why the call site's keyword padding needs them.
+        'param_names': [_cm_as_str(pn)
+                        for pn, _pn_ann in (getattr(fn, 'params', None) or [])],
     })
     return body_fd
 
@@ -5142,6 +5146,10 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
+        # SOURCE parameter names in C-slot order -- see `_lower_one`'s
+        # identical entry for why the call site's keyword padding needs them.
+        'param_names': [_cm_as_str(pn)
+                        for pn, _pn_ann in (getattr(fn, 'params', None) or [])],
     })
     return body_fd
 
@@ -8875,6 +8883,23 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'star_slot': _star_slot(real_params, len(_lead)),
         'kwargs_slot': _kwargs_slot(real_params, len(_lead)),
         'nargs': len(real_params),
+        # The SOURCE parameter names, in C-slot order (the receiver slot
+        # first for a method, `*`/`**` names included). `c_params` above is
+        # the same order with the names stripped, and the lowered body
+        # (`__mgco_<g>_body`) carries only its `__c` handle, so this is the
+        # one record of the names that survives the rewrite. The call site's
+        # padding (`_emit_generator_start_call`) needs them to bind a
+        # keyword argument to the slot of its own NAME instead of popping it
+        # into the next free slot in sequence -- without them,
+        # `tokenize(src, filename=filename)` against
+        # `def tokenize(src, line=1, filename="")` packed the filename word
+        # into the `line` slot and padded `filename` with its `""` default
+        # (COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fix,
+        # the "class b" garbage line numbers: `line` WAS the filename
+        # pointer, incremented once per newline, reading the bytes of
+        # whatever static data sat next to that string).
+        'param_names': [_cm_as_str(pn)
+                        for pn, _pn_ann in (getattr(fn, 'params', None) or [])],
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
         'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
@@ -9350,6 +9375,14 @@ def register(gen, meta: list) -> None:
             # padded the missing slot with a typed zero instead of the
             # real default, silently miscompiling every such call.
             gen._func_param_defaults[f"{m['base']}_start"] = m['defaults']
+        if m.get('param_names'):
+            # The padding's name-based keyword binding (`_emit_generator_
+            # start_call`'s `_gen_pnames` fallback) reads THIS off the api,
+            # because the module-level `_func_param_names` table is keyed by
+            # the function name as it was when the gen_module pass ran --
+            # `__mgco_<g>_body` for a lowered generator, whose params are
+            # just `__c` -- so the ORIGINAL name is never in that table.
+            api['param_names'] = list(m['param_names'])
         if m.get('is_method'):
             gen._generator_method_api[(m['struct'], m['name'])] = api
             gen._supported_generator_methods[(m['struct'], m['name'])] = None
