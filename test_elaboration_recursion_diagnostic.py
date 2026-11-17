@@ -194,6 +194,54 @@ def test_concrete_unrenderable_type_arg_is_not_refused():
     assert 'will cause an infinite loop' not in out and 'cannot materialize' not in out, out
 
 
+def test_nested_bracketed_call_in_instantiation_is_materialized():
+    # bugs/CODEGEN_nested_bracket_generic_call_stubs_to_zero.md: `ident[7](x)`
+    # inside the elaborated body of `wrap[1]` used to stub to `(int64_t)0`, so
+    # the program printed 1 (ident[7](5) = 12, plus i = 1 -> 13 expected). The
+    # nested call is a generic VALUE-parameter instantiation, which the in-TU
+    # pass refuses by design, so it takes the `.o` route, and that route's
+    # isolated unit must be able to see `ident` and link its object.
+    src = (
+        'def ident[n: Int](x: Int) -> Int:\n'
+        '    return x + n\n'
+        '\n'
+        'def wrap[i: Int](x: Int) -> Int:\n'
+        '    return ident[7](x) + i\n'
+        '\n'
+        'def main():\n'
+        '    print(wrap[1](5))\n'
+    )
+    rc, out, r = _build_and_run(src)
+    assert rc == 0, 'nested bracketed call failed to build:\n' + out
+    assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
+    assert r.stdout.strip() == '13', r.stdout
+
+
+def test_nested_bracketed_calls_two_levels_and_shared_callee():
+    # The same mechanism one level further down: `top` elaborates `mid`, and
+    # `mid` elaborates `ident`, so `ident`'s object reaches the final link
+    # through two isolated units. `top` also calls `ident[7]` itself, so the
+    # one callee object is linked by two different parents.
+    #   mid[2](5) = ident[7](5) * 2 = 24, ident[7](5) = 12, i = 1 -> 37
+    src = (
+        'def ident[n: Int](x: Int) -> Int:\n'
+        '    return x + n\n'
+        '\n'
+        'def mid[k: Int](x: Int) -> Int:\n'
+        '    return ident[7](x) * k\n'
+        '\n'
+        'def top[i: Int](x: Int) -> Int:\n'
+        '    return mid[2](x) + ident[7](x) + i\n'
+        '\n'
+        'def main():\n'
+        '    print(top[1](5))\n'
+    )
+    rc, out, r = _build_and_run(src)
+    assert rc == 0, 'two-level nested calls failed to build:\n' + out
+    assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
+    assert r.stdout.strip() == '37', r.stdout
+
+
 if __name__ == '__main__':
     tests = [
         test_direct_self_recursion_still_refused,
@@ -203,6 +251,8 @@ if __name__ == '__main__':
         test_intrinsic_name_bracket_arg_builds,
         test_string_spelling_bracket_arg_builds,
         test_concrete_unrenderable_type_arg_is_not_refused,
+        test_nested_bracketed_call_in_instantiation_is_materialized,
+        test_nested_bracketed_calls_two_levels_and_shared_callee,
     ]
     for t in tests:
         t()

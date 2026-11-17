@@ -205,7 +205,6 @@ BARE_BASELINE = {
     # `hard/Xcase.md` into its own temp dir and asserts SPLIT parsing on it, so
     # the string is test data. Added when c2be80506 introduced the fixture.
     'tools/test_swarm_replan.py': 1,
-    'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'fire.py': 1,
     'formal/arm64_codegen.py': 1,
     'formal/arm64_proof_gen.py': 1,

@@ -548,8 +548,31 @@ def _quick_type(gen, node) -> str:
         # `_struct_import_aliases` first, exactly as the constructor
         # dispatch in emit_calls.py does, so this estimator and the real
         # lowering cannot disagree about what a call returns.
-        _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
-                       or {}).get(fname, fname)
+        _aliases_q = (getattr(gen, '_struct_import_aliases', None) or {})
+        _ctor_was_aliased_q = fname in _aliases_q
+        _fname_ctor = _aliases_q.get(fname, fname)
+        # Cross-module collision, local-first — the SAME remap the
+        # constructor dispatch in emit_calls.py applies (`_local_cname_map`),
+        # so this estimator and the real lowering cannot disagree about what
+        # a call returns: a bare `Family(...)` in a module that LOST a
+        # cross-module name collision constructs the module's OWN class (the
+        # collision pass renamed it `analyzer_Family`), not the winner that
+        # holds the bare name in the shared `struct_field_types`. Measured
+        # without this: analyzer.py's `family = Family(...)` local was typed
+        # `Family *` (parsing.py's 5-field layout, `name` at +16) while the
+        # value was `analyzer_Family *` (4 fields, `name` at +8), so
+        # `family->name` read the `size` slot and every
+        # `families[family.name] = family` store keyed off the cache argument
+        # (the ICB names / 0 / 1) — `BINARY_OP` was absent from the dict, and
+        # `families["BINARY_OP"].members` boxed NULL and raised
+        # AttributeError at analyzer.py:1174. An aliased spelling
+        # (`from parsing import Family as PFamily; PFamily(...)`) explicitly
+        # names the imported struct and never remaps, the same gate as the
+        # dispatch.
+        if not _ctor_was_aliased_q:
+            _lcm_q = getattr(gen, '_local_cname_map', None)
+            if _lcm_q and _fname_ctor in _lcm_q:
+                _fname_ctor = _lcm_q[_fname_ctor]
         if _fname_ctor in gen.struct_field_types:
             return f'{_fname_ctor} *'
         # A bare call to a KNOWN COMPILED GENERATOR function (Milestone
