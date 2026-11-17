@@ -4688,6 +4688,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _gen = (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
             and node.func.obj.name in gen._imported_generics) or \
            (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generics)
+    # A bracketed call to a SIBLING generic of the instantiation this unit is
+    # compiling (monomorphize.instantiate's `generic_paths`): explicit only, see
+    # emit_resolve._elaborate_generic_call.
+    _gen = _gen or (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+                    and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+                    and node.func.obj.name in (getattr(gen, '_sibling_generic_paths', None) or {}))
     if _gen:
         res = gen._elaborate_generic_call(node)
         if res is not None:

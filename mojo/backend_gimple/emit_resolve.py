@@ -3524,6 +3524,17 @@ def _constructed_struct_type(gen, arg, ctype):
     return None
 
 
+def _generic_paths_for(gen) -> dict:
+    """The {name: source path} generic functions a call made from `gen` may
+    elaborate: this unit's own imported generics, plus — inside an elaborated
+    instantiation — the sibling generics its caller handed down. A nested
+    instantiation needs the whole chain (`mid` calls `ident` while `top` is the
+    unit that elaborated `mid`), so the sibling map is forwarded as well."""
+    out = dict(getattr(gen, '_sibling_generic_paths', None) or {})
+    out.update(gen._imported_generics)
+    return out
+
+
 def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     """Elaborate a call to an imported generic into a concrete CAS-cached
     instantiation. Handles both the explicit form `Generic[TypeArgs](args)`
@@ -3555,6 +3566,12 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
         if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
             _bare_in_own_instance = True
     source = gen._imported_generics.get(g)
+    if not source and explicit:
+        # A sibling generic of the instantiation this unit is compiling
+        # (monomorphize.instantiate's `generic_paths`). Explicit calls only: a
+        # bare `g(x)` can name a NON-generic overload of the same name, as
+        # `log(x)` inside math's `log[...]` does, and must keep its meaning.
+        source = (getattr(gen, '_sibling_generic_paths', None) or {}).get(g)
     if not source:
         return None
     # An instantiation the in-TU pre-pass ALREADY DEFINED in this translation
@@ -3679,7 +3696,8 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             type_args = new_type_args
             info = el.elaborate_generic_call(
                 module_src, g, type_args, arg_count=len(arg_pairs),
-                origin_module=elaborate.declaring_module_name(gen, module_src))
+                origin_module=elaborate.declaring_module_name(gen, module_src),
+                generic_paths=_generic_paths_for(gen))
             if info:
                 gen._refine_generic_return_type(
                     info, module_src, g, type_args, len(node.args),
@@ -3772,7 +3790,8 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 module_src, g, [ct for ct, _ in arg_pairs],
                 origin_module=elaborate.declaring_module_name(gen, module_src),
                 arg_mojo_types=[_constructed_struct_type(gen, a, ct)
-                                for a, (ct, _) in zip(node.args, arg_pairs)])
+                                for a, (ct, _) in zip(node.args, arg_pairs)],
+                generic_paths=_generic_paths_for(gen))
     except RuntimeError:
         # The nested-async-in-a-generic guard above raises RuntimeError
         # deliberately — an honest refusal, not a "try something else"
@@ -4272,6 +4291,13 @@ def _emit_generic_instantiation(gen, info, arg_pairs):
     if _cpp_obj is not None and _cpp_obj not in gen._link_objects:
         gen._link_objects.append(_cpp_obj)
         gen._link_needs_cxx = True
+    # The callees this instantiation's body calls (see elaborate_generic_call's
+    # `generic_paths`): its object only declares them, so they link here too.
+    for _nobj in info.get('nested_objects') or ():
+        if _nobj not in gen._link_objects:
+            gen._link_objects.append(_nobj)
+            if _nobj.endswith('.cpp.o'):
+                gen._link_needs_cxx = True
     gen.func_return_types[sym] = info['ret']
     gen.func_param_types[sym] = info['params']
     # The template may have trailing params with a default value (e.g.
