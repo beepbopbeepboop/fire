@@ -3255,9 +3255,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
         return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
-        # A str slot holding the null word is None: repr(None) is "None".
-        return gen._call_expr('char *', 'mojo_repr_slot_kind',
-                              [('char', "'s'"), ('int64_t', gen._cast('int64_t', rav))])
+        return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
         # Unpacked into named locals, not splatted into the call: a `*call()`
         # of a returned tuple becomes ONE positional argument once

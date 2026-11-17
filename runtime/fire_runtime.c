@@ -3560,11 +3560,6 @@ int mojo_list_contains_mixed_int(MojoList *l, int64_t v)
         char k = mojo_list_slot_kind(l, i);
         if (k == 'i') {
             if (l->data[i] == v) return 1;
-        } else if (k == 'n') {
-            /* A None slot is the null word 0, and `== None` / `is None`
-             * treat that word as None (see CODEGEN_none_passed_to_a_parameter
-             * fix): membership must agree. */
-            if (v == 0) return 1;
         } else if (k == 'd') {
             double d = mojo_double_from_bits(l->data[i]);
             /* Exact: d equals v only if d is an integral value in int64_t

@@ -3054,16 +3054,6 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 gen._cast_into(ct, 'int64_t', f"{aval}")
             coerced_args.append(ct)
         elif ptype == 'char *' and atype in ('int', 'int64_t', 'char', 'double', '_Bool'):
-            _anode = None
-            if arg_nodes is not None and i < len(arg_nodes):
-                _anode = arg_nodes[i]
-            # `None` is the null word 0 for every parameter slot, and a
-            # user-function call must pass that null pointer through — never
-            # stringify it to `"0"` (`mojo_cstr_or_int_str`/`_stringify_value`
-            # belong to `print`/`str`, not to argument passing). A literal
-            # `None` argument is the direct case; passing (char *)0 lets the
-            # callee's `is None` / `== None` see it as None.
-            _is_none_arg = _anode is not None and gen._is_none_literal(_anode)
             # A raw single char whose DECLARED type was widened to
             # int64_t (joining another assignment site in the same
             # function — e.g. `qch = stmt[i]` in fire_compiler.py's own
@@ -3082,9 +3072,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # instrumented stage1.ci build: `_find_tstring_closing_
             # quote_7a972f (stmt, i, _t42)`'s `_t42` was exactly this
             # `(char *)(void *)qch` cast, not a real 1-char string.
-            if _is_none_arg:
-                coerced_args.append(gen._cast('char *', '0'))
-            elif atype == 'char' or actual_atype == 'char':
+            if atype == 'char' or actual_atype == 'char':
                 # `aval` itself is still C-declared as whatever `atype`
                 # says (int64_t when widened) even though it's really a
                 # char — cast it to a real `char` lvalue first so the
@@ -3172,26 +3160,17 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 # fourth spelling. It is what makes `Dialog(5)` print `5`
                 # rather than segfault, and a refusal would have diverged
                 # from CPython besides.
+                _anode = None
+                if arg_nodes is not None and i < len(arg_nodes):
+                    _anode = arg_nodes[i]
                 _provable = (
                     actual_atype in ('double', 'float', '_Bool')
                     or aval in getattr(gen, '_int_word_vals', ())
                     or (_anode is not None
                         and gimple_exprtypes.is_python_bool_expr(gen, _anode)))
-                _is_null_word = (
-                    aval == '0'
-                    and atype in ('int', 'int64_t')
-                    and actual_atype in ('int', 'int64_t'))
                 if _provable:
                     coerced_args.append(
                         gen._stringify_value(actual_atype, aval, _anode))
-                elif _is_null_word:
-                    # The null word 0 is None for every parameter slot. A
-                    # user-function `char *` parameter must receive the null
-                    # pointer, not the string "0" (`mojo_word_cstr_value`/
-                    # stringify would spell the integer). A provable integer
-                    # literal 0 is already handled above (tracked in
-                    # _int_word_vals) and correctly stringifies to "0".
-                    coerced_args.append(gen._cast('char *', '0'))
                 else:
                     _iv = (aval if atype == 'int64_t'
                            else gen._cast('int64_t', f"{aval}"))
@@ -5899,11 +5878,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     value inside a `def` (where the name's inferred type IS `_Bool`) printed
     `True`. See `is_python_bool_expr`."""
     if et == 'char *':
-        # A str slot holding the null word is None; str(None) is "None".
-        _none_s = gen._new_val('char *', gen._intern_string('None'))
-        _nz = gen._new_temp('_Bool')
-        gen._binop_into(_nz, ev, '!=', gen._cast('char *', '0'))
-        return gen._new_val('char *', f'{_nz} ? {ev} : {_none_s}')
+        return ev
     if enode is not None and et in ('int', 'int64_t') \
             and gimple_exprtypes.is_python_bool_expr(gen, enode):
         return gen._call_expr('char *', 'mojo_bool_to_str',
