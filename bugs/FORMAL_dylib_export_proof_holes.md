@@ -76,6 +76,25 @@ the `cset` makes `csetval`'s CFG a shape the constant-fuel walk does not cover.
 The fix is in the WALK's coverage (or in spelling the refusal as a stated
 assumption the way `svc_write_assumed` is), not in the two theorems.
 
+### The refusal message does not name the site, though it says it does
+
+`_cfg_decomposition_refusal`'s docstring promises "this names the one site in
+THIS export ... so 'no proof because a dynamic svc at 0x...' is distinguishable
+from 'no proof because a loop'". Called directly on both exports, it returns
+the SAME generic sentence for each:
+
+    universal theorem: CFG decomposition unsupported for this function shape,
+    and every instruction in its own code has a step, so the cause is not an
+    unmodelled word: the walk returns None for a shape with no `RET`, an empty
+    block runs certificate, or a constant-fuel caller whose budget is below the
+    instruction count
+
+So neither of its specific branches (an unmodelled word, or a classified `svc`)
+fires for these two, and the reader is left with three candidate classes and no
+way to pick. Naming the actual `None` return needs the walk itself
+instrumented -- which of the three it is for `csetval` (the `cset` suggests the
+block partition, not the fuel) is unmeasured.
+
 **Reproduced in isolation, and the instrument's limit.** Rebuilding just the
 `csetval` program and running `formal.lean.proof_census` on the generated proof
 gives `n_sorries = 3`, `lib_sorries = 0` -- the count is exact and the library
