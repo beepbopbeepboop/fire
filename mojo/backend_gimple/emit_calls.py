@@ -34,7 +34,6 @@ import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.simd_width as _simd_width
-import mojo.middle.float8_dtype as _float8_dtype
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.stmts_shared import _annotation_container_elem_type
@@ -2093,22 +2092,14 @@ def _dtype_arg_name(e):
 def _dtype_cast_ctype(e):
     """C type named by a dtype bracket argument — `DType.int32` or the
     dot-relative `.int32` — or None when it is anything else (a parameter, an
-    expression). A float8 dtype (`mojo.middle.float8_dtype`) answers that
-    module's private C type, so a `SIMD`/`Scalar` constructor of one carries
-    the dtype rather than erasing to an integer."""
-    s = ''
+    expression)."""
     if isinstance(e, gimple_ctypes.DottedLiteral):
-        s = _as_str(e.path)
-    elif (isinstance(e, gimple_ctypes.MemberExpr)
+        return _DTYPE_CAST_CTYPES.get(_as_str(e.path))
+    if (isinstance(e, gimple_ctypes.MemberExpr)
             and isinstance(e.obj, gimple_ctypes.IdentExpr)
             and _as_str(e.obj.name) == 'DType'):
-        s = _as_str(e.member)
-    else:
-        return None
-    _f8 = _float8_dtype.float8_ctype(s)
-    if _f8 is not None:
-        return _f8
-    return _DTYPE_CAST_CTYPES.get(s)
+        return _DTYPE_CAST_CTYPES.get(_as_str(e.member))
+    return None
 
 
 def _comptime_conforms_to_pred(gen):
@@ -3090,87 +3081,6 @@ def _lc_next_with_default(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
     return None
 
 
-#: Bit width of the scalar Mojo types an llvm_intrinsic's type argument may name.
-_INTRINSIC_TYPE_WIDTH = {
-    'Int8': 8, 'UInt8': 8, 'Int16': 16, 'UInt16': 16, 'Int32': 32, 'UInt32': 32,
-    'Int64': 64, 'UInt64': 64, 'Int': 64, 'UInt': 64,
-    'int8_t': 8, 'uint8_t': 8, 'int16_t': 16, 'uint16_t': 16,
-    'int32_t': 32, 'uint32_t': 32, 'int64_t': 64, 'uint64_t': 64,
-}
-#: The C-type width used when the type argument does not name a scalar.
-_CTYPE_WIDTH = _INTRINSIC_TYPE_WIDTH
-
-
-def _intrinsic_width(gen, type_expr, arg_ctype) -> int | None:
-    """The bit width an integer intrinsic works at: from its type argument when
-    that names a scalar (`Int32`, `DType.int32` is not a width and is refused),
-    else from the first argument's C type. None when neither is known."""
-    try:
-        ann = _as_str(gen._type_expr_to_ann(type_expr))
-    except Exception:
-        ann = ''
-    if ann in _INTRINSIC_TYPE_WIDTH:
-        return _INTRINSIC_TYPE_WIDTH[ann]
-    return _CTYPE_WIDTH.get(_as_str(arg_ctype))
-
-
-def _lower_llvm_intrinsic(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`llvm_intrinsic["llvm.name", Type, ...](args)` on the CPU.
-
-    The stdlib writes its bit and math primitives this way, and this path used to
-    fall through to the generic indirect-call stub, which emitted 0: a silent wrong
-    answer (`rotate_bits_right[2](104)` printed 0, not 26). Each intrinsic that has a
-    CPU lowering here is implemented; any other name is REFUSED with a diagnostic, so
-    no call can compute 0 silently. The GPU-only intrinsics are refused the same way.
-    """
-    idx = node.func.index
-    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
-    if not elems or not isinstance(elems[0], gimple_ctypes.StringLiteral):
-        return _trap_unsupported_intrinsic(gen, "<non-literal name>")
-    name = _as_str(elems[0].value)
-    pairs = [gen.lower_expr(a) for a in node.args]
-    if name in ('llvm.fshl', 'llvm.fshr', 'llvm.ctpop', 'llvm.ctlz', 'llvm.cttz',
-                'llvm.bswap', 'llvm.usub.sat'):
-        if not pairs:
-            raise RuntimeError(f"{name}: no operands")
-        width = _intrinsic_width(gen, elems[1] if len(elems) > 1 else None, pairs[0][0])
-        if width is None:
-            return _trap_unsupported_intrinsic(gen, name + " (bit width unknown)")
-        ops = [('int64_t', gen._to_int64(t, v)) for t, v in pairs]
-        if name in ('llvm.fshl', 'llvm.fshr'):
-            if len(ops) != 3:
-                raise RuntimeError(f"{name}: expects three operands")
-            fn = 'mojo_fshl' if name == 'llvm.fshl' else 'mojo_fshr'
-            return 'int64_t', gen._call_expr('int64_t', fn, ops + [('int64_t', str(width))])
-        if name == 'llvm.usub.sat':
-            if len(ops) != 2:
-                raise RuntimeError(f"{name}: expects two operands")
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_usub_sat',
-                                             ops + [('int64_t', str(width))])
-        fn = {'llvm.ctpop': 'mojo_ctpop', 'llvm.ctlz': 'mojo_ctlz',
-              'llvm.cttz': 'mojo_cttz', 'llvm.bswap': 'mojo_bswap'}[name]
-        return 'int64_t', gen._call_expr('int64_t', fn, ops[:1] + [('int64_t', str(width))])
-    if name == 'llvm.expect' and pairs:
-        return pairs[0]
-    if name == 'llvm.assume':
-        return 'int64_t', '0'
-    return _trap_unsupported_intrinsic(gen, name)
-
-
-def _trap_unsupported_intrinsic(gen, name: str) -> tuple[str, str]:
-    """An intrinsic with no CPU lowering. The call TRAPS when it is reached (a
-    message naming it, exit nonzero) instead of yielding a value: the compiled
-    stdlib contains GPU intrinsics in code the CPU never runs, so this cannot be
-    a compile-time refusal, and it cannot be a silent 0 either. The value after
-    the trap is the integer word the call has always produced, which is what the
-    surrounding C was written against (a struct- or pointer-typed result here
-    breaks the callers that take the word)."""
-    gen._rt_void('mojo_unsupported_intrinsic', ['"' + name.replace('"', '') + '"'])
-    t = gen._new_temp('int64_t')
-    gen._emit(f'  {t} = (int64_t)0;')
-    return 'int64_t', t
-
-
 def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """A callee that is not a plain name: the result of a call, a subscript, a lambda, ...
 
@@ -4099,12 +4009,7 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
                 if _cv:
                     _dt_ctype = gimple_ctypes._dtype_token_ctype(
                         _cv.get(_as_str(_e0.name)))
-        if (_dt_ctype in ('float', 'double', '__fp16')
-                or _float8_dtype.float8_spelling_of_ctype(_dt_ctype) is not None):
-            # A float8 dtype's private C type arrives here from
-            # `_dtype_token_ctype`; a conversion INTO the dtype is allowed,
-            # and the two uses with no rule are refused at the coercion
-            # and binary-operation chokepoints (mojo.middle.float8_dtype).
+        if _dt_ctype in ('float', 'double', '__fp16'):
             _target = _dt_ctype
         else:
             _target = 'int64_t'
@@ -4984,21 +4889,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             t = gen._rt_call('MojoSet *', 'mojo_set_copy', [f"{av}"])
             gen._note_fresh_result(t)
             return 'MojoSet *', t
-    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
-            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-            and node.func.obj.name == 'llvm_intrinsic'):
-        return _lower_llvm_intrinsic(gen, node)
-    # `type_of(x)(v)`: the value `v` converted to the type of `x` (the stdlib's
-    # idiom for the element type of a SIMD operand). Lowered directly; a runtime
-    # `type_of` symbol does not exist.
-    if (isinstance(node.func, gimple_ctypes.CallExpr)
-            and isinstance(node.func.func, gimple_ctypes.IdentExpr)
-            and node.func.func.name == 'type_of'
-            and len(node.func.args) == 1 and len(node.args) == 1
-            and not gen._locally_binds_name('type_of')):
-        ot, _ov = gen.lower_expr(node.func.args[0])
-        vt, vv = gen.lower_expr(node.args[0])
-        return ot, gen._cast(ot, f"{vv}")
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
         return _lc_non_ident_callee(gen, node)
 
@@ -5499,16 +5389,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         res = gen._new_val('double', f'floor({dv})')
         return 'int64_t', gen._cast('int64_t', f"{res}")
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
-    # The interpreter's float8 scalar (`myinterpreter._MojoFloat8Value`): a
-    # float that carries its dtype's spelling. Compiled, it is a float8 BOX in
-    # the tagged word (runtime mojo_box_from_f8), so a value returned beside a
-    # float is a word of one kind, not a pointer the boxing refuses.
-    if fname_raw == '_MojoFloat8Value' and len(node.args) == 2:
-        return _lower_float8_value_box(gen, node)
-    if fname_raw == '_float8_spelling_of' and len(node.args) == 1:
-        vt, vv = gen.lower_expr(node.args[0])
-        return 'char *', gen._call_expr('char *', 'mojo_f8_spelling',
-                                        [('int64_t', gen._to_int64(vt, vv))])
     if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
     # `callable(x)` — does the word denote a function at run time? The runtime's
     # `mojo_is_callable_word` answers from the function/bound-method/variadic-
@@ -6425,11 +6305,6 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                                [('int64_t', gen._to_int64(obj_type, obj_val))])
             return gen._cast('_Bool', r)
         return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
-    if type_name == '_MojoFloat8Value':
-        # A float8 scalar is a float8 box in the tagged word (mojo_box_from_f8).
-        r = gen._call_expr('int', 'mojo_is_f8_box',
-                           [('int64_t', gen._to_int64(obj_type, obj_val))])
-        return gen._cast('_Bool', r)
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
         # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
@@ -6671,17 +6546,6 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     return gen._cast('_Bool', res)
 
 
-
-
-def _lower_float8_value_box(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`_MojoFloat8Value(spelling, value)` in compiled code: a float8 box word."""
-    st, sv = gen.lower_expr(node.args[0])
-    if st != 'char *':
-        sv = gen._cast('char *', f"{sv}")
-    vt, vv = gen.lower_expr(node.args[1])
-    dv = vv if vt == 'double' else gen._cast('double', f"{vv}")
-    return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_f8',
-                                     [('double', dv), ('char *', sv)])
 
 
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

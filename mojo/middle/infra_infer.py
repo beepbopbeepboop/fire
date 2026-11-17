@@ -58,8 +58,6 @@ def _type_of(gen, name: str) -> str:
     return gen.var_types.get(name, 'int64_t')
 
 def _resolve_type(gen, ann: str | None) -> str:
-    if ann == '_MojoFloat8Value':
-        return 'int64_t'
     # Map a C-keyword struct name (`auto`) to its renamed form so a bare
     # `auto` annotation resolves to the struct registered under `_kw_auto`.
     if isinstance(ann, str):
