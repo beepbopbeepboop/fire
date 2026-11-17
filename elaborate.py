@@ -454,6 +454,43 @@ def _default_type_arg(default: str):
     return m.group(1) if m else None
 
 
+def _first_unbound_type_param(params, supplied, defaults):
+    """The first bracket parameter `supplied` leaves unbound with no provable
+    default, or None when every omitted parameter can be filled.
+
+    One implementation, two readers: `bind_type_args` uses it to decide the
+    instantiation is impossible, and `unbound_type_parameter` exposes the SAME
+    answer so a call site can name the parameter in its diagnostic. Splitting
+    this rule in two is how a refusal and its message drift apart."""
+    for i, p in enumerate(params):
+        if p.startswith('*'):
+            # A trailing variadic parameter needs at least one supplied
+            # argument; an empty expansion has no lifting shape.
+            return p if len(supplied) <= i else None
+        if i >= len(supplied) and _default_type_arg(defaults.get(p, '')) is None:
+            return p
+    return None
+
+
+def unbound_type_parameter(template_src: str, type_args):
+    """The first bracket parameter a call's EXPLICIT `type_args` leaves
+    unbound and cannot fill from a default, or None when the bracket is
+    complete enough to instantiate.
+
+    This is `bind_type_args`'s "missing and no provable default" answer, named
+    so a caller can report which parameter it is (`failed to infer parameter
+    'y' of 'param_fn'`) instead of silently declining the instantiation. See
+    `_first_unbound_type_param` for the shared rule."""
+    params = type_param_names(template_src)
+    if not params:
+        return None
+    supplied = list(type_args or ())
+    if not any(p.startswith('*') for p in params) and len(supplied) > len(params):
+        supplied = supplied[:len(params)]
+    defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
+    return _first_unbound_type_param(params, supplied, defaults)
+
+
 def bind_type_args(template_src: str, type_args):
     """{param: concrete} for a template's bracket parameters, filling any the
     caller did not supply from their DEFAULT (`type_param_defaults`). None when
@@ -479,6 +516,8 @@ def bind_type_args(template_src: str, type_args):
         if len(supplied) > len(params):
             supplied = supplied[:len(params)]
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
+    if _first_unbound_type_param(params, supplied, defaults) is not None:
+        return None
     targs = {}
     for i, p in enumerate(params):
         if p.startswith('*'):
@@ -487,17 +526,9 @@ def bind_type_args(template_src: str, type_args):
             # position), and it needs at least one argument (an empty
             # `chain()` has no measured lifting shape — the seed's
             # container gate already requires >= 1 argument).
-            if len(supplied) <= i:
-                return None
             targs[p] = list(supplied[i:])
             break
-        if i < len(supplied):
-            targs[p] = supplied[i]
-            continue
-        dflt = _default_type_arg(defaults.get(p, ''))
-        if dflt is None:
-            return None
-        targs[p] = dflt
+        targs[p] = supplied[i] if i < len(supplied) else _default_type_arg(defaults.get(p, ''))
     return targs
 
 

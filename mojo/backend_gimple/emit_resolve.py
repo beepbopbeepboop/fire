@@ -3603,6 +3603,8 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
+    module_src = None
+    type_args = None
     try:
         module_src = gen._generic_source_text(source)
         import elaborate
@@ -3832,6 +3834,39 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             f'cannot compile module: self recursive call to {g!r} will '
             f'cause an infinite loop')
     if not info:
+        # An EXPLICIT bracket that supplies fewer CONCRETE arguments than the
+        # callee's non-defaulted comptime parameters is a program error, not
+        # an elaboration gap. `bind_type_args` declines it, and declining here
+        # lets the call fall through `_lower_call`'s stub path, which emits 0
+        # at exit 0 — a silent wrong answer (measured 2026-11-16:
+        # `param_fn[2](1)` with `def param_fn[x: Int, y: Int]` built and
+        # printed 0). The interpreter already names the mistake
+        # (`myinterpreter._raise_unbound_comptime_error`: "failed to infer
+        # parameter 'y' of 'param_fn'"); `test_interp_oracle.py`'s premise is
+        # that the two engines agree, so this path renders the same words as a
+        # user diagnostic. The check runs only when elaboration DECLINED and
+        # the type args were all concrete, so a still-generic body
+        # (`Self.T`, `U`) keeps declining exactly as before. `type_args` is
+        # only assigned INSIDE the try (the explicit arm), so a failure before
+        # its assignment keeps master's plain decline — the None init above
+        # makes the guard total instead of raising UnboundLocalError.
+        if explicit and module_src and type_args is not None:
+            import elaborate  # the try above may have failed before its own import
+            try:
+                _tmpl = elaborate.extract_fn_source(
+                    module_src, g, arg_count=len(arg_pairs))
+            except Exception:
+                _tmpl = None
+            _unbound = (elaborate.unbound_type_parameter(_tmpl, type_args)
+                        if _tmpl else None)
+            if _unbound:
+                _cfn = getattr(gen, '_current_filename', '') or ''
+                _cln = getattr(node, 'line', 0) or 0
+                _clc = getattr(node, 'col', 0) or 0
+                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                raise RuntimeError(
+                    f"{_cat}error: failed to infer parameter "
+                    f"'{_unbound}' of '{g}'")
         return None
     return gen._emit_generic_instantiation(info, arg_pairs)
 
