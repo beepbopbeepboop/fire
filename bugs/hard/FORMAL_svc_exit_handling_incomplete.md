@@ -144,3 +144,27 @@ Consequences of the model change (not bugs in themselves, but to know):
 6. Only then remove the `expect=` marker on formal-dylib.
 
 Related: the overflow-guard wrong-spec fix (2026-11-12), which closed the soundness hole this doc's svc model underlies.
+
+## 2026-11-16 (wakeup 52): the marker's 3 failures cannot be verified -- the
+## job is RESOURCE-CAPPED
+
+`formal-dylib` is registered `mem='tiny'` (4 GB), with the comment that the
+class came from "the 0.1 GB peak its own branch measured". Measured today:
+
+    RESOURCE formal-dylib  (128s)  memory ceiling reached before the job finished
+             peak 4.0 GB -- killed for memory before finishing, so this says
+             nothing about correctness
+    suite: 2 passed, 0 failed, 0 skipped, 1 resource-capped
+    NOT TRUSTED as measurements (failed, or under 2s): formal-dylib
+
+So the job that carries `expect='3 failing: ... whose termination obligations
+an exit svc keeps named'` (this doc) no longer produces a verdict at all, and
+the 3 is unverified in both directions -- it could be 3, fewer, or more. The
+0.1 GB → 4+ GB growth is also well past `MEM_DEBT_GB` (4.0), where the tree's
+standard is that "anything over 3-4 GB in this compiler is a bug, not a fact
+about the workload"; raising the class needs a `memwhy` and an entry in
+`doc/POLICY_memory_over_4gb.md`, which does not name this job.
+
+Before anyone can act on this doc's remaining termination obligations, the job
+has to run again: either find why it grew 40x, or measure the real peak and back
+a class raise with the policy entry.
