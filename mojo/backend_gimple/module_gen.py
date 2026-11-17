@@ -2193,10 +2193,23 @@ def _emit_reflection_dispatch(self, parts):
         if _mm_arms:
             for _mm_attr0 in _mm_arms:
                 _mm_attr = _as_str(_mm_attr0)
+                _mm_sym = _as_str(_mm_arms[_mm_attr])
+                # A method whose definition-site body was REFUSED in this TU
+                # is prototype-only (see the transactional fallback above):
+                # taking its ADDRESS here is a reference to a symbol this TU
+                # deliberately did not define, i.e. an undefined symbol at
+                # link (measured once the plain `iter` beside its generic
+                # template survived: std/iter/__init__.mojo emitted
+                # `mojo_bound_method_new((void *)std_iter___init____
+                # Enumerate___next__, ...)` for `__next__`, whose body is
+                # prototype-only — the two class tables already skip these,
+                # this arm did not).
+                if _mm_sym in self._prototype_only_syms:
+                    continue
                 get_lines.append(
                     f'  if (strcmp(attr, "{_mm_attr}") == 0) '
                     f'return (int64_t)(intptr_t)mojo_bound_method_new ('
-                    f'(void *){_as_str(_mm_arms[_mm_attr])}, (void *)obj);')
+                    f'(void *){_mm_sym}, (void *)obj);')
         # Inlined `_fieldnames_append_lines` (was a separate function
         # taking `name_lits: list`, called once, at the single call site
         # below) — self-hosted codegen has no mechanism that carries a
@@ -12084,7 +12097,20 @@ def gen_module_impl(self, stmts: list):
     # every downstream loop collision-free. No-op otherwise.
     _dup_defs: dict = {}
     for _s in stmts:
-        if isinstance(_s, FunctionDef):
+        # A GENERIC TEMPLATE is not a C definition and never was: the
+        # bracket-instantiation pass strips it (a few dozen lines below) and
+        # emits each concrete instantiation separately. Counting it as a
+        # same-name definition is what made the plain sibling beside it look
+        # like one half of a "genuine overload" pair, so BOTH were dropped —
+        # std/sys/info.mojo's `def is_apple_gpu()` next to
+        # `def is_apple_gpu[subarch: StaticString]()` lost its only real
+        # definition, and every in-module call to it fell through to the
+        # unknown-name path's BARE weak stub while cross-module callers named
+        # `std_sys_info_is_apple_gpu`: undefined at link time. A pair of
+        # PLAIN defs is still the overload/redefinition case handled below.
+        if (isinstance(_s, FunctionDef)
+                and not getattr(_s, 'comptime_params', None)
+                and not getattr(_s, 'variadic_bracket_params', None)):
             _dup_defs.setdefault(_s.name, []).append(_s)
     _dup_drop_ids: set = set()
     for _dup_list in _dup_defs.values():
@@ -12245,11 +12271,30 @@ def gen_module_impl(self, stmts: list):
         for _gn in _local_generics:
             self._imported_generics.setdefault(_gn, self._current_filename)
         if _local_generics:
-            _stripped_generic_fns = [s for s in stmts
-                                      if isinstance(s, FunctionDef) and s.name in _local_generics]
+            # Strip the GENERIC declarations only, never every def that
+            # shares their name. `_local_generics` is a NAME set (that is
+            # what `_imported_generics` and the bracket-instantiation
+            # scan need), but a module may legitimately declare a plain
+            # `def f()` BESIDE a generic `def f[T]()` — std/sys/info.mojo's
+            # `is_apple_gpu` (and `is_nvidia_gpu`/`is_amd_gpu`) is exactly
+            # that shape. Filtering by name dropped the plain overload with
+            # the template: it lost its definition AND its `_mangled_funcs`
+            # registration, so every call to it in this module fell through
+            # to the unknown-name path and emitted a BARE weak stub, while
+            # cross-module callers named `std_sys_info_is_apple_gpu` — an
+            # undefined symbol at link time. The AST already answers this
+            # per node: a bracketed declaration carries its binders in
+            # `comptime_params` (and `variadic_bracket_params` for `[*Ts]`),
+            # an unbracketed sibling carries neither.
+            _stripped_generic_fns = [
+                s for s in stmts
+                if (isinstance(s, FunctionDef) and s.name in _local_generics
+                    and (getattr(s, 'comptime_params', None)
+                         or getattr(s, 'variadic_bracket_params', None)))]
             self._stripped_generic_fns = list(_stripped_generic_fns)
+            _stripped_ids = {id(s) for s in _stripped_generic_fns}
             stmts = [s for s in stmts
-                     if not (isinstance(s, FunctionDef) and s.name in _local_generics)]
+                     if not (isinstance(s, FunctionDef) and id(s) in _stripped_ids)]
             for _sgf in _stripped_generic_fns:
                 for _n in _walk_ast(_sgf.body):
                     if isinstance(_n, FunctionDef):
@@ -12351,6 +12396,16 @@ def gen_module_impl(self, stmts: list):
     # closure with more than one module defining free functions.
     self._local_top_level_func_names = {
         _as_funcdef_node(s).name for s in stmts if isinstance(s, FunctionDef)}
+    # Of those, the ones with a REAL C definition: no bracket binders. Read
+    # by `_lc_non_ident_callee`'s bracket-call refusal, which must not
+    # mistake "this module defines a PLAIN function of this name" for "this
+    # module owns an instantiable generic template of this name" (a module
+    # may declare both — see `is_amd_gpu` in std/sys/info.mojo).
+    self._local_plain_func_names = {
+        _as_funcdef_node(s).name for s in stmts
+        if (isinstance(s, FunctionDef)
+            and not getattr(s, 'comptime_params', None)
+            and not getattr(s, 'variadic_bracket_params', None))}
     # The same set of statements, by identity rather than by name — read only
     # by `_record_home_def_return_type`, and needed because the NAME set cannot
     # answer the question that publisher asks. Every return-type inference pass

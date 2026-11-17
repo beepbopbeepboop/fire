@@ -3208,7 +3208,20 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.name in gen.func_return_types
                 and node.func.obj.name not in gen.imported_symbols
-                and node.func.obj.name not in gen._imported_generic_structs):
+                and node.func.obj.name not in gen._imported_generic_structs
+                # ...but only when the callee really IS this TU's generic
+                # template. A module may declare a PLAIN function beside a
+                # same-named generic one (std/sys/info.mojo's
+                # `is_amd_gpu()` / `is_amd_gpu[arch: StaticString]()`), and
+                # the plain def puts the bare name in `func_return_types`
+                # without making `is_amd_gpu[arch]()` an instantiable
+                # local generic. Those bracket calls (inside the module's
+                # own `comptime for` target queries) have always lowered to
+                # the stub below; refusing them turned a compiling module
+                # into a hard failure. The measured refusal case —
+                # `def a[T: Int]()` with NO plain sibling — is unchanged.
+                and node.func.obj.name not in getattr(
+                    gen, '_local_plain_func_names', ())):
             _base_name = node.func.obj.name
             raise RuntimeError(
                 f"cannot compile module: a bracketed call {_base_name}[...]() "

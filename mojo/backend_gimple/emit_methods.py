@@ -8450,7 +8450,24 @@ def _lsmc_autostub(gen, method: str, mangled: str, struct_name: str) -> tuple | 
             _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
                       f'int64_t {mangled} (int64_t);\n#endif')
         else:
-            _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
+            # A declaration-only extern here leaves an UNDEFINED symbol
+            # whenever no unit in the program defines the method at all:
+            # std/python/python.mojo's `Pointer(to=...).as_imm()` is
+            # lowered against the receiver's boxed CPython* type, so the
+            # call site named `std_python__cpython_CPython_as_imm` while
+            # nothing defines it and `_cpython.mojo` never could (the
+            # method belongs to `Pointer`, not `CPython`). A weak
+            # DEFINITION under the caller-visible name is the existing
+            # convention for a body this backend cannot lower (see
+            # `_lower_named_call`'s "unavailable in compiled mode" stub),
+            # and a strong definition elsewhere in the program still wins
+            # over it at link time — so the ordinary "sibling method
+            # emitted later in another unit" case is unaffected.
+            _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                      f'__attribute__((weak)) int64_t {mangled} (...) '
+                      f'{{ mojo_print ((char *)'
+                      f'"{struct_name}.{method}: unavailable in compiled mode"); '
+                      f'return (int64_t)0; }}\n#endif')
     if _stub not in gen._elaborated_externs:
         gen._elaborated_externs.append(_stub)
     gen._auto_stubbed.add(mangled)
