@@ -2382,6 +2382,17 @@ def _is_simple_progression_operand(e) -> bool:
     return False
 
 
+def _is_constant_operand(e) -> bool:
+    """True for a numeric literal, or a unary sign chain whose innermost operand
+    is one. Used by `_progressing_bracket_arg`: a constant of any sign depth is
+    a value, never a recursion step."""
+    if isinstance(e, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
+        return True
+    if isinstance(e, gimple_ctypes.UnaryOp) and _as_str(e.op) in ('-', '+', '~'):
+        return _is_constant_operand(e.operand)
+    return False
+
+
 def _progressing_bracket_arg(e) -> bool:
     """Whether one bracket argument at an elaborated call site is the
     progressing RECURSION shape the refusal below exists to catch (`i + 1`),
@@ -2409,9 +2420,11 @@ def _progressing_bracket_arg(e) -> bool:
     if isinstance(e, gimple_ctypes.UnaryOp):
         if _as_str(e.op) not in ('-', '+', '~'):
             return False
-        if isinstance(e.operand, (gimple_ctypes.IntLiteral,
-                                  gimple_ctypes.FloatLiteral)):
-            return False  # a negative literal, not arithmetic over a parameter
+        if _is_constant_operand(e.operand):
+            # A negative literal, or a sign chain over one (`-shift` with
+            # shift = -2 substituted is `-(-2)`): fixed values, not arithmetic
+            # over a parameter, so not a progression.
+            return False
         if _spells_a_string(e):
             return False
         return _is_simple_progression_operand(e)
