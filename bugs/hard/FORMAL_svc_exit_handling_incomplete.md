@@ -157,14 +157,17 @@ class came from "the 0.1 GB peak its own branch measured". Measured today:
     suite: 2 passed, 0 failed, 0 skipped, 1 resource-capped
     NOT TRUSTED as measurements (failed, or under 2s): formal-dylib
 
-So the job that carries `expect='3 failing: ... whose termination obligations
-an exit svc keeps named'` (this doc) no longer produces a verdict at all, and
-the 3 is unverified in both directions -- it could be 3, fewer, or more. The
-0.1 GB → 4+ GB growth is also well past `MEM_DEBT_GB` (4.0), where the tree's
-standard is that "anything over 3-4 GB in this compiler is a bug, not a fact
-about the workload"; raising the class needs a `memwhy` and an entry in
-`doc/POLICY_memory_over_4gb.md`, which does not name this job.
+**Update 2026-11-16 (wakeup 53/54): the job runs again, and the marker's REASON
+was wrong.** Re-classed to `small` (8) with a `memwhy` and a
+`doc/POLICY_memory_over_4gb.md` entry, after measuring peak RSS 4.58 GB uncapped
+(the recorded 2.2 GB was a 102 s run that never finished the proof set). The job
+now completes in 472 s at 4.3 GB and reports `PASS=27 FAIL=3` -- so the count 3
+was right all along.
 
-Before anyone can act on this doc's remaining termination obligations, the job
-has to run again: either find why it grew 40x, or measure the real peak and back
-a class raise with the policy entry.
+But the three failures are NOT this doc's termination obligations. They are
+GENERATED-proof `sorry` holes: `several exports, and one with no derivable
+spec` (2 holes), `an export that binds a local still gets a proved contract`
+(3 holes), and `a conditional value is not a branch` (3 holes). None is
+described here, and a search of `bugs/` found no doc tracking them. The marker
+has been re-pointed to `bugs/FORMAL_dylib_export_proof_holes.md`, which names
+all three. This doc's own remaining work is unchanged and still unmeasured.

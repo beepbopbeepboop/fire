@@ -2943,8 +2943,12 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
             'ceiling before it finished, so the class was raised to `small` '
             '(8). Over the 4 GB line and therefore a debt, not a fact -- see '
             + MEM_DEBT_DOC,
-     expect='3 failing: the hole-count checks on the overflow-trapping exports, whose termination '
-            'obligations an exit svc keeps named (bugs/hard/FORMAL_svc_exit_handling_incomplete.md)',
+     # The reason was stale: it described hole-count checks on the
+     # overflow-trapping exports, but the three failures are GENERATED-proof
+     # `sorry` holes in test_formal_dylib.py (measured 2026-11-16, uncapped:
+     # PASS=27 FAIL=3). Re-pointed to the doc that names them.
+     expect='3 failing: the dylib export proofs still admit `sorry` holes -- see '
+            'bugs/FORMAL_dylib_export_proof_holes.md',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
