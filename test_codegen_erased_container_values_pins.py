@@ -155,7 +155,10 @@ def test_part1_list_ctor_unchanged():
     body = _body(_compile(LIST_SRC, 'lst'), 'lst_f')
     assert 'mojo_list_init (&_owned_storage1_l)' in body, body
     assert 'mojo_list_append_int (l, _t2)' in body, body
-    assert 'mojo_list_get_int (l, _t4)' in body, body
+    # An explicit subscript is the bounds-checked read: an out-of-range index raises
+    # IndexError (mojo_list_get_int_checked). The lenient mojo_list_get_int stays for
+    # loop-internal reads. Pinned here so the explicit read cannot silently go back.
+    assert 'mojo_list_get_int_checked (l, _t4)' in body, body
 
 
 # part2: Span(<tracked container>) inherits the element type.
