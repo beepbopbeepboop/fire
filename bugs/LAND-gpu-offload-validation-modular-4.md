@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-gpu-offload-validation-modular-3 land?
+# Land: should finished branch bug-land-gpu-offload-validation-modular-4 land?
 
-**Branch:** `work/bug-land-gpu-offload-validation-modular-3` (task `bug-land-gpu-offload-validation-modular-3`; its tip is also saved as `refs/archive/work/bug-land-gpu-offload-validation-modular-3`, so dropping it loses nothing).
-**Age:** last commit 2026-11-17, first unlanded commit 2026-11-15; 6 commit(s) ahead of master, 13 behind it; task started 2026-11-17 01:27:58
-**Original work:** Fix the bug in bugs/LAND-gpu-offload-validation-modular-part8-2.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test,
-**Original claims:** bug:LAND-gpu-offload-validation-modular-part8-2
+**Branch:** `work/bug-land-gpu-offload-validation-modular-4` (task `bug-land-gpu-offload-validation-modular-4`; its tip is also saved as `refs/archive/work/bug-land-gpu-offload-validation-modular-4`, so dropping it loses nothing).
+**Age:** last commit 2026-11-16, first unlanded commit 2026-11-16; 1 commit(s) ahead of master, 54 behind it; task started 2026-11-16 09:01:27
+**Original work:** Fix the bug in bugs/LAND-gpu-offload-validation-modular.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or repo
+**Original claims:** bug:LAND-gpu-offload-validation-modular
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-17 07:44:35: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-15; 6 commit(s) ahead of master, 13 behind it; task started 2026-11-17 01:27:58)
-  Branch: work/bug-land-gpu-offload-validation-modular-3
+- 2026-11-16 12:55:31: conflicts with master (last commit 2026-11-16, first unlanded commit 2026-11-16; 1 commit(s) ahead of master, 54 behind it; task started 2026-11-16 09:01:27)
+  Branch: work/bug-land-gpu-offload-validation-modular-4
   Conflicting files: bugs/hard/GPU_offload_validation_modular.md

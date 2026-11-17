@@ -29,9 +29,11 @@ real_compile = bsd.compile_module_to_c
 reason = "forced: generic struct elaboration failed (stubbed for the dylib job)"
 
 
-def _degraded(src, path, module_name, linkable=True):
+def _degraded(src, path, module_name, linkable=True, no_mangle=()):
     # Produce C the compiler could object-compile, but record a degradation for
     # THIS compile so the dylib path must refuse to publish/link it.
+    # `no_mangle` mirrors the real function's interface (the cross-module
+    # generic-instance pass passes it; an ordinary compile passes nothing).
     bsd._LAST_DEGRADED[:] = [reason]
     return "void __stub__(void) {}\n"
 

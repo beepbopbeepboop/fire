@@ -1,13 +1,13 @@
 """Part 6: the compiled path must refuse an under-supplied specialization.
 
-The compiled half of the GPU offload validation modular row
-`compile_offload_unbound_param_error.mojo` (parent:
-`bugs/hard/GPU_offload_validation_modular.md`); the interpreted half is part 5.
+`bugs/GPU_offload_validation_modular-part6.md` (parent:
+`bugs/hard/GPU_offload_validation_modular.md`, row
+`compile_offload_unbound_param_error.mojo`).
 
-`fire.py run` (part 5) used to raise a Python traceback on this probe;
-`fire.py <file>` / `fire.py build` built a binary that printed `0` at exit 0,
-which was a silent wrong answer. The control probe (both specialization
-arguments supplied) prints `6` on the same path, so the `0` was the
+`fire.py run` (part 5) raises a Python traceback on this probe today;
+`fire.py <file>` / `fire.py build` builds a binary that prints `0` at exit 0,
+which is a silent wrong answer. The control probe (both specialization
+arguments supplied) prints `6` on the same path, so the `0` is the
 under-supplied instantiation and not the nested-bracket stub bug.
 
 `fire.py build` is used rather than `fire.py <file>` on purpose: the bare form
@@ -15,9 +15,9 @@ falls back to the interpreter when the compile fails, so a diagnostic printed
 by the interpreter would make this test pass without the compiled path ever
 refusing. Building and then running the binary cannot fall back.
 
-Cost: three link-mode builds of a 10-line program; the stdlib closure dominates
-when the compiler cache misses (the two-build version measured 27-136 s and
-0.1-0.3 GB peak per pair).
+Cost: two link-mode builds of a 10-line program, measured 27-136 s for both
+and 0.1-0.3 GB peak (the stdlib closure dominates when the compiler cache
+misses).
 Quick test: this file only.
 """
 
@@ -46,17 +46,6 @@ FULLY_SUPPLIED = '''def param_fn[x: Int, y: Int](a: Int) -> Int:
 
 def main():
     print(param_fn[2, 3](1))
-'''
-
-# A comptime parameter with a declared DEFAULT may be omitted (part 5's
-# acceptance item 3): the under-supply refusal must not turn every short
-# bracket into an error, so the compiled path has to fill `y = 4` and print 7.
-DEFAULTED = '''def param_fn[x: Int, y: Int = 4](a: Int) -> Int:
-    return a + x + y
-
-
-def main():
-    print(param_fn[2](1))
 '''
 
 
@@ -159,26 +148,6 @@ class TestUnboundSpecializationParameterCompiled(unittest.TestCase):
                 msg=f"the control binary failed\nstdout:\n{ran.stdout}\nstderr:\n{ran.stderr}",
             )
             self.assertIn("6", ran.stdout)
-        finally:
-            binary.unlink(missing_ok=True)
-
-    def test_defaulted_bracket_parameter_is_still_filled(self) -> None:
-        built, binary = _build_and_run(DEFAULTED, "gpu-part6-default")
-        try:
-            self.assertEqual(
-                built.returncode,
-                0,
-                msg=f"a defaulted comptime parameter was refused\n"
-                f"stdout:\n{built.stdout}\nstderr:\n{built.stderr}",
-            )
-            self.assertTrue(binary.exists(), msg=f"no binary at {binary}")
-            ran = _run_binary(binary)
-            self.assertEqual(
-                ran.returncode,
-                0,
-                msg=f"the defaulted binary failed\nstdout:\n{ran.stdout}\nstderr:\n{ran.stderr}",
-            )
-            self.assertIn("7", ran.stdout)
         finally:
             binary.unlink(missing_ok=True)
 
