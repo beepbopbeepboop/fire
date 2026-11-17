@@ -38,6 +38,7 @@ from fire_compiler import (
     IdentExpr, BinaryOp, CallExpr, MemberExpr, SubscriptExpr, TernaryExpr,
     AssignStmt, ExprStmt, IntLiteral, FloatLiteral, StringLiteral, UnaryOp,
     StructDef, FunctionDef, ForStmt, Generator, Parser, py_tokenize,
+    BoolLiteral, VarDecl,
     _as_str, _as_list, _as_dict,
 )
 
@@ -979,6 +980,216 @@ def _field_call_default(value):
 
 _CONTAINER_ANN_PREFIXES = {'list': ('list', 'List'), 'dict': ('dict', 'Dict'), 'set': ('set', 'Set')}
 
+# ── dataclass constructor provenance ───────────────────────────────────────
+# id(StructDef) -> merged-layout field names CPython's synthesized dataclass
+# __init__ (and __match_args__) does NOT take a positional slot for: a field
+# declared in a base class that is not itself a dataclass (CPython only
+# inherits dataclass fields from dataclass bases — a plain base's annotated
+# attribute is storage, not an init parameter) or a `field(init=False, ...)`
+# declaration at any dataclass level.
+#
+# The entry can only be recorded HERE, in desugar_field_defaults: the
+# desugaring that follows replaces a `field(init=False, ...)` call with its
+# `default` value, erasing the `init=` flag, and the downstream
+# `_merge_struct_inheritance` (gimple_codegen) rewrites `.fields` into the
+# merged base-first view with no provenance record. Consumers read it back
+# through dataclass_noninit_names(): module_gen's gen_module pass seeds
+# `gen._struct_noninit_fields` from it, which emit_calls'
+# `_lower_struct_constructor` and emit_stmts' dataclass `__match_args__`
+# synthesis filter their positional mapping against. Without the filter, a
+# `@dataclass class InstDef(Node)` whose `Node` declares
+# `context: ... = field(init=False, ...)` maps its six positional
+# constructor arguments onto the SEVEN-slot merged layout starting at
+# `context`: every node read then answers its neighbour (the measured
+# Tools/cases_generator failure — `node.kind` answered `name`, and
+# `assert node.kind == "op"` trapped).
+_DATACLASS_NONINIT: dict = {}
+
+
+def _struct_is_dataclass(node):
+    for d in (getattr(node, 'decorators', None) or []):
+        ds = str(d)
+        if ds == 'dataclass' or ds == '@dataclass':
+            return True
+    return False
+
+
+def _field_decl_name(fd):
+    if isinstance(fd, AssignStmt):
+        tgt = getattr(fd, 'target', None)
+        if isinstance(tgt, IdentExpr):
+            return _as_str(tgt.name)
+        return ''
+    if isinstance(fd, VarDecl):
+        n = getattr(fd, 'name', None)
+        if n is None:
+            return ''
+        return _as_str(n)
+    return ''
+
+
+def _field_call_init_false(value):
+    """True when `value` is a `field(...)` call whose `init` keyword is
+    False — CPython then keeps the field OUT of the synthesized dataclass
+    __init__ and __match_args__. Mirrors _field_call_default's field-call
+    recognition (both the bare `field` and the `dataclasses.field` spelling)."""
+    if not isinstance(value, CallExpr):
+        return False
+    fn = value.func
+    is_field = False
+    if isinstance(fn, IdentExpr):
+        is_field = fn.name == 'field'
+    elif isinstance(fn, MemberExpr):
+        is_field = (fn.member == 'field' and isinstance(fn.obj, IdentExpr)
+                    and fn.obj.name == 'dataclasses')
+    if not is_field:
+        return False
+    for kw in value.kwargs:
+        kname = kw[0]
+        kval = kw[1]
+        if kname == 'init' and isinstance(kval, BoolLiteral) \
+                and _as_boollit_value(kval) is False:
+            return True
+    return False
+
+
+def _as_boollit_value(node):
+    v = getattr(node, 'value', None)
+    if v is True or v is False:
+        return v
+    return None
+
+
+def _record_dataclass_noninit(stmts):
+    """Populate _DATACLASS_NONINIT for every @dataclass StructDef reachable
+    from `stmts` (module level plus function bodies — nested classes are
+    rewritten too, so their provenance is recorded in the same scope)."""
+    scope = {}
+
+    def _collect(ns):
+        for st in (ns or []):
+            if st is None:
+                continue
+            if isinstance(st, StructDef):
+                nm = _as_str(getattr(st, 'name', ''))
+                if nm and nm not in scope:
+                    scope[nm] = st
+            if isinstance(st, FunctionDef):
+                _collect(getattr(st, 'body', None))
+
+    _collect(stmts)
+    if not scope:
+        return
+    info_names = {}
+    info_initfalse = {}
+    info_dc = {}
+
+    def _class_info(cn):
+        if cn in info_names:
+            return True
+        c = scope.get(cn)
+        if c is None:
+            return False
+        nms = []
+        inits = set()
+        for fd in (c.fields or []):
+            fn = _field_decl_name(fd)
+            if not fn:
+                continue
+            nms.append(fn)
+            if _field_call_init_false(getattr(fd, 'value', None)):
+                inits.add(fn)
+        info_names[cn] = nms
+        info_initfalse[cn] = inits
+        info_dc[cn] = _struct_is_dataclass(c)
+        return True
+
+    def _ancestor_order(cn, seen, out):
+        # `cn`'s bases in _merge_struct_inheritance's own order (each
+        # base's bases first, the base itself last), then `cn`.
+        if cn in seen or not _class_info(cn):
+            return
+        seen.add(cn)
+        c = scope.get(cn)
+        for bn in (getattr(c, 'bases', None) or []):
+            _ancestor_order(_as_str(bn), seen, out)
+        out.append(cn)
+
+    def _merged_names(cn, seen, out):
+        # `cn`'s MERGED field names in the merge's own order (each base's
+        # merged names first, the class's own names last) — mirrors
+        # _merge_struct_inheritance (gimple_codegen), whose merged
+        # `.fields` is the layout the constructor positional mapping runs
+        # against. Walking only `cn`'s own fields would miss an inherited
+        # `field(init=False, ...)` like Tools/cases_generator's
+        # `Node.context`: CPython keeps it out of every subclass's
+        # synthesized __init__/__match_args__ too, but it is NOT in the
+        # subclass's own field list (the merge folds it in base-first).
+        if cn in seen or not _class_info(cn):
+            return
+        seen.add(cn)
+        c = scope.get(cn)
+        for bn in (getattr(c, 'bases', None) or []):
+            _merged_names(_as_str(bn), seen, out)
+        for fd in (c.fields or []):
+            fn = _field_decl_name(fd)
+            if fn and fn not in out:
+                out.append(fn)
+
+    for cn in scope:
+        sd = scope[cn]
+        # The desugar recurses into function bodies, re-running this
+        # recorder on the NARROWER body scope; the module-level run (which
+        # sees the full class scope) already recorded those nodes, and
+        # recomputing them against the narrow scope would drop the
+        # base-provenance entries — never overwrite.
+        if id(sd) in _DATACLASS_NONINIT:
+            continue
+        if not _struct_is_dataclass(sd):
+            continue
+        _class_info(cn)
+        mnames = []
+        _merged_names(cn, set(), mnames)
+        excluded = []
+        for fn in mnames:
+            if fn in excluded:
+                continue
+            # Declaring class: the own class's declaration wins (CPython
+            # override semantics); else the first base that has it.
+            decl = None
+            if fn in info_names.get(cn, ()):
+                decl = cn
+            else:
+                seen = set()
+                ob_list = []
+                c0 = scope.get(cn)
+                for bn in (getattr(c0, 'bases', None) or []):
+                    _ancestor_order(_as_str(bn), seen, ob_list)
+                for obn in ob_list:
+                    if fn in info_names.get(obn, ()):
+                        decl = obn
+                        break
+            if decl is None:
+                # Declared in a base this module cannot see (cross-module
+                # base): no provenance — keep the legacy mapping.
+                continue
+            if decl != cn:
+                if not info_dc.get(decl) or fn in info_initfalse.get(decl, ()):
+                    excluded.append(fn)
+            elif fn in info_initfalse.get(decl, ()):
+                excluded.append(fn)
+        _DATACLASS_NONINIT[id(sd)] = excluded
+
+
+def dataclass_noninit_names(node):
+    """The _DATACLASS_NONINIT entry recorded for a StructDef node by
+    desugar_field_defaults, or None when the node has no entry (not a
+    dataclass, or a tree that never ran the desugar)."""
+    v = _DATACLASS_NONINIT.get(id(node))
+    if v is None:
+        return None
+    return v
+
 
 def desugar_field_defaults(stmts: list) -> list:
     """Make a dataclass `field(...)` default mean what it says.
@@ -991,6 +1202,11 @@ def desugar_field_defaults(stmts: list) -> list:
     which is the shape `_alloc_<S>` already builds as a fresh container for every
     instance (a literal `= []` would be one object shared by all instances).
     Nested classes (inside function bodies) are rewritten too."""
+    # BEFORE the rewrite loop below erases the `field(...)` calls: record
+    # which dataclass fields CPython keeps out of the synthesized __init__
+    # (see _DATACLASS_NONINIT's docstring for why only this point in the
+    # pipeline can see the `init=` flag).
+    _record_dataclass_noninit(stmts)
     for st in stmts:
         if isinstance(st, StructDef):
             for fd in st.fields:

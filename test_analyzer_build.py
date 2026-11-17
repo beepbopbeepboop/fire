@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""End-to-end acceptance for bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer-part3
-(the original bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md):
+"""End-to-end acceptance for the compiled `Tools/cases_generator` analyzer
+(the `COMPILE_FAIL_Tools_cases_generator_analyzer` bug: the compiled analyzer
+must build and behave like CPython's):
 
 1. `fire.py build` of CPython's Tools/cases_generator/analyzer.py exits 0 with
    no `error:` line (run under the 8 GB memslot reservation);
@@ -10,7 +11,9 @@
 SKIP (exit 0) when the CPython source tree is absent. Locate it with
 $PYTHON_SRC, default /Users/mrs/net/Python-3.14.6.
 
-Run: `python3 test_analyzer_build.py`   (~20 s, < 1 GB)
+Run: `python3 test_analyzer_build.py`   (~20 s warm; the compiled analyzer
+itself peaks at ~8.6 GB of RSS on bytecodes.c — see
+bugs/CODEGEN_casesgen_analyzer_runtime_footprint.md)
 """
 import os
 import shutil

@@ -407,24 +407,3 @@ output for the same files is `error: violated constraint` and
 prefix, so FileCheck cannot match. That is the same theme as
 `identifier_source_range.mojo`, and it is a narrower, more tractable target
 than "the type checker ones" the umbrella lists last.
-
-### The delta is one line number (wakeup 46)
-
-Our output for `failed_binding_deferrals.mojo` is
-
-    Error building: .../failed_binding_deferrals.mojo:32:0: error: violated constraint
-
-The CHECK is `# CHECK: [[@LINE+3]]:{{[0-9]+}}: error: violated constraint` written
-on file line 30, so it wants **line 33** -- which is
-`    x: NeedsCopyablePos[CondCopyable[U], 0]`, the parameter carrying the
-violated binding. We report **line 32**, `def failed_binding[...](`.
-
-So the prefix format is already right and the column already matches
-(`{{[0-9]+}}` accepts `0`); the ONLY disagreement is WHICH LINE the diagnostic
-anchors to. The range is attached at `module_gen.py:5179-5183` (and the twin at
-5194-5197) from `fn.line`/`fn.col` -- the FUNCTION/STRUCT position -- while
-Modular anchors at the offending parameter. `check_where_clauses` raises
-`WhereConformanceError`; making it name the parameter would close this.
-
-Same shape expected for `autoparam_dependency_errors` (its CHECKs are also
-`[[@LINE+n]]:{{[0-9]+}}: error: ...`).
