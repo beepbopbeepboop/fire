@@ -25,7 +25,18 @@ specific number:
   derived spec should have a PROVED contract", 2 holes.
 
 Measured 2026-11-16 on the uncapped run (`/usr/bin/time -l`, peak RSS 4.58 GB,
-263 s). The `lib/` holes this job's `expect=` used to describe are GONE --
+263 s).
+
+**Reproduced in isolation, and the instrument's limit.** Rebuilding just the
+`csetval` program and running `formal.lean.proof_census` on the generated proof
+gives `n_sorries = 3`, `lib_sorries = 0` -- the count is exact and the library
+is clean, so all three are in the GENERATED file. What the census does NOT give
+is the declaration names: `Census.detail` is the per-module library table, and
+the generated file's own warnings are only parsed on an UNCACHED Lean run (on a
+cache hit `detail` carries nothing, which `check_proof_cached`'s own docstring
+records). Naming the three therefore needs one uncached `lean` invocation on
+that proof -- the missing piece for a fix, not a missing measurement of the
+count. The `lib/` holes this job's `expect=` used to describe are GONE --
 `no module under lib/ admits a sorry or an admit` PASSES, and the remaining
 `library: 1 declaration(s) ... admitted a sorry` is `scaffold_canary`, which is
 recorded as vacuous. So these three are in the GENERATED proof, not the
