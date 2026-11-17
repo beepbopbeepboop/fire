@@ -17,9 +17,6 @@ deleted in the same commit, as for any bug.
 | `COMPILE_FAIL_Tools_cases_generator_analyzer.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
-| `DIAGNOSTICS_trait_conformance.md` | see doc | workers |
-| `FORMAL_arm64_instruction_coverage.md` | see doc | workers |
 | `FORMAL_svc_exit_handling_incomplete.md` | see doc | workers |
 | `GATE_red_recover-land_2026-11-02.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |
-| `SUITE_gimplerunner_21_failing.md` | see doc | workers |

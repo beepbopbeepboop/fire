@@ -1315,12 +1315,9 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # three are the overflow-trapping hole-count rows in
                      # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
                      'formal-dylib': 3,
-     # `gimplerunner` at 1 (was 20): its 2026-11-13 re-run on master reports
-     # `626 passed, 1 failed` of 627, and the registry marker states that 1.
-     # The census had gone stale against the marker, which is the drift this
-     # check exists to catch (bug:SUITE_self_test_red). The remaining failure
-     # is `c_accessor_helpers_emitted_once_across_modules`.
-                     'gimplerunner': 1,
+     # `gimplerunner` left this census 2026-11-16: re-measured at 628 passed /
+     # 0 failed, so its `expect=` marker was removed and the census entry with
+     # it (an expect= that passes is reported as a failure).
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
      # deleted with the work and the marker was retired with it (2026-11-13).
@@ -6336,7 +6333,7 @@ def test_the_formal_doc_index_is_current():
     # is DELETED and the block is not regenerated. The NEW-document check above
     # exercises the same comparison, but only in the direction that was never
     # the failure — d3ec70ee7 deleted
-    # `FORMAL_arm64_instruction_coverage-part1.md` and merged a block that had
+    # the arm64 extend-option census (part 1) and merged a block that had
     # lost the ROW but kept the counts ("4 documents" over three rows, "5
     # documents" over four), so `python3 tools/formal_doc_index.py --check` was
     # red on master and `test_suite.py` with it. Pinned on a planted tree in

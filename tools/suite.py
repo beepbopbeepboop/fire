@@ -2012,19 +2012,18 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
 # `gimplerunner` is red on the tree (2026-11-11): 20 cases fail, a mix of wrong output,
 # RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 20 are listed
-# in bugs/hard/SUITE_gimplerunner_21_failing.md; the 21st, `gimple_nested_class_var_attr_from_str_param`,
+# in the (now retired) gimplerunner-21 inventory; the 21st,
+# `gimple_nested_class_var_attr_from_str_param`,
 # was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
 # (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
 # so a case that starts or stops failing makes this marker disagree and the gate says so.
 #
-# 2026-11-13: re-measured at 626 passed / 1 failed (627 cases). Every case the
-# doc's inventory names now passes; the one failure is
-# `c_accessor_helpers_emitted_once_across_modules` (two modules each emit their
-# own sizeof/fnaddr accessor for a same-shaped lambda environment, where the
-# test wants one shared across the closure). Marker updated to 1.
+# 2026-11-13: re-measured at 626 passed / 1 failed (627 cases); the one failure
+# was `c_accessor_helpers_emitted_once_across_modules`.
+# 2026-11-16: re-measured at 628 passed / 0 failed -- that last case passes, so
+# the `expect=` marker is REMOVED (an expect= that passes is reported as a
+# failure) and the gimplerunner-21 inventory doc is retired with it.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
-     expect='1 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md '
-            '(c_accessor_helpers_emitted_once_across_modules: duplicate sizeof/fnaddr accessors)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
