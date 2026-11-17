@@ -2378,8 +2378,11 @@ def error_suggestion_suffix(e):
 
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
-    def __init__(self, value=None):
+    def __init__(self, value=None, node=None):
         self.value = value
+        # The ReturnStmt, kept so a return type's conversion diagnostic can
+        # point at the statement (`_invoke`'s declared return type).
+        self.node = node
 
 
 class BreakException(Exception):
@@ -2577,6 +2580,15 @@ class Scope:
     def __init__(self, parent=None):
         self.parent = parent
         self.vars = {}
+        # Declared type annotations (`var x: Float32`, `def f(x: Float32)`)
+        # for this scope's bindings, name -> annotation text. Only the
+        # unimplemented float8 refusals read it (see
+        # Interpreter._declared_conversion): an assignment to an already
+        # declared name is a conversion to its declared type, the same one a
+        # `var` initialiser performs, and a dynamically typed engine cannot
+        # know the type without recording it here. A name with no annotation
+        # is simply absent.
+        self.declared_types = {}
         # Names this scope's function declared `nonlocal`. A declaration
         # changes no value, so it belongs on the scope rather than in a
         # side table: a plain `x = ...` in a nested function is LOCAL by
@@ -2591,6 +2603,16 @@ class Scope:
 
     def is_nonlocal(self, name: str) -> bool:
         return name in self.nonlocals
+
+    def declared_type(self, name: str):
+        """The declared type annotation recorded for `name` by the nearest
+        scope that binds it, or None when no such declaration was recorded
+        (an unannotated `var`/parameter, an import, a builtin)."""
+        if name in self.vars:
+            return self.declared_types.get(name)
+        if self.parent:
+            return self.parent.declared_type(name)
+        return None
 
     def define(self, name: str, value):
         self.vars[name] = value
@@ -2700,7 +2722,7 @@ class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
                  is_generator=False, is_async=False, interpreter=None,
-                 comptime_param_defaults=None):
+                 comptime_param_defaults=None, param_types=None, return_type=None):
         self.name = name
         self.params = params
         self.body = body
@@ -2724,6 +2746,16 @@ class MojoFunction:
         # default's offset. Read in `_invoke` below, next to the `_pd` read,
         # so there is exactly one place a declared default is applied.
         self.comptime_param_defaults = comptime_param_defaults or {}
+        # Declared RUNTIME parameter annotations (`def f(x: Float32)`), name ->
+        # annotation text, and the declared `-> T` return annotation. Both are
+        # conversion sites: a parameter binding and a returned value convert
+        # to the DECLARED type exactly like a `var` initialiser does, which is
+        # where the unimplemented float8 dtypes are refused (see
+        # _coerce_to_declared_type and test_regress_gpu_offload_validation_
+        # modular_part8.py). Only the float8 refusal reads them, so a function
+        # with no annotation is untouched (`{}` / None).
+        self.param_types = param_types or {}
+        self.return_type = return_type
         if param_defaults:
             self._pd = param_defaults
         # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
@@ -2945,6 +2977,28 @@ class MojoFunction:
                     _rest_kw[_kk] = kwargs[_kk]
             func_scope.define(_var_kw_name, _rest_kw)
 
+        # A parameter binding converts to the DECLARED parameter type, exactly
+        # like a `var` initialiser (see _coerce_to_declared_type). Only an
+        # unimplemented float8 dtype changes here, in either direction: a
+        # float8 argument passed to a parameter of another scalar dtype is the
+        # conversion Modular refuses ("conversion from 'f8e3m4' to 'f32' is
+        # not implemented"), and an argument passed to a parameter DECLARED as
+        # a float8 dtype becomes a value of that dtype, so a later operation on
+        # it is refused rather than computed. A parameter whose annotation
+        # names no scalar this engine knows (`T`, `Self`, a struct) is left
+        # untouched — there is no conversion to refuse. The compiled path
+        # refuses both at `_safe_coerce_emit`'s call-argument arm; this is the
+        # interpreter half of that parity.
+        if self.param_types:
+            _bind_node = _CALL_SITE[0]
+            for _pt_name in self.param_types:
+                _pt_ann = self.param_types[_pt_name]
+                func_scope.declared_types[_pt_name] = _pt_ann
+                if not func_scope.has(_pt_name):
+                    continue
+                func_scope.define(_pt_name, interpreter._declared_conversion(
+                    func_scope.get(_pt_name), _pt_ann, _bind_node))
+
         if self.is_generator and self.is_async:
             # `async def f(): yield x` — a real async generator. Python's
             # actual protocol for these (`__aiter__`/`__anext__`, driven by
@@ -3003,6 +3057,18 @@ class MojoFunction:
                 result = None
             except ReturnValue as ret:
                 result = ret.value
+                # A returned value converts to the DECLARED return type, the
+                # same conversion site a `var` initialiser is (see
+                # _declared_conversion): a float8 value returned as another
+                # scalar dtype is refused, and a numeric value returned as a
+                # float8 dtype is held as one so a later use is refused. The
+                # compiled path refuses both at _safe_coerce_emit's return
+                # slot; this is the interpreter half.
+                if (isinstance(result, _MojoFloat8Value)
+                        or (isinstance(self.return_type, str)
+                            and self.return_type in _FLOAT8_TYPE_NAMES)):
+                    result = interpreter._declared_conversion(
+                        result, self.return_type, getattr(ret, 'node', None))
             finally:
                 interpreter.scope = old_scope
 
@@ -4288,15 +4354,23 @@ class MojoClass:
             # and real Mojo). Previously the interpreter ignored the args,
             # leaving every field None ("unsupported operand +: None + None").
             field_names = []
+            field_anns = []
+            field_nodes = []
             for f in self.fields:
                 if self.interpreter._is_instance(f, 'VarDecl'):
                     field_names.append(f.name)
+                    field_anns.append(getattr(f, 'type_ann', None))
+                    field_nodes.append(f)
                 elif self.interpreter._is_instance(f, 'AssignStmt') \
                         and self.interpreter._is_instance(f.target, 'IdentExpr'):
                     field_names.append(f.target.name)
+                    field_anns.append(getattr(f, 'type_ann', None))
+                    field_nodes.append(f.target)
             for i, a in enumerate(args):
                 if i < len(field_names):
                     fname = field_names[i]
+                    a = self.interpreter._declared_conversion(
+                        a, field_anns[i], field_nodes[i])
                     setattr(instance, fname, a)
         return instance
 
@@ -6989,6 +7063,31 @@ class Interpreter:
         return params
 
     @staticmethod
+    def _extract_param_types(node):
+        """The declared type annotation of each named parameter (`def f(x:
+        Float32)`), name -> annotation, stars stripped like `_extract_param_names`
+        so the two agree about a `*args`/`**kwargs` parameter's name. A
+        parameter with no annotation, and every non-tuple param shape this
+        parser no longer emits, is simply absent — `MojoFunction._invoke` reads
+        only what is here, so an absent entry is "no declared type", not a
+        default type."""
+        types = {}
+        if not hasattr(node, 'params') or not node.params:
+            return types
+        for p in node.params:
+            if not isinstance(p, tuple) or len(p) < 2:
+                continue
+            if not isinstance(p[1], str) or not p[1]:
+                continue
+            name = p[0]
+            if not isinstance(name, str) or not name:
+                continue
+            name = name.lstrip('*')
+            if name:
+                types[name] = p[1]
+        return types
+
+    @staticmethod
     def _classify_params(node):
         """Classify a FunctionDef's parameters for overload-signature
         matching: (required positional names, optional/defaulted positional
@@ -7057,7 +7156,9 @@ class Interpreter:
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
                              is_async=getattr(node, 'is_async', False), interpreter=self,
-                             comptime_param_defaults=_cpd)
+                             comptime_param_defaults=_cpd,
+                             param_types=self._extract_param_types(node),
+                             return_type=getattr(node, 'return_type', None))
         spec = self._classify_params(node)
         _FUNC_DEF_LOCS[id(func)] = (self.filename, getattr(node, 'line', 0))
         if getattr(node, 'where_clause', None) is not None:
@@ -7236,7 +7337,9 @@ class Interpreter:
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                        is_generator=getattr(m, 'is_generator', False),
                                        is_async=getattr(m, 'is_async', False), interpreter=self,
-                                       comptime_param_defaults=_cpd)
+                                       comptime_param_defaults=_cpd,
+                                       param_types=self._extract_param_types(m),
+                                       return_type=getattr(m, 'return_type', None))
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -7381,7 +7484,9 @@ class Interpreter:
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                            is_generator=getattr(m, 'is_generator', False),
                                            is_async=getattr(m, 'is_async', False), interpreter=self,
-                                           comptime_param_defaults=_cpd)
+                                           comptime_param_defaults=_cpd,
+                                           param_types=self._extract_param_types(m),
+                                           return_type=getattr(m, 'return_type', None))
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -7868,6 +7973,51 @@ class Interpreter:
             return bool(value)
         return value
 
+    def _declared_conversion(self, value, type_ann, node=None):
+        """Apply the DECLARED-type conversion of an unimplemented float8 dtype
+        at a site whose conversion this engine deliberately does not model
+        generally (a parameter binding, a return slot, an assignment to a
+        declared name, a field store).
+
+        A `var` initialiser goes through `_coerce_to_declared_type` directly;
+        those sites already have the declaration in hand. These sites are
+        dynamically typed here (a plain Python rebinding has no declared type,
+        and a parameter list is a list of names), so only the float8 family is
+        converted/refused — the one family with a legality rule to enforce —
+        and every other value is returned exactly as it was, keeping this
+        engine's existing coercion behaviour. `type_ann` naming no scalar the
+        table knows (`T`, `Self`, a struct) is likewise untouched: there is no
+        conversion rule to refuse.
+        """
+        if not isinstance(type_ann, str):
+            return value
+        if not (isinstance(value, _MojoFloat8Value) or type_ann in _FLOAT8_TYPE_NAMES):
+            return value
+        if (isinstance(value, _MojoFloat8Value)
+                and type_ann not in _FLOAT8_TYPE_NAMES
+                and _SCALAR_TYPE_SPELLINGS.get(type_ann) is None):
+            return value
+        return self._coerce_to_declared_type(value, type_ann, node)
+
+    def _field_declared_type(self, obj, name):
+        """The declared type annotation of `obj`'s struct/class field `name`,
+        or None when `obj` is not a Mojo instance or the field has none.
+
+        A field store (`self.x = value`) converts to the field's declared type
+        in the compiled path (`_safe_coerce_emit`'s struct-field arm); the
+        interpreter sets the attribute directly, so the declaration has to be
+        read back from the class's field list to see the same conversion."""
+        if not isinstance(obj, MojoInstance):
+            return None
+        for f in obj._mojo_class.fields:
+            if self._is_instance(f, 'VarDecl') and f.name == name:
+                return getattr(f, 'type_ann', None)
+            if (self._is_instance(f, 'AssignStmt')
+                    and self._is_instance(f.target, 'IdentExpr')
+                    and f.target.name == name):
+                return getattr(f, 'type_ann', None)
+        return None
+
     def execute_VarDecl(self, node):
         """Execute variable declaration."""
         if node.value is None and ',' not in node.name:
@@ -7879,6 +8029,8 @@ class Interpreter:
             # its own path below, where one value feeds both names.
             container_default = self._container_field_default(getattr(node, 'type_ann', None))
             if container_default is not None:
+                if isinstance(getattr(node, 'type_ann', None), str):
+                    self.scope.declared_types[node.name] = node.type_ann
                 self.scope.define(node.name, container_default)
                 return container_default
         value = self.eval_expr(node.value)
@@ -7893,6 +8045,8 @@ class Interpreter:
                 self.scope.define(name, v)
             return value
         value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None), node)
+        if isinstance(getattr(node, 'type_ann', None), str):
+            self.scope.declared_types[node.name] = node.type_ann
         self.scope.define(node.name, value)
         return value
 
@@ -7967,6 +8121,9 @@ class Interpreter:
         it updates that local in place, identical to `define`'s prior
         behavior for anyone not intending nonlocal effects."""
         if self._is_instance(target, 'IdentExpr'):
+            _decl_ann = self.scope.declared_type(target.name)
+            if _decl_ann is not None:
+                value = self._declared_conversion(value, _decl_ann, target)
             # Check if this is a global variable
             global_vars = getattr(self, 'global_vars', set())
             if target.name in global_vars:
@@ -7987,6 +8144,8 @@ class Interpreter:
                 self.scope.define(target.name, value)
         elif self._is_instance(target, 'MemberExpr'):
             obj = self.eval_expr(target.obj)
+            value = self._declared_conversion(
+                value, self._field_declared_type(obj, target.member), target)
             setattr(obj, target.member, value)
         elif self._is_instance(target, 'SubscriptExpr'):
             obj = self.eval_expr(target.obj)
@@ -8047,7 +8206,7 @@ class Interpreter:
     def execute_ReturnStmt(self, node):
         """Execute return statement."""
         value = self.eval_expr(node.value) if hasattr(node, 'value') and node.value is not None else None
-        raise ReturnValue(value)
+        raise ReturnValue(value, node)
 
     def execute_IfStmt(self, node):
         """Execute if statement."""

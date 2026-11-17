@@ -50,9 +50,11 @@ Part 8 is fully fixed (2026-11-15 interpreter half, 2026-11-16 compiled
 host half): its doc was deleted with the interpreter fix, the follow-up
 compiled-half doc was deleted with the compiled fix, and both refusals on
 both paths are pinned by
-`test_regress_gpu_offload_validation_modular_part8.py`. Only the NVPTX
-half of the row remains, and it is target-specific (no device toolchain in
-this tree).
+`test_regress_gpu_offload_validation_modular_part8.py`. A conversion is
+refused at every DECLARED-type site — `var` initialiser, argument binding,
+return slot, assignment to a declared name and field store — not only at the
+`var` initialiser. Only the NVPTX half of the row remains, and it is
+target-specific (no device toolchain in this tree).
 
 The old mid-class part 2 is superseded by parts 5-7 and is deleted in the
 commit that adds them: it bundled three cases, one of which
@@ -94,8 +96,12 @@ What is NOT a part, and why:
   the interpreter), holds a value of one in its `double` representation
   behind a private C typedef, and refuses the two uses at the coercion
   (`emit_resolve._safe_coerce_emit`) and binary-operation
-  (`emit_exprs._lower_binary_tail`) chokepoints. Both docs were deleted with
-  their fixes; both paths are pinned by
+  (`emit_exprs._lower_binary_tail`) chokepoints. The interpreter refuses the
+  conversion at every declared-type site (var initialiser, argument
+  binding, return slot, assignment, field store), not only the `var`
+  initialiser: before 2026-11-17 the other four silently accepted a float8
+  value (exit 0, `1.0`) while the compiled path refused it. Both docs were
+  deleted with their fixes; both paths are pinned by
   `test_regress_gpu_offload_validation_modular_part8.py`. Only the NVPTX
   half of the row remains, target-specific.
 

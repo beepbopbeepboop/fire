@@ -18,7 +18,14 @@ erased to an integer. The compiled half now resolves the dtype to its private
 C type and refuses at the coercion and binary-operation chokepoints, so the
 build stops with the same two messages.
 
-Quick test: this file only (three interpreter runs, ~3 s, < 0.1 GB; three
+A conversion site is not only a `var` initialiser. Passing a float8 value as an
+argument to a parameter of another scalar dtype, returning one from a function
+declared to return another scalar, assigning one to an already-declared name,
+and storing one into a differently-typed field are the same conversion; the
+compiled path already refused all four, and the interpreter used to accept all
+four. `TestFloat8ConversionSites` pins each site on the interpreter.
+
+Quick test: this file only (eight interpreter runs, ~8 s, < 0.1 GB; four
 compiled builds, ~2 min each on a cold compiler cache).
 """
 
@@ -47,6 +54,49 @@ OPERATION_PROBE = '''def main():
     var a: Float8_e3m4 = 1.0
     var b: Float8_e3m4 = 2.0
     print(a + b)
+'''
+
+ARGUMENT_PROBE = '''def takes(x: Float32):
+    print(x)
+
+def main():
+    var a: Float8_e3m4 = 1.0
+    takes(a)
+'''
+
+RETURN_PROBE = '''def f() -> Float32:
+    var a: Float8_e3m4 = 1.0
+    return a
+
+def main():
+    print(f())
+'''
+
+ASSIGNMENT_PROBE = '''def main():
+    var a: Float8_e3m4 = 1.0
+    var b: Float32 = 0.0
+    b = a
+    print(b)
+'''
+
+FIELD_PROBE = '''struct S:
+    var x: Float32
+
+    def __init__(out self):
+        self.x = 0.0
+
+def main():
+    var a: Float8_e3m4 = 1.0
+    var s = S()
+    s.x = a
+    print(s.x)
+'''
+
+PARAMETER_OPERATION_PROBE = '''def takes(x: Float8_e3m4):
+    print(x + x)
+
+def main():
+    takes(1.0)
 '''
 
 
@@ -173,6 +223,61 @@ class TestUnsupportedFloat8Dtype(unittest.TestCase):
             combined,
             msg=f"an internal traceback is not a diagnostic\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}",
         )
+
+
+class TestFloat8ConversionSites(unittest.TestCase):
+    """Every DECLARED-type conversion site refuses, not just a var initialiser.
+
+    Before this class the interpreter's refusal lived in the `var`
+    initialiser only, so all four of these accepted a float8 value silently
+    (exit 0, `1.0`) while the compiled path refused it with Modular's
+    `conversion from 'f8e3m4' to 'f32' is not implemented`. They are one bug,
+    not four: a conversion site is wherever a value meets a declared type.
+    """
+
+    def _assert_refused(self, src: str, label: str, message: str) -> None:
+        r = _run(src, label)
+        combined = r.stdout + r.stderr
+        self.assertNotEqual(
+            r.returncode, 0,
+            msg=f"expected refusal\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}",
+        )
+        self.assertIn(
+            message, combined,
+            msg=f"missing the canonical diagnostic\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}",
+        )
+        self.assertNotIn(
+            "Traceback (most recent call last)", combined,
+            msg=f"an internal traceback is not a diagnostic\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}",
+        )
+
+    def test_argument_conversion_to_f32_is_refused(self) -> None:
+        self._assert_refused(
+            ARGUMENT_PROBE, "gpu-part8-arg",
+            "conversion from 'f8e3m4' to 'f32' is not implemented")
+
+    def test_return_conversion_to_f32_is_refused(self) -> None:
+        self._assert_refused(
+            RETURN_PROBE, "gpu-part8-return",
+            "conversion from 'f8e3m4' to 'f32' is not implemented")
+
+    def test_assignment_conversion_to_f32_is_refused(self) -> None:
+        self._assert_refused(
+            ASSIGNMENT_PROBE, "gpu-part8-assign",
+            "conversion from 'f8e3m4' to 'f32' is not implemented")
+
+    def test_field_conversion_to_f32_is_refused(self) -> None:
+        self._assert_refused(
+            FIELD_PROBE, "gpu-part8-field",
+            "conversion from 'f8e3m4' to 'f32' is not implemented")
+
+    def test_operation_on_a_float8_parameter_is_refused(self) -> None:
+        """A parameter DECLARED as a float8 dtype holds a value of it, so an
+        operation on the parameter is refused — passing `1.0` must not leave a
+        plain Float64 that computes `2.0`."""
+        self._assert_refused(
+            PARAMETER_OPERATION_PROBE, "gpu-part8-param-op",
+            "operation with a type 'f8e3m4' is not implemented")
 
 
 class TestUnsupportedFloat8DtypeCompiled(unittest.TestCase):
