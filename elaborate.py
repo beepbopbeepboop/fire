@@ -491,6 +491,58 @@ def unbound_type_parameter(template_src: str, type_args):
     return _first_unbound_type_param(params, supplied, defaults)
 
 
+def _argument_list_text(template_src: str) -> str:
+    """The text between the parentheses of the template's `def` argument list,
+    skipping the bracket parameter list (which may itself nest brackets)."""
+    i = template_src.find('def ')
+    if i < 0:
+        return ''
+    j = i
+    while j < len(template_src) and template_src[j] not in '[(':
+        j += 1
+    if j < len(template_src) and template_src[j] == '[':
+        depth = 0
+        while j < len(template_src):
+            ch = template_src[j]
+            j += 1
+            if ch == '[':
+                depth += 1
+            elif ch == ']':
+                depth -= 1
+                if depth == 0:
+                    break
+        while j < len(template_src) and template_src[j] != '(':
+            j += 1
+    if j >= len(template_src) or template_src[j] != '(':
+        return ''
+    start, depth = j, 0
+    while j < len(template_src):
+        ch = template_src[j]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return template_src[start + 1:j]
+        j += 1
+    return template_src[start + 1:]
+
+
+def unbound_param_is_inferable(template_src: str, name: str) -> bool:
+    """True when the bracket parameter `name` appears in the template's ARGUMENT
+    list (`def f[T](x: SIMD[T, 4])`). Such a parameter is filled from the call's
+    argument types, so an explicit bracket that leaves it out is not a program
+    error: the inference path binds it. A parameter with a DEFAULT expression
+    (even one `type_param_defaults` cannot evaluate to a literal, such as a
+    named constant) is fillable too. Only a parameter that neither an argument
+    nor a default can supply (`def param_fn[x: Int, y: Int](x: Int)` leaves `y`
+    nowhere to come from) is refused by the caller."""
+    if name in type_param_defaults(template_src):
+        return True
+    return re.search(r'\b%s\b' % re.escape(name),
+                     _argument_list_text(template_src)) is not None
+
+
 def bind_type_args(template_src: str, type_args):
     """{param: concrete} for a template's bracket parameters, filling any the
     caller did not supply from their DEFAULT (`type_param_defaults`). None when

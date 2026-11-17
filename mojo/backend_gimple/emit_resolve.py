@@ -3859,7 +3859,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 _tmpl = None
             _unbound = (elaborate.unbound_type_parameter(_tmpl, type_args)
                         if _tmpl else None)
-            if _unbound:
+            if _unbound and not elaborate.unbound_param_is_inferable(_tmpl, _unbound):
                 _cfn = getattr(gen, '_current_filename', '') or ''
                 _cln = getattr(node, 'line', 0) or 0
                 _clc = getattr(node, 'col', 0) or 0
