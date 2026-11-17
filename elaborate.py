@@ -454,6 +454,43 @@ def _default_type_arg(default: str):
     return m.group(1) if m else None
 
 
+def _first_unbound_type_param(params, supplied, defaults):
+    """The first bracket parameter `supplied` leaves unbound with no provable
+    default, or None when every omitted parameter can be filled.
+
+    One implementation, two readers: `bind_type_args` uses it to decide the
+    instantiation is impossible, and `unbound_type_parameter` exposes the SAME
+    answer so a call site can name the parameter in its diagnostic. Splitting
+    this rule in two is how a refusal and its message drift apart."""
+    for i, p in enumerate(params):
+        if p.startswith('*'):
+            # A trailing variadic parameter needs at least one supplied
+            # argument; an empty expansion has no lifting shape.
+            return p if len(supplied) <= i else None
+        if i >= len(supplied) and _default_type_arg(defaults.get(p, '')) is None:
+            return p
+    return None
+
+
+def unbound_type_parameter(template_src: str, type_args):
+    """The first bracket parameter a call's EXPLICIT `type_args` leaves
+    unbound and cannot fill from a default, or None when the bracket is
+    complete enough to instantiate.
+
+    This is `bind_type_args`'s "missing and no provable default" answer, named
+    so a caller can report which parameter it is (`failed to infer parameter
+    'y' of 'param_fn'`) instead of silently declining the instantiation. See
+    `_first_unbound_type_param` for the shared rule."""
+    params = type_param_names(template_src)
+    if not params:
+        return None
+    supplied = list(type_args or ())
+    if not any(p.startswith('*') for p in params) and len(supplied) > len(params):
+        supplied = supplied[:len(params)]
+    defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
+    return _first_unbound_type_param(params, supplied, defaults)
+
+
 def bind_type_args(template_src: str, type_args):
     """{param: concrete} for a template's bracket parameters, filling any the
     caller did not supply from their DEFAULT (`type_param_defaults`). None when
@@ -479,6 +516,8 @@ def bind_type_args(template_src: str, type_args):
         if len(supplied) > len(params):
             supplied = supplied[:len(params)]
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
+    if _first_unbound_type_param(params, supplied, defaults) is not None:
+        return None
     targs = {}
     for i, p in enumerate(params):
         if p.startswith('*'):
@@ -487,17 +526,9 @@ def bind_type_args(template_src: str, type_args):
             # position), and it needs at least one argument (an empty
             # `chain()` has no measured lifting shape — the seed's
             # container gate already requires >= 1 argument).
-            if len(supplied) <= i:
-                return None
             targs[p] = list(supplied[i:])
             break
-        if i < len(supplied):
-            targs[p] = supplied[i]
-            continue
-        dflt = _default_type_arg(defaults.get(p, ''))
-        if dflt is None:
-            return None
-        targs[p] = dflt
+        targs[p] = supplied[i] if i < len(supplied) else _default_type_arg(defaults.get(p, ''))
     return targs
 
 
@@ -3593,20 +3624,13 @@ class Elaborator:
         self.gcc = gcc
 
     def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None,
-                               arg_ctypes=None, origin_module: str | None = None,
-                               generic_paths: dict | None = None) -> dict:
+                               arg_ctypes=None, origin_module: str | None = None) -> dict:
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
-        via the CAS. Returns a dict {symbol, object, ret, params, nested_objects}
-        or None.
+        via the CAS. Returns a dict {symbol, object, ret, params} or None.
 
         `arg_count` (the call's actual argument count, when known) disambiguates
         same-named generic overloads distinguished only by arity (e.g.
         itertools.product's 2/3/4-iterable versions) — see extract_fn_source.
-
-        `generic_paths` ({name: source path}) are the generic functions the
-        caller can see. A body that calls one of them is elaborated too, and the
-        objects that call needs are returned in `nested_objects`, which the
-        caller must link in beside `object` (see monomorphize.instantiate).
 
         Elaborate-once-ever: the instantiation is content-addressed, so a repeat
         (here or in another program) is a cache hit."""
@@ -3632,18 +3656,15 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        nested_objects: list = []
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      conformance_bases=_where_conformance_bases(module_src),
-                                                     origin_module=origin_module,
-                                                     generic_paths=generic_paths,
-                                                     links_out=nested_objects)
+                                                     origin_module=origin_module)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
         if ret is None:
             ret = mm.defined_return_ctype(mangled) or 'void'
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
-                'nested_objects': nested_objects, 'ret': ret, 'params': ptypes}
+                'ret': ret, 'params': ptypes}
 
     def elaborate_generic_struct(self, module_src: str, struct_name: str,
                                  type_args, nested=None) -> dict:
@@ -3768,8 +3789,7 @@ class Elaborator:
 
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes,
                                         origin_module: str | None = None,
-                                        arg_mojo_types=None,
-                                        generic_paths: dict | None = None) -> dict:
+                                        arg_mojo_types=None) -> dict:
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
         tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
@@ -3783,8 +3803,7 @@ class Elaborator:
             return self.elaborate_generic_call(module_src, fn_name, type_args,
                                                arg_count=len(arg_ctypes),
                                                arg_ctypes=arg_ctypes,
-                                               origin_module=origin_module,
-                                               generic_paths=generic_paths)
+                                               origin_module=origin_module)
         except ConformanceError:
             # A conformance failure inferred from an ERASED argument type is
             # a fact about this codegen's C representation, not about the

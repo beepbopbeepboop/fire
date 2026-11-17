@@ -4114,11 +4114,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             _api24 = gen._generator_api.get(_gf)
             if _api24 is not None:
                 gen._generator_var_api[gen._cname(_pb)] = _api24
-                # A parameter crossed a call boundary: the caller holds the
-                # value and may drain it again after this body returns, so
-                # a drain here must not destroy it (see
-                # _generator_value_owned).
-                gen._generator_value_owned[gen._cname(_pb)] = False
 
     params_str = ', '.join(param_strs) if param_strs else 'void'
     # Record that this function takes varargs so call sites can pack args

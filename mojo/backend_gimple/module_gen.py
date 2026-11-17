@@ -1927,109 +1927,6 @@ def _emit_reflection_fwd_decls(self, parts):
     return elem_repr_fwd_decls
 
 
-def _populate_decorated_method_wrapped(self, stmts, imported_stmts) -> None:
-    """Fill `_getattr_decorated_arms` / `_decorated_method_wrapped` /
-    `_decorated_method_dec_csym` for every method whose decorator is a
-    BARE-NAME decorator that resolves to a function of THIS closure whose
-    return type is a scalar word — i.e. a decorator that installs a
-    compiled closure in place of the raw method (`@contextual` in
-    Tools/cases_generator/parsing.py).
-
-    Runs BEFORE the body-emission loop (see its call site in
-    gen_module_impl) because `_lower_struct_method_call` (emit_methods)
-    reads the table while LOWERING a call site: `psr.definition()` in
-    parser.py's `parse_files` must route through the wrapper value (which
-    sets the parsed node's `context`) rather than the raw method symbol.
-    The `_emit_struct_method_prototypes` walk that used to detect these
-    runs after the bodies, so detection living there could never be seen
-    by the call sites it exists for — the analyzer's `first_token` assert
-    (COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2, doc deleted with the fix).
-
-    It reads `func_return_types` (shared across gens, populated by the
-    Pass 1/2 inference this pre-pass sits after) to gate on a scalar
-    return: a decorator whose result is a by-value struct has no word
-    spelling `mojo_maybe_bound_call_N` can consume, and keeps the
-    historical raw behavior. `staticmethod`/`classmethod` are the special
-    decorators the other passes own — excluded explicitly. A
-    `@deco(args)` / `@mod.deco` spelling has no lowering here yet and is
-    skipped by the bare-name gate, exactly as the prototype walk's own
-    gate reads it, so the two passes cannot disagree about what is
-    decorated.
-
-    First-occurrence-wins per (struct, method): the getter name is a pure
-    function of the pair, so a later gen seeing the same struct (the
-    shared-dict aliasing the temp_gens get) re-finds the entry and does
-    nothing. The forward declaration is registered in `_external_protos`
-    (shared; the ROOT preamble emits it ahead of every spliced module
-    section, so a call site in an alphabetically-earlier module — parser
-    sorts before parsing — sees the declaration before the definition
-    that lands in the defining module's section).
-    """
-    if getattr(self, '_getattr_decorated_arms', None) is None:
-        self._getattr_decorated_arms: dict = {}
-    if getattr(self, '_decorated_method_wrapped', None) is None:
-        self._decorated_method_wrapped: dict = {}
-    if getattr(self, '_decorated_method_dec_csym', None) is None:
-        self._decorated_method_dec_csym: dict = {}
-    _dw_sd_list = []
-    for _dw_s0 in (stmts or []):
-        if isinstance(_dw_s0, StructDef) and not _is_enum_class_def(_dw_s0):
-            _dw_sd_list.append(_dw_s0)
-    if self.do_imports:
-        for _dw_s0 in (imported_stmts or []):
-            if isinstance(_dw_s0, StructDef) and not _is_enum_class_def(_dw_s0):
-                _dw_sd_list.append(_dw_s0)
-    for _dw_sd in _dw_sd_list:
-        _dw_meths = _dw_sd.methods
-        for _dw_mk in range(len(_dw_meths)):
-            _dw_m = _dw_meths[_dw_mk]
-            _dw_sn = _as_str(_dw_sd.name)
-            _dw_mn = _as_str(_dw_m.name)
-            if (_dw_sn, _dw_mn) in self._decorated_method_wrapped:
-                continue
-            if 'property' in (getattr(_dw_m, 'decorators', None) or []):
-                # The property half has its own arm (getter-call, not
-                # wrapper) — the prototype walk owns it.
-                continue
-            _dw_dec_csym = None
-            for _dw_d0 in (getattr(_dw_m, 'decorators', None) or []):
-                _dw_ds = _as_str(_dw_d0)
-                # `@deco(args)` / `@mod.deco` are NODES (CallExpr/MemberExpr),
-                # not bare names, and have no lowering here yet: the bare-name
-                # gate below skips them. Guard the `re` call on the string
-                # test the prototype walk's own gate uses (emit_infra's
-                # `isinstance(_dwp[1], str)`), because `_as_str` is identity
-                # and a node reached it unchanged.
-                if not isinstance(_dw_ds, str):
-                    continue
-                if (_dw_ds in ('staticmethod', 'classmethod', 'property')
-                        or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', _dw_ds)):
-                    continue
-                _dw_csym_c = _as_str(self._func_csym(_dw_ds))
-                if (_dw_csym_c not in self.func_return_types
-                        and _dw_ds not in self.func_return_types):
-                    continue
-                _dw_dret = self.func_return_types.get(_dw_csym_c)
-                if _dw_dret is None:
-                    _dw_dret = self.func_return_types.get(_dw_ds)
-                if _as_str(_dw_dret) in ('int64_t', 'int'):
-                    _dw_dec_csym = _dw_csym_c
-                    break
-            if _dw_dec_csym is None:
-                continue
-            _dw_getter = f'_wrapped_{_safe_name(_dw_sn)}_{_safe_name(_dw_mn)}'
-            if _dw_sn not in self._getattr_decorated_arms:
-                self._getattr_decorated_arms[_dw_sn] = {}
-            self._getattr_decorated_arms[_dw_sn][_dw_mn] = _dw_getter
-            self._decorated_method_wrapped[(_dw_sn, _dw_mn)] = _dw_getter
-            self._decorated_method_dec_csym[(_dw_sn, _dw_mn)] = _dw_dec_csym
-            # Preamble forward declaration: the getter definition lands in
-            # the DEFINING module's spliced section, which need not be the
-            # first one; the call sites live in other modules' sections.
-            if _dw_getter not in self._external_protos:
-                self._external_protos[_dw_getter] = ('int64_t', [])
-
-
 def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
     """One prototype per struct method's mangled C symbol, and the record of
     which METHOD names its generated `_mojo_getattr_<Struct>` may answer as a
@@ -2053,38 +1950,7 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
     _resume/_value/_destroy` coroutine API; see `_lower_bound_method_value`'s
     refusal, which is the same decision from the value side).
     """
-    # PRESERVE any table a shared gen already holds: an imported module's
-    # temp_gen aliases the ROOT's dict (emit_resolve's import-sharing block —
-    # the same share the `_virt_dispatch_helpers` line carries), so an
-    # unconditional re-init here would orphan the arms this pass records for
-    # the imported module's structs before the ROOT's `_emit_reflection_
-    # dispatch` — the only gen that emits the `_mojo_getattr_<Struct>`
-    # definitions — ever sees them (the erased-receiver property read on an
-    # imported dataclass's inherited `@property` then raised AttributeError).
-    if getattr(self, '_getattr_method_arms', None) is None:
-        self._getattr_method_arms: dict = {}
-    if getattr(self, '_getattr_property_arms', None) is None:
-        self._getattr_property_arms: dict = {}
-    # A method whose decorator is a same-module function (`@contextual` in
-    # Tools/cases_generator/parsing.py): the class attribute is the
-    # decorator's RESULT, a compiled closure holding the raw function —
-    # `sn -> {mn -> <lazy getter C name>}`, read by `_emit_reflection_
-    # dispatch` (the getattr arm returns the wrapped VALUE, never a
-    # binding to the raw symbol) and by `gen._decorated_method_wrapped`
-    # ((sn, mn) -> the same getter, the call-site routing in
-    # emit_methods' _lower_struct_method_call). Same aliasing story as the
-    # two tables above: an imported module's temp_gen shares the ROOT's
-    # dict, so init it or never.
-    if getattr(self, '_getattr_decorated_arms', None) is None:
-        self._getattr_decorated_arms: dict = {}
-    if getattr(self, '_decorated_method_wrapped', None) is None:
-        self._decorated_method_wrapped: dict = {}
-    # Decorator symbols for which this walk has already emitted the
-    # file-scope guarded declaration (see the getter branch below). Local,
-    # not on self: the preprocessor macro state it mirrors is per-walk
-    # emission order within this TU, and a later section that skips the
-    # guard relies on this walk's declaration still being in scope.
-    _dw_guard_emitted: set = set()
+    self._getattr_method_arms: dict = {}
     for sd in struct_defs:
         if not isinstance(sd, StructDef):
             continue
@@ -2185,110 +2051,11 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
             # bound method to the first overload is a value and a link error is
             # not.
             _arms_sn = _as_str(sd.name)
+            if _arms_sn not in self._getattr_method_arms:
+                self._getattr_method_arms[_arms_sn] = {}
             _arms_mn = _as_str(m.name)
-            # A `@property` read is the getter's RESULT, not a bound method
-            # (the typed-receiver read lowers to a call of the getter —
-            # emit_exprs' property arm) — so it gets ONLY a call arm, keyed
-            # to the same getter symbol the prototype above declared. It must
-            # NOT also record a bound-method arm: the method arms are emitted
-            # first in `_emit_reflection_dispatch`, and a first arm answers
-            # the read with a binding — the exact value mismatch this split
-            # exists to avoid (a real Python `obj.prop` never yields a
-            # binding). Gated to scalar/pointer return types: a by-value-
-            # struct return has no int64_t box spelling, and those keep the
-            # pre-arm behavior.
-            if 'property' in (getattr(m, 'decorators', None) or []):
-                _pa_ret = _as_str(ret)
-                if (_pa_ret.endswith(' *') or _pa_ret in ('int64_t', 'int', '_Bool')):
-                    _pa = self._getattr_property_arms
-                    if _arms_sn not in _pa:
-                        _pa[_arms_sn] = {}
-                    if _arms_mn not in _pa[_arms_sn]:
-                        _pa[_arms_sn][_arms_mn] = _as_str(mangled_name)
-            else:
-                # A method whose decorator is a SAME-MODULE function: the
-                # class attribute is the decorator's RESULT, a compiled
-                # closure holding the raw function — NOT the raw function
-                # itself. `@contextual def inst_def(self)` in
-                # Tools/cases_generator/parsing.py installs
-                # `contextual(inst_def)`, and the call must run that
-                # wrapper (it sets the parsed node's `context`, which
-                # `Node.first_token` asserts non-None); the historical
-                # behavior dropped every non-special decorator and called
-                # the raw symbol, so `context` stayed None and the
-                # analyzer's `assert context is not None` trapped
-                # (bugs/COMPILE_FAIL_Tools_cases_generator_analyzer-part3-
-                # part2.md). DETECTION lives in
-                # `_populate_decorated_method_wrapped` — the early pre-pass
-                # the call-site routing in emit_methods'
-                # `_lower_struct_method_call` reads (detection that only
-                # ran HERE would be too late: this walk sits after the
-                # body loop that lowers the call sites it exists for).
-                # This walk only EMITS the lazy getter definition the
-                # shared table names, plus the getattr arm the ROOT's
-                # `_mojo_getattr_<S>` answers with. The getter is
-                # NON-STATIC deliberately: the ROOT preamble forwards it
-                # as `extern` (the call sites live in other modules'
-                # spliced sections, ahead of this definition), and a
-                # static definition would contradict that declaration; the
-                # shared `_emitted_decorated_getters` keeps one definition
-                # per TU no matter how many sections see the struct.
-                _dw_getter = self._decorated_method_wrapped.get((_arms_sn, _arms_mn))
-                if _dw_getter is not None:
-                    if _arms_mn not in self._getattr_decorated_arms.get(_arms_sn, {}):
-                        if _arms_sn not in self._getattr_decorated_arms:
-                            self._getattr_decorated_arms[_arms_sn] = {}
-                        self._getattr_decorated_arms[_arms_sn][_arms_mn] = _dw_getter
-                    _dw_dec_csym = self._decorated_method_dec_csym.get((_arms_sn, _arms_mn))
-                    if (_dw_dec_csym is not None
-                            and _dw_getter not in self._emitted_decorated_getters):
-                        # LAZY, not module-init: the getter builds the
-                        # wrapper on first use, so no ordering against the
-                        # decorator's own definition is needed; the guarded
-                        # FILE-SCOPE declaration below covers the
-                        # declaration-order gap the same way the method
-                        # prototypes above do. File scope, NOT inside the
-                        # getter body: a declaration inside the first
-                        # getter's braces is block-scoped and invisible to
-                        # every sibling getter (the 14 `@contextual`
-                        # methods of Tools/cases_generator/parsing.py),
-                        # which then called the decorator implicit —
-                        # gcc: "incompatible implicit declaration of
-                        # function 'parsing_contextual_...'" (measured,
-                        # analyzer-inline build iN3). One guard per
-                        # decorator symbol per walk: a later section
-                        # re-seeing the same symbol finds the macro
-                        # already defined and skips, with the earlier
-                        # file-scope declaration still visible there.
-                        if _dw_dec_csym not in _dw_guard_emitted:
-                            parts.append(
-                                f'#ifndef _MOJO_STUB_{_dw_dec_csym}\n'
-                                f'#define _MOJO_STUB_{_dw_dec_csym}\n'
-                                f'int64_t {_dw_dec_csym} (int64_t);\n'
-                                f'#endif\n')
-                            _dw_guard_emitted.add(_dw_dec_csym)
-                        self._emitted_decorated_getters.add(_dw_getter)
-                        parts.append(
-                            f'int64_t {_dw_getter} (void) {{\n'
-                            f'  static int64_t _w = 0;\n'
-                            f'  if (!_w) {{ _w = {_dw_dec_csym} ((int64_t)(intptr_t){_as_str(mangled_name)}); }}\n'
-                            f'  return _w;\n'
-                            f'}}')
-                else:
-                    # FIRST
-                    # occurrence of a source name wins: an overloaded method is two
-                    # (or more) symbols and one `attr` string, and this is the same
-                    # symbol whose prototype is directly above. `_lower_bound_method_
-                    # value`'s own overload rule falls back to the UNSUFFIXED symbol
-                    # when a name is overloaded, which no overload defines (measured:
-                    # `f = c.m` with two `def m` overloads links `Undefined symbols:
-                    # _C_m`) — the arm deliberately does not follow it there, because a
-                    # bound method to the first overload is a value and a link error is
-                    # not.
-                    if _arms_sn not in self._getattr_method_arms:
-                        self._getattr_method_arms[_arms_sn] = {}
-                    if _arms_mn not in self._getattr_method_arms[_arms_sn]:
-                        self._getattr_method_arms[_arms_sn][_arms_mn] = _as_str(mangled_name)
+            if _arms_mn not in self._getattr_method_arms[_arms_sn]:
+                self._getattr_method_arms[_arms_sn][_arms_mn] = _as_str(mangled_name)
 
         _emitted_base: set[str] = set()
         _z9_meths = sd.methods
@@ -2339,15 +2106,7 @@ def _emit_reflection_dispatch(self, parts):
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
         _mm_arms_sn = self._getattr_method_arms.get(_as_str(sn))
-        _pp_arms_sn = self._getattr_property_arms.get(_as_str(sn))
-        # A FIELDLESS struct whose surface is a decorated method (the
-        # decorator's result, see the arm below) gets a helper too: the
-        # dispatch table named below is driven from this loop's emission
-        # set, so a struct this predicate skips must never be appended
-        # there either, or the table dangles on an unemitted helper.
-        _dc_arms_sn = (self._getattr_decorated_arms or {}).get(_as_str(sn))
-        if (len(fields) == 0 and not _mm_arms_sn and not _pp_arms_sn
-                and not _dc_arms_sn):
+        if len(fields) == 0 and not _mm_arms_sn:
             continue
         get_lines = []
         set_lines = []
@@ -2403,32 +2162,8 @@ def _emit_reflection_dispatch(self, parts):
                     f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)obj->{safe_f};')
                 set_lines.append(
                     f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; {_pset}return; }}')
-                # The DICT SLOT's kind, not just its word: a C `_Bool` field
-                # is a Python bool, so it stores through the bool setter
-                # (kind 3) — the pair's kinds row then spells the value
-                # True/False through any f-string over
-                # `self.__dict__.items()`, where the plain int store (kind 0)
-                # printed 1/0 and CPython prints True/False (measured,
-                # Tools/cases_generator/analyzer.py's `Properties.escapes:
-                # bool`). The stored WORD is unchanged (a _Bool is exactly
-                # its 0/1), so no value consumer sees anything new.
-                _ad_setter = 'mojo_dict_set_int'
-                _ad_arg = f'(int64_t)obj->{safe_f}'
-                if ftype == '_Bool':
-                    _ad_setter = 'mojo_dict_set_bool'
-                    _ad_arg = f'obj->{safe_f}'
-                elif (ftype in ('int64_t', 'int') and _asdict_scalar_none_annot(
-                        (getattr(self, '_field_annotations', None) or {}).get(
-                            sn + '.' + fname, ''))):
-                    # `int | None`: the word 0 may be a None (this word
-                    # model's None IS the zero word) — the slot's kind is
-                    # decided from the word by the setter (see
-                    # `mojo_dict_set_opt_int`), so `tier: None` prints
-                    # `None` and `const_oparg: -1` prints `-1`.
-                    _ad_setter = 'mojo_dict_set_opt_int'
-                    _ad_arg = f'obj->{safe_f}'
                 asdict_lines.append(
-                    f'  {_ad_setter}(_r, "{fname}", {_ad_arg});')
+                    f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
             name_lits.append(f'"{fname}"')
         # A METHOD name is answered with the SAME value a typed receiver's
         # `c.add` already builds — `mojo_bound_method_new(<the method's own
@@ -2475,40 +2210,6 @@ def _emit_reflection_dispatch(self, parts):
                     f'  if (strcmp(attr, "{_mm_attr}") == 0) '
                     f'return (int64_t)(intptr_t)mojo_bound_method_new ('
                     f'(void *){_mm_sym}, (void *)obj);')
-        # A `@property` read on an erased receiver must answer the getter's
-        # RESULT — the same value a typed receiver's read produces (the
-        # getter's own compiled body, called with `obj` as its implicit
-        # self). The getter symbol is THIS struct's own mangled copy of the
-        # (possibly inherited) property: `_merge_struct_inheritance` puts
-        # the base's FunctionDef into every subclass's merged `.methods`,
-        # and the prototype walk above declared one symbol per (struct,
-        # property) pair — the same single-walk guarantee the bound-method
-        # arms just above rest on. Fields and method arms stay FIRST (a
-        # field or a method binding wins a name clash, exactly as in the
-        # typed path), and a miss falls through to `mojo_obj_getattr`
-        # unchanged. Generator-valued properties have no ordinary C symbol
-        # (the prototype walk skips them), so they are never armed here.
-        _pp_arms: dict = self._getattr_property_arms.get(_as_str(sn))
-        if _pp_arms:
-            for _pp_attr0 in _pp_arms:
-                _pp_attr = _as_str(_pp_attr0)
-                get_lines.append(
-                    f'  if (strcmp(attr, "{_pp_attr}") == 0) '
-                    f'return (int64_t)(intptr_t){_as_str(_pp_arms[_pp_attr])}(obj);')
-        # A decorated method's attribute is the decorator's RESULT (the
-        # wrapped closure value), not a binding to the raw method symbol —
-        # the same split as the property arms above, whose answer is the
-        # getter's result rather than a binding. The lazy getter
-        # (`_emit_struct_method_prototypes`) builds the wrapper on first
-        # use; the value is the word `mojo_maybe_bound_call_N` consumes
-        # with the receiver in the first argument slot.
-        _dc_arms: dict = self._getattr_decorated_arms.get(_as_str(sn))
-        if _dc_arms:
-            for _dc_attr0 in _dc_arms:
-                _dc_attr = _as_str(_dc_attr0)
-                get_lines.append(
-                    f'  if (strcmp(attr, "{_dc_attr}") == 0) '
-                    f'return {_as_str(_dc_arms[_dc_attr])}();')
         # Inlined `_fieldnames_append_lines` (was a separate function
         # taking `name_lits: list`, called once, at the single call site
         # below) — self-hosted codegen has no mechanism that carries a
@@ -2747,26 +2448,6 @@ def _emit_reflection_dispatch(self, parts):
                     body_lines.append('  /* a string literal: not ours to free */')
             body_lines.append('  return mojo_str_cat_free(_buf, ")");')
             repr_body = "\n".join(body_lines) + "\n"
-        # A user's own `__repr__` (recorded in `func_return_types` by the
-        # method-emission pass as `char *`) OVERRIDES the field dump in the
-        # struct repr itself, not just in the element shim below: CPython
-        # prints any object -- a container element, a struct field, a bare
-        # value -- with its user `repr`, and every path that reaches this
-        # dumper (the type-tag dispatch in `_mojo_generic_elem_repr` and
-        # `_mojo_dispatch_repr`, which struct-allocated values with no other
-        # recorded identity fall through to) must agree with it. Without
-        # this override a Token prints `Token(filename='', kind='INT', ...)`
-        # where CPython prints `INT('int', 159:17:20)` -- the "class a"
-        # half of bugs/COMPILE_FAIL_Tools_cases_generator_analyzer-
-        # part3-part2.md. Computed HERE, before the body is chosen, so the
-        # struct repr and the element shim below share one gate and cannot
-        # drift (they are still emitted as two functions, but both defer to
-        # the same user symbol when the gate is open).
-        _erep = self._struct_method_csym(sn, '__repr__', '')
-        _erep_ok = self.func_return_types.get(_erep) == 'char *'
-        if _erep_ok:
-            repr_body = (f"  if (!obj) return strdup(\"None\");\n"
-                         f"  return {_erep} (obj);\n")
         refl_parts.append(
             f"static char * _mojo_repr_{sn} ({sn} *obj) {{\n"
             + repr_body +
@@ -2780,11 +2461,14 @@ def _emit_reflection_dispatch(self, parts):
         # behaviour even where every ABI this targets passes it in the same
         # register.
         #
-        # The gate above already puts a user `__repr__` into
-        # `_mojo_repr_{sn}` itself, so the shim's fallback reaches it too;
-        # the direct call is kept for the narrow case where the struct gets
-        # an element shim but no reflective field dump (a fieldless struct),
-        # where `_mojo_repr_{sn}` does not exist.
+        # A user's own `__repr__` wins, which is CPython's rule for a
+        # container element (a list reprs its elements with `repr`, not with
+        # `str`, and not with a field dump) and the reason this is a shim and
+        # not just `_mojo_repr_{sn}`: the field dump cannot see the dunder, and
+        # a struct-allocated element has no type tag for
+        # `_mojo_dispatch_repr` to dispatch on.
+        _erep = self._struct_method_csym(sn, '__repr__', '')
+        _erep_ok = self.func_return_types.get(_erep) == 'char *'
         elem_repr_names.add(sn)
         # Published on the emitter, because "is there a shim for this struct?"
         # is asked from the STORE lowerings (a list or a dict literal /
@@ -2837,47 +2521,28 @@ def _emit_reflection_dispatch(self, parts):
             _pd_lines.append("  return 0;")
             _pd_lines.append("}")
             parts.append("\n".join(_pd_lines) + "\n")
-        # One list for ALL five tag tables below: the loop above emits
-        # `_mojo_getattr_<S>` / `_mojo_setattr_<S>` / `_mojo_fieldnames_<S>` /
-        # `_mojo_asdict_<S>` for exactly this set — every field-bearing struct
-        # (`reflect_emitted`) plus every fieldless struct it kept for its
-        # METHOD / PROPERTY / DECORATED arms. Naming any struct whose helper
-        # the loop skipped dangles on an unemitted function; naming none of
-        # the loop's arm-kept fieldless structs leaves their tag case out of
-        # the switch, and the read falls through to `mojo_obj_getattr`, which
-        # raises — the measured case is analyzer.py's fieldless `Flush`
-        # (only `@property` name/size/properties): `part.name` on a Flush
-        # died `AttributeError: name` while `_mojo_getattr_Flush` sat
-        # emitted and uncallable (bugs/COMPILE_FAIL_Tools_cases_generator_
-        # analyzer-part3-part2.md). The REPR tables and the is_dataclass
-        # `_known[]` below stay on `reflect_emitted`: `_mojo_repr_<S>` is
-        # emitted for field-bearing structs alone, and a fieldless class is
-        # not a dataclass in CPython either.
         _getattr_emitted = list(reflect_emitted)
         for _sn2 in reflect_structs:
             if _sn2 in _getattr_emitted:
                 continue
-            _sn2_s = _as_str(_sn2)
-            if (_sn2_s in (self._getattr_method_arms or {})
-                    or _sn2_s in (self._getattr_property_arms or {})
-                    or _sn2_s in (self._getattr_decorated_arms or {})):
+            if _as_str(_sn2) in (self._getattr_method_arms or {}):
                 _getattr_emitted.append(_sn2)
         tag_cases_get = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'
             for sn in _getattr_emitted)
         tag_cases_set = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) {{ _mojo_setattr_{sn}(({sn} *)obj, attr, val); return; }}'
-            for sn in _getattr_emitted)
+            for sn in reflect_emitted)
         tag_cases_fields = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_fieldnames_{sn}();'
-            for sn in _getattr_emitted)
+            for sn in reflect_emitted)
         tag_cases_asdict = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_asdict_{sn}(({sn} *)obj);'
-            for sn in _getattr_emitted)
+            for sn in reflect_emitted)
         tag_cases_copy = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) {{ {sn} *_n = ({sn} *)malloc(sizeof({sn})); '
             f'memcpy(_n, obj, sizeof({sn})); return (int64_t)(intptr_t)_n; }}'
-            for sn in _getattr_emitted)
+            for sn in reflect_emitted)
         tag_set_literal = ", ".join(
             str(_struct_type_id(sn)) for sn in reflect_emitted)
         if len(tag_set_literal) == 0:
@@ -3261,69 +2926,6 @@ def _emit_reflection_dispatch(self, parts):
             )
         )
         parts.append('')
-        # Virtual-dispatch helper DEFINITIONS: one function per
-        # (base struct, method) pair whose call sites asked for dynamic
-        # resolution (emit_methods._virt_dispatch_plan registers them;
-        # the prototypes ride the section emitted right after
-        # _emit_struct_method_prototypes, ahead of the function bodies).
-        # The switch mirrors _mojo_dispatch_getattr's own shape below:
-        # read the receiver's stamped __mojo_type_id and forward to the
-        # concrete type's method — the generator trampoline
-        # `__mgco_<C>_<m>_start` for a compiled generator (the handle the
-        # yield-from/for consumer drives via mojo_iter_gen_handle), the
-        # ordinary `{qualifier_}C_m` otherwise. The default arm runs the
-        # base's own definition — CPython's MRO fallback for an object
-        # whose type never overrides the method.
-        _vdh2 = getattr(self, '_virt_dispatch_helpers', None) or {}
-        for _vdn in sorted(_vdh2):
-            _vds = _vdh2[_vdn]
-            _vlines = []
-            _vp = []
-            for _vi, _pt in enumerate(_vds['param_ctypes']):
-                if _vi:
-                    _vp.append(', ')
-                _vp.append(_pt + ' __' + ('self' if _vi == 0 else 'a' + str(_vi - 1)))
-            _vlines.append('static ' + _vds['ret'] + ' ' + _vdn + ' ('
-                           + ''.join(_vp) + ') {')
-            _vlines.append(
-                '  int64_t _vtid = mojo_read_type_tag_safe '
-                '((int64_t)(intptr_t)__self);')
-            for _vc, _vcallee, _vselfc, _vk in _vds['cases']:
-                _cast = '(' + _vselfc + ')__self'
-                if len(_vds['param_ctypes']) > 1:
-                    _args = []
-                    for _ai in range(1, len(_vds['param_ctypes'])):
-                        _args.append('__a' + str(_ai - 1))
-                    _callargs = _cast + ', ' + ', '.join(_args)
-                else:
-                    _callargs = _cast
-                _taglit = str(_struct_type_id(_vc))
-                if _vk is None:
-                    # Ordinary method: return its value directly.
-                    _retexpr = ('(' + _vds['ret'] + ')'
-                                + _vcallee + ' (' + _callargs + ')')
-                else:
-                    # Generator trampoline: register the live handle
-                    # (mojo_gen_note_a3, vkind-classified — see the plan)
-                    # so the generic `yield from` / for consumer's
-                    # mojo_iter_gen_handle can drain it; it returns the
-                    # same handle word.
-                    _retexpr = ('mojo_gen_note_a3((int64_t)(intptr_t)'
-                                + _vcallee + ' (' + _callargs + '), '
-                                + str(_vk) + ')')
-                _vlines.append('  if (_vtid == ' + _taglit + ') { return '
-                               + _retexpr + '; }')
-            _da = []
-            for _di in range(1, len(_vds['param_ctypes'])):
-                _da.append('__a' + str(_di - 1))
-            _default_args = '__self'
-            if _da:
-                _default_args = '__self, ' + ', '.join(_da)
-            _vlines.append('  return ' + _vds['default_callee']
-                           + ' (' + _default_args + ');')
-            _vlines.append('}')
-            parts.append("/* virtual dispatch: " + _vdn + " */\n"
-                         + "\n".join(_vlines) + "\n")
 
 
 
@@ -4070,39 +3672,6 @@ def _cattr_value_is_constant(v) -> bool:
     may read the enclosing function's locals and is stored per execution."""
     return isinstance(v, (IntLiteral, FloatLiteral, StringLiteral, BoolLiteral,
                           NoneLiteral))
-
-
-def _asdict_scalar_none_annot(ann) -> bool:
-    """True when a struct FIELD's annotation is a two-way union of a scalar
-    primitive and None (`int | None`, `Optional[int]`) — the one case where
-    the field's stored word is a zero that may MEAN None (this word model's
-    None IS the zero word), so the `_mojo_asdict_<S>` store must record the
-    slot's kind from the word (`mojo_dict_set_opt_int`: kind 4 when zero,
-    kind 0 otherwise) instead of the plain int kind a `mojo_dict_set_int`
-    records. Without it the f-string over `self.__dict__.items()` prints
-    `0` where CPython prints `None` (measured, Tools/cases_generator/
-    analyzer.py's `Properties.tier: int | None`). A `bool | None` is NOT
-    admitted: its C type is `_Bool`, which the bool setter tags kind 3
-    unconditionally, and a None-in-a-bool is a word the runtime cannot tell
-    apart anywhere else either."""
-    if not isinstance(ann, str):
-        return False
-    s = ann.strip()
-    m = re.match(r'^Optional\[\s*(.+?)\s*\]$', s)
-    if m:
-        _parts = [m.group(1).strip(), 'None']
-    elif '|' in s:
-        _parts = [p.strip() for p in s.split('|')]
-    else:
-        return False
-    _nones = 0
-    _rest = ''
-    for _p in _parts:
-        if _p == 'None':
-            _nones += 1
-        elif _p:
-            _rest = _p
-    return _nones == 1 and _rest in ('int', 'float')
 
 
 def _cattr_value_is_cell(gen, cls_name: str, v) -> bool:
@@ -6742,23 +6311,6 @@ def _gmp_class_attr_globals(self, _cai_structs: list, class_attr_decls: list[str
                         elif isinstance(v, IntLiteral):
                             ctype = 'int64_t'
                             class_attr_inits.append(f'  {mangled} = {_signed_int64_c_literal(v.value)};')
-                        elif isinstance(v, UnaryOp) and v.op == '-' and isinstance(v.operand, IntLiteral):
-                            # `-1` parses as `UnaryOp('-', IntLiteral(1))`, not a
-                            # negative literal node (the same shape the
-                            # `_arg_scalar_type` pass above looks through), so
-                            # without this branch it fell into the "seeded by no
-                            # one" else below and the class attribute stayed
-                            # ZERO: Tools/cases_generator/analyzer.py's
-                            # `const_oparg: int = -1` (and `Uop._size` /
-                            # `Instruction.opcode` / `PseudoInstruction.opcode`,
-                            # all `= -1`) read back 0, and Properties.dump
-                            # printed `const_oparg: 0` where CPython prints
-                            # `const_oparg: -1`. The sign cannot change the
-                            # type, so the operand's answer — int64_t — is the
-                            # type; negate the value for the C literal.
-                            ctype = 'int64_t'
-                            class_attr_inits.append(
-                                f'  {mangled} = {_signed_int64_c_literal(-v.operand.value)};')
                         else:
                             # A reference to a module global is stored by the
                             # class statement's top-level store (see
@@ -7916,17 +7468,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                 and '.' not in _fann_s and '*' not in _fann_s
                                 and _fann_s not in self._IMPORTED_STRUCT_SKIP_BASENAMES
                                 and _TYPE_MAP.get(_fann_s) is None):
-                            # Local-first collision remap (see
-                            # `_local_cname_map`): `Uop.stack: StackEffect` in
-                            # analyzer.py means analyzer.py's own class,
-                            # renamed `analyzer_StackEffect`, not the winner
-                            # that holds the bare name in the shared table
-                            # (the old path emitted `StackEffect *` — the
-                            # parsing-side layout — for the field).
-                            _lcm_tf = getattr(self, '_local_cname_map', None)
-                            if _lcm_tf and _fann_s in _lcm_tf:
-                                ft = f"{_lcm_tf[_fann_s]} *"
-                            elif _fann_s in self.struct_field_types:
+                            if _fann_s in self.struct_field_types:
                                 ft = f"{_fann_s} *"
                             else:
                                 for _ist in stmts:
@@ -7945,45 +7487,6 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                     else:
                                         continue
                                     break
-                        # Dotted struct annotation (`call: lexer.Token`,
-                        # cases_generator/analyzer.py's EscapingCall): the
-                        # capitalized branch above EXCLUDES '.' so such a
-                        # field stayed at the int64_t erasure — repr then
-                        # printed the raw struct address (`call=512350838656`)
-                        # and a NULL pointer printed as `0` instead of `None`
-                        # (`kills=0`), the two remaining escaping_calls diff
-                        # classes on Tools/cases_generator/analyzer (RC-6).
-                        # The union unwrap above already reduced
-                        # `lexer.Token | None` to `lexer.Token`. The module
-                        # qualifier is EXPLICIT, so the local-first remap does
-                        # not apply; materialize the struct from that module
-                        # under its bare name (the one the rest of the
-                        # emission keys on) and take the pointer spelling.
-                        # Explicit loops, no f-string: self-host-safe.
-                        if (ft == 'int64_t' and _fann_s
-                                and '.' in _fann_s and '[' not in _fann_s
-                                and '*' not in _fann_s):
-                            _dparts = _fann_s.split('.')
-                            if len(_dparts) == 2:
-                                _dmod, _dbare = _dparts[0], _dparts[1]
-                                if (_dbare and _dbare[0].isupper() and _dmod
-                                        and _dbare not in self._IMPORTED_STRUCT_SKIP_BASENAMES
-                                        and _TYPE_MAP.get(_dbare) is None):
-                                    _dident_ok = True
-                                    for _dc in _dbare:
-                                        if not (_dc.isalnum() or _dc == '_'):
-                                            _dident_ok = False
-                                            break
-                                    for _dc in _dmod:
-                                        if not (_dc.isalnum() or _dc == '_'):
-                                            _dident_ok = False
-                                            break
-                                    if _dident_ok:
-                                        if _dbare in self.struct_field_types:
-                                            ft = _dbare + " *"
-                                        elif self._materialize_imported_struct(
-                                                _dmod, _dbare, _dbare):
-                                            ft = _dbare + " *"
                         # A bare annotation that is a registered struct name
                         # under a NON-capitalized spelling — a mangled generic-
                         # struct instantiation of a private base (`_ListIter_1_
@@ -7999,12 +7502,9 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # capitalized branch and `_resolve_type` apply).
                         if (ft == 'int64_t' and _fann_s
                                 and '[' not in _fann_s and '.' not in _fann_s
-                                and '*' not in _fann_s):
-                            _lcm_nf = getattr(self, '_local_cname_map', None)
-                            if _lcm_nf and _fann_s in _lcm_nf:
-                                ft = f"{_lcm_nf[_fann_s]} *"
-                            elif _fann_s in self.struct_field_types:
-                                ft = f"{_fann_s} *"
+                                and '*' not in _fann_s
+                                and _fann_s in self.struct_field_types):
+                            ft = f"{_fann_s} *"
                         _arr_m = (_FIXED_ARRAY_ANN_RE.match(_as_str(field.type_ann).strip())
                                   if field.type_ann else None)
                         if _arr_m:
@@ -8031,36 +7531,13 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                             _outer_base = _ann_str.split('[')[0].strip()
                             _ptr_wrappers = ('UnsafePointer', 'OwnedPointer',
                                              'ArcPointer', 'Pointer', 'Reference')
-                            _lcm_pw = getattr(self, '_local_cname_map', None)
                             if _outer_base in _ptr_wrappers and '[' in _ann_str:
                                 _inner = _ann_str.split('[', 1)[1]
                                 _inner_base = _inner.split('[')[0].strip()
                                 if _inner_base in self.struct_field_types:
-                                    # Local-first collision remap (see
-                                    # `_local_cname_map`): the inner element is
-                                    # THIS module's own same-named class (e.g.
-                                    # analyzer.py's `StackEffect`) when the map
-                                    # says so; the bare spelling in
-                                    # `struct_field_types` is the WINNER's.
-                                    if (_lcm_pw and _inner_base in _lcm_pw):
-                                        ft = f"{_lcm_pw[_inner_base]} *"
-                                    else:
-                                        ft = f'{_inner_base} *'
+                                    ft = f'{_inner_base} *'
                             elif ft.endswith(' *') and _outer_base in self.struct_field_types:
-                                # Same local-first rule for the bare-annotation
-                                # spelling: a previous branch resolved `ft` to a
-                                # struct pointer and the annotation's base is a
-                                # registered struct. Rewriting `ft` to the bare
-                                # annotation spelling REVERTS a local-map
-                                # remap already applied (`analyzer_StackEffect *`
-                                # -> `StackEffect *` — measured, the analyzer.py
-                                # `Uop.stack: StackEffect` field), so consult the
-                                # map first; the empty self-host map keeps the
-                                # old spelling.
-                                if (_lcm_pw and _outer_base in _lcm_pw):
-                                    ft = f"{_lcm_pw[_outer_base]} *"
-                                else:
-                                    ft = f'{_outer_base} *'
+                                ft = f'{_outer_base} *'
                         self.struct_field_types[s.name][f_name] = ft
                         if field.type_ann:
                             self._field_annotations[s.name + '.' + f_name] = _as_str(field.type_ann)
@@ -8093,32 +7570,8 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # (int64_t is what every fallback already assumes).
                         if (ft in ('MojoList *', 'MojoSet *') and field.type_ann
                                 and '[' in _as_str(field.type_ann)):
-                            _ann_el = _as_str(field.type_ann)
-                            # A top-level UNION annotation (e.g.
-                            # `list[Stmt] | None`) does not sit at the head
-                            # of the string, so the extraction below
-                            # (`split('[', 1)`) sees `Stmt] | None` and
-                            # records nothing — the field's elements then
-                            # fall back to the boxed int64_t read, and a
-                            # `for stmt in self.else_body:` loop variable
-                            # loses its static `Stmt *` type (measured:
-                            # parsing.py's MacroIfStmt.tokens lowered
-                            # `stmt.tokens()` through a dynamic getattr,
-                            # which cannot find a trampoline method and
-                            # raised `AttributeError: tokens` on
-                            # bytecodes.c). Pick the first top-level union
-                            # member that is itself a list/set subscript
-                            # (the same `' | '` split the type resolver
-                            # uses) and extract its element from there.
-                            if '|' in _ann_el:
-                                for _ann_m in _ann_el.split(' | '):
-                                    _ann_ms = _ann_m.strip()
-                                    if (_ann_ms.startswith('list[') or _ann_ms.startswith('List[')
-                                            or _ann_ms.startswith('set[') or _ann_ms.startswith('Set[')):
-                                        _ann_el = _ann_ms
-                                        break
                             _li = gimple_ctypes._split_top_level_commas(
-                                _ann_el.split('[', 1)[1].rstrip(']').strip())
+                                _as_str(field.type_ann).split('[', 1)[1].rstrip(']').strip())
                             if _li:
                                 _et = self._resolve_type(_li[0].strip())
                                 if _et and _et not in ('int64_t', 'MojoList *'):
@@ -8433,85 +7886,38 @@ def _gmp_assign_struct_cnames(self, all_struct_defs: list) -> None:
         if hasattr(self, '_compiler_preseed_struct_home'):
             _preshome = self._compiler_preseed_struct_home.get(_sname, '')
         if _owner is None:
+            # A compiler-pre-seeded layout reserves the bare C name for the
+            # compiler's home. A StructDef from a genuinely different module is
+            # a cross-module collision and must take a qualified cname, leaving
+            # the pre-seeded layout (and any real compiler StructDef) as the
+            # bare-name owner.
+            if _preshome and _shome and _shome != _preshome:
+                _q = _sanitize_cname_qualifier(_shome)
+                _cname = _q + '_' + _sname
+                _n = 2
+                while _cname in self._struct_cname_of_name or _cname in self._struct_name_owner:
+                    _cname = _q + '_' + _sname + str(_n)
+                    _n += 1
+                self._struct_cname_by_id[_sid] = _cname
+                self._struct_name_owner[_cname] = s
+                self._struct_cname_by_home[_skey + '::' + _sname] = _cname
+                self._struct_qualified_cnames.add(_cname)
+                continue
             # First claim on this bare name: it OWNS it, under the bare name.
             self._struct_name_owner[_sname] = s
             self._struct_cname_by_id[_sid] = _sname
             self._struct_cname_of_name[_sname] = _sname
             if _skey:
                 self._struct_cname_by_home[_skey + '::' + _sname] = _sname
-            if _preshome and _shome and _shome != _preshome:
-                # A sibling module defines a class whose bare name is one of
-                # the compiler's own pre-seeded AST layouts (`IfStmt`,
-                # `ForStmt`, `WhileStmt`, ... — `_compiler_preseed_struct_
-                # home`): the compiler's own class is NOT in this TU's
-                # closure, so the sibling OWNS the bare C name for the whole
-                # unit. Its real layout must REPLACE the pre-seeded one, not
-                # merge with it: the field pass below registers only fields
-                # ABSENT from the table, so a pre-seeded field of the same
-                # name (`IfStmt.condition` is `int64_t` in the compiler's
-                # layout, `MojoList *` in the sibling's) would keep the
-                # compiler's ctype, and the compiler-only fields (`then_
-                # body`, `elifs`, `line`, `col`) would ride along into the
-                # sibling's typedef. Clearing the entry lets the field pass
-                # write the sibling's own fields from scratch, and EVERY
-                # reference in this TU — the constructor's `_alloc_`, the
-                # coroutine trampoline and body, the importer's isinstance
-                # tag and field reads — then addresses the one layout that
-                # exists. (The earlier qualified-cname variant split the
-                # references across the two layouts: the constructor and the
-                # trampoline kept the pre-seeded spelling, the methods took
-                # the qualified one — a memory-layout desync that segfaulted
-                # the first `isinstance(stmt, IfStmt)` field read; measured
-                # on Tools/cases_generator: the parser stamped tag
-                # H('IfStmt') on a 6-field pre-seeded object while
-                # analyzer.py's `visit` read `IfStmt.condition` — slot 1,
-                # the `if_` token — as a list of tokens.) The per-call re-
-                # seed in gen_module's pre-seed block consults `_struct_
-                # cname_of_name` (set above) and leaves a claimed name
-                # alone, so later modules cannot restore the phantom.
-                self.struct_field_types[_sname] = {}
             continue
         if _owner is s:
             self._struct_cname_by_id[_sid] = _sname
             continue
-        # A different StructDef already owns this bare name. Genuine
-        # cross-module collision ONLY when both sides carry a home and the
-        # homes differ. The `continue` (first-wins fusion) cases:
-        # - same non-empty home: one file redefining a class (Python
-        #   semantics — the second binding replaces the first), which
-        #   `_struct_name_owner`'s first-wins already models;
-        # - exactly one home-less side: a node that never rode a file's own
-        #   `stmts` (the synthetic self-host `GimpleGen` rides
-        #   `_imported_typedef_structs`, not `stmts`, so its home stays '')
-        #   against a real module's same-named class. `make check-selfhost`
-        #   relies on that fusion: the REAL `class GimpleGen` in
-        #   gimple_codegen.py's own temp arrives against the synthetic's
-        #   home-less claim and must keep the bare name, or its method
-        #   symbols re-qualify and every hardcoded self-host table stops
-        #   matching;
-        # - both home-less: a filename-less root seeing one of its own
-        #   same-named classes twice — the same redefinition case.
-        #
-        # A GENUINE cross-file pair now always has two non-empty differing
-        # homes, because the root's own structs carry the root file's stem
-        # (see the `_struct_home_by_id` setter above) instead of no home:
-        # the Tools/cases_generator analyzer.py(root) `@dataclass
-        # StackEffect(inputs, outputs)` vs parsing.py `@dataclass
-        # StackEffect(Node)` pair previously fused into ONE C struct (the
-        # parsing-side field list won the typedef, the analyzer-side
-        # constructor wrote its inputs/outputs lists into the parsing-side
-        # context/name fields, and `StackEffect.__str__`'s dynamic
-        # getattr('inputs') raised AttributeError at run time — measured,
-        # analyzer-inline iN4; bugs/COMPILE_FAIL_Tools_cases_generator_
-        # analyzer-part3-part2.md). The named module's temp claims the bare
-        # name during the root's import loop (which runs BEFORE this pass),
-        # so in a root-involved collision the arriving loser is the root's
-        # struct and its stem home yields the non-degenerate
-        # `analyzer_StackEffect` qualifier below. The self-host root
-        # (fire.py) defines no classes, so no self-host pair reaches the
-        # collision branch.
+        # A different StructDef already owns this bare name. Genuine collision?
         _ohome = self._struct_home_by_id.get(id(_owner), '')
         if not _shome or not _ohome or _shome == _ohome:
+            # Same file (or an unresolvable home): a redefinition, not a
+            # cross-module collision. Leave it to the first-wins skip below.
             continue
         # Real cross-module collision: give the loser a module-qualified cname,
         # uniquified against any cname already handed out.
@@ -8525,43 +7931,6 @@ def _gmp_assign_struct_cnames(self, all_struct_defs: list) -> None:
         self._struct_name_owner[_cname] = s
         self._struct_cname_by_home[_skey + '::' + _sname] = _cname
         self._struct_qualified_cnames.add(_cname)
-    # This module's OWN structs that LOST a cross-module collision, keyed by
-    # their BARE source name (the one this file's annotations and call sites
-    # write) with their qualified cname as the value. Every resolution path
-    # in this module consults it BEFORE falling back to the bare name in the
-    # shared `struct_field_types`, where the WINNER's struct sits: a bare
-    # `StackEffect` in analyzer.py means analyzer.py's class, which the
-    # collision pass renamed `analyzer_StackEffect`, not parsing.py's
-    # `StackEffect(Node)`. The consumers: the local-first check in
-    # `_resolve_type` (params, returns, dict/list value annotations), the
-    # typed-struct-field pass below, and the constructor-call dispatch in
-    # emit_calls' struct-constructor branch. Built BEFORE the rename loop
-    # further down replaces each `s.name` with its cname, so the key is the
-    # pre-rename spelling. Only this module's own structs (bare name in
-    # `_local_struct_names`) and only a genuine rename (cname != bare) earn
-    # an entry; the self-host closure defines no colliding root-vs-named
-    # pair, so its map is empty and every path behaves exactly as before.
-    self._local_cname_map = {}
-    for s in all_struct_defs:
-        s = _as_structdef_node(s)
-        if not isinstance(s, StructDef):
-            continue
-        _lsn = _as_str(s.name)
-        if _lsn not in self._local_struct_names:
-            continue
-        _lc_c = self._struct_cname_by_id.get(id(s), _lsn)
-        if _lc_c == _lsn:
-            continue
-        # No preseed carve-out: a pre-seeded bare name is now claimed by the
-        # sibling that defines it (the takeover in the collision pass above),
-        # so the only cnames minted for those names are GENUINE collision
-        # losers — a SECOND module claiming a name the first sibling already
-        # took — and every collision loser is remapped exactly the same way.
-        # (The earlier qualified-mint variant needed the carve-out because
-        # the trampoline registration kept the BARE spelling for preseed-
-        # qualified structs; that desync is gone now that both spellings are
-        # the one claimant layout.)
-        self._local_cname_map[_lsn] = _lc_c
 
 
 def _gmp_ctor_init_param_fields(self, stmts: list, _ctor_init_methods: dict, _ctor_init_params: dict, all_struct_defs: list, imported_stmts: list) -> None:
@@ -12723,34 +12092,13 @@ def gen_module_impl(self, stmts: list):
     # in GimpleGen.__init__). THIS gen_module call IS the compile of
     # `self.module_name`, so every StructDef in `stmts` is that module's own.
     # Keyed by node identity, which is what `_struct_name_owner` compares when
-    # it decides "same class", so the two agree on what that means.
-    #
-    # The ROOT module compiles with `module_name == ''`, but its classes are
-    # still a peer of the imported modules' same-named classes (Python does
-    # not merge them: two modules each defining `class StackEffect` are two
-    # unrelated types), so the root's structs carry the root FILE'S STEM as
-    # their home instead of no home. A home-less root used to lose the
-    # collision test's `not _shome` guard and fuse with the named module's
-    # class into ONE C struct (Tools/cases_generator's analyzer.py
-    # `@dataclass StackEffect(inputs, outputs)` vs parsing.py `@dataclass
-    # StackEffect(Node)` — the AttributeError bugs/COMPILE_FAIL_
-    # Tools_cases_generator_analyzer-part3-part2.md records), and once that
-    # pair was made to collide the loser's qualifier came out degenerate
-    # (`_StackEffect`) because the root's home was ''. The stem makes the
-    # loser `analyzer_StackEffect`. The self-host root (fire.py) defines no
-    # classes, so this is inert for the bootstrap closure; and a node that
-    # is not in a file's own `stmts` (the synthetic self-host `GimpleGen`
-    # rides `_imported_typedef_structs`, not `stmts`) still gets no home,
-    # which is what keeps its first-wins fusion (see the collision test).
+    # it decides "same class", so the two agree on what that means. The ROOT
+    # module compiles with `module_name == ''`; it is not a peer of any
+    # imported module, so it claims the bare name like any other first-wins
+    # owner rather than being qualified against itself.
     for _hms in stmts:
-        if isinstance(_hms, StructDef):
-            if self.module_name:
-                _hms_home = _as_str(self.module_name)
-            else:
-                _hms_home = os.path.splitext(
-                    os.path.basename(self._current_filename or ''))[0]
-            if _hms_home:
-                self._struct_home_by_id[id(_hms)] = _hms_home
+        if isinstance(_hms, StructDef) and self.module_name:
+            self._struct_home_by_id[id(_hms)] = _as_str(self.module_name)
     # Overloaded / duplicated top-level functions (same name, multiple defs)
     # can't all be emitted as distinct C symbols. Two genuinely different
     # situations hide behind that one description, with OPPOSITE correct
@@ -13382,513 +12730,483 @@ def gen_module_impl(self, stmts: list):
     self.struct_boxed_fields['YieldFromExpr'] = {'value'}
     self.struct_boxed_fields['AwaitExpr'] = {'value'}
 
-    # Compiler-pre-seeded AST layout tables (IfStmt, WhileStmt, ForStmt, ...).
-    # Registered per gen_module_impl call so the SHARED table survives every
-    # nested temp_gen (each shares the root's dict by reference).
-    #
-    # Skipped whole once ANY sibling module has claimed one of these bare
-    # names under its own home (the collision pass below sets `_struct_
-    # cname_of_name` at the first claim): the FIRST call in this TU has
-    # already registered every entry — no claim can exist before the first
-    # call's own pre-seed section, which runs before its own collision
-    # pass — and the claimant's collision pass has replaced the claimed
-    # entry with the claimant's own field table. Re-registering
-    # unconditionally here would restore the compiler's phantom layout over
-    # the claimant's, and every reference lowered AFTER this call —
-    # including the root's own body, which lowers after its import loop —
-    # would address the phantom again. Measured on Tools/cases_generator:
-    # the modules the root compiles after parser (re, typing) re-seeded the
-    # six-field IfStmt over parsing.py's five-field one, and analyzer.py's
-    # isinstance/field reads addressed the phantom slots (the `visit`
-    # segfault). In the self-host closure no module but fire_compiler
-    # defines any of these names, and fire_compiler's own claim is made in
-    # ITS collision pass — after its own pre-seed section has run the
-    # block in full — so the self-hosted tables are built exactly as
-    # before; the guard only skips the idempotent re-registration in the
-    # calls that follow it.
-    _pseed_claimed = False
-    for _pseed_n in self._compiler_preseed_struct_home:
-        if _pseed_n in self._struct_cname_of_name:
-            _pseed_claimed = True
-            break
-    if not _pseed_claimed:
-        self.struct_field_types['IfStmt'] = {
-            'condition': 'int64_t',
-            'then_body': 'MojoList *',
-            'elifs': 'MojoList *',
-            'else_body': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['WhileStmt'] = {
-            'condition': 'int64_t',
-            'body': 'MojoList *',
-            'else_body': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['ForStmt'] = {
-            'target': 'int64_t',
-            'iterable': 'int64_t',
-            'body': 'MojoList *',
-            'else_body': 'MojoList *',
-            'is_async': '_Bool',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['FunctionDef'] = {
-            'name': 'char *',
-            'params': 'MojoList *',
-            'return_type': 'int64_t',
-            'body': 'MojoList *',
-            'decorators': 'MojoList *',
-            'param_convs': 'MojoDict *',
-            'param_has_default': 'MojoDict *',
-            'param_defaults': 'MojoDict *',
-            'kwonly': 'MojoList *',
-            'comptime_params': 'MojoList *',
-            # The two bracket-parameter tables the dataclass grew AFTER this table
-            # was written. A field missing here is a field the compiled `repr` never
-            # prints (`comptime_param_defaults={}, comptime_param_annotations={}`),
-            # so every `.ast` the self-hosted binary wrote differed from the
-            # reference's at the first `FunctionDef`.
-            'comptime_param_defaults': 'MojoDict *',
-            'comptime_param_annotations': 'MojoDict *',
-            'is_generator': '_Bool',
-            'yield_bearing_node_ids': 'int64_t',
-            'is_async': '_Bool',
-            # The explicit capture list and the flag that says one was written.
-            # Both are needed: `captures` alone cannot distinguish `{}` from no
-            # list. `has_capture_list` is `_Bool` for the same reason `is_async`
-            # is — it is a real Python bool on the dataclass.
-            'captures': 'MojoList *',
-            'has_capture_list': '_Bool',
-            # `*Name: Type` variadic bracket parameters, filled from
-            # `Parser._last_bracket_variadics` by `_parse_funcdef` and read by
-            # `_check_variadic_element_types`.
-            'variadic_bracket_params': 'MojoList *',
-            'where_clause': 'int64_t',
-            'where_else': 'int64_t',
-            'return_origin': 'char *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['ExprStmt'] = {
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['AssignStmt'] = {
-            'target': 'int64_t',
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-            'type_ann': 'int64_t',
-        }
-        self.struct_field_types['AugAssignStmt'] = {
-            'target': 'int64_t',
-            'op': 'char *',
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['ReturnStmt'] = {
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['VarDecl'] = {
-            'name': 'char *',
-            'type_ann': 'int64_t',
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['MultiAssignStmt'] = {
-            'targets': 'MojoList *',
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['BreakStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
-        self.struct_field_types['ContinueStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
-        self.struct_field_types['PassStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
-        self.struct_field_types['AssertStmt'] = {
-            'value': 'int64_t',
-            'msg': 'int64_t',
-            'is_comptime': '_Bool',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['RaiseStmt'] = {
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['TryStmt'] = {
-            'body': 'MojoList *',
-            'handlers': 'MojoList *',
-            'else_body': 'MojoList *',
-            'finally_body': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['WithStmt'] = {
-            'items': 'MojoList *',
-            'body': 'MojoList *',
-            'is_async': '_Bool',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['ImportStmt'] = {
-            'module': 'char *',
-            'alias': 'char *',
-            'extra': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-            # `lazy import ...` (PEP 810) — see ImportStmt.lazy in fire_compiler.py.
-            'lazy': '_Bool',
-            'decorators': 'MojoList *',
-        }
-        self.struct_field_types['FromImportStmt'] = {
-            'module': 'char *',
-            'names': 'MojoList *',
-            'wildcard': '_Bool',
-            'line': 'int64_t',
-            'col': 'int64_t',
-            # `lazy from ... import ...` (PEP 810) — see FromImportStmt.lazy.
-            'lazy': '_Bool',
-            'name_alias_strs': 'MojoList *',
-            'decorators': 'MojoList *',
-        }
-        self.struct_field_types['ComptimeIfStmt'] = {
-            'condition': 'int64_t',
-            'then_body': 'MojoList *',
-            'elifs': 'MojoList *',
-            'else_body': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['ComptimeForStmt'] = {
-            'target': 'char *',
-            'iterable': 'int64_t',
-            'body': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['ComptimeVarStmt'] = {
-            'target': 'char *',
-            'value': 'int64_t',
-            'type_ann': 'char *',
-            'where_clause': 'char *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['GlobalStmt'] = {
-            'names': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        # `NonlocalStmt` / `DottedLiteral` were missing from this table, so every
-        # `isinstance(x, NonlocalStmt)` in the compiled compiler lowered to the
-        # always-false `mojo_isinstance_p(x, 0)` -- a `nonlocal` declaration fell
-        # out of `gen_stmt`'s chain as `/* TODO: NonlocalStmt */` and the closure
-        # read its captured cell by value.
-        self.struct_field_types['NonlocalStmt'] = {
-            'names': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['DottedLiteral'] = {
-            'path': 'char *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['DelStmt'] = {
-            'targets': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['MatchStmt'] = {
-            'subject': 'int64_t',
-            'cases': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        # `MatchCase` must be registered (and `MatchStmt.cases`'s element type
-        # seeded below) or `for i, match_case in enumerate(node.cases):` binds
-        # `match_case` as an opaque int64_t, leaving `match_case.patterns` an
-        # untyped dynamic-getattr result. `_gen_stmt_MatchStmt`'s wildcard
-        # detection then can't statically resolve the pattern list at all, and
-        # the self-hosted binary emits `case _:` as `case 0:` — a real
-        # native-vs-python3 `--dump match_stmt.mojo` divergence.
-        self.struct_field_types['MatchCase'] = {
-            'patterns': 'MojoList *',
-            'body': 'MojoList *',
-            'guard': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['LambdaExpr'] = {
-            'params': 'MojoList *',
-            'body': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-            'param_types': 'MojoList *',
-            'return_type': 'int64_t',
-            'comptime_params': 'MojoList *',
-            'captures': 'char *',
-        }
-        self.struct_field_types['SubscriptExpr'] = {
-            'obj': 'int64_t',
-            'index': 'int64_t',
-            'attrs': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['SliceExpr'] = {
-            'obj': 'int64_t',
-            'start': 'int64_t',
-            'stop': 'int64_t',
-            'step': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        # `value`, NOT the long-gone `key`: the dataclass declares (kind, element,
-        # value, generators, line, col) and this seed fixes the field ORDER of the
-        # typedef and of the generated `__repr__` that prints the `.ast`. A stale
-        # `key` made the compiled dump print `key=None` where CPython prints
-        # `value=None`, and put `value` after `generators`.
-        self.struct_field_types['Comprehension'] = {
-            'kind': 'char *',
-            'element': 'int64_t',
-            'value': 'int64_t',
-            'generators': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
-        # node (`target`/`iterable`/`conditions`), and the struct
-        # `gimple_gen_calls._lower_ctor_from_iterable` synthesizes for
-        # `list(x)`/`set(x)`. This table is the self-hosted backend's reliable
-        # field-layout source for AST nodes; without an entry here the module-
-        # qualified constructor `gimple_ctypes.Generator(...)` found no
-        # registered layout, fell through to the opaque 0 placeholder, and the
-        # synthesized comprehension's `generators` list ended up holding a NULL
-        # — `_lower_comprehension`'s `gen0.iterable` then raised
-        # `AttributeError: iterable` and the whole module was dropped (5
-        # modules lost from a self-hosted fire.py --dump-full: gimple_codegen,
-        # gimple_solvers, imports, jit.arm64, myinterpreter). `Comprehension`
-        # directly above was the only node of the pair that was listed.
-        self.struct_field_types['Generator'] = {
-            'target': 'char *',
-            'iterable': 'int64_t',
-            'conditions': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['IdentExpr'] = {
-            'name': 'char *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['IntLiteral'] = {
-            'value': 'int64_t', 'line': 'int64_t', 'col': 'int64_t', 'raw': 'char *',
-        }
-        self.struct_field_types['FloatLiteral'] = {
-            'value': 'double',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['BoolLiteral'] = {
-            'value': '_Bool',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['EllipsisLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
-        self.struct_field_types['NoneLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
-        self.struct_field_types['StringLiteral'] = {
-            'value': 'char *',
-            # `line`/`col` must stay in the seed AHEAD of `is_bytes`: the
-            # reflection repr iterates `struct_field_types` in insertion order
-            # and the later self-host augmentation appends any missing dataclass
-            # fields, so the seed has to remain a PREFIX of
-            # `StringLiteral(value, line, col, is_bytes, is_raw, ...)` or the
-            # native repr emits fields in the wrong order and `.ast` dumps diverge.
-            # `is_raw` and the interpolation flags are appended at the END.
-            'line': 'int64_t',
-            'col': 'int64_t',
-            'is_bytes': '_Bool',
-            'is_raw': '_Bool',
-            'is_interpolated': '_Bool',
-            'is_tstring': '_Bool',
-        }
-        self.struct_field_types['TstringLiteral'] = {
-            'value': 'char *',
-        }
-        self.struct_field_types['ImagLiteral'] = {
-            'value': 'double',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['TupleLiteral'] = {
-            'elements': 'MojoList *',
-        }
-        self.struct_field_types['TupleExpr'] = {
-            'elements': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['ListLiteral'] = {
-            'elements': 'MojoList *',
-        }
-        self.struct_field_types['ListExpr'] = {
-            'elements': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['SetLiteral'] = {
-            'elements': 'MojoList *',
-        }
-        self.struct_field_types['SetExpr'] = {
-            'elements': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['DictLiteral'] = {
-            'pairs': 'MojoList *',
-        }
-        self.struct_field_types['DictExpr'] = {
-            'pairs': 'MojoList *',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['WalrusExpr'] = {
-            'name': 'char *', 'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['YieldExpr'] = {
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['YieldFromExpr'] = {
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['AwaitExpr'] = {
-            'value': 'int64_t',
-            'line': 'int64_t',
-            'col': 'int64_t',
-        }
-        self.struct_field_types['StructDef'] = {
-            'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
-            'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
-            'comptime_member_types': 'MojoDict *',
-            'comptime_member_wheres': 'MojoDict *',
-            'bases': 'MojoList *',
-            # Parallel to `bases`: (base_name, where_text) per positional base.
-            'base_constraints': 'MojoList *',
-            'line': 'int64_t', 'col': 'int64_t',
-            '_fieldwise_ctor_synthesized': '_Bool',
-            'bracket_params': 'MojoList *',
-            'type_param_names': 'MojoList *',
-            'keywords': 'MojoList *',
-            # `where_clause` is the same shape as FunctionDef's (None / one
-            # expression / a list) and takes the same boxed word;
-            # `bracket_types` is the (name, annotation source) pairs of the
-            # bracket parameter list.
-            'where_clause': 'int64_t',
-            'bracket_types': 'MojoList *',
-            # `align_expr` is the parsed argument/expression of a struct's
-            # `@align(...)` decorator (None when absent), and `presence_fields`
-            # the compiler-minted presence-tracked field names. Both dataclass
-            # fields landed without a row here, so the self-hosted `StructDef`
-            # struct omitted them and gcc rejected every access with
-            # `'StructDef' has no member named 'align_expr'` /
-            # `... 'presence_fields'` (module_gen's own mint site and
-            # mojo/middle/types.py's presence-bit helpers).
-            'align_expr': 'int64_t',
-            'presence_fields': 'MojoList *',
-            # `(name, annotation, default text)` per bracket parameter
-            # (fire_compiler.StructDef.bracket_param_info); the dataclass field
-            # landed without a row, so gcc rejected `'StructDef' has no member
-            # named 'bracket_param_info'`.
-            'bracket_param_info': 'MojoList *',
-        }
-        self.struct_field_types['TraitDef'] = {
-            'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
-            'bases': 'MojoList *',
-            'comptime_members': 'MojoList *',
-            'line': 'int64_t', 'col': 'int64_t',
-        }
-        # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so
-        # every compile unit (including nested temp_gens) sees them.
-        self.struct_boxed_fields['IfStmt'] = {'condition'}
-        self.struct_boxed_fields['WhileStmt'] = {'condition'}
-        self.struct_boxed_fields['ForStmt'] = {'target', 'iterable'}
-        self.struct_boxed_fields['FunctionDef'] = {'return_type', 'yield_bearing_node_ids'}
-        self.struct_boxed_fields['ExprStmt'] = {'value'}
-        self.struct_boxed_fields['AssignStmt'] = {'target', 'value', 'type_ann'}
-        self.struct_boxed_fields['AugAssignStmt'] = {'target', 'value'}
-        self.struct_boxed_fields['ReturnStmt'] = {'value'}
-        self.struct_boxed_fields['VarDecl'] = {'type_ann', 'value'}
-        self.struct_boxed_fields['MultiAssignStmt'] = {'value'}
-        self.struct_boxed_fields['AssertStmt'] = {'value', 'msg'}
-        self.struct_boxed_fields['RaiseStmt'] = {'value'}
-        self.struct_boxed_fields['ComptimeIfStmt'] = {'condition'}
-        self.struct_boxed_fields['ComptimeForStmt'] = {'iterable'}
-        self.struct_boxed_fields['ComptimeVarStmt'] = {'value'}
-        self.struct_boxed_fields['MatchStmt'] = {'subject'}
-        self.struct_boxed_fields['LambdaExpr'] = {'body'}
-        self.struct_boxed_fields['SliceExpr'] = {'obj', 'start', 'stop', 'step'}
-        self.struct_boxed_fields['Comprehension'] = {'element', 'value'}
-        # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
-        # node. Its `iterable` is `object` (any AST node), so it must be marked
-        # boxed like Comprehension's `element`/`key`: the generated
-        # `_mojo_repr_<Struct>` then routes it through `_mojo_generic_elem_repr`
-        # (runtime type-tag dispatch) instead of `mojo_repr_int`. Without this,
-        # `repr(ast)` printed the raw boxed pointer as a decimal — the exact
-        # stage1-vs-stage2 `fire_compiler.ast` / `fire.ast` / `module_loader.ast`
-        # / `myinterpreter.ast` mismatches `make bootstrap`'s verify step reports
-        # (`Generator(target='c', iterable=47038764864, ...)` instead of the
-        # nested `IdentExpr(...)` repr).
-        self.struct_boxed_fields['Generator'] = {'iterable'}
-        self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
+    self.struct_field_types['IfStmt'] = {
+        'condition': 'int64_t',
+        'then_body': 'MojoList *',
+        'elifs': 'MojoList *',
+        'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['WhileStmt'] = {
+        'condition': 'int64_t',
+        'body': 'MojoList *',
+        'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['ForStmt'] = {
+        'target': 'int64_t',
+        'iterable': 'int64_t',
+        'body': 'MojoList *',
+        'else_body': 'MojoList *',
+        'is_async': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['FunctionDef'] = {
+        'name': 'char *',
+        'params': 'MojoList *',
+        'return_type': 'int64_t',
+        'body': 'MojoList *',
+        'decorators': 'MojoList *',
+        'param_convs': 'MojoDict *',
+        'param_has_default': 'MojoDict *',
+        'param_defaults': 'MojoDict *',
+        'kwonly': 'MojoList *',
+        'comptime_params': 'MojoList *',
+        # The two bracket-parameter tables the dataclass grew AFTER this table
+        # was written. A field missing here is a field the compiled `repr` never
+        # prints (`comptime_param_defaults={}, comptime_param_annotations={}`),
+        # so every `.ast` the self-hosted binary wrote differed from the
+        # reference's at the first `FunctionDef`.
+        'comptime_param_defaults': 'MojoDict *',
+        'comptime_param_annotations': 'MojoDict *',
+        'is_generator': '_Bool',
+        'yield_bearing_node_ids': 'int64_t',
+        'is_async': '_Bool',
+        # The explicit capture list and the flag that says one was written.
+        # Both are needed: `captures` alone cannot distinguish `{}` from no
+        # list. `has_capture_list` is `_Bool` for the same reason `is_async`
+        # is — it is a real Python bool on the dataclass.
+        'captures': 'MojoList *',
+        'has_capture_list': '_Bool',
+        # `*Name: Type` variadic bracket parameters, filled from
+        # `Parser._last_bracket_variadics` by `_parse_funcdef` and read by
+        # `_check_variadic_element_types`.
+        'variadic_bracket_params': 'MojoList *',
+        'where_clause': 'int64_t',
+        'where_else': 'int64_t',
+        'return_origin': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['ExprStmt'] = {
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['AssignStmt'] = {
+        'target': 'int64_t',
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'type_ann': 'int64_t',
+    }
+    self.struct_field_types['AugAssignStmt'] = {
+        'target': 'int64_t',
+        'op': 'char *',
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['ReturnStmt'] = {
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['VarDecl'] = {
+        'name': 'char *',
+        'type_ann': 'int64_t',
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['MultiAssignStmt'] = {
+        'targets': 'MojoList *',
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['BreakStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['ContinueStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['PassStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['AssertStmt'] = {
+        'value': 'int64_t',
+        'msg': 'int64_t',
+        'is_comptime': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['RaiseStmt'] = {
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['TryStmt'] = {
+        'body': 'MojoList *',
+        'handlers': 'MojoList *',
+        'else_body': 'MojoList *',
+        'finally_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['WithStmt'] = {
+        'items': 'MojoList *',
+        'body': 'MojoList *',
+        'is_async': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['ImportStmt'] = {
+        'module': 'char *',
+        'alias': 'char *',
+        'extra': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        # `lazy import ...` (PEP 810) — see ImportStmt.lazy in fire_compiler.py.
+        'lazy': '_Bool',
+        'decorators': 'MojoList *',
+    }
+    self.struct_field_types['FromImportStmt'] = {
+        'module': 'char *',
+        'names': 'MojoList *',
+        'wildcard': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        # `lazy from ... import ...` (PEP 810) — see FromImportStmt.lazy.
+        'lazy': '_Bool',
+        'name_alias_strs': 'MojoList *',
+        'decorators': 'MojoList *',
+    }
+    self.struct_field_types['ComptimeIfStmt'] = {
+        'condition': 'int64_t',
+        'then_body': 'MojoList *',
+        'elifs': 'MojoList *',
+        'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['ComptimeForStmt'] = {
+        'target': 'char *',
+        'iterable': 'int64_t',
+        'body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['ComptimeVarStmt'] = {
+        'target': 'char *',
+        'value': 'int64_t',
+        'type_ann': 'char *',
+        'where_clause': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['GlobalStmt'] = {
+        'names': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    # `NonlocalStmt` / `DottedLiteral` were missing from this table, so every
+    # `isinstance(x, NonlocalStmt)` in the compiled compiler lowered to the
+    # always-false `mojo_isinstance_p(x, 0)` -- a `nonlocal` declaration fell
+    # out of `gen_stmt`'s chain as `/* TODO: NonlocalStmt */` and the closure
+    # read its captured cell by value.
+    self.struct_field_types['NonlocalStmt'] = {
+        'names': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['DottedLiteral'] = {
+        'path': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['DelStmt'] = {
+        'targets': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['MatchStmt'] = {
+        'subject': 'int64_t',
+        'cases': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    # `MatchCase` must be registered (and `MatchStmt.cases`'s element type
+    # seeded below) or `for i, match_case in enumerate(node.cases):` binds
+    # `match_case` as an opaque int64_t, leaving `match_case.patterns` an
+    # untyped dynamic-getattr result. `_gen_stmt_MatchStmt`'s wildcard
+    # detection then can't statically resolve the pattern list at all, and
+    # the self-hosted binary emits `case _:` as `case 0:` — a real
+    # native-vs-python3 `--dump match_stmt.mojo` divergence.
+    self.struct_field_types['MatchCase'] = {
+        'patterns': 'MojoList *',
+        'body': 'MojoList *',
+        'guard': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['LambdaExpr'] = {
+        'params': 'MojoList *',
+        'body': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'param_types': 'MojoList *',
+        'return_type': 'int64_t',
+        'comptime_params': 'MojoList *',
+        'captures': 'char *',
+    }
+    self.struct_field_types['SubscriptExpr'] = {
+        'obj': 'int64_t',
+        'index': 'int64_t',
+        'attrs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['SliceExpr'] = {
+        'obj': 'int64_t',
+        'start': 'int64_t',
+        'stop': 'int64_t',
+        'step': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    # `value`, NOT the long-gone `key`: the dataclass declares (kind, element,
+    # value, generators, line, col) and this seed fixes the field ORDER of the
+    # typedef and of the generated `__repr__` that prints the `.ast`. A stale
+    # `key` made the compiled dump print `key=None` where CPython prints
+    # `value=None`, and put `value` after `generators`.
+    self.struct_field_types['Comprehension'] = {
+        'kind': 'char *',
+        'element': 'int64_t',
+        'value': 'int64_t',
+        'generators': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
+    # node (`target`/`iterable`/`conditions`), and the struct
+    # `gimple_gen_calls._lower_ctor_from_iterable` synthesizes for
+    # `list(x)`/`set(x)`. This table is the self-hosted backend's reliable
+    # field-layout source for AST nodes; without an entry here the module-
+    # qualified constructor `gimple_ctypes.Generator(...)` found no
+    # registered layout, fell through to the opaque 0 placeholder, and the
+    # synthesized comprehension's `generators` list ended up holding a NULL
+    # — `_lower_comprehension`'s `gen0.iterable` then raised
+    # `AttributeError: iterable` and the whole module was dropped (5
+    # modules lost from a self-hosted fire.py --dump-full: gimple_codegen,
+    # gimple_solvers, imports, jit.arm64, myinterpreter). `Comprehension`
+    # directly above was the only node of the pair that was listed.
+    self.struct_field_types['Generator'] = {
+        'target': 'char *',
+        'iterable': 'int64_t',
+        'conditions': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['IdentExpr'] = {
+        'name': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['IntLiteral'] = {
+        'value': 'int64_t', 'line': 'int64_t', 'col': 'int64_t', 'raw': 'char *',
+    }
+    self.struct_field_types['FloatLiteral'] = {
+        'value': 'double',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['BoolLiteral'] = {
+        'value': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['EllipsisLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['NoneLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['StringLiteral'] = {
+        'value': 'char *',
+        # `line`/`col` must stay in the seed AHEAD of `is_bytes`: the
+        # reflection repr iterates `struct_field_types` in insertion order
+        # and the later self-host augmentation appends any missing dataclass
+        # fields, so the seed has to remain a PREFIX of
+        # `StringLiteral(value, line, col, is_bytes, is_raw, ...)` or the
+        # native repr emits fields in the wrong order and `.ast` dumps diverge.
+        # `is_raw` and the interpolation flags are appended at the END.
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'is_bytes': '_Bool',
+        'is_raw': '_Bool',
+        'is_interpolated': '_Bool',
+        'is_tstring': '_Bool',
+    }
+    self.struct_field_types['TstringLiteral'] = {
+        'value': 'char *',
+    }
+    self.struct_field_types['ImagLiteral'] = {
+        'value': 'double',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['TupleLiteral'] = {
+        'elements': 'MojoList *',
+    }
+    self.struct_field_types['TupleExpr'] = {
+        'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['ListLiteral'] = {
+        'elements': 'MojoList *',
+    }
+    self.struct_field_types['ListExpr'] = {
+        'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['SetLiteral'] = {
+        'elements': 'MojoList *',
+    }
+    self.struct_field_types['SetExpr'] = {
+        'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['DictLiteral'] = {
+        'pairs': 'MojoList *',
+    }
+    self.struct_field_types['DictExpr'] = {
+        'pairs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['WalrusExpr'] = {
+        'name': 'char *', 'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['YieldExpr'] = {
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['YieldFromExpr'] = {
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['AwaitExpr'] = {
+        'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
+    self.struct_field_types['StructDef'] = {
+        'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
+        'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
+        'comptime_member_types': 'MojoDict *',
+        'comptime_member_wheres': 'MojoDict *',
+        'bases': 'MojoList *',
+        # Parallel to `bases`: (base_name, where_text) per positional base.
+        'base_constraints': 'MojoList *',
+        'line': 'int64_t', 'col': 'int64_t',
+        '_fieldwise_ctor_synthesized': '_Bool',
+        'bracket_params': 'MojoList *',
+        'type_param_names': 'MojoList *',
+        'keywords': 'MojoList *',
+        # `where_clause` is the same shape as FunctionDef's (None / one
+        # expression / a list) and takes the same boxed word;
+        # `bracket_types` is the (name, annotation source) pairs of the
+        # bracket parameter list.
+        'where_clause': 'int64_t',
+        'bracket_types': 'MojoList *',
+        # `align_expr` is the parsed argument/expression of a struct's
+        # `@align(...)` decorator (None when absent), and `presence_fields`
+        # the compiler-minted presence-tracked field names. Both dataclass
+        # fields landed without a row here, so the self-hosted `StructDef`
+        # struct omitted them and gcc rejected every access with
+        # `'StructDef' has no member named 'align_expr'` /
+        # `... 'presence_fields'` (module_gen's own mint site and
+        # mojo/middle/types.py's presence-bit helpers).
+        'align_expr': 'int64_t',
+        'presence_fields': 'MojoList *',
+        # `(name, annotation, default text)` per bracket parameter
+        # (fire_compiler.StructDef.bracket_param_info); the dataclass field
+        # landed without a row, so gcc rejected `'StructDef' has no member
+        # named 'bracket_param_info'`.
+        'bracket_param_info': 'MojoList *',
+    }
+    self.struct_field_types['TraitDef'] = {
+        'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
+        'bases': 'MojoList *',
+        'comptime_members': 'MojoList *',
+        'line': 'int64_t', 'col': 'int64_t',
+    }
+    # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so
+    # every compile unit (including nested temp_gens) sees them.
+    self.struct_boxed_fields['IfStmt'] = {'condition'}
+    self.struct_boxed_fields['WhileStmt'] = {'condition'}
+    self.struct_boxed_fields['ForStmt'] = {'target', 'iterable'}
+    self.struct_boxed_fields['FunctionDef'] = {'return_type', 'yield_bearing_node_ids'}
+    self.struct_boxed_fields['ExprStmt'] = {'value'}
+    self.struct_boxed_fields['AssignStmt'] = {'target', 'value', 'type_ann'}
+    self.struct_boxed_fields['AugAssignStmt'] = {'target', 'value'}
+    self.struct_boxed_fields['ReturnStmt'] = {'value'}
+    self.struct_boxed_fields['VarDecl'] = {'type_ann', 'value'}
+    self.struct_boxed_fields['MultiAssignStmt'] = {'value'}
+    self.struct_boxed_fields['AssertStmt'] = {'value', 'msg'}
+    self.struct_boxed_fields['RaiseStmt'] = {'value'}
+    self.struct_boxed_fields['ComptimeIfStmt'] = {'condition'}
+    self.struct_boxed_fields['ComptimeForStmt'] = {'iterable'}
+    self.struct_boxed_fields['ComptimeVarStmt'] = {'value'}
+    self.struct_boxed_fields['MatchStmt'] = {'subject'}
+    self.struct_boxed_fields['LambdaExpr'] = {'body'}
+    self.struct_boxed_fields['SliceExpr'] = {'obj', 'start', 'stop', 'step'}
+    self.struct_boxed_fields['Comprehension'] = {'element', 'value'}
+    # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
+    # node. Its `iterable` is `object` (any AST node), so it must be marked
+    # boxed like Comprehension's `element`/`key`: the generated
+    # `_mojo_repr_<Struct>` then routes it through `_mojo_generic_elem_repr`
+    # (runtime type-tag dispatch) instead of `mojo_repr_int`. Without this,
+    # `repr(ast)` printed the raw boxed pointer as a decimal — the exact
+    # stage1-vs-stage2 `fire_compiler.ast` / `fire.ast` / `module_loader.ast`
+    # / `myinterpreter.ast` mismatches `make bootstrap`'s verify step reports
+    # (`Generator(target='c', iterable=47038764864, ...)` instead of the
+    # nested `IdentExpr(...)` repr).
+    self.struct_boxed_fields['Generator'] = {'iterable'}
+    self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
 
-        # ELEMENT types for the homogeneous list fields of the AST tables above.
-        # `struct_field_types` records only that a field IS a `MojoList *`; with
-        # no element type every `for m in struct_def.methods:` binds its loop
-        # variable as an opaque int64_t, so `m.name` goes through the boxed
-        # dynamic-getattr path and `m.params` cannot be typed at all. These
-        # mirror the `list[FunctionDef]` / `list[tuple[str, str]]` annotations on
-        # the corresponding dataclasses in fire_compiler.py (the single source of
-        # truth) — the same declarative seed the field-type tables above already
-        # are, kept here because those tables are what a compile of an arbitrary
-        # user file has available. Only genuinely HOMOGENEOUS fields are listed:
-        # `StructDef.fields` (VarDecl | AssignStmt) and `FunctionDef.body` (any
-        # statement) have no single element type and are deliberately absent.
-        self._field_elem_types.setdefault('StructDef', {})['methods'] = 'FunctionDef *'
-        self._field_elem_types.setdefault('TraitDef', {})['methods'] = 'FunctionDef *'
-        # `MatchStmt.cases` is `list[MatchCase]` (see fire_compiler.py) — without
-        # this the `enumerate(node.cases)` loop variable is an opaque int64_t and
-        # `match_case.patterns` can't be typed (see the MatchCase table entry
-        # above for the concrete `case _:` divergence this caused).
-        self._field_elem_types.setdefault('MatchStmt', {})['cases'] = 'MatchCase *'
-        # `params` is a list of (name, annotation) STRING pairs — the element is
-        # itself a 2-slot tuple, so the slot type goes in the nested table.
-        self._field_nested_elem_types.setdefault('FunctionDef', {})['params'] = 'char *'
-        self._field_nested_elem_types.setdefault('LambdaExpr', {})['params'] = 'char *'
+    # ELEMENT types for the homogeneous list fields of the AST tables above.
+    # `struct_field_types` records only that a field IS a `MojoList *`; with
+    # no element type every `for m in struct_def.methods:` binds its loop
+    # variable as an opaque int64_t, so `m.name` goes through the boxed
+    # dynamic-getattr path and `m.params` cannot be typed at all. These
+    # mirror the `list[FunctionDef]` / `list[tuple[str, str]]` annotations on
+    # the corresponding dataclasses in fire_compiler.py (the single source of
+    # truth) — the same declarative seed the field-type tables above already
+    # are, kept here because those tables are what a compile of an arbitrary
+    # user file has available. Only genuinely HOMOGENEOUS fields are listed:
+    # `StructDef.fields` (VarDecl | AssignStmt) and `FunctionDef.body` (any
+    # statement) have no single element type and are deliberately absent.
+    self._field_elem_types.setdefault('StructDef', {})['methods'] = 'FunctionDef *'
+    self._field_elem_types.setdefault('TraitDef', {})['methods'] = 'FunctionDef *'
+    # `MatchStmt.cases` is `list[MatchCase]` (see fire_compiler.py) — without
+    # this the `enumerate(node.cases)` loop variable is an opaque int64_t and
+    # `match_case.patterns` can't be typed (see the MatchCase table entry
+    # above for the concrete `case _:` divergence this caused).
+    self._field_elem_types.setdefault('MatchStmt', {})['cases'] = 'MatchCase *'
+    # `params` is a list of (name, annotation) STRING pairs — the element is
+    # itself a 2-slot tuple, so the slot type goes in the nested table.
+    self._field_nested_elem_types.setdefault('FunctionDef', {})['params'] = 'char *'
+    self._field_nested_elem_types.setdefault('LambdaExpr', {})['params'] = 'char *'
 
-        self.struct_nullable_container_fields['SubscriptExpr'] = {'attrs'}
-        self.struct_nullable_container_fields['IfStmt'] = {'else_body'}
-        self.struct_nullable_container_fields['WhileStmt'] = {'else_body'}
-        self.struct_nullable_container_fields['ForStmt'] = {'else_body'}
-        self.struct_nullable_container_fields['TryStmt'] = {'else_body', 'finally_body'}
-        self.struct_nullable_container_fields['ComptimeIfStmt'] = {'else_body'}
-        self.struct_nullable_container_fields['ImportStmt'] = {'extra'}
+    self.struct_nullable_container_fields['SubscriptExpr'] = {'attrs'}
+    self.struct_nullable_container_fields['IfStmt'] = {'else_body'}
+    self.struct_nullable_container_fields['WhileStmt'] = {'else_body'}
+    self.struct_nullable_container_fields['ForStmt'] = {'else_body'}
+    self.struct_nullable_container_fields['TryStmt'] = {'else_body', 'finally_body'}
+    self.struct_nullable_container_fields['ComptimeIfStmt'] = {'else_body'}
+    self.struct_nullable_container_fields['ImportStmt'] = {'extra'}
 
     # Self-hosting bootstrap: register `class GimpleGen` (parsed once by
     # gimple_codegen._selfhost_register_gimplegen, shared into every nested
@@ -14103,42 +13421,6 @@ def gen_module_impl(self, stmts: list):
     _check_rp_origin(_all_stmts_for_rp, _all_struct_def_nodes)
     _check_copy_move_synth(_all_struct_def_nodes, _all_trait_def_nodes)
     _merge_struct_inheritance(all_struct_defs)
-    # Post-merge: read back, per dataclass struct, the merged-layout names
-    # CPython's synthesized __init__/__match_args__ does NOT take a
-    # positional parameter for. The provenance is recorded in
-    # ast_rewriter's module-level registry (id(StructDef)-keyed — the
-    # nodes here are the very objects `desugar_field_defaults` processed)
-    # because that is the only pipeline point that sees the `init=` flag:
-    # the desugar loop that follows replaces each `field(...)` call with
-    # its `default` value, and the merge above has already rewritten
-    # `.fields` into the base-first view. A name is excluded when its
-    # DECLARING class is a base that is not itself a dataclass (CPython
-    # only inherits dataclass fields from dataclass bases — a plain
-    # base's annotated attribute is storage, not an init parameter) or
-    # the declaration there is `field(init=False, ...)`.
-    # `self._struct_noninit_fields` is keyed by the bare name (first
-    # definition wins, the `_struct_bases` convention); for a
-    # non-colliding struct that is exactly the `struct_field_types`/
-    # ctor-lookup name (a genuine cross-module collision is the only case
-    # where the cname differs, and there the consumers simply keep the
-    # legacy mapping). emit_calls' `_lower_struct_constructor` and
-    # emit_stmts' dataclass `__match_args__` synthesis filter against it.
-    # Without the filter, a `@dataclass class InstDef(Node)` whose `Node`
-    # declares `context: ... = field(init=False, ...)` maps its six
-    # positional constructor arguments onto the SEVEN-slot merged layout
-    # starting at `context`: every field reads back its neighbour (the
-    # measured Tools/cases_generator failure — `node.kind` answered
-    # `name`, `assert node.kind == "op"` trapped).
-    self._struct_noninit_fields = {}
-    for _ns0 in all_struct_defs:
-        if isinstance(_ns0, StructDef):
-            _ns0 = _as_structdef_node(_ns0)
-            _nsn = _as_str(_ns0.name)
-            if _nsn in self._struct_noninit_fields:
-                continue
-            _ns_noninit = ast_rewriter.dataclass_noninit_names(_ns0)
-            if _ns_noninit is not None:
-                self._struct_noninit_fields[_nsn] = _ns_noninit
     # id(inherited method node) -> home module name, resolved by finding
     # which struct ORIGINALLY declared it.
     _inherited_method_src: dict = {}
@@ -19478,16 +18760,6 @@ def gen_module_impl(self, stmts: list):
             if _shn not in self.func_param_types:
                 self.func_param_types[_shn] = list(_shp)
 
-    # Decorated-method table, EARLY: the body loop below lowers call sites,
-    # and a call to a method whose decorator is a same-module function
-    # (`@contextual`) must route through the wrapper value that table
-    # names. Every function/method return type the gate needs is in
-    # func_return_types by now (Pass 1 + Pass 2b ran above); the
-    # _emit_struct_method_prototypes walk that used to detect these runs
-    # after the bodies and only emits the getter definitions from the
-    # table this call populates.
-    _populate_decorated_method_wrapped(self, stmts, imported_stmts)
-
     # ── GPU offload, Seam 1 + Seam 3 ──────────────────────────────────────
     # Which functions are DEVICE is decided ONCE, here, before any body is
     # emitted -- "emit this one to a different target" is not a decision an
@@ -21476,22 +20748,6 @@ def gen_module_impl(self, stmts: list):
             or self._generator_api):
         parts.append('typedef struct MojoGenerator MojoGenerator;')
     _emit_struct_method_prototypes(self, parts, struct_defs)
-    # Virtual-dispatch helper PROTOTYPES (emit_methods._virt_dispatch_plan
-    # registers them during the lower phase, which has run by now): the
-    # definitions land in `_emit_reflection_dispatch` below, which may sit
-    # after the function bodies that call them, so the declaration has to
-    # ride the prototype section — the same reason the method prototypes
-    # above are emitted here, ahead of `parts.extend(func_parts)`.
-    _vdh = getattr(self, '_virt_dispatch_helpers', None) or {}
-    for _vdn in sorted(_vdh):
-        _vds = _vdh[_vdn]
-        _vps = []
-        for _vi, _pt in enumerate(_vds['param_ctypes']):
-            if _vi:
-                _vps.append(', ')
-            _vps.append(_pt + ' __' + ('self' if _vi == 0 else 'a' + str(_vi - 1)))
-        parts.append('static ' + _vds['ret'] + ' ' + _vdn + ' ('
-                     + ''.join(_vps) + ');')
 
     if self.emit_struct_defs:
         _emit_reflection_dispatch(self, parts)
@@ -21892,14 +21148,6 @@ def gen_module_impl(self, stmts: list):
                 _mname_s = _as_str(_mname)
                 if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
                     continue
-                if (_sdn, _mname_s) in self._supported_generator_methods \
-                        or (_sdn, _mname_s) in self._generator_method_api:
-                    # Trampoline method: no per-class C function exists (only the
-                    # `__mgco_*` body plus the vtable dispatch entry), so the
-                    # class-table slot would name a dangling symbol and the
-                    # generated C fails gcc with `undeclared`. Same guard as the
-                    # method-prototype pass above (Phase 2a).
-                    continue
                 if _mname_s == '__new__' and _sdcname in getattr(self, '_bytes_subclass_structs', ()):
                     continue   # handled inline at the construction site; no C function exists
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
@@ -21953,12 +21201,6 @@ def gen_module_impl(self, stmts: list):
                     continue
                 _mname_s = _as_str(_mname)
                 if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
-                    continue
-                if (_sdn, _mname_s) in self._supported_generator_methods \
-                        or (_sdn, _mname_s) in self._generator_method_api:
-                    # Trampoline method: no per-class C function exists (see the
-                    # matching guard in the `mojo_class_setattr` loop above);
-                    # the reader arm would name a dangling symbol.
                     continue
                 if _mname_s == '__new__' and _sdcname in getattr(self, '_bytes_subclass_structs', ()):
                     continue   # handled inline at the construction site; no C function exists

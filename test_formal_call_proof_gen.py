@@ -11302,7 +11302,7 @@ class TestExtendOptionCensus(unittest.TestCase):
 class TestExtendRefusalNamesTheOption(unittest.TestCase):
     """The extended-register refusal names the option the WORD carries.
 
-    Part 2 of the arm64 instruction-coverage census.  The arm's
+    Part 2 of `bugs/hard/FORMAL_arm64_instruction_coverage.md`.  The arm's
     paragraph explains the CLASS and says "the other extend options remain
     unmodelled"; a reader holding a hex word -- the exact position when this
     refusal fires from `_cfg_decomposition_refusal` on an image the emitter
@@ -11348,7 +11348,7 @@ class TestExtendRefusalNamesTheOption(unittest.TestCase):
 class TestExtendOptionsAreDormantInEmittedImages(unittest.TestCase):
     """No EMITTED image word is a non-UXTX extended-register instruction.
 
-    Part 3 of the arm64 instruction-coverage census.  The gap is
+    Part 3 of `bugs/hard/FORMAL_arm64_instruction_coverage.md`.  The gap is
     DORMANT: the only producer of these words in the tree is the platform
     assembler (clang spellings such as `cmp sp, x16`), and nothing in the tree
     would notice the day the emitter grew an encoder for one.
