@@ -842,7 +842,11 @@ MEASURED_PEAK_GB = {
     # how far it got. Two dylib PROOF obligations are open -- "the 3-export
     # proof admits 1 hole(s)" and "a conditional value is not a branch" -- which
     # is a proof lane, not a memory finding, so neither is filed here as one.
-    'formal-dylib':                           (2.2, 'measured'),   # 102 s, red on 2 proofs
+    # 2.2 GB was the 102 s run's number. Re-measured 2026-11-16 with
+    # `/usr/bin/time -l`: peak RSS 4.58 GB over 263 s, PASS=*** FAIL=3 -- at the
+    # 4 GB `tiny` class the suite killed it before it finished (RESOURCE, not a
+    # verdict), so the peak is the uncapped run's.
+    'formal-dylib':                           (4.58, 'measured'),
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'ambiguous-import-diagnostic':            (0.1, 'measured'),
     'attr-error-messages':                    (0.1, 'measured'),
@@ -2926,7 +2930,19 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 # 96 GB budget for every claim on the job.
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
-     mem='tiny',
+     # `tiny` (4) was set from a 0.1 GB peak. Measured 2026-11-16 with
+     # `/usr/bin/time -l`: peak RSS 4.58 GB, and at that class the job was
+     # KILLED before finishing -- RESOURCE, "not a verdict on the output", so
+     # the expect= below could not be verified in either direction. `small`
+     # (8) covers it. Over the 4 GB line and therefore a debt, not a fact --
+     # see MEM_DEBT_DOC.
+     mem='small',
+     memwhy='measured 4.58 GB peak RSS 2026-11-16 (/usr/bin/time -l on '
+            'test_formal_dylib.py, 263 s wall): the Lean dylib contract proof '
+            'over the whole export closure. `tiny` (4) killed the job at the '
+            'ceiling before it finished, so the class was raised to `small` '
+            '(8). Over the 4 GB line and therefore a debt, not a fact -- see '
+            + MEM_DEBT_DOC,
      expect='3 failing: the hole-count checks on the overflow-trapping exports, whose termination '
             'obligations an exit svc keeps named (bugs/hard/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
