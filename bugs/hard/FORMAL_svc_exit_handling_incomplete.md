@@ -144,3 +144,30 @@ Consequences of the model change (not bugs in themselves, but to know):
 6. Only then remove the `expect=` marker on formal-dylib.
 
 Related: the overflow-guard wrong-spec fix (2026-11-12), which closed the soundness hole this doc's svc model underlies.
+
+## 2026-11-16 (wakeup 52): the marker's 3 failures cannot be verified -- the
+## job is RESOURCE-CAPPED
+
+`formal-dylib` is registered `mem='tiny'` (4 GB), with the comment that the
+class came from "the 0.1 GB peak its own branch measured". Measured today:
+
+    RESOURCE formal-dylib  (128s)  memory ceiling reached before the job finished
+             peak 4.0 GB -- killed for memory before finishing, so this says
+             nothing about correctness
+    suite: 2 passed, 0 failed, 0 skipped, 1 resource-capped
+    NOT TRUSTED as measurements (failed, or under 2s): formal-dylib
+
+**Update 2026-11-16 (wakeup 53/54): the job runs again, and the marker's REASON
+was wrong.** Re-classed to `small` (8) with a `memwhy` and a
+`doc/POLICY_memory_over_4gb.md` entry, after measuring peak RSS 4.58 GB uncapped
+(the recorded 2.2 GB was a 102 s run that never finished the proof set). The job
+now completes in 472 s at 4.3 GB and reports `PASS=27 FAIL=3` -- so the count 3
+was right all along.
+
+But the three failures are NOT this doc's termination obligations. They are
+GENERATED-proof `sorry` holes: `several exports, and one with no derivable
+spec` (2 holes), `an export that binds a local still gets a proved contract`
+(3 holes), and `a conditional value is not a branch` (3 holes). None is
+described here, and a search of `bugs/` found no doc tracking them. The marker
+has been re-pointed to `bugs/FORMAL_dylib_export_proof_holes.md`, which names
+all three. This doc's own remaining work is unchanged and still unmeasured.

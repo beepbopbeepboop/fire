@@ -169,3 +169,17 @@ Verification of any fix here is heavy by nature (it rebuilds the self-host chain
 the integrator's job: `python3 tools/integrate.py --only <task> --jobs mojoc ab-native
 native-dumpfull`, with the before/after peaks reported, and the `leaks` report on
 `fire.py` attached to the fix.
+
+## `formal-dylib`: 4.58 GB, measured 2026-11-16
+
+`test_formal_dylib.py` was classed `tiny` (4 GB) from a 0.1 GB peak its own
+branch measured. Re-measured with `/usr/bin/time -l`: **peak RSS 4.58 GB**,
+263 s wall, `PASS=*** FAIL=3`. At the 4 GB class the suite killed it before it
+finished (`RESOURCE ... not a verdict on the output`), which also meant the
+job's `expect=3` could not be verified in either direction. Re-classed to
+`small` (8), with a `memwhy` pointing here.
+
+This is a debt under the standard above, not a fact about the workload: the
+4.58 GB is the Lean dylib contract proof over the whole export closure, and
+nothing here says it should need that. The three failures it reports are
+tracked by `bugs/hard/FORMAL_svc_exit_handling_incomplete.md`.
