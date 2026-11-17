@@ -344,3 +344,31 @@ Two consequences, not one: the missing MOCO-4400 diagnostic, and a bare call to
 a symbol nothing defines. Same-module generic calls are elaborated by the
 in-TU pre-pass (`elab_intu`), which is also where the conformance check would
 have to be wired for this case.
+
+### The full chain (wakeup 44) -- a discriminator blind spot, not a missing check
+
+Probed end to end on the 30-line repro:
+
+1. `needs_iterator` IS registered for the same module -- `module_gen.py:12246`
+   puts every local generic into `_imported_generics` under
+   `_current_filename`, and `_generic_source_text` (:5137) resolves that back to
+   the in-memory text. Probed: `_elaborate_generic_call` is entered with
+   `explicit=False source='.../m.mojo'`.
+2. So the inferred branch runs and calls `elaborate_generic_call_inferred`,
+   which infers `S[NotMovable]` and calls `elaborate_generic_call` -- which
+   raises `ConformanceError` for the violated `Iterator` bound.
+3. **`elaborate.py:3776` swallows it.** The handler's own discriminator is
+   `if any(not inferred_ctype_is_specific(ct) for ct in arg_ctypes): return None`
+   -- i.e. decline when an argument's C type is a placeholder. Measured:
+   `inferred_ctype_is_specific('S *')` is **False**, along with `int64_t`,
+   `char`, `int`, `MojoList *`, `NotMovable *`; only `double` is True.
+4. So a REAL struct pointer is indistinguishable, to that predicate, from an
+   erased `int64_t`/`char` -- which is exactly the case the swallow exists to
+   protect (the six stdlib files listed in its comment). The caller's real Mojo
+   type is not available to disambiguate: `_constructed_struct_type`
+   (emit_resolve.py:3514) recovers a type only for a direct constructor call
+   (`Foo()`), and here the argument is the IdentExpr `s`.
+
+The fix is therefore in the discriminator, not in the check: it needs the
+argument's real Mojo type (from the local's declared type) rather than the C
+type, so a genuine `S[NotMovable]` is distinguished from an erased scalar.
