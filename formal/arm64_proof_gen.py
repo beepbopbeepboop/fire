@@ -939,8 +939,6 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
                 # Try to pass first meaningful arg
                 return render(e.args[0], param, env)
             return "(0 : UInt64)"
-    if scope is not None and hasattr(scope, '__contains__') and sym in scope and not (isinstance(scope, dict) and sym in (getattr(scope,'structs_by_name') or {}) and sym not in {g for g in (getattr(scope,'keys')() if hasattr(scope,'keys') else [])}):  # rough check
-        pass  # fall through
     if scope is not None and sym in scope:
         # Don't treat as function if it's a struct name
         is_struct_name = False

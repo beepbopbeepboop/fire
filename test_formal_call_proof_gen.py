@@ -430,6 +430,32 @@ class TestGeneratorSource(unittest.TestCase):
                       "Lean reads a comma as a pair, so `(f_go a, b)` has the "
                       "wrong type for every multi-argument call")
 
+    def test_a_scope_without_structs_by_name_still_models_a_call(self):
+        """A call must not read the OPTIONAL `structs_by_name` un-defended.
+
+        `_Scope.__init__` sets `admitted`, `str_addrs` and
+        `str_literal_locals` and nothing else, so every scope this generator
+        builds for `_go_defs_for` lacks `structs_by_name`; the rest of the
+        file reads that attribute defensively (`getattr(..., None)`,
+        `hasattr`, `scope.get(...)`).  One `getattr(scope,
+        'structs_by_name')` with no default in `_call_go` turned every call
+        whose callee is in scope into an AttributeError, taking the whole
+        call-model half of this file down with it.
+        """
+        import formal.arm64_proof_gen as G
+        import fire_compiler as F
+        scope = G._Scope({"g": {"name": "g"}})
+        self.assertFalse(hasattr(scope, "structs_by_name"),
+                         "the premise: a `_Scope` carries no "
+                         "`structs_by_name`, and the generator intends the "
+                         "attribute to be optional")
+        call = F.CallExpr(F.IdentExpr("g"), [F.IntLiteral(1)])
+        self.assertEqual(G._expr_go(call, "n", {"n": "n"}, scope=scope),
+                         "(g_go (UInt64.ofNat 1))",
+                         "a call to a function in scope is that function's "
+                         "model application; it must not raise on a scope "
+                         "that has no struct table")
+
     def test_nullary_function_gets_no_parameter(self):
         defs = _models(PROGRAMS["no_params"][0], "seven")
         self.assertIn("def seven_go : UInt64 :=", defs,
