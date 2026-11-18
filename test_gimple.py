@@ -15458,6 +15458,8 @@ main()
 
     _run_isolated(test_two_same_name_free_functions_get_distinct_symbols,
                   'two_same_name_free_functions_get_distinct_symbols')
+    _run_isolated(test_local_generic_struct_in_own_module_keeps_methods_and_plain_overloads,
+                  'local_generic_struct_in_own_module_keeps_methods_and_plain_overloads')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
@@ -15471,6 +15473,122 @@ main()
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
+
+
+def test_local_generic_struct_in_own_module_keeps_methods_and_plain_overloads():
+    """A generic struct defined in the same module must keep its own method
+    definitions when constructed there, and a plain overload set in that module
+    must still be emitted.
+
+    Regression for CODEGEN_intu_generic_struct_in_own_module_drops_method:
+    the in-TU materializer must not instantiate a generic struct whose
+    definition lives in the current file (it corrupted this module's own
+    method emission, making methods prototype-only and leaving dangling refs),
+    and the plain-overload gate that suppressed overload sets constructing such
+    a struct is no longer needed."""
+    global _PASS, _FAIL
+    name = "local_generic_struct_in_own_module_keeps_methods_and_plain_overloads"
+    src = """\
+struct Iter[T: Copyable & Movable, N: Int = 0]:
+    var v: T
+    fn __init__(out self, var v: T):
+        self.v = v^
+    fn get(self) -> T:
+        return self.v.copy()
+    fn __iter__(self) -> Self:
+        return self.copy()
+    fn __iter__(var self) -> Self:
+        return self^
+
+def make(x: Int) -> Int:
+    var b = Iter(1)
+    return b.get()
+
+def make(x: Int, y: Int) -> Int:
+    return x + y
+"""
+    try:
+        c_src = stdlib_unit_emits(src)
+    except Exception as e:
+        print(f"FAIL  {name}: compile failed: {type(e).__name__}: {e}")
+        _FAIL += 1
+        return
+    lines = c_src.splitlines()
+    get_defs = [i for i, l in enumerate(lines)
+                if 'stdlib_unit_probe_Iter_get' in l
+                and i + 1 < len(lines) and lines[i + 1].strip() == '{']
+    make_defs = [i for i, l in enumerate(lines)
+                 if re.match(r'^.*\bstdlib_unit_probe_make_[0-9a-f]{6}\s*\(', l)
+                 and i + 1 < len(lines) and lines[i + 1].strip() == '{']
+    problems = []
+    if not get_defs:
+        problems.append('Iter.get has no definition (method dropped)')
+    if len(make_defs) < 2:
+        problems.append(f'want both make overloads defined, got {len(make_defs)}: {make_defs}')
+    if problems:
+        print(f"FAIL  {name}: " + '; '.join(problems))
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}  get_defs={len(get_defs)} make_defs={len(make_defs)}")
+        _PASS += 1
+
+
+def test_local_generic_struct_in_own_module_keeps_methods_and_plain_overloads():
+    """A generic struct defined in the same module must keep its own method
+    definitions when constructed there, and a plain overload set in that module
+    must still be emitted.
+
+    Regression for CODEGEN_intu_generic_struct_in_own_module_drops_method:
+    the in-TU materializer must not instantiate a generic struct whose
+    definition lives in the current file (it corrupted this module's own
+    method emission, making methods prototype-only and leaving dangling refs),
+    and the plain-overload gate that suppressed overload sets constructing such
+    a struct is no longer needed."""
+    global _PASS, _FAIL
+    name = "local_generic_struct_in_own_module_keeps_methods_and_plain_overloads"
+    src = """\
+struct Iter[T: Copyable & Movable, N: Int = 0]:
+    var v: T
+    fn __init__(out self, var v: T):
+        self.v = v^
+    fn get(self) -> T:
+        return self.v.copy()
+    fn __iter__(self) -> Self:
+        return self.copy()
+    fn __iter__(var self) -> Self:
+        return self^
+
+def make(x: Int) -> Int:
+    var b = Iter(1)
+    return b.get()
+
+def make(x: Int, y: Int) -> Int:
+    return x + y
+"""
+    try:
+        c_src = stdlib_unit_emits(src)
+    except Exception as e:
+        print(f"FAIL  {name}: compile failed: {type(e).__name__}: {e}")
+        _FAIL += 1
+        return
+    lines = c_src.splitlines()
+    get_defs = [i for i, l in enumerate(lines)
+                if 'Iter_get' in l
+                and i + 1 < len(lines) and lines[i + 1].strip() == '{']
+    make_defs = [i for i, l in enumerate(lines)
+                 if re.match(r'^.*\bstdlib_unit_probe_make_[0-9a-f]{6}\s*\(', l)
+                 and i + 1 < len(lines) and lines[i + 1].strip() == '{']
+    problems = []
+    if not get_defs:
+        problems.append('Iter.get has no definition (method dropped)')
+    if len(make_defs) < 2:
+        problems.append(f'want both make overloads defined, got {len(make_defs)}')
+    if problems:
+        print(f"FAIL  {name}: " + '; '.join(problems))
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}  get_defs={len(get_defs)} make_defs={len(make_defs)}")
+        _PASS += 1
 
 
 def test_two_same_name_free_functions_get_distinct_symbols():
