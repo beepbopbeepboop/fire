@@ -60,12 +60,14 @@ which is the last undefined `_std_` name in the dylib
 
 ## Done when
 
-Add `test_codegen_scalar_integer_overload.py` (build the home and caller
-modules with `build_stdlib_dylib.compile_module_to_c` in a temp dir exactly as
-`test_import_overload_choice.py` does, discover each overload's symbol from
-the home C's definitions rather than hard-coding hashes, assert the `hi` body
-names the UInt32 one and not the Int64 one) and run, from the worktree root:
+Add `test_scalar_integer_overload_choice()` to `test_import_overload_choice.py`
+(its `test_import_overload_by_argument_type` shows the temp-dir two-module
+build with `build_stdlib_dylib.compile_module_to_c`; the new function builds
+the `mulhi`/`Fd` mirror, discovers each overload's symbol from the home C's
+definitions rather than hard-coding hashes, and asserts the `hi` body names
+the UInt32 one and not the Int64 one); add it to that file's `__main__` chain
+as the other three tests are. Run, from the worktree root:
 
-    python3 test_codegen_scalar_integer_overload.py
+    python3 -c "import test_import_overload_choice as t; t.test_scalar_integer_overload_choice()"
 
 It prints `PASS` and exits 0.

@@ -45,10 +45,12 @@ The emitted C for the arithmetic and the pointer load names the narrow C type
 
 ## Done when
 
-Add `test_codegen_scalar_integer_arithmetic.py` (compile with
-`test_gimple_runner.compile_mojo_to_gimple_exe`, run it, assert the stdout
-above) and run, from the worktree root:
+Add `test_scalar_integer_narrow_arithmetic()` to `test_gimple_runner.py`
+(`compile_mojo_to_gimple_exe` in that file already builds and runs a Mojo
+program; the function asserts the outputs above and that the emitted C
+names the narrow temp type) and call it from that file's `run_tests()` so the
+registered `gimplerunner` job runs it too. Run, from the worktree root:
 
-    python3 test_codegen_scalar_integer_arithmetic.py
+    python3 -c "import test_gimple_runner as t; t.test_scalar_integer_narrow_arithmetic()"
 
 It prints `PASS` and exits 0.

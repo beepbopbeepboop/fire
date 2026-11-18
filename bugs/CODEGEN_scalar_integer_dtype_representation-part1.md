@@ -12,8 +12,9 @@ parts 2 and 3 build on it.
 - `mojo/middle/types.py`: replace the float-only table `_SIMD_FLOAT_DTYPE_CTYPE`
   with one dtype table (suggested `_DTYPE_CTYPE`) whose keys are the lowercase
   dtype spellings (`int8` ... `uint64`, `index` -> `int64_t`, `uindex` ->
-  `uint64_t`, the existing `float32`/`float64`, and the `uint`/`int` aliases the
-  table already serves). `_dtype_token_ctype` keeps normalising every spelling
+  `uint64_t`, and the existing `float32`/`float64` entries), absorbing the
+  integer entries that today live only in `emit_calls._DTYPE_CAST_CTYPES`.
+  `_dtype_token_ctype` keeps normalising every spelling
   it normalises today (tuple, tuple-REPR, `DType.`/`dtype.`/leading dot, bare
   scalar name, `f32`/`f64`) and reads that one table. Its docstring stops saying
   "float".
@@ -58,22 +59,25 @@ parts 2 and 3 build on it.
   the existing module hash suffix; match it with a regex).
 - A local `var a = Scalar[DType.uint8](250)` emits `uint8_t a`, and
   `var p = UnsafePointer[Scalar[DType.uint8]].alloc(4)` emits `uint8_t * p`.
-- gcc accepts and the program runs correctly when the repro reads through the
-  pointer and compares against a `Scalar[DType.uint8]` target, and when a
-  `struct` with a `var b: Scalar[DType.uint8]` field is used (the
-  swisstable/philox shapes: `ctrl[i]` loops over an
-  `UnsafePointer[Scalar[DType.uint8]]`). This is the guard against the
-  measured 53-error disagreement class.
+- gcc accepts the repro's read-through-the-pointer/compare shape and the
+  swisstable/philox shapes when a `struct` with a `var b:
+  Scalar[DType.uint8]` field is used and a loop runs `ctrl[i]` over an
+  `UnsafePointer[Scalar[DType.uint8]]` (the `gimple_compiles` helper in the
+  Done-when test compiles with `gcc -fgimple -fsyntax-only`). This is the
+  guard against the measured 53-error disagreement class.
 - Floats are unchanged: `_mojo_type('Scalar[DType.float32]') == 'float'`,
   `_mojo_type('SIMD[DType.float64, 2]') == 'double'`, and the float8 refusal
   tests still pass.
 
 ## Done when
 
-Add `test_codegen_scalar_integer_dtype.py` (resolution assertions plus a
-compile-and-run of the repro and a pointer-loop/struct-field case) and run,
+Add `test_scalar_integer_dtype_resolution()` to `test_gimple.py` (the file's
+`gimple_compiles` helper already lowers a source string to C; the function
+asserts the resolver answers above, the repro's `uint8_t * ctrl, uint8_t
+target` signature, and the `uint8_t` local/pointer declarations) and call it
+from that file's `run_tests()` so the registered `gimple` job runs it too. Run,
 from the worktree root:
 
-    python3 test_codegen_scalar_integer_dtype.py
+    python3 -c "import test_gimple as t; t.test_scalar_integer_dtype_resolution()"
 
 It prints `PASS` and exits 0.
