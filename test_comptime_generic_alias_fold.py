@@ -53,6 +53,7 @@ def use(n: Int) -> Int:
 
 LOCAL = '''\
 comptime is_deinitable[T: AnyType]: Bool = conforms_to(T, Deinitable)
+comptime always_true[T: AnyType]: Bool = True
 
 def pick[T: AnyType](n: Int) -> Int:
     comptime if is_deinitable[T]:
@@ -60,8 +61,14 @@ def pick[T: AnyType](n: Int) -> Int:
     else:
         return 2
 
+def always[T: AnyType](n: Int) -> Int:
+    comptime if always_true[T]:
+        return 1
+    else:
+        return 2
+
 def use(n: Int) -> Int:
-    return pick[Int](n)
+    return pick[Int](n) + always[Int](n)
 '''
 
 
@@ -106,10 +113,14 @@ def test_imported_generic_alias_folds():
 
 def test_local_generic_alias_folds():
     """The same alias declared locally: the defect is the evaluator, not the
-    import path (the doc's own root-cause measurement)."""
+    import path (the doc's own root-cause measurement). A generic alias whose
+    body does not mention its parameter is still a template, and its
+    application must fold too."""
     c = _compile(LOCAL)
     assert 'pick_1_T_3_Int' in c, 'the in-TU instance was not emitted:\n' + c
     _check(c, 'is_deinitable', 'pick_1_T_3_Int')
+    assert 'always_1_T_3_Int' in c, 'the in-TU instance was not emitted:\n' + c
+    _check(c, 'always_true', 'always_1_T_3_Int')
 
 
 if __name__ == '__main__':
