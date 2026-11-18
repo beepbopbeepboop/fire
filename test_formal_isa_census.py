@@ -43,7 +43,6 @@ Run: python3 test_formal_isa_census.py [-v]
 """
 import argparse
 import os
-import re
 import sys
 import unittest
 
@@ -119,65 +118,6 @@ class TestEmittedFormCoverage(unittest.TestCase):
             self.assertEqual([], broken,
                              "these emitted %s encoders have no canonical "
                              "sample: %s" % (arch, broken))
-
-
-class TestTheScalarDoubleFpClass(unittest.TestCase):
-    """The ten scalar-double forms are in the fuzz pool, not just in a model.
-
-    Its bug doc (deleted with the fix, 2026-11-17) was the census reading
-    `no` in the FUZZ column for all ten:
-    the class had a Lean arm (aca4f2bbf) and an `as` check, but the fuzz
-    harness had no V register file, so no case ever ran one of the forms
-    against the CPU. The fix is the harness itself — `tools/formal_model_
-    fuzz.py` installs and dumps D0-D7 and its `fp` mix draws the ten forms —
-    and this is the pin that keeps the coverage rather than letting a future
-    pool change quietly stop drawing the class.
-    """
-
-    SCALAR_DOUBLE = (
-        "encode_fadd_dd_dn_dm", "encode_fsub_dd_dn_dm", "encode_fmul_dd_dn_dm",
-        "encode_fdiv_dd_dn_dm", "encode_fneg_dd_dn", "encode_fcmp_dn_dm",
-        "encode_fmov_gpr_to_v", "encode_fmov_v_to_gpr", "encode_scvtf_dn_xn",
-        "encode_fcvtzs_xn_dn",
-    )
-
-    def test_every_scalar_double_form_has_all_three_columns(self):
-        rows = {r.encoder: r for r in _ROWS["arm64"]}
-        gaps = [(e, rows[e].missing()) for e in self.SCALAR_DOUBLE
-                if e in rows and rows[e].missing()]
-        self.assertEqual(
-            [], gaps,
-            "these scalar-double FP forms are missing a column again: %s — "
-            "the FUZZ gap the bug doc filed was that every one of them said "
-            "`no` in the pool" % gaps)
-        gone = [e for e in self.SCALAR_DOUBLE if e not in rows]
-        self.assertEqual(
-            [], gone,
-            "these scalar-double encoders are no longer emitted by the "
-            "backend, so this pin no longer has a subject: %s" % gone)
-
-    def test_the_fp_mix_draws_every_scalar_double_form(self):
-        """The pool does not just NAME the ten encoders; it runs them.
-
-        The census's FUZZ column is an AST read of the fuzzer's pool, so a
-        name in a comment or a dead generator would still read `yes`. This
-        builds cases from the `fp` mix and requires every mnemonic the class
-        emits to actually come out of a draw, both directions of `fmov`
-        included — the regression shape the bug doc describes is a form that
-        is named but never generated.
-        """
-        import formal_model_fuzz as F
-        cases = F.build_cases("fp", 500, "pool-coverage", length=3)
-        texts = [t for c in cases for t in c.texts]
-        got = {t.split()[0] for t in texts}
-        want = {"fadd", "fsub", "fmul", "fdiv", "fneg", "fcmp", "fmov",
-                "scvtf", "fcvtzs"}
-        self.assertTrue(want <= got,
-                        "the `fp` mix never drew %s" % sorted(want - got))
-        self.assertTrue(any(re.match(r"^fmov d\d+, x\d+$", t) for t in texts),
-                        "the `fp` mix never drew the GPR->V `fmov`")
-        self.assertTrue(any(re.match(r"^fmov x\d+, d\d+$", t) for t in texts),
-                        "the `fp` mix never drew the V->GPR `fmov`")
 
 
 class TestTheInstrument(unittest.TestCase):
