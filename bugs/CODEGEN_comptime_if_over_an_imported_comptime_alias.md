@@ -118,3 +118,12 @@ falls back to source, while a defined wrong body is a silent miscompile.
 4. Until then, `_gen_stmt_ComptimeIfStmt`'s CONST_UNKNOWN arm should refuse
    (a visible error naming the condition) rather than emit the runtime
    branch, so a future instance cannot ship a NULL-dereferencing body.
+
+## Done when
+
+`python3 test_comptime_generic_alias_fold.py` passes: the doc's synthetic
+`maybe[Int]` module compiles with only the `comptime if`'s TRUE arm emitted —
+no `ct param or undeclared: IsTriviallyDeinitable`, no runtime branch on the
+condition, no `mojo_list_get_int` read — for BOTH spellings of the alias
+(imported through `std.traits` and declared locally in the same module).
+
