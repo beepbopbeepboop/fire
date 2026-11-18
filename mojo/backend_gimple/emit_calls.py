@@ -3246,6 +3246,24 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gimple_ctypes._debug_note('un-elaboratable generic call statically-typed stub',
                         (node.func.obj.name, _static_ct))
             return _static_ct, t
+    # `rebind_var[T](x)` is the IDENTITY in this C representation. The
+    # monomorphizer already rewrites exactly this spelling to `x`
+    # (monomorphize.py: `rebind_var\[[^\]]*\]\((...)\)` -> `\1`), so the
+    # emit side must agree, and it did not: the call fell through to the
+    # catch-all below, which returns integer 0 and DISCARDS the argument.
+    # Measured on std/itertools/itertools.mojo: `_Product3.__next__` emitted
+    # `_t1 = (int64_t)0;  /* indirect call via SubscriptExpr */` and returned
+    # it, so the whole `_flatten(next(self._inner))` call vanished --
+    # `_flatten` and `forget_deinit` occurred ZERO times in that module's C.
+    # A POSITIVE test on the base NAME is right here: `rebind_var` is a
+    # builtin, never a container a callable was recorded being stored into,
+    # so unlike the runtime-subscript arm below it needs no type-table
+    # discriminator.
+    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(node.func.obj.name) == 'rebind_var'
+            and len(node.args) == 1):
+        return gen.lower_expr(node.args[0])
     # The OTHER SubscriptExpr callee: a RUNTIME subscript read of a
     # callable held as a first-class value — `d['k'](2, 3)`, a name-keyed
     # dispatch table. This was lumped in with the generic case above and
