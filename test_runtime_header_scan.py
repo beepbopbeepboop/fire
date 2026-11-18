@@ -629,7 +629,45 @@ def test_every_declaration_is_seen():
     # Both are word-shaped: no float and no named container crosses the
     # boundary, so word 431 -> 433 and total 942 -> 944; box stays 511.
     # `--fix` wrote this rung and every quoted figure above from that one scan.
-    for header, want in (('fire_runtime.h', 837),   # --fix writes the live figure
+    # 834 -> 837 (2026-11-15, the master-side merge a8e4f64bc): THREE names,
+    # read off the call on the live header after the merge, from a0dfc3b0f
+    # ("Fix compiled file-object iteration, cpp string equality, generator
+    # defaults"), which landed on master without a rung. The merge resolution
+    # took the live figure (837) and recorded no ladder entry for them:
+    #   +1  `mojo_is_registered_file` (int64_t in, int out) — "is this address
+    #       a file the runtime opened?" — and `mojo_open_default` (three
+    #       int64_t in, one int64_t out) — `open()` with mode/newline defaults.
+    #       Both are word-shaped: word 433 -> 435, total 944 -> 947.
+    #   +1  `mojo_file_lines` — the list a file's lines are materialized into.
+    #       Box-shaped: it returns `MojoList *`, which the boundary cannot hand
+    #       back by value, so box 511 -> 512.
+    # 837 -> 856 (2026-11-18, the gate fix for `rthdrscan`): NINETEEN names,
+    # all read off the call on the live header, in three commits that landed
+    # after the 837 figure without rungs. Word 435 -> 448 (+13) and box
+    # 512 -> 518 (+6) are exactly the shapes below; `--fix` wrote this rung and
+    # every quoted figure above from one scan.
+    #   +4  4ded7f5f3 ("gpu-offload-6: float8 has real numeric rules; the
+    #       self-hosted compiler can hold float8 values"):
+    #         `mojo_f8_spelling` (int64_t in, `const char *` out) and
+    #         `mojo_is_f8_box` (int64_t in, int out) are word-shaped;
+    #         `mojo_box_from_f8` (double in) and `mojo_f8_round` (double in,
+    #         double out) are box-shaped — a `double` is not one word.
+    #   +8  0c7b94fd4 ("rotate_bits_right[2](104) printed 0: llvm_intrinsic had
+    #       no CPU lowering and fell to a silent stub") — the bit-intrinsic
+    #       lowering: `mojo_bswap`, `mojo_ctlz`, `mojo_ctpop`, `mojo_cttz`,
+    #       `mojo_fshl`, `mojo_fshr` and `mojo_usub_sat` (all int64_t in,
+    #       int64_t out), plus `mojo_unsupported_intrinsic` (`const char *` in,
+    #       void out). All eight are word-shaped.
+    #   +7  6c661dd89 ("tools/cases_generator analyzer: byte-identical compiled
+    #       output on Python/bytecodes.c"): `mojo_builtin_list_append`
+    #       (`void *self` is one pointer), `mojo_cleanup_pad_checkpoint` (two
+    #       int in) and `mojo_int_of_word` (one int64_t in) are word-shaped;
+    #       `mojo_dict_set_opt_int` (`MojoDict *` in),
+    #       `mojo_list_get_double_checked` (`MojoList *` in, double out),
+    #       `mojo_list_get_int_checked` (`MojoList *` in) and
+    #       `mojo_list_get_str_checked` (`MojoList *` in, `char *` out) are
+    #       box-shaped.
+    for header, want in (('fire_runtime.h', 856),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
