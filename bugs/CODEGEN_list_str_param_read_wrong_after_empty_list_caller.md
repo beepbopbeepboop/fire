@@ -24,23 +24,6 @@ program prints `closed` `closed`.
 fixed on 2026-11-16: an empty LITERAL is no longer recorded as a call site
 that passes a list of ints.)
 
-## Defect 1 (the cause): an annotated empty local counts as "a list of ints"
-
-`gen_module_impl` in `mojo/backend_gimple/module_gen.py` records what each
-call site passes for a parameter. In its nested `_static_arg_elems`, the
-`IdentExpr` arm looks the argument up in `elem`, the caller's local element
-types from `self._scan_container_elems(body)`. For `e: list[str] = []` that
-answer is `int64_t` (the "cannot tell" default: the annotation is not
-read), the arm sets `_static_arg_int[0] = True`, and the call site is
-recorded in `self._param_int_elem_obs`. A second call site passes strings,
-so the parameter is put in `self._param_elem_mixed` and its element type
-becomes unknown.
-
-Fix: a local declared with a container annotation (`e: list[str]`) has the
-annotation's element type in that scan. Make `_scan_container_elems`
-answer `char *` for it, so the arm records a `char *` observation and the
-two call sites agree.
-
 ## Defect 2: a kind-mixed element is cast to `char *` instead of unboxed
 
 With the parameter mixed, `lines[-1]` is read with
@@ -69,7 +52,7 @@ Use `_norm_idx` the same way.
 ## How to verify
 
 1. Add the program above to `test_gimple_runner.py` (compare with CPython).
-   It passes after Defect 1 alone.
+   It passes after Defect 1 alone (the annotation-read fix).
 2. For Defects 2 and 3 add a program whose parameter is genuinely mixed:
    `show([1, 2])` and `show(["a", "b:"])` calling
    `def show(xs): print(xs[-1])`, compared with CPython.
