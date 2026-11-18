@@ -16161,13 +16161,61 @@ def total(*nums):
 def main():
     texts = {"x": "1", "y": "2"}
     # The iterable is INLINE `sorted(texts)`: that is the shape that hands the
-    # call a `MojoGenerator *` operand. The element here stays a plain
-    # f-string: `texts[p]` would also trip the separate bug where a string
-    # yielded over an inline `sorted(...)` is boxed into an int64_t value slot
-    # (bugs/CODEGEN_generator_string_values_boxed_as_int_slot.md), which is
-    # not this test's subject.
+    # call a `MojoGenerator *` operand.
     print(cat(*(f"{p}=;" for p in sorted(texts))))
     print(total(*(x * x for x in [1, 2, 3, 4])))
+
+main()
+""")
+
+
+def test_star_unpack_doc_symptom_program():
+    """The bug doc's `## Symptom` program, VERBATIM. It needs both halves of
+    the fix: the star-unpacked operand is a generator (materialized, not
+    dereferenced), and the generator's value slot is `char *` while `texts`
+    stays a `MojoDict *` inside the lifted generator expression."""
+    test_gimple_matches_cpython("gimple_star_unpack_symptom", """\
+def cat(*parts):
+    out = ""
+    for p in parts:
+        out += p
+    return out
+
+def main():
+    texts = {"x": "1", "y": "2"}
+    print(cat(*(f"{p}={texts[p]};" for p in sorted(texts))))
+
+main()
+""")
+
+
+def test_generator_string_value_slot_over_inline_sorted():
+    """A generator whose value is a string read from an inline `sorted(...)`
+    must have a `char *` value slot: `list(g())` printed the strings' pointer
+    bits, and `list(p for p in sorted(xs))` came out in ADDRESS order rather
+    than lexically. A dict's iteration yields its KEYS, which are strings too,
+    and its `d[k]` is a dict read, not a list read of the dict header. All
+    four shapes are pinned here, plus the star-unpack doc's own program."""
+    test_gimple_matches_cpython("gimple_generator_string_value_slot", """\
+def cat(*parts):
+    out = ""
+    for p in parts:
+        out += p
+    return out
+
+def g():
+    for p in sorted(["b", "a"]):
+        yield p
+
+def main():
+    xs = ["b", "a"]
+    print(list(p for p in sorted(["b", "a"])))
+    print(list(g()))
+    print(list(p for p in sorted(xs)))
+    texts = {"x": "1", "y": "2"}
+    # A dict's iteration yields its KEYS, which are strings.
+    print(list(p for p in sorted(texts)))
+    print(cat(*(f"{p}={texts[p]};" for p in sorted(texts))))
 
 main()
 """)
@@ -16200,6 +16248,14 @@ if __name__ == '__main__':
         print(f"ERR: {e}")
     try:
         test_star_unpack_of_generator_expression_in_call()
+    except Exception as e:
+        print(f"ERR: {e}")
+    try:
+        test_star_unpack_doc_symptom_program()
+    except Exception as e:
+        print(f"ERR: {e}")
+    try:
+        test_generator_string_value_slot_over_inline_sorted()
     except Exception as e:
         print(f"ERR: {e}")
     main()

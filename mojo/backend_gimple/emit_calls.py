@@ -7835,6 +7835,18 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
     if at == 'MojoList *' and gen._elem_of(av) == 'char *':
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:
+        # The element contract is evidence the CONTAINER kind does not give:
+        # a generator body's list parameter arrives as an int64_t box (its
+        # type is fixed by the ABI), yet `_param_elem_types` has already told
+        # `_elem_types` that its elements are strings. Sorting such a value
+        # with the generic int64-payload sort ordered it by ADDRESS —
+        # `list(p for p in sorted(xs))` printed `['b', 'a']` for
+        # `xs = ["b", "a"]`. Read the element type BEFORE the materialize
+        # (the fresh probe temp has none) and take the same string sorter the
+        # statically typed `MojoList *` arm above takes. Only `char *` is
+        # answered: the probe can equally be a list of ints or doubles, and
+        # claiming a string sort for those would be a different wrong answer.
+        _elem_before = gen._elem_of(av)
         if at != 'MojoList *':
             # Any other iterable — a generator (a generator call or a
             # compiled generator expression) above all. Every runtime
@@ -7844,7 +7856,11 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
             # chokepoint first, exactly as sum()/any()/max() now do.
             av = gen._materialize_as_list(at, av)
             at = 'MojoList *'
-        t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
+        if _elem_before == 'char *':
+            t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
+            gen._elem_types[t] = 'char *'
+        else:
+            t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
     # sorted() only reorders — the result keeps the input's element /
     # nested-element (tuple-pair) types, so a later `for x, y in
     # sorted(lst):` tuple-target loop reads slots with the right accessor.
