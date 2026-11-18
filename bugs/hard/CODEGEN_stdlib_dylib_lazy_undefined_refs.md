@@ -49,6 +49,40 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   `int64_t f(int64_t *)`; hashing the definer's list alone creates a
   conflicting-types error at the call site, so the out-parameter calling
   convention must be fixed together with the hash, not one or the other.
+
+  **Planning guide (2026-11-17), the `out` parameter convention.** Measured
+  this round, not inferred:
+  - A local `out` parameter is not implemented at all. For
+    `def make(out r: Box): r = Box(7)` the definition is
+    `void m (Box * r)` with body `r = _t1` (it assigns the pointer, it does not
+    write through it), and the caller emits `m (0);` then `b = 0`. So a local
+    call loses the result too; this is not specific to the cross-module case.
+  - `mut` parameters already work end to end: `setv(mut r: Box)` is
+    `void setv (Box * r)` and the caller passes `b`, and the body writes through
+    `r.v`. That is the convention `out` should reuse.
+  - Scope: 110 stdlib files use `out`. Most are `out self` (constructors, a
+    different path) and `out result: ...` returns. The random failure is
+    `std.random._rng.get_global_random_state(out result: Pointer[_RandomState,
+    ...])`, one of the few free functions with an `out` result.
+  Plan, in order:
+  1. Definition side: in the function emitter, a parameter with `out`
+     convention is bound like a `mut` parameter (pointer, reads and writes
+     through `*r`), and the function returns `void`. Files: the param binding
+     in `emit_funcs.py` (where `mut` is recognised), `module_gen.py`.
+  2. Call side: `make()` with an `out` parameter is elaborated to a fresh local
+     of the out type whose address is the argument; the call expression's value
+     is that local. Files: `elaborate.py` (call elaboration, where the argument
+     list is built) so both local and imported calls get the same rewrite.
+  3. Import side: the import scan records the out parameter's pointee type and
+     the `void` return, so the extern declares `void f (T *)` and the hash uses
+     the definer's list (the part-7 path, already in place).
+  Decision needed: do steps 1-2 for ALL `out` free functions (the general fix,
+  large: the 110-file population) or only `out result` free functions
+  (sufficient for the 1 remaining dylib name, but leaves `out` broken elsewhere).
+  Tests: a local `out` round-trip (`var b = make(); b.v == 7`), the same across
+  two modules (cross-module import of `out`), and the stdlib-syntax and
+  dylib counts. Do not land the import hash alone: it creates a conflicting
+  type at the call site (shown above).
 - part 8: two same-name free functions in one module each get a definition
   under their own mangled symbol, and a call names one of them — by
   arity/argument types inside the module, by the defining unit's first
