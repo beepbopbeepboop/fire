@@ -5,7 +5,7 @@ bootstrap jobs.  The underscore entry
 `^(bootstrap-stage1-transitive|bootstrap-stage2-dumps|bootstrap-stage3-dumps)$`
 (documented by the retired `GATE_red_recover-land_2026-11-02` bootstrap-recovery
 umbrella) named all three, and the 23-job recover-land entry documented by
-bugs/mid/GATE_recover_land_remainder.md also swept in
+bugs/hard/GATE_recover_land_remainder.md also swept in
 `bootstrap-stage1-transitive`.  Both are gone in the fix; this pins that state.
 
 The match is `re.search(pattern, job)` because that is exactly how the
@@ -21,7 +21,7 @@ BOOTSTRAP_JOBS = (
     "bootstrap-stage2-dumps",
     "bootstrap-stage3-dumps",
 )
-REMAINDER_DOC = "bugs/mid/GATE_recover_land_remainder.md"
+REMAINDER_DOC = "bugs/hard/GATE_recover_land_remainder.md"
 # A job the remainder entry owns for a different backlog and must keep owning
 # (acceptance: narrowing the entry may not re-enable the rest of its jobs).
 REMAINDER_JOBS_STILL_OFF = ("mojoc", "gimplerunner")

@@ -11,13 +11,13 @@ true first.
 `python3 tools/control.py gate list` showed the three jobs OFF under TWO
 entries:
 
-    OFF  ^(…|bootstrap-stage1-transitive|…)…$   …  doc bugs/mid/GATE_recover_land_remainder.md
+    OFF  ^(…|bootstrap-stage1-transitive|…)…$   …  doc bugs/hard/GATE_recover_land_remainder.md
     OFF  ^(bootstrap\-stage1\-transitive|bootstrap\-stage2\-dumps|bootstrap\-stage3\-dumps)$
          …  doc (retired `GATE_red_recover-land_2026-11-02` umbrella)
 
 The first entry originally named the deleted `bugs/mid/GATE_red_recover_land_2026-11-02` doc
 (removed in `d44f44787`), leaving 23 jobs owned by no doc. That orphan-off-entry
-bug was fixed by re-pointing the entry to `bugs/mid/GATE_recover_land_remainder.md`
+bug was fixed by re-pointing the entry to `bugs/hard/GATE_recover_land_remainder.md`
 and adding `test_gates_off_entries_name_a_doc.py` as the pinning test. This part
 must not leave `bootstrap-stage1-transitive` matched by that 23-job entry either
 — narrow that entry (drop the bootstrap name) or delete the entry as part of the
