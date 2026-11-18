@@ -256,7 +256,7 @@ def use() -> UInt32:
         all_c = '\n'.join(emitted)
         hi_bodies = []
         for m in re.finditer(
-                r'(?:uint32_t|__GIMPLE uint32_t|static uint32_t)\s+([A-Za-z0-9_]*hi[A-Za-z0-9_]*)\s*\([^)]*\)\s*\{(.*?)\n\}',
+                r'(?:uint32_t|__GIMPLE uint32_t|static uint32_t)\s+([A-Za-z0-9_]*_hi)\s*\([^)]*\)\s*\{(.*?)\n\}',
                 all_c, re.S):
             hi_bodies.append((m.group(1), m.group(2)))
         # Prefer the specialised hi body; fall back to any hi body.

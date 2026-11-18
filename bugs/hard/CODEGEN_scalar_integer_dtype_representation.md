@@ -192,3 +192,35 @@ project interpreter (`python3 fire.py run`). Measured:
 So the alias must be evaluated structurally (a narrow evaluator for a
 width-to-DType ternary chain), or the interpreter's `DType` and stdlib-import
 evaluation must be made to match. Choose one before implementing.
+
+## Status 2026-11-18 (alias evaluation landed; mulhi instance fixed, dylib stub remains)
+
+Landed: `mojo/middle/comptime_fn.py` evaluates a struct's single-line `comptime` alias
+through the stdlib generic functions it calls (`_uint_type_of_width`, `bit_width_of`),
+with `Self.<param>` bound to the instance's dtype. `elaborate_generic_struct` calls
+`resolve_struct_aliases` once on the template, so the instance object, its signature
+and its cache key see the same concrete text. It also folds `bit_width_of[<dtype>]()`
+to its integer, so `comptime if bit_width_of[Self.dtype]() <= 32` picks the 32-bit arm.
+
+Measured:
+- `FastDiv[DType.uint32]` now calls `std__gpu_intrinsics_mulhi_7a3fec` (the UInt32
+  overload), not `_2dbb98` (Int64) and not the 64-bit arm.
+- stdlib compile: 610/610, 0 skips. test_gimple: 466/0.
+- dylib: one undefined `_std__gpu_intrinsics_mulhi__1_0_5_Int64_1_1_5_Int64` remains,
+  the same count as before this change.
+
+Remaining (two separate defects, both measured):
+1. The dylib exports ERASED generic `FastDiv` methods (`_std_utils_fast_div_FastDiv___divmod__`,
+   ...). In an erased body `Scalar[dtype]` is the int64 word, so `mulhi` has no
+   overload to choose and the call site emits the unhashed stub name. Fix needs a
+   decision: stop exporting erased copies of generic struct methods (every generic
+   struct), or give the erased path a defined answer. Not decided here.
+2. `test_import_overload_choice.py` (red on master too): its `hi`-body regex matched
+   `mulhi`'s own body and picked it. Fixed to match only `*_hi` names. It now reads the
+   real specialised `hi`, which calls `scov_mulhi_..._mulhi__1_0_6_UInt32_1_1_6_UInt32`:
+   the UInt32 overload, chosen correctly. The test still asserts the HASHED home symbol
+   (`_7a3fec`); for a non-std module the emitter deliberately calls its elaborated copy
+   (named from the Mojo types, `mangle_signature`), so the assertion is stricter than the
+   design. Next: decide whether the non-std call should reference the home symbol
+   (hashed, needs the home object linked) or the elaborated copy (self-consistent), then
+   make the test assert that.
