@@ -1191,12 +1191,25 @@ main()
     # A variadic lambda's `*args` really is a sequence: len(), iteration and
     # indexing all read the packed list, and the ZERO-argument call packs an
     # empty one rather than passing a stray scalar.
-    test_gimple_stdout("gimple_variadic_lambda_args_is_a_sequence", """\
+    # `*a` is a real sequence, so indexing it works AND reading past its end
+    # is CPython's IndexError rather than a silent default. This case was
+    # pinned to "0\n31\n" from b3de1658b ("each pinned to CPython's answer")
+    # until 2026-11-18; that expectation is NOT CPython's -- CPython raises
+    # `tuple index out of range` for `e()`, and the compiled raise
+    # (`mojo_list_get_int_checked`) is the correct behaviour. Pinned as a
+    # runtime error, with the in-bounds index asserted separately.
+    test_gimple_runtime_error("gimple_variadic_lambda_args_is_a_sequence", """\
 def main():
     e = lambda *a: len(a) * 10 + a[0]
     print(e())
     print(e(1, 2, 3))
-""", "0\n31\n")
+""", "IndexError")
+
+    test_gimple_stdout("gimple_variadic_lambda_args_sequence_index", """\
+def main():
+    e = lambda *a: len(a) * 10 + a[0]
+    print(e(1, 2, 3))
+""", "31\n")
 
     # CAPTURING + variadic: the closure env leads the packed parameters, and
     # the capture is read through it. This is the corpus shape
