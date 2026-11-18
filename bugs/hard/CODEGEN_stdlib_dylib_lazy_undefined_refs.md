@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6, CODEGEN_stdlib_dylib_lazy_undefined_refs-part9
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
@@ -7,9 +7,9 @@ that the dylib LOADS (a data/class-table reference to an undefined symbol is fat
 `tools/stdlib_dylib_ratchet.py`). These 50 are lazy CALL references: they do not stop the load, but a
 client that reaches one through the dylib aborts at that call unless another image happens to define it.
 
-## Replan (2026-11-15): the live parts are 5-6 and 9
+## Replan (2026-11-15): the live parts are 5-6 (part 9 landed)
 
-Parts 1-3, 4, 7 and 8 landed and their docs were deleted when they landed:
+Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
 
 - part 1: a re-exported free function's reference carries the DEFINING module's
   qualifier (`_reexported_defining_qualifier`).
@@ -44,6 +44,15 @@ Parts 1-3, 4, 7 and 8 landed and their docs were deleted when they landed:
   (`splat[.int]`), and overloads whose bodies cannot be emitted correctly
   because of an unrelated platform/external-call typing bug keep the
   historical "not emitted" disposition instead of failing the module.
+- part 9 (landed 2026-11-16, doc deleted): a generic free function
+  instantiated only by ANOTHER module is now emitted by its defining module.
+  `build_stdlib_dylib._generic_instance_requests` reads each caller object's
+  references (`nm -u`), matches an erased signature to a top-level
+  `def <name>[` in the module that owns the symbol's qualifier, and recompiles
+  that module once with the monomorphized instance appended, emitted under the
+  caller's exact symbol (the caller's own `_func_csym` spelling) in the
+  defining module's own translation unit. Pinned by
+  `test_dylib_generic_instances.py` and the `p9_generic` probe.
 
 The title's "50" is the 2026-11-12 measurement and is stale; the live
 residual is the table below. Measured 2026-11-15 in this worktree by compiling
@@ -57,7 +66,6 @@ build, no link), then confirming the end-to-end shape with two-module
 |---|---|---|---|
 | 5 | `...-part5.md` | a body the backend cannot lower vanishes, so the caller's qualified name has no definition (its own calls get a BARE weak stub) | `std_sys_info_is_{apple,nvidia,amd}_gpu`, `std_python__cpython_CPython_as_imm` |
 | 6 | `...-part6.md` | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
-| 9 | `...-part9.md` | a generic free function instantiated only by another module is never emitted | `..._forget_deinit`, `..._unsafe_destroy_n`, `..._dealloc`, `std_time_time_time_function` |
 
 Not a part:
 
@@ -146,7 +154,7 @@ test: run `nm -u` against `nm -gU` and require the `_std_` difference to *shrink
 `stdlib-dylib` fail on it until the count is zero: all 50 exist before the fix and the job's documented
 contract is that the dylib need not be complete.
 
-**Exact next step:** work parts 5-6 and 9, in the order of the table above. Each
+**Exact next step:** work parts 5-6, in the order of the table above. Each
 part's `## Done when` names the probe that is red today and green when the
 part lands. The old advice to take "the arity-only overload choice" is part 3,
 which landed; the remaining classes are the replan table's, not this

@@ -29,9 +29,10 @@ import cas
 import reflect
 import build_config
 from build_config import find_gcc, find_gxx
-from gimple_codegen import GimpleGen, FromImportStmt
-from fire_compiler import py_tokenize, Parser
-from module_loader import load_module, STDLIB_PATH, module_name_for_path
+from gimple_codegen import GimpleGen, FromImportStmt, _safe_name
+from fire_compiler import py_tokenize, Parser, FunctionDef
+from module_loader import (load_module, STDLIB_PATH, module_name_for_path,
+                           ModuleLoader)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
@@ -409,8 +410,16 @@ class _DylibGeneratedCppError(RuntimeError):
 
 
 def compile_module_to_c(src: str, path: str, module_name: str,
-                        linkable: bool = True) -> str:
+                        linkable: bool = True, no_mangle: tuple = ()) -> str:
     """Transpile one library module to GIMPLE C with no main/entry points.
+
+    `no_mangle`: free-function names whose C symbol is emitted EXACTLY as
+    written instead of being module-qualified and overload-suffixed. The
+    cross-module generic-instance pre-pass (`_generic_instance_requests`) uses
+    it for the definitions it appends, because their names are already the
+    exact symbols callers in OTHER modules reference — the caller's own
+    `_func_csym` spelling, which this side must not re-derive. Empty for every
+    ordinary module compile, so their symbols are unchanged.
 
     Deep-but-finite generic-instantiation chains (a module pulling in nested
     generics) can run many thousands of Python frames deep on a COLD cache before
@@ -435,7 +444,8 @@ def compile_module_to_c(src: str, path: str, module_name: str,
     def _run():
         try:
             sys.setrecursionlimit(120000)
-            gen = GimpleGen(emit_entry_points=False, module_name=module_name)
+            gen = GimpleGen(emit_entry_points=False, module_name=module_name,
+                            no_mangle=no_mangle)
             gen._current_filename = path
             # Stash the text the parser consumes, exactly as gimple_codegen's
             # pipeline does (`gen._source_text = mojo_src`). `module_gen`'s
@@ -859,9 +869,375 @@ def _module_name_for(path: str) -> str:
     return module_name_for_path(path)
 
 
+def _nm_all(objs: list, args: tuple) -> set:
+    """Every symbol ONE `nm` run over ALL of `objs` names — the union, because
+    the caller only ever asks "is this symbol referenced anywhere in the
+    link / defined anywhere in it", never which object carried it.
+
+    One invocation per question, not one per object: `build()` runs the
+    generic-instance pre-pass on every dylib it links, including the full
+    664-module stdlib build whose pass-1 objects are usually all CAS hits, so
+    a subprocess per object per question would put seconds of `nm` on the warm
+    path for nothing. `nm` prints a `file:` header before each object's
+    symbols (and a fat file's header ends in ':' too); those are skipped, and
+    the symbol is the line's last token in both `-u` (`_foo`) and `-g -U`
+    (`0000000000000123 T _foo`) spellings — the same rule
+    `tools/stdlib_dylib_ratchet._nm_symbols` uses.
+
+    A failing `nm` RAISES: an empty set would read as "nothing is referenced"
+    or "nothing is defined", which are silent-green and false-red readings of
+    exactly the state this pre-pass exists to measure."""
+    argv = ['nm']
+    argv = argv + list(args) + list(objs)
+    r = subprocess.run(argv, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("nm %s failed (exit %d): %s"
+                           % (' '.join(args), r.returncode,
+                              (r.stderr or '').strip()))
+    syms = set()
+    for line in r.stdout.splitlines():
+        line = line.rstrip()
+        if not line or line.endswith(':'):
+            continue
+        syms.add(line.split()[-1])
+    return syms
+
+
+def _bare_symbol(s: str) -> str:
+    """`s` without the single leading underscore Mach-O gives every C symbol,
+    so symbol sets from `nm` can be compared on ELF too."""
+    if s.startswith('_'):
+        return s[1:]
+    return s
+
+
+# The type argument a cross-module generic instance is built with.
+#
+# Every generic free function a caller in ANOTHER module names by an erased
+# signature has its type parameters erased to `int64_t` on the caller's side:
+# `module_loader`'s text scan resolves the annotation `T` (and every container
+# wrapped around it, e.g. `MutPointer[T, _]`) to `int64_t`, which is why the
+# reference carries the suffix of `int64_t` / `int64_t, int64_t` rather than of
+# any concrete type. `Int` is the Mojo spelling whose C lowering is exactly
+# that word, so the definition the module emits has the parameter types the
+# caller's own declaration has. The body is compiled by the defining module's
+# codegen (not in an isolated TU), so it is the same program the same template
+# lowers to everywhere else in this backend — including this backend's normal
+# erasure of the parts that need the concrete type.
+_INSTANCE_TYPE_ARG = 'Int'
+
+_HEX_DIGITS = '0123456789abcdef'
+
+
+def _split_overload_suffix(sym: str) -> tuple:
+    """`(base, suffix)` where `suffix` is '' or the `_` plus six lowercase hex
+    digits `GimpleGen.overload_suffix_for` appends.
+
+    Bounded slices plus `find`, never `sym[-7]`/`sym[i]` or a loop over the
+    string's characters: this file is compiled by the self-hosted compiler,
+    whose char* subscription yields the BYTE's integer value rather than a
+    1-char string, and whose run-time regex engine is deliberately absent (see
+    `overload_suffix_for`'s own note and `gimple_ctypes.source_decl_ends`)."""
+    if len(sym) > 6 and sym[-7:].startswith('_'):
+        tail = sym[-6:]
+        ok = True
+        for k in range(0, 6):
+            if _HEX_DIGITS.find(tail[k:k + 1]) < 0:
+                ok = False
+                break
+        if ok:
+            return sym[:-7], sym[-7:]
+    return sym, ''
+
+
+def _top_level_generic_names(src: str) -> list:
+    """Names of the TOP-LEVEL generic free functions a module's text declares,
+    in source order.
+
+    Text-only, no parse: this runs over every module in the link before any
+    codegen, and `def <name>[` in column 0 is exactly a top-level generic free
+    function. An indented `def` is a method, and `def <name>(` is concrete, so
+    neither is a candidate. Bounded slices, not `rest[i]` — see
+    `_split_overload_suffix` on why this file cannot index a string."""
+    out = []
+    _word = ('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+             '0123456789_')
+    for line in src.split('\n'):
+        kw = 0
+        if line.startswith('def '):
+            kw = 4
+        elif line.startswith('fn '):
+            kw = 3
+        else:
+            continue
+        rest = line[kw:]
+        i = 0
+        while i < len(rest) and _word.find(rest[i:i + 1]) >= 0:
+            i += 1
+        if i == 0:
+            continue
+        j = i
+        while j < len(rest) and (' \t').find(rest[j:j + 1]) >= 0:
+            j += 1
+        if j < len(rest) and rest[j:j + 1] == '[' and rest[:i] not in out:
+            out.append(rest[:i])
+    return out
+
+
+def _template_shape(template_src: str, name: str):
+    """`(arity, c_parameter_types, return_annotation)` for the parsed template,
+    or None.
+
+    The C types come from `ModuleLoader._mojo_type_to_c`, the ONE resolver the
+    text-scan import signature (`module_loader.load_module`) uses to spell an
+    imported function's parameters — so the suffix computed from them with
+    `GimpleGen.overload_suffix_for` is the suffix the CALLER put on its
+    reference, not a second naming scheme."""
+    try:
+        stmts = Parser(py_tokenize(template_src)).parse_module()
+    except Exception:
+        return None
+    for s in stmts:
+        if not (isinstance(s, FunctionDef) and s.name == name):
+            continue
+        c_params = []
+        for pname, ptype in (getattr(s, 'params', None) or []):
+            if pname == 'self':
+                continue
+            if pname.startswith('*'):
+                # `*args` makes the scan's signature variadic, i.e. suffix-less
+                # (`overload_suffix_for` refuses a `...` parameter list).
+                c_params.append('...')
+                break
+            bare = ptype.split('=')[0].strip()
+            try:
+                ct = ModuleLoader._mojo_type_to_c(bare)
+            except Exception:
+                ct = 'int64_t'
+            c_params.append('int64_t' if ct == 'void' else ct)
+        ret = getattr(s, 'return_type', None) or ''
+        return (len(c_params), tuple(c_params), ret)
+    return None
+
+
+def _select_generic_template(module_src: str, name: str, suffix: str):
+    """The template of `name` that the requested `suffix` names, or None.
+
+    A name may have several same-named generic definitions (Mojo separates
+    them by arity and parameter types; the C symbol separates them by
+    `overload_suffix_for`). Two provable selections, and nothing else:
+
+    * `suffix` is non-empty — the candidates whose PREDICTED suffix is exactly
+      it. Several such candidates are indistinguishable at the C level when
+      their erased parameter and return types agree, so any of them is right.
+    * `suffix` is empty — the caller's scan spells an OVERLOADED name `(...)`,
+      so the symbol states no types. Accept only when every candidate has one
+      and the same erased signature; then any of them is callable.
+
+    Anything else is ambiguous, and an ambiguous request is DECLINED rather
+    than resolved by source order: a definition with the wrong body under the
+    caller's symbol is a silent miscompile, while no definition is the
+    documented "client falls back to source" state this pass must not worsen."""
+    import elaborate
+    shapes = []
+    for t in elaborate.extract_fn_sources(module_src, name):
+        # A concrete same-name definition (`def name(`) has no type parameters
+        # and an indented one is a METHOD whose block cannot be parsed as a
+        # module; neither is a generic free-function template.
+        if not elaborate.type_param_names(t):
+            continue
+        shape = _template_shape(t, name)
+        if shape is not None:
+            shapes.append((t, shape))
+    if not shapes:
+        return None
+    if suffix:
+        matches = []
+        for _t, sh in shapes:
+            if GimpleGen.overload_suffix_for(list(sh[1])) == suffix:
+                matches.append((_t, sh))
+    else:
+        matches = shapes
+    if not matches:
+        return None
+    pick = matches[0]
+    first = pick[1]
+    for _t, sh in matches[1:]:
+        if sh != first:
+            return None
+    return pick[0]
+
+
+def _rename_instance_head(concrete: str, mangled: str, symbol: str) -> str:
+    """The monomorphized definition with its own mangled name replaced by the
+    exact `symbol` the caller references.
+
+    Anchored on a line-initial `def`/`fn`, so a mention of the template name
+    inside the body or a docstring is untouched. `monomorphize_source` puts
+    the definition head first, and this REFUSES rather than return a text it
+    did not rename — an unrenamed instance is a different symbol. Bounded
+    slices, not `concrete[q]` — see `_split_overload_suffix` on why this file
+    cannot index a string."""
+    _after = '([: \t\n'
+    for kw in ('def ', 'fn '):
+        head = kw + mangled
+        if concrete.startswith(head):
+            rest = concrete[len(head):]
+            if not rest or _after.find(rest[:1]) >= 0:
+                return kw + symbol + rest
+    for kw in ('def ', 'fn '):
+        head = '\n' + kw + mangled
+        p = concrete.find(head)
+        if p < 0:
+            continue
+        q = p + len(head)
+        if q >= len(concrete) or _after.find(concrete[q:q + 1]) >= 0:
+            return concrete[:p] + '\n' + kw + symbol + concrete[q:]
+    raise RuntimeError("could not rename the monomorphized head %r" % mangled)
+
+
+def _generic_instance_source(template_src: str, symbol: str) -> str:
+    """The concrete definition of `template_src` that `symbol` asks for.
+
+    One monomorphization, then the head renamed to the caller's exact symbol.
+    The caller's own `_func_csym` produced that name; reusing it verbatim is
+    what makes the definition and the reference the SAME symbol (the bug
+    doc's "one naming function, not a second spelling").
+
+    The bracket arguments are the ones the caller's erased signature PROVES,
+    and nothing else:
+
+    * a TYPE parameter is instantiated with `_INSTANCE_TYPE_ARG` — the type
+      whose C lowering is the erased word the caller passes;
+    * a parameter `elaborate.erased_only_params` proves is discarded by
+      `_mojo_type` (the origin / receiver-convention group) takes the SAME
+      stand-in the elaborator's own `.o` route uses for it
+      (`elaborate.ERASED_TYPE_ARG`);
+    * a comptime VALUE parameter (`k: Int`, `mut: Bool`) has no provable
+      argument here — the caller's erased signature does not carry it — so the
+      request is REFUSED rather than substituting a type into a value's place.
+
+    Refusing is deliberate and is the doc's own rule: a wrong-erased template
+    under the caller's symbol is a silent miscompile, while no definition is
+    the documented "client falls back to source" state this pass must not
+    worsen."""
+    import monomorphize
+    import elaborate
+    params = elaborate.type_param_names(template_src)
+    if not params:
+        return None
+    kinds = elaborate.type_param_kinds(template_src)
+    kind_of = {}
+    for i in range(len(params)):
+        kind_of[params[i]] = kinds[i] if i < len(kinds) else 'type'
+    erased = elaborate.erased_only_params(template_src, params)
+    type_args = {}
+    for p in params:
+        if p in erased:
+            type_args[p] = elaborate.ERASED_TYPE_ARG
+        elif kind_of[p] == 'type':
+            type_args[p] = _INSTANCE_TYPE_ARG
+        else:
+            return None
+    mangled, concrete = monomorphize.monomorphize_source(template_src, type_args)
+    return _rename_instance_head(concrete, mangled, symbol)
+
+
+def _generic_instance_requests(modules: list, results: list) -> dict:
+    """`{defining module path: {caller symbol: instance source}}` for every
+    generic free-function instance a module in THIS link references and
+    nothing in it defines.
+
+    A module is compiled ALONE, so a generic it merely declares has no
+    concrete signature there and is never emitted — while a caller in another
+    module that cannot elaborate the call names it by the text-scan erased
+    signature (`..._forget_deinit_9f63a2`). Nothing defined that symbol, so
+    the dylib left it lazy/undefined and every client fell back to source.
+    This pre-pass answers exactly those references: it reads the reference set
+    from the caller OBJECTS (`nm -u`, so it works on a CAS hit too, unlike the
+    generated C, which only exists after a miss) and hands each defining
+    module the instances its callers ask for, to emit in its OWN translation
+    unit where its own types and functions resolve.
+
+    Only symbols whose home module is in this link are considered, and only
+    when a top-level `def <name>[` in that module names them — this is the
+    generic-free-function class, not a place to invent definitions for
+    ordinary missing symbols (parts 5 and 8 of the same bug are their own)."""
+    index = {}
+    src_by_path = {}
+    for path in modules:
+        try:
+            src = open(path).read()
+        except OSError:
+            continue
+        src_by_path[path] = src
+        qualifier = _module_name_for(path)
+        for name in _top_level_generic_names(src):
+            index[qualifier + '_' + _safe_name(name)] = (path, name)
+    if not index:
+        return {}
+
+    defined = set()
+    undefined = set()
+    _objs = []
+    for _path, _name, ofile, _exports, error, _hit in results:
+        if error is None and ofile:
+            _objs.append(ofile)
+    if _objs:
+        try:
+            for s in _nm_all(_objs, ('-g', '-U')):
+                defined.add(_bare_symbol(s))
+            for s in _nm_all(_objs, ('-u',)):
+                undefined.add(_bare_symbol(s))
+        except Exception as e:
+            print("  instance scan: %s" % e, file=sys.stderr)
+            return {}
+
+    requested = {}
+    for sym in sorted(undefined):
+        if sym in defined:
+            continue
+        base, suffix = _split_overload_suffix(sym)
+        home = index.get(base)
+        if home is None:
+            continue
+        definer, gname = home
+        if sym in requested.get(definer, {}):
+            continue
+        module_src = src_by_path.get(definer)
+        if module_src is None:
+            continue
+        try:
+            template = _select_generic_template(module_src, gname, suffix)
+            if template is None:
+                raise RuntimeError(
+                    "no %s template matches the erased signature" % gname)
+            source = _generic_instance_source(template, sym)
+            if source is None:
+                raise RuntimeError(
+                    "%s has a comptime value parameter the erased "
+                    "signature does not carry" % gname)
+        except Exception as e:
+            # Visible, and NOT a `skip <module>:` line: the module still
+            # builds and the dylib still links. The reference stays lazy,
+            # the documented state this pass must not worsen.
+            print("  instance %s: not emitted in %s: %s"
+                  % (sym, os.path.basename(definer), e), file=sys.stderr)
+            continue
+        if definer not in requested:
+            requested[definer] = {}
+        requested[definer][sym] = source
+    return requested
+
+
 def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
-                         objflags: tuple = _OBJ_FLAGS) -> bytes:
+                         objflags: tuple = _OBJ_FLAGS, no_mangle: tuple = ()) -> bytes:
     """Cold-path builder: Mojo → C → .o; returns the object's bytes.
+
+    `src` may already carry the cross-module generic instances a caller in
+    another module asked for, appended by `_compile_module_job`; `no_mangle`
+    names them, so each is emitted under exactly the symbol that caller
+    references.
 
     A module whose generic-struct elaboration failed is compiled against its
     un-elaborated template (every type parameter `int64_t`), so its C is not the
@@ -870,7 +1246,7 @@ def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
     caller's per-module skip path handles it the same way the sweep does."""
     cfile = os.path.join(workdir, name + '.c')
     ofile = os.path.join(workdir, name + '.o')
-    c_text = compile_module_to_c(src, path, name)
+    c_text = compile_module_to_c(src, path, name, no_mangle=no_mangle)
     refusals = last_degradations()
     if refusals:
         raise RuntimeError(
@@ -884,7 +1260,8 @@ def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
 
 
 def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tuple = _OBJ_FLAGS,
-                         known_structs: frozenset = frozenset(), dep_fingerprint: str = ''):
+                         known_structs: frozenset = frozenset(), dep_fingerprint: str = '',
+                         instances: dict = None):
     """Per-module independent work (source → object): read, collect exports,
     compile (cache-or-build). Each module is fully independent — no shared
     state — so this parallelizes across processes the same way
@@ -905,7 +1282,16 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
     `reflect.collect_exports_src` so a module-level global whose struct type
     is defined in a SIBLING file (not this module's own file) still gets a
     SYM_GLOBAL reflection export instead of being silently un-advertised.
-    Must be picklable for ProcessPoolExecutor — a frozenset of str is."""
+    Must be picklable for ProcessPoolExecutor — a frozenset of str is.
+
+    `instances` (`{symbol: source}`, second pass only): concrete generic
+    instances a caller in another module references, appended to this module's
+    source and emitted HERE, so the template body is compiled against its own
+    module's types and functions. They are part of the source, hence of the
+    CAS key, and their names go to `no_mangle` so each is emitted under the
+    caller's own symbol rather than qualified and re-suffixed here. Their
+    exports are deliberately not advertised: the reflection table describes
+    the module's declarations, and these exist only to satisfy references."""
     gcc = find_gcc()
     name = _module_name_for(path)
     src = open(path).read()
@@ -917,17 +1303,28 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
                                                known_structs=known_structs)
     except Exception:
         exports = []
+    no_mangle = ()
+    if instances:
+        # Sorted, so the appended text (and therefore the CAS key and the
+        # emitted C) is the same byte for byte on every build.
+        _parts = []
+        for _sym in sorted(instances):
+            _parts.append(instances[_sym])
+        src = src + '\n\n\n' + '\n\n\n'.join(_parts)
+        no_mangle = tuple(sorted(instances))
     hit = None
     try:
         if use_cache:
             key = cas.module_key(src, _imported_sigs(src), gcc, objflags,
                                  dep_fingerprint=dep_fingerprint)
             ofile, hit = cas.get_or_build(
-                key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc, objflags))
+                key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc,
+                                                       objflags, no_mangle))
         else:
             ofile = os.path.join(workdir, name + '.o')
             with open(ofile, 'wb') as f:
-                f.write(_compile_one_object(src, path, name, workdir, gcc, objflags))
+                f.write(_compile_one_object(src, path, name, workdir, gcc,
+                                            objflags, no_mangle))
         # A degraded compile must never reach the dylib. The cached path only
         # serves objects published by a clean build (_compile_one_object refuses
         # to produce a degraded one), but a fresh in-process compile records its
@@ -1186,6 +1583,41 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             results = [_compile_module_job(path, workdir, use_cache, objflags, known_structs,
                                            dep_fps[path])
                        for path in modules]
+
+        # Cross-module generic FREE FUNCTION instances (bug:CODEGEN_stdlib_
+        # dylib_lazy_undefined_refs, the "generic free function instantiated
+        # only by another module" class). A module is compiled ALONE, so a
+        # generic it declares has no concrete signature there and is never
+        # emitted; a caller in another module that cannot elaborate the call
+        # references the text-scan ERASED signature instead, which nothing
+        # defined — so the dylib left it lazy and clients silently fell back
+        # to source. `_generic_instance_requests` reads the caller objects'
+        # references and recompiles each DEFINING module once with the
+        # requested instances appended, so its own codegen emits them under
+        # the caller's exact symbols. A defining module whose second compile
+        # fails keeps its first-pass object: the reference stays lazy (the
+        # documented contract) instead of the module being skipped, and the
+        # reason is printed by name on stderr.
+        #
+        # BEFORE the collision dedup below, because the dedup is what turns
+        # `results` into the link line; a replaced object after it would never
+        # be linked.
+        instance_jobs = _generic_instance_requests(modules, results)
+        if instance_jobs:
+            _idx_by_path = {}
+            for _i in range(len(results)):
+                _row = results[_i]
+                _idx_by_path[_row[0]] = _i
+            for _ipath in sorted(instance_jobs):
+                _inst = instance_jobs[_ipath]
+                _ires = _compile_module_job(
+                    _ipath, workdir, use_cache, objflags, known_structs,
+                    dep_fps[_ipath], _inst)
+                if _ires[4] is not None:
+                    print("  instances for %s: not emitted (%s)"
+                          % (os.path.basename(_ipath), _ires[4]), file=sys.stderr)
+                    continue
+                results[_idx_by_path[_ipath]] = _ires
 
         # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
         # symbol from it if present, else falls back to source), so it need not be

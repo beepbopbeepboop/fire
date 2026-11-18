@@ -208,6 +208,30 @@ def _binds_from_args(template_src: str, arg_ctypes) -> bool:
     return all(p in bound for p in params)
 
 
+def extract_fn_sources(module_src: str, fn_name: str) -> list:
+    """Every same-named `fn`/`def` block in `module_src`, in source order, by
+    indentation — the candidates `extract_fn_source` selects ONE of.
+
+    Factored out of `extract_fn_source` so a caller that must account for
+    EVERY overload (not just the first by arity) enumerates them through the
+    same block reader instead of a second one. A name may be declared as a
+    free function and as a method, so a returned block can be indented."""
+    lines = module_src.splitlines(keepends=True)
+    pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*[\[\(]')
+    depths = _bracket_depth_by_line(module_src)
+    out = []
+    i = 0
+    while i < len(lines):
+        if pat.match(lines[i]):
+            base = len(lines[i]) - len(lines[i].lstrip())
+            end = _find_block_end(lines, depths, i, base)
+            out.append(''.join(lines[i:end]))
+            i = end
+        else:
+            i += 1
+    return out
+
+
 def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None,
                       arg_ctypes: list | None = None):
     """Pull the source text of a single `fn fn_name[...](...): body` from a
@@ -221,19 +245,7 @@ def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = Non
     get one via `extract_overloads`). When `arg_count` is given and more than
     one candidate matches by name, pick the one whose non-self, non-variadic
     parameter count equals it; otherwise fall back to the first match."""
-    lines = module_src.splitlines(keepends=True)
-    pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*[\[\(]')
-    depths = _bracket_depth_by_line(module_src)
-    candidates = []
-    i = 0
-    while i < len(lines):
-        if pat.match(lines[i]):
-            base = len(lines[i]) - len(lines[i].lstrip())
-            end = _find_block_end(lines, depths, i, base)
-            candidates.append(''.join(lines[i:end]))
-            i = end
-        else:
-            i += 1
+    candidates = extract_fn_sources(module_src, fn_name)
     if not candidates:
         return None
     if arg_count is None or len(candidates) == 1:
