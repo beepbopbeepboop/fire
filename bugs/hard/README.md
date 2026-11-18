@@ -14,9 +14,7 @@ deleted in the same commit, as for any bug.
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` | see doc | workers |
-| `COMPILE_FAIL_Tools_cases_generator_analyzer.md` | see doc | workers |
-| `COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
 | `FORMAL_svc_exit_handling_incomplete.md` | see doc | workers |
-| `GATE_red_recover-land_2026-11-02.md` | see doc | workers |
+| `GATE_red_recover-land_2026-11-02-part5.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |

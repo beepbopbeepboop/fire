@@ -61,7 +61,8 @@ int64_t mojo_list_get_int(void *lp, int64_t i)
 int   mojo_coro_frame_base(void)   { return 0; }
 int   mojo_coro_cleanup_base(void) { return 0; }
 void *mojo_coro_slice_save(int f, int c) { (void)f; (void)c; return 0; }
-void  mojo_coro_slice_restore(void *s) { (void)s; }
+int   mojo_coro_slice_restore(void *s) { (void)s; return 0; }
+void  mojo_cleanup_pad_checkpoint(int lvl, int nc) { (void)lvl; (void)nc; }
 int64_t (*_mojo_gen_state_hook)(int64_t) = 0;
 int64_t mojo_frame_for_gen(int64_t g, int64_t o, const char *n, const char *f, int64_t a, int64_t b)
 { (void)g; (void)o; (void)n; (void)f; (void)a; (void)b; return 0; }

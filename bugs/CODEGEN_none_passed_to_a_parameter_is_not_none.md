@@ -52,12 +52,12 @@ so the wrong answer was measured with that refusal lifted in memory.
 
 ## What is already there
 
-`mojo_unbox_plain` (landed with `bugs/hard/GATE_red_recover-land_2026-11-02.md`
-item 2) is supposed to turn a None box into the plain word at user-function call
-sites. That lands `is None` for the unannotated parameter but leaves `== None`
-wrong, and the str-annotated parameter is not unboxed at all (or is coerced to
-the string `"0"` — see `_default_expr_to_pair`'s note that a 0 passed to a
-`char *` parameter becomes `mojo_cstr_or_int_str(0)`, i.e. the one-character
+`mojo_unbox_plain` (landed earlier as item 2 of the `GATE_red_recover-land_2026-11-02`
+bootstrap-recovery work) is supposed to turn a None box into the plain word at
+user-function call sites. That lands `is None` for the unannotated parameter but
+leaves `== None` wrong, and the str-annotated parameter is not unboxed at all (or
+is coerced to the string `"0"` — see `_default_expr_to_pair`'s note that a 0 passed
+to a `char *` parameter becomes `mojo_cstr_or_int_str(0)`, i.e. the one-character
 string `"0"`, which is exactly what `repr` printed).
 
 ## Next step

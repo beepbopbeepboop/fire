@@ -4202,6 +4202,18 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
+    # The cases-generator analyzer landing (2026-11-17) left these regression
+    # pins next to their fixes without registering them. Each runs directly;
+    # the `*_build.py` siblings compile one small source with `fire.py build`
+    # in seconds, and the export-table pin is the dylib cross-check that same
+    # landing carried (its subject is `build_stdlib_dylib.py`, not the
+    # analyzer). The landing's own end-to-end test is `test_analyzer_build.py`,
+    # registered as `reg-analyzer-build`.
+    'test_casesgen_dataclass_ctor_literal_union.py': _STANDALONE_TEST_REASON,
+    'test_casesgen_dataclass_ctor_literal_union_build.py': _STANDALONE_TEST_REASON,
+    'test_casesgen_decorated_method_gate.py': _STANDALONE_TEST_REASON,
+    'test_casesgen_preseed_takeover_union_elems.py': _STANDALONE_TEST_REASON,
+    'test_export_table_suffix_mismatch.py': _STANDALONE_TEST_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
     'test_codegen_sys_encoding_capture.py': _STANDALONE_TEST_REASON,
