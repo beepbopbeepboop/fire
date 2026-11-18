@@ -48,6 +48,9 @@ BASELINE = {
     # retired on 2026-11-16: this is a historical LANDING RECORD that names the
     # doc it merged, so the citation is the record, not a dangling pointer.
     'bugs/LAND-codegen-simd-and-array-values-erase-2.md': 1,
+    # Historical LANDING RECORD: names the part8-2 doc it attempted to land,
+    # which is not in the tree. Raised rather than rewound.
+    'bugs/LAND-gpu-offload-validation-modular-3.md': 1,
     'bugs/mid/LAND-codegen-simd-and-array-values-erase-3.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
