@@ -3525,6 +3525,22 @@ def _func_mangleable(gen, name: str) -> bool:
 
 
 def _func_csym(gen, bare_name: str, def_pts: list | None = None) -> str:
+    """The C symbol codegen gives a free function, recorded on `gen` so the
+    export table can name the symbol the object actually defines.
+
+    Every definition and call site asks this function for the name, so the
+    record is the authoritative answer for each bare name in this module; see
+    `_func_csym_impl` for how the name is built."""
+    sym = _func_csym_impl(gen, bare_name, def_pts)
+    rec = getattr(gen, '_func_csym_record', None)
+    if rec is None:
+        rec = {}
+        gen._func_csym_record = rec
+    rec.setdefault(bare_name, set()).add(sym)
+    return sym
+
+
+def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
     """The C symbol for a free function: _safe_name + overload suffix when the
     function is a user/imported Mojo function eligible for mangling. Used at the
     definition, every forward declaration, and every call site so they agree.
