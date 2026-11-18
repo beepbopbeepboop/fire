@@ -6099,6 +6099,12 @@ def _gen_stmt_ExprStmt(gen, node):
         # wrappers are exactly that) never reaches _lower_named_call at
         # all, so without this its prototype was never recorded and the
         # call stayed an implicit declaration.
+        # An imported name its home module defines more than once: name the overload
+        # the call selects (the same chooser `_lower_named_call` uses).
+        import mojo.backend_gimple.emit_calls as _ec_stmt
+        _imp_ov = _ec_stmt._imported_overload_call_symbol(gen, raw_name, node.value)
+        if _imp_ov is not None:
+            fname = _imp_ov
         ggc._ensure_libc_self_extern(gen, raw_name)
         arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
 

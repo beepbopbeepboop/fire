@@ -95,6 +95,26 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   not an object the caller fills; the right fix is to return the pointer
   (`_RandomState * f(void)`), a separate change to the definer's signature and
   the caller's use of the value.
+  Status 2026-11-17 (overload selection for an imported name): the import scan
+  records a name defined more than once as a variadic `name(...)` stub, which
+  names no overload, so `bitset.mojo`'s `unsafe_memset_zero(ptr, count)` bound
+  to the bare stub. `emit_calls._imported_overload_call_symbol` now picks the
+  overload from the HOME module's own statements (following a package
+  re-export to the defining module), and declares it. It decides ONLY when
+  exactly one plain (non-generic) overload fits the call's arity and the call
+  supplies every parameter; anything else keeps the stub. Both call paths use
+  it (`_lower_named_call` and the statement path in `emit_stmts`).
+  `test_import_overload_choice.py` fails on the committed code and passes here.
+  Undefined `_std_` names: 8 -> 7 (`unsafe_memset_zero` resolved).
+  Not done, found while doing it: (a) a defaulted or ambiguous overload set
+  (`assert_equal`, `b64encode`, `time.sleep`) still falls back: the imported
+  call path does not fill defaults, and the chooser does not see argument types;
+  (b) `std.time.time` emits NO `sleep` symbol at all, so `_std_time_time_sleep`
+  stays undefined whatever the caller names; (c) the scan takes an overload
+  set's return type from its LAST overload, so the declaration can differ from
+  the definer's (`unsafe_memset_zero` is `void` there, `int64_t` in the import).
+  Gates: stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple
+  465/0, lint and ratchet clean.
   Previously open (now done): step 3, the cross-module import. Gates:
   stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
   Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
