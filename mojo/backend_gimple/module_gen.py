@@ -12420,8 +12420,6 @@ def _gmp_device_kernel_meta(self, stmts: list, _device_explicit: set, _device_fa
 
 
 def gen_module_impl(self, stmts: list):
-    from mojo.middle.out_result import lower_pointer_out_results
-    lower_pointer_out_results(stmts)
     self._stmts = stmts
     self._current_module_stmts = stmts
 
@@ -13107,17 +13105,17 @@ def gen_module_impl(self, stmts: list):
 
     # A name with two or more PLAIN definitions is emitted as one definition
     # per signature — but only when every body is something this build can
-    # lower without tripping an unrelated type bug. A body that constructs a
-    # generic struct DEFINED IN THIS FILE (the in-TU materializer would
-    # instantiate it here and change this file's own struct-method emission)
-    # cannot be emitted correctly here. Those names keep the historical
-    # disposition — none of their overloads is emitted — rather than turning an
-    # unrelated type bug into a module refusal. A body that uses
-    # `external_call[...]` is NOT in that set: its declaration is typed from the
-    # call's own annotations, and the stdlib builds clean with every such
-    # overload emitted (`time.sleep`'s two overloads, 2026-11-17). The stdlib-
-    # dylib overload rows (`_free`, `unsafe_memset_zero`, `splat`, `to_integer`)
-    # and the synthetic probe have neither shape.
+    # lower without tripping an unrelated type bug. A body that uses
+    # `external_call[...]` (whose declaration is typed from the call's own
+    # annotations and can collide with the platform header, e.g.
+    # `nanosleep`'s `struct timespec *`), or that constructs a generic struct
+    # DEFINED IN THIS FILE (the in-TU materializer would instantiate it here
+    # and change this file's own struct-method emission), cannot be emitted
+    # correctly here. Those names keep the historical disposition — none of
+    # their overloads is emitted — rather than turning an unrelated type bug
+    # into a module refusal. The stdlib-dylib overload rows (`_free`,
+    # `unsafe_memset_zero`, `splat`, `to_integer`) and the synthetic probe
+    # have neither shape.
     _plain_groups: dict = {}
     for _pog_s in stmts:
         if (isinstance(_pog_s, FunctionDef)
@@ -13139,7 +13137,8 @@ def gen_module_impl(self, stmts: list):
                     break
                 if (isinstance(_pog_f, SubscriptExpr)
                         and isinstance(_pog_f.obj, IdentExpr)
-                        and _as_str(_pog_f.obj.name) in _local_generic_structs):
+                        and (_as_str(_pog_f.obj.name) == 'external_call'
+                             or _as_str(_pog_f.obj.name) in _local_generic_structs)):
                     _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
                     break
             if id(_pog_n) in _unsafe_overload_ids:
