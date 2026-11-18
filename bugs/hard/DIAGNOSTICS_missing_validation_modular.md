@@ -428,3 +428,26 @@ Modular anchors at the offending parameter. `check_where_clauses` raises
 
 Same shape expected for `autoparam_dependency_errors` (its CHECKs are also
 `[[@LINE+n]]:{{[0-9]+}}: error: ...`).
+
+### `enum_exhaustive_errors` isolated (wakeup 63)
+
+Re-measured: `fire.py build` exits **0** on the Modular file, so the miss is
+real. But it is NOT the general "comptime member type" check:
+
+* the general check EXISTS and is pinned --
+  `test_trait_comptime_member_conformance_diagnostic.py` PASSes, including
+  `test_enum_exhaustive_mistyped`, which is exactly this shape with an
+  EXPLICIT `__enum Mistyped(EnumLike)`;
+* the Modular file declares no `EnumLike` at all -- it is
+  `__enum Mistyped(ImplicitlyCopyable, Writable)` -- and FileCheck expects the
+  diagnostic to name `EnumLike`.
+
+Probed the trait list (`Writable`, `ImplicitlyCopyable`, both): all exit 0.
+So the requirement Modular enforces comes from the **`__enum` construct's
+IMPLICIT `EnumLike` conformance** (`std/builtin/enum_like.EnumLike`, which
+requires `comptime _enum_is_exhaustive: Bool`), and our compiler does not model
+that implicit conformance, so a user-declared
+`comptime _enum_is_exhaustive = 5` is never checked against it.
+
+That is a narrower target than "declaration-level `rc=0`": the conformance
+machinery works; what is missing is that `__enum` implies `EnumLike`.
