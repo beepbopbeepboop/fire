@@ -20,10 +20,10 @@ Landed (integer-valued bracket arguments, the repro below):
 - Measured: the repro below prints `13` (was `1`).
 - Tests: `test_elaboration_recursion_diagnostic.py::test_nested_bracketed_call_in_instantiation_is_materialized`
   (13) and `::test_nested_bracketed_calls_two_levels_and_shared_callee` (37) pass. The file's other
-  seven cases pass too, except `::test_intrinsic_name_bracket_arg_builds`, which fails before
-  elaboration on an unrelated pre-existing unknown-declaration false positive (`type_of`) —
-  `bugs/DIAGNOSTICS_type_of_builtin_reported_undeclared.md`. Not run here:
-  `stdlib-dylib` / `stdlib-syntax` skip and FAILED counts (integrator gate).
+  seven cases pass too, including `::test_intrinsic_name_bracket_arg_builds`, which had been failing before
+  elaboration on an unrelated pre-existing unknown-declaration false positive: the compiler-provided
+  `type_of` builtin was not in the name check's known set. Fixed 2026-11-17 (all nine cases pass).
+  Not run here: `stdlib-dylib` / `stdlib-syntax` skip and FAILED counts (integrator gate).
 
 Still open (the doc stays until these pass):
 
