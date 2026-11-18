@@ -464,3 +464,24 @@ Target, narrowed: synthesize the enum's `EnumLike` conformance with
 "does not implement all requirements" + "note: comptime member ... does not
 conform to trait's required type ..." machinery -- both of which already work
 for an explicit conformance.
+
+### implementation target (wakeup 65)
+
+Two probes bound it:
+
+* `__enum Mistyped(EnumLike)` with the REAL stdlib trait imported
+  (`from std.builtin.enum_like import EnumLike`) still exits 0 -- correctly, since
+  that trait does not require `_enum_is_exhaustive`;
+* our compiler contains **no builtin `EnumLike`**: grep for the name over
+  `mojo/` + `fire_compiler.py` + `elaborate.py` returns only two COMMENTS
+  (`fire_compiler.py:6163`, `elaborate.py:1559`), and builtin traits are not
+  special-cased by name anywhere in the middle end (`ImplicitlyCopyable` likewise
+  appears only in a comment). So the conformance our enum needs does not exist
+  here at all.
+
+What the fix therefore is: when an `__enum` is declared, synthesize its
+`EnumLike` conformance with `comptime _enum_is_exhaustive: Bool` (the one
+member a user may write), and let the existing conformance checker report the
+violation. The checker is proven -- the pinned
+`test_enum_exhaustive_mistyped` drives exactly this diagnostic through a
+user-defined trait with the same requirement. Only the synthesis is missing.
