@@ -1702,16 +1702,31 @@ def _drop_unreferenced_extern_decls(text: str) -> str:
         return text
 
     # Count symbol occurrences inside their own declaration blocks vs total.
+    # The block counts are cheap (2-4 short lines per symbol); the whole-text
+    # count is NOT done per symbol. That shape is O(symbols x text), and the
+    # whole-closure `--dump-full` of `fire.py` carries tens of thousands of
+    # guarded externs over a ~40 MB translation unit, so the per-symbol scan
+    # ran for tens of minutes and `bootstrap-stage1-transitive` could not
+    # finish (measured 43 min and still inside this loop, all samples in
+    # `_sre_SRE_Pattern_findall`). One `\w+` tokenisation answers every
+    # symbol's count in a single pass: for a symbol `_decl_sym` has already
+    # restricted to `[A-Za-z_]\w*`, `\b<sym>\b` matches exactly the tokens
+    # equal to it.
     sym_in_blocks = {}
     for start, end, sym in blocks:
         sym_in_blocks.setdefault(sym, 0)
         for j in range(start, end):
             sym_in_blocks[sym] += len(re.findall(r'\b' + re.escape(sym) + r'\b', lines[j]))
 
+    totals = dict.fromkeys(sym_in_blocks, 0)
+    for m in re.finditer(r'\w+', text):
+        w = m.group(0)
+        if w in totals:
+            totals[w] += 1
+
     drop_syms = set()
-    for sym in sym_in_blocks:
-        total = len(re.findall(r'\b' + re.escape(sym) + r'\b', text))
-        if total > 0 and total == sym_in_blocks[sym]:
+    for sym, in_blocks in sym_in_blocks.items():
+        if totals[sym] > 0 and totals[sym] == in_blocks:
             drop_syms.add(sym)
 
     if not drop_syms:
