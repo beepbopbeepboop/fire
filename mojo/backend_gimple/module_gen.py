@@ -13009,8 +13009,12 @@ def gen_module_impl(self, stmts: list):
                     break
         if _generic_uninstantiable:
             for _g_ps in stmts:
+                # Only a GENERIC overload can be made uninstantiable: a plain
+                # function that shares its name with one (has_nvidia_gpu_accelerator)
+                # is a real definition and must stay.
                 if (not isinstance(_g_ps, FunctionDef)
                         or id(_g_ps) in _local_generic_ids
+                        or not (getattr(_g_ps, 'comptime_params', None) or [])
                         or _g_ps.name not in _local_generics):
                     continue
                 for _g_pn in _walk_ast(_g_ps.body):
@@ -13041,6 +13045,7 @@ def gen_module_impl(self, stmts: list):
             for _g_ls in stmts:
                 if (not isinstance(_g_ls, FunctionDef)
                         or id(_g_ls) in _local_generic_ids
+                        or not (getattr(_g_ls, 'comptime_params', None) or [])
                         or _g_ls.name not in _local_generics):
                     continue
                 for _g_ln in _walk_ast(_g_ls.body):
