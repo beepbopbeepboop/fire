@@ -3,8 +3,8 @@
 GATE_red_recover-land_2026-11-02-part5-part3: two OFF entries named the three
 bootstrap jobs.  The underscore entry
 `^(bootstrap-stage1-transitive|bootstrap-stage2-dumps|bootstrap-stage3-dumps)$`
-(documented by bugs/hard/GATE_red_recover-land_2026-11-02.md) named all three,
-and the 23-job recover-land entry documented by
+(documented by the retired `GATE_red_recover-land_2026-11-02` bootstrap-recovery
+umbrella) named all three, and the 23-job recover-land entry documented by
 bugs/mid/GATE_recover_land_remainder.md also swept in
 `bootstrap-stage1-transitive`.  Both are gone in the fix; this pins that state.
 
