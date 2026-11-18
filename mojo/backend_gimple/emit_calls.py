@@ -3503,16 +3503,6 @@ def _lc_pointer_ctor_to_kwarg(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         _tname = ''
         if _is_ident:
             _tname = _as_str(_as_ident_node(_to_expr).name)
-        # A name this closure CAPTURES BY VALUE lives in its environment, not in a C
-        # local of this function: its address is the address of the env field. The
-        # bare name here is `&base` with no `base` in scope (a nested def's
-        # `Pointer(to=outer_local)`; test_variadic's `make_elem_ptr`).
-        if _is_ident and gen._env_param and _tname in gen._captures:
-            _cap_t = _as_str(gen._captures.get(_tname) or 'int64_t')
-            if not _cap_t.endswith(' *'):
-                _fld = gimple_ctypes._c_field_name(_tname)
-                _ptr_ct = f'{_cap_t} *'
-                return _ptr_ct, gen._new_val(_ptr_ct, f'&{gen._env_param}->{_fld}')
         if _is_ident and _tname in gen._addressed_locals:
             at = gen._type_of(_tname)
             av = gen._c_names.get(_tname, _tname)

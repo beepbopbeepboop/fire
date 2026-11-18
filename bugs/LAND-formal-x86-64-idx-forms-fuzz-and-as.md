@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gate-recover-land-remainder-part4 land?
+# Land: should finished branch bug-formal-x86-64-idx-forms-fuzz-and-as land?
 
-**Branch:** `work/bug-gate-recover-land-remainder-part4` (task `bug-gate-recover-land-remainder-part4`; its tip is also saved as `refs/archive/work/bug-gate-recover-land-remainder-part4`, so dropping it loses nothing).
-**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 26 behind it; task started 2026-11-18 05:04:07
-**Original work:** Fix the bug in bugs/GATE_recover_land_remainder-part4.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report
-**Original claims:** bug:GATE_recover_land_remainder-part4
+**Branch:** `work/bug-formal-x86-64-idx-forms-fuzz-and-as` (task `bug-formal-x86-64-idx-forms-fuzz-and-as`; its tip is also saved as `refs/archive/work/bug-formal-x86-64-idx-forms-fuzz-and-as`, so dropping it loses nothing).
+**Age:** last commit 2026-11-17, first unlanded commit 2026-11-17; 1 commit(s) ahead of master, 26 behind it; task started 2026-11-17 20:02:08
+**Original work:** Fix the bug in bugs/FORMAL_x86_64_idx_forms_fuzz_and_as.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or repo
+**Original claims:** bug:FORMAL_x86_64_idx_forms_fuzz_and_as
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-18 09:45:57: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 26 behind it; task started 2026-11-18 05:04:07)
-  Branch: work/bug-gate-recover-land-remainder-part4
-  Conflicting files: mojo/backend_gimple/module_gen.py, test_gimple_runner.py
+- 2026-11-17 23:20:46: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-17; 1 commit(s) ahead of master, 26 behind it; task started 2026-11-17 20:02:08)
+  Branch: work/bug-formal-x86-64-idx-forms-fuzz-and-as
+  Conflicting files: bugs/OPEN_WORK.md

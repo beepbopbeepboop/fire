@@ -1,9 +1,9 @@
-SPLIT: CODEGEN_scalar_integer_dtype_representation-part1, CODEGEN_scalar_integer_dtype_representation-part2, CODEGEN_scalar_integer_dtype_representation-part3
+SPLIT: CODEGEN_scalar_integer_dtype_representation-part1, CODEGEN_scalar_integer_dtype_representation-part2 (part3 fixed and deleted)
 
 # CODEGEN: integer `Scalar[DType.*]` lowers to a 64-bit word
 
 **Status (2026-11-18): replanned for the easy pool. The work is in the
-`CODEGEN_scalar_integer_dtype_representation-part1..3` docs; this doc keeps the
+`CODEGEN_scalar_integer_dtype_representation-part1..2` docs; part3 (imported overload choice in a concrete specialised generic) is fixed. This doc keeps the
 measured evidence, the rejected fix and the gates.**
 
 ## Symptom
@@ -128,27 +128,3 @@ brings them back is wrong, whatever the other numbers say.
 The generic-struct elaboration itself (per-instantiation emission). Imported
 generic instances already specialise (`Fd_5_dtype_17_DType_x002Euint32_f`); the
 problem here is the element type, not the instance.
-
-## Step 1 results (2026-11-18, partial)
-
-Measured sites so far. Each is a place that gives a `Scalar[...]` type a C
-spelling, with the current answer for an integer dtype.
-
-| site | role | integer `Scalar[DType.uint8]` today |
-|---|---|---|
-| `mojo/middle/infra_infer.py` `_resolve_type`, pointer arm (~line 152-170) | `UnsafePointer[Scalar[..]]` element | falls to `_mojo_type(elem)` -> `int64_t *` |
-| `mojo/middle/infra_infer.py` `_resolve_type`, `Scalar`/`SIMD` arm (~line 168-185) | scalar parameter, return, local annotation | float-only table -> `int64_t` |
-| `mojo/middle/types.py` `_mojo_type`, pointer arm (~line 1407) | pointer element, the second resolver | recurses into `_mojo_type('Scalar[..]')` -> no `Scalar` arm -> `int64_t *` |
-| `mojo/middle/types.py` `_mojo_type`, `SIMD` arm (~line 1464) | `SIMD[float, N]` | float only; integer falls through to `int64_t` |
-| `mojo/middle/types.py` `_SIMD_FLOAT_DTYPE_CTYPE` / `_dtype_token_ctype` | the one dtype table | float dtypes only |
-| `gimple_codegen.py` `_resolve_type` (~line 5722) | self-host wrapper | delegates to the above |
-
-The disagreement the repro shows is therefore structural: two resolvers
-(`infra_infer._resolve_type` for scalars, `types._mojo_type` for pointer
-elements) and one float-only table. Step 2 must make both call ONE function
-that knows the integer dtypes, and the pointer element arm must go through it.
-
-Still to measure (not yet recorded): subscript load/store through a pointer
-(`emit_exprs.py` subscript lowering), `.cast[T]` (`emit_calls.py`), comparisons
-and arithmetic on a `Scalar` value, the struct field layout
-(`_imported_field_ctype`), and boxing (`mojo_box_from_*`).

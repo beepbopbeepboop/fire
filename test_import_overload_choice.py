@@ -143,8 +143,148 @@ def test_external_call_overloads_are_all_emitted():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_scalar_integer_overload_choice():
+    import uuid
+    from gimple_codegen import GimpleGen
+    import module_loader
+    import mojo.middle.funcs_shared as fns
+    tag = uuid.uuid4().hex[:8]
+    mulhi_mod = f'scov_mulhi_{tag}'
+    fd_mod = f'scov_fd_{tag}'
+    caller_mod = f'scov_caller_{tag}'
+    mulhi_src = f"""
+def mulhi(a: Int64, b: Int64) -> Int64:
+    return 0
+
+def mulhi(a: UInt32, b: UInt32) -> UInt32:
+    return UInt32((UInt64(a) * UInt64(b)) >> 32)
+"""
+    fd_src = f"""
+from {mulhi_mod} import mulhi
+
+struct Fd[dtype: DType]:
+    var m: Scalar[dtype]
+    def __init__(out self, m: Scalar[dtype]):
+        self.m = m
+    def hi(self, other: Scalar[dtype]) -> UInt32:
+        var a = UInt32(self.m)
+        var b = UInt32(other)
+        return mulhi(a, b)
+"""
+    caller_src = f"""
+from {fd_mod} import Fd
+
+def use() -> UInt32:
+    var x = Fd[DType.uint32](UInt32(1))
+    return x.hi(UInt32(2))
+"""
+    tmp = tempfile.mkdtemp(prefix='scov_')
+    emitted = []
+    orig_gen_module = GimpleGen.gen_module
+
+    def capture_gen_module(self, stmts):
+        c = orig_gen_module(self, stmts)
+        emitted.append(c)
+        return c
+
+    GimpleGen.gen_module = capture_gen_module
+    mods = {mulhi_mod, fd_mod}
+    orig_can = module_loader.can_resolve_module_path
+    orig_load = module_loader.load_module
+    orig_resolve = module_loader._module_loader.resolve_module_path
+    orig_gpi = GimpleGen._parsed_import
+
+    def my_can(name):
+        if name in mods:
+            return True
+        return orig_can(name)
+
+    def my_resolve(name):
+        if name in mods:
+            return os.path.join(tmp, name + '.mojo')
+        return orig_resolve(name)
+
+    def my_load(name):
+        if name in mods:
+            return module_loader._module_loader.load_module_from_path(
+                os.path.join(tmp, name + '.mojo'))
+        return orig_load(name)
+
+    def my_gpi(self, module):
+        if module in mods:
+            path = os.path.join(tmp, module + '.mojo')
+            try:
+                src = open(path).read()
+                from fire_compiler import Parser, py_tokenize
+                stmts = Parser(py_tokenize(src)).parse_module()
+                if not hasattr(self, '_imported_src_cache'):
+                    self._imported_src_cache = {}
+                self._imported_src_cache[module] = (path, src, stmts)
+                return (path, src, stmts)
+            except Exception:
+                pass
+        return orig_gpi(self, module)
+
+    module_loader.can_resolve_module_path = my_can
+    module_loader._module_loader.resolve_module_path = my_resolve
+    module_loader.load_module = my_load
+    GimpleGen._parsed_import = my_gpi
+    try:
+        mulhi_path = os.path.join(tmp, mulhi_mod + '.mojo')
+        with open(mulhi_path, 'w') as f:
+            f.write(mulhi_src)
+        fd_path = os.path.join(tmp, fd_mod + '.mojo')
+        with open(fd_path, 'w') as f:
+            f.write(fd_src)
+        caller_path = os.path.join(tmp, caller_mod + '.mojo')
+        with open(caller_path, 'w') as f:
+            f.write(caller_src)
+        sys.path.insert(0, tmp)
+        try:
+            mulhi_c = b.compile_module_to_c(mulhi_src, mulhi_path, mulhi_mod)
+            fd_c = b.compile_module_to_c(fd_src, fd_path, fd_mod)
+            caller_c = b.compile_module_to_c(caller_src, caller_path, caller_mod)
+        finally:
+            sys.path.remove(tmp)
+        mul_defs = re.findall(
+            rf'\n(?:int64_t|uint32_t|void|_Bool) ({mulhi_mod}_mulhi_[0-9a-f]+) \(([^)]*)\)\s*\n\{{',
+            mulhi_c)
+        by_type = {params.strip(): name for name, params in mul_defs}
+        int_sym = by_type.get('int64_t a, int64_t b')
+        uint_sym = by_type.get('uint32_t a, uint32_t b')
+        assert int_sym and uint_sym, f'expected both mulhi overloads in home, got {by_type}'
+        all_c = '\n'.join(emitted)
+        hi_bodies = []
+        for m in re.finditer(
+                r'(?:uint32_t|__GIMPLE uint32_t|static uint32_t)\s+([A-Za-z0-9_]*hi[A-Za-z0-9_]*)\s*\([^)]*\)\s*\{(.*?)\n\}',
+                all_c, re.S):
+            hi_bodies.append((m.group(1), m.group(2)))
+        # Prefer the specialised hi body; fall back to any hi body.
+        chosen = None
+        for name, body in hi_bodies:
+            if 'DType_x002Euint32' in name or 'uint32' in name.lower():
+                chosen = (name, body)
+                break
+        if chosen is None:
+            assert hi_bodies, f'no hi body found in emitted C'
+            chosen = hi_bodies[-1]
+        _, body = chosen
+        assert uint_sym in body, f'hi body does not call uint32 mulhi {uint_sym}: {body[:400]}'
+        assert int_sym not in body, f'hi body calls int64 mulhi {int_sym}: {body[:400]}'
+        print('PASS')
+        return True
+    finally:
+        GimpleGen.gen_module = orig_gen_module
+        GimpleGen._parsed_import = orig_gpi
+        module_loader.can_resolve_module_path = orig_can
+        module_loader._module_loader.resolve_module_path = orig_resolve
+        module_loader.load_module = orig_load
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == '__main__':
     ok = (test_import_overload_choice() and test_import_overload_by_argument_type()
-          and test_external_call_overloads_are_all_emitted())
+          and test_external_call_overloads_are_all_emitted()
+          and test_scalar_integer_overload_choice())
     print('PASS' if ok else 'FAIL')
     sys.exit(0 if ok else 1)

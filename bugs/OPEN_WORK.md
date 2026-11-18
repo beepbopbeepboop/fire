@@ -51,7 +51,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/FORMAL_x86_64_mem_addr_effective_address_not_wrapped.md` | **unclaimed** | `x86_mem_addr` does not wrap the effective address to 64 bits |
+| `bugs/FORMAL_x86_64_idx_forms_fuzz_and_as.md` | **unclaimed** | two x86-64 base+index forms have neither a fuzz draw nor an `as` check |
 
 ---
 
