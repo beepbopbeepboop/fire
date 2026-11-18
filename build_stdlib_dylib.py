@@ -457,6 +457,7 @@ def compile_module_to_c(src: str, path: str, module_name: str,
             gen._source_text = src
             box['c'] = gen.gen_module(Parser(py_tokenize(src)).parse_module())
             box['degraded'] = list(gen._generic_struct_elaboration_failures)
+            box['csyms'] = {k: sorted(v) for k, v in (getattr(gen, '_func_csym_record', None) or {}).items()}
             box['cpp'] = getattr(gen, 'generated_cpp', '')
             # A generator / `async def` the C++20 emitter accepted leaves its
             # DEFINITIONS in a second artifact, `gen.generated_cpp`, and this
@@ -537,6 +538,8 @@ def compile_module_to_c(src: str, path: str, module_name: str,
     if 'err' in box:
         raise box['err']
     _LAST_DEGRADED[:] = box.get('degraded') or []
+    _LAST_CSYMS.clear()
+    _LAST_CSYMS.update(box.get('csyms') or {})
     return box['c']
 
 
@@ -550,6 +553,43 @@ def compile_module_to_c(src: str, path: str, module_name: str,
 # from the in-process L1 — never an accumulation, so a degraded module followed
 # by a clean cache hit does not label the clean one.
 _LAST_DEGRADED: list = []
+
+# The free-function C symbols the LAST module compiled named, `{bare name: [symbol]}`,
+# as codegen itself produced them (see emit_funcs._func_csym). The export table takes
+# its symbol names from this, so it can never disagree with the definitions it lists.
+_LAST_CSYMS: dict = {}
+# The symbol record of the object `_compile_one_object` last built in this process.
+_OBJECT_CSYMS: dict = {}
+
+
+def _apply_codegen_csyms(exports: list, csyms: dict, defined: set) -> list:
+    """Give each free-function export the symbol codegen named it for a definition
+    this object actually contains.
+
+    Codegen's record for a name holds every symbol it produced for that name in this
+    module: the definition, and also call sites that resolve to another symbol (a
+    call to the runtime's `atol` is spelled `mojo_atol`). The definition is the one
+    the object defines, so the candidates are intersected with `defined` (the
+    object's own symbols, arch-prefixed as `nm` spells them). Exactly one survivor
+    is the function's symbol. Anything else keeps its signature-derived spelling and
+    the classifier checks it as before."""
+    for e in exports:
+        if e['kind'] != reflect.SYM_FUNCTION or e.get('csym'):
+            continue
+        names = [n for n in (csyms.get(e['name']) or []) if ('_' + n) in defined]
+        if len(names) == 1:
+            e['csym'] = names[0]
+    return exports
+
+
+def _read_csyms(side_key: str):
+    """The symbol record CAS-published beside an object, or None when there is none."""
+    import json
+    p = cas.lookup(side_key, '.json')
+    if p is None:
+        return None
+    with open(p) as f:
+        return json.load(f)
 
 # Every generic-struct elaboration refusal this process has seen, as
 # `(module_path, [reason, ...])`, accumulated by `compile_module_to_c_cached`.
@@ -1247,6 +1287,8 @@ def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
     cfile = os.path.join(workdir, name + '.c')
     ofile = os.path.join(workdir, name + '.o')
     c_text = compile_module_to_c(src, path, name, no_mangle=no_mangle)
+    _OBJECT_CSYMS.clear()
+    _OBJECT_CSYMS.update(_LAST_CSYMS)
     refusals = last_degradations()
     if refusals:
         raise RuntimeError(
@@ -1320,11 +1362,24 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
             ofile, hit = cas.get_or_build(
                 key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc,
                                                        objflags, no_mangle))
+            # The codegen symbol record is published beside the object. A hit whose
+            # entry predates the record is rebuilt once, so the record exists.
+            side_key = key + '.csyms'
+            csyms = _read_csyms(side_key) if hit else None
+            if csyms is None:
+                if hit:
+                    ofile = cas.publish(key, '.o', _compile_one_object(
+                        src, path, name, workdir, gcc, objflags, no_mangle))
+                csyms = dict(_OBJECT_CSYMS)
+                import json
+                cas.publish(side_key, '.json', json.dumps(csyms, sort_keys=True).encode())
         else:
             ofile = os.path.join(workdir, name + '.o')
             with open(ofile, 'wb') as f:
                 f.write(_compile_one_object(src, path, name, workdir, gcc,
                                             objflags, no_mangle))
+            csyms = dict(_OBJECT_CSYMS)
+        exports = _apply_codegen_csyms(exports, csyms, _defined_symbols(gcc, ofile, include_weak=True))
         # A degraded compile must never reach the dylib. The cached path only
         # serves objects published by a clean build (_compile_one_object refuses
         # to produce a degraded one), but a fresh in-process compile records its
