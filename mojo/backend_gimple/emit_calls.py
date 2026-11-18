@@ -3090,6 +3090,87 @@ def _lc_next_with_default(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
     return None
 
 
+#: Bit width of the scalar Mojo types an llvm_intrinsic's type argument may name.
+_INTRINSIC_TYPE_WIDTH = {
+    'Int8': 8, 'UInt8': 8, 'Int16': 16, 'UInt16': 16, 'Int32': 32, 'UInt32': 32,
+    'Int64': 64, 'UInt64': 64, 'Int': 64, 'UInt': 64,
+    'int8_t': 8, 'uint8_t': 8, 'int16_t': 16, 'uint16_t': 16,
+    'int32_t': 32, 'uint32_t': 32, 'int64_t': 64, 'uint64_t': 64,
+}
+#: The C-type width used when the type argument does not name a scalar.
+_CTYPE_WIDTH = _INTRINSIC_TYPE_WIDTH
+
+
+def _intrinsic_width(gen, type_expr, arg_ctype) -> int | None:
+    """The bit width an integer intrinsic works at: from its type argument when
+    that names a scalar (`Int32`, `DType.int32` is not a width and is refused),
+    else from the first argument's C type. None when neither is known."""
+    try:
+        ann = _as_str(gen._type_expr_to_ann(type_expr))
+    except Exception:
+        ann = ''
+    if ann in _INTRINSIC_TYPE_WIDTH:
+        return _INTRINSIC_TYPE_WIDTH[ann]
+    return _CTYPE_WIDTH.get(_as_str(arg_ctype))
+
+
+def _lower_llvm_intrinsic(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`llvm_intrinsic["llvm.name", Type, ...](args)` on the CPU.
+
+    The stdlib writes its bit and math primitives this way, and this path used to
+    fall through to the generic indirect-call stub, which emitted 0: a silent wrong
+    answer (`rotate_bits_right[2](104)` printed 0, not 26). Each intrinsic that has a
+    CPU lowering here is implemented; any other name is REFUSED with a diagnostic, so
+    no call can compute 0 silently. The GPU-only intrinsics are refused the same way.
+    """
+    idx = node.func.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    if not elems or not isinstance(elems[0], gimple_ctypes.StringLiteral):
+        return _trap_unsupported_intrinsic(gen, "<non-literal name>")
+    name = _as_str(elems[0].value)
+    pairs = [gen.lower_expr(a) for a in node.args]
+    if name in ('llvm.fshl', 'llvm.fshr', 'llvm.ctpop', 'llvm.ctlz', 'llvm.cttz',
+                'llvm.bswap', 'llvm.usub.sat'):
+        if not pairs:
+            raise RuntimeError(f"{name}: no operands")
+        width = _intrinsic_width(gen, elems[1] if len(elems) > 1 else None, pairs[0][0])
+        if width is None:
+            return _trap_unsupported_intrinsic(gen, name + " (bit width unknown)")
+        ops = [('int64_t', gen._to_int64(t, v)) for t, v in pairs]
+        if name in ('llvm.fshl', 'llvm.fshr'):
+            if len(ops) != 3:
+                raise RuntimeError(f"{name}: expects three operands")
+            fn = 'mojo_fshl' if name == 'llvm.fshl' else 'mojo_fshr'
+            return 'int64_t', gen._call_expr('int64_t', fn, ops + [('int64_t', str(width))])
+        if name == 'llvm.usub.sat':
+            if len(ops) != 2:
+                raise RuntimeError(f"{name}: expects two operands")
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_usub_sat',
+                                             ops + [('int64_t', str(width))])
+        fn = {'llvm.ctpop': 'mojo_ctpop', 'llvm.ctlz': 'mojo_ctlz',
+              'llvm.cttz': 'mojo_cttz', 'llvm.bswap': 'mojo_bswap'}[name]
+        return 'int64_t', gen._call_expr('int64_t', fn, ops[:1] + [('int64_t', str(width))])
+    if name == 'llvm.expect' and pairs:
+        return pairs[0]
+    if name == 'llvm.assume':
+        return 'int64_t', '0'
+    return _trap_unsupported_intrinsic(gen, name)
+
+
+def _trap_unsupported_intrinsic(gen, name: str) -> tuple[str, str]:
+    """An intrinsic with no CPU lowering. The call TRAPS when it is reached (a
+    message naming it, exit nonzero) instead of yielding a value: the compiled
+    stdlib contains GPU intrinsics in code the CPU never runs, so this cannot be
+    a compile-time refusal, and it cannot be a silent 0 either. The value after
+    the trap is the integer word the call has always produced, which is what the
+    surrounding C was written against (a struct- or pointer-typed result here
+    breaks the callers that take the word)."""
+    gen._rt_void('mojo_unsupported_intrinsic', ['"' + name.replace('"', '') + '"'])
+    t = gen._new_temp('int64_t')
+    gen._emit(f'  {t} = (int64_t)0;')
+    return 'int64_t', t
+
+
 def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """A callee that is not a plain name: the result of a call, a subscript, a lambda, ...
 
@@ -4903,6 +4984,21 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             t = gen._rt_call('MojoSet *', 'mojo_set_copy', [f"{av}"])
             gen._note_fresh_result(t)
             return 'MojoSet *', t
+    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name == 'llvm_intrinsic'):
+        return _lower_llvm_intrinsic(gen, node)
+    # `type_of(x)(v)`: the value `v` converted to the type of `x` (the stdlib's
+    # idiom for the element type of a SIMD operand). Lowered directly; a runtime
+    # `type_of` symbol does not exist.
+    if (isinstance(node.func, gimple_ctypes.CallExpr)
+            and isinstance(node.func.func, gimple_ctypes.IdentExpr)
+            and node.func.func.name == 'type_of'
+            and len(node.func.args) == 1 and len(node.args) == 1
+            and not gen._locally_binds_name('type_of')):
+        ot, _ov = gen.lower_expr(node.func.args[0])
+        vt, vv = gen.lower_expr(node.args[0])
+        return ot, gen._cast(ot, f"{vv}")
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
         return _lc_non_ident_callee(gen, node)
 

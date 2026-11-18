@@ -3556,6 +3556,26 @@ def _literal_mojo_type(arg):
     return None
 
 
+def _proven_arg_mojo_type(gen, arg, ctype):
+    """The Mojo type of a call argument when the syntax (or the enclosing
+    function's own declaration) proves it, else None: a numeric literal, a
+    direct constructor call, or a parameter of the function being compiled
+    whose annotation names the type after monomorphization (`x: SIMD[Int64, 1]`).
+    The C type of an erased SIMD value is `int64_t`, which cannot say which
+    dtype it is; the declaration can."""
+    lit = _literal_mojo_type(arg)
+    if lit is not None:
+        return lit
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        fn = getattr(gen, '_current_func_node', None)
+        for _pname, _pann in (getattr(fn, 'params', None) or []):
+            if _as_str(_pname).lstrip('*') == _as_str(arg.name):
+                ann = _as_str(_pann).strip()
+                return ann or None
+        return None
+    return _constructed_struct_type(gen, arg, ctype)
+
+
 def _constructed_struct_type(gen, arg, ctype):
     """The Mojo type of a call argument that is a direct constructor call of a
     concrete struct of this module (`Foo()` -> `Foo`), or None. The C type
@@ -3577,6 +3597,18 @@ def _generic_paths_for(gen) -> dict:
     unit that elaborated `mid`), so the sibling map is forwarded as well."""
     out = dict(getattr(gen, '_sibling_generic_paths', None) or {})
     out.update(gen._imported_generics)
+    return out
+
+
+def _generic_paths_with_module(gen, source, module_src) -> dict:
+    """`_generic_paths_for(gen)` plus every generic function defined in the
+    CALLEE's own source file. A generic body calling a sibling generic of its own
+    module (`rotate_bits_right[-shift]` calling `rotate_bits_left` in bit.mojo)
+    needs that sibling to elaborate; the caller's imports do not name it, and a
+    missing sibling declined the call into a silent 0."""
+    out = _generic_paths_for(gen)
+    for _m in re.finditer(r'^def ([A-Za-z_]\w*)\s*\[', module_src or '', re.M):
+        out.setdefault(_m.group(1), source)
     return out
 
 
@@ -3753,14 +3785,14 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             if _tmpl_dd and elaborate.deduced_param_count(_tmpl_dd):
                 type_args = elaborate.complete_explicit_type_args(
                     _tmpl_dd, type_args, [ct for ct, _ in arg_pairs],
-                    arg_mojo_types=[_literal_mojo_type(a) or _constructed_struct_type(gen, a, ct)
+                    arg_mojo_types=[_proven_arg_mojo_type(gen, a, ct)
                                     for a, (ct, _) in zip(node.args, arg_pairs)])
                 if type_args is None:
                     return None
             info = el.elaborate_generic_call(
                 module_src, g, type_args, arg_count=len(arg_pairs),
                 origin_module=elaborate.declaring_module_name(gen, module_src),
-                generic_paths=_generic_paths_for(gen))
+                generic_paths=_generic_paths_with_module(gen, source, module_src))
             if info:
                 gen._refine_generic_return_type(
                     info, module_src, g, type_args, len(node.args),
