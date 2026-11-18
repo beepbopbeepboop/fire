@@ -1,4 +1,4 @@
-SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part2, GATE_recover_land_remainder-part4, GATE_recover_land_remainder-part5
+SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part4, GATE_recover_land_remainder-part5
 
 # GATE: recover-land backlog remainder — OFF entry owner doc
 
@@ -6,7 +6,7 @@ SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part2, GAT
 
 The OFF entry in `tools/gates.json` matching
 
-    ^(doc-refs|doc-refs-stale-verdicts|gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$
+    ^(gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$
 
 previously named the deleted `bugs/mid/GATE_red_recover_land_2026-11-02` doc, which was removed
 in `d44f44787` ("Fixed root cause (coro.module_qualifier missing as module
@@ -20,21 +20,26 @@ coverage such as `selfhost`, `mojoc`, `linkmode`, `bootstrap-stage1-transitive`)
 is outside a light worker's budget. Treat every job in the pattern as still part
 of the backlog until individually verified green and removed from the entry.
 
-### 2026-11-18: `formal-sweep-truth` and `formal-sys` are green; both removed
+### 2026-11-18: `formal-sweep-truth` and `formal-sys` are green; both re-enabled
 
-`work/bug-gate-recover-land-remainder-part3` had verified this pair before its
-landing went stale, and it was re-verified against today's master:
+`work/bug-gate-recover-land-remainder-part3` verified this pair, and its landing
+went stale while master re-enabled the same jobs from its own evidence:
 
-- `python3 test_formal_sys.py` — `PASS=13 FAIL=0`.
-- `python3 test_formal_sweep_truth.py` — RED on master for two reasons, both
-  fixed in the same commit: the scratch-dir guard named a hard-coded `/tmp` in
-  `tools/test_claim_release.py`, and `AXIOM_CLOSURE` still pinned the
-  2026-11-08 census (the live census is `Contracts` 9, `ProofLibSteps2` 11,
-  `ProofLibSteps8` 6, `Refine` 32). Green with both fixed.
+- `python3 test_formal_sys.py` — `PASS=13 FAIL=0`; re-enabled in `2df09657e`.
+  Re-run on this branch, same result.
+- `python3 test_formal_sweep_truth.py` — `145 tests OK (skipped=10)` on this
+  branch. It was red on master for two reasons, both fixed in `efb44e0a4`: the
+  scratch-dir guard named a hard-coded `/tmp` in `tools/test_claim_release.py`,
+  and `AXIOM_CLOSURE` still pinned the 2026-11-08 census (`Contracts` 9,
+  `ProofLibSteps2` 11, `ProofLibSteps8` 6, `Refine` 32). Re-enabled in the same
+  commit.
 
-Both jobs are now out of the OFF entry and `GATE_recover_land_remainder-part3.md`
-is deleted with the evidence. The remaining 15 jobs in the pattern are still
-untriaged.
+The branch therefore lands no `tools/gates.json` change: both names are already
+out of the OFF entry on master, and its stale copy of the pattern must not
+re-add `doc-refs`/`doc-refs-stale-verdicts`, which `fb746c0b1` turned back on.
+What it does land is the pinning test (`test_gates_off_entries_name_a_doc.py`)
+and the deletion of the part-3 backlog doc with its evidence.
+The remaining jobs in the pattern are still untriaged.
 
 ## Original context (carried over from the deleted `GATE_red_recover_land_2026-11-02` doc)
 
