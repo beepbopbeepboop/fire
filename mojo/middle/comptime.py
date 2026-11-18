@@ -89,6 +89,11 @@ _as_comptimevar_node = _fc._as_comptimevar_node
 # loop, which is the right answer for a comprehension that large anyway.
 COMPREHENSION_FOLD_CAP = 4096
 
+# Marker key in the binding table that an in-progress generic-alias expansion
+# inserts, so a self-referential alias body cannot re-enter forever. A NUL
+# prefix cannot collide with a source identifier or any other binding key.
+_ALIAS_EXPANDING_PREFIX = '\x00comptime-alias:'
+
 
 def _is_dtype_value(v) -> bool:
     """A value that is a DType: a bound `DType.x` / `dtype.x` spelling, or the
@@ -611,8 +616,8 @@ def conforms_to(struct_name, trait_name, bases_map):
     # fold at an instantiation with `T = Int` instead of staying CONST_UNKNOWN
     # and becoming a runtime branch on a zero word (the imported-generic-alias
     # miscompile: a NULL boxed-list read for `IsTriviallyDeinitable[T]`). Any
-    # OTHER trait is
-    # still an honest None: nothing here says a scalar does not conform.
+    # OTHER trait is still an honest None: nothing here says a scalar does not
+    # conform.
     if struct_name in TRIVIAL_REGISTER_PASSABLE_TYPES:
         if trait_name in TRIVIAL_REGISTER_PASSABLE_TRAITS:
             return True
@@ -862,7 +867,15 @@ def _eval_alias_application(node, tmpl, bindings, platform, conforms_to_pred):
     """Evaluate `Alias[args]` against the alias declaration `tmpl`: bind its
     bracket parameters to the application's arguments and fold its body, or
     None when the body still cannot be decided (an unknown conformance, a
-    nested uninstantiated type, ...)."""
+    nested uninstantiated type, ...).
+
+    A self-referential body (`comptime A[T] = A[T]`) would otherwise re-enter
+    forever; an in-progress marker in the cloned binding table stops it (no
+    real identifier can be spelled with the NUL prefix)."""
+    if isinstance(node.obj, IdentExpr):
+        _mark = _ALIAS_EXPANDING_PREFIX + node.obj.name
+        if bindings and _mark in bindings:
+            return None
     _params = tmpl.comptime_params or []
     _body = tmpl.value
     if _body is None:
@@ -875,6 +888,8 @@ def _eval_alias_application(node, tmpl, bindings, platform, conforms_to_pred):
     if len(_args) != len(_params):
         return None
     _bound = dict(bindings)
+    if isinstance(node.obj, IdentExpr):
+        _bound[_ALIAS_EXPANDING_PREFIX + node.obj.name] = True
     for _i, _p in enumerate(_params):
         _av = _alias_arg_value(_args[_i], bindings, platform, conforms_to_pred)
         if _av is None:

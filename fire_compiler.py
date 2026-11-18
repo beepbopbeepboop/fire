@@ -1106,7 +1106,8 @@ class ComptimeVarStmt:
     (`IsTriviallyDeinitable[Int]`) supplies them. Keeping the names (instead
     of only skipping the brackets, which is what the parser did before) is
     what lets that substitution happen; see mojo/middle/comptime.py's
-    ComptimeAlias handling and `_gmi_find_comptime_one`.
+    `_comptime_alias_template` / `_eval_alias_application` and
+    `_gmi_find_comptime_one`.
     """
     target: str
     value: object
