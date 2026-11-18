@@ -48,10 +48,13 @@ CORPUS = [
 BASELINE = {
     # empty since 2026-11-13: every call-argument finding in CORPUS was closed
     # by `_repr_fix_args` (emit_infra.py). Keep that class empty.
-    # Rule added 2026-11-14: a pointer made by casting a `_Bool` or an `int`
-    # (GCC's -Wint-to-pointer-cast). Zero since the return-type and parameter
-    # inference fixes of 2026-11-17 (`_apply_binary_op` and `_eval_member_of`
-    # declare their parameter and result types).
+    # `cast-narrow-int-to-ptr` was added 2026-11-14 and reached 2. Both were
+    # closed on 2026-11-17 by the inference fixes it was written for: a
+    # pointer/scalar return mix now returns the boxed word instead of casting
+    # the scalar to the pointer (`_return_arms_need_boxed_word`), and a class
+    # no caller passes can no longer collect phantom fields from another
+    # method's locals and win parameter inference (`module_gen`'s per-scope
+    # field scan). Keep this class empty too.
 }
 
 _INJECTED = r'''

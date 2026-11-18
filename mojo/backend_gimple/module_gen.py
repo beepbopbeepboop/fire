@@ -14589,9 +14589,56 @@ def gen_module_impl(self, stmts: list):
                     _mark_presence_field(target_def, fn)
                     _walk_ast_invalidate(target_def)
 
-    _scan_body_for_local_field_access(stmts, None)
+    def _scan_scopes_for_local_field_access(body, own_struct_name):
+        """Run the phantom-field scan once per LEXICAL SCOPE, not once per
+        top-level statement.
+
+        `_scan_body_for_local_field_access` unions the struct constructors
+        bound to each local NAME across the statements it is given. Handing
+        it a `StructDef` therefore unions every METHOD's locals into one
+        namespace, and a name is then "bound" to whatever any method built
+        even when the read it is matched against happens in a DIFFERENT
+        method — where it means a different variable. Measured on this
+        compiler's own `myinterpreter.py`: `Interpreter` binds
+        `target = _LazyImportTarget(...)` in its two import methods, and a
+        dozen OTHER `Interpreter` methods use `target` for an AST statement
+        (`target.name`, `.obj`, `.member`, ...). The whole-class union made
+        `target` _LazyImportTarget everywhere, so this scan minted
+        `name/obj/member/index/start/stop/step/elements` as `int` fields on
+        `_LazyImportTarget` — and then `_infer_param_types`' struct-field
+        match, seeing a class with a `member` field, typed
+        `Interpreter._eval_member_of`'s `expr` parameter `_LazyImportTarget *`
+        (its only caller passes a `MemberExpr`). The body read
+        `expr->member` through an unrelated class's layout.
+
+        So each method and each module-level function body is scanned on its
+        own, with the caller's `own_struct_name` carried through unchanged.
+        Module-level (non-def) statements are one scope of their own, which
+        is what a name assigned at module scope really is.
+
+        Nested `def`s inside a body are still reached by the candidate walk
+        (`_walk_ast` is generic); they are separate scopes too, but their
+        names can only collide with the enclosing body's when the same name
+        is bound to two DIFFERENT struct constructors, which the ambiguity
+        filter above already drops."""
+        _module_stmts = []
+        for _ss in body:
+            if isinstance(_ss, StructDef):
+                _sdef = _as_structdef_node(_ss)
+                for _sm in _sdef.methods:
+                    _scan_body_for_local_field_access(
+                        _as_funcdef_node(_sm).body, own_struct_name)
+            elif isinstance(_ss, FunctionDef):
+                _scan_body_for_local_field_access(
+                    _as_funcdef_node(_ss).body, own_struct_name)
+            else:
+                _module_stmts.append(_ss)
+        if _module_stmts:
+            _scan_body_for_local_field_access(_module_stmts, own_struct_name)
+
+    _scan_scopes_for_local_field_access(stmts, None)
     if self.do_imports or self.link_imports:
-        _scan_body_for_local_field_access(imported_stmts, None)
+        _scan_scopes_for_local_field_access(imported_stmts, None)
 
     # Aliased CLASS imports (`from M import Class as Alias`) for the WHOLE
     # module, module scope AND function bodies, resolved HERE rather than
@@ -15236,16 +15283,18 @@ def gen_module_impl(self, stmts: list):
     # `print(f(x))` never reads a parameter at all.
     self._ret_may_hold_str: set = set()
     # Functions whose RETURN VALUE is a TAGGED WORD because their arms mix a
-    # float with a pointer (`infra_infer._infer_return_type_core` widens that
-    # shape to `int64_t`; each arm is boxed by `_gen_stmt_ReturnStmt`). This is
-    # the call-site half: the result of calling one is a possibly-boxed word,
-    # so `lower_expr` marks the temp for the consumers that dispatch by kind
-    # (`print` -> `mojo_repr_boxed`, a list store -> `mojo_list_append_word`,
-    # arithmetic -> `_tagged_arith_select`) instead of reading it as a plain
-    # integer or casting it to the pointer the old join chose. Computed with
-    # `_float_mixed_return_bodies` — the exact per-body decision inference
-    # recorded — so a marker and its emitter cannot drift apart.
-    self._ret_may_hold_float: set = set()
+    # pointer with a value no pointer can hold (a float, a `_Bool`, or an
+    # unambiguous scalar arm; `infra_infer._infer_return_type_core` widens
+    # that shape to `int64_t` and each arm is boxed by
+    # `_gen_stmt_ReturnStmt`). This is the call-site half: the result of
+    # calling one is a possibly-boxed word, so `lower_expr` marks the temp for
+    # the consumers that dispatch by kind (`print` -> `mojo_repr_boxed`, a
+    # list store -> `mojo_list_append_word`, arithmetic ->
+    # `_tagged_arith_select`) instead of reading it as a plain integer or
+    # casting it to the pointer the old join chose. Computed with
+    # `_mixed_return_bodies` — the exact per-body decision inference recorded
+    # — so a marker and its emitter cannot drift apart.
+    self._ret_may_hold_mixed: set = set()
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
@@ -17431,10 +17480,11 @@ def gen_module_impl(self, stmts: list):
             if _fn_name in _sset:
                 _fset.discard(_fn_name)
 
-    # Which CALLEES return a TAGGED WORD because their arms mix a float with a
-    # pointer. Inference records that decision per BODY in
-    # `_float_mixed_return_bodies` (`infra_infer._infer_return_type_core` widens
-    # the shape to `int64_t` there and the return emitter boxes each arm by the
+    # Which CALLEES return a TAGGED WORD because their arms mix a pointer with
+    # a value no pointer can hold (a float, a `_Bool`, or an unambiguous
+    # scalar literal/expression). Inference records that decision per BODY in
+    # `_mixed_return_bodies` (`infra_infer._infer_return_type_core` widens the
+    # shape to `int64_t` there and the return emitter boxes each arm by the
     # same body id). A call site needs the NAME, before/independent of the body
     # that may not be emitted yet, so the two populations every fixed point
     # above walks are asked here: `_fn_by_name` for top-level definitions and
@@ -17442,41 +17492,41 @@ def gen_module_impl(self, stmts: list):
     # yet is asked directly, so a call site emitted later cannot miss it.
     #
     # An ANNOTATED return type is skipped: the annotation decides the C return
-    # type (the float arm keeps its old coercion), so the value is not a tagged
-    # word and marking it one here would misread it at every consumer. That
-    # shape — a pointer annotation contradicted by a float arm — is not a
-    # tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
+    # type (the scalar arm keeps its old coercion), so the value is not a
+    # tagged word and marking it one here would misread it at every consumer.
+    # That shape — a pointer annotation contradicted by a scalar arm — is not
+    # a tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
     # refuses it at compile time.
-    _ret_float: set = set()
-    _fmb = getattr(self, '_float_mixed_return_bodies', None)
-    if _fmb is None:
-        _fmb = set()
-        self._float_mixed_return_bodies = _fmb
+    _ret_mixed: set = set()
+    _mrb = getattr(self, '_mixed_return_bodies', None)
+    if _mrb is None:
+        _mrb = set()
+        self._mixed_return_bodies = _mrb
 
-    def _note_float_mixed(_ff_name, _ff_body):
-        if _ff_body is None:
+    def _note_mixed_return(_mf_name, _mf_body):
+        if _mf_body is None:
             return
-        if id(_ff_body) not in _fmb:
+        if id(_mf_body) not in _mrb:
             # The SAME entry point the definition emitter uses, overlays and
-            # all: it records the mix in `_fmb` when (and only when) it
+            # all: it records the mix in `_mrb` when (and only when) it
             # widens the return type, so a call site marked here and the
             # definition emitting there are answering one question.
             try:
-                self._infer_return_type(_ff_body)
+                self._infer_return_type(_mf_body)
             except Exception:
                 return
-        if id(_ff_body) in _fmb:
-            _ret_float.add(_as_str(_ff_name))
+        if id(_mf_body) in _mrb:
+            _ret_mixed.add(_as_str(_mf_name))
 
     for _rf_name in _fn_by_name:
         _rf_fn = _fn_by_name[_rf_name]
         if getattr(_rf_fn, 'return_type', None) is not None:
             continue
-        _note_float_mixed(_rf_name, getattr(_rf_fn, 'body', None))
+        _note_mixed_return(_rf_name, getattr(_rf_fn, 'body', None))
     for _gni in range(len(_gmi_src)):
-        _note_float_mixed(_as_str(_gmi_lift[_gni]),
-                          getattr(_gmi_def[_gni], 'body', None))
-    self._ret_may_hold_float = _ret_float
+        _note_mixed_return(_as_str(_gmi_lift[_gni]),
+                           getattr(_gmi_def[_gni], 'body', None))
+    self._ret_may_hold_mixed = _ret_mixed
 
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')

@@ -12323,14 +12323,14 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # `node.args` positionally, so an argument coercion can tell what each
     # argument MEANT (see `_emit_call`'s `arg_nodes`).
     t = gen._call_expr(ret_type, fname, arg_pairs, node.args)
-    # A float+pointer callee returns the TAGGED WORD
-    # (`module_gen._ret_may_hold_float`). Every piece of bookkeeping below is
+    # A mixed-return callee returns the TAGGED WORD
+    # (`module_gen._ret_may_hold_mixed`). Every piece of bookkeeping below is
     # about ONE container shape, and this result has none: it may be a float
-    # box, a str/list/tuple box or a plain int. Recording one of those shapes
-    # would make a consumer cast the box's own address to a container (`f(1)
-    # [0:1]` sliced the box cell as a list). The word is marked as tagged for
-    # the consumers that dispatch by kind instead.
-    if fname_raw in getattr(gen, '_ret_may_hold_float', ()):
+    # box, a bool box, a str/list/tuple box or a plain int. Recording one of
+    # those shapes would make a consumer cast the box's own address to a
+    # container (`f(1)[0:1]` sliced the box cell as a list). The word is marked
+    # as tagged for the consumers that dispatch by kind instead.
+    if fname_raw in getattr(gen, '_ret_may_hold_mixed', ()):
         gen._boxed_vals.add(t)
         gen._tagged_word_vals.add(t)
         return ret_type, t

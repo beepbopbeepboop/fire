@@ -2004,11 +2004,18 @@ def _closure_info_for_ident(gen, name: str):
         return ci
     return getattr(gen, '_lambda_outer_closures', {}).get(name)
 
-def _collect_return_types(gen, stmts: list, acc: list):
-    """Collect return-expression C types from all ReturnStmt nodes."""
+def _collect_return_types(gen, stmts: list, acc: list, arms: list = None):
+    """Collect return-expression C types from all ReturnStmt nodes.
+
+    `arms` (optional) receives the arm NODES in the same order as `acc`, so a
+    caller can tell `return None` (the null pointer) and a scalar literal
+    from a `String`/container whose C type is the same erased `int64_t`. A
+    bare `return` contributes `None` there, keeping the two lists aligned."""
     for node in stmts:
         if isinstance(node, gimple_ctypes.ReturnStmt):
             acc.append('void' if node.value is None else gen._quick_type(node.value))
+            if arms is not None:
+                arms.append(node.value)
         elif isinstance(node, gimple_ctypes.IfStmt):
             # Inside `if isinstance(x, T):` a read of `x` IS a `T *`, and
             # that is the only way a field read whose name is ambiguous
@@ -2048,7 +2055,7 @@ def _collect_return_types(gen, stmts: list, acc: list):
                         _saved[_nm] = None
                 gen.var_types[_nm] = _as_str(_nw[_ni][1])
             try:
-                gen._collect_return_types(node.then_body, acc)
+                gen._collect_return_types(node.then_body, acc, arms)
             finally:
                 for _nm in _saved:
                     if _nm in _had:
@@ -2079,7 +2086,7 @@ def _collect_return_types(gen, stmts: list, acc: list):
                             _esaved[_nm] = None
                     gen.var_types[_nm] = _as_str(_enw[_ni][1])
                 try:
-                    gen._collect_return_types(eb, acc)
+                    gen._collect_return_types(eb, acc, arms)
                 finally:
                     for _nm in _esaved:
                         if _nm in _ehad:
@@ -2087,64 +2094,108 @@ def _collect_return_types(gen, stmts: list, acc: list):
                         else:
                             gen.var_types.pop(_nm, None)
             if node.else_body:
-                gen._collect_return_types(node.else_body, acc)
+                gen._collect_return_types(node.else_body, acc, arms)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-            gen._collect_return_types(node.body, acc)
+            gen._collect_return_types(node.body, acc, arms)
             if node.else_body:
-                gen._collect_return_types(node.else_body, acc)
+                gen._collect_return_types(node.else_body, acc, arms)
         elif isinstance(node, gimple_ctypes.MatchStmt):
             # A function whose `return`s are all inside `match` arms had NO return statement as
             # far as this scan could see, so it was typed `void` (or `int64_t`) and handed back 0.
             for _mc in node.cases:
-                gen._collect_return_types(_mc.body, acc)
+                gen._collect_return_types(_mc.body, acc, arms)
         elif isinstance(node, gimple_ctypes.TryStmt):
-            gen._collect_return_types(node.body, acc)
+            gen._collect_return_types(node.body, acc, arms)
             for h in node.handlers:
-                gen._collect_return_types(h.body, acc)
+                gen._collect_return_types(h.body, acc, arms)
             if node.else_body:
-                gen._collect_return_types(node.else_body, acc)
+                gen._collect_return_types(node.else_body, acc, arms)
             if node.finally_body:
-                gen._collect_return_types(node.finally_body, acc)
+                gen._collect_return_types(node.finally_body, acc, arms)
         elif isinstance(node, gimple_ctypes.WithStmt):
-            gen._collect_return_types(node.body, acc)
+            gen._collect_return_types(node.body, acc, arms)
 
-def _acc_has_float(acc: list) -> bool:
-    """Does this return-arm type list hold a float arm?"""
-    for _t in acc:
-        if _t in ('double', 'float'):
+def _is_none_return_arm(node) -> bool:
+    """Is this return arm Python's None (the NULL pointer in this model)?
+
+    `None` must never be read as scalar evidence: `return None` beside a
+    pointer arm is the ordinary nullable-pointer shape, and widening it to a
+    boxed word would change the signature of every function that has an early
+    `return None`."""
+    if node is None:
+        return True
+    if isinstance(node, gimple_ctypes.NoneLiteral):
+        return True
+    return (isinstance(node, gimple_ctypes.IdentExpr)
+            and _as_str(node.name) == 'None')
+
+
+def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
+    """Does an unannotated function whose arms joined to a POINTER really mix
+    a pointer with a scalar, so its return type must be the boxed word?
+
+    No C arm type holds both, and `TypeLattice.join` answers such a pair with
+    the pointer (it is C's rule for pointer+integer arithmetic, which is what
+    `join` is written for). For a RETURN that answer is wrong: every scalar
+    arm was then cast to the pointer, so `return a == b` handed the caller
+    address 1 and `return 7` handed it address 7. Measured in this
+    compiler's own `myinterpreter.py`: `Interpreter._apply_binary_op` returns
+    `MojoString *`, `int64_t`, `double` and `_Bool` from different arms and
+    was emitted as `MojoString *` with `(MojoString *)_t167` on the `_Bool`
+    arm (gimple-lint's `cast-narrow-int-to-ptr`).
+
+    WHICH scalar arms count is the whole subtlety, and it is the same rule
+    the return emitter already applies to annotated pointer returns
+    (`exprtypes.scalar_shape_arm_kind`, whose two readers this is the second
+    of): an `int64_t` arm is not necessarily an integer. A String/bytes/
+    container value is an erased `int64_t` box and `None` is the NULL word,
+    so widening every int64_t arm would turn every nullable-pointer and every
+    `-> String`-style function into a boxed word. So only
+
+      * `_Bool` and a float — C types no pointer value can have; and
+      * an int/int64_t arm whose SOURCE SHAPE is unambiguously scalar
+        (a literal, a comparison, `not`, a sign on a literal)
+
+    are evidence. An IdentExpr or a call is not: `return result^` (String)
+    and `return len(x)` are both named `int64_t` here, and only the first
+    must stay legal. `None` is never evidence. `void` (a bare `return`) is
+    ignored, as the join ignores it.
+
+    `acc` and `arms` are index-aligned; `arms` may be shorter when a caller
+    did not ask for nodes, in which case there is no node evidence."""
+    for _i in range(len(acc)):
+        _t = _as_str(acc[_i])
+        if _t == 'void' or gimple_ctypes.TypeLattice.is_pointer(_t):
+            continue
+        _node = arms[_i] if _i < len(arms) else None
+        if _is_none_return_arm(_node):
+            continue
+        if _t in ('double', 'float', '_Bool'):
             return True
+        if _t in ('int', 'int64_t'):
+            if gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
+                return True
     return False
-
-
-def _acc_has_bool(acc: list) -> bool:
-    """Does this return-arm type list hold a `_Bool` arm?"""
-    return any(_t == '_Bool' for _t in acc)
 
 
 def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
-    gen._collect_return_types(body, acc)
+    arms: list = []
+    gen._collect_return_types(body, acc, arms)
     if acc:
         _rt = gimple_ctypes.TypeLattice.join_all(acc)
-        # A float beside a pointer has no arm type that can hold both (a
-        # pointer beats a `double` in `join`, and the float arm then truncates
-        # into it), so the function returns the TAGGED WORD instead. Body
-        # identity is recorded so the return emitter boxes exactly the
-        # functions this decision widened, rather than re-deriving the mix
-        # from a differently-seeded type table.
-        # A `_Bool` beside a pointer is the same join (the pointer wins `join` and
-        # the bool arm was CAST to it: `True` became the pointer 1). It boxes
-        # when every pointer arm has a box kind: a str, a list or a bytes.
-        _bool_boxable = (_acc_has_bool(acc) and all(
-            _t in ('char *', 'MojoList *', 'MojoBytes *') or not _t.endswith(' *')
-            for _t in acc))
-        if ((_acc_has_float(acc) or _bool_boxable)
-                and gimple_ctypes.TypeLattice.is_pointer(_rt)):
-            _mixed = getattr(gen, '_float_mixed_return_bodies', None)
+        # A pointer beside a scalar has no arm type that can hold both; see
+        # `_return_arms_need_boxed_word`. The function returns the TAGGED WORD
+        # instead, and body identity is recorded so the return emitter boxes
+        # exactly the functions this decision widened, rather than re-deriving
+        # the mix from a differently-seeded type table.
+        if gimple_ctypes.TypeLattice.is_pointer(_rt) \
+                and _return_arms_need_boxed_word(acc, arms):
+            _mixed = getattr(gen, '_mixed_return_bodies', None)
             if _mixed is None:
                 _mixed = set()
-                gen._float_mixed_return_bodies = _mixed
+                gen._mixed_return_bodies = _mixed
             _mixed.add(id(body))
             return 'int64_t'
         # `int` is this compiler's INTERNAL marker for "a _Bool met an int"
