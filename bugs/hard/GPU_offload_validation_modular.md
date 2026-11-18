@@ -43,7 +43,7 @@ done at the easy class is filed as three parts; each one names one quick test.
 | part | doc | covers | pinned by |
 |---|---|---|---|
 | 5 | fixed 2026-11-15, doc deleted | `compile_offload_unbound_param_error.mojo`, interpreted half: an under-supplied specialization is a diagnostic, not `None` | `test_regress_gpu_offload_validation_modular_part5.py` |
-| 6 | `bugs/GPU_offload_validation_modular-part6.md` | the same case, compiled half: the build must refuse it instead of answering `0` | `test_regress_gpu_offload_validation_modular_part6.py` |
+| 6 | the GPU offload validation part6 bug (its doc, deleted) | the same case, compiled half: the build must refuse it instead of answering `0` | `test_regress_gpu_offload_validation_modular_part6.py` |
 | 7 | fixed 2026-11-16, doc deleted | `compile_offload_missing_symbol_error.mojo`: `std.compile.compile_info` refuses an unsliceable runtime-pointer kernel with `cannot slice out exported symbol` | `test_regress_gpu_offload_validation_modular_part7.py` |
 
 Part 8 is fully fixed (2026-11-15 interpreter half, 2026-11-16 compiled

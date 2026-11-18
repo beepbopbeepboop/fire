@@ -2,7 +2,7 @@
 
 **Branch:** `work/bug-land-gpu-offload-validation-modular-3` (task `bug-land-gpu-offload-validation-modular-3`; its tip is also saved as `refs/archive/work/bug-land-gpu-offload-validation-modular-3`, so dropping it loses nothing).
 **Age:** last commit 2026-11-17, first unlanded commit 2026-11-15; 6 commit(s) ahead of master, 13 behind it; task started 2026-11-17 01:27:58
-**Original work:** Fix the bug in bugs/LAND-gpu-offload-validation-modular-part8-2.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test,
+**Original work:** Fix the bug in the LAND gpu-offload-validation-modular part8-2 bug (its doc, deleted) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test,
 **Original claims:** bug:LAND-gpu-offload-validation-modular-part8-2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
