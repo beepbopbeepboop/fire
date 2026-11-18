@@ -1516,6 +1516,48 @@ def _mojo_type(ann: str | type | None) -> str:
     t = _TYPE_MAP.get(ann)
     return t if t is not None else 'int64_t'
 
+# The string-wrapper annotations whose BARE spelling is a real C string
+# parameter. Bracketed forms (`StringSlice[_]`, `Span[...]`) are NOT in this
+# set: those are the fat-pointer `Span *` (see _mojo_type's Span branch).
+_BARE_STRING_PARAM_ANNS = frozenset(
+    {'StaticString', 'StringLiteral', 'StringRef', 'StringSlice'})
+
+
+def is_bare_string_param_annotation(ann) -> bool:
+    """True for the BARE compile-time string annotations (`StringSlice`, not
+    `StringSlice[_]`), whose parameter C type is a real `char *` — see
+    `param_annotation_ctype`."""
+    return isinstance(ann, str) and ann in _BARE_STRING_PARAM_ANNS
+
+
+def param_annotation_ctype(ann) -> str:
+    """The C type a PARAMETER annotated `ann` has, from the annotation alone.
+
+    This is the stateless half of the parameter rule `funcs_shared.
+    _param_ctype` applies, stated ONCE so the export scanners (module_loader's
+    text scan and reflect.py's signature emitter) cannot drift from it:
+    a bare compile-time string type is a NUL-terminated `char *` (the general
+    resolver boxes it as an opaque int64_t handle), everything else is
+    `_mojo_type`'s answer.
+
+    It exists because those two scanners used to box `StringSlice` (bare AND
+    bracketed) to `int64_t *` so an extern could name it without a `Span`
+    typedef. Every generated translation unit now carries
+    `typedef struct Span Span;` in its prelude, and the box was silently a
+    DIFFERENT C type from the one the defining module emitted — so the
+    importer hashed a different `overload_suffix_for` and called a
+    `_std_*_<hex>` symbol that does not exist (the stdlib-dylib
+    undefined-reference red). Returns a parameter type only: a `StringSlice`
+    RETURN is still `_mojo_type`'s boxed int64_t, exactly as the codegen's
+    return-type path resolves it.
+
+    Callers that have a GimpleGen must still use `_param_ctype` — it also
+    applies inferred types, literal defaults and parameter convs; this is the
+    annotation rule for the scanners, which have no gen."""
+    if isinstance(ann, str) and ann in _BARE_STRING_PARAM_ANNS:
+        return 'char *'
+    return _mojo_type(ann)
+
 def _result_type(t1: str, t2: str) -> str:
     return TypeLattice.join(t1, t2)
 _PTR_OUT_PARAM_SCALAR_ELEMS = frozenset({'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t', 'int', 'unsigned', 'long', 'size_t', 'float', 'double', '_Bool'})

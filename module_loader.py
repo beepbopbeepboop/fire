@@ -4,7 +4,6 @@ Resolves and loads .mojo module files from the official stdlib.
 Parses imported modules and makes symbols available to the codegen.
 """
 import os
-import re
 import ctypes
 from pathlib import Path
 
@@ -387,52 +386,6 @@ _TESTING_EXPORTS = {
 # nested inside read_reflection — so the self-host codegen emits their struct
 # typedefs at top level (a class nested in a function is referenced but never
 # declared in the generated C).
-
-
-def _out_name_read_in_body(lines: list, start: int, indent: int, name: str) -> bool:
-    """True when the body of the `def` on `lines[start]` (indented past `indent`)
-    reads `name` other than as a plain `name = e` assignment target. Docstrings
-    are skipped. The same test as mojo/middle/out_result.py's `_reads_name`, on
-    text: the scan must not rewrite a function the lowering leaves alone."""
-    import re as _re
-    body = []
-    for raw in lines[start + 1:]:
-        if raw.strip() == '':
-            continue
-        ind = len(raw) - len(raw.lstrip(' '))
-        if ind <= indent:
-            break
-        body.append(raw.strip())
-    in_doc = False
-    word = _re.compile(r'\b' + _re.escape(name) + r'\b')
-    for ln in body:
-        if ln.count('"""') % 2 == 1:
-            in_doc = not in_doc
-            continue
-        if in_doc:
-            continue
-        m = _re.match(r'^' + _re.escape(name) + r'\s*=(?!=)\s*(.*)$', ln)
-        if m:
-            if word.search(m.group(1)):
-                return True
-            continue
-        if word.search(ln):
-            return True
-    return False
-
-def _out_param_names(params_str: str) -> set:
-    """Names of the parameters in a `def` parameter-list text that carry the
-    `out` convention (`out result: T`)."""
-    names = set()
-    for _pp in params_str.split(','):
-        if ':' not in _pp:
-            continue
-        _head, _ = _pp.split(':', 1)
-        _words = _head.split()
-        if _words[:1] == ['out'] and len(_words) >= 2:
-            names.add(_words[-1])
-    return names
-
 class _ReflectSym(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p), ('signature', ctypes.c_char_p),
                 ('addr', ctypes.c_void_p), ('kind', ctypes.c_int32)]
@@ -796,8 +749,7 @@ class ModuleLoader:
                 # nested-closure note on the skip below for the measured
                 # failure this exists for).
                 _block_stack: list = []
-                _all_def_lines = _ml_def_logical_lines(src_content)
-                for _li, _raw_line in enumerate(_all_def_lines):
+                for _raw_line in _ml_def_logical_lines(src_content):
                     line = _raw_line.strip()
                     if not line or line.startswith('#'):
                         continue
@@ -892,56 +844,11 @@ class ModuleLoader:
                                     param_type = param_type.strip()
                                     parameters.append((param_name, param_type))
 
-                        # A pointer-typed `out` result is a pointer RETURN (see
-                        # mojo/middle/out_result.py, which the definer and the
-                        # import parse both apply): drop the parameter and return
-                        # `struct <Pointee> *`, so the extern and the overload hash
-                        # (now over no parameters) match the definition.
-                        _ptr_out = [(_pn, _pt) for _pn, _pt in parameters
-                                    if _pt.strip().startswith(('Pointer[', 'UnsafePointer['))
-                                    and _pn in _out_param_names(params_str)]
-                        _ptr_return_c = None
-                        _ptr_pointee = None
-                        # Mirror mojo/middle/out_result.py: a body that reads the out name
-                        # (anything but a plain `name = e` target) is not rewritten.
-                        if _ptr_out and _out_name_read_in_body(
-                                _all_def_lines, _li, _indent, _ptr_out[0][0]):
-                            _ptr_out = []
-                        if '->' not in sig and len(_ptr_out) == 1:
-                            _pn0, _pt0 = _ptr_out[0]
-                            _inner = _pt0.split('[', 1)[1].split(',', 1)[0].split(']', 1)[0].strip()
-                            if _inner and '[' not in _inner:
-                                return_type = None
-                                parameters = [(_n, _t) for _n, _t in parameters if _n != _pn0]
-                                _ptr_return_c = f'struct {_inner} *'
-                                _ptr_pointee = _inner
-
                         # Build C signature from extracted info
-                        if return_type is None:
-                            # The pointee is mapped like any return annotation, so an
-                            # imported struct registers its layout here; only a struct
-                            # this module cannot name (private to its home) falls back to
-                            # the tag spelling.
-                            try:
-                                _pee = _ml_as_str(self._mojo_type_to_c(_ptr_pointee))
-                            except Exception:
-                                _pee = 'int64_t'
-                            c_return_type = (_pee[:-2].rstrip() + ' *') if _pee.endswith(' *') else _ptr_return_c
-                        else:
-                            try:
-                                c_return_type = _ml_as_str(self._mojo_type_to_c(return_type))
-                            except Exception:
-                                c_return_type = 'int64_t'
-                        # A return annotation naming a struct this module IMPORTS (`-> Passwd`
-                        # with `from .pwd import Passwd`) maps to the word above; the struct
-                        # is a pointer, so its extern returns `struct X *` (the same C type
-                        # as the definition's `X *`).
-                        if (isinstance(return_type, str) and c_return_type == 'int64_t'
-                                and re.match(r'^[A-Z]\w*$', return_type.strip())
-                                and re.search(r'^\s*from\s+[\w.]+\s+import\b.*\b'
-                                              + re.escape(return_type.strip()) + r'\b',
-                                              src_content, re.M)):
-                            c_return_type = f'struct {return_type.strip()} *'
+                        try:
+                            c_return_type = _ml_as_str(self._mojo_type_to_c(return_type))
+                        except Exception:
+                            c_return_type = 'int64_t'
                         # An `out` parameter is the result: the definer emits the
                         # function void and writes through the pointer, so the
                         # extern must be void too (see emit_calls._lower_out_param_call).
@@ -994,7 +901,7 @@ class ModuleLoader:
                                 else:
                                     bare_type = ptype
                                 try:
-                                    c_type = self._mojo_type_to_c(bare_type)
+                                    c_type = self._mojo_type_to_c(bare_type, param=True)
                                 except Exception:
                                     c_type = 'int64_t'
                                 # A named parameter can never be typed 'void' in C
@@ -1428,7 +1335,7 @@ class ModuleLoader:
             return {}
 
     @staticmethod
-    def _mojo_type_to_c(mojo_type: str) -> str:
+    def _mojo_type_to_c(mojo_type: str, param: bool = False) -> str:
         """Convert Mojo type annotation to C type.
 
         This used to maintain its own small type_map (a second, independent
@@ -1468,8 +1375,17 @@ class ModuleLoader:
         top level, so a top-level import here would be a circular partial-
         init failure; by the time `load_module` is actually called at
         runtime both modules are fully loaded.
-        """
+
+        `param=True` asks for a PARAMETER's type instead of a general/return
+        one. The two differ for the string wrappers only, and that difference
+        is the whole point: a bare `StringSlice` parameter is `char *` in the
+        definition while `_mojo_type` (the return-type rule) boxes it to
+        int64_t, and `StringSlice[_]` is the fat-pointer `Span *`. The
+        parameter rule is `param_annotation_ctype`, the ONE statement of it
+        that `funcs_shared._param_ctype` also uses — see its docstring for
+        the stdlib-dylib undefined-reference this drift used to cause."""
         from gimple_codegen import _mojo_type
+        from mojo.middle.types import param_annotation_ctype
         mojo_type = mojo_type.strip()
 
         # A few shapes this text-only extractor can hand in that aren't a
@@ -1493,28 +1409,15 @@ class ModuleLoader:
         # default instead of a pointer type.
         if mojo_type == 'UnsafePointer':
             return 'int64_t *'
-        # Span/StringSlice: _mojo_type correctly resolves these to 'Span *'
-        # (the fat-pointer struct GimpleGen seeds into struct_field_types
-        # and typedefs into the preamble of a module IT is compiling), but
-        # this call site emits a bare `extern <type> sym(...);` declaration
-        # into a DIFFERENT file's translation unit that has no reason to
-        # have that typedef too -- "unknown type name 'Span'". Unlike
-        # MojoList/MojoDict/MojoSet (always available via fire_runtime.h,
-        # included everywhere), Span has no globally-available typedef.
-        # The defining unit's real lowering for these parameter annotations
-        # is `char *` (see e.g. parsing_floats._atof(StringSlice) -> char *),
-        # which is parseable in any TU without a local typedef. Returning the
-        # real lowering here keeps the text-scan import signature's overload
-        # suffix in agreement with the defining unit (and the extern itself
-        # parseable); the old `int64_t *` opaque handle disagreed with the
-        # definition and made cross-module references undefined at link time.
+        # Span/StringSlice: _mojo_type correctly resolves bracketed forms to
+        # 'Span *' and bare ones to boxed int64_t, but PARAMETER spellings
+        # differ (bare -> char *, bracketed -> Span *) per the shared rule.
+        # Every generated TU carries `typedef struct Span Span;` in its
+        # prelude, so returning Span * is parseable.
+        if param:
+            return param_annotation_ctype(mojo_type)
         if mojo_type.split('[', 1)[0].strip() in ('Span', 'StringSlice'):
-            # A BARE annotation is `char *` in the defining unit (parsing_floats'
-            # `_atof(x: StringSlice)`). A BRACKETED one (`StringSlice[_]`,
-            # `Span[UInt8, _]`) lowers to the `Span *` struct pointer there, so the
-            # import must name that, or the caller references a symbol the defining
-            # unit never emits.
-            return 'Span *' if '[' in mojo_type else 'char *'
+            return 'Span *' if '[' in mojo_type else _mojo_type(mojo_type)
         return _mojo_type(mojo_type)
 
     def get_symbol_type(self, module_name: str, symbol_name: str) -> str:

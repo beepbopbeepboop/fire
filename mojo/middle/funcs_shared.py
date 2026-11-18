@@ -520,8 +520,16 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # param then slices an int64_t and lowers to int64_t, and passing it to
     # a String-taking ctor is a `makes pointer from integer` error. Mirror
     # _imported_field_ctype's handling (std/pathlib/path.mojo:90).
-    if ptype in ('StaticString', 'StringLiteral', 'StringRef', 'StringSlice'):
-        ctype = 'char *'
+    #
+    # The rule itself lives in `param_annotation_ctype` (mojo/middle/types.py)
+    # because module_loader.py's export text scan and reflect.py's signature
+    # emitter need the SAME annotation -> parameter-ctype answer, and their
+    # own copies had boxed `StringSlice[_]` to `int64_t *` — a different C
+    # type from the definition's `Span *`, hence a different overload suffix,
+    # hence a call to a `_std_*_<hex>` symbol nothing defines (the
+    # stdlib-dylib red). One statement of the rule, three readers.
+    if is_bare_string_param_annotation(ptype):
+        ctype = param_annotation_ctype(ptype)
     if ctype == 'void':
         # _mojo_type('None') correctly maps NoneType -> void for RETURN
         # types, but a named PARAMETER can never be typed void in a
@@ -1303,12 +1311,8 @@ def _parsed_import(gen, module: str):
             if not path:
                 path = gen._submodule_source_path(module)
             src = open(path).read() if path else ''
-            _pst = ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None
-            if _pst is not None:
-                # A pointer-typed `out` result is a pointer return (see middle/out_result).
-                from mojo.middle.out_result import lower_pointer_out_results
-                lower_pointer_out_results(_pst)
-            cache[module] = (path, src, _pst)
+            cache[module] = (path, src,
+                             ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)
         except Exception:
             gimple_ctypes._debug_note('cannot resolve/parse module', module)
             cache[module] = (None, '', None)

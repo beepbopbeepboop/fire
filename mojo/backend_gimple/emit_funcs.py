@@ -4848,23 +4848,6 @@ def _register_imported_structs(gen, stmts: list) -> None:
     the many imported structs a module merely passes through untouched."""
     if gen.do_imports or not getattr(gen, '_current_filename', None):
         return
-    # A struct an imported function RETURNS is a value this module may dereference
-    # or call methods on (`get()[].seed(...)`), which the parameter/constructor scan
-    # below never sees. Register each such home struct by name, as the scan would.
-    for _st in stmts or []:
-        if type(_st).__name__ != 'FromImportStmt' or _st.wildcard:
-            continue
-        _imod = str(_st.module)
-        _hstmts = gen._parsed_import(_imod)[2] or []
-        for _name, _alias in (_st.names or []):
-            _hfs = [h for h in _hstmts if type(h).__name__ == 'FunctionDef'
-                    and str(h.name) == str(_name) and not getattr(h, 'comptime_params', None)]
-            if len(_hfs) != 1 or not isinstance(_hfs[0].return_type, str):
-                continue
-            _rt = str(_hfs[0].return_type).strip()
-            if any(type(h).__name__ == 'StructDef' and str(h.name) == _rt
-                   and not getattr(h, 'bracket_params', None) for h in _hstmts):
-                gen._materialize_imported_struct(_imod, _rt, _rt)
     try:
         src = open(gen._current_filename).read()
     except Exception:

@@ -971,7 +971,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 gcc: str = None, nested_defs: list = None,
                 renames: list = None, conformance_bases: dict = None,
                 origin_module: str = None, generic_paths: dict = None,
-                links_out: list = None, import_text: str = '') -> tuple:
+                links_out: list = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.
     Returns (mangled_name, object_path_or_None, hit, cpp_object_path_or_None)
     — both object results are PATHS into the CAS (cas.get_or_build's own
@@ -1108,11 +1108,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         _sib_extra = ('siblings_v1', tuple(_sib))
         _nested_extra = ((_nested_extra, _sib_extra) if _nested_extra is not None
                          else _sib_extra)
-    if import_text:
-        # The unit's imports are part of its text, so they are part of its key, and
-        # they lead the unit: a call to an imported name binds to the real import.
-        _nested_extra = (_nested_extra, ('imports', import_text))
-        concrete = import_text + concrete
     key = cas.instantiation_key(template_src, type_args, comptime_args, gcc,
                                 _OBJ_FLAGS, extra=_nested_extra)
 
