@@ -36,13 +36,23 @@ therefore fixed for generators, methods and the await/async-for paths.
 
 NOT verified and NOT done:
 
-- `Lib/contextlib.py` itself was NOT re-built. That is a `fire.py build` through
-  the stdlib dylib, which the light-worker budget excludes. Its current
-  refusal text (`cannot compile module: ... *args/**kwargs parameters not
-  supported for compiled async functions`, from `cpp_async.py`) is the LEGACY
-  cpp path's gate; the default A3 backend accepts that shape in-process
-  (probed). Whether the whole-module refusal still fires on the default path is
-  for the integrator's gate to say.
+- `Lib/contextlib.py` itself was NOT re-built. **Verified 2026-11-17**: it DOES
+  still refuse on the default path -- `python3 fire.py build Lib/contextlib.py`
+  exits 1 -- but with a DIFFERENT gate than the one recorded here. The
+  refusal is now the plain async one:
+
+      RuntimeError: cannot compile module: function(s) __aexit__, __aexit__,
+      _exit_wrapper, inner (async function(s), declared `async def`) -- this
+      codegen compiles every function into a single straight-line C function
+      and has no suspend/resume state-machine transform for generators, nor an
+      event loop / suspend-resume codegen for async functions, yet
+
+  not `*args/**kwargs parameters not supported for compiled async functions`.
+  So the legacy cpp gate is gone from this path and the shape that stops the
+  module is simply `async def` -- which is the same wall as every other
+  COMPILE_FAIL_* file here. (The build also reports `unable to locate module
+  'nt'` while resolving the import closure; that is a separate module-path
+  matter and is not what stops it.)
 - Element typing for the `*args` body is still wrong in two ways, both
   separate defects, filed:
   the int-element list-param loop target typed `char *` (arithmetic on an int

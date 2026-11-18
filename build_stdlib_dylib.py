@@ -2323,18 +2323,6 @@ def classify_export_entries(entries: list, defined: set) -> tuple:
         if m:
             siblings = sorted(d for d in suffix_by_stem.get(expect[:m.start()], ())
                               if d != expect)
-            if len(siblings) == 1:
-                # Exactly one definition of this function exists under another
-                # overload suffix: codegen named the body from the parameter types
-                # it infers from the definition, and the export entry hashed the
-                # types it scanned from the signature. The definition is the
-                # function the entry means, so the entry advertises it. Two or more
-                # candidates are ambiguous and stay misresolved below.
-                # `defined` carries the arch's leading underscore; the table
-                # does not.
-                e['csym'] = siblings[0][1:] if siblings[0].startswith('_') else siblings[0]
-                kept.append(e)
-                continue
             if siblings:
                 # `sym` is spelled without the arch's leading underscore;
                 # `defined` carries it — strip it so both halves of the line
