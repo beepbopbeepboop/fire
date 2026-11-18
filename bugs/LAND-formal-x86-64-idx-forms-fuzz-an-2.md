@@ -1,9 +1,9 @@
-# Land: should finished branch bug-suite-modcache-slice4-home-overload land?
+# Land: should finished branch bug-land-formal-x86-64-idx-forms-fuzz-an-2 land?
 
-**Branch:** `work/bug-suite-modcache-slice4-home-overload` (task `bug-suite-modcache-slice4-home-overload`; its tip is also saved as `refs/archive/work/bug-suite-modcache-slice4-home-overload`, so dropping it loses nothing).
-**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 8 behind it; task started 2026-11-18 10:05:51
-**Original work:** Fix the bug in bugs/SUITE_modcache_slice4_home_overload_undefined.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning tes
-**Original claims:** bug:SUITE_modcache_slice4_home_overload_undefined
+**Branch:** `work/bug-land-formal-x86-64-idx-forms-fuzz-an-2` (task `bug-land-formal-x86-64-idx-forms-fuzz-an-2`; its tip is also saved as `refs/archive/work/bug-land-formal-x86-64-idx-forms-fuzz-an-2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 3 commit(s) ahead of master, 5 behind it; task started 2026-11-18 04:11:58
+**Original work:** Fix the bug (the SIB-indexed byte forms with no fuzz draw or `as` check) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
+**Original claims:** bug:LAND-formal-x86-64-idx-forms-fuzz-an
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-18 10:55:01: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 8 behind it; task started 2026-11-18 10:05:51)
-  Branch: work/bug-suite-modcache-slice4-home-overload
-  Conflicting files: mojo/backend_gimple/emit_infra.py
+- 2026-11-18 05:23:30: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 3 commit(s) ahead of master, 5 behind it; task started 2026-11-18 04:11:58)
+  Branch: work/bug-land-formal-x86-64-idx-forms-fuzz-an-2
+  Conflicting files: bugs/OPEN_WORK.md

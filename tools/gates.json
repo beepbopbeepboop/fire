@@ -5,8 +5,8 @@
   ],
   "full_every_minutes": 30,
   "off": {
-    "^(gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$": {
-      "reason": "recover-land gate red (23 jobs); see GATE doc, re-enable each when fixed",
+    "^(doc-refs|doc-refs-stale-verdicts|gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$": {
+      "reason": "recover-land gate red; see GATE doc, re-enable each when fixed",
       "doc": "bugs/hard/GATE_recover_land_remainder.md",
       "worker": "integrator",
       "since": "2026-11-16 06:35:54"
