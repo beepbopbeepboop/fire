@@ -6101,14 +6101,6 @@ def _gen_stmt_ExprStmt(gen, node):
         # call stayed an implicit declaration.
         ggc._ensure_libc_self_extern(gen, raw_name)
         arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
-        # An imported name its home module defines more than once: name the overload
-        # the call selects, by the argument C types just lowered (the same chooser
-        # `_lower_named_call` uses).
-        import mojo.backend_gimple.emit_calls as _ec_stmt
-        _imp_ov = _ec_stmt._imported_overload_call_symbol(
-            gen, raw_name, node.value, [_t for _t, _v in arg_pairs])
-        if _imp_ov is not None:
-            fname = _imp_ov
 
         # exit(msg)/quit(msg) as a bare statement — see _lower_named_
         # call's identical check (this is that fix's statement-level

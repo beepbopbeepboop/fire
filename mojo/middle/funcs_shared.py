@@ -1303,12 +1303,8 @@ def _parsed_import(gen, module: str):
             if not path:
                 path = gen._submodule_source_path(module)
             src = open(path).read() if path else ''
-            _pst = ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None
-            if _pst is not None:
-                # A pointer-typed `out` result is a pointer return (see middle/out_result).
-                from mojo.middle.out_result import lower_pointer_out_results
-                lower_pointer_out_results(_pst)
-            cache[module] = (path, src, _pst)
+            cache[module] = (path, src,
+                             ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)
         except Exception:
             gimple_ctypes._debug_note('cannot resolve/parse module', module)
             cache[module] = (None, '', None)

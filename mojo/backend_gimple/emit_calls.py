@@ -55,7 +55,6 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
-from mojo.middle.funcs_shared import _find_symbol_home_module
 from mojo.middle.calls_shared import (
     _is_pointer_ctype, _null_default_pair,
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
@@ -11659,84 +11658,6 @@ def _lnc_unknown(gen, fname_raw: str, fname: str) -> tuple[str, str] | None:
 
 
 def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr):
-    over = getattr(gen, '_local_def_overloads', None) or {}
-    nodes = over.get(fname_raw)
-    if not nodes or len(nodes) < 2:
-        return None
-    return _choose_overload_symbol(gen, fname_raw, node, nodes, None)
-
-
-def _imported_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr, arg_ctypes=None):
-    """The C symbol for a call to an IMPORTED free function that its home module
-    defines more than once, or None when the name is not such an overload set.
-
-    The import scan keeps one entry per name, and a name defined more than once
-    is recorded as a variadic `name(...)` stub, so the caller had no signature to
-    name the overload by (`stdlib/std/collections/bitset.mojo` calls
-    `unsafe_memset_zero(ptr, count)` and got the bare stub). The overloads are
-    read from the home module's own parsed statements instead. A generic template
-    (`comptime_params`) is not a plain callee, so it is left out of the choice; a
-    name with a single plain overload and a generic one still chooses the plain
-    one, since the generic cannot be called without its brackets."""
-    # Only where the import scan gave up on the name and emitted the variadic stub
-    # (that is the case that leaves the call with no overload to name), and never
-    # for a name with a builtin mapping (`abort`, `print`): those keep their builtin.
-    _ent = (getattr(gen, 'imported_symbols', None) or {}).get(fname_raw) or {}
-    if not str(_ent.get('signature') or '').endswith('(...)') or fname_raw in gen.BUILTIN_VALUE_MAP:
-        return None
-    _mod = None
-    for _st in getattr(gen, '_current_module_stmts', None) or []:
-        if type(_st).__name__ == 'FromImportStmt' and not _st.wildcard:
-            if any(str(_n) == fname_raw for _n, _a in (_st.names or [])):
-                _mod = str(_st.module)
-                break
-    if _mod is None:
-        return None
-    # The named module may only re-export the name (a package `__init__.mojo`); the
-    # overloads live in the module that DEFINES it.
-    _home_name = _find_symbol_home_module(gen, _mod, fname_raw, 'fn', want_abs=True) or _mod
-    _mod = _home_name
-    _home = gen._parsed_import(_mod)[2] or []
-    _all = [h for h in _home if type(h).__name__ == 'FunctionDef' and str(h.name) == fname_raw]
-    _plain = [h for h in _all if not getattr(h, 'comptime_params', None)]
-    if not _plain or len(_all) < 2:
-        return None
-    _fit = [h for h in _plain if len(h.params) == len(node.args)]
-    if arg_ctypes is None:
-        # Without the argument C types only a single arity match is decided: two
-        # plain overloads of one arity differ only in argument types, which are not
-        # known yet (`b64encode("a")`: a string and a byte span both take one
-        # argument), so the call keeps the stub rather than a guess.
-        if len(_fit) != 1:
-            return None
-        return _choose_overload_symbol(gen, fname_raw, node, _fit, _mod)
-    # With the lowered argument C types, the choice is the one arity match whose
-    # parameter C types are exactly the arguments': `time.sleep(1.5)` against
-    # `(Float64)` and `(Int)`. Anything else (none, or two) keeps the stub.
-    if len(_fit) == 1:
-        return _choose_overload_symbol(gen, fname_raw, node, _fit, _mod)
-    def _norm(t):
-        # A literal lowers to C `int`; Mojo's Int (and every integer parameter) is
-        # the 64-bit word. Both are the same argument for this choice.
-        _c = gimple_ctypes.c_client_callable_ctype(t)
-        return 'int64_t' if _c == 'int' else _c
-    _want = [_norm(t) for t in arg_ctypes]
-    _exact = []
-    for h in _fit:
-        _pts = [_norm(t) for t in gen._home_signature_ctypes(_mod, h)]
-        if _pts == _want:
-            _exact.append(h)
-    if len(_exact) != 1:
-        return None
-    return _choose_overload_symbol(gen, fname_raw, node, _exact, _mod)
-
-
-def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
-    """Choose one overload of FNAME_RAW for NODE among NODES and return its C
-    symbol. HOME is the defining module for an imported overload set (its nodes'
-    parameter types are read as the home unit types them, and the chosen overload
-    is declared here, since its definition lives in another unit), or None for a
-    module's own overloads (defined in this translation unit)."""
     """The C symbol for a call to one of THIS module's own same-named free
     functions, or None when the name is not an overload set.
 
@@ -11751,12 +11672,15 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
     back to the first in declaration order, which is also the canonical
     cross-module signature (see emit_funcs._def_is_canonical), so the call
     still names a definition that exists rather than a bare stub."""
+    over = getattr(gen, '_local_def_overloads', None) or {}
+    nodes = over.get(fname_raw)
+    if not nodes or len(nodes) < 2:
+        return None
     cands = []
     for n in nodes:
         pnames = []
-        _raw_pts = (gen._home_signature_ctypes(home, n) if home is not None
-                    else gen._signature_ctypes(n.params, n))
-        pts = [gimple_ctypes.c_client_callable_ctype(t) for t in _raw_pts]
+        pts = [gimple_ctypes.c_client_callable_ctype(t)
+               for t in gen._signature_ctypes(n.params, n)]
         star_idx = -1
         for _ppn, _ppt in n.params:
             pnames.append(_as_str(_ppn).lstrip('*'))
@@ -11821,24 +11745,8 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
         if cands[_ci] is chosen:
             _def = nodes[_ci]
             break
-    if home is not None:
-        # An imported choice must fit the call's arity. `_resolve_overload` picks a
-        # best candidate even when none fits, and a wrong pick here would emit a
-        # prototype the call cannot satisfy ("too few arguments"); decline instead,
-        # and the call keeps the variadic stub it had.
-        # The imported call path does not fill a chosen overload's defaults, so the
-        # call must supply every parameter itself: a defaulted or keyword-only
-        # overload is declined (`assert_equal(a, b)` against `(lhs, rhs, msg="",
-        # *, location=None)` would be emitted with two of four arguments).
-        _plain_params = [pn for pn, _pt in _def.params]
-        if any(str(pn).startswith('*') for pn in _plain_params) or len(node.args) != len(_plain_params) \
-                or (getattr(node, 'kwargs', None) or []):
-            return None
-        if any(_def.param_has_default.get(pn) for pn in _plain_params) if getattr(_def, 'param_has_default', None) else False:
-            return None
-    _raw_def_pts = (gen._home_signature_ctypes(home, _def) if home is not None
-                    else gen._signature_ctypes(_def.params, _def))
-    _def_pts = [gimple_ctypes.c_client_callable_ctype(t) for t in _raw_def_pts]
+    _def_pts = [gimple_ctypes.c_client_callable_ctype(t)
+                for t in gen._signature_ctypes(_def.params, _def)]
     _sym = (getattr(gen, '_def_sym_by_id', None) or {}).get(id(_def)) \
         or gen._func_csym(fname_raw, _def_pts)
     # The chosen overload's own parameter/return types, under its own symbol
@@ -11869,20 +11777,6 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
         except Exception:
             _rt = 'void'
         gen.func_return_types[_sym] = _rt or 'void'
-    if home is not None:
-        # The definition is in the home unit: declare the chosen overload here, with
-        # the return type this file already uses for it (the same record the call
-        # reads), so the prototype and every other declaration of the symbol agree.
-        # The same return type the import scan records for the name (the declaration
-        # the importer already emits for it), so the two prototypes cannot conflict.
-        # The scan takes the return type from the last overload, so for an overload
-        # set this can differ from the definer's; a statement call discards it.
-        _dret = str((getattr(gen, 'imported_symbols', None) or {}).get(fname_raw, {}).get('c_return_type')
-                    or gen.func_return_types.get(_sym) or 'void')
-        _dguard = gimple_ctypes._stub_guard_name(_sym)
-        gen._link_import_decl_list.append(
-            f"#ifndef {_dguard}\n#define {_dguard}\n"
-            f"extern {_dret} {_sym} ({', '.join(_def_pts) if _def_pts else 'void'});\n#endif")
     return _sym
 
 
@@ -11918,8 +11812,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # straight to it, bypassing BUILTIN_VALUE_MAP entirely, whenever this
     # module locally binds the name.
     _over_sym = _local_overload_call_symbol(gen, fname_raw, node)
-    if _over_sym is None:
-        _over_sym = _imported_overload_call_symbol(gen, fname_raw, node)
     if _over_sym:
         fname = _over_sym
     elif fname_raw in gen.BUILTIN_VALUE_MAP and gen._locally_binds_name(fname_raw):
