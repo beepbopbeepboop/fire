@@ -7942,18 +7942,6 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
     if at == 'MojoList *' and gen._elem_of(av) == 'char *':
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:
-        # The element contract is evidence the CONTAINER kind does not give:
-        # a generator body's list parameter arrives as an int64_t box (its
-        # type is fixed by the ABI), yet `_param_elem_types` has already told
-        # `_elem_types` that its elements are strings. Sorting such a value
-        # with the generic int64-payload sort ordered it by ADDRESS —
-        # `list(p for p in sorted(xs))` printed `['b', 'a']` for
-        # `xs = ["b", "a"]`. Read the element type BEFORE the materialize
-        # (the fresh probe temp has none) and take the same string sorter the
-        # statically typed `MojoList *` arm above takes. Only `char *` is
-        # answered: the probe can equally be a list of ints or doubles, and
-        # claiming a string sort for those would be a different wrong answer.
-        _elem_before = gen._elem_of(av)
         if at != 'MojoList *':
             # Any other iterable — a generator (a generator call or a
             # compiled generator expression) above all. Every runtime
@@ -7963,11 +7951,7 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
             # chokepoint first, exactly as sum()/any()/max() now do.
             av = gen._materialize_as_list(at, av)
             at = 'MojoList *'
-        if _elem_before == 'char *':
-            t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
-            gen._elem_types[t] = 'char *'
-        else:
-            t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
+        t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
     # sorted() only reorders — the result keeps the input's element /
     # nested-element (tuple-pair) types, so a later `for x, y in
     # sorted(lst):` tuple-target loop reads slots with the right accessor.
@@ -10861,25 +10845,14 @@ def lower_call_args(gen, args: list) -> list:
     for a in args:
         if isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) == '*':
             # A Mojo pointer DEREFERENCE (`f(*p)`) is `_lower_UnaryOp`'s, not a
-            # spread. A generator is the exception: `f(*(<generator
-            # expression>))` is an iterable unpack, and `*<generator-handle>`
-            # would dereference the incomplete `MojoGenerator` typedef (gcc:
-            # "storage size of '_t10' isn't known", "invalid use of
-            # incomplete typedef 'MojoGenerator'"). It is materialized as a
-            # list below and that list is unpacked.
+            # spread.
             _qt = _as_str(gen._quick_type(a.operand) or '')
             if (_qt.endswith(' *') and _qt not in (
-                    'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *',
-                    'MojoGenerator *')):
+                    'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *')):
                 _lt, _lv = gen.lower_expr(a)
                 out.append(_box_escaping_dict_slot_read(gen, a, _lt, _lv))
                 continue
             _st, _sv = gen.lower_expr(a.operand)
-            if _as_str(_st) == 'MojoGenerator *':
-                # `_quick_type` is only a hint and may not have known the
-                # operand's type, so the lowered type is the authority.
-                _sv = gen._materialize_as_list(_st, _as_str(_sv))
-                _st = 'MojoList *'
             _slots = gen._tuple_slot_types.get(_sv)
             if _slots is None:
                 _slots = _annotated_call_slots(gen, a.operand)
@@ -10888,9 +10861,9 @@ def lower_call_args(gen, args: list) -> list:
                     _et, _ev = gen._tuple_elem_value(_st, _sv, _i)
                     out.append(_box_escaping_dict_slot_read(gen, None, _et, _ev))
                 continue
-            # Unknown arity: the single pass-through pair the spread path
-            # expects, built from the operand already lowered rather than
-            # lowering it a second time.
+            # Unknown arity: the single pass-through pair `_lower_UnaryOp`
+            # gives a spread, built from the operand already lowered rather
+            # than lowering it a second time.
             out.append((_st, _sv))
             continue
         _lt, _lv = gen.lower_expr(a)
@@ -11737,16 +11710,12 @@ def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExp
 
 
 def _imported_overload_home_module(gen, fname_raw: str):
-    """The ABSOLUTE module that DEFINES the overloads a `from <module> import <fname_raw>`
-    statement of this module names (a relative import such as `from ._macos import f` is
-    followed to its defining module through any package re-export), or None. A wildcard or
-    no import of the name gives None."""
-    from mojo.middle.funcs_shared import _find_symbol_home_module
+    """The module a `from <module> import <fname_raw>` statement of this module names, or
+    None. A wildcard or no import of the name gives None."""
     for _st in getattr(gen, '_current_module_stmts', None) or []:
         if type(_st).__name__ == 'FromImportStmt' and not _st.wildcard:
             if any(str(_n) == fname_raw for _n, _a in (_st.names or [])):
-                _home = _find_symbol_home_module(gen, str(_st.module), fname_raw, 'fn', want_abs=True)
-                return str(_home or _st.module)
+                return str(_st.module)
     return None
 
 
