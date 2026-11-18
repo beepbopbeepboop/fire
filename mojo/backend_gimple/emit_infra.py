@@ -6271,35 +6271,14 @@ def _to_int64(gen, ctype: str, val: str) -> str:
 
 
 def _erasure_free_context(gen) -> bool:
-    """True when the lowered argument C types in the function being emitted are
-    the source's own types, so an exact-C-type overload choice is safe.
-
-    A body still emitted with a symbolic/erased type parameter is not: inside a
-    generic struct or function a parameter's C type can be erased to a word (e.g.
-    `Scalar[dtype].cast[.uint32]()` lowers to int64_t), so the choice would be a
-    guess. An enclosing generic that has been substituted to concrete types is a
-    concrete specialisation, and its argument C types are real."""
-    if getattr(gen, '_is_elaborated_instantiation', False):
-        return True
+    """True when the function being emitted is not inside a generic: its own
+    `def` takes no bracket parameters and its enclosing struct (if any) takes none.
+    Only there are the C types of the arguments the source's own types."""
     _cur = getattr(gen, '_current_func_node', None)
     if _cur is not None and getattr(_cur, 'comptime_params', None):
-        _intu_f = getattr(gen, '_intu_func_args', None) or {}
-        _fname = getattr(_cur, 'name', None)
-        _concrete = False
-        for (_base, _args), _mangled in _intu_f.items():
-            if _mangled == _fname or _base == _fname:
-                if _args and all(gimple_exprtypes._is_concrete_type_arg(a) for a in _args):
-                    _concrete = True
-                break
-        if not _concrete:
-            return False
+        return False
     _sname = getattr(gen, '_current_struct_name', None) or ''
     if _sname:
-        _intu_s = getattr(gen, '_intu_struct_args', None) or {}
-        for (_base, _args), _mangled in _intu_s.items():
-            if _mangled == _sname:
-                return bool(_args) and all(
-                    gimple_exprtypes._is_concrete_type_arg(a) for a in _args)
         for _st in getattr(gen, '_current_module_stmts', None) or []:
             if (type(_st).__name__ == 'StructDef' and str(_st.name) == _sname
                     and getattr(_st, 'bracket_params', None)):
@@ -6337,11 +6316,10 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     import mojo.backend_gimple.emit_calls as _ec_el
     _home_sym = _ec_el._imported_overload_call_symbol(gen, g, node, None)
     if _home_sym is None and _erasure_free_context(gen):
-        # Several arity matches: choose by the lowered argument types, but only
-        # when the enclosing generic (if any) has been substituted to concrete
-        # types so those types are real. A body still emitted with a symbolic/
-        # erased type parameter (e.g. `Scalar[dtype].cast[.uint32]()` lowered to
-        # int64_t) keeps the refusal, because the choice would be a guess.
+        # Several arity matches: choose by the lowered argument types, but only in a
+        # caller whose types are real. Inside a generic struct or function a
+        # parameter's C type can be erased to a word (`Scalar[dtype].cast[.uint32]()`
+        # lowers to int64_t), so there the choice would be a guess and it is not made.
         _home_sym = _ec_el._imported_overload_call_symbol(
             gen, g, node, [_ct for _ct, _ in arg_pairs])
     if _home_sym is not None:
