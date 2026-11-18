@@ -9223,14 +9223,19 @@ def _conformance_trait_bases_from_source(gen):
 
 
 def _conforms_to_pred(gen):
-    """Predicate for comptime `conforms_to(T, Trait)` folding, or None."""
+    """Predicate for comptime `conforms_to(T, Trait)` folding, or None.
+
+    Never None merely because this module declares no structs or traits:
+    `comptime_eval.conforms_to` also answers the builtin-scalar cases (the
+    compiler-synthesized `TrivialRegisterPassable` and the traits it derives),
+    and a module whose only structs are the builtins — the doc's synthetic
+    `maybe[Int]` module is one — must still be able to fold
+    `conforms_to(Int, TrivialRegisterPassable)`."""
     try:
         sb = getattr(gen, '_struct_bases', None) or {}
         tb = getattr(gen, '_trait_bases', None) or {}
         ex = getattr(gen, '_conformance_bases_extra', None) or {}
         tbt = _conformance_trait_bases_from_source(gen) or {}
-        if not sb and not tb and not ex and not tbt:
-            return None
         bases = dict(ex)
         bases.update(sb)
         bases.update(tb)

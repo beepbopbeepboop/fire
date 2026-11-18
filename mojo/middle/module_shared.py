@@ -923,6 +923,15 @@ def _gmi_prefold_toplevel_comptime(self, _node_list: list):
             _cv = self._eval_const(_cn.value)
             if _cv is not None:
                 self._comptime_vals.setdefault(_cn.target, _cv)
+            elif _cn.comptime_params:
+                # A GENERIC comptime alias (`comptime IsTriviallyDeinitable
+                # [T: AnyType]: Bool = ...`) has no value until an application
+                # supplies its bracket parameters; its own RHS names them, so
+                # `_eval_const` cannot fold it here. Keep the DECLARATION in
+                # the binding table so `IsTriviallyDeinitable[Int]` can be
+                # substituted instead of reading as an undeclared name (see
+                # comptime._comptime_alias_template).
+                self._comptime_vals.setdefault(_cn.target, _cn)
             if isinstance(_cn.value, ListExpr):
                 self._comptime_list_asts.setdefault(_cn.target, _cn.value)
         elif isinstance(_cn, IfStmt):
@@ -951,6 +960,11 @@ def _gmi_find_comptime_one(self, _node_list: list, _target, _out: dict):
             _cv = self._eval_const(_cn.value)
             if _cv is not None:
                 _out['v'] = _cv
+            elif _cn.comptime_params:
+                # A generic alias: its RHS names its bracket parameters, so it
+                # has no value until an application supplies them. Hand the
+                # declaration over; comptime.py substitutes it at the call.
+                _out['alias'] = _cn
             return
         elif isinstance(_cn, IfStmt):
             _gmi_find_comptime_one(self, _cn.then_body or [], _target, _out)

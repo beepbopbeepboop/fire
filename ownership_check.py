@@ -128,6 +128,7 @@ value). Re-run that sweep after any change to this file.
 
 import fire_compiler as N
 from fire_compiler import conv_is_exclusive
+from mojo.middle.builtin_types import TRIVIAL_REGISTER_PASSABLE_TYPES
 
 
 from dataclasses import dataclass as _dataclass
@@ -167,12 +168,11 @@ _COMPTIME_TYPE_FUNCS = {'type_of', '__type_of'}
 # values of raw MLIR type are always trivial". `Address` and `Pointer[...]`
 # are thin pointers with no destructor: std/memory/pointer.mojo declares the
 # TrivialRegisterPassable conformance on both structs directly.
-_TRIVIAL_BUILTIN_TYPES = frozenset((
-    'Int', 'Int8', 'Int16', 'Int32', 'Int64', 'Int128',
-    'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128',
-    'Float', 'Float16', 'Float32', 'Float64', 'Float128',
-    'Bool', 'Byte', 'Char', 'Address',
-))
+#
+# The set itself lives in `mojo/middle/builtin_types.py` because the comptime
+# conformance predicate asks the same question (`conforms_to(Int,
+# TrivialRegisterPassable)`) and the two answers must not drift.
+_TRIVIAL_BUILTIN_TYPES = TRIVIAL_REGISTER_PASSABLE_TYPES
 
 
 def _struct_def_is_trivial(st, struct_table, depth=0):

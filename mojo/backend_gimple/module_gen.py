@@ -12627,10 +12627,37 @@ def gen_module_impl(self, stmts: list):
                 continue   # a same-named local binding always wins
             _found = {}
             _gmi_find_comptime_one(self, _imp_stmts, _iname, _found)
+            if not _found:
+                # The named module may only RE-EXPORT `_iname` from a
+                # submodule (a package `__init__`: `std/traits/__init__.mojo`'s
+                # `from .deinitable import IsTriviallyDeinitable`), in which
+                # case its own body contains no ComptimeVarStmt. Follow the
+                # re-export with the shared, cycle-guarded walker — 'comptime'
+                # is the third kind it resolves, beside functions and structs —
+                # anchored at the module named by THIS import (`_fis.module`),
+                # because the hop's own `from .deinitable` is relative to it.
+                try:
+                    _home = self._find_symbol_home_module(
+                        _fis.module, _iname, 'comptime', want_abs=True)
+                except Exception:
+                    _home = None
+                if _home:
+                    _hp, _hs, _hstmts = self._parsed_import(_home)
+                    if _hstmts:
+                        _gmi_find_comptime_one(self, _hstmts, _iname, _found)
             if 'v' in _found:
                 if isinstance(_found['v'], str):
                     self._comptime_str_names.add(_as_str(_isym))
                 self._comptime_vals[_isym] = _found['v']
+            elif 'alias' in _found:
+                # A GENERIC comptime alias (`from std.traits import
+                # IsTriviallyDeinitable`): it has no value of its own — its
+                # RHS names its bracket parameters — so record the DECLARATION
+                # and let the evaluator substitute `IsTriviallyDeinitable[Int]`
+                # at the application. Without this the imported name lowered
+                # as an undeclared identifier (a zero word), and a `comptime
+                # if` over it became a runtime branch on address 0.
+                self._comptime_vals[_isym] = _found['alias']
     # Handle ImportStmt (import X; later X.NAME) - populate per-module comptime table
     for _fis in stmts:
         if isinstance(_fis, ImportStmt):
