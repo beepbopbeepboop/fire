@@ -1362,7 +1362,17 @@ def _dtype_token_ctype(tok):
         sl = 'float32'
     elif sl == 'f64':
         sl = 'float64'
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl)
+    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl) or _SIMD_INT_DTYPE_CTYPE.get(sl)
+
+
+# Integer dtypes, one table with the float one. A `Scalar[DType.uint32]` is a 32-bit
+# unsigned word, not the 64-bit word every unknown `Scalar` erased to.
+_SIMD_INT_DTYPE_CTYPE = {
+    'int8': 'int8_t', 'uint8': 'uint8_t',
+    'int16': 'int16_t', 'uint16': 'uint16_t',
+    'int32': 'int32_t', 'uint32': 'uint32_t',
+    'int64': 'int64_t', 'uint64': 'uint64_t',
+}
 
 
 def _simd_float_dtype_ctype(inner: str) -> str | None:
@@ -1375,6 +1385,13 @@ def _simd_float_dtype_ctype(inner: str) -> str | None:
     dt = _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
     if dt is not None:
         return dt
+    # An INTEGER dtype is a scalar only at width 1 (`Scalar[X]`, `SIMD[X, 1]`). A wider
+    # integer SIMD is a vector and keeps the word fallback; the float arm above is
+    # unchanged (it has always erased any width to its scalar).
+    if len(parts) == 1 or parts[1].strip() == '1':
+        dt = _dtype_token_ctype(parts[0].strip())
+        if dt is not None and dt in _SIMD_INT_DTYPE_CTYPE.values():
+            return dt
     return _float8_dtype.float8_ctype(parts[0].strip())
 
 
@@ -1408,6 +1425,12 @@ def _mojo_type(ann: str | type | None) -> str:
     if '[' in ann:
         base, rest = ann.split('[', 1)
         inner = rest.rstrip(']').strip()
+        if base == 'Scalar':
+            # `Scalar[X]` is a scalar of dtype X: the same C type the annotation resolver
+            # gives it, so a pointer to it and a parameter of it agree.
+            _sdt = _dtype_token_ctype(_split_top_level_commas(inner)[0].strip())
+            if _sdt is not None:
+                return _sdt
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'

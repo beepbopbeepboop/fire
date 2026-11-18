@@ -11710,12 +11710,16 @@ def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExp
 
 
 def _imported_overload_home_module(gen, fname_raw: str):
-    """The module a `from <module> import <fname_raw>` statement of this module names, or
-    None. A wildcard or no import of the name gives None."""
+    """The ABSOLUTE module that DEFINES the overloads a `from <module> import <fname_raw>`
+    statement of this module names (a relative import such as `from ._macos import f` is
+    followed to its defining module through any package re-export), or None. A wildcard or
+    no import of the name gives None."""
+    from mojo.middle.funcs_shared import _find_symbol_home_module
     for _st in getattr(gen, '_current_module_stmts', None) or []:
         if type(_st).__name__ == 'FromImportStmt' and not _st.wildcard:
             if any(str(_n) == fname_raw for _n, _a in (_st.names or [])):
-                return str(_st.module)
+                _home = _find_symbol_home_module(gen, str(_st.module), fname_raw, 'fn', want_abs=True)
+                return str(_home or _st.module)
     return None
 
 

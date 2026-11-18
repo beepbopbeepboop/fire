@@ -205,6 +205,13 @@ def _resolve_type(gen, ann: str | None) -> str:
                     return None
 
                 _sct = _resolve_dtype_token(_dtok)
+                # An INTEGER dtype is a scalar only at width 1 (`Scalar[X]`, `SIMD[X, 1]`). A
+                # wider integer SIMD is a vector: it keeps the word fallback, the same rule
+                # `types._simd_float_dtype_ctype` applies on the `_mojo_type` side.
+                _wtok = _parts[1].strip() if len(_parts) > 1 else '1'
+                if (_sct is not None and _wtok != '1' and base == 'SIMD'
+                        and _sct.startswith(('int', 'uint')) and _sct.endswith('_t')):
+                    _sct = None
                 if _sct is not None:
                     return _sct
     # Same gap as above, for Mojo's OTHER raw-pointer spelling: `*T`

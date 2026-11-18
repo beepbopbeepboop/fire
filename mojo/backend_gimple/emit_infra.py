@@ -6339,7 +6339,11 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     # link line, so its definition is there. A local sibling's home symbol is defined in
     # no object on the link line, so a sibling keeps the elaborated copy, which links.
     _home_mod = _ec_el._imported_overload_home_module(gen, g) or ''
-    _std_home = _home_mod == 'std' or _home_mod.startswith('std.')
+    # A relative import (`from ._macos import f`) inside the stdlib names a stdlib module
+    # too: the importing file is what says so when the module name does not.
+    _in_std = '/stdlib/std/' in (getattr(gen, '_current_filename', None) or '')
+    _std_home = (_home_mod == 'std' or _home_mod.startswith('std.')
+                 or (_home_mod.startswith('.') and _in_std))
     _home_sym = (_ec_el._imported_overload_call_symbol(gen, g, node, None)
                  if _std_home else None)
     if _home_sym is None and _std_home and _erasure_free_context(gen):
