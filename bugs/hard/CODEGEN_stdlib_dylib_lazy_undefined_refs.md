@@ -76,6 +76,20 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   3. Import side: the import scan records the out parameter's pointee type and
      the `void` return, so the extern declares `void f (T *)` and the hash uses
      the definer's list (the part-7 path, already in place).
+  Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
+  - Callee chosen: `mojo/backend_gimple/emit_calls.py` ~11650-11676, where
+    `_def` (the FunctionDef) and `_sym` are resolved. `_def.param_convs` gives
+    the `out` names. The argument list is built after this point from
+    `node.args`, so the synthetic temp must be threaded in there.
+  - Temp: a struct result is allocated with `_alloc_<Struct>()` (seen in
+    emitted C); `gen._emit_call(ret, tmp, fname, arg_pairs)` emits a call from
+    pre-lowered `(ctype, value)` pairs (`emit_resolve.py:2445` `_call_expr`).
+  - Callee writes: an assignment to an `out` name must copy into the caller's
+    object (`*r = *value`), not rebind the pointer. Struct locals are heap
+    pointers and today's `b = Box(9)` only rebinds (`emit_stmts`, the Assign
+    lowering).
+  - Local-only first: `_closure_call_stmts` (emit_calls.py ~70) gives the
+    module's root FunctionDefs; the cross-module case needs the import entry.
   Decision needed: do steps 1-2 for ALL `out` free functions (the general fix,
   large: the 110-file population) or only `out result` free functions
   (sufficient for the 1 remaining dylib name, but leaves `out` broken elsewhere).
