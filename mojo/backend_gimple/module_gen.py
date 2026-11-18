@@ -11042,19 +11042,7 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         # emit_funcs.py's function-scoped pre-pass); resolving it here would
         # run outside that scope and lose the module qualifier.
         _recorded_csym = _as_str(sym_info.get('csym')) if sym_info.get('csym') else None
-        # An import whose home signature names a struct private to the defining
-        # module is hashed with the DEFINER's parameter list (the importer still
-        # declares the struct as a word). The tiers that would supply that list
-        # are only registered later in this pass, so ask for it here.
-        _safe_home_pts = None
-        if not _recorded_csym:
-            try:
-                _safe_home_pts = _ggf_dup._home_private_struct_pts(self, {
-                    'module': sym_info.get('module'),
-                    'original_name': sym_info.get('original_name') or sym_name})
-            except Exception:
-                _safe_home_pts = None
-        safe = _recorded_csym or self._func_csym(_as_str(sym_name), _safe_home_pts or None)
+        safe = _recorded_csym or self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
                 _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
@@ -12420,8 +12408,6 @@ def _gmp_device_kernel_meta(self, stmts: list, _device_explicit: set, _device_fa
 
 
 def gen_module_impl(self, stmts: list):
-    from mojo.middle.out_result import lower_pointer_out_results
-    lower_pointer_out_results(stmts)
     self._stmts = stmts
     self._current_module_stmts = stmts
 
@@ -13023,12 +13009,8 @@ def gen_module_impl(self, stmts: list):
                     break
         if _generic_uninstantiable:
             for _g_ps in stmts:
-                # Only a GENERIC overload can be made uninstantiable: a plain
-                # function that shares its name with one (has_nvidia_gpu_accelerator)
-                # is a real definition and must stay.
                 if (not isinstance(_g_ps, FunctionDef)
                         or id(_g_ps) in _local_generic_ids
-                        or not (getattr(_g_ps, 'comptime_params', None) or [])
                         or _g_ps.name not in _local_generics):
                     continue
                 for _g_pn in _walk_ast(_g_ps.body):
@@ -13059,7 +13041,6 @@ def gen_module_impl(self, stmts: list):
             for _g_ls in stmts:
                 if (not isinstance(_g_ls, FunctionDef)
                         or id(_g_ls) in _local_generic_ids
-                        or not (getattr(_g_ls, 'comptime_params', None) or [])
                         or _g_ls.name not in _local_generics):
                     continue
                 for _g_ln in _walk_ast(_g_ls.body):
@@ -13107,17 +13088,17 @@ def gen_module_impl(self, stmts: list):
 
     # A name with two or more PLAIN definitions is emitted as one definition
     # per signature — but only when every body is something this build can
-    # lower without tripping an unrelated type bug. A body that constructs a
-    # generic struct DEFINED IN THIS FILE (the in-TU materializer would
-    # instantiate it here and change this file's own struct-method emission)
-    # cannot be emitted correctly here. Those names keep the historical
-    # disposition — none of their overloads is emitted — rather than turning an
-    # unrelated type bug into a module refusal. A body that uses
-    # `external_call[...]` is NOT in that set: its declaration is typed from the
-    # call's own annotations, and the stdlib builds clean with every such
-    # overload emitted (`time.sleep`'s two overloads, 2026-11-17). The stdlib-
-    # dylib overload rows (`_free`, `unsafe_memset_zero`, `splat`, `to_integer`)
-    # and the synthetic probe have neither shape.
+    # lower without tripping an unrelated type bug. A body that uses
+    # `external_call[...]` (whose declaration is typed from the call's own
+    # annotations and can collide with the platform header, e.g.
+    # `nanosleep`'s `struct timespec *`), or that constructs a generic struct
+    # DEFINED IN THIS FILE (the in-TU materializer would instantiate it here
+    # and change this file's own struct-method emission), cannot be emitted
+    # correctly here. Those names keep the historical disposition — none of
+    # their overloads is emitted — rather than turning an unrelated type bug
+    # into a module refusal. The stdlib-dylib overload rows (`_free`,
+    # `unsafe_memset_zero`, `splat`, `to_integer`) and the synthetic probe
+    # have neither shape.
     _plain_groups: dict = {}
     for _pog_s in stmts:
         if (isinstance(_pog_s, FunctionDef)
@@ -13139,7 +13120,8 @@ def gen_module_impl(self, stmts: list):
                     break
                 if (isinstance(_pog_f, SubscriptExpr)
                         and isinstance(_pog_f.obj, IdentExpr)
-                        and _as_str(_pog_f.obj.name) in _local_generic_structs):
+                        and (_as_str(_pog_f.obj.name) == 'external_call'
+                             or _as_str(_pog_f.obj.name) in _local_generic_structs)):
                     _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
                     break
             if id(_pog_n) in _unsafe_overload_ids:

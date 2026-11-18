@@ -4,7 +4,6 @@ Resolves and loads .mojo module files from the official stdlib.
 Parses imported modules and makes symbols available to the codegen.
 """
 import os
-import re
 import ctypes
 from pathlib import Path
 
@@ -387,52 +386,6 @@ _TESTING_EXPORTS = {
 # nested inside read_reflection — so the self-host codegen emits their struct
 # typedefs at top level (a class nested in a function is referenced but never
 # declared in the generated C).
-
-
-def _out_name_read_in_body(lines: list, start: int, indent: int, name: str) -> bool:
-    """True when the body of the `def` on `lines[start]` (indented past `indent`)
-    reads `name` other than as a plain `name = e` assignment target. Docstrings
-    are skipped. The same test as mojo/middle/out_result.py's `_reads_name`, on
-    text: the scan must not rewrite a function the lowering leaves alone."""
-    import re as _re
-    body = []
-    for raw in lines[start + 1:]:
-        if raw.strip() == '':
-            continue
-        ind = len(raw) - len(raw.lstrip(' '))
-        if ind <= indent:
-            break
-        body.append(raw.strip())
-    in_doc = False
-    word = _re.compile(r'\b' + _re.escape(name) + r'\b')
-    for ln in body:
-        if ln.count('"""') % 2 == 1:
-            in_doc = not in_doc
-            continue
-        if in_doc:
-            continue
-        m = _re.match(r'^' + _re.escape(name) + r'\s*=(?!=)\s*(.*)$', ln)
-        if m:
-            if word.search(m.group(1)):
-                return True
-            continue
-        if word.search(ln):
-            return True
-    return False
-
-def _out_param_names(params_str: str) -> set:
-    """Names of the parameters in a `def` parameter-list text that carry the
-    `out` convention (`out result: T`)."""
-    names = set()
-    for _pp in params_str.split(','):
-        if ':' not in _pp:
-            continue
-        _head, _ = _pp.split(':', 1)
-        _words = _head.split()
-        if _words[:1] == ['out'] and len(_words) >= 2:
-            names.add(_words[-1])
-    return names
-
 class _ReflectSym(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p), ('signature', ctypes.c_char_p),
                 ('addr', ctypes.c_void_p), ('kind', ctypes.c_int32)]
@@ -796,8 +749,7 @@ class ModuleLoader:
                 # nested-closure note on the skip below for the measured
                 # failure this exists for).
                 _block_stack: list = []
-                _all_def_lines = _ml_def_logical_lines(src_content)
-                for _li, _raw_line in enumerate(_all_def_lines):
+                for _raw_line in _ml_def_logical_lines(src_content):
                     line = _raw_line.strip()
                     if not line or line.startswith('#'):
                         continue
@@ -892,66 +844,11 @@ class ModuleLoader:
                                     param_type = param_type.strip()
                                     parameters.append((param_name, param_type))
 
-                        # A pointer-typed `out` result is a pointer RETURN (see
-                        # mojo/middle/out_result.py, which the definer and the
-                        # import parse both apply): drop the parameter and return
-                        # `struct <Pointee> *`, so the extern and the overload hash
-                        # (now over no parameters) match the definition.
-                        _ptr_out = [(_pn, _pt) for _pn, _pt in parameters
-                                    if _pt.strip().startswith(('Pointer[', 'UnsafePointer['))
-                                    and _pn in _out_param_names(params_str)]
-                        _ptr_return_c = None
-                        _ptr_pointee = None
-                        # Mirror mojo/middle/out_result.py: a body that reads the out name
-                        # (anything but a plain `name = e` target) is not rewritten.
-                        if _ptr_out and _out_name_read_in_body(
-                                _all_def_lines, _li, _indent, _ptr_out[0][0]):
-                            _ptr_out = []
-                        if '->' not in sig and len(_ptr_out) == 1:
-                            _pn0, _pt0 = _ptr_out[0]
-                            _inner = _pt0.split('[', 1)[1].split(',', 1)[0].split(']', 1)[0].strip()
-                            if _inner and '[' not in _inner:
-                                return_type = None
-                                parameters = [(_n, _t) for _n, _t in parameters if _n != _pn0]
-                                _ptr_return_c = f'struct {_inner} *'
-                                _ptr_pointee = _inner
-
                         # Build C signature from extracted info
-                        if return_type is None:
-                            # The pointee is mapped like any return annotation, so an
-                            # imported struct registers its layout here; only a struct
-                            # this module cannot name (private to its home) falls back to
-                            # the tag spelling.
-                            try:
-                                _pee = _ml_as_str(self._mojo_type_to_c(_ptr_pointee))
-                            except Exception:
-                                _pee = 'int64_t'
-                            c_return_type = (_pee[:-2].rstrip() + ' *') if _pee.endswith(' *') else _ptr_return_c
-                        else:
-                            try:
-                                c_return_type = _ml_as_str(self._mojo_type_to_c(return_type))
-                            except Exception:
-                                c_return_type = 'int64_t'
-                        # A return annotation naming a struct this module IMPORTS (`-> Passwd`
-                        # with `from .pwd import Passwd`) maps to the word above; the struct
-                        # is a pointer, so its extern returns `struct X *` (the same C type
-                        # as the definition's `X *`).
-                        if (isinstance(return_type, str) and c_return_type == 'int64_t'
-                                and re.match(r'^[A-Z]\w*$', return_type.strip())
-                                and re.search(r'^\s*from\s+[\w.]+\s+import\b.*\b'
-                                              + re.escape(return_type.strip()) + r'\b',
-                                              src_content, re.M)):
-                            c_return_type = f'struct {return_type.strip()} *'
-                        # An `out` parameter is the result: the definer emits the
-                        # function void and writes through the pointer, so the
-                        # extern must be void too (see emit_calls._lower_out_param_call).
-                        # Only a plain (non-generic) annotation: that is the one shape the
-                        # caller rewrite supports (a struct object it allocates).
-                        if '->' not in sig and any(
-                                _pp.split(':', 1)[0].split()[:1] == ['out']
-                                and '[' not in _pp.split(':', 1)[1]
-                                for _pp in params_str.split(',') if ':' in _pp):
-                            c_return_type = 'void'
+                        try:
+                            c_return_type = _ml_as_str(self._mojo_type_to_c(return_type))
+                        except Exception:
+                            c_return_type = 'int64_t'
                         c_params = []
                         _star_idx = None
                         for idx_p, (pname, ptype) in enumerate(parameters):
