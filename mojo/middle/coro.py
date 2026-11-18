@@ -566,78 +566,6 @@ def _literal_kind(expr) -> str | None:
     return None
 
 
-def _dict_literal_kind(expr) -> tuple | None:
-    """`('dict', <key kind>, <value kind>)` for a dict LITERAL whose keys —
-    and separately whose values — are all literals of ONE scalar kind, else
-    None.
-
-    A dict is a container whose ELEMENT (the key a `for` yields or a `sorted`
-    sorts) is a string in every dict this codebase's sources build from
-    literals, and that is a purely syntactic fact — the same standing as
-    `_literal_kind`'s `('list', kind)`. Nothing infers it from VALUES, so it
-    cannot be wrong about a type; the only way to get None is a dict whose
-    key (or value) spellings disagree (`{1: 'a', 'b': 2}`), which is
-    genuinely mixed and is left untyped, exactly as before this existed.
-
-    The one consumer is the coroutine pre-pass's parameter evidence
-    (`_mark_coro_param_elem_kinds`), which needs to know a captured dict is a
-    `MojoDict *` so a lifted genexp's `texts[p]` is a dict subscript rather
-    than a list read of a dict header, and needs the VALUE kind so that read
-    uses `mojo_dict_get_str` rather than falling back to a repr. It
-    deliberately does NOT reach `_argkind` or `_yield_kind`: a dict has no
-    scalar yield kind.
-    """
-    if not isinstance(expr, N.DictExpr):
-        return None
-    pairs = getattr(expr, 'pairs', None) or []
-    if not pairs:
-        return None
-    key_kinds = set()
-    val_kinds = set()
-    for _dk, _dv in pairs:
-        lk = _literal_kind(_dk)
-        if not isinstance(lk, str):
-            return None
-        key_kinds.add(lk)
-        vk = _literal_kind(_dv)
-        if not isinstance(vk, str):
-            return None
-        val_kinds.add(vk)
-    if len(key_kinds) == 1 and len(val_kinds) == 1:
-        return ('dict', list(key_kinds)[0], list(val_kinds)[0])
-    return None
-
-
-def _iter_elem_kind(expr, env: dict | None = None) -> str | tuple | None:
-    """The element kind of an ITERABLE expression, as `_static_env`'s
-    for-target branch needs it: the scalar kind of each element, or a
-    `('list', <inner>)` tuple when the elements are themselves lists.
-
-    `_argkind` is the same question asked of a call ARGUMENT, and it already
-    answers a homogeneous list literal and a bare name the caller's env types
-    as a list; those are exactly the two shapes a `for` iterates here (and
-    the two the env-lookup this replaces could see). A plain string is
-    answered character-by-character (`'p'`), and a `bytes`-kinded word (`'w'`)
-    is deliberately NOT answered: iterating bytes yields its INTEGERS, not its
-    words, so inheriting `'w'` would type a byte as a pointer.
-    """
-    k = _argkind(expr, env)
-    if isinstance(k, (tuple, list)) and len(k) == 2 and k[0] == 'list':
-        # A `('list', None)` answer (a list narrowed by an `isinstance` guard
-        # with no element evidence) is no kind at all.
-        return k[1] if isinstance(k[1], (str, tuple)) else None
-    if k == 'p':
-        return 'p'
-    # A dict: iterating it yields its KEYS, and every dict this runtime has
-    # is string-keyed. `_argkind` deliberately has no dict answer (no scalar
-    # kind), so read the `('dict', key_kind)` entry here.
-    if isinstance(expr, N.IdentExpr) and env is not None:
-        v = env.get(expr.name)
-        if isinstance(v, tuple) and len(v) >= 2 and v[0] == 'dict':
-            return v[1]
-    return None
-
-
 def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     """Best-effort, purely-syntactic name -> yield-kind map available to the
     Layer-1 pre-pass (before GimpleGen / struct_field_types exist):
@@ -685,21 +613,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         env.setdefault(pname, k)
     for pname, k in _PLAIN_CALLSITE_PARAM_KINDS.get(_fname, {}).items():
         env.setdefault(pname, k)
-    # A DICT parameter's key kind, from the container half of the same
-    # contract (`_CALLSITE_PARAM_CONTAINERS`). `_argkind` has no dict answer
-    # (a dict has no scalar kind), so this is the only route by which a
-    # synthesized genexp body learns that its captured `d` is a dict: the
-    # iteration/sort of `d` yields its KEYS, which are strings. Without it
-    # `for p in sorted(d): yield p` typed `p` int64_t and `list(<genexp>)`
-    # printed the keys' pointer words. The parameter stays in
-    # `_CALLSITE_PARAM_CONFLICTS` (it is untypable as a VALUE), so a `yield`
-    # of the dict itself is still refused by `_ambiguous_yielded_params`.
-    _pct_env = _CALLSITE_PARAM_CONTAINERS.get(_fname, {})
-    for _cpn in _pct_env:
-        _cpp = _pct_env[_cpn]
-        if isinstance(_cpp, tuple) and len(_cpp) >= 2 \
-                and _cpp[0] == 'MojoDict *':
-            env.setdefault(_cpn, ('dict', 'p'))
     # Lambda-bound locals: `f = lambda: <body>` makes `f()` answer the body's
     # kind, so `r = f()` / `yield f()` are typed the way `r = h()` for a named
     # `def h` already is (`_callee_return_kind`). Recorded BEFORE the walk
@@ -765,11 +678,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             k = _ann_kind(ann)
             if k is None:
                 k = _literal_kind(val)
-            if k is None:
-                # A dict LITERAL local is a container with a key kind (see
-                # `_dict_literal_kind`); its only consumer is the coroutine
-                # pre-pass's parameter-container evidence below.
-                k = _dict_literal_kind(val)
             if k is None and val is not None:
                 k = _yield_kind(val, env)     # BinaryOp / literal / str-method fallthrough
                 # A bare call to a same-module `def` that states its return
@@ -822,12 +730,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                     k = ('list', list(list_elem[_src])[0])
             if isinstance(k, tuple) and k[0] == 'list':
                 list_elem.setdefault(tgt, set()).add(k[1])
-            elif isinstance(k, tuple) and k[0] == 'dict':
-                # A dict local: recorded directly (there is no per-slot
-                # refinement pass for one). Read only by the coroutine
-                # parameter-container evidence; `_yield_kind` answers None for
-                # it, as it always did.
-                env.setdefault(tgt, k)
             elif isinstance(k, str):
                 # Record EVERY kind the name is bound to, not just the first
                 # (`env.setdefault` kept the first binding's kind and silently
@@ -923,10 +825,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 v = env.get('*' + it.name)
             if isinstance(v, tuple) and v[0] == 'list':
                 ek = v[1]
-            elif isinstance(v, tuple) and v[0] == 'dict':
-                # Iterating a dict yields its KEYS (Python's own rule), and a
-                # dict literal's key kind is the only kind it can have.
-                ek = v[1]
             elif v == 'p':
                 # Iterating a string yields its 1-character strings, which
                 # are string values ('p'). Without this a `for it in s:`
@@ -936,23 +834,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 # yields_nothing).
                 ek = 'p'
         elif (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
-                and it.func.name in ('reversed', 'sorted', 'list', 'tuple')
-                and len(it.args) == 1 and not it.kwargs):
+                and it.func.name in ('reversed', 'sorted', 'list')
+                and len(it.args) == 1 and not it.kwargs
+                and isinstance(it.args[0], N.IdentExpr)
+                and isinstance(env.get(it.args[0].name), tuple)
+                and env[it.args[0].name][0] == 'list'):
             # `reversed(xs)` / `sorted(xs)` / `list(xs)` reorder or copy a
-            # sequence and never change its element kind. The operand has
-            # always been read through the caller's env, which only knows a
-            # BARE NAME, so `for p in sorted(["b", "a"]): yield p` left `p`
-            # untyped and the generator's value slot became int64_t — the
-            # string was yielded as its pointer bits (`list(g())` printed
-            # addresses, and `cat(*(... for p in sorted(texts)))` handed `cat`
-            # pointer words as `char *`). `_argkind` answers the same question
-            # for a literal and for any expression whose list kind is known,
-            # so ask it first and keep the bare-name answer as the fallback.
-            ek = _iter_elem_kind(it.args[0], env)
-            if ek is None and isinstance(it.args[0], N.IdentExpr) \
-                    and isinstance(env.get(it.args[0].name), tuple) \
-                    and env[it.args[0].name][0] == 'list':
-                ek = env[it.args[0].name][1]
+            # list and never change its element kind.
+            ek = env[it.args[0].name][1]
         elif isinstance(it, N.CallExpr):
             # A sibling generator's call — the consuming twin of `yield
             # from`. See `_sibling_gen_kind`, which is where the recursion
@@ -3543,25 +3432,6 @@ _PLAIN_CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 # only for its two narrower contributing causes and its stdlib measurements.
 _CALLSITE_PARAM_CONFLICTS: dict[str, set] = {}
 
-# Generator/async-def name -> {unannotated-param-name: (container C type,
-# dict value C type or None)} (`MojoList *` / `MojoDict *`), from the same
-# whole-module call-site walk and the same verdict rule as
-# `_CALLSITE_PARAM_KINDS`: record the slot only when every observing call
-# site agrees. This is the CONTAINER half of the parameter evidence a
-# synthesized coroutine body needs; the second slot is a dict's VALUE type,
-# which a `d[k]` read needs and the container type alone does not give.
-#
-# It is deliberately a separate table rather than a third tuple kind in
-# `_CALLSITE_PARAM_KINDS`: those kinds are the generator's fixed-VALUE-slot
-# contract, and a dict has no scalar yield kind at all. Folding `('dict', k)`
-# into that table would resolve a slot that used to be a HOLE (a refusal) and
-# let `def g(x): yield x` called with a dict compile into an int64_t slot
-# holding a dict pointer — the exact silent miscompile the hole rule refuses.
-# A container is a fact about how the parameter is CONSUMED (`for`, `sorted`,
-# `d[k]`), not about what it yields, so it gets its own table and its own
-# reader: `_mark_coro_param_elem_kinds`.
-_CALLSITE_PARAM_CONTAINERS: dict[str, dict[str, str]] = {}
-
 # Local/param names bound from create_task/create_raising_task in the async
 # def CURRENTLY being lowered -- set by _lower_one_async(_gen) before it
 # calls _rewrite_async_stmts, so _await_drive_stmts can tell an `await
@@ -5121,7 +4991,7 @@ def _mark_coro_callable_param_fns(body_fd, fn):
         body_fd._mojo_coro_callable_param_fns = _fns
 
 
-def _mark_coro_param_elem_kinds(body_fd, real_params, env, extra_containers=None):
+def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     """Attach the C element ctype of every LIST-typed parameter to a
     synthesized coroutine body, as `body_fd._mojo_coro_param_elem_kinds`
     ({param name: element C type}).
@@ -5160,37 +5030,22 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env, extra_containers=None
     Part of the same contract as `_mark_coro_body` and marked the same way
     (an attribute, not a name-suffix guess) for the same reason: the backend
     must be able to ask "is this a coroutine body, and what did its params
-    look like" without a parallel naming convention to keep in sync.
-
-    The same walk also records the params' CONTAINER KINDS, as
-    `body_fd._mojo_coro_param_container_kinds` ({param: `MojoList *` /
-    `MojoDict *`}), for the question the element type does not answer: WHICH
-    container the box holds. A genexp's captured dict reached its body as an
-    untyped word, so `(f"{p}={texts[p]};" for p in sorted(texts))` sorted a
-    runtime-probed key list by address and then read `texts[p]` as a
-    `mojo_list_get_int` of a MojoDict header — exit -10. The kind is
-    syntactic evidence here (`('list', k)` / `('dict', k)` in `env`), and it
-    reaches `_actual_types` through `module_gen`'s `_param_container_types`
-    fold -> `emit_funcs.gen_func`, the same route the element type takes."""
+    look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
     nested: dict = {}
-    containers: dict = {}
-    dict_vals: dict = {}
     str_params: list = []
     int_lists: list = []
     for pname, _pann in real_params:
         v = env.get(_cm_as_str(pname))
-        _ln = _local_param_name(pname)
         # Keyed by the BODY's local name (`_local_param_name`): a `*args`
         # parameter's raw name carries its star, and the body never does.
         if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
                 and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
-            containers[_ln] = 'MojoList *'
             ct = _KIND_CTYPE[v[1]]
             if ct == 'int64_t':
-                int_lists.append(_ln)
+                int_lists.append(_local_param_name(pname))
             else:
-                kinds[_ln] = ct
+                kinds[_local_param_name(pname)] = ct
         elif (isinstance(v, tuple) and len(v) == 2 and v[0] == 'list'
                 and isinstance(v[1], tuple) and len(v[1]) == 2
                 and v[1][0] == 'list' and v[1][1] in _KIND_CTYPE):
@@ -5198,39 +5053,14 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env, extra_containers=None
             # inner element kind rides in the nested slot (the same
             # (elem, nested) pair `_param_elem_types` carries for an
             # ordinary function's list-of-lists parameter).
-            containers[_ln] = 'MojoList *'
-            kinds[_ln] = 'MojoList *'
-            nested[_ln] = _KIND_CTYPE[v[1][1]]
-        elif isinstance(v, tuple) and len(v) >= 2 and v[0] == 'dict':
-            # A dict parameter: its iteration yields keys, and its subscripts
-            # are dict reads. No ELEMENT slot (a dict is not a list), and the
-            # key kind is not needed here; the VALUE kind is, in its own
-            # attribute — `_dict_val_types` is the backend table a subscript
-            # consults to pick `mojo_dict_get_str` over a repr fallback.
-            containers[_ln] = 'MojoDict *'
-            if len(v) >= 3 and isinstance(v[2], str) and v[2] in _KIND_CTYPE:
-                dict_vals[_ln] = _KIND_CTYPE[v[2]]
+            kinds[_local_param_name(pname)] = 'MojoList *'
+            nested[_local_param_name(pname)] = _KIND_CTYPE[v[1][1]]
         elif v == 'p':
-            str_params.append(_ln)
-    # ...and the container table the call-site scan resolved (a dict local
-    # reaches `env` only through `_dict_literal_kind`, but a dict handed in
-    # from a caller's own local may not be in this function's env at all).
-    for _ecn in (extra_containers or {}):
-        _ecpn = _local_param_name(_cm_as_str(_ecn))
-        _epair = extra_containers[_ecn]
-        _ect = _cm_as_str(_epair[0])
-        if _ect in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-            containers[_ecpn] = _ect
-        if _epair[1] is not None:
-            dict_vals[_ecpn] = _cm_as_str(_epair[1])
+            str_params.append(_local_param_name(pname))
     if nested:
         body_fd._mojo_coro_param_nested_kinds = nested
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
-    if containers:
-        body_fd._mojo_coro_param_container_kinds = containers
-    if dict_vals:
-        body_fd._mojo_coro_param_dict_val_kinds = dict_vals
     if int_lists:
         body_fd._mojo_coro_param_int_lists = int_lists
     if str_params:
@@ -5304,9 +5134,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     # `_lower_one`): an `async def` reads its list params through the same
     # untyped int64_t slots, so without it `for x in xs:` over an int list
     # param declared the loop variable through the dict-or-list dispatch.
-    body_fd = _mark_coro_param_elem_kinds(
-        body_fd, real_params, _static_env(fn, struct_def),
-        _CALLSITE_PARAM_CONTAINERS.get(_cm_as_str(fn.name), {}))
+    body_fd = _mark_coro_param_elem_kinds(body_fd, real_params, _static_env(fn, struct_def))
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'receiver': _async_receiver_kind(fn, is_method),
@@ -5960,47 +5788,6 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     return _yield_kind(expr, caller_env)
 
 
-def _container_facts_of(expr, env: dict | None = None):
-    """`(container C type, dict VALUE C type or None)` an argument expression
-    provably holds, or None.
-
-    The CONTAINER half of `_argkind`, for `_CALLSITE_PARAM_CONTAINERS`: a
-    `list`/`tuple`/`set`/`dict` display is decidable on its own syntax, and a
-    bare name defers to the caller's `_static_env` (which types list and dict
-    literals). `_argkind`'s `('list', k)` answer is the last fallback, so this
-    cannot be narrower than the element contract it rides beside.
-
-    The second slot is the dict's VALUE ctype (`char *` for the string-keyed
-    literal maps this tree builds by hand), which is the separate answer a
-    `d[k]` read needs: without it the dict subscript falls back to a boxed /
-    repr slot and an f-string prints `'1'` for `1`.
-    """
-    if isinstance(expr, (N.ListExpr, N.TupleExpr)):
-        return ('MojoList *', None)
-    if isinstance(expr, N.SetExpr):
-        return ('MojoSet *', None)
-    if isinstance(expr, N.DictExpr):
-        dk = _dict_literal_kind(expr)
-        vct = None
-        if isinstance(dk, tuple) and len(dk) == 3 and dk[2] in _KIND_CTYPE:
-            vct = _KIND_CTYPE[dk[2]]
-        return ('MojoDict *', vct)
-    if isinstance(expr, N.IdentExpr) and env is not None:
-        v = env.get(expr.name)
-        if isinstance(v, tuple) and len(v) >= 2:
-            if v[0] == 'list':
-                return ('MojoList *', None)
-            if v[0] == 'dict':
-                vct = None
-                if len(v) >= 3 and isinstance(v[2], str) and v[2] in _KIND_CTYPE:
-                    vct = _KIND_CTYPE[v[2]]
-                return ('MojoDict *', vct)
-    k = _argkind(expr, env)
-    if isinstance(k, (tuple, list)) and len(k) == 2 and k[0] == 'list':
-        return ('MojoList *', None)
-    return None
-
-
 def _list_narrowed_recursive_args(fn: N.FunctionDef) -> set:
     """ids of the bare-identifier arguments of `fn`'s OWN recursive calls that
     a dominating `if isinstance(NAME, list):` proves are lists.
@@ -6286,7 +6073,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
             return
         cenv = caller_env
         slot = seen[gname]
-        cslot = cseen.setdefault(gname, {})
         # A `*expr` / `**expr` call argument is a UnaryOp (fire_compiler.py's
         # UnaryOp(op='*') / op='**') sitting in the SAME `args`/`kwargs` lists
         # as every other argument, so mapping `node.args` onto the callee's
@@ -6354,9 +6140,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                     _has_kwargs_spread = True
                 continue
             slot.setdefault(pname, set()).add(_call_observation(a, cenv))
-            _cf = _container_facts_of(a, cenv)
-            if _cf is not None:
-                cslot.setdefault(pname, set()).add(_cf)
         if _star_i is not None:
             # From the spread's own index to the end of the POSITIONAL
             # parameters, every one is now untypable.
@@ -6372,9 +6155,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
             if pname not in by_name or not _unannotated(by_name[pname]):
                 continue
             slot.setdefault(pname, set()).add(_call_observation(a, cenv))
-            _cf = _container_facts_of(a, cenv)
-            if _cf is not None:
-                cslot.setdefault(pname, set()).add(_cf)
         if _has_kwargs_spread:
             for _pn, _pa in pinfo:
                 if not _unannotated(_pa) or _pn in _kw_names:
@@ -6383,10 +6163,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
 
     # per callee: param name -> set of kinds seen (a None poisons the slot)
     seen: dict = {}
-    # callee -> param -> {container C types observed at its call sites}, the
-    # container half of `seen` (see `_CALLSITE_PARAM_CONTAINERS`). Filled by
-    # the same `_visit_call`, resolved by the same `_classify`.
-    cseen: dict = {}
     # ids of the recursive-call arguments that the enclosing `isinstance(_,
     # list)` guard proves are lists, for the generator whose body is being
     # walked (see `_list_narrowed_recursive_args`). A one-element holder
@@ -6412,7 +6188,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
         entire reason it exists."""
         for _n in list(gen_params.keys()) + list(plain_params.keys()):
             seen[_n] = {}
-            cseen[_n] = {}
         _collect()
 
     # What the closure module currently being walked binds to THIS module's
@@ -6598,7 +6373,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
         _CALLSITE_PARAM_KINDS.clear()
         _CALLSITE_PARAM_CONFLICTS.clear()
         _PLAIN_CALLSITE_PARAM_KINDS.clear()
-        _CALLSITE_PARAM_CONTAINERS.clear()
         # The generator-kind memo (`_GEN_VALUE_KINDS`) is a function of these
         # tables: a generator's kind reads its unannotated params' call-site
         # kinds through `_static_env`. The scan itself reaches the memo
@@ -6677,20 +6451,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                 _CALLSITE_PARAM_KINDS[gname] = resolved
             if conflicted:
                 _CALLSITE_PARAM_CONFLICTS[gname] = conflicted
-        # The container half: a slot is recorded only when every OBSERVING
-        # call site agrees. A site that contributed no container (an
-        # untracked local, a result) is silence, not dissent — the same rule
-        # `_PLAIN_CALLSITE_PARAM_KINDS` uses, and the reason this cannot make
-        # a parameter a dict that some caller passes a list to.
-        for _cgname in cseen:
-            _cslots = cseen[_cgname]
-            _cres = {}
-            for _cpn in _cslots:
-                _cks = _cslots[_cpn]
-                if len(_cks) == 1:
-                    _cres[_cpn] = list(_cks)[0]
-            if _cres:
-                _CALLSITE_PARAM_CONTAINERS[_cgname] = _cres
 
     # TWO passes, not one, and the reason is the ordinary-function half:
     # typing the call `__genexp_0(k)` inside `def scaled(k)` needs `k`'s kind,
@@ -9086,8 +8846,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_generator = False
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
-    _mark_coro_param_elem_kinds(body_fd, real_params, env,
-                                _CALLSITE_PARAM_CONTAINERS.get(_cm_as_str(fn.name), {}))
+    _mark_coro_param_elem_kinds(body_fd, real_params, env)
     _mark_coro_callable_param_fns(body_fd, fn)
 
     _lead = ([f'{struct_name} *'] if has_self else

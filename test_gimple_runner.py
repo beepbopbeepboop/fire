@@ -16171,89 +16171,6 @@ main()
 """)
 
 
-def test_star_unpack_of_generator_expression_in_call():
-    """Star-unpacking a generator expression in a call argument is an ITERABLE
-    spread, not a C pointer dereference: `f(*(... for ...))` used to lower the
-    `MojoGenerator *` handle with `_lower_UnaryOp`'s `*`, emitting
-    `_t10 = *_t6`, which gcc rejects ("storage size of '_t10' isn't known",
-    "invalid use of incomplete typedef 'MojoGenerator'"). The generator is now
-    materialized as a list and that list is unpacked."""
-    test_gimple_matches_cpython("gimple_star_unpack_generator_expression_call", """\
-def cat(*parts):
-    out = ""
-    for p in parts:
-        out += p
-    return out
-
-def total(*nums):
-    s = 0
-    for n in nums:
-        s += n
-    return s
-
-def main():
-    texts = {"x": "1", "y": "2"}
-    # The iterable is INLINE `sorted(texts)`: that is the shape that hands the
-    # call a `MojoGenerator *` operand.
-    print(cat(*(f"{p}=;" for p in sorted(texts))))
-    print(total(*(x * x for x in [1, 2, 3, 4])))
-
-main()
-""")
-
-
-def test_star_unpack_doc_symptom_program():
-    """The bug doc's `## Symptom` program, VERBATIM. It needs both halves of
-    the fix: the star-unpacked operand is a generator (materialized, not
-    dereferenced), and the generator's value slot is `char *` while `texts`
-    stays a `MojoDict *` inside the lifted generator expression."""
-    test_gimple_matches_cpython("gimple_star_unpack_symptom", """\
-def cat(*parts):
-    out = ""
-    for p in parts:
-        out += p
-    return out
-
-def main():
-    texts = {"x": "1", "y": "2"}
-    print(cat(*(f"{p}={texts[p]};" for p in sorted(texts))))
-
-main()
-""")
-
-
-def test_generator_string_value_slot_over_inline_sorted():
-    """A generator whose value is a string read from an inline `sorted(...)`
-    must have a `char *` value slot: `list(g())` printed the strings' pointer
-    bits, and `list(p for p in sorted(xs))` came out in ADDRESS order rather
-    than lexically. A dict's iteration yields its KEYS, which are strings too,
-    and its `d[k]` is a dict read, not a list read of the dict header. All
-    four shapes are pinned here, plus the star-unpack doc's own program."""
-    test_gimple_matches_cpython("gimple_generator_string_value_slot", """\
-def cat(*parts):
-    out = ""
-    for p in parts:
-        out += p
-    return out
-
-def g():
-    for p in sorted(["b", "a"]):
-        yield p
-
-def main():
-    xs = ["b", "a"]
-    print(list(p for p in sorted(["b", "a"])))
-    print(list(g()))
-    print(list(p for p in sorted(xs)))
-    texts = {"x": "1", "y": "2"}
-    # A dict's iteration yields its KEYS, which are strings.
-    print(list(p for p in sorted(texts)))
-    print(cat(*(f"{p}={texts[p]};" for p in sorted(texts))))
-
-main()
-""")
-
-
 def test_list_slice_of_mixed_list_reads_slots_as_values():
     """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
     test_gimple_matches_cpython("gimple_list_slice_mixed", """\
@@ -16271,55 +16188,12 @@ main()
 """)
 
 
-def test_list_str_param_read_wrong_after_empty_list_caller():
-    """A list[str] param read after a caller passes an empty list variable."""
-    test_gimple_matches_cpython("gimple_list_str_param_after_empty_list_var", """\
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    e: list[str] = []
-    print(ends(e))
-    print(ends(["a", "b:"]))
-
-main()
-""")
-    test_gimple_matches_cpython("gimple_mixed_param_negative_index_boxed_str", """\
-def show(xs):
-    print(xs[-1])
-
-def main():
-    show([1, 2])
-    show(["a", "b:"])
-
-main()
-""")
-
-
 # Keep the existing main if present; append our test call via module globals not needed
 # The test will be discovered by name if run differently, but easier to just run it directly
 if __name__ == '__main__':
     # Run all tests including our new one
     try:
         test_list_slice_of_mixed_list_reads_slots_as_values()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_star_unpack_of_generator_expression_in_call()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_star_unpack_doc_symptom_program()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_generator_string_value_slot_over_inline_sorted()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_list_str_param_read_wrong_after_empty_list_caller()
     except Exception as e:
         print(f"ERR: {e}")
     main()

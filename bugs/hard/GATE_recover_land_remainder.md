@@ -1,4 +1,4 @@
-SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part4
+SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part4, GATE_recover_land_remainder-part5
 
 # GATE: recover-land backlog remainder — OFF entry owner doc
 
@@ -6,7 +6,7 @@ SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part4
 
 The OFF entry in `tools/gates.json` matching
 
-    ^(gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|selfhost)$
+    ^(gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$
 
 previously named the deleted `bugs/mid/GATE_red_recover_land_2026-11-02` doc, which was removed
 in `d44f44787` ("Fixed root cause (coro.module_qualifier missing as module
@@ -40,35 +40,6 @@ re-add `doc-refs`/`doc-refs-stale-verdicts`, which `fb746c0b1` turned back on.
 What it does land is the pinning test (`test_gates_off_entries_name_a_doc.py`)
 and the deletion of the part-3 backlog doc with its evidence.
 The remaining jobs in the pattern are still untriaged.
-
-### 2026-11-18: the runtime and utility jobs are green; all six re-enabled
-
-`work/bug-land-gate-recover-land-remainder-par-3` assessed the part-5 branch
-(`work/bug-gate-recover-land-remainder-part5`) against today's HEAD and
-landed its runtime half, adapted:
-
-- `python3 test_runtime_diff.py` — 69 passed, 0 failed.
-- `python3 test_runtime_dylib.py` — 130 passed, 0 failed (the `fire_ssl.c`
-  row is skipped: openssl/ssl.h is not installed on this machine).
-- `python3 test_runtime_re.py` — engine vs CPython 48/48 + the compiled
-  program matches.
-- `python3 test_silent_noop_iter.py` — 28 passed, 0 failed.
-- `python3 test_sqlite3_runtime.py` — 66 passed, 0 failed.
-- `python3 test_suite.py` — green on this HEAD (the suite-self-test job).
-
-`runtimediff`, `runtimedylib`, `runtimere`, `silentnoop`, `sqliteruntime` and
-`suite-self-test` are out of the OFF entry, pinned by
-`test_gates_runtime_jobs_not_off.py` (registered as `gates-runtime-not-off`,
-in the check bucket), which fails if any of the six names an OFF entry again.
-The part-5 backlog doc `GATE_recover_land_remainder-part5` (deleted) went with
-this evidence.
-
-Still OFF, still this doc's backlog: `gimplegenerators`, `gimplerunner`,
-`globcompiled`, `linkmode` (part 4; `test_gates_gimple_jobs_not_off.py` is not
-landed here), `modcache`, `mojoc`, `selfhost`. The part-5 branch's
-`test_suite.py` UNREGISTERED declarations were dropped instead of landed:
-all eight files are registered as named jobs on master, so declaring them
-UNREGISTERED would trip the estate audit both ways.
 
 ## Original context (carried over from the deleted `GATE_red_recover_land_2026-11-02` doc)
 

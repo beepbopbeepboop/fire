@@ -256,7 +256,7 @@ def use() -> UInt32:
         all_c = '\n'.join(emitted)
         hi_bodies = []
         for m in re.finditer(
-                r'(?:uint32_t|__GIMPLE uint32_t|static uint32_t)\s+([A-Za-z0-9_]*_hi)\s*\([^)]*\)\s*\{(.*?)\n\}',
+                r'(?:uint32_t|__GIMPLE uint32_t|static uint32_t)\s+([A-Za-z0-9_]*hi[A-Za-z0-9_]*)\s*\([^)]*\)\s*\{(.*?)\n\}',
                 all_c, re.S):
             hi_bodies.append((m.group(1), m.group(2)))
         # Prefer the specialised hi body; fall back to any hi body.
@@ -269,13 +269,7 @@ def use() -> UInt32:
             assert hi_bodies, f'no hi body found in emitted C'
             chosen = hi_bodies[-1]
         _, body = chosen
-        # The CHOICE is what this asserts. A non-std module's overload call names the copy the
-        # elaborator makes for the chosen overload, spelled from its Mojo types (the `UInt32`
-        # signature), not the home's hashed symbol; a std home calls the hashed symbol. Either is
-        # the UInt32 overload. What must not happen is the Int64 overload being called.
-        uint_elab = f'{mulhi_mod}_mulhi__1_0_6_UInt32_1_1_6_UInt32'
-        assert uint_sym in body or uint_elab in body, (
-            f'hi body does not call the uint32 mulhi ({uint_sym} or {uint_elab}): {body[:400]}')
+        assert uint_sym in body, f'hi body does not call uint32 mulhi {uint_sym}: {body[:400]}'
         assert int_sym not in body, f'hi body calls int64 mulhi {int_sym}: {body[:400]}'
         print('PASS')
         return True

@@ -3854,12 +3854,6 @@ class Elaborator:
         targs = bind_type_args(tmpl, type_args)
         if targs is None:
             return None
-        # A struct's `comptime` alias that a stdlib function computes (`comptime uint_type =
-        # _uint_type_of_width[bit_width_of[Self.dtype]()]()`) takes its value here, so the fields
-        # typed with it name the concrete dtype rather than staying erased. Done once on the
-        # template so the instance object, its signature and its cache key all see the same text.
-        from mojo.middle.comptime_fn import resolve_struct_aliases
-        tmpl = resolve_struct_aliases(tmpl, targs, module_src)
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
         _validate_align_decorators_for_struct(module_src, tmpl, struct_name, targs)
