@@ -1004,8 +1004,21 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     if not stmts:
         return None
     for st in stmts:
-        if not (isinstance(st, gimple_ctypes.FromImportStmt)
-                and not getattr(st, 'wildcard', False)):
+        if not isinstance(st, gimple_ctypes.FromImportStmt):
+            continue
+        if getattr(st, 'wildcard', False):
+            # `from X import *` re-exports every public name of X into this
+            # module's namespace without listing them, so the defining home of
+            # `name` is wherever X (or X's own re-export chain) defines it.
+            # Recurse with `name` unchanged — a star import never renames —
+            # and keep the cycle/depth guards the walk already has.
+            sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
+            r = _find_symbol_home_module(gen, sub, name, kind, depth + 1,
+                                         want_abs=want_abs)
+            if r:
+                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
+                cache[key] = _raw
+                return _raw
             continue
         for _fip6 in (getattr(st, 'name_alias_strs', None) or []):
             nm = gimple_ctypes._fi_name(_fip6)

@@ -22,12 +22,16 @@ Quick pinning test (cheap, for a light worker; run it beside the job):
 global may not emit a function stub; the emitted C must build and print
 CPython's answer. It is one stub class's pin, not the job's substitute.
 
-## Status 2026-11-18 (three root causes fixed; the closure still carries dead weak stubs)
+## Status 2026-11-18 (five root causes fixed; the closure still carries dead weak stubs)
 
 **This part is still open.** Its acceptance is a green job *plus* a closure
 with no `unavailable in compiled mode` stub, and the second half is not met.
-Three of the red's root causes have been found and fixed; the first is on
-master, the second and third land with the commits that carry this Status.
+Five of the red's root causes have been found and fixed; the first is on
+master, the second and third land with earlier commits on this branch, and
+the fourth and fifth land with the commit that carries this Status. The
+closure was not re-measured in this round (a whole-closure dump is the
+integrator's job), so the stub count below is stale until
+`python3 tools/suite.py bootstrap-stage1-transitive` runs.
 
 1. **The dump could not finish.** `_drop_unreferenced_extern_decls`
    (`module_gen.py`, added 2026-11-15 by the stdlib-dylib lane) ran a
@@ -98,28 +102,59 @@ locate a survivor by the quoted call, not by the number.
    remaining count below must be re-measured by
    `python3 tools/suite.py bootstrap-stage1-transitive` before trusting it.
 
+4. **`globals()` in function scope was refused.** `is_module_globals_call`
+   (`mojo/backend_gimple/emit_infra.py`) only accepted module-scope reads
+   (`_in_toplevel_gen`), so a bare `globals()` inside a real function body
+   reached the generic unavailable-builtin path and the closure emitted a
+   weak stub for it (the two call sites in the table below). The module's
+   globals are its `_<mod>_globals` struct, readable from any function of the
+   same module, so the gate no longer requires toplevel and
+   `module_globals_bound_names` returns the module's full own-global set in
+   function scope (it keeps the sequential "bound so far" view at toplevel).
+   Pinned by `test_globals_in_function_scope.py`: a function reading module
+   globals via `globals().get`/`in` emits no "unavailable in compiled mode"
+   stub and the emitted C builds and prints CPython's answer.
+
+5. **The re-export walk skipped `from X import *`.**
+   `_find_symbol_home_module` (`mojo/middle/funcs_shared.py`) only followed
+   explicit `from X import name` edges, so a symbol brought into a module's
+   namespace by a wildcard import could not be traced to its defining module.
+   The `multi_kind_locals` stubs came from this shape (`emit_infra`
+   star-imports it from `mojo.middle.infra_infer`). Wildcard `FromImportStmt`
+   edges are now followed (recursing with the looked-up name unchanged;
+   depth/cycle guards unchanged). Pinned by
+   `test_star_reexport_resolution.py`: `from p import helper` where
+   `p/__init__.py` does `from .sub import *` resolves without an unavailable
+   stub and the emitted C builds and prints CPython's answer. The closure was
+   not re-measured, so confirm the `multi_kind_locals` row is gone by
+   re-running the job.
+
 | stub(s) | emitted because | probe / next step |
 |---|---|---|
-| `globals` (2 call sites) | `getattr(globals(), '_FOREIGN_CALLABLES', {})` in `mojo/middle/types.py:2948`, i.e. `globals()` in FUNCTION scope; `ginf.is_module_globals_call` only lowers the module-scope read | a function with `getattr(globals(), 'X', 0)`; extend `lower_module_globals_read` to function scope (the module globals struct is readable from any function of the same module) |
+| `globals` (2 call sites) | **FIXED 2026-11-18** (cause 4 above): `getattr(globals(), '_FOREIGN_CALLABLES', {})` in `mojo/middle/types.py:2948`, i.e. `globals()` in FUNCTION scope; `is_module_globals_call` now lowers it and the snapshot covers the module's own globals in function scope | pin: `test_globals_in_function_scope.py`; re-measure the job's stub count |
 | `locals` | `'obj_v' in locals()` in `emit_stmts.py:2843` | same shape; `_cur_func_body`/`var_types` already know the local set |
 | `_EXPR_DISPATCH`, `_STMT_DISPATCH`, `_BIN_OPS`, `_CMP_OPS`, `_FLOAT`, `_SIGNED`, `_UNSIGNED` | **FIXED 2026-11-18** (cause 3 above): imported module-level DICT/SET globals from `generated_dispatch`; `_gmp_emit_imported_symbol_stubs` emitted a function stub for each `_imp_syms` entry with no signature, while their real lowering is the `_<mod>__mojo_global_get_<name>` accessor. The pass now skips an entry whose accessor is registered | pin: `test_imported_global_stub.py`; re-measure the job's stub count |
 | `object` | same pass, but **not** a registered global — do not assume cause 3 removed it. `object` is an imported builtin/type name, never called | `grep '[^_a-z]object *(' fire.ci` finds no call — it is a type, not a function; find which import registers it (it is not in any `import object` statement) and then skip type-only imported names |
-| `multi_kind_locals` (3 call sites) | `ginf.multi_kind_locals(gen)` in `emit_stmts.py:1924,1979,3828`; `ginf` is `emit_infra`, which only STAR-imports it from `mojo.middle.infra_infer`. `_find_symbol_home_module` follows `from X import name` but not `from X import *` | a `p/__init__.py` doing `from .sub import *` and a caller of a `sub` function; teach the re-export walk about star imports (keep its cycle cap) |
+| `multi_kind_locals` (3 call sites) | **FIXED 2026-11-18** (cause 5 above): `ginf.multi_kind_locals(gen)` in `emit_stmts.py:1924,1979,3828`; `ginf` is `emit_infra`, which only STAR-imports it from `mojo.middle.infra_infer`. `_find_symbol_home_module` now follows `from X import *` re-export edges | pin: `test_star_reexport_resolution.py`; re-measure the job's stub count |
 | `lower`, `mojo_register` | `gimple_codegen.gimple_gen_coro.lower(...)` / `.register(...)` in `emit_resolve.py:1297,1301` — a call through a MODULE ATTRIBUTE (`mod.submod.fn`), which the two-hop/module-qualified branches do not treat as a submodule function | the same two-line call in a fixture; resolve `gimple_gen_coro` as the module `mojo.middle.coro` |
 | `_dc_fields` (10 call sites) | `from dataclasses import fields as _dc_fields` in `cpp_core.py`; CPython's `dataclasses` is not in the closure, so the imported alias gets the by-design unresolved-external stub — but this one IS called (`cpp_core.py:2874` etc.) | decide whether the compiled path reaches `_rewrite_node`'s `fields(type(node))`; if it does this is a silent wrong answer, and a static `__dataclass_fields__` walk is the lowering |
 | `_yield_from` | registered for a generator/async function the lowering skipped; no call site exists in the `.ci` | find the skipped function with `MOJO_DEBUG`/the generator pre-pass note; either lower it or record the accepted gap |
 
 The four `_mojo_gpu_*` weak definitions are the documented GPU no-op stubs and
-were not counted above. The seven dispatch-table stubs are now fixed (cause 3);
-the remaining rows are separate causes, and none is a one-symbol registration
-of the part-1/part-2 shape. The two fixed by cause 2 were that shape, which is
-why they are here.
+were not counted above. The dispatch-table stubs (cause 3), the function-scope
+`globals` stubs (cause 4), and the star-reexported `multi_kind_locals` stubs
+(cause 5) are fixed in this lane; the remaining rows are separate causes, and
+none is a one-symbol registration of the part-1/part-2 shape. The two fixed by
+cause 2 were that shape, which is why they are here.
 
-The last measurement of the full closure (before cause 3) was 15 stubs; the
-seven fixed here bring the expected remainder to eight (`globals`, `locals`,
-`object`, `multi_kind_locals`, `lower`, `mojo_register`, `_dc_fields`,
-`_yield_from`), but that is arithmetic from the hatch, not a reading — the
-number is stale until `bootstrap-stage1-transitive` runs.
+The last measurement of the full closure (before cause 3) was 15 stubs; causes
+3–5 remove the seven dispatch-table stubs, the two `globals` call sites, and
+the three `multi_kind_locals` call sites in that measurement, which would leave
+`locals`, `object`, `lower`, `mojo_register`, `_dc_fields`, and `_yield_from`.
+That is arithmetic from the table, not a reading — the number and the
+membership are stale until `bootstrap-stage1-transitive` runs (a stub thought
+dead may persist for a different reason, and a new one may have appeared on
+master since the measurement).
 
 The job's `reject=CLOSURE_INCOMPLETE` only reads the child's OUTPUT, and
 `--dump-full` writes the stubs to `fire.ci` (it prints just

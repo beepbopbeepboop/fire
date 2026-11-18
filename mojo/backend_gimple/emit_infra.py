@@ -7687,21 +7687,23 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
 
 
 def is_module_globals_call(gen, node) -> bool:
-    """True for a bare zero-argument `globals()` call at module top level.
+    """True for a bare zero-argument `globals()` call this compile can lower.
 
     `_locally_binds_name` keeps a user function/variable that happens to be
     called `globals` on the ordinary path (real Python would shadow the
-    builtin the same way). `_in_toplevel_gen` is the existing "generating a
-    module's own `_toplevel` body" flag, so a call from a real function keeps
-    its previous lowering.
+    builtin the same way). The module's globals are its `_<mod>_globals`
+    struct, readable from any function of the same module, so a call inside a
+    real function body is the same module namespace read as one at module top
+    level — a snapshot of the module's value bindings (the read path; a
+    `globals()[k] = v` store in function scope reaches the same field-dispatch
+    lowering, which writes the module's struct fields).
     """
     return (isinstance(node, CallExpr)
             and isinstance(node.func, IdentExpr)
             and _as_str(node.func.name) == 'globals'
             and not node.args
             and not getattr(node, 'kwargs', None)
-            and not gen._locally_binds_name('globals')
-            and getattr(gen, '_in_toplevel_gen', False))
+            and not gen._locally_binds_name('globals'))
 
 
 def _mg_bind_names(target) -> list:
@@ -7832,13 +7834,31 @@ def module_globals_bound_names(gen) -> list:
     `bare_global_read_plan` uses) and that have a globals-struct field. An
     import/`def`/`class` name has no field and is not a value binding of the
     compiled namespace.
+
+    At module top level this is the sequential "names bound so far" view
+    (`_toplevel_bound_globals`), so a `globals()` read sees exactly what
+    CPython's module execution order has bound at that point. Inside a real
+    function body the module's globals struct is the same namespace but the
+    sequential cursor is a toplevel concept; there every module value global
+    with a struct field is in scope, so the snapshot is the module's full set.
     """
     own = getattr(gen, '_own_global_var_types', None) or {}
     gv = getattr(gen, '_global_var_types', None) or {}
     out = []
-    for _n in getattr(gen, '_toplevel_bound_globals', None) or []:
-        if _n in own and _n in gv and _n not in out:
-            out.append(_n)
+    if getattr(gen, '_in_toplevel_gen', False):
+        for _n in getattr(gen, '_toplevel_bound_globals', None) or []:
+            if _n in own and _n in gv and _n not in out:
+                out.append(_n)
+    else:
+        # Function scope: every own module global with a field is part of the
+        # module namespace. Preserve a stable order (toplevel-bound names first
+        # when known, then any remaining own globals).
+        for _n in getattr(gen, '_toplevel_bound_globals', None) or []:
+            if _n in own and _n in gv and _n not in out:
+                out.append(_n)
+        for _n in own:
+            if _n in gv and _n not in out:
+                out.append(_n)
     return out
 
 
