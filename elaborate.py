@@ -3907,7 +3907,8 @@ class Elaborator:
             return None
         return self.elaborate_generic_struct(module_src, struct_name, type_args)
 
-    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
+    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes,
+                                qualifier: str = '') -> dict:
         """Resolve an overloaded call (slice 4): pick the `fn_name` overload whose
         parameter types match the argument C types, mangle it by signature, and
         compile that one concrete function (CAS-cached). Returns
@@ -3947,7 +3948,12 @@ class Elaborator:
         # call names the bare symbol too. `mangle_signature`'s `__void` names
         # nothing.
         mangled = mm.mangle_signature(fn_name, ptypes) if ptypes else fn_name
-        renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
+        # The defining module's qualifier is part of the symbol the object EXPORTS, so
+        # the call site and the object name the same function (the call site used to
+        # prefix the qualifier after the object was built under the bare name).
+        if qualifier:
+            mangled = qualifier + '_' + mangled
+        renamed = re.sub(rf'\b(fn|def)\s+{re.escape(fn_name)}\b', rf'\1 {mangled}', src, count=1)
         try:
             obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
         except Exception:

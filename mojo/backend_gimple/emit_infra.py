@@ -6335,8 +6335,14 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     # `splat(Bool)` reached from `codepoint.mojo`). Several arity matches keep the
     # elaboration below.
     import mojo.backend_gimple.emit_calls as _ec_el
-    _home_sym = _ec_el._imported_overload_call_symbol(gen, g, node, None)
-    if _home_sym is None and _erasure_free_context(gen):
+    # The home symbol is called only for a `std` module: the stdlib dylib is on every
+    # link line, so its definition is there. A local sibling's home symbol is defined in
+    # no object on the link line, so a sibling keeps the elaborated copy, which links.
+    _home_mod = _ec_el._imported_overload_home_module(gen, g) or ''
+    _std_home = _home_mod == 'std' or _home_mod.startswith('std.')
+    _home_sym = (_ec_el._imported_overload_call_symbol(gen, g, node, None)
+                 if _std_home else None)
+    if _home_sym is None and _std_home and _erasure_free_context(gen):
         # Several arity matches: choose by the lowered argument types, but only
         # when the enclosing generic (if any) has been substituted to concrete
         # types so those types are real. A body still emitted with a symbolic/
@@ -6347,23 +6353,20 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     if _home_sym is not None:
         _hret = gen.func_return_types.get(_home_sym, 'int64_t')
         return _hret, gen._call_expr(_hret, _home_sym, arg_pairs)
+    # The overload symbol is qualified by the defining module (the same composition
+    # `_func_csym` uses) BEFORE the object is built, so the object exports the name
+    # the call site uses.
+    _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
     try:
         module_src = gen._generic_source_text(source)
         import elaborate
         info = elaborate.Elaborator().elaborate_overload_call(
-            module_src, g, [ct for ct, _ in arg_pairs])
+            module_src, g, [ct for ct, _ in arg_pairs], qualifier=_q)
     except Exception:
         gimple_ctypes._debug_note('overload elaboration failed')
         info = None
     if not info:
         return None
-    # The overload symbol is mangled from the BARE name, so an IMPORTED
-    # overloaded function lost the defining module's qualifier and every call
-    # site emitted a symbol nothing defines (`pick__void` for
-    # `from m1 import pick`). Same composition `_func_csym` uses.
-    _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
-    if _q:
-        info['symbol'] = _q + '_' + info['symbol']
     return gen._emit_generic_instantiation(info, arg_pairs)
 
 

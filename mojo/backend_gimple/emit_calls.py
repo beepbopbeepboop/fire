@@ -11709,6 +11709,16 @@ def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExp
     return _choose_overload_symbol(gen, fname_raw, node, nodes, None)
 
 
+def _imported_overload_home_module(gen, fname_raw: str):
+    """The module a `from <module> import <fname_raw>` statement of this module names, or
+    None. A wildcard or no import of the name gives None."""
+    for _st in getattr(gen, '_current_module_stmts', None) or []:
+        if type(_st).__name__ == 'FromImportStmt' and not _st.wildcard:
+            if any(str(_n) == fname_raw for _n, _a in (_st.names or [])):
+                return str(_st.module)
+    return None
+
+
 def _imported_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr, arg_ctypes=None):
     """The C symbol for a call to an IMPORTED free function that its home module
     defines more than once, or None when the name is not such an overload set.
