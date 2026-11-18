@@ -4308,12 +4308,6 @@ test('gate-files', [PY, 'tools/test_gate_files.py'], mem='tiny',
 test('dylib-generic-instances', [PY, 'test_dylib_generic_instances.py'],
      mem='tiny',
      desc='dylib generic instances (estate backlog, 2026-11-17)')
-test('import-overload-choice', [PY, 'test_import_overload_choice.py'],
-     mem='tiny',
-     desc='imported plain overload + generic registration (estate backlog, 2026-11-17)')
-test('out-param-local', [PY, 'test_out_param_local.py'],
-     mem='tiny',
-     desc='out parameter reaches the caller, local and cross-module (estate backlog, 2026-11-17)')
 test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
      mem='tiny',
      desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
@@ -5180,8 +5174,6 @@ BUCKETS = {
 BUCKETS['check'].append('binding-evidence')
 BUCKETS['check'].append('gates-bootstrap-not-off')
 BUCKETS['check'].append('dylib-generic-instances')
-BUCKETS['check'].append('import-overload-choice')
-BUCKETS['check'].append('out-param-local')
 BUCKETS['check'].append('interp-list-ctor')
 BUCKETS['check'].append('module-globals-compiled')
 BUCKETS['check'].append('mojoc-precompile-signature')

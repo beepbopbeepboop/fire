@@ -3246,24 +3246,6 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gimple_ctypes._debug_note('un-elaboratable generic call statically-typed stub',
                         (node.func.obj.name, _static_ct))
             return _static_ct, t
-    # `rebind_var[T](x)` is the IDENTITY in this C representation. The
-    # monomorphizer already rewrites exactly this spelling to `x`
-    # (monomorphize.py: `rebind_var\[[^\]]*\]\((...)\)` -> `\1`), so the
-    # emit side must agree, and it did not: the call fell through to the
-    # catch-all below, which returns integer 0 and DISCARDS the argument.
-    # Measured on std/itertools/itertools.mojo: `_Product3.__next__` emitted
-    # `_t1 = (int64_t)0;  /* indirect call via SubscriptExpr */` and returned
-    # it, so the whole `_flatten(next(self._inner))` call vanished --
-    # `_flatten` and `forget_deinit` occurred ZERO times in that module's C.
-    # A POSITIVE test on the base NAME is right here: `rebind_var` is a
-    # builtin, never a container a callable was recorded being stored into,
-    # so unlike the runtime-subscript arm below it needs no type-table
-    # discriminator.
-    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
-            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-            and _as_str(node.func.obj.name) == 'rebind_var'
-            and len(node.args) == 1):
-        return gen.lower_expr(node.args[0])
     # The OTHER SubscriptExpr callee: a RUNTIME subscript read of a
     # callable held as a first-class value — `d['k'](2, 3)`, a name-keyed
     # dispatch table. This was lumped in with the generic case above and
@@ -11451,23 +11433,8 @@ def _lnc_int(gen, arg_pairs: list) -> tuple[str, str] | None:
     # (mojo_box_int answered a boxed string with the pointer, the same
     # defect, and a None box with 0 where CPython raises).
     if at == 'int64_t':
-        _iow = gen._call_expr('int64_t', 'mojo_int_of_word',
-                              [('int64_t', gen._ensure_local('int64_t', av))])
-        # `mojo_int_of_word` ALWAYS yields an integer -- identity for a
-        # numeric word, digit parse for a bare or boxed string, truncation for
-        # a double box -- so its result is a PROVABLE int word and belongs in
-        # `_int_word_vals` (see `_mark_known_int`'s contract: an operation that
-        # cannot reinterpret its operands' bits may record its result). Without
-        # this the word reached a dict site untracked, so `_char_to_cstr` fell
-        # to its `_kw` placeholder and the runtime's range-guessing twin
-        # decided the key; the INSERT of the same expression had already
-        # stringified it (`mojo_cstr_or_int_str`), so the two sides keyed the
-        # entry differently. Measured: `d = {int(id(a)): 'v'}; d[int(id(a))]`
-        # stored under "140..." and looked up in the integer domain, returning
-        # None -- or raising `unhashable type: 'list'` when a prior line made
-        # the token's kind visible.
-        gen._int_word_vals.add(_iow)
-        return 'int64_t', _iow
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_int_of_word',
+                                         [('int64_t', gen._ensure_local('int64_t', av))])
     if at in ('int', '_Bool'):
         return 'int64_t', gen._cast('int64_t', f"{av}")
     return None
