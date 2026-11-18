@@ -17,13 +17,17 @@ This is a follow-up replan part of `bugs/hard/GATE_red_recover-land_2026-11-02-p
 File: `tools/suite.py` (registry entry for `bootstrap-stage1-transitive`; the job is the test)
 Command: `python3 tools/suite.py bootstrap-stage1-transitive`
 
-## Status 2026-11-17 (two root causes fixed; the closure still carries 15 dead weak stubs)
+Quick pinning test (cheap, for a light worker; run it beside the job):
+`python3 test_imported_global_stub.py` — an imported module-level DICT/SET
+global may not emit a function stub; the emitted C must build and print
+CPython's answer. It is one stub class's pin, not the job's substitute.
+
+## Status 2026-11-18 (three root causes fixed; the closure still carries dead weak stubs)
 
 **This part is still open.** Its acceptance is a green job *plus* a closure
-with no `unavailable in compiled mode` stub, and the second half is not met
-(15 stubs, table below). Two of the red's root causes were found and fixed
-in this lane; the first is already on master, the second lands with the land
-commit that carries this Status.
+with no `unavailable in compiled mode` stub, and the second half is not met.
+Three of the red's root causes have been found and fixed; the first is on
+master, the second and third land with the commits that carry this Status.
 
 1. **The dump could not finish.** `_drop_unreferenced_extern_decls`
    (`module_gen.py`, added 2026-11-15 by the stdlib-dylib lane) ran a
@@ -70,24 +74,56 @@ class of each survivor, so the next round does not have to re-derive them.
 The line numbers are as of that measurement; master has moved since, so
 locate a survivor by the quoted call, not by the number.
 
+3. **Imported module-level globals were stubbed as functions.**
+   `_gmp_emit_imported_symbol_stubs` (`module_gen.py`) emits a weak
+   `int64_t <name> (...)` "unavailable in compiled mode" stub for every
+   `imported_symbols` entry with no `signature`. An imported DICT/SET global
+   has no signature — `module_loader` records it as `'kind': 'global_var'`
+   with a `c_return_type` — but every read of it is already lowered through
+   the defining module's `<mod>__mojo_global_get_<name>` accessor, registered
+   by `_emit_imported_global_accessors` earlier in the same
+   `gen_module_impl`. So the stub is dead code that the closure still counts.
+   The pass now skips a symbol present in `_imported_global_accessors`: that
+   map's membership is proof the real lowering exists for every use site
+   (the export's `kind` alone is not, since a global whose accessor could not
+   resolve would not become callable behind a stub either). This removes the
+   seven dispatch/rank-table stubs in the table below
+   (`_EXPR_DISPATCH`, `_STMT_DISPATCH`, `_BIN_OPS`, `_CMP_OPS`, `_FLOAT`,
+   `_SIGNED`, `_UNSIGNED`); the `object` row is not this class and stays
+   open. Pinned by `test_imported_global_stub.py` (measured red before the
+   fix: the minimal `generated_dispatch`/`types`/consumer fixture emits the
+   `_EXPR_DISPATCH` and `_SIGNED` stubs; green after, and the emitted C
+   builds and prints CPython's answer). The job was not re-run here — a
+   whole-closure dump is the integrator's, not a light worker's — so the
+   remaining count below must be re-measured by
+   `python3 tools/suite.py bootstrap-stage1-transitive` before trusting it.
+
 | stub(s) | emitted because | probe / next step |
 |---|---|---|
 | `globals` (2 call sites) | `getattr(globals(), '_FOREIGN_CALLABLES', {})` in `mojo/middle/types.py:2948`, i.e. `globals()` in FUNCTION scope; `ginf.is_module_globals_call` only lowers the module-scope read | a function with `getattr(globals(), 'X', 0)`; extend `lower_module_globals_read` to function scope (the module globals struct is readable from any function of the same module) |
 | `locals` | `'obj_v' in locals()` in `emit_stmts.py:2843` | same shape; `_cur_func_body`/`var_types` already know the local set |
-| `_EXPR_DISPATCH`, `_STMT_DISPATCH`, `_BIN_OPS`, `_CMP_OPS`, `_FLOAT`, `_SIGNED`, `_UNSIGNED` | imported module-level DICT/SET globals from `generated_dispatch`; `_gmp_emit_imported_symbol_stubs` emits a function stub for each `_imp_syms` entry that has a return type but no signature. Their real lowering is the `_<mod>__mojo_global_get_<name>` accessor, so these are dead | any module that imports one dict global; skip imported symbols whose home records them as globals (the getter path is already taken at each use) |
-| `object` | same pass; `object` is an imported builtin/type name, never called | `grep '[^_a-z]object *(' fire.ci` finds no call — it is a type, not a function |
+| `_EXPR_DISPATCH`, `_STMT_DISPATCH`, `_BIN_OPS`, `_CMP_OPS`, `_FLOAT`, `_SIGNED`, `_UNSIGNED` | **FIXED 2026-11-18** (cause 3 above): imported module-level DICT/SET globals from `generated_dispatch`; `_gmp_emit_imported_symbol_stubs` emitted a function stub for each `_imp_syms` entry with no signature, while their real lowering is the `_<mod>__mojo_global_get_<name>` accessor. The pass now skips an entry whose accessor is registered | pin: `test_imported_global_stub.py`; re-measure the job's stub count |
+| `object` | same pass, but **not** a registered global — do not assume cause 3 removed it. `object` is an imported builtin/type name, never called | `grep '[^_a-z]object *(' fire.ci` finds no call — it is a type, not a function; find which import registers it (it is not in any `import object` statement) and then skip type-only imported names |
 | `multi_kind_locals` (3 call sites) | `ginf.multi_kind_locals(gen)` in `emit_stmts.py:1924,1979,3828`; `ginf` is `emit_infra`, which only STAR-imports it from `mojo.middle.infra_infer`. `_find_symbol_home_module` follows `from X import name` but not `from X import *` | a `p/__init__.py` doing `from .sub import *` and a caller of a `sub` function; teach the re-export walk about star imports (keep its cycle cap) |
 | `lower`, `mojo_register` | `gimple_codegen.gimple_gen_coro.lower(...)` / `.register(...)` in `emit_resolve.py:1297,1301` — a call through a MODULE ATTRIBUTE (`mod.submod.fn`), which the two-hop/module-qualified branches do not treat as a submodule function | the same two-line call in a fixture; resolve `gimple_gen_coro` as the module `mojo.middle.coro` |
 | `_dc_fields` (10 call sites) | `from dataclasses import fields as _dc_fields` in `cpp_core.py`; CPython's `dataclasses` is not in the closure, so the imported alias gets the by-design unresolved-external stub — but this one IS called (`cpp_core.py:2874` etc.) | decide whether the compiled path reaches `_rewrite_node`'s `fields(type(node))`; if it does this is a silent wrong answer, and a static `__dataclass_fields__` walk is the lowering |
 | `_yield_from` | registered for a generator/async function the lowering skipped; no call site exists in the `.ci` | find the skipped function with `MOJO_DEBUG`/the generator pre-pass note; either lower it or record the accepted gap |
 
 The four `_mojo_gpu_*` weak definitions are the documented GPU no-op stubs and
-were not counted above. None of these is a one-symbol registration of the
-part-1/part-2 shape; the two fixed here were, which is why they are here.
+were not counted above. The seven dispatch-table stubs are now fixed (cause 3);
+the remaining rows are separate causes, and none is a one-symbol registration
+of the part-1/part-2 shape. The two fixed by cause 2 were that shape, which is
+why they are here.
+
+The last measurement of the full closure (before cause 3) was 15 stubs; the
+seven fixed here bring the expected remainder to eight (`globals`, `locals`,
+`object`, `multi_kind_locals`, `lower`, `mojo_register`, `_dc_fields`,
+`_yield_from`), but that is arithmetic from the hatch, not a reading — the
+number is stale until `bootstrap-stage1-transitive` runs.
 
 The job's `reject=CLOSURE_INCOMPLETE` only reads the child's OUTPUT, and
 `--dump-full` writes the stubs to `fire.ci` (it prints just
 `✓ Generated fire.ci`), so the job can pass with them present. They are
 stage2's and stage3's failure mode (their binaries CALL them), which is
-`bugs/mid/GATE_red_recover-land_2026-11-02-part5-part2.md`'s chain.
+`bugs/GATE_red_recover-land_2026-11-02-part5-part2.md`'s chain.
 

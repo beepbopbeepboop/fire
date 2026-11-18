@@ -34,9 +34,9 @@ Landing the tip would REGRESS the census (947 -> 932), re-add the stale
 master's other work in tools/suite.py and fire_compiler.py (5 files
 conflict). The branch's own deletions of the gate docs are stale:
 the rthdrscan gate bug is retired on master (6cd1368ca), and
-the formal-doc-truth gate bug was re-filed (b3fe558b2) when the gate went
-red again on another branch — that red was tracked in its own doc, deleted
-with its fix, which this decision leaves alone. The branch tip stays in
+bugs/gate-formal-doc-truth.md was re-filed (b3fe558b2) when the gate went
+red again on another branch — that red is tracked in its own doc, which
+this decision leaves alone. The branch tip stays in
 refs/archive/work/bug-gate-formal-doc-truth-2, so dropping it loses
 nothing.
 

@@ -1,0 +1,70 @@
+# `f(*(<generator expression>))` dereferences the generator handle (C compile error)
+
+Class: medium. One lowering path. Found by gimple-lint (`cast-illegal`).
+
+## Symptom
+
+    def cat(*parts):
+        out = ""
+        for p in parts:
+            out += p
+        return out
+
+    def main():
+        texts = {"x": "1", "y": "2"}
+        print(cat(*(f"{p}={texts[p]};" for p in sorted(texts))))
+
+    main()
+
+CPython prints `x=1;y=2;`. Measured 2026-11-16: `python3 fire.py build`
+fails in the C compiler:
+
+    error: storage size of '_t10' isn't known
+    error: invalid use of incomplete typedef 'MojoGenerator'
+
+The emitted statements are
+
+    _t6 = __mgco___genexp_0_start (...);     /* MojoGenerator * */
+    _t10 = *_t6;                             /* a C DEREFERENCE of the handle */
+    _t13 = (int64_t)_t10;
+
+The compiler's own `gimple_codegen.py` has this shape near line 7120
+(`cas._hash(*(f'{p}\0{texts[p]}' for p in sorted(texts)))`), so its
+self-compiled output carries the same statement:
+
+    python3 tools/gimple_lint.py -v --code cast-illegal gimple_codegen.ci
+    gimple_codegen.ci: cast-illegal: MojoGenerator cast to int64_t
+        in _dep_sources_digest
+
+## Cause
+
+The unary `*` in a call's argument list means "unpack this iterable into
+positional arguments". For a list operand that is handled. For an operand
+whose type is `MojoGenerator *` the `*` falls through to the lowering of a
+unary operator on a pointer and is written out as a C dereference.
+
+## Fix
+
+In the star-argument path of the call lowering (search
+`mojo/backend_gimple/emit_calls.py` and `emit_exprs.py` for where a
+`UnaryOp` with `op == '*'` is handled as a call argument), when the
+operand's type is `MojoGenerator *`, first materialize it as a list with
+the helper the backend already uses for `list(<generator>)`
+(`gen._materialize_as_list(ctype, value)`), then unpack that list. Never
+emit `*<temp>` for a starred call argument.
+
+## How to verify
+
+1. Add the program above to `test_gimple_runner.py` (compare with CPython).
+2. From an empty directory: `python3 /path/to/tree/fire.py --dump
+   /path/to/tree/gimple_codegen.py`, then
+   `python3 /path/to/tree/tools/gimple_lint.py --code cast-illegal gimple_codegen.ci`
+   reports 0 findings.
+3. `python3 test_gimple.py` keeps its pass count with 0 failed;
+   `python3 tools/suite.py stdlib-syntax stdlib-dylib gimple-lint` passes.
+
+## Done when
+
+The test passes, the lint reports 0 `cast-illegal` for `gimple_codegen.ci`,
+and this file is deleted in the same commit (then
+`python3 tools/dangling_doc_refs.py --ratchet`).

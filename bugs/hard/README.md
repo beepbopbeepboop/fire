@@ -6,7 +6,6 @@ deleted in the same commit, as for any bug.
 
 | doc | what it needs | for |
 |---|---|---|
-| `CODEGEN_scalar_integer_dtype_representation.md` | see doc | workers |
 | `CODEGEN_stdlib_dylib_lazy_undefined_refs.md` | see doc | workers |
 | `COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md` | see doc | workers |

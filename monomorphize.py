@@ -923,9 +923,7 @@ def compile_fn(fn_src: str, gcc: str = None) -> tuple:
     key = cas.instantiation_key(fn_src, {'__fn__': name}, None, gcc, _OBJ_FLAGS)
 
     def build():
-        # The unit exports exactly `name` (the overload's own symbol): no module
-        # qualifier and no overload suffix are added on top of it.
-        gen = GimpleGen(emit_entry_points=False, module_name=name, no_mangle=(name,))
+        gen = GimpleGen(emit_entry_points=False, module_name=name)
         c = gen.gen_module(Parser(py_tokenize(fn_src)).parse_module())
         wd = tempfile.mkdtemp(prefix='mojo_ovl_')
         cf, of = os.path.join(wd, name + '.c'), os.path.join(wd, name + '.o')

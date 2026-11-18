@@ -21,24 +21,18 @@
 #                                    The same call site spelled through an alias
 #                                    (`from m import gen as g`, `import m as k`).
 #
-# COMPILE_REFUSAL_CASES are the other outcome the rule allows: a program this
-# entry point cannot deliver an honest artifact for is refused at COMPILE time,
-# naming the symbols it cannot define, never built into a `.ci` that dies at
-# link with "Undefined symbols". Mixed str/int call sites of one imported
-# generator are one of those in the single-`.ci` pipeline: the C++20 path types
-# the generator (each yield is a boxed word), so a build that also links the
-# imported companion prints `p q 1 2` — but its definitions live in the
-# imported module's companion .cpp, which `compile_to_gimple`'s pinned
-# one-string ABI has nowhere to return.
-# Before the guard learned about imported companions, this case emitted a `.ci`
-# naming `_mojogen_m_gen_value` with no definition anywhere (link error).
+# REFUSAL_CASES are the other outcome the rule allows: a program that cannot be
+# compiled honestly is refused, never run with a wrong value. Mixed str/int call
+# sites of one generator are one of those; their stdout must carry the refusal
+# marker and no printed heap address.
 #
-# Not covered here (still wrong): a call site in a module the child is not
-# compiled under, or a value passed on through a parameter.
+# Not covered here (still wrong, see the doc): a call site in a module the
+# child is not compiled under, or a value passed on through a parameter.
 #
 # Scratch files go under TMPDIR (the worktree's .tmp/), never a fixed path.
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -141,9 +135,11 @@ CASES = [
     ),
 ]
 
-# (name, m.py, u.py, needles) -- `compile_to_gimple(do_imports=True)` must
-# refuse, and the message must name what went missing.
-COMPILE_REFUSAL_CASES = [
+# (name, m.py, u.py, marker) -- the stdout must contain `marker`, the refusal
+# text the compiled module emits for a generator it skipped. Mixed call sites
+# of one generator are NOT a value the compiler can type: before the loop-target
+# fix this printed the str's heap address (`4331220848`) at exit 0.
+REFUSAL_CASES = [
     (
         'imported_generator_mixed_str_int_call_sites_refused',
         'def gen(xs):\n'
@@ -156,7 +152,7 @@ COMPILE_REFUSAL_CASES = [
         '    for w in m.gen([1, 2]):\n'
         '        print(w)\n'
         'main()\n',
-        ('single .ci', '_mojogen_m_gen_value'),
+        'unavailable in compiled mode',
     ),
 ]
 
@@ -195,24 +191,6 @@ def build_and_run(name, m_src, u_src):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def compile_refusal(name, m_src, u_src):
-    """Compile u.py (importing m.py) expecting a refusal; return its message."""
-    work = tempfile.mkdtemp(prefix=f'modboundary_{name}_')
-    try:
-        with open(os.path.join(work, 'm.py'), 'w') as f:
-            f.write(m_src)
-        u_path = os.path.join(work, 'u.py')
-        with open(u_path, 'w') as f:
-            f.write(u_src)
-        try:
-            compile_to_gimple(u_src, do_imports=True, filename=u_path)
-        except RuntimeError as e:
-            return str(e)
-        return '<compiled: no refusal>'
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-
-
 def main():
     failed = []
     for name, m_src, u_src, expected in CASES:
@@ -222,15 +200,14 @@ def main():
         else:
             print(f'FAIL {name}: expected {expected!r}, got {got!r}')
             failed.append(name)
-    for name, m_src, u_src, needles in COMPILE_REFUSAL_CASES:
-        got = compile_refusal(name, m_src, u_src)
-        missing = [needle for needle in needles if needle not in got]
-        if not missing:
+    for name, m_src, u_src, marker in REFUSAL_CASES:
+        got = build_and_run(name, m_src, u_src)
+        if marker in got and not re.search(r'^\d{6,}$', got, re.M):
             print(f'PASS {name}')
         else:
-            print(f'FAIL {name}: expected a refusal containing {missing!r}, got {got!r}')
+            print(f'FAIL {name}: expected a refusal containing {marker!r}, got {got!r}')
             failed.append(name)
-    total = len(CASES) + len(COMPILE_REFUSAL_CASES)
+    total = len(CASES) + len(REFUSAL_CASES)
     print(f'{total - len(failed)}/{total} passed')
     return 1 if failed else 0
 

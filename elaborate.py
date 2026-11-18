@@ -3854,12 +3854,6 @@ class Elaborator:
         targs = bind_type_args(tmpl, type_args)
         if targs is None:
             return None
-        # A struct's `comptime` alias that a stdlib function computes (`comptime uint_type =
-        # _uint_type_of_width[bit_width_of[Self.dtype]()]()`) takes its value here, so the fields
-        # typed with it name the concrete dtype rather than staying erased. Done once on the
-        # template so the instance object, its signature and its cache key all see the same text.
-        from mojo.middle.comptime_fn import resolve_struct_aliases
-        tmpl = resolve_struct_aliases(tmpl, targs, module_src)
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
         _validate_align_decorators_for_struct(module_src, tmpl, struct_name, targs)
@@ -3913,8 +3907,7 @@ class Elaborator:
             return None
         return self.elaborate_generic_struct(module_src, struct_name, type_args)
 
-    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes,
-                                qualifier: str = '') -> dict:
+    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
         """Resolve an overloaded call (slice 4): pick the `fn_name` overload whose
         parameter types match the argument C types, mangle it by signature, and
         compile that one concrete function (CAS-cached). Returns
@@ -3954,12 +3947,7 @@ class Elaborator:
         # call names the bare symbol too. `mangle_signature`'s `__void` names
         # nothing.
         mangled = mm.mangle_signature(fn_name, ptypes) if ptypes else fn_name
-        # The defining module's qualifier is part of the symbol the object EXPORTS, so
-        # the call site and the object name the same function (the call site used to
-        # prefix the qualifier after the object was built under the bare name).
-        if qualifier:
-            mangled = qualifier + '_' + mangled
-        renamed = re.sub(rf'\b(fn|def)\s+{re.escape(fn_name)}\b', rf'\1 {mangled}', src, count=1)
+        renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
         try:
             obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
         except Exception:

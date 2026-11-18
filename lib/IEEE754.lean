@@ -155,28 +155,20 @@ def geBits (a b : Bits) : Bool := leBits b a
 `eqBits` and this are complements. -/
 def unordered (a b : Bits) : Bool := isNaN a || isNaN b
 
-/-- The flags FCMP (the flag-setting compare) leaves behind, in the layout
-`Arm64State.nzcv` uses everywhere: `arm64_subs_flags` and the other step
-functions write N at bit 0, Z at bit 1, C at bit 2 and V at bit 3, and
-`arm64_matches_condition` reads them back the same way — which is NOT the
-PSTATE byte's bit order (N at bit 3), and the first version of this function
-was written in the PSTATE order: it answered unordered `0b0011` where the
-harness probe reads `0b1100`, and `0b1000`/`0b0010` for less/greater where
-the probe reads `0b0001`/`0b0100`. The integer branch `equal`'s `0b0110`
-happens to be the same value in both layouts, which is why only the other
-three were wrong and none of them can be caught by a test that checks the
-equal case. The semantics stated are the ARM ARM's, and they were measured
-against this CPU before the layout was fixed: a NaN operand sets C and V
-(unordered), `a < b` sets N, and `a > b` sets C. -/
+/-- NZCV for FCMP (flag-setting compare). 
+ARM64 FCMP: if unordered -> NZCV = 0b0011 (C=1, V=1)
+else if equal -> 0b0110 (Z=1, C=1)
+else if less -> 0b1000 (N=1)
+else (greater) -> 0b0010 (C=1) -/
 def fcmp_nzcv (a b : Bits) : UInt8 :=
   if unordered a b then
-    (0b1100 : UInt8)  -- C=1, V=1 (unordered)
+    (0b0011 : UInt8)  -- N=0,Z=0,C=1,V=1
   else if eqBits a b then
-    (0b0110 : UInt8)  -- Z=1, C=1
+    (0b0110 : UInt8)  -- N=0,Z=1,C=1,V=0
   else if ltBits a b then
-    (0b0001 : UInt8)  -- N=1
+    (0b1000 : UInt8)  -- N=1,Z=0,C=0,V=0
   else
-    (0b0100 : UInt8)  -- greater: C=1
+    (0b0010 : UInt8)  -- greater: N=0,Z=0,C=1,V=0
 
 /-! ## The arithmetic, through Lean's `Float`
 
@@ -223,38 +215,16 @@ def scvtfBits (a : UInt64) : Bits :=
   let i : Int := if a >= (0x8000000000000000 : UInt64) then ((a.toNat : Int) - (18446744073709551616 : Int)) else (a.toNat : Int)
   Float.toBits (Float.ofInt i)
 
-/-- `FCVTZS`'s answer for one binary64 bit pattern: the value truncated
-    toward zero as a signed 64-bit integer.
-
-    The NaN clause is the ARM ARM's convention, which differs from x86's: a
-    NaN in Dn answers `0`. The first version answered
-    `0x8000000000000000` — x86 `CVTTSD2SI`'s integer indefinite — and the fp
-    fuzz caught the hardware answering `0` instead (measured on this CPU).
-    `lib/X86.lean` does not route through this helper: `CVTTSD2SI` keeps the
-    indefinite and has its own bit-level `x86_cvttsd`, so the x86 convention
-    is preserved where it lives. Infinity and out-of-range saturate under
-    either convention, so the two agree on those clauses.
-
-    The negative half is the magnitude's two's complement, and NOT
-    `t.toUInt64`: measured on this toolchain, `Float.toUInt64` clamps every
-    NEGATIVE float to `0` (-1.0, -2.0 and -2.9 all answer 0), so a
-    `2^64 + t.toUInt64` computes `2^64 + 0` and every negative result comes
-    back `0`. The fp fuzz caught it: `fcvtzs x23, d7` on `d7 = -1.0` answered
-    0 in the model where the hardware answers `0xffffffffffffffff`. When this
-    branch is taken, `-t` is in `[1, 2^63]` — a magnitude past `2^63` already
-    saturated above — so `(-t).toUInt64` is the right shape for it and the
-    subtraction is the sign. The `t = -0.0` case (-1 < f < 0) is in the
-    `t >= 0.0` arm, where `toUInt64` of a zero float is the `0` both sides
-    want. -/
+/-- Double to signed 64-bit integer, truncation toward zero (FCVTZS). -/
 def fcvtzsBits (a : Bits) : UInt64 :=
   let f := Float.ofBits a
-  if f.isNaN then (0 : UInt64)
+  if f.isNaN then (0x8000000000000000 : UInt64)
   else if f.isInf then if f < 0.0 then (0x8000000000000000 : UInt64) else (0x7fffffffffffffff : UInt64)
   else if f >= (9223372036854775807.0 : Float) then (0x7fffffffffffffff : UInt64)
   else if f < (-9223372036854775808.0 : Float) then (0x8000000000000000 : UInt64)
   else
     let t := if f >= 0.0 then Float.floor f else Float.ceil f
-    if t >= 0.0 then t.toUInt64 else (0 : UInt64) - (-t).toUInt64
+    if t >= 0.0 then t.toUInt64 else (UInt64.ofNat ((18446744073709551616 : Nat) + (t.toUInt64.toNat)))
 
 
 /-- The signed 64-bit integer `a` as a double.  Round-to-nearest-even, so

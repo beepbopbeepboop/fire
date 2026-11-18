@@ -20,7 +20,7 @@ def test_task_with_unlanded_branch_releases_after_max_attempts():
         # Create a minimal task registry (no git needed - just test state transitions)
         task_name = "bug-test-unlanded"
         task = {"state": "exited-ok", "branch": "work/bug-test-unlanded", "claims": ["bug:TEST_unlanded"],
-                "worktree": tmp, "pid": 0}
+                "worktree": "/tmp", "pid": 0}
         with C.registry() as reg:
             reg[task_name] = task
 
@@ -50,7 +50,7 @@ def test_task_with_landed_branch_marks_integrated():
 
         task_name = "bug-test-landed"
         task = {"state": "exited-ok", "branch": "work/bug-test-landed", "claims": ["bug:TEST_landed"],
-                "worktree": tmp, "pid": 0}
+                "worktree": "/tmp", "pid": 0}
         with C.registry() as reg:
             reg[task_name] = task
 

@@ -1909,17 +1909,6 @@ def _emit_reflection_fwd_decls(self, parts):
         parts.append("/* Forward decls for generic repr() (mutual struct references) */")
         parts.append("\n".join(repr_fwd_decls))
         parts.append('')
-    field_repr_names = set()
-    for _sn in _emitted:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
-            field_repr_names.add(_sn)
-    field_repr_fwd_decls = [f"static char * _mojo_field_repr_{sn} ({sn} *obj);"
-                            for sn in sorted(field_repr_names)]
-    if field_repr_fwd_decls:
-        parts.append("/* Forward decls for the reflective FIELD dump (no __repr__) */")
-        parts.append("\n".join(field_repr_fwd_decls))
-        parts.append('')
     elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
                            for sn in _emitted]
     # No `void *` alias of each shim is declared here: inside a `__GIMPLE`-
@@ -2363,24 +2352,6 @@ def _emit_reflection_dispatch(self, parts):
     # list` test is a linear scan of a list that can hold every struct in the
     # closure.
     elem_repr_names = set()
-    # Structs whose FIELD dump must NOT consult the user `__repr__` (the
-    # corpus pins `DunderHolder(p=R(x='c'))`, not `R<c>`; see
-    # test_gimple_runner.py's `gimple_struct_field_dump_is_not_an_address`:
-    # "a field dump is this runtime's own rendering ... so the dunder is not
-    # consulted for it, while the CONTAINER case above does consult it").
-    # A CONTAINER element still consults it -- `_mojo_elem_repr_*` is
-    # unchanged -- so this is a second, reflective-only entry point.
-    #
-    # Computed HERE, before the reflection loop, not accumulated inside it:
-    # that loop walks the structs in REVERSE declaration order, so a field
-    # dump for an early struct would otherwise ask before a later struct's
-    # name was known (measured: `elem_repr_names` empty at the first
-    # iteration, so every field fell through to the tag dispatch).
-    field_repr_names = set()
-    for _sn in reflect_structs:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
-            field_repr_names.add(_sn)
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
         _mm_arms_sn = self._getattr_method_arms.get(_as_str(sn))
@@ -2699,23 +2670,16 @@ def _emit_reflection_dispatch(self, parts):
                 owned = 'T'
             elif ftype.endswith(' *'):
                 # A field whose declared type is a struct this compile
-                # reflected is rendered through that struct's OWN dump, not
-                # through the tag-based dispatch: the field's type is written
-                # down right here, so there is nothing to discover at runtime,
-                # and `_mojo_dispatch_repr` cannot use it anyway for a
+                # reflected is rendered through that struct's ELEMENT REPR
+                # shim, not through the tag-based dispatch: the field's type is
+                # written down right here, so there is nothing to discover at
+                # runtime, and `_mojo_dispatch_repr` cannot use it anyway for a
                 # struct-allocated value (no runtime type tag -- the same gap
-                # that made `[p]` print a pointer decimal). A struct with a
-                # user `__repr__` uses `_mojo_field_repr_*`, which is the
-                # REFLECTIVE dump (the dunder is for a bare `repr()` and for a
-                # container ELEMENT, not for a field). A field of a type with
-                # neither keeps the dispatch, which is what reaches a
+                # that made `[p]` print a pointer decimal). A field of a type
+                # with no shim keeps the dispatch, which is what reaches a
                 # non-reflected struct's own dumper.
                 _fsn = ftype[:-2].strip()
-                if _fsn and _fsn in field_repr_names:
-                    val_expr = (f'({fref} ? _mojo_field_repr_{_fsn}'
-                                f'(({_fsn} *)(intptr_t){fref}) : _mojo_repr_none())')
-                    owned = 'T'
-                elif _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
+                if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
                     val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
                                 f'((int64_t)(intptr_t){fref}) : _mojo_repr_none())')
                     owned = 'T'
@@ -2814,7 +2778,6 @@ def _emit_reflection_dispatch(self, parts):
         # struct repr and the element shim below share one gate and cannot
         # drift (they are still emitted as two functions, but both defer to
         # the same user symbol when the gate is open).
-        _refl_body = repr_body
         _erep = self._struct_method_csym(sn, '__repr__', '')
         _erep_ok = self.func_return_types.get(_erep) == 'char *'
         if _erep_ok:
@@ -2825,16 +2788,6 @@ def _emit_reflection_dispatch(self, parts):
             + repr_body +
             f"}}\n"
         )
-        # The FIELD dump's own entry point: the reflective body, WITHOUT the
-        # dunder override above. Emitted only where the override exists (a
-        # struct whose dunder is absent already renders reflectively through
-        # `_mojo_repr_{sn}` / the element shim).
-        if _erep_ok:
-            refl_parts.append(
-                f"static char * _mojo_field_repr_{sn} ({sn} *obj) {{\n"
-                + _refl_body +
-                f"}}\n"
-            )
         # The ELEMENT REPR shim for a list/tuple of this struct: the walker
         # holds one `char *(*)(int64_t)` for a slot it reads as a word, and
         # this is the typed function behind it. A shim rather than a cast of
@@ -11040,6 +10993,32 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         sym_info = _as_dict(_imp_syms[_sn])
         if sym_info.get('return_type') == 'unknown':
             continue
+        # An imported module-level GLOBAL is not a function, and this pass used
+        # to emit a dead weak "unavailable in compiled mode" stub for it: the
+        # export entry (`module_loader`'s `'kind': 'global_var'`) carries a
+        # `c_return_type` but no `signature`, so it fell through to the
+        # by-design unresolved-symbol stub below.
+        #
+        # Its reads are already lowered through the defining module's
+        # `<mod>__mojo_global_get_<name>` accessor, registered for this name by
+        # `_emit_imported_global_accessors`, which runs before this pass in the
+        # same `gen_module_impl`. That registration IS the proof the real
+        # lowering exists for every use site, which is why the gate is the
+        # accessor map's own membership rather than the export's `kind` alone:
+        # a global the accessor pass could not resolve (no export entry, no
+        # qualifier) is not made callable by a stub either, and skipping it
+        # here turns a silent wrong answer into an implicit-declaration error
+        # at the one site that would have needed a real lowering.
+        #
+        # The self-host closure's own imported dispatch tables
+        # (`_EXPR_DISPATCH`, `_STMT_DISPATCH`, the aliased `_SIGNED`/`_FLOAT`/
+        # ... from `generated_dispatch`) were every one of its remaining
+        # dead stubs of this class. The key is the LOCAL bound name (the
+        # alias), while the emitted C symbol can be the defining name (an
+        # `X as Y` import registers `Y` and resolves `Y`'s accessor to `X`'s),
+        # so test `_sn` — this loop's own key — and not `safe`.
+        if _sn in self._imported_global_accessors:
+            continue
         # The `'signature' not in sym_info` escape hatch is LOAD-BEARING, not
         # an oversight: for a symbol this whole program defines but the module
         # being emitted only IMPORTS, the definition's own forward-declaration
@@ -11989,26 +11968,6 @@ def _gmp_collect_free_params(self, _free_params: dict, all_functions: list) -> N
                 if _pe_k in _pe_nested:
                     _pe_ne = _as_str(_pe_nested[_pe_k])
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), _pe_ne)
-        # The container-KIND half of the same evidence, folded into the same
-        # table a function's own call sites feed: `emit_funcs.gen_func` seeds
-        # `_actual_types` from `_param_container_types`, which is what lets a
-        # coroutine body's boxed container parameter dispatch as the list/dict
-        # it is instead of going through `_materialize_as_list`'s runtime
-        # probes. A genexp's captured dict is the case that needs it.
-        _pc_body = getattr(_fp_s, '_mojo_coro_param_container_kinds', None)
-        if _pc_body:
-            _pc_d = self._param_container_types.setdefault(_as_str(_fp_s.name), {})
-            for _pc_k in _pc_body:
-                _pc_d[_as_str(_pc_k)] = _as_str(_pc_body[_pc_k])
-        # ...and the dict VALUE kind, into the table `gen_func` already seeds
-        # `_dict_val_types` from (`_pdv`): the value type a dict parameter's
-        # `d[k]` reads with, which without it falls to the boxed/repr slot.
-        _pdvk_body = getattr(_fp_s, '_mojo_coro_param_dict_val_kinds', None)
-        if _pdvk_body:
-            _pdvk_d = self._param_dict_val_types.setdefault(
-                _as_str(_fp_s.name), {})
-            for _pdvk_k in _pdvk_body:
-                _pdvk_d[_as_str(_pdvk_k)] = _as_str(_pdvk_body[_pdvk_k])
         _pi_body = getattr(_fp_s, '_mojo_coro_param_int_lists', None)
         if _pi_body:
             _pi_d = self._coro_int_list_params.setdefault(_as_str(_fp_s.name), set())
@@ -19846,9 +19805,7 @@ def gen_module_impl(self, stmts: list):
                     _nested_snap = dict(self._nested_elem_types)
                     _dval_snap = dict(self._dict_val_types)
                     _prev_tp = getattr(self, '_current_struct_type_params', None)
-                    _prev_sn = getattr(self, '_current_struct_name', None)
                     self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
-                    self._current_struct_name = _as_str(stmt.name)
                     try:
                         func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                         func_parts.append('')
@@ -19885,7 +19842,6 @@ def gen_module_impl(self, stmts: list):
                         continue
                     finally:
                         self._current_struct_type_params = _prev_tp
-                        self._current_struct_name = _prev_sn
                     self._line_src_file = _prev_line_src
                     self._pop_import_scope()
                     if self._lambda_parts:

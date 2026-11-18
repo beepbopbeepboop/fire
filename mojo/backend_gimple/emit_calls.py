@@ -3246,24 +3246,6 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gimple_ctypes._debug_note('un-elaboratable generic call statically-typed stub',
                         (node.func.obj.name, _static_ct))
             return _static_ct, t
-    # `rebind_var[T](x)` is the IDENTITY in this C representation. The
-    # monomorphizer already rewrites exactly this spelling to `x`
-    # (monomorphize.py: `rebind_var\[[^\]]*\]\((...)\)` -> `\1`), so the
-    # emit side must agree, and it did not: the call fell through to the
-    # catch-all below, which returns integer 0 and DISCARDS the argument.
-    # Measured on std/itertools/itertools.mojo: `_Product3.__next__` emitted
-    # `_t1 = (int64_t)0;  /* indirect call via SubscriptExpr */` and returned
-    # it, so the whole `_flatten(next(self._inner))` call vanished --
-    # `_flatten` and `forget_deinit` occurred ZERO times in that module's C.
-    # A POSITIVE test on the base NAME is right here: `rebind_var` is a
-    # builtin, never a container a callable was recorded being stored into,
-    # so unlike the runtime-subscript arm below it needs no type-table
-    # discriminator.
-    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
-            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-            and _as_str(node.func.obj.name) == 'rebind_var'
-            and len(node.args) == 1):
-        return gen.lower_expr(node.args[0])
     # The OTHER SubscriptExpr callee: a RUNTIME subscript read of a
     # callable held as a first-class value — `d['k'](2, 3)`, a name-keyed
     # dispatch table. This was lumped in with the generic case above and
@@ -3503,16 +3485,6 @@ def _lc_pointer_ctor_to_kwarg(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         _tname = ''
         if _is_ident:
             _tname = _as_str(_as_ident_node(_to_expr).name)
-        # A name this closure CAPTURES BY VALUE lives in its environment, not in a C
-        # local of this function: its address is the address of the env field. The
-        # bare name here is `&base` with no `base` in scope (a nested def's
-        # `Pointer(to=outer_local)`; test_variadic's `make_elem_ptr`).
-        if _is_ident and gen._env_param and _tname in gen._captures:
-            _cap_t = _as_str(gen._captures.get(_tname) or 'int64_t')
-            if not _cap_t.endswith(' *'):
-                _fld = gimple_ctypes._c_field_name(_tname)
-                _ptr_ct = f'{_cap_t} *'
-                return _ptr_ct, gen._new_val(_ptr_ct, f'&{gen._env_param}->{_fld}')
         if _is_ident and _tname in gen._addressed_locals:
             at = gen._type_of(_tname)
             av = gen._c_names.get(_tname, _tname)
@@ -7942,18 +7914,6 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
     if at == 'MojoList *' and gen._elem_of(av) == 'char *':
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:
-        # The element contract is evidence the CONTAINER kind does not give:
-        # a generator body's list parameter arrives as an int64_t box (its
-        # type is fixed by the ABI), yet `_param_elem_types` has already told
-        # `_elem_types` that its elements are strings. Sorting such a value
-        # with the generic int64-payload sort ordered it by ADDRESS —
-        # `list(p for p in sorted(xs))` printed `['b', 'a']` for
-        # `xs = ["b", "a"]`. Read the element type BEFORE the materialize
-        # (the fresh probe temp has none) and take the same string sorter the
-        # statically typed `MojoList *` arm above takes. Only `char *` is
-        # answered: the probe can equally be a list of ints or doubles, and
-        # claiming a string sort for those would be a different wrong answer.
-        _elem_before = gen._elem_of(av)
         if at != 'MojoList *':
             # Any other iterable — a generator (a generator call or a
             # compiled generator expression) above all. Every runtime
@@ -7963,11 +7923,7 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
             # chokepoint first, exactly as sum()/any()/max() now do.
             av = gen._materialize_as_list(at, av)
             at = 'MojoList *'
-        if _elem_before == 'char *':
-            t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
-            gen._elem_types[t] = 'char *'
-        else:
-            t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
+        t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
     # sorted() only reorders — the result keeps the input's element /
     # nested-element (tuple-pair) types, so a later `for x, y in
     # sorted(lst):` tuple-target loop reads slots with the right accessor.
@@ -10861,25 +10817,14 @@ def lower_call_args(gen, args: list) -> list:
     for a in args:
         if isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) == '*':
             # A Mojo pointer DEREFERENCE (`f(*p)`) is `_lower_UnaryOp`'s, not a
-            # spread. A generator is the exception: `f(*(<generator
-            # expression>))` is an iterable unpack, and `*<generator-handle>`
-            # would dereference the incomplete `MojoGenerator` typedef (gcc:
-            # "storage size of '_t10' isn't known", "invalid use of
-            # incomplete typedef 'MojoGenerator'"). It is materialized as a
-            # list below and that list is unpacked.
+            # spread.
             _qt = _as_str(gen._quick_type(a.operand) or '')
             if (_qt.endswith(' *') and _qt not in (
-                    'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *',
-                    'MojoGenerator *')):
+                    'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *')):
                 _lt, _lv = gen.lower_expr(a)
                 out.append(_box_escaping_dict_slot_read(gen, a, _lt, _lv))
                 continue
             _st, _sv = gen.lower_expr(a.operand)
-            if _as_str(_st) == 'MojoGenerator *':
-                # `_quick_type` is only a hint and may not have known the
-                # operand's type, so the lowered type is the authority.
-                _sv = gen._materialize_as_list(_st, _as_str(_sv))
-                _st = 'MojoList *'
             _slots = gen._tuple_slot_types.get(_sv)
             if _slots is None:
                 _slots = _annotated_call_slots(gen, a.operand)
@@ -10888,9 +10833,9 @@ def lower_call_args(gen, args: list) -> list:
                     _et, _ev = gen._tuple_elem_value(_st, _sv, _i)
                     out.append(_box_escaping_dict_slot_read(gen, None, _et, _ev))
                 continue
-            # Unknown arity: the single pass-through pair the spread path
-            # expects, built from the operand already lowered rather than
-            # lowering it a second time.
+            # Unknown arity: the single pass-through pair `_lower_UnaryOp`
+            # gives a spread, built from the operand already lowered rather
+            # than lowering it a second time.
             out.append((_st, _sv))
             continue
         _lt, _lv = gen.lower_expr(a)
@@ -11488,23 +11433,8 @@ def _lnc_int(gen, arg_pairs: list) -> tuple[str, str] | None:
     # (mojo_box_int answered a boxed string with the pointer, the same
     # defect, and a None box with 0 where CPython raises).
     if at == 'int64_t':
-        _iow = gen._call_expr('int64_t', 'mojo_int_of_word',
-                              [('int64_t', gen._ensure_local('int64_t', av))])
-        # `mojo_int_of_word` ALWAYS yields an integer -- identity for a
-        # numeric word, digit parse for a bare or boxed string, truncation for
-        # a double box -- so its result is a PROVABLE int word and belongs in
-        # `_int_word_vals` (see `_mark_known_int`'s contract: an operation that
-        # cannot reinterpret its operands' bits may record its result). Without
-        # this the word reached a dict site untracked, so `_char_to_cstr` fell
-        # to its `_kw` placeholder and the runtime's range-guessing twin
-        # decided the key; the INSERT of the same expression had already
-        # stringified it (`mojo_cstr_or_int_str`), so the two sides keyed the
-        # entry differently. Measured: `d = {int(id(a)): 'v'}; d[int(id(a))]`
-        # stored under "140..." and looked up in the integer domain, returning
-        # None -- or raising `unhashable type: 'list'` when a prior line made
-        # the token's kind visible.
-        gen._int_word_vals.add(_iow)
-        return 'int64_t', _iow
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_int_of_word',
+                                         [('int64_t', gen._ensure_local('int64_t', av))])
     if at in ('int', '_Bool'):
         return 'int64_t', gen._cast('int64_t', f"{av}")
     return None
@@ -11734,20 +11664,6 @@ def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExp
     if not nodes or len(nodes) < 2:
         return None
     return _choose_overload_symbol(gen, fname_raw, node, nodes, None)
-
-
-def _imported_overload_home_module(gen, fname_raw: str):
-    """The ABSOLUTE module that DEFINES the overloads a `from <module> import <fname_raw>`
-    statement of this module names (a relative import such as `from ._macos import f` is
-    followed to its defining module through any package re-export), or None. A wildcard or
-    no import of the name gives None."""
-    from mojo.middle.funcs_shared import _find_symbol_home_module
-    for _st in getattr(gen, '_current_module_stmts', None) or []:
-        if type(_st).__name__ == 'FromImportStmt' and not _st.wildcard:
-            if any(str(_n) == fname_raw for _n, _a in (_st.names or [])):
-                _home = _find_symbol_home_module(gen, str(_st.module), fname_raw, 'fn', want_abs=True)
-                return str(_home or _st.module)
-    return None
 
 
 def _imported_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr, arg_ctypes=None):
