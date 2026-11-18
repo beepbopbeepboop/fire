@@ -10248,17 +10248,17 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
         return False
     if _as_str(st) == 'char *' or _as_str(st) == 'double':
         return True
-    # An INTEGER observation is proof unless the name came from a
-    # multi-value UNPACK of a single iterable: `_infer_local_var_types`
-    # types each such target with the `int64_t` STORAGE DEFAULT because
-    # the per-element type is not knowable there, and the element may be a
-    # container. `coro.py`'s `base, is_method, real_params, ... =
-    # _async_method_setup(...)` feeds `_mark_coro_param_elem_kinds(
-    # real_params)`, and reading that default as "a number" refused the
-    # file for a parameter every call site passes a list. Everything else
-    # -- a literal (answered above), a call result, a parameter, an
-    # ordinary local -- keeps counting, so `each([4, 5])` beside
-    # `each(n)` where `n = 3` (or `n = f()`) is still refused.
+    # An INTEGER observation is proof only when it is a REAL integer. The
+    # `int64_t` STORAGE DEFAULT is not: `_infer_local_var_types` leaves it on
+    # every value whose kind it cannot resolve and on every tuple-unpack
+    # target, and the value it stands for may be a container. Two such
+    # readers used to count, and both refused a container parameter that
+    # every call site feeds a list: `coro.py`'s `base, is_method,
+    # real_params, ... = _async_method_setup(...)` (the unpack exemption
+    # below), and `_to_returns`/`_choose_overload_symbol` recursing through a
+    # local bound to a `getattr`/`dict.get` result (the `int64_t` arm below).
+    # `each([4, 5])` beside `each(n)` where `n = 3` is still refused, because
+    # `n`'s binding is a PROVEN scalar (`_confident_scalar_locals`).
     if isinstance(a, gimple_ctypes.IdentExpr):
         _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
             _as_str(caller_name), ())
@@ -10268,7 +10268,25 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
             # `_unpack_from_container_slot` / `_unpack_from_scalar_slot`
             # at the call site below, so this reader stays silent.
             return False
-    return _as_str(st) in ('int64_t', 'int', 'bool')
+    _st = _as_str(st)
+    if _st == 'int64_t':
+        # `int64_t` is ALSO this codegen's BOX for a value whose kind nothing
+        # resolved: a call/attribute result, an unpack target, an unannotated
+        # parameter. The box may hold a container, so it is not proof of "a
+        # str or number". Only a local the pre-pass PROVED is a scalar
+        # (`_confident_scalar_locals`) is a number here. Reading the box as a
+        # number refused a container parameter fed the very same value at
+        # another call site even though nothing in the program is a str or a
+        # number: `mojo/middle/out_result.py`'s `_to_returns` recurses a
+        # statement list through `v = getattr(st, f.name)`, and
+        # `mojo/backend_gimple/emit_calls.py`'s `_choose_overload_symbol`
+        # takes `over.get(fname_raw)`. Both modules fell out of the compiler's
+        # own closure (`# ERROR: compiling imported module`), which is what
+        # `bootstrap-stage1-transitive` rejects.
+        _conf = (getattr(self, '_confident_scalar_locals', None) or {}).get(
+            _as_str(caller_name), ())
+        return _as_str(a.name) in _conf
+    return _st in ('int', 'bool')
 
 
 def _gmh_resolve_param_containers(self):
