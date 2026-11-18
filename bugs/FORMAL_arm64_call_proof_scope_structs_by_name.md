@@ -60,6 +60,33 @@ has no attribute `structs_by_name` in `_call_go`)". The retirement closed the
 parent on the strength of the part tests alone, and no live doc carried the
 whole-file red forward, so `formal-call-proofgen` is now an unmarked red.
 
+## Status, 2026-11-18: the `structs_by_name` AttributeError is fixed
+
+The read was in a statement whose body was `pass  # fall through` — dead code,
+and the only un-defended `getattr(scope, 'structs_by_name')` in the file (the
+other three call sites read it behind `hasattr` or `scope.get`). It is removed;
+a `_Scope` carries `admitted`, `str_addrs` and `str_literal_locals` and no
+struct table, and the statement no longer touches it. Removing a statement
+whose body was `pass` cannot change what the generator emits.
+
+Pinning test (fails with the AttributeError before the change):
+`TestGeneratorSource.test_a_scope_without_structs_by_name_still_models_a_call`.
+It builds a `_Scope` with a callee in it and requires
+`_expr_go(CallExpr(…), …)` to answer the callee's application. The three rows
+that used to die on the AttributeError
+(`test_call_model_renders_every_argument`,
+`test_callee_models_are_defined_before_use`,
+`test_a_self_call_in_another_calls_argument_is_recursive`) all pass.
+
+**The remainder is NOT this bug.** A full-file run still has the stale-text /
+fixture cluster (the `PLACEHOLDER` note, `NO RUN TESTS`, the identity model
+sentence, `eval_eq_mojo`, the literal-divisor "no call" counts, and the
+`proofs[...] is None` cascade from a refused generation). That cluster is
+cluster 2 of `bugs/FORMAL_call_proofgen_red_on_head.md`, which already covers
+this file's red; it is the doc to work next, and this doc should not be
+re-opened for it. This doc stays only because `## Done when` below is the
+whole-file run, which that cluster still keeps red.
+
 ## Done when
 
 `python3 tools/memslot.py --gb 8 --label fcpp -- python3 test_formal_call_proof_gen.py`

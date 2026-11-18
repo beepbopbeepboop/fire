@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gate-red-recover-land-2026-11-02-par-3 land?
+# Land: should finished branch bug-land-formal-x86-64-idx-forms-fuzz-an-2 land?
 
-**Branch:** `work/bug-gate-red-recover-land-2026-11-02-par-3` (task `bug-gate-red-recover-land-2026-11-02-par-3`; its tip is also saved as `refs/archive/work/bug-gate-red-recover-land-2026-11-02-par-3`, so dropping it loses nothing).
-**Age:** last commit 2026-11-18, first unlanded commit 2026-11-17; 5 commit(s) ahead of master, 165 behind it; task started 2026-11-18 00:50:47
-**Original work:** An earlier attempt left 4 commit(s) on branch work/bug-gate-red-recover-land-2026-11-02-par, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/G
-**Original claims:** bug:GATE_red_recover-land_2026-11-02-part5-part2
+**Branch:** `work/bug-land-formal-x86-64-idx-forms-fuzz-an-2` (task `bug-land-formal-x86-64-idx-forms-fuzz-an-2`; its tip is also saved as `refs/archive/work/bug-land-formal-x86-64-idx-forms-fuzz-an-2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 3 commit(s) ahead of master, 5 behind it; task started 2026-11-18 04:11:58
+**Original work:** Fix the bug in bugs/LAND-formal-x86-64-idx-forms-fuzz-an.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
+**Original claims:** bug:LAND-formal-x86-64-idx-forms-fuzz-an
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-18 02:57:55: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-17; 5 commit(s) ahead of master, 165 behind it; task started 2026-11-18 00:50:47)
-  Branch: work/bug-gate-red-recover-land-2026-11-02-par-3
-  Conflicting files: runtime/fire_runtime.c
+- 2026-11-18 05:23:30: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 3 commit(s) ahead of master, 5 behind it; task started 2026-11-18 04:11:58)
+  Branch: work/bug-land-formal-x86-64-idx-forms-fuzz-an-2
+  Conflicting files: bugs/OPEN_WORK.md

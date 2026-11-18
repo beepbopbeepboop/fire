@@ -38,9 +38,11 @@ bug look identical, and the harness would spend its findings on the wrong one.
 **Both engines run the same code bytes.** The native side is a generated
 Mach-O function per case (see `STUB` below) that installs an arbitrary
 register/flag/memory state, runs the case's instructions, and dumps X0-X30,
-SP, NZCV, PC and the whole memory window. The Lean side is one `#eval` per case
-calling `arm64_step` the same number of times. Registers, flags and memory are
-then compared byte for byte.
+SP, NZCV, PC, the D0-D7 binary64 file and the whole memory window. The Lean
+side is one `#eval` per case calling `arm64_step` the same number of times.
+Registers, flags, the D file and memory are then compared byte for byte, the
+one exception being a NaN's PAYLOAD, which is implementation-defined (see
+`compare`).
 
 **Three verdicts, not one.** `AGREE`; `WRONG`, where both engines ran to the
 end and the final state differs — that is a model bug, and `--minimise` reduces
@@ -143,7 +145,9 @@ CASES_PER_MIX = 40
 # SP-relative. `mov x30, x0` is the table base and `ldr x30, [x30, #240]` is the
 # last load, so all 31 GPRs carry their case value and NONE of them is reserved
 # for the harness — a reserved register would be a register the model never
-# gets to disagree about.
+# gets to disagree about. The D file is loaded in the same run while the table
+# base still sits in X30 (`ldp d0, d1, [x30, #264]` and its three siblings),
+# which touches no GPR and so cannot disturb any of them.
 STUB_HEAD = """
     sub  sp, sp, #96
     stp  x19, x20, [sp, #0]
@@ -168,6 +172,12 @@ STUB_HEAD += "    mov  x30, x0\n"
 # last, self-referentially, so the base survives until the final instruction.
 for _i in range(15):
     STUB_HEAD += "    ldp  x%d, x%d, [x30, #%d]\n" % (2 * _i, 2 * _i + 1, 16 * _i)
+# The binary64 file, D0-D7, in table slots 33..40. The loads touch no GPR, so
+# they can run while X30 still holds the table base, just before the base is
+# consumed; a case instruction before them would be a case that ran on the
+# harness's own D file rather than the one it was given.
+for _i in range(4):
+    STUB_HEAD += "    ldp  d%d, d%d, [x30, #%d]\n" % (2 * _i, 2 * _i + 1, 264 + 16 * _i)
 STUB_HEAD += "    ldr  x30, [x30, #240]\n4:\n"
 
 #: The epilogue, in this order and not another one:
@@ -201,9 +211,15 @@ STUB_TAIL_BODY += """    b.mi 9f
     str  x16, [sp, #%d]
     adr  x16, 2b
     str  x16, [sp, #%d]
-    ldr  x16, [sp, #-128]
-    mov  sp, x16
 """ % (SLOT_PROBE, DUMP_OFF + 248, SLOT_PC_END)
+# The binary64 file, dumped into dump-band slots 35..42 (the PC-START record in
+# slot 34 is written in the head and never touched again, and SP is restored
+# only after the dump, so the band is still in the window).
+for _i in range(8):
+    STUB_TAIL_BODY += "    str  d%d, [sp, #%d]\n" % (_i, DUMP_OFF + 8 * (35 + _i))
+STUB_TAIL_BODY += """    ldr  x16, [sp, #-128]
+    mov  sp, x16
+"""
 for _i in range(6):
     STUB_TAIL_BODY += "    ldp  x%d, x%d, [sp, #%d]\n" % (19 + 2 * _i, 20 + 2 * _i, 16 * _i)
 STUB_TAIL_BODY += "    add  sp, sp, #96\n    ret\n"
@@ -213,12 +229,13 @@ PROBE_BITS = 4      # the probe adds this many bits to x16, one per flag
 class Case(object):
     """One differential test: a state, and the instructions to run on it."""
 
-    __slots__ = ("regs", "nzcv", "mem", "texts", "words", "n", "mix")
+    __slots__ = ("regs", "nzcv", "mem", "d", "texts", "words", "n", "mix")
 
-    def __init__(self, regs, nzcv, mem, texts, words):
+    def __init__(self, regs, nzcv, mem, d, texts, words):
         self.regs = regs        # 32 UInt64: X0..X30 then SP
         self.nzcv = nzcv        # the PSTATE.NZCV the case starts with
         self.mem = mem          # (MEM_HI - MEM_LO) bytes at [MEM_LO, MEM_HI)
+        self.d = d              # 8 UInt64: the binary64 file D0..D7
         self.texts = texts      # the case's instructions, as assembly text
         self.words = words      # their encodings as instruction words (ints)
         self.n = len(texts)
@@ -228,6 +245,7 @@ class Case(object):
         out = ["  %d instruction(s), nzcv=0x%x" % (self.n, self.nzcv)]
         for r in ADDR_REGS:
             out.append("  base register x%d = MODEL_SP + %d" % (r, self.regs[r] - MODEL_SP))
+        out.append("  d registers: " + " ".join("%016x" % w for w in self.d))
         for t in self.texts:
             out.append("    " + t)
         return "\n".join(out)
@@ -661,6 +679,52 @@ def gen_memreg(rng, free):
             A.encode_strb_wd_wn_xm(d, base, off))
 
 
+def gen_fp(rng, free):
+    """The scalar-double binary64 class, the ten forms of it.
+
+    The D file is D0-D7 only, because `Arm64State` has exactly eight `d`
+    registers and `arm64_reg_d` answers 0 for anything past them — a draw of
+    D8 would be a state the model cannot even name. The GPR operands come from
+    `free` like every other generator: `fmov`/`scvtf`/`fcvtzs` are the only
+    instructions that bridge the two register files, so a case is a chain of
+    word-to-double and double-to-word crossings, which is what `float(x)` and
+    the arithmetic on its result lower to.
+
+    `fmov` is drawn in both directions, with the destination in the operand
+    the assembler spells, because the two directions are two encoders
+    (`0x9e670000`/`0x9e660000`) and the census counts them separately.
+    `fcmp` writes no register — it sets the flags, which the case's flag probe
+    then reads back, the same split `gen_flags` makes for the integer `cmp`.
+    """
+    d = rng.randrange(8)
+    n = rng.randrange(8)
+    m = rng.randrange(8)
+    k = rng.randrange(10)
+    if k == 0:
+        return "fadd d%d, d%d, d%d" % (d, n, m), A.encode_fadd_dd_dn_dm(d, n, m)
+    if k == 1:
+        return "fsub d%d, d%d, d%d" % (d, n, m), A.encode_fsub_dd_dn_dm(d, n, m)
+    if k == 2:
+        return "fmul d%d, d%d, d%d" % (d, n, m), A.encode_fmul_dd_dn_dm(d, n, m)
+    if k == 3:
+        return "fdiv d%d, d%d, d%d" % (d, n, m), A.encode_fdiv_dd_dn_dm(d, n, m)
+    if k == 4:
+        return "fneg d%d, d%d" % (d, n), A.encode_fneg_dd_dn(d, n)
+    if k == 5:
+        return "fcmp d%d, d%d" % (n, m), A.encode_fcmp_dn_dm(n, m)
+    if k == 6:
+        x = _dst(rng, free)
+        return "fmov d%d, x%d" % (d, x), A.encode_fmov_gpr_to_v(d, x)
+    if k == 7:
+        x = _dst(rng, free)
+        return "fmov x%d, d%d" % (x, n), A.encode_fmov_v_to_gpr(x, n)
+    if k == 8:
+        x = _r(rng, free)
+        return "scvtf d%d, x%d" % (d, x), A.encode_scvtf_dn_xn(d, x)
+    x = _dst(rng, free)
+    return "fcvtzs x%d, d%d" % (x, n), A.encode_fcvtzs_xn_dn(x, n)
+
+
 #: The mixes, and what each one is for. `MIXES` is a NAME → generators map
 #: rather than one generator list because a mix is also a row of the sweep
 #: ledger (`ledger_row` writes it), and a row that cannot be named cannot be
@@ -714,11 +778,20 @@ MIXES = {
     # flag-setting / scaled ALU forms. What is still missing after these two is
     # in `EXCLUSIONS` in that tool, each with the reason it is the harness's
     # limit rather than work nobody did: `svc` traps in EL0, `adrp`/`blr`/`bl`
-    # produce or consume a pc-relative value the two engines cannot share, the
-    # SP write-back pairs move the window, and the IEEE-754 forms have no
-    # register file in a harness that dumps X0-X30.
+    # produce or consume a pc-relative value the two engines cannot share, and
+    # the SP write-back pairs move the window.
     "branch": (gen_branches, gen_flags),
     "flagged": (gen_flagged_alu, gen_alu),
+    # The scalar-double binary64 class, `gen_fp`'s ten forms. It is a mix of
+    # one generator on purpose: a case is the flag seed plus a chain of
+    # double-precision instructions, which is the shape the class's semantics
+    # are (a value lives in the D file, an op moves it, a conversion crosses
+    # into a GPR). The harness grew the D0-D7 file for it — the stub installs
+    # it from the table and the epilogue dumps it, the case input carries it,
+    # and the comparison is over it with the one NaN-payload exception stated
+    # in `compare`. The gap this mix closes was the census reading `no` in
+    # FUZZ for all ten of these rows.
+    "fp": (gen_fp,),
 }
 
 
@@ -812,7 +885,8 @@ def gen_case(rng, mix, length=None):
         texts.append(text)
         words.append(struct.unpack("<I", word)[0])
     mem = bytes(rng.randrange(256) for _ in range(MEM_HI - MEM_LO))
-    return Case(regs, rng.randrange(16), mem, texts, words)
+    d = [fp_word(rng) for _ in range(8)]
+    return Case(regs, rng.randrange(16), mem, d, texts, words)
 
 
 def interesting_word(rng):
@@ -843,6 +917,52 @@ def interesting_word(rng):
     if kind == 10:
         return lambda r: ((r.getrandbits(32) << 32) | r.getrandbits(32)) & ((1 << 64) - 1)
     return lambda r: r.getrandbits(64)
+
+#: The bit patterns the `fp` mix starts the D file with, the special values
+#: each of the ten forms answers differently on: the signed zeros (the sign of
+#: a zero result is an `fadd`/`fneg` question), the infinities (the overflow
+#: and saturation boundary of `fdiv` and `fcvtzs`), the NaNs (the unordered
+#: class `fcmp` and every arithmetic op routes through) and the rounding
+#: cases `lib/IEEE754.lean` pins (`1.5 + 2.25`, `0.1 + 0.2`, `2**53`, the
+#: largest finite).
+_FP_WORDS = (
+    0x0000000000000000,   # +0.0
+    0x8000000000000000,   # -0.0
+    0x7FF0000000000000,   # +inf
+    0xFFF0000000000000,   # -inf
+    0x7FF8000000000000,   # the canonical quiet NaN
+    0x7FF0000000000001,   # a NaN whose payload the arithmetic keeps
+    0x3FF8000000000000,   # 1.5
+    0x4002000000000000,   # 2.25
+    0x3FB999999999999A,   # 0.1
+    0x3FC999999999999A,   # 0.2
+    0x0000000000000001,   # the smallest subnormal, 5e-324
+    0x0010000000000000,   # the smallest normal, 2.2e-308
+    0x4340000000000000,   # 2**53, the int64<->double rounding boundary
+    0x7FE0000000000000,   # 2**63, the FCVTZS saturation edge
+    0x7FEFFFFFFFFFFFFF,   # the largest finite, 1.8e308
+)
+
+
+def fp_word(rng):
+    """One binary64 word for the D file, from the same shape logic
+    `interesting_word` uses for the GPR file: a special value, or a random
+    one of a kind the uniform draw almost never reaches on its own.
+
+    The random FINITE draw masks the exponent's top bit, so the pattern
+    cannot read as an infinity or a NaN — those come from `_FP_WORDS` and
+    the NaN draw, in controlled proportions, because the NaN class is where
+    the model's `Float` bridge and the CPU's payload behaviour can part and
+    the comparison rule has to be tested against it.
+    """
+    kind = rng.randrange(8)
+    if kind < 4:
+        return rng.choice(_FP_WORDS)
+    if kind < 6:
+        return rng.getrandbits(64) & 0x7FEFFFFFFFFFFFFF | rng.getrandbits(1) << 63
+    if kind == 6:
+        return 0x7FF0000000000000 | (1 + rng.getrandbits(52))
+    return struct.unpack("<Q", struct.pack("<d", rng.uniform(-1e15, 1e15)))[0]
 
 # ── the assembler cross-check ───────────────────────────────────────────
 #
@@ -912,9 +1032,9 @@ C_DRIVER = r"""
 #define STASH %(stash)d
 
 typedef struct { uint64_t regs[32]; uint8_t nzcv; uint8_t pad[7];
-                 uint8_t mem[MEM_HI - MEM_LO]; } CaseIn;
+                 uint64_t d[8]; uint8_t mem[MEM_HI - MEM_LO]; } CaseIn;
 
-static uint64_t _tab[33];
+static uint64_t _tab[41];
 static sigjmp_buf _jb;
 
 /* A Mach-O C symbol `foo` is the object symbol `_foo`, and an assembler label
@@ -983,6 +1103,8 @@ int main(int argc, char **argv) {
                 _tab[r] = in.regs[r] - MODEL_SP + (uint64_t)(uintptr_t)win;
         _tab[31] = (uint64_t)(uintptr_t)win;
         _tab[32] = in.nzcv;
+        /* The binary64 file holds VALUES, not addresses: copied through as-is. */
+        for (int r = 0; r < 8; r++) _tab[33 + r] = in.d[r];
         memset(region, 0, 8192);
         /* Model coordinate `a` is hardware offset `a - MODEL_SP` from the
            window base, because the model's SP is the constant MODEL_SP and the
@@ -1019,6 +1141,10 @@ int main(int argc, char **argv) {
         }
         printf(" %%llx %%llx %%llx", (unsigned long long)d[32], (unsigned long long)d[33],
                (unsigned long long)d[34]);
+        /* The binary64 file, dump-band slots 35..42: one word each, in the
+           order the stub stores them. */
+        for (int r = 35; r < 43; r++)
+            printf(" %%016llx", (unsigned long long)d[r]);
         /* The window is relative to the SP the case ENDED with, so a case that
            moves SP with a writeback is compared over the same bytes the model
            read and wrote rather than over whatever used to be there. */
@@ -1090,6 +1216,7 @@ def run_native(cases, workdir, verbose=False):
             # the 32nd slot is written as 0 and never read.
             f.write(struct.pack("<32Q", *(list(case.regs[:31]) + [0])))
             f.write(struct.pack("<B7x", case.nzcv))
+            f.write(struct.pack("<8Q", *case.d))
             f.write(case.mem)
     r = subprocess.run([exe, data], capture_output=True, text=True, timeout=600)
     if r.returncode != 0 and not r.stdout:
@@ -1111,11 +1238,12 @@ def run_native(cases, workdir, verbose=False):
             # reported on the next line and this one has nothing usable in it.
             continue
         regs = vals[:32]
-        # The dump band's own three words, in the order `C_DRIVER` prints them:
-        # SLOT_PC_END, SLOT_PROBE, SLOT_PC_START.
+        # The dump band's own words, in the order `C_DRIVER` prints them:
+        # SLOT_PC_END, SLOT_PROBE, SLOT_PC_START, then the D file, slots 35..42.
         pc_end, probe, pc_start = vals[32], vals[33], vals[34]
-        mem = bytes(vals[35:])
-        out[i] = ("OK", regs, pc_end, pc_start, probe, mem)
+        dfile = vals[35:43]
+        mem = bytes(vals[43:])
+        out[i] = ("OK", regs, pc_end, pc_start, probe, dfile, mem)
     if verbose:
         sys.stderr.write("  native: %d case(s) reported\n" % len(out))
     return out
@@ -1141,6 +1269,7 @@ structure Case where
   nzcv : UInt8
   mem : List UInt8
   code : List UInt8
+  d : List UInt64
   n : Nat
 
 /-- The memory a case starts with: the window's bytes in window coordinates,
@@ -1161,9 +1290,12 @@ def stOf (c : Case) : Arm64State :=
     x20 := c.regs.getD 20 0, x21 := c.regs.getD 21 0, x22 := c.regs.getD 22 0, x23 := c.regs.getD 23 0
     x24 := c.regs.getD 24 0, x25 := c.regs.getD 25 0, x26 := c.regs.getD 26 0, x27 := c.regs.getD 27 0
     x28 := c.regs.getD 28 0, x29 := c.regs.getD 29 0, x30 := c.regs.getD 30 0
-    -- The FP file (`d0..d7`) exists since the model grew binary64 arms; the
-    -- integer fuzz leaves it zero, and the FP mixes (if any) set it themselves.
-    d0 := 0, d1 := 0, d2 := 0, d3 := 0, d4 := 0, d5 := 0, d6 := 0, d7 := 0
+    -- The binary64 file: the case's own D0-D7, installed from its input just
+    -- like the GPR file. A mix that never draws an FP instruction leaves the
+    -- file untouched, and the model then compares it byte for byte against a
+    -- file the hardware also left untouched.
+    d0 := c.d.getD 0 0, d1 := c.d.getD 1 0, d2 := c.d.getD 2 0, d3 := c.d.getD 3 0
+    d4 := c.d.getD 4 0, d5 := c.d.getD 5 0, d6 := c.d.getD 6 0, d7 := c.d.getD 7 0
     sp := UInt64.ofNat MODEL_SP, pc := MODEL_PC, nzcv := c.nzcv, mem := memOf c.mem }
 
 def HEX : List Char := "0123456789abcdef".toList
@@ -1182,16 +1314,17 @@ def memHex (m : Nat → UInt8) (sp : Nat) : String :=
     let b := (m (sp + MEM_LO - MODEL_SP + k)).toNat
     [HEX.getD (b / 16) '0', HEX.getD (b % 16) '0'])))
 
-/-- The whole post-state as one line: 31 registers, SP, NZCV, the pc, and every
-compared memory byte. -/
+/-- The whole post-state as one line: 31 registers, SP, NZCV, the pc, the
+D0-D7 binary64 file, and every compared memory byte. -/
 def render (c : Case) : String :=
   match arm64_steps (stOf c) (codeOf c.code) c.n with
   | none => "NORUN"
   | some s =>
       String.intercalate " "
         ((List.range 31).map (fun i => hexNat (arm64_reg i s).toNat)
-          ++ [hexNat s.sp.toNat, hexNat s.nzcv.toNat, hexNat s.pc,
-              memHex s.mem s.sp.toNat])
+          ++ [hexNat s.sp.toNat, hexNat s.nzcv.toNat, hexNat s.pc]
+          ++ (List.range 8).map (fun i => hexNat (arm64_reg_d i s).toNat)
+          ++ [memHex s.mem s.sp.toNat])
 '''
 
 
@@ -1211,9 +1344,11 @@ def write_lean(cases, workdir):
         code = "[" + ", ".join("0x%x" % b for w in case.words
                                for b in struct.pack("<I", w)) + "]"
         mem = "[" + ", ".join("0x%x" % b for b in case.mem) + "]"
+        d = "[" + ", ".join(_u64(w) for w in case.d) + "]"
         out.append("def case_%d : Case :=\n  { regs := [%s]\n"
-                   "    nzcv := 0x%x\n    mem := %s\n    code := %s\n    n := %d }"
-                   % (i, regs, case.nzcv, mem, code, case.n))
+                   "    nzcv := 0x%x\n    mem := %s\n    code := %s\n"
+                   "    d := %s\n    n := %d }"
+                   % (i, regs, case.nzcv, mem, code, d, case.n))
         out.append('#eval "%d " ++ render case_%d' % (i, i))
     path = os.path.join(workdir, "model.lean")
     with open(path, "w") as f:
@@ -1263,13 +1398,13 @@ def run_model_batch(cases, workdir, verbose=False, start=0):
             continue
         i, body = start + int(m.group(1)), m.group(2)
         parts = body.split(" ")
-        if len(parts) != 35 or len(parts[34]) != 2 * (MEM_HI - MEM_LO):
+        if len(parts) != 43 or len(parts[42]) != 2 * (MEM_HI - MEM_LO):
             out[i] = ("BAD", body)
             continue
-        vals = [int(v, 16) for v in parts[:34]]
-        hexmem = parts[34]
+        vals = [int(v, 16) for v in parts[:42]]
+        hexmem = parts[42]
         mem = bytes(int(hexmem[j:j + 2], 16) for j in range(0, len(hexmem), 2))
-        out[i] = ("OK", vals[:31], vals[31], vals[32], vals[33], mem)
+        out[i] = ("OK", vals[:31], vals[31], vals[32], vals[33], vals[34:42], mem)
     if verbose:
         sys.stderr.write("  model: %d case(s) evaluated\n" % len(out))
     return out
@@ -1292,13 +1427,45 @@ FIELD_NAMES = ["x%d" % r for r in range(31)] + ["sp", "nzcv", "pc"]
 SKIP_REGS = (18,)
 
 
+def _is_nan_bits(w):
+    """`IEEE754.isNaN` over a binary64 word: every NaN, quiet or signalling.
+
+    The mantissa mask is the FULL 52 bits, mirroring `lib/IEEE754.lean`'s
+    `isNaN` mask `0x000FFFFFFFFFFFFF`: a 44-bit mask classified as not-a-NaN a
+    NaN whose payload lived entirely above bit 44 (the canonical
+    `0x7ff8000000000000` has zero mantissa in its low 44 bits), so the
+    both-NaN rule in `compare` missed real pairs and the sweep reported them
+    WRONG.
+    """
+    return (w & 0x7ff0000000000000) == 0x7ff0000000000000 \
+        and (w & 0xfffffffffffffff) != 0
+
+
 def compare(hw, md):
     """The differences between the two engines' final states, as text lines.
 
-    A plain equality on the registers, the flags, the pc DELTA and the whole
-    window: the harness has already put the two base registers in model
-    coordinates (see `C_DRIVER`), so there is nothing to translate here, and the
-    only exception is `SKIP_REGS` — X18, which the platform owns and clobbers.
+    A plain equality on the registers, the flags, the pc DELTA, the whole
+    window and the D0-D7 binary64 file: the harness has already put the two
+    base registers in model coordinates (see `C_DRIVER`), so there is nothing
+    to translate in the GPR half, and the only exceptions are `SKIP_REGS` —
+    X18, which the platform owns and clobbers — and a NaN's PAYLOAD, which the
+    ARM ARM leaves implementation-defined: measured on this CPU, `fadd` keeps
+    a NaN input's payload rather than answering the canonical
+    `0x7ff8000000000000` that the model's `Float` bridge normalises to
+    (`lib/IEEE754.lean`'s `ofBits_toBits_normalises_a_nan_payload`). Two
+    values therefore agree when equal or when BOTH are NaNs — the value class
+    is what the arithmetic answers, and a number where the other side answers
+    a NaN is a disagreement this rule must not swallow.
+
+    The rule extends to a GPR that CARRIES one of those copies, because
+    `fmov xN, dN` is a raw bit move: the payload the hardware kept in the D
+    file lands in the GPR where the model's canonical one does, and a
+    differing-NaN pair there is the same implementation-defined fact (seed
+    `fp-c2`'s first sweep hit it exactly: x28 held the hardware's preserved
+    payload where the model had the canonical one, the D file itself
+    agreeing). It does not extend to SP or NZCV, which are never binary64,
+    and in a mix that draws no FP instruction no GPR can carry a NaN the
+    other engine did not compute from the same shared initial state.
     """
     if hw[0] != "OK":
         return ["      hardware did not run: %s" % hw[1]]
@@ -1306,8 +1473,8 @@ def compare(hw, md):
         return ["      arm64_step took no step"]
     if md[0] != "OK":
         return ["      lean said: %s" % md[1]]
-    _t, hregs, hpc_end, hpc_start, hprobe, hmem = hw
-    _t, mregs, msp, mnz, mpc, mmem = md
+    _t, hregs, hpc_end, hpc_start, hprobe, hdfile, hmem = hw
+    _t, mregs, msp, mnz, mpc, mdfile, mmem = md
     # Each probe branch is TAKEN when its flag is SET, and a taken branch skips
     # the `add`, so the bits the probe accumulated are the flags that were
     # CLEAR. Inverting them gives the flags themselves.
@@ -1317,8 +1484,11 @@ def compare(hw, md):
     for k, (m, h) in enumerate(pairs):
         if k in SKIP_REGS:
             continue
-        if m != h:
+        if m != h and not (k < 31 and _is_nan_bits(m) and _is_nan_bits(h)):
             diffs.append("      %-4s model=%016x hardware=%016x" % (FIELD_NAMES[k], m, h))
+    for k, (m, h) in enumerate(zip(mdfile, hdfile)):
+        if not (m == h or (_is_nan_bits(m) and _is_nan_bits(h))):
+            diffs.append("      d%-2d model=%016x hardware=%016x" % (k, m, h))
     if (mpc - MODEL_PC) != (hpc_end - hpc_start):
         diffs.append("      pc    model=+%d hardware=+%d"
                      % (mpc - MODEL_PC, hpc_end - hpc_start))
@@ -1578,7 +1748,7 @@ def minimise(case, workdir):
     while changed and best.n > 1:
         changed = False
         for j in range(1, best.n):
-            trial = Case(best.regs, best.nzcv, best.mem,
+            trial = Case(best.regs, best.nzcv, best.mem, best.d,
                          best.texts[:j] + best.texts[j + 1:],
                          best.words[:j] + best.words[j + 1:])
             if still_fails(trial, workdir, want):
