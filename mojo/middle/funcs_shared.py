@@ -1941,7 +1941,14 @@ def _scan_from_imports_flat(src: str) -> list:
     [mod0, names0, mod1, names1, ...] — a flat list (not a list of
     2-tuples, not a tuple return) so the self-hosted backend can iterate
     it by index without boxing. A parenthesised, multi-line import list
-    (`from X import (\n a,\n b,\n)`) is joined into one names string."""
+    (`from X import (\n a,\n b,\n)`) is joined into one names string.
+
+    The matching `)` of a parenthesised list is found by a depth-counted
+    scan that skips `#` comments and quoted string literals, so a `)` inside
+    either (e.g. a TODO/JIRA id in a comment) cannot truncate the list — the
+    same hazard `elaborate._bracket_depth_by_line` documents and solves for
+    source text.
+    """
     out: list = []
     lines = src.split('\n')
     _i = 0
@@ -1958,13 +1965,76 @@ def _scan_from_imports_flat(src: str) -> list:
         _mod = _rest[:_p].strip()
         _names = _rest[_p + 7:].lstrip()
         if _names.startswith('('):
-            _names = _names[1:]
-            while (')' not in _names) and (_i < _n):
-                _names = _names + ' ' + lines[_i].strip()
-                _i += 1
-            _cut = _names.find(')')
-            if _cut >= 0:
-                _names = _names[:_cut]
+            depth = 1
+            _in_str = None  # None, or '"', "'", '"""', "'''", '`'
+            _collected = []
+            _done = False
+            _first = True
+            _seg = _names[1:]
+            while not _done:
+                if _first:
+                    _s = _seg
+                    _first = False
+                else:
+                    if _i >= _n:
+                        break
+                    _s = lines[_i]
+                    _i += 1
+                _j = 0
+                _sn = len(_s)
+                while _j < _sn and not _done:
+                    _c = _s[_j]
+                    if _in_str:
+                        if _in_str in ('"""', "'''"):
+                            if _s.startswith(_in_str, _j):
+                                _collected.append(_in_str)
+                                _j += 3
+                                _in_str = None
+                                continue
+                        else:
+                            if _c == '\\' and _in_str != '`':
+                                _collected.append(_c)
+                                if _j + 1 < _sn:
+                                    _collected.append(_s[_j + 1])
+                                    _j += 2
+                                else:
+                                    _j += 1
+                                continue
+                            if _c == _in_str:
+                                _in_str = None
+                        _collected.append(_c)
+                        _j += 1
+                        continue
+                    if _c == '#':
+                        break
+                    if _s.startswith('"""', _j) or _s.startswith("'''", _j):
+                        _in_str = _s[_j:_j + 3]
+                        _collected.append(_in_str)
+                        _j += 3
+                        continue
+                    if _c in ('"', "'", '`'):
+                        _in_str = _c
+                        _collected.append(_c)
+                        _j += 1
+                        continue
+                    if _c in '([{':
+                        depth += 1
+                        _collected.append(_c)
+                        _j += 1
+                        continue
+                    if _c in ')]}':
+                        depth -= 1
+                        if depth == 0:
+                            _done = True
+                            break
+                        _collected.append(_c)
+                        _j += 1
+                        continue
+                    _collected.append(_c)
+                    _j += 1
+                if not _done and _in_str is not None and _in_str not in ('"""', "'''"):
+                    _in_str = None
+            _names = ''.join(_collected)
         out.append(_mod)
         out.append(_names)
     return out
