@@ -1680,19 +1680,9 @@ class GimpleGen:
         # `int64_t` there is not proof the argument is a number — it may be a
         # container element (coro.py's `real_params` from
         # `base, is_method, real_params, ... = _async_method_setup(...)` is a
-        # list). The `int64_t` fallback has other sources too — the result of
-        # a call or attribute read whose type the pre-pass cannot resolve, an
-        # unannotated parameter — and `_confident_scalar_locals` below is the
-        # positive half that keeps them from counting as scalars.
+        # list) — while an ordinary local bound by a call or a parameter keeps
+        # counting as a scalar, so a genuinely mixed call site is still refused.
         self._tuple_unpack_locals: dict[str, set] = {}
-        # Function name -> the locals the pre-pass PROVED are scalars (a real
-        # int/float/bool value, never the `int64_t` unknown fallback). Read by
-        # `module_gen`'s container-vs-scalar contract beside the table above:
-        # an `int64_t` argument that is not one of these is the BOX, which may
-        # hold a container, a str or a number, so it is not evidence of "a str
-        # or number at another call site" and must not refuse a container
-        # parameter (`_gmh_is_noncontainer_arg`).
-        self._confident_scalar_locals: dict[str, set] = {}
         # Call-result VALUE names holding a container whose kind the CALLER
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other
@@ -5801,8 +5791,8 @@ class GimpleGen:
         return ginf._closure_info_for_ident(self, name)
     def _generator_value_ctype_for_next(self, arg):
         return ginf._generator_value_ctype_for_next(self, arg)
-    def _collect_return_types(self, stmts: list, acc: list, arms: list = None):
-        return ginf._collect_return_types(self, stmts, acc, arms)
+    def _collect_return_types(self, stmts: list, acc: list):
+        return ginf._collect_return_types(self, stmts, acc)
     def _coerce_to_type(self, src_type: str, dst_type: str, value: str) -> str:
         return ginf._coerce_to_type(self, src_type, dst_type, value)
     def _cpp_container_cast_prefix(self, kind: str, via_intptr: bool) -> str:

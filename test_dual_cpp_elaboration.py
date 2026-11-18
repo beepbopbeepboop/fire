@@ -170,14 +170,7 @@ def main() raises:
 def test_trace_and_comptime_and_abort_inside_nested_async():
     """test_tracing.mojo's FULL real shape (modulo real Trace/TraceLevel
     stdlib imports, which pull in unrelated GPU/DeviceContext machinery
-    out of scope here -- a minimal local `Trace[level: Int]` stand-in is
-    declared instead: the elision under test is keyed on the guard type's
-    NAME in gimple_codegen.py's `_ASYNC_NOOP_LOCK_GUARD_TYPES`, and the
-    guard's `__enter__`/`__exit__` are no-ops here, so an empty struct is
-    the whole thing; the declaration itself is REQUIRED -- unknown_decl_
-    check.check_module correctly refuses a source that reads an undeclared
-    name, which is what broke this fixture when that check landed):
-    `with Trace[level](s1, s2):` guarding the return
+    out of scope here): `with Trace[level](s1, s2):` guarding the return
     (elided as a no-op, like BlockingScopedLock -- see gimple_codegen.py's
     `_ASYNC_NOOP_LOCK_GUARD_TYPES`), preceded by `comptime s1 = ...`/
     `comptime s2 = ...` declarations feeding it (a no-op fold -- see
@@ -185,15 +178,6 @@ def test_trace_and_comptime_and_abort_inside_nested_async():
     calls `abort(...)` (a bare CallExpr statement `_cpp_stmt` didn't
     recognize before this fix either)."""
     src = """\
-struct Trace[level: Int]:
-    def __init__(out self, s1: String, s2: String):
-        pass
-    def __enter__(self):
-        pass
-    def __exit__(self):
-        pass
-
-
 def test_tracing[level: Int, enabled: Bool]() raises:
     @parameter
     async def test_tracing_add[enabled: Bool, lhs: Int](rhs: Int) -> Int:

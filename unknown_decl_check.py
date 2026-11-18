@@ -80,20 +80,10 @@ _KEYWORDS = frozenset({
 # `__mlir_op` / `__mlir_attr` / `__mlir_type` are Mojo's own MLIR escape
 # hatches (`__mlir_op.`index.add`(a, b)`); the stdlib is written in them.
 # `create_future` is the event loop's future constructor, lowered by name in
-# mojo/backend_gimple/emit_calls.py and mojo/middle/coro.py. `Event` and
-# `Future` are the same Awaitable protocol's other two no-arg constructors,
-# lowered by name at the same sites to the `__mojo_event_new` /
-# `__mojo_future_new` shims (emit_calls.py, emit_methods.py, module_shared.py,
-# coro.py); no source file declares them either. The unknown-decl pass landed
-# in 0d277236a whitelisting only `create_future`, and refused the gate's
-# coro-future-await job's bare `Event()` as "use of unknown declaration".
-# `type_of` / `__type_of` are the compile-time type builtins, whose canonical
-# set is `fire_compiler._COMPTIME_TYPE_FUNCS` (shared with ownership_check):
-# their argument's STATIC TYPE is the result, so no runtime symbol exists.
+# mojo/backend_gimple/emit_calls.py and mojo/middle/coro.py.
 _COMPILE_TIME_INTRINSICS = frozenset({
     'constrained', '__mlir_op', '__mlir_attr', '__mlir_type', 'create_future',
-    'Event', 'Future',
-}) | N._COMPTIME_TYPE_FUNCS
+})
 
 _RUNTIME_NAMES = frozenset({
     'self', 'Self', '__file__', '__name__', '__init__', '__class__',

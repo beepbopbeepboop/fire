@@ -1362,17 +1362,7 @@ def _dtype_token_ctype(tok):
         sl = 'float32'
     elif sl == 'f64':
         sl = 'float64'
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl) or _SIMD_INT_DTYPE_CTYPE.get(sl)
-
-
-# Integer dtypes, one table with the float one. A `Scalar[DType.uint32]` is a 32-bit
-# unsigned word, not the 64-bit word every unknown `Scalar` erased to.
-_SIMD_INT_DTYPE_CTYPE = {
-    'int8': 'int8_t', 'uint8': 'uint8_t',
-    'int16': 'int16_t', 'uint16': 'uint16_t',
-    'int32': 'int32_t', 'uint32': 'uint32_t',
-    'int64': 'int64_t', 'uint64': 'uint64_t',
-}
+    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl)
 
 
 def _simd_float_dtype_ctype(inner: str) -> str | None:
@@ -1385,13 +1375,6 @@ def _simd_float_dtype_ctype(inner: str) -> str | None:
     dt = _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
     if dt is not None:
         return dt
-    # An INTEGER dtype is a scalar only at width 1 (`Scalar[X]`, `SIMD[X, 1]`). A wider
-    # integer SIMD is a vector and keeps the word fallback; the float arm above is
-    # unchanged (it has always erased any width to its scalar).
-    if len(parts) == 1 or parts[1].strip() == '1':
-        dt = _dtype_token_ctype(parts[0].strip())
-        if dt is not None and dt in _SIMD_INT_DTYPE_CTYPE.values():
-            return dt
     return _float8_dtype.float8_ctype(parts[0].strip())
 
 
@@ -1425,12 +1408,6 @@ def _mojo_type(ann: str | type | None) -> str:
     if '[' in ann:
         base, rest = ann.split('[', 1)
         inner = rest.rstrip(']').strip()
-        if base == 'Scalar':
-            # `Scalar[X]` is a scalar of dtype X: the same C type the annotation resolver
-            # gives it, so a pointer to it and a parameter of it agree.
-            _sdt = _dtype_token_ctype(_split_top_level_commas(inner)[0].strip())
-            if _sdt is not None:
-                return _sdt
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
@@ -1538,48 +1515,6 @@ def _mojo_type(ann: str | type | None) -> str:
         return _f8
     t = _TYPE_MAP.get(ann)
     return t if t is not None else 'int64_t'
-
-# The string-wrapper annotations whose BARE spelling is a real C string
-# parameter. Bracketed forms (`StringSlice[_]`, `Span[...]`) are NOT in this
-# set: those are the fat-pointer `Span *` (see _mojo_type's Span branch).
-_BARE_STRING_PARAM_ANNS = frozenset(
-    {'StaticString', 'StringLiteral', 'StringRef', 'StringSlice'})
-
-
-def is_bare_string_param_annotation(ann) -> bool:
-    """True for the BARE compile-time string annotations (`StringSlice`, not
-    `StringSlice[_]`), whose parameter C type is a real `char *` — see
-    `param_annotation_ctype`."""
-    return isinstance(ann, str) and ann in _BARE_STRING_PARAM_ANNS
-
-
-def param_annotation_ctype(ann) -> str:
-    """The C type a PARAMETER annotated `ann` has, from the annotation alone.
-
-    This is the stateless half of the parameter rule `funcs_shared.
-    _param_ctype` applies, stated ONCE so the export scanners (module_loader's
-    text scan and reflect.py's signature emitter) cannot drift from it:
-    a bare compile-time string type is a NUL-terminated `char *` (the general
-    resolver boxes it as an opaque int64_t handle), everything else is
-    `_mojo_type`'s answer.
-
-    It exists because those two scanners used to box `StringSlice` (bare AND
-    bracketed) to `int64_t *` so an extern could name it without a `Span`
-    typedef. Every generated translation unit now carries
-    `typedef struct Span Span;` in its prelude, and the box was silently a
-    DIFFERENT C type from the one the defining module emitted — so the
-    importer hashed a different `overload_suffix_for` and called a
-    `_std_*_<hex>` symbol that does not exist (the stdlib-dylib
-    undefined-reference red). Returns a parameter type only: a `StringSlice`
-    RETURN is still `_mojo_type`'s boxed int64_t, exactly as the codegen's
-    return-type path resolves it.
-
-    Callers that have a GimpleGen must still use `_param_ctype` — it also
-    applies inferred types, literal defaults and parameter convs; this is the
-    annotation rule for the scanners, which have no gen."""
-    if isinstance(ann, str) and ann in _BARE_STRING_PARAM_ANNS:
-        return 'char *'
-    return _mojo_type(ann)
 
 def _result_type(t1: str, t2: str) -> str:
     return TypeLattice.join(t1, t2)

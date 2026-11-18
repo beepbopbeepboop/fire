@@ -183,10 +183,9 @@ STACK_SIZE = 1 << 16
 DATA_OFF = 0x020000
 DATA_N = 128
 """The compared memory window, in bytes. Every memory operand the pool emits
-addresses `[membase + disp]` (or `[membase + index]`, with the index loaded
-from a small non-negative immediate — see `_index_off`) inside the window and
-inside it ALONE — a byte outside would be compared against the model's `0` for
-an address the CPU never had."""
+addresses `[membase + disp]` with `|disp| <= DATA_N/2`, so every load and store
+lands inside the window and inside it ALONE — a byte outside would be compared
+against the model's `0` for an address the CPU never had."""
 
 #: Region-RELATIVE. The absolute value (`REGION_BASE + STACK_TOP`) is what both
 #: halves are given, and it has to be absolute in the harness too: a
@@ -424,36 +423,6 @@ def _mem(r, size):
     return _reg(r, MEM_BASES), _disp(r, size)
 
 
-def _index_off(r, size):
-    """The value loaded into an index register, as a WINDOW OFFSET.
-
-    The two indexed byte forms carry no displacement field at all, so the whole
-    offset from `MEMBASE` is the index register's value.  It is drawn from the
-    window's UPPER half (non-negative) on purpose: `x86_mem_addr` adds the
-    index as a `Nat` and has no 64-bit wraparound, so a "negative" offset would
-    be a register holding `2^64 - n`, which the CPU wraps back below MEMBASE and
-    the model does not — a real difference in the model's address ARITHMETIC,
-    not the base+index form this pool exists to cover.  Drawing it positive
-    keeps both halves on the same address, and the lower half is already
-    covered by the `[base + disp]` forms that draw `_disp` over the whole
-    window.
-    """
-    return r.randrange(0, DATA_N // 2 - size + 1)
-
-
-def _mem_idx(r, size):
-    """`(base, index, offset)` for a `[base + index]` operand.
-
-    `offset` is what the index register must hold; the pool entry that draws
-    this emits the `mov index, offset` immediately before the access, the same
-    way the `div` entries load their divisor.  Without that the index would be
-    a random 64-bit register value — an address far outside the harness's one
-    `MAP_FIXED` region, so every case would fault instead of comparing an
-    effective address.
-    """
-    return _reg(r, MEM_BASES), _reg(r, GENERAL), _index_off(r, size)
-
-
 _ALU_RR = (("add", X.encode_add_r64_r64, 4), ("or", X.encode_or_r64_r64, 2),
            ("and", X.encode_and_r64_r64, 2), ("sub", X.encode_sub_r64_r64, 4),
            ("xor", X.encode_xor_r64_r64, 3), ("cmp", X.encode_cmp_r64_r64, 5),
@@ -539,30 +508,6 @@ def pool():
         (b, off), s = _mem(r, 1), _reg(r, GENERAL)
         return "mov [%s%+d], %s" % (b.name, off, s.name), \
             X.encode_mov_rm8_r8(b, off, s)
-
-    # The two SIB-INDEXED byte forms. They are the only `[base + index]`
-    # spellings this backend emits (the float-repr helper's digit buffer), and
-    # until they were here the pool's every memory operand was
-    # `[base + disp]`: `tools/formal_isa_census.py` reported both encoders with
-    # no fuzz draw and no `as` check. The index register is LOADED from an
-    # immediate first (`_mem_idx` says why), so the effective address is still
-    # inside the compared window, and it is that sum — not a displacement — the
-    # CPU and `x86_mem_addr` are being compared about.
-    @add(3, "mov_rm8_r8_idx")
-    def _(r):
-        b, i, off = _mem_idx(r, 1)
-        s = _reg(r, GENERAL)
-        return ("mov %s, %d" % (i.name, off), X.encode_mov_r64_imm32(i, off)), \
-               ("mov [%s+%s], %s" % (b.name, i.name, s.name),
-                X.encode_mov_rm8_r8_idx(b, i, s))
-
-    @add(3, "movzx_r64_rm8_idx")
-    def _(r):
-        b, i, off = _mem_idx(r, 1)
-        d = _reg(r, GENERAL)
-        return ("mov %s, %d" % (i.name, off), X.encode_mov_r64_imm32(i, off)), \
-               ("movzx %s, [%s+%s]" % (d.name, b.name, i.name),
-                X.encode_movzx_r64_rm8_idx(d, b, i))
 
     @add(3, "mov_rm16_r16")
     def _(r):

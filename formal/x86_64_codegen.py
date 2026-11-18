@@ -10668,13 +10668,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # so the divide below is the `IDIV` the pre-check protects.
             self._emit_int_overflow_precheck(op)
         if signed:
-            if (op != "%" and not checked
-                    and M.division_needs_overflow_precheck(
-                        folded_left, folded_right)):
-                # Check for INT64_MIN / -1 overflow (only for division).
-                # When `checked` is true the unified pre-check above already
-                # guards the pair; when the divisor cannot be -1 the hardware
-                # `#DE` is impossible and no sentinel is needed.
+            if op != "%":
+                # Check for INT64_MIN / -1 overflow (only for division)
                 self.asm.emit(encode_cmp_r64_imm32(Reg.R11, -1))
                 self._record_cond_branch()
                 self._if_counter += 1

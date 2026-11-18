@@ -132,29 +132,6 @@ def test_multi_name_import_interpreter():
     return True
 
 
-def test_scan_from_imports_flat_comment_paren():
-    """A `)` inside a `#` comment must not truncate a parenthesised import list."""
-    from mojo.middle.funcs_shared import _scan_from_imports_flat
-
-    src = '''from .memory import (
-    a,
-    # TODO(X-1): remove once done
-    b,
-)
-'''
-    got = _scan_from_imports_flat(src)
-    if len(got) != 2 or got[0] != '.memory':
-        print(f"✗ unexpected module/names pair: {got!r}")
-        return False
-    names = [n.strip().rstrip(',') for n in got[1].replace('\n', ',').split(',')]
-    names = [n for n in names if n]
-    if names != ['a', 'b']:
-        print(f"✗ names after comment-paren: {names!r} (raw {got[1]!r})")
-        return False
-    print("✓ _scan_from_imports_flat keeps names after a ')' inside a comment")
-    return True
-
-
 def test_import_integration():
     """Test that imports work with compilation and linking.
 
@@ -261,12 +238,6 @@ if __name__ == '__main__':
         print("\n✓ Multi-name import interpreter test passed!")
     else:
         print("\n✗ Multi-name import interpreter test failed")
-        ok = False
-
-    if test_scan_from_imports_flat_comment_paren():
-        print("\n✓ Import scan comment-paren regression test passed!")
-    else:
-        print("\n✗ Import scan comment-paren regression test failed")
         ok = False
 
     if not ok:

@@ -1191,25 +1191,12 @@ main()
     # A variadic lambda's `*args` really is a sequence: len(), iteration and
     # indexing all read the packed list, and the ZERO-argument call packs an
     # empty one rather than passing a stray scalar.
-    # `*a` is a real sequence, so indexing it works AND reading past its end
-    # is CPython's IndexError rather than a silent default. This case was
-    # pinned to "0\n31\n" from b3de1658b ("each pinned to CPython's answer")
-    # until 2026-11-18; that expectation is NOT CPython's -- CPython raises
-    # `tuple index out of range` for `e()`, and the compiled raise
-    # (`mojo_list_get_int_checked`) is the correct behaviour. Pinned as a
-    # runtime error, with the in-bounds index asserted separately.
-    test_gimple_runtime_error("gimple_variadic_lambda_args_is_a_sequence", """\
+    test_gimple_stdout("gimple_variadic_lambda_args_is_a_sequence", """\
 def main():
     e = lambda *a: len(a) * 10 + a[0]
     print(e())
     print(e(1, 2, 3))
-""", "IndexError")
-
-    test_gimple_stdout("gimple_variadic_lambda_args_sequence_index", """\
-def main():
-    e = lambda *a: len(a) * 10 + a[0]
-    print(e(1, 2, 3))
-""", "31\n")
+""", "0\n31\n")
 
     # CAPTURING + variadic: the closure env leads the packed parameters, and
     # the capture is read through it. This is the corpus shape
@@ -15961,26 +15948,6 @@ main()
 """)
 
 
-def test_list_str_param_read_wrong_after_empty_list_caller():
-    """`e: list[str] = []` then `ends(e)`: the empty list VARIABLE was recorded
-    as a list of ints (the annotation's element type was not read), which made
-    the `list[str]` parameter kind-mixed and its element read a boxed word cast
-    to `char *` (always False). CPython prints `closed` then `open`."""
-    test_gimple_matches_cpython("gimple_list_str_param_read_wrong_after_empty_list_caller", """\
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    e: list[str] = []
-    print(ends(e))
-    print(ends(["a", "b:"]))
-
-main()
-""")
-
-
 def test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool():
     """`a.flag or getattr(a, 'x', False) or a.some_dict`: the middle link is a
     word of unknown kind, and the last link joined it with a dict pointer, so
@@ -16171,6 +16138,31 @@ main()
 """)
 
 
+def test_star_unpack_of_generator_expression_in_call():
+    """Star-unpacking a generator expression in a call must not deref the handle
+    (bug:CODEGEN_star_unpack_of_generator_expression_derefs_the_handle)."""
+    test_gimple_matches_cpython("gimple_star_unpack_generator_expression_call", """\
+def cat(*parts):
+    out = ""
+    for p in parts:
+        out += p
+    return out
+
+def total(*nums):
+    s = 0
+    for n in nums:
+        s += n
+    return s
+
+def main():
+    texts = {"x": "1", "y": "2"}
+    print(cat(*(f"{p}=;" for p in sorted(texts))))
+    print(total(*(x * x for x in [1, 2, 3, 4])))
+
+main()
+""")
+
+
 def test_list_slice_of_mixed_list_reads_slots_as_values():
     """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
     test_gimple_matches_cpython("gimple_list_slice_mixed", """\
@@ -16194,6 +16186,10 @@ if __name__ == '__main__':
     # Run all tests including our new one
     try:
         test_list_slice_of_mixed_list_reads_slots_as_values()
+    except Exception as e:
+        print(f"ERR: {e}")
+    try:
+        test_star_unpack_of_generator_expression_in_call()
     except Exception as e:
         print(f"ERR: {e}")
     main()

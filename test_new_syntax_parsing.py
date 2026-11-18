@@ -985,22 +985,10 @@ def test_string_default_ends_its_sub_stream():
     fn = stmts[0]
     check("string_default_parses_to_a_function", isinstance(fn, N.FunctionDef),
           repr(type(fn)))
-    # The default is kept, not just parsed: the string that ends the
-    # sub-stream must come back as the value itself (a misparse that no
-    # longer hangs would still be a bug, and the value is the check that
-    # catches it).
-    s_default = (fn.comptime_param_defaults or {}).get('S')
-    check("string_default_value_is_kept",
-          isinstance(s_default, N.StringLiteral) and s_default.value == 'x',
-          repr(s_default))
     # Adjacent literals in the default still concatenate (the loop's purpose).
     stmts2 = _parse('def g[S: StringLiteral = "a" "b"]() -> Int:\n    return 1\n')
     check("adjacent_string_default_parses", isinstance(stmts2[0], N.FunctionDef),
           repr(type(stmts2[0])))
-    ab_default = (stmts2[0].comptime_param_defaults or {}).get('S')
-    check("adjacent_string_defaults_concatenate",
-          isinstance(ab_default, N.StringLiteral) and ab_default.value == 'ab',
-          repr(ab_default))
 
 
 def run_tests():

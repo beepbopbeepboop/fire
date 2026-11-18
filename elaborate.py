@@ -3854,12 +3854,6 @@ class Elaborator:
         targs = bind_type_args(tmpl, type_args)
         if targs is None:
             return None
-        # A struct's `comptime` alias that a stdlib function computes (`comptime uint_type =
-        # _uint_type_of_width[bit_width_of[Self.dtype]()]()`) takes its value here, so the fields
-        # typed with it name the concrete dtype rather than staying erased. Done once on the
-        # template so the instance object, its signature and its cache key all see the same text.
-        from mojo.middle.comptime_fn import resolve_struct_aliases
-        tmpl = resolve_struct_aliases(tmpl, targs, module_src)
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
         _validate_align_decorators_for_struct(module_src, tmpl, struct_name, targs)
@@ -3879,17 +3873,12 @@ class Elaborator:
             nested_defs.append(n_concrete)
             renames.append((mention, n_mangled))
 
-        _, concrete = mm.monomorphize_source(tmpl, targs)
-        # The instance is its own compilation unit: it sees the names its home module
-        # imports, or a call to one of them (`mulhi` from std.gpu.intrinsics in a
-        # method body) would bind to a weak stub that fails at run time.
-        _imports = _instance_import_text(module_src, concrete)
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      nested_defs=nested_defs,
                                                      renames=renames,
-                                                     conformance_bases=_where_conformance_bases(module_src),
-                                                     import_text=_imports)
-        fields, methods, anns = _struct_layout_anns(_imports + concrete, mangled)
+                                                     conformance_bases=_where_conformance_bases(module_src))
+        _, concrete = mm.monomorphize_source(tmpl, targs)
+        fields, methods, anns = _struct_layout_anns(concrete, mangled)
         # `symbols`: what the TU ACTUALLY defined (`nm`). The caller registers
         # its externs and its `func_return_types` keys from this rather than
         # from a re-derived name, so a declaration and its definition cannot
@@ -3913,8 +3902,7 @@ class Elaborator:
             return None
         return self.elaborate_generic_struct(module_src, struct_name, type_args)
 
-    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes,
-                                qualifier: str = '') -> dict:
+    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
         """Resolve an overloaded call (slice 4): pick the `fn_name` overload whose
         parameter types match the argument C types, mangle it by signature, and
         compile that one concrete function (CAS-cached). Returns
@@ -3927,14 +3915,6 @@ class Elaborator:
         arg_mojo = [c_to_mojo(ct) for ct in arg_ctypes]
         chosen = None
         for src, ptypes, ret in overloads:
-            # A candidate with bracket parameters is a GENERIC template: a plain
-            # call cannot select it (it needs `name[...]()`), so it never matches
-            # here. Matching it on an empty parameter list named `is_amd_gpu()`
-            # after the generic overload `is_amd_gpu[subarch]()` (both have no
-            # value parameters), and its instance was emitted under a symbol
-            # nothing defines.
-            if type_param_names(src):
-                continue
             if ptypes == arg_mojo:
                 chosen = (src, ptypes, ret)
                 break
@@ -3948,18 +3928,8 @@ class Elaborator:
         # INJECTIVELY, via the same length-prefixed encoding `mangle` uses. The
         # previous `safe_suffix('_'.join(ptypes))` was ambiguous segmentation
         # with a lossy escape, so `['A_B']` and `['A', 'B']` named one symbol.
-        # An overload with NO parameters is named as the definer names it: an
-        # overloaded free function's definition takes the bare name when its
-        # parameter list is empty (codegen's overload suffix of [] is ''), so the
-        # call names the bare symbol too. `mangle_signature`'s `__void` names
-        # nothing.
-        mangled = mm.mangle_signature(fn_name, ptypes) if ptypes else fn_name
-        # The defining module's qualifier is part of the symbol the object EXPORTS, so
-        # the call site and the object name the same function (the call site used to
-        # prefix the qualifier after the object was built under the bare name).
-        if qualifier:
-            mangled = qualifier + '_' + mangled
-        renamed = re.sub(rf'\b(fn|def)\s+{re.escape(fn_name)}\b', rf'\1 {mangled}', src, count=1)
+        mangled = mm.mangle_signature(fn_name, ptypes)
+        renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
         try:
             obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
         except Exception:
@@ -4526,88 +4496,3 @@ def type_arg_bound_evidence(module_src, template_src, param, arg, fn_bounds):
     if all(v == 'proven' for v in verdicts):
         return 'proven'
     return 'unknown'
-
-
-def _instance_import_text(module_src: str, body_src: str) -> str:
-    """The home module's absolute imports, narrowed to the names the instance body
-    CALLS PLAIN (`name(...)`): a non-generic function the body needs, which would
-    otherwise bind to a weak stub. A generic call is written with brackets
-    (`bitcast[...]`), and that call already resolves through the path it always
-    took; importing its generic definition changes that resolution, so it is left
-    out."""
-    plain = set(re.findall(r'(?<![.\w])([A-Za-z_]\w*)\s*\(', body_src))
-    out = []
-    for stmt in _module_import_lines(module_src):
-        m = re.match(r'^from\s+([\w.]+)\s+import\s+\(?([^)]*)\)?\s*$', stmt.replace('\n', ' '))
-        if not m:
-            continue
-        keep = []
-        for part in m.group(2).split(','):
-            part = part.strip()
-            if not part:
-                continue
-            name = part.split(' as ')[0].strip()
-            if name in plain:
-                keep.append(part)
-        if keep:
-            out.append('from %s import %s' % (m.group(1), ', '.join(keep)))
-    return ('\n'.join(out) + '\n\n') if out else ''
-
-
-def _module_import_lines(module_src: str) -> list:
-    """The module's top-level import statements (see `_module_import_text`)."""
-    out = []
-    lines = module_src.splitlines()
-    in_doc = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.count('"""') % 2 == 1:
-            in_doc = not in_doc
-            i += 1
-            continue
-        if in_doc:
-            i += 1
-            continue
-        if re.match(r'^(from|import)\s', line):
-            stmt = [line]
-            if '(' in line and ')' not in line:
-                while i + 1 < len(lines) and ')' not in lines[i]:
-                    i += 1
-                    stmt.append(lines[i])
-            text = '\n'.join(stmt)
-            if not re.match(r'^from\s+\.', text):
-                out.append(text)
-        i += 1
-    return out
-
-
-def _module_import_text(module_src: str) -> str:
-    """The module's top-level ABSOLUTE import statements, as source text (a
-    parenthesised import spanning lines is kept whole). Relative imports are left
-    out: an instance is compiled without a file path, so they cannot resolve.
-    Lines inside a triple-quoted string (a docstring) are not statements."""
-    out = []
-    lines = module_src.splitlines()
-    in_doc = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.count('"""') % 2 == 1:
-            in_doc = not in_doc
-            i += 1
-            continue
-        if in_doc:
-            i += 1
-            continue
-        if re.match(r'^(from|import)\s', line):
-            stmt = [line]
-            if '(' in line and ')' not in line:
-                while i + 1 < len(lines) and ')' not in lines[i]:
-                    i += 1
-                    stmt.append(lines[i])
-            text = '\n'.join(stmt)
-            if not re.match(r'^from\s+\.', text):
-                out.append(text)
-        i += 1
-    return ('\n'.join(out) + '\n\n') if out else ''

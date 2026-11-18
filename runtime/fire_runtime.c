@@ -1544,26 +1544,21 @@ const char *mojo_list_get_kinds(MojoList *l)
  * pointer DECIMAL because its kind byte still said 'i' though it held a
  * string). Copy-on-write: the kinds string may be a shared string-pool
  * constant (two same-shaped literals share one pool entry), so the first
- * kind-CHANGING write takes a private copy; a buffer this row already owns
- * is mutated in place. Same-kind writes (the common case) and undescribed
- * lists touch nothing. */
+ * kind-CHANGING write takes a private copy; same-kind writes (the common
+ * case) and undescribed lists touch nothing. The private copy is row-owned
+ * (never freed — the row is the table's). */
 static void _kinds_set_byte(MojoList *l, int64_t idx, char kind) {
     if (!l || idx < 0) return;
     _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
     if (!r || !r->kinds) return;
     size_t li = (size_t)idx;
     if (!r->kinds[li] || r->kinds[li] == kind) return;
-    if (r->owned != 0) {
-        r->kinds[li] = kind;
-        return;
-    }
     size_t n = strlen(r->kinds) + 1;
     char *priv = (char *)malloc(n);
     if (!priv) return;
     memcpy(priv, r->kinds, n);
     priv[li] = kind;
     r->kinds = priv;
-    r->owned = 1;
 }
 
 static void _kinds_forget(uint64_t addr);
@@ -1577,15 +1572,9 @@ void mojo_list_set_kinds(MojoList *l, const char *kinds)
     if ((!kinds || !*kinds) && !_kinds_row(addr)) return;
     int fresh = 0;
     _KindRow *r = _kinds_row_for_write(addr, &fresh);
-    if (!fresh && r->kinds && r->kinds != (char *)kinds) {
-        if (r->owned == 2)
-            free(r->kinds - 8);
-        else if (r->owned == 1)
-            free(r->kinds);
-    }
     r->kinds = (char *)kinds;
     r->owned = 0;   /* mojo_list_set_kinds stores a (possibly shared) pointer */
-    if (!r->kinds) _kinds_forget(addr);
+    if (fresh && !kinds) _kinds_forget(addr);
 }
 
 void mojo_list_set_kinds_uniform(MojoList *l, char kind)
@@ -1768,12 +1757,6 @@ static void _kinds_forget(uint64_t addr)
         i = (i + 1) & mask;
     }
     free(_reg_kinds.rows[i].boxes);
-    if (_reg_kinds.rows[i].kinds) {
-        if (_reg_kinds.rows[i].owned == 2)
-            free(_reg_kinds.rows[i].kinds - 8);
-        else if (_reg_kinds.rows[i].owned == 1)
-            free(_reg_kinds.rows[i].kinds);
-    }
     /* Backward-shift deletion, the same algorithm (and the same reason) as
      * _pr_del: clearing the slot outright would leave a hole that every
      * LATER member of this probe cluster can no longer be found through, so
@@ -1795,7 +1778,6 @@ static void _kinds_forget(uint64_t addr)
     }
     _reg_kinds.rows[i].addr = 0;
     _reg_kinds.rows[i].kinds = NULL;
-    _reg_kinds.rows[i].owned = 0;
     _reg_kinds.rows[i].boxes = NULL;
     /* `repr_fn` too. It was the one field left behind, so the NEXT row
      * created in this slot -- for any list at all -- inherited the dead
@@ -2247,27 +2229,21 @@ static void _list_word_push(MojoList *l, char kind, int64_t raw, char prior)
      * Slots before this one that the string does not describe are `prior`:
      * the static kind of the list's existing elements (a str list's slots
      * are 'p', an int list's are 'i'). The kinds string is a PRIVATE growable
-     * buffer: an 8-byte header holds its capacity so the append is amortised
-     * O(1), and a row whose kinds are not such a buffer (shared/pooled or a
-     * fixed private copy) is copied into one on first extension. The buffer
-     * is owned by the row (owned == 2) and freed/replaced here or when the
-     * row is forgotten, never leaked on growth and never re-copied per append. */
+     * buffer (`mojo_list_set_kinds` stores the pointer it is given, it never
+     * copies): an 8-byte header holds its capacity so the append is amortised
+     * O(1), and a row whose kinds are not such a buffer (shared/pooled) is
+     * copied first. */
     int64_t n = l->len;
-    uint64_t addr = (uint64_t)(uintptr_t)l;
-    int fresh = 0;
-    _KindRow *r = _kinds_row_for_write(addr, &fresh);
+    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
     char *buf = NULL;
-    if (!fresh && r->kinds && r->owned == 2) {
+    if (r && r->kinds && r->owned == 2) {
         buf = r->kinds;
         int64_t cap = *(int64_t *)(buf - 8);
         if (n + 2 > cap) {
-            int64_t ncap = cap * 2;
-            if (ncap < n + 2) ncap = n + 2;
-            ncap += 8;
+            int64_t ncap = cap * 2 + 8;
             char *nb = (char *)malloc((size_t)ncap + 8);
-            *(int64_t *)nb = ncap;
             memcpy(nb + 8, buf, (size_t)n);
-            free(buf - 8);
+            *(int64_t *)nb = ncap;
             buf = nb + 8;
         }
     } else {
@@ -2275,15 +2251,15 @@ static void _list_word_push(MojoList *l, char kind, int64_t raw, char prior)
         char *nb = (char *)malloc((size_t)ncap + 8);
         *(int64_t *)nb = ncap;
         buf = nb + 8;
-        const char *old = (!fresh && r->kinds) ? r->kinds : NULL;
+        const char *old = (r && r->kinds) ? r->kinds : NULL;
         for (int64_t i = 0; i < n; i++) buf[i] = (old && old[i]) ? old[i] : prior;
-        if (!fresh && r->kinds && r->owned != 0) free(r->kinds);
     }
     buf[n] = kind;
     buf[n + 1] = '\0';
     mojo_list_append_int(l, raw);
-    r->kinds = buf;
-    r->owned = 2;
+    mojo_list_set_kinds(l, buf);
+    r = _kinds_row((uint64_t)(uintptr_t)l);
+    if (r) r->owned = 2;
 }
 
 void mojo_list_append_word(MojoList *l, int64_t w)
@@ -13794,37 +13770,23 @@ int64_t mojo_list_delitem(MojoList *l, int64_t idx) {
  * recording on an append (the runtime's fallback for an undescribed slot is
  * 'i', and inventing bytes here would describe slots the codegen never
  * committed to). Copy-on-write: a shared (unowned) buffer is copied first, so
- * growth only ever touches a private buffer. */
+ * the realloc only ever touches a private buffer. */
 static void _kinds_append(_KindRow *r, const char *bytes, int64_t n) {
     if (!r || !r->kinds || !bytes || n <= 0) return;
-    size_t cur = strlen(r->kinds);
-    if (r->owned == 2) {
-        char *buf = r->kinds;
-        int64_t cap = *(int64_t *)(buf - 8);
-        if ((int64_t)cur + n + 1 > cap) {
-            int64_t ncap = cap * 2;
-            if (ncap < (int64_t)cur + n + 1) ncap = (int64_t)cur + n + 1;
-            ncap += 8;
-            char *nb = (char *)malloc((size_t)ncap + 8);
-            if (!nb) return;
-            *(int64_t *)nb = ncap;
-            memcpy(nb + 8, buf, cur);
-            free(buf - 8);
-            r->kinds = nb + 8;
-        }
-    } else if (!r->owned) {
-        char *priv = (char *)malloc(cur + (size_t)n + 1);
+    if (!r->owned) {
+        size_t cur = strlen(r->kinds);
+        char *priv = (char *)malloc(cur + 1);
         if (!priv) return;
-        memcpy(priv, r->kinds, cur);
+        memcpy(priv, r->kinds, cur + 1);
         r->kinds = priv;
         r->owned = 1;
-    } else {
-        char *nb = (char *)realloc(r->kinds, cur + (size_t)n + 1);
-        if (!nb) return;
-        r->kinds = nb;
     }
-    memcpy(r->kinds + cur, bytes, (size_t)n);
-    r->kinds[cur + (size_t)n] = '\0';
+    size_t cur = strlen(r->kinds);
+    char *nb = (char *)realloc(r->kinds, cur + (size_t)n + 1);
+    if (!nb) return;
+    memcpy(nb + cur, bytes, (size_t)n);
+    nb[cur + (size_t)n] = '\0';
+    r->kinds = nb;
 }
 
 void mojo_list_extend(MojoList *dst, MojoList *src) {
@@ -17741,8 +17703,8 @@ int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
 typedef struct { FreProg *pg; char *pattern; int64_t flags; } MojoRePat;
 /* `is_bytes` is the subject's KIND, recorded at match time: a bytes subject's
  * groups are bytes objects and its repr is spelled with bytes reprs (CPython:
- * `m.group(1)` of `re.compile(b'a(b)').match(b'ab')` is `b'b'`). `text` views
- * the subject in place (captures index into it); groups copy by length. */
+ * `m.group(1)` of `re.compile(b'a(b)').match(b'ab')` is `b'b'`). `text` is a
+ * NUL-terminated copy of the subject either way; groups copy by length. */
 typedef struct { MojoRePat *re; char *text; int64_t n; int64_t *caps; int64_t pos, endpos; int is_bytes; } MojoReMatch;
 static _PtrReg _reg_re_pat, _reg_re_match;
 
@@ -17815,9 +17777,8 @@ static int _re_exec_raw(const FreProg *pg, ReSubj sb, int64_t pos, int64_t endpo
         : fre_exec(pg, sb.p, sb.n, pos, endpos, mode, caps);
 }
 
-/* A match record over a subject of either kind (the match views the subject's
- * text in place and records its kind; see m->text). NULL when the pattern does
- * not match. */
+/* A match record over a subject of either kind (the match keeps its own copy of the
+ * text, and the subject's kind). NULL when the pattern does not match. */
 static MojoReMatch *_re_search(MojoRePat *r, ReSubj sb, int64_t pos, int64_t endpos, int mode)
 {
     if (endpos < 0 || endpos > sb.n) endpos = sb.n;
@@ -17825,8 +17786,9 @@ static MojoReMatch *_re_search(MojoRePat *r, ReSubj sb, int64_t pos, int64_t end
     int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
     if (!_re_exec_raw(r->pg, sb, pos, endpos, mode, caps)) { free(caps); return NULL; }
     MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
-    m->re = r; m->text = (char *)sb.p; m->n = sb.n;
-    m->caps = caps; m->pos = pos; m->endpos = endpos; m->is_bytes = sb.is_bytes;
+    m->re = r; m->text = (char *)malloc((size_t)sb.n + 1);
+    memcpy(m->text, sb.p, (size_t)sb.n); m->text[sb.n] = 0;
+    m->n = sb.n; m->caps = caps; m->pos = pos; m->endpos = endpos; m->is_bytes = sb.is_bytes;
     _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
     return m;
 }

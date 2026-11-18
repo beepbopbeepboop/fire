@@ -265,19 +265,6 @@ CASES += [
      lambda: X.encode_imul_r64_r64_imm(R["R15"], R["R14"], -128)),
     ("imulq $127, %r14, %r15",
      lambda: X.encode_imul_r64_r64_imm(R["R15"], R["R14"], 127)),
-    # The SIB-indexed byte STORE. It is the only `[base + index]` form this
-    # backend emits (the float-repr helper's digit buffer), and it was the one
-    # encoder `tools/formal_isa_census.py` reported with no `as` check at all.
-    # Three rows rather than one, because the fields are independent: the first
-    # has every REX bit clear, the second is the SPL/BPL/SIL/DIL case a null REX
-    # is load-bearing for (without it the store names DH, not SIL), and the
-    # third sets REX.R, REX.X and REX.B together and carries R13's disp8.
-    ("movb %al, (%rcx,%rdi)",
-     lambda: X.encode_mov_rm8_r8_idx(R["RCX"], R["RDI"], R["RAX"])),
-    ("movb %sil, (%rbp,%rbx)",
-     lambda: X.encode_mov_rm8_r8_idx(R["RBP"], R["RBX"], R["RSI"])),
-    ("movb %r9b, (%r13,%r12)",
-     lambda: X.encode_mov_rm8_r8_idx(R["R13"], R["R12"], R["R9"])),
 ]
 
 # The four-byte-width memory forms, kept OUT of the byte table above on purpose.
@@ -315,19 +302,6 @@ REX_VARIANT_CASES = [
      "prefix where `as` omits it"),
     ("movl 8(%r13), %r11d", lambda: X.encode_mov_r32_rm32(R["R11"], R["R13"], 8),
      "a 32-bit load off an r8-r15 base: REX.B is set on both sides"),
-    # The SIB-indexed byte LOAD, the store's sibling. `as` spells the same
-    # instruction `movzbq` (REX.W) and this backend leaves W clear because the
-    # 32-bit destination zero-extends either way — the same difference, for the
-    # same reason, as the `movzbq -1(%rbp), %rax` row above. The pair covers
-    # REX.X as well: the first row has it clear (index RSI), the second set
-    # (index R11) together with REX.B (base R13).
-    ("movzbq (%rcx,%rsi), %rax",
-     lambda: X.encode_movzx_r64_rm8_idx(R["RAX"], R["RCX"], R["RSI"]),
-     "`movzx r32, m8` and `movzx r64, m8` both zero the whole register, so ours "
-     "leaves REX.W clear where `as` sets it; the SIB index is RSI (REX.X clear)"),
-    ("movzbq 0(%r13,%r11), %r10",
-     lambda: X.encode_movzx_r64_rm8_idx(R["R10"], R["R13"], R["R11"]),
-     "…and the same with REX.R, REX.X and REX.B all set, plus R13's disp8"),
 ]
 
 

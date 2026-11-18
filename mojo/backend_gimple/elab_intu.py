@@ -4186,11 +4186,6 @@ def run(gen, stmts: list):
             setattr(gen, attr, dict(default))
     if _skip(gen):
         return []
-    local_generic_struct_defs = {
-        s.name for s in stmts
-        if isinstance(s, StructDef)
-        and (getattr(s, 'type_param_names', None) or [])
-    }
     work = _Work(gen)
     queue = []
     # Dependent-return iterator factories (`peekable(l)`, `take(l, 3)`, ...):
@@ -4217,13 +4212,6 @@ def run(gen, stmts: list):
         if kind is None:
             return
         if kind == 'struct':
-            # A generic struct defined in THIS file must be served by this
-            # module's own struct/method emission, not materialized as an in-TU
-            # instantiation here: doing so can drop the defining module's own
-            # method definitions (e.g. std/iter's _Enumerate.__next__ became
-            # prototype-only when a same-file constructor seeded it).
-            if base in local_generic_struct_defs:
-                return
             if isinstance(base, str) and base.startswith('_'):
                 pass  # skip internal structs
             if _protocol_only_overloads(gen, base):

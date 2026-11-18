@@ -359,13 +359,6 @@ def land_doc(name, t, reason, detail=""):
         with open(p, "w") as f:
             f.write(body.rstrip("\n") + "\n" + entry)
     else:
-        import dangling_doc_refs as DDR  # lazy: its checked_run -> build_config -> module_loader chain imports the compiler; the integrator needs it only when it files a doc
-        # The task summary quotes the worker's task file, which names the bug doc as `bugs/<doc>.md`; when the
-        # branch being filed is the fix, that doc has already been deleted, and the citation would be dangling
-        # from the doc's first commit (a brand-new file has a 0 ceiling in the doc-refs ratchet). Sanitize it:
-        # a citation of a doc this tree no longer has becomes the bare stem plus "(deleted)", in both ratchet
-        # classes, and a citation that resolves is left alone.
-        summary = DDR.sanitize_text((t.get("summary") or "")[:300])
         claims = ", ".join(t.get("claims") or []) or "(none)"
         with open(p, "w") as f:
             f.write(
@@ -393,7 +386,7 @@ def land_doc(name, t, reason, detail=""):
                 "## Done when\n\nA commit exists that records the decision: the change (LAND/ADAPT) or the reason it was dropped\n"
                 "(DROP), and this doc is gone.\n\n"
                 "## Status\n%s"
-                % (name, t["branch"], name, t["branch"], branch_age(t), summary, claims, entry))
+                % (name, t["branch"], name, t["branch"], branch_age(t), (t.get("summary") or "")[:300], claims, entry))
     commit_doc(p, "land: %s cannot land (%s); the doc is the work\n\nFiled by the integrator." % (name, reason.split(":")[0][:60]))
     print("land doc %s: %s" % (os.path.relpath(p, C.MAIN), reason), flush=True)
     return p

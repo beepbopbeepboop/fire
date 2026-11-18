@@ -1,12 +1,10 @@
-SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part4, GATE_recover_land_remainder-part5
-
-# GATE: recover-land backlog remainder — OFF entry owner doc
+# GATE: recover-land backlog remainder (23 jobs) — OFF entry owner doc
 
 ## Status (2026-11-13, OPEN; remainder untriaged on current HEAD)
 
 The OFF entry in `tools/gates.json` matching
 
-    ^(gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$
+    ^(async-void-return|bootstrap-stage1-transitive|coro|coro-detached-async|coro-future-await|doc-refs|doc-refs-stale-verdicts|formal-sweep-truth|formal-sys|gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$
 
 previously named the deleted `bugs/mid/GATE_red_recover_land_2026-11-02` doc, which was removed
 in `d44f44787` ("Fixed root cause (coro.module_qualifier missing as module
@@ -19,27 +17,6 @@ this worktree and re-running all 23 jobs (including compiled-path/bootstrap
 coverage such as `selfhost`, `mojoc`, `linkmode`, `bootstrap-stage1-transitive`)
 is outside a light worker's budget. Treat every job in the pattern as still part
 of the backlog until individually verified green and removed from the entry.
-
-### 2026-11-18: `formal-sweep-truth` and `formal-sys` are green; both re-enabled
-
-`work/bug-gate-recover-land-remainder-part3` verified this pair, and its landing
-went stale while master re-enabled the same jobs from its own evidence:
-
-- `python3 test_formal_sys.py` — `PASS=13 FAIL=0`; re-enabled in `2df09657e`.
-  Re-run on this branch, same result.
-- `python3 test_formal_sweep_truth.py` — `145 tests OK (skipped=10)` on this
-  branch. It was red on master for two reasons, both fixed in `efb44e0a4`: the
-  scratch-dir guard named a hard-coded `/tmp` in `tools/test_claim_release.py`,
-  and `AXIOM_CLOSURE` still pinned the 2026-11-08 census (`Contracts` 9,
-  `ProofLibSteps2` 11, `ProofLibSteps8` 6, `Refine` 32). Re-enabled in the same
-  commit.
-
-The branch therefore lands no `tools/gates.json` change: both names are already
-out of the OFF entry on master, and its stale copy of the pattern must not
-re-add `doc-refs`/`doc-refs-stale-verdicts`, which `fb746c0b1` turned back on.
-What it does land is the pinning test (`test_gates_off_entries_name_a_doc.py`)
-and the deletion of the part-3 backlog doc with its evidence.
-The remaining jobs in the pattern are still untriaged.
 
 ## Original context (carried over from the deleted `GATE_red_recover_land_2026-11-02` doc)
 
@@ -66,4 +43,5 @@ on 2026-11-02 with 23 jobs failing. Known observations from that report:
 
 `python3 tools/memslot.py --gb 8 --label gate-off-doc -- python3 -m unittest test_gates_off_entries_name_a_doc.py -v`
 passes, proving every `tools/gates.json` OFF entry names an existing doc and
-worker (so the recover-land entry is owned by a live doc, not a deleted path).
+worker (so the 23-job recover-land entry is owned by a live doc, not a deleted
+path).

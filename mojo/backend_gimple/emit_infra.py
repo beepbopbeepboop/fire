@@ -1713,18 +1713,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
             # Only for genuinely mangled functions — reserved renames (pipe →
             # mojo_pipe) are handled by other decl paths and must not change here.
             if gen._func_mangleable(sym):
-                # The definer's list when its home signature names a struct private
-                # to the defining module. Recorded here, once, so every later name
-                # for this import (call sites, which are generated before the
-                # import block is written) hashes the same list as the definition.
-                import mojo.backend_gimple.emit_funcs as _efn_pv
-                _home_pv = _efn_pv._imported_private_struct_pts(gen, sym)
-                if _home_pv:
-                    _hp_by = getattr(gen, '_home_private_pts_by_name', None)
-                    if _hp_by is None:
-                        _hp_by = {}
-                        gen._home_private_pts_by_name = _hp_by
-                    _hp_by[sym] = list(_home_pv)
                 _csym = gen._func_csym(sym)
                 if _csym != sym:
                     sig = gimple_ctypes._replace_first_ident(sig, sym, _csym)
@@ -6269,80 +6257,6 @@ def _to_int64(gen, ctype: str, val: str) -> str:
 
 
 
-
-def _erasure_free_context(gen) -> bool:
-    """True when the lowered argument C types in the function being emitted are
-    the source's own types, so an exact-C-type overload choice is safe.
-
-    A body still emitted with a symbolic/erased type parameter is not: inside a
-    generic struct or function a parameter's C type can be erased to a word (e.g.
-    `Scalar[dtype].cast[.uint32]()` lowers to int64_t), so the choice would be a
-    guess. An enclosing generic that has been substituted to concrete types is a
-    concrete specialisation, and its argument C types are real."""
-    if getattr(gen, '_is_elaborated_instantiation', False):
-        return True
-    _cur = getattr(gen, '_current_func_node', None)
-    if _cur is not None and getattr(_cur, 'comptime_params', None):
-        _intu_f = getattr(gen, '_intu_func_args', None) or {}
-        _fname = getattr(_cur, 'name', None)
-        _concrete = False
-        for (_base, _args), _mangled in _intu_f.items():
-            if _mangled == _fname or _base == _fname:
-                if _args and all(gimple_exprtypes._is_concrete_type_arg(a) for a in _args):
-                    _concrete = True
-                break
-        if not _concrete:
-            return False
-    _sname = getattr(gen, '_current_struct_name', None) or ''
-    if _sname:
-        _intu_s = getattr(gen, '_intu_struct_args', None) or {}
-        for (_base, _args), _mangled in _intu_s.items():
-            if _mangled == _sname:
-                return bool(_args) and all(
-                    gimple_exprtypes._is_concrete_type_arg(a) for a in _args)
-        for _st in getattr(gen, '_current_module_stmts', None) or []:
-            if (type(_st).__name__ == 'StructDef' and str(_st.name) == _sname
-                    and getattr(_st, 'bracket_params', None)):
-                return False
-    return True
-
-def _arg_reads_type_dependent_field(gen, args) -> bool:
-    """True when an argument, anywhere in its tree, reads `self.<field>` of the struct whose
-    method is being emitted and that field's annotation names a type parameter or `Self.`."""
-    sname = getattr(gen, '_current_struct_name', None)
-    tparams = getattr(gen, '_current_struct_type_params', None)
-    if not sname or not tparams:
-        return False
-    ann = getattr(gen, '_field_annotations', None) or {}
-    dep_names = {str(t) for t in tparams}
-    seen = set()
-
-    def walk(n) -> bool:
-        if id(n) in seen:
-            return False
-        seen.add(id(n))
-        if isinstance(n, gimple_ctypes.MemberExpr) and isinstance(n.obj, gimple_ctypes.IdentExpr) \
-                and n.obj.name == 'self':
-            text = str(ann.get(f'{sname}.{n.member}', ''))
-            if text and ('Self.' in text or any(re.search(rf'\b{re.escape(t)}\b', text)
-                                                 for t in dep_names)):
-                return True
-        if isinstance(n, (list, tuple)):
-            return any(walk(x) for x in n)
-        d = getattr(n, '__dict__', None)
-        if d is None:
-            return False
-        return any(walk(v) for v in d.values() if v is not None)
-
-    return any(walk(a) for a in args)
-
-
-def _is_overloaded_home(gen, name, source) -> bool:
-    """True when the module that defines NAME declares it more than once (an overload set)."""
-    src = gen._generic_source_text(source)
-    return bool(src) and len(gimple_ctypes.source_decl_ends(src, ['fn', 'def'], name, '([')) > 1
-
-
 def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     """Resolve and elaborate an overloaded imported call (slice 4): lower the
     args, pick the matching overload by their C types, and emit the call to the
@@ -6366,60 +6280,23 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
-    # A call whose arity matches exactly ONE plain overload is that overload: no
-    # type choice is needed, so its home symbol is called rather than a private copy
-    # elaborated under the mangled name nothing else defines (stdlib `bit.mask`'s
-    # `splat(Bool)` reached from `codepoint.mojo`). Several arity matches keep the
-    # elaboration below.
-    import mojo.backend_gimple.emit_calls as _ec_el
-    # The home symbol is called only for a `std` module: the stdlib dylib is on every
-    # link line, so its definition is there. A local sibling's home symbol is defined in
-    # no object on the link line, so a sibling keeps the elaborated copy, which links.
-    _home_mod = _ec_el._imported_overload_home_module(gen, g) or ''
-    # A relative import (`from ._macos import f`) inside the stdlib names a stdlib module
-    # too: the importing file is what says so when the module name does not.
-    _in_std = '/stdlib/std/' in (getattr(gen, '_current_filename', None) or '')
-    _std_home = (_home_mod == 'std' or _home_mod.startswith('std.')
-                 or (_home_mod.startswith('.') and _in_std))
-    _home_sym = (_ec_el._imported_overload_call_symbol(gen, g, node, None)
-                 if _std_home else None)
-    if _home_sym is None and _std_home and _erasure_free_context(gen):
-        # Several arity matches: choose by the lowered argument types, but only
-        # when the enclosing generic (if any) has been substituted to concrete
-        # types so those types are real. A body still emitted with a symbolic/
-        # erased type parameter (e.g. `Scalar[dtype].cast[.uint32]()` lowered to
-        # int64_t) keeps the refusal, because the choice would be a guess.
-        _home_sym = _ec_el._imported_overload_call_symbol(
-            gen, g, node, [_ct for _ct, _ in arg_pairs])
-    if _home_sym is not None:
-        _hret = gen.func_return_types.get(_home_sym, 'int64_t')
-        return _hret, gen._call_expr(_hret, _home_sym, arg_pairs)
-    # The overload symbol is qualified by the defining module (the same composition
-    # `_func_csym` uses) BEFORE the object is built, so the object exports the name
-    # the call site uses.
-    _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
-    # An overloaded call whose ARGUMENT reads a field typed by the struct's type parameters
-    # (`self._mprime.cast[.uint32]()`, field `Scalar[Self.uint_type]`) inside a generic template
-    # body: that field is the erased word here, so the overload the elaborator would pick is a
-    # guess, and the copy it names is never emitted (an undefined `mulhi__...Int64` in the dylib).
-    # The body is refused, and its caller falls back to the prototype-only form, the same path as
-    # any other unlowerable body. Calls whose arguments are concrete (`max(self.capacity() * 2,
-    # min_capacity)`) keep their choice. Raised OUTSIDE the try below, whose `except` would turn
-    # the refusal into a silent None.
-    if _arg_reads_type_dependent_field(gen, node.args or []) and _is_overloaded_home(gen, g, source):
-        raise RuntimeError(
-            f'cannot compile module: overloaded call {g}() reads a type-parameter-dependent field '
-            f'in a generic struct body; the overload is not decidable here')
     try:
         module_src = gen._generic_source_text(source)
         import elaborate
         info = elaborate.Elaborator().elaborate_overload_call(
-            module_src, g, [ct for ct, _ in arg_pairs], qualifier=_q)
+            module_src, g, [ct for ct, _ in arg_pairs])
     except Exception:
         gimple_ctypes._debug_note('overload elaboration failed')
         info = None
     if not info:
         return None
+    # The overload symbol is mangled from the BARE name, so an IMPORTED
+    # overloaded function lost the defining module's qualifier and every call
+    # site emitted a symbol nothing defines (`pick__void` for
+    # `from m1 import pick`). Same composition `_func_csym` uses.
+    _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
+    if _q:
+        info['symbol'] = _q + '_' + info['symbol']
     return gen._emit_generic_instantiation(info, arg_pairs)
 
 
@@ -9301,19 +9178,14 @@ def _conformance_trait_bases_from_source(gen):
 
 
 def _conforms_to_pred(gen):
-    """Predicate for comptime `conforms_to(T, Trait)` folding, or None.
-
-    Never None merely because this module declares no structs or traits:
-    `comptime_eval.conforms_to` also answers the builtin-scalar cases (the
-    compiler-synthesized `TrivialRegisterPassable` and the traits it derives),
-    and a module whose only structs are the builtins — the doc's synthetic
-    `maybe[Int]` module is one — must still be able to fold
-    `conforms_to(Int, TrivialRegisterPassable)`."""
+    """Predicate for comptime `conforms_to(T, Trait)` folding, or None."""
     try:
         sb = getattr(gen, '_struct_bases', None) or {}
         tb = getattr(gen, '_trait_bases', None) or {}
         ex = getattr(gen, '_conformance_bases_extra', None) or {}
         tbt = _conformance_trait_bases_from_source(gen) or {}
+        if not sb and not tb and not ex and not tbt:
+            return None
         bases = dict(ex)
         bases.update(sb)
         bases.update(tb)

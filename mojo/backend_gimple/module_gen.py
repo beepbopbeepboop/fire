@@ -1702,31 +1702,16 @@ def _drop_unreferenced_extern_decls(text: str) -> str:
         return text
 
     # Count symbol occurrences inside their own declaration blocks vs total.
-    # The block counts are cheap (2-4 short lines per symbol); the whole-text
-    # count is NOT done per symbol. That shape is O(symbols x text), and the
-    # whole-closure `--dump-full` of `fire.py` carries tens of thousands of
-    # guarded externs over a ~40 MB translation unit, so the per-symbol scan
-    # ran for tens of minutes and `bootstrap-stage1-transitive` could not
-    # finish (measured 43 min and still inside this loop, all samples in
-    # `_sre_SRE_Pattern_findall`). One `\w+` tokenisation answers every
-    # symbol's count in a single pass: for a symbol `_decl_sym` has already
-    # restricted to `[A-Za-z_]\w*`, `\b<sym>\b` matches exactly the tokens
-    # equal to it.
     sym_in_blocks = {}
     for start, end, sym in blocks:
         sym_in_blocks.setdefault(sym, 0)
         for j in range(start, end):
             sym_in_blocks[sym] += len(re.findall(r'\b' + re.escape(sym) + r'\b', lines[j]))
 
-    totals = dict.fromkeys(sym_in_blocks, 0)
-    for m in re.finditer(r'\w+', text):
-        w = m.group(0)
-        if w in totals:
-            totals[w] += 1
-
     drop_syms = set()
-    for sym, in_blocks in sym_in_blocks.items():
-        if totals[sym] > 0 and totals[sym] == in_blocks:
+    for sym in sym_in_blocks:
+        total = len(re.findall(r'\b' + re.escape(sym) + r'\b', text))
+        if total > 0 and total == sym_in_blocks[sym]:
             drop_syms.add(sym)
 
     if not drop_syms:
@@ -1908,17 +1893,6 @@ def _emit_reflection_fwd_decls(self, parts):
     if repr_fwd_decls:
         parts.append("/* Forward decls for generic repr() (mutual struct references) */")
         parts.append("\n".join(repr_fwd_decls))
-        parts.append('')
-    field_repr_names = set()
-    for _sn in _emitted:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
-            field_repr_names.add(_sn)
-    field_repr_fwd_decls = [f"static char * _mojo_field_repr_{sn} ({sn} *obj);"
-                            for sn in sorted(field_repr_names)]
-    if field_repr_fwd_decls:
-        parts.append("/* Forward decls for the reflective FIELD dump (no __repr__) */")
-        parts.append("\n".join(field_repr_fwd_decls))
         parts.append('')
     elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
                            for sn in _emitted]
@@ -2363,24 +2337,6 @@ def _emit_reflection_dispatch(self, parts):
     # list` test is a linear scan of a list that can hold every struct in the
     # closure.
     elem_repr_names = set()
-    # Structs whose FIELD dump must NOT consult the user `__repr__` (the
-    # corpus pins `DunderHolder(p=R(x='c'))`, not `R<c>`; see
-    # test_gimple_runner.py's `gimple_struct_field_dump_is_not_an_address`:
-    # "a field dump is this runtime's own rendering ... so the dunder is not
-    # consulted for it, while the CONTAINER case above does consult it").
-    # A CONTAINER element still consults it -- `_mojo_elem_repr_*` is
-    # unchanged -- so this is a second, reflective-only entry point.
-    #
-    # Computed HERE, before the reflection loop, not accumulated inside it:
-    # that loop walks the structs in REVERSE declaration order, so a field
-    # dump for an early struct would otherwise ask before a later struct's
-    # name was known (measured: `elem_repr_names` empty at the first
-    # iteration, so every field fell through to the tag dispatch).
-    field_repr_names = set()
-    for _sn in reflect_structs:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
-            field_repr_names.add(_sn)
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
         _mm_arms_sn = self._getattr_method_arms.get(_as_str(sn))
@@ -2699,23 +2655,16 @@ def _emit_reflection_dispatch(self, parts):
                 owned = 'T'
             elif ftype.endswith(' *'):
                 # A field whose declared type is a struct this compile
-                # reflected is rendered through that struct's OWN dump, not
-                # through the tag-based dispatch: the field's type is written
-                # down right here, so there is nothing to discover at runtime,
-                # and `_mojo_dispatch_repr` cannot use it anyway for a
+                # reflected is rendered through that struct's ELEMENT REPR
+                # shim, not through the tag-based dispatch: the field's type is
+                # written down right here, so there is nothing to discover at
+                # runtime, and `_mojo_dispatch_repr` cannot use it anyway for a
                 # struct-allocated value (no runtime type tag -- the same gap
-                # that made `[p]` print a pointer decimal). A struct with a
-                # user `__repr__` uses `_mojo_field_repr_*`, which is the
-                # REFLECTIVE dump (the dunder is for a bare `repr()` and for a
-                # container ELEMENT, not for a field). A field of a type with
-                # neither keeps the dispatch, which is what reaches a
+                # that made `[p]` print a pointer decimal). A field of a type
+                # with no shim keeps the dispatch, which is what reaches a
                 # non-reflected struct's own dumper.
                 _fsn = ftype[:-2].strip()
-                if _fsn and _fsn in field_repr_names:
-                    val_expr = (f'({fref} ? _mojo_field_repr_{_fsn}'
-                                f'(({_fsn} *)(intptr_t){fref}) : _mojo_repr_none())')
-                    owned = 'T'
-                elif _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
+                if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
                     val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
                                 f'((int64_t)(intptr_t){fref}) : _mojo_repr_none())')
                     owned = 'T'
@@ -2814,7 +2763,6 @@ def _emit_reflection_dispatch(self, parts):
         # struct repr and the element shim below share one gate and cannot
         # drift (they are still emitted as two functions, but both defer to
         # the same user symbol when the gate is open).
-        _refl_body = repr_body
         _erep = self._struct_method_csym(sn, '__repr__', '')
         _erep_ok = self.func_return_types.get(_erep) == 'char *'
         if _erep_ok:
@@ -2825,16 +2773,6 @@ def _emit_reflection_dispatch(self, parts):
             + repr_body +
             f"}}\n"
         )
-        # The FIELD dump's own entry point: the reflective body, WITHOUT the
-        # dunder override above. Emitted only where the override exists (a
-        # struct whose dunder is absent already renders reflectively through
-        # `_mojo_repr_{sn}` / the element shim).
-        if _erep_ok:
-            refl_parts.append(
-                f"static char * _mojo_field_repr_{sn} ({sn} *obj) {{\n"
-                + _refl_body +
-                f"}}\n"
-            )
         # The ELEMENT REPR shim for a list/tuple of this struct: the walker
         # holds one `char *(*)(int64_t)` for a slot it reads as a word, and
         # this is the typed function behind it. A shim rather than a cast of
@@ -10295,17 +10233,17 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
         return False
     if _as_str(st) == 'char *' or _as_str(st) == 'double':
         return True
-    # An INTEGER observation is proof only when it is a REAL integer. The
-    # `int64_t` STORAGE DEFAULT is not: `_infer_local_var_types` leaves it on
-    # every value whose kind it cannot resolve and on every tuple-unpack
-    # target, and the value it stands for may be a container. Two such
-    # readers used to count, and both refused a container parameter that
-    # every call site feeds a list: `coro.py`'s `base, is_method,
-    # real_params, ... = _async_method_setup(...)` (the unpack exemption
-    # below), and `_to_returns`/`_choose_overload_symbol` recursing through a
-    # local bound to a `getattr`/`dict.get` result (the `int64_t` arm below).
-    # `each([4, 5])` beside `each(n)` where `n = 3` is still refused, because
-    # `n`'s binding is a PROVEN scalar (`_confident_scalar_locals`).
+    # An INTEGER observation is proof unless the name came from a
+    # multi-value UNPACK of a single iterable: `_infer_local_var_types`
+    # types each such target with the `int64_t` STORAGE DEFAULT because
+    # the per-element type is not knowable there, and the element may be a
+    # container. `coro.py`'s `base, is_method, real_params, ... =
+    # _async_method_setup(...)` feeds `_mark_coro_param_elem_kinds(
+    # real_params)`, and reading that default as "a number" refused the
+    # file for a parameter every call site passes a list. Everything else
+    # -- a literal (answered above), a call result, a parameter, an
+    # ordinary local -- keeps counting, so `each([4, 5])` beside
+    # `each(n)` where `n = 3` (or `n = f()`) is still refused.
     if isinstance(a, gimple_ctypes.IdentExpr):
         _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
             _as_str(caller_name), ())
@@ -10315,25 +10253,7 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
             # `_unpack_from_container_slot` / `_unpack_from_scalar_slot`
             # at the call site below, so this reader stays silent.
             return False
-    _st = _as_str(st)
-    if _st == 'int64_t':
-        # `int64_t` is ALSO this codegen's BOX for a value whose kind nothing
-        # resolved: a call/attribute result, an unpack target, an unannotated
-        # parameter. The box may hold a container, so it is not proof of "a
-        # str or number". Only a local the pre-pass PROVED is a scalar
-        # (`_confident_scalar_locals`) is a number here. Reading the box as a
-        # number refused a container parameter fed the very same value at
-        # another call site even though nothing in the program is a str or a
-        # number: `mojo/middle/out_result.py`'s `_to_returns` recurses a
-        # statement list through `v = getattr(st, f.name)`, and
-        # `mojo/backend_gimple/emit_calls.py`'s `_choose_overload_symbol`
-        # takes `over.get(fname_raw)`. Both modules fell out of the compiler's
-        # own closure (`# ERROR: compiling imported module`), which is what
-        # `bootstrap-stage1-transitive` rejects.
-        _conf = (getattr(self, '_confident_scalar_locals', None) or {}).get(
-            _as_str(caller_name), ())
-        return _as_str(a.name) in _conf
-    return _st in ('int', 'bool')
+    return _as_str(st) in ('int64_t', 'int', 'bool')
 
 
 def _gmh_resolve_param_containers(self):
@@ -11107,19 +11027,7 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         # emit_funcs.py's function-scoped pre-pass); resolving it here would
         # run outside that scope and lose the module qualifier.
         _recorded_csym = _as_str(sym_info.get('csym')) if sym_info.get('csym') else None
-        # An import whose home signature names a struct private to the defining
-        # module is hashed with the DEFINER's parameter list (the importer still
-        # declares the struct as a word). The tiers that would supply that list
-        # are only registered later in this pass, so ask for it here.
-        _safe_home_pts = None
-        if not _recorded_csym:
-            try:
-                _safe_home_pts = _ggf_dup._home_private_struct_pts(self, {
-                    'module': sym_info.get('module'),
-                    'original_name': sym_info.get('original_name') or sym_name})
-            except Exception:
-                _safe_home_pts = None
-        safe = _recorded_csym or self._func_csym(_as_str(sym_name), _safe_home_pts or None)
+        safe = _recorded_csym or self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
                 _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
@@ -12485,8 +12393,6 @@ def _gmp_device_kernel_meta(self, stmts: list, _device_explicit: set, _device_fa
 
 
 def gen_module_impl(self, stmts: list):
-    from mojo.middle.out_result import lower_pointer_out_results
-    lower_pointer_out_results(stmts)
     self._stmts = stmts
     self._current_module_stmts = stmts
 
@@ -12692,37 +12598,10 @@ def gen_module_impl(self, stmts: list):
                 continue   # a same-named local binding always wins
             _found = {}
             _gmi_find_comptime_one(self, _imp_stmts, _iname, _found)
-            if not _found:
-                # The named module may only RE-EXPORT `_iname` from a
-                # submodule (a package `__init__`: `std/traits/__init__.mojo`'s
-                # `from .deinitable import IsTriviallyDeinitable`), in which
-                # case its own body contains no ComptimeVarStmt. Follow the
-                # re-export with the shared, cycle-guarded walker — 'comptime'
-                # is the third kind it resolves, beside functions and structs —
-                # anchored at the module named by THIS import (`_fis.module`),
-                # because the hop's own `from .deinitable` is relative to it.
-                try:
-                    _home = self._find_symbol_home_module(
-                        _fis.module, _iname, 'comptime', want_abs=True)
-                except Exception:
-                    _home = None
-                if _home:
-                    _hp, _hs, _hstmts = self._parsed_import(_home)
-                    if _hstmts:
-                        _gmi_find_comptime_one(self, _hstmts, _iname, _found)
             if 'v' in _found:
                 if isinstance(_found['v'], str):
                     self._comptime_str_names.add(_as_str(_isym))
                 self._comptime_vals[_isym] = _found['v']
-            elif 'alias' in _found:
-                # A GENERIC comptime alias (`from std.traits import
-                # IsTriviallyDeinitable`): it has no value of its own — its
-                # RHS names its bracket parameters — so record the DECLARATION
-                # and let the evaluator substitute `IsTriviallyDeinitable[Int]`
-                # at the application. Without this the imported name lowered
-                # as an undeclared identifier (a zero word), and a `comptime
-                # if` over it became a runtime branch on address 0.
-                self._comptime_vals[_isym] = _found['alias']
     # Handle ImportStmt (import X; later X.NAME) - populate per-module comptime table
     for _fis in stmts:
         if isinstance(_fis, ImportStmt):
@@ -13064,6 +12943,18 @@ def gen_module_impl(self, stmts: list):
     self._local_generic_func_names = set()
     self._stripped_generic_fns = []
     self._signature_check_generic_fns = []
+    # A generic struct defined in THIS file: a plain overload that constructs
+    # one (`std/iter/__init__.mojo`'s `enumerate` building a bare
+    # `_Enumerate(...)`) makes the in-TU materializer instantiate it here,
+    # which changes that file's own struct-method emission
+    # (`_Enumerate.__next__` became prototype-only, so the dylib referenced
+    # `_std_iter___init____Enumerate___next__` and never defined it). Such
+    # plain overloads keep the historical disposition — not emitted.
+    _local_generic_structs = {
+        _lgs.name for _lgs in stmts
+        if isinstance(_lgs, StructDef)
+        and (getattr(_lgs, 'type_param_names', None) or [])
+    }
     if _gsrc:
         # A name is generic per-DECLARATION, not per-name: `std/bit/mask.mojo`
         # declares `splat[size, dtype](SIMD[.bool, size])` AND
@@ -13103,12 +12994,8 @@ def gen_module_impl(self, stmts: list):
                     break
         if _generic_uninstantiable:
             for _g_ps in stmts:
-                # Only a GENERIC overload can be made uninstantiable: a plain
-                # function that shares its name with one (has_nvidia_gpu_accelerator)
-                # is a real definition and must stay.
                 if (not isinstance(_g_ps, FunctionDef)
                         or id(_g_ps) in _local_generic_ids
-                        or not (getattr(_g_ps, 'comptime_params', None) or [])
                         or _g_ps.name not in _local_generics):
                     continue
                 for _g_pn in _walk_ast(_g_ps.body):
@@ -13135,6 +13022,23 @@ def gen_module_impl(self, stmts: list):
                         and _as_str(_g_sn.func.name) == _g_self.name):
                     _local_generic_ids.add(id(_g_self))
                     break
+        if _local_generic_structs:
+            for _g_ls in stmts:
+                if (not isinstance(_g_ls, FunctionDef)
+                        or id(_g_ls) in _local_generic_ids
+                        or _g_ls.name not in _local_generics):
+                    continue
+                for _g_ln in _walk_ast(_g_ls.body):
+                    if not isinstance(_g_ln, CallExpr):
+                        continue
+                    _g_lf = _g_ln.func
+                    _g_lb = (_g_lf.name if isinstance(_g_lf, IdentExpr) else
+                             _g_lf.obj.name if (isinstance(_g_lf, SubscriptExpr)
+                                                and isinstance(_g_lf.obj, IdentExpr))
+                             else None)
+                    if _g_lb is not None and _as_str(_g_lb) in _local_generic_structs:
+                        _local_generic_ids.add(id(_g_ls))
+                        break
         for _gn in _local_generics:
             self._imported_generics.setdefault(_gn, self._current_filename)
         self._local_generic_func_names = set(_local_generics)
@@ -13168,18 +13072,50 @@ def gen_module_impl(self, stmts: list):
             self._local_generic_func_names = set()
 
     # A name with two or more PLAIN definitions is emitted as one definition
-    # per signature. `external_call[...]` bodies are not special-cased:
-    # declarations are typed from the call's own annotations, and the stdlib
-    # builds clean with every such overload emitted (`time.sleep`'s two
-    # overloads, 2026-11-17).
+    # per signature — but only when every body is something this build can
+    # lower without tripping an unrelated type bug. A body that uses
+    # `external_call[...]` (whose declaration is typed from the call's own
+    # annotations and can collide with the platform header, e.g.
+    # `nanosleep`'s `struct timespec *`), or that constructs a generic struct
+    # DEFINED IN THIS FILE (the in-TU materializer would instantiate it here
+    # and change this file's own struct-method emission), cannot be emitted
+    # correctly here. Those names keep the historical disposition — none of
+    # their overloads is emitted — rather than turning an unrelated type bug
+    # into a module refusal. The stdlib-dylib overload rows (`_free`,
+    # `unsafe_memset_zero`, `splat`, `to_integer`) and the synthetic probe
+    # have neither shape.
     _plain_groups: dict = {}
     for _pog_s in stmts:
         if (isinstance(_pog_s, FunctionDef)
                 and not getattr(_pog_s, 'comptime_params', None)):
             _plain_groups.setdefault(_pog_s.name, []).append(_pog_s)
+    _unsafe_overload_ids: set = set()
+    for _pog_name in _plain_groups:
+        _pog_nodes = _plain_groups[_pog_name]
+        if len(_pog_nodes) < 2:
+            continue
+        for _pog_n in _pog_nodes:
+            for _pog_x in _walk_ast(_pog_n.body):
+                if not isinstance(_pog_x, CallExpr):
+                    continue
+                _pog_f = _pog_x.func
+                if (isinstance(_pog_f, IdentExpr)
+                        and _as_str(_pog_f.name) in _local_generic_structs):
+                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
+                    break
+                if (isinstance(_pog_f, SubscriptExpr)
+                        and isinstance(_pog_f.obj, IdentExpr)
+                        and (_as_str(_pog_f.obj.name) == 'external_call'
+                             or _as_str(_pog_f.obj.name) in _local_generic_structs)):
+                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
+                    break
+            if id(_pog_n) in _unsafe_overload_ids:
+                break
+    if _unsafe_overload_ids:
+        stmts = [s for s in stmts if id(s) not in _unsafe_overload_ids]
     _multi_def_names = set()
     for _mdn in _plain_groups:
-        if len(_plain_groups[_mdn]) >= 2:
+        if len(_plain_groups[_mdn]) >= 2 and id(_plain_groups[_mdn][0]) not in _unsafe_overload_ids:
             _multi_def_names.add(_mdn)
 
     self._local_def_nodes = {}
@@ -14653,56 +14589,9 @@ def gen_module_impl(self, stmts: list):
                     _mark_presence_field(target_def, fn)
                     _walk_ast_invalidate(target_def)
 
-    def _scan_scopes_for_local_field_access(body, own_struct_name):
-        """Run the phantom-field scan once per LEXICAL SCOPE, not once per
-        top-level statement.
-
-        `_scan_body_for_local_field_access` unions the struct constructors
-        bound to each local NAME across the statements it is given. Handing
-        it a `StructDef` therefore unions every METHOD's locals into one
-        namespace, and a name is then "bound" to whatever any method built
-        even when the read it is matched against happens in a DIFFERENT
-        method — where it means a different variable. Measured on this
-        compiler's own `myinterpreter.py`: `Interpreter` binds
-        `target = _LazyImportTarget(...)` in its two import methods, and a
-        dozen OTHER `Interpreter` methods use `target` for an AST statement
-        (`target.name`, `.obj`, `.member`, ...). The whole-class union made
-        `target` _LazyImportTarget everywhere, so this scan minted
-        `name/obj/member/index/start/stop/step/elements` as `int` fields on
-        `_LazyImportTarget` — and then `_infer_param_types`' struct-field
-        match, seeing a class with a `member` field, typed
-        `Interpreter._eval_member_of`'s `expr` parameter `_LazyImportTarget *`
-        (its only caller passes a `MemberExpr`). The body read
-        `expr->member` through an unrelated class's layout.
-
-        So each method and each module-level function body is scanned on its
-        own, with the caller's `own_struct_name` carried through unchanged.
-        Module-level (non-def) statements are one scope of their own, which
-        is what a name assigned at module scope really is.
-
-        Nested `def`s inside a body are still reached by the candidate walk
-        (`_walk_ast` is generic); they are separate scopes too, but their
-        names can only collide with the enclosing body's when the same name
-        is bound to two DIFFERENT struct constructors, which the ambiguity
-        filter above already drops."""
-        _module_stmts = []
-        for _ss in body:
-            if isinstance(_ss, StructDef):
-                _sdef = _as_structdef_node(_ss)
-                for _sm in _sdef.methods:
-                    _scan_body_for_local_field_access(
-                        _as_funcdef_node(_sm).body, own_struct_name)
-            elif isinstance(_ss, FunctionDef):
-                _scan_body_for_local_field_access(
-                    _as_funcdef_node(_ss).body, own_struct_name)
-            else:
-                _module_stmts.append(_ss)
-        if _module_stmts:
-            _scan_body_for_local_field_access(_module_stmts, own_struct_name)
-
-    _scan_scopes_for_local_field_access(stmts, None)
+    _scan_body_for_local_field_access(stmts, None)
     if self.do_imports or self.link_imports:
-        _scan_scopes_for_local_field_access(imported_stmts, None)
+        _scan_body_for_local_field_access(imported_stmts, None)
 
     # Aliased CLASS imports (`from M import Class as Alias`) for the WHOLE
     # module, module scope AND function bodies, resolved HERE rather than
@@ -15347,18 +15236,16 @@ def gen_module_impl(self, stmts: list):
     # `print(f(x))` never reads a parameter at all.
     self._ret_may_hold_str: set = set()
     # Functions whose RETURN VALUE is a TAGGED WORD because their arms mix a
-    # pointer with a value no pointer can hold (a float, a `_Bool`, or an
-    # unambiguous scalar arm; `infra_infer._infer_return_type_core` widens
-    # that shape to `int64_t` and each arm is boxed by
-    # `_gen_stmt_ReturnStmt`). This is the call-site half: the result of
-    # calling one is a possibly-boxed word, so `lower_expr` marks the temp for
-    # the consumers that dispatch by kind (`print` -> `mojo_repr_boxed`, a
-    # list store -> `mojo_list_append_word`, arithmetic ->
-    # `_tagged_arith_select`) instead of reading it as a plain integer or
-    # casting it to the pointer the old join chose. Computed with
-    # `_mixed_return_bodies` — the exact per-body decision inference recorded
-    # — so a marker and its emitter cannot drift apart.
-    self._ret_may_hold_mixed: set = set()
+    # float with a pointer (`infra_infer._infer_return_type_core` widens that
+    # shape to `int64_t`; each arm is boxed by `_gen_stmt_ReturnStmt`). This is
+    # the call-site half: the result of calling one is a possibly-boxed word,
+    # so `lower_expr` marks the temp for the consumers that dispatch by kind
+    # (`print` -> `mojo_repr_boxed`, a list store -> `mojo_list_append_word`,
+    # arithmetic -> `_tagged_arith_select`) instead of reading it as a plain
+    # integer or casting it to the pointer the old join chose. Computed with
+    # `_float_mixed_return_bodies` — the exact per-body decision inference
+    # recorded — so a marker and its emitter cannot drift apart.
+    self._ret_may_hold_float: set = set()
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
@@ -17544,11 +17431,10 @@ def gen_module_impl(self, stmts: list):
             if _fn_name in _sset:
                 _fset.discard(_fn_name)
 
-    # Which CALLEES return a TAGGED WORD because their arms mix a pointer with
-    # a value no pointer can hold (a float, a `_Bool`, or an unambiguous
-    # scalar literal/expression). Inference records that decision per BODY in
-    # `_mixed_return_bodies` (`infra_infer._infer_return_type_core` widens the
-    # shape to `int64_t` there and the return emitter boxes each arm by the
+    # Which CALLEES return a TAGGED WORD because their arms mix a float with a
+    # pointer. Inference records that decision per BODY in
+    # `_float_mixed_return_bodies` (`infra_infer._infer_return_type_core` widens
+    # the shape to `int64_t` there and the return emitter boxes each arm by the
     # same body id). A call site needs the NAME, before/independent of the body
     # that may not be emitted yet, so the two populations every fixed point
     # above walks are asked here: `_fn_by_name` for top-level definitions and
@@ -17556,41 +17442,41 @@ def gen_module_impl(self, stmts: list):
     # yet is asked directly, so a call site emitted later cannot miss it.
     #
     # An ANNOTATED return type is skipped: the annotation decides the C return
-    # type (the scalar arm keeps its old coercion), so the value is not a
-    # tagged word and marking it one here would misread it at every consumer.
-    # That shape — a pointer annotation contradicted by a scalar arm — is not
-    # a tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
+    # type (the float arm keeps its old coercion), so the value is not a tagged
+    # word and marking it one here would misread it at every consumer. That
+    # shape — a pointer annotation contradicted by a float arm — is not a
+    # tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
     # refuses it at compile time.
-    _ret_mixed: set = set()
-    _mrb = getattr(self, '_mixed_return_bodies', None)
-    if _mrb is None:
-        _mrb = set()
-        self._mixed_return_bodies = _mrb
+    _ret_float: set = set()
+    _fmb = getattr(self, '_float_mixed_return_bodies', None)
+    if _fmb is None:
+        _fmb = set()
+        self._float_mixed_return_bodies = _fmb
 
-    def _note_mixed_return(_mf_name, _mf_body):
-        if _mf_body is None:
+    def _note_float_mixed(_ff_name, _ff_body):
+        if _ff_body is None:
             return
-        if id(_mf_body) not in _mrb:
+        if id(_ff_body) not in _fmb:
             # The SAME entry point the definition emitter uses, overlays and
-            # all: it records the mix in `_mrb` when (and only when) it
+            # all: it records the mix in `_fmb` when (and only when) it
             # widens the return type, so a call site marked here and the
             # definition emitting there are answering one question.
             try:
-                self._infer_return_type(_mf_body)
+                self._infer_return_type(_ff_body)
             except Exception:
                 return
-        if id(_mf_body) in _mrb:
-            _ret_mixed.add(_as_str(_mf_name))
+        if id(_ff_body) in _fmb:
+            _ret_float.add(_as_str(_ff_name))
 
     for _rf_name in _fn_by_name:
         _rf_fn = _fn_by_name[_rf_name]
         if getattr(_rf_fn, 'return_type', None) is not None:
             continue
-        _note_mixed_return(_rf_name, getattr(_rf_fn, 'body', None))
+        _note_float_mixed(_rf_name, getattr(_rf_fn, 'body', None))
     for _gni in range(len(_gmi_src)):
-        _note_mixed_return(_as_str(_gmi_lift[_gni]),
-                           getattr(_gmi_def[_gni], 'body', None))
-    self._ret_may_hold_mixed = _ret_mixed
+        _note_float_mixed(_as_str(_gmi_lift[_gni]),
+                          getattr(_gmi_def[_gni], 'body', None))
+    self._ret_may_hold_float = _ret_float
 
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')
@@ -19826,9 +19712,7 @@ def gen_module_impl(self, stmts: list):
                     _nested_snap = dict(self._nested_elem_types)
                     _dval_snap = dict(self._dict_val_types)
                     _prev_tp = getattr(self, '_current_struct_type_params', None)
-                    _prev_sn = getattr(self, '_current_struct_name', None)
                     self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
-                    self._current_struct_name = _as_str(stmt.name)
                     try:
                         func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                         func_parts.append('')
@@ -19865,7 +19749,6 @@ def gen_module_impl(self, stmts: list):
                         continue
                     finally:
                         self._current_struct_type_params = _prev_tp
-                        self._current_struct_name = _prev_sn
                     self._line_src_file = _prev_line_src
                     self._pop_import_scope()
                     if self._lambda_parts:

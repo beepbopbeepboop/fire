@@ -1774,6 +1774,52 @@ def _regression_tables_module_qualified_tuple_for():
         "x,y\na\nb\nc\n")
 
 
+def _regression_tables_callable_param_generator_handle_arg():
+    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5: a call THROUGH a
+    # callable-valued parameter whose ARGUMENT is a compiled-generator HANDLE
+    # local — tables.py's read_table doing
+    # `lines = strutil._iter_significant_lines(infile)` then
+    # `for row in _get_reader(lines, delimiter=sep or '\t'):`. The handle is
+    # not statically a word, string or container, so `_cpp_dyn_call_expr`
+    # (cpp_core.py:1875, refusal at :1927) refuses:
+    #
+    #     read_table: a call through the callable-valued parameter
+    #     '_get_reader' passes an argument whose C type is not statically
+    #     a word, string or container.
+    #
+    # `mlines.iter_lines` is A3-lowered (no kwonly params) exactly like
+    # `strutil._iter_significant_lines`; `_get_reader=csv.reader` (a callable
+    # default) keeps `read_table` on the cpp path, and the csv.reader tabled
+    # runtime (part 2 / 7e6a8ac5c) iterates the materialized list of lines.
+    # Measured 2026-11-13: the SAME fixture with `lines = entries` (a list,
+    # no handle) compiles and runs, so this regression is red ONLY for the
+    # generator-handle-argument shape.
+    #
+    # RED until part 5 lands; wire into run_tests() in that fix.
+    _test_foreign_package_case(
+        "tables_callable_param_generator_handle_arg",
+        {'__init__.py': '',
+         'mlines.py': (
+             "def iter_lines(lines):\n"
+             "    for line in lines:\n"
+             "        yield line\n")},
+        (
+            "import csv\n"
+            "from . import mlines\n"
+            "\n"
+            "def read_table(entries, header, *, sep=',', _get_reader=csv.reader):\n"
+            "    lines = mlines.iter_lines(entries)\n"
+            "    for row in _get_reader(lines, delimiter=sep):\n"
+            "        yield row[0]\n"
+            "\n"
+            "def main():\n"
+            "    for v in read_table([\"a,b\", \"1,2\"], \"a,b\", sep=','):\n"
+            "        print(v)\n"
+            "\n"
+            "main()\n"),
+        "a\n1\n")
+
+
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
     # `signal` bind to an opaque marker with no compiled body in this TU, so

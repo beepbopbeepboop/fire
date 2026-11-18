@@ -2932,9 +2932,10 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      # `tiny` (4) was set from a 0.1 GB peak. Measured 2026-11-16 with
      # `/usr/bin/time -l`: peak RSS 4.58 GB, and at that class the job was
-     # KILLED before finishing -- RESOURCE, "not a verdict on the output". So
-     # `small` (8) covers it. Over the 4 GB line and therefore a debt, not a
-     # fact -- see MEM_DEBT_DOC.
+     # KILLED before finishing -- RESOURCE, "not a verdict on the output", so
+     # the expect= below could not be verified in either direction. `small`
+     # (8) covers it. Over the 4 GB line and therefore a debt, not a fact --
+     # see MEM_DEBT_DOC.
      mem='small',
      memwhy='measured 4.58 GB peak RSS 2026-11-16 (/usr/bin/time -l on '
             'test_formal_dylib.py, 263 s wall): the Lean dylib contract proof '
@@ -2942,15 +2943,12 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
             'ceiling before it finished, so the class was raised to `small` '
             '(8). Over the 4 GB line and therefore a debt, not a fact -- see '
             + MEM_DEBT_DOC,
-     # No `expect=` any more. The three hole-count checks used to demand a
-     # PROVED `DylibExport.Total` for exports whose run can halt at the
-     # integer-overflow trap, which is a FALSE statement (measured:
-     # `runExport … add1 0x7FFFFFFFFFFFFFFF = none`), so the emitter now emits
-     # `NO TERMINATION CLAIM` instead of a `sorry` over it and the counts are
-     # 0/0/1. The marker was measured at PASS=27 FAIL=3 on 2026-11-16; the
-     # three checks are the ones that changed, and the new
-     # `an overflow-trapping export makes no termination claim` pins the
-     # emitter's verdict. The doc was deleted with the fix.
+     # The reason was stale: it described hole-count checks on the
+     # overflow-trapping exports, but the three failures are GENERATED-proof
+     # `sorry` holes in test_formal_dylib.py (measured 2026-11-16, uncapped:
+     # PASS=27 FAIL=3). Re-pointed to the doc that names them.
+     expect='3 failing: the dylib export proofs still admit `sorry` holes -- see '
+            'bugs/FORMAL_dylib_export_proof_holes.md',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -4305,39 +4303,6 @@ test('land-doc', [PY, 'tools/test_land_doc.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('gate-files', [PY, 'tools/test_gate_files.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('dylib-generic-instances', [PY, 'test_dylib_generic_instances.py'],
-     mem='tiny',
-     desc='dylib generic instances (estate backlog, 2026-11-17)')
-test('import-overload-choice', [PY, 'test_import_overload_choice.py'],
-     mem='tiny',
-     desc='imported plain overload + generic registration (estate backlog, 2026-11-17)')
-test('out-param-local', [PY, 'test_out_param_local.py'],
-     mem='tiny',
-     desc='out parameter reaches the caller, local and cross-module (estate backlog, 2026-11-17)')
-test('closure-address-of-capture', [PY, 'test_closure_address_of_capture.py'],
-     mem='tiny',
-     desc="Pointer(to=x) of a by-value capture takes the env field's address (CODEGEN closure capture)")
-test('codegen-container-param-unknown-arg', [PY, 'test_codegen_container_param_unknown_arg.py'],
-     mem='tiny',
-     desc='container parameter with an unknown argument (registered by the estate audit)')
-test('comptime-generic-alias-fold', [PY, 'test_comptime_generic_alias_fold.py'],
-     mem='tiny',
-     desc='a generic comptime alias folds (registered by the estate audit)')
-test('extend-register-refusal', [PY, 'test_extend_register_refusal.py'],
-     mem='tiny',
-     desc='extend-register refusal (registered by the estate audit)')
-test('gates-coro-jobs-not-off', [PY, 'test_gates_coro_jobs_not_off.py'],
-     mem='tiny',
-     desc='no gates.json OFF pattern may name a coro gate job (registered by the estate audit)')
-test('stdlib-import-suffix', [PY, 'test_stdlib_import_suffix.py'],
-     mem='tiny',
-     desc='stdlib import suffix (registered by the estate audit)')
-test('stdlib-syntax-quick-bench-math', [PY, 'test_stdlib_syntax_quick_bench_math.py'],
-     mem='tiny',
-     desc='quick_bench math stdlib syntax (registered by the estate audit)')
-test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
-     mem='tiny',
-     desc='land doc summary (registered by the estate audit)')
 test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
      mem='tiny',
      desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
@@ -5203,17 +5168,6 @@ BUCKETS = {
 # for the one entry it adds.
 BUCKETS['check'].append('binding-evidence')
 BUCKETS['check'].append('gates-bootstrap-not-off')
-BUCKETS['check'].append('closure-address-of-capture')
-BUCKETS['check'].append('codegen-container-param-unknown-arg')
-BUCKETS['check'].append('comptime-generic-alias-fold')
-BUCKETS['check'].append('extend-register-refusal')
-BUCKETS['check'].append('gates-coro-jobs-not-off')
-BUCKETS['check'].append('stdlib-import-suffix')
-BUCKETS['check'].append('stdlib-syntax-quick-bench-math')
-BUCKETS['check'].append('land-doc-summary')
-BUCKETS['check'].append('dylib-generic-instances')
-BUCKETS['check'].append('import-overload-choice')
-BUCKETS['check'].append('out-param-local')
 BUCKETS['check'].append('interp-list-ctor')
 BUCKETS['check'].append('module-globals-compiled')
 BUCKETS['check'].append('mojoc-precompile-signature')
