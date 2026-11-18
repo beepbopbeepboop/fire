@@ -69,7 +69,82 @@ def test_import_overload_choice():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+TYPED_HOME = """
+def nap(sec: Float64):
+    print(sec)
+
+def nap(sec: Int):
+    print(sec)
+"""
+
+TYPED_CALLER = """
+from typed_home import nap
+
+def use():
+    nap(1)
+    nap(1.5)
+"""
+
+
+def test_import_overload_by_argument_type():
+    """Two plain overloads of one arity (`time.sleep(Float64)` / `sleep(Int)`):
+    each call names the overload its argument type selects, and both names are
+    the definer's own."""
+    tmp = tempfile.mkdtemp(prefix='imp_ovt_')
+    try:
+        home_path = os.path.join(tmp, 'typed_home.mojo')
+        with open(home_path, 'w') as f:
+            f.write(TYPED_HOME)
+        caller_path = os.path.join(tmp, 'typed_caller.mojo')
+        with open(caller_path, 'w') as f:
+            f.write(TYPED_CALLER)
+        sys.path.insert(0, tmp)
+        try:
+            home_c = b.compile_module_to_c(TYPED_HOME, home_path, 'typed_home')
+            caller_c = b.compile_module_to_c(TYPED_CALLER, caller_path, 'typed_caller')
+        finally:
+            sys.path.remove(tmp)
+        defined = set(re.findall(r'\n(?:int64_t|void|_Bool) (typed_home_nap_[0-9a-f]+) \(([^)]*)\)\s*\n\{', home_c))
+        by_type = {params.strip(): name for name, params in defined}
+        assert set(by_type) == {'int64_t sec', 'double sec'}, f'definitions: {defined}'
+        calls = re.findall(r'\b(typed_home_nap_[0-9a-f]+) \((_t\d+|1\.5)\)', caller_c)
+        names = sorted(c[0] for c in calls)
+        assert names == sorted([by_type['int64_t sec'], by_type['double sec']]), f'calls {calls}'
+        assert 'typed_home_nap (...)' not in caller_c, 'caller still binds the variadic stub'
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+EXT_HOME = """
+from std.ffi import external_call
+
+def nap(sec: Float64):
+    print(sec)
+
+def nap(sec: Int):
+    external_call["ext_nap", NoneType](Int32(sec))
+"""
+
+
+def test_external_call_overloads_are_all_emitted():
+    """An overload set in which one body calls `external_call[...]` emits every
+    overload (it was dropped whole, which left `time.sleep` undefined)."""
+    tmp = tempfile.mkdtemp(prefix='ext_ov_')
+    try:
+        path = os.path.join(tmp, 'ext_home.mojo')
+        with open(path, 'w') as f:
+            f.write(EXT_HOME)
+        c = b.compile_module_to_c(EXT_HOME, path, 'ext_home')
+        defs = re.findall(r'\n(?:int64_t|void|_Bool) (ext_home_nap_[0-9a-f]+) \(', c)
+        assert len(set(defs)) == 2, f'expected both overloads defined, got {set(defs)}'
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == '__main__':
-    ok = test_import_overload_choice()
+    ok = (test_import_overload_choice() and test_import_overload_by_argument_type()
+          and test_external_call_overloads_are_all_emitted())
     print('PASS' if ok else 'FAIL')
     sys.exit(0 if ok else 1)

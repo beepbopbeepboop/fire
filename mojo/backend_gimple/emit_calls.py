@@ -11666,7 +11666,7 @@ def _local_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExp
     return _choose_overload_symbol(gen, fname_raw, node, nodes, None)
 
 
-def _imported_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr):
+def _imported_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.CallExpr, arg_ctypes=None):
     """The C symbol for a call to an IMPORTED free function that its home module
     defines more than once, or None when the name is not such an overload set.
 
@@ -11701,14 +11701,34 @@ def _imported_overload_call_symbol(gen, fname_raw: str, node: gimple_ctypes.Call
     _plain = [h for h in _all if not getattr(h, 'comptime_params', None)]
     if not _plain or len(_all) < 2:
         return None
-    # Only a call with ONE plain candidate of its arity is decided here. Two plain
-    # overloads of that arity differ only in argument types, which this chooser
-    # does not see (`b64encode("a")`: a string and a byte span both take one
-    # argument), so the call keeps the stub rather than a guess.
     _fit = [h for h in _plain if len(h.params) == len(node.args)]
-    if len(_fit) != 1:
+    if arg_ctypes is None:
+        # Without the argument C types only a single arity match is decided: two
+        # plain overloads of one arity differ only in argument types, which are not
+        # known yet (`b64encode("a")`: a string and a byte span both take one
+        # argument), so the call keeps the stub rather than a guess.
+        if len(_fit) != 1:
+            return None
+        return _choose_overload_symbol(gen, fname_raw, node, _fit, _mod)
+    # With the lowered argument C types, the choice is the one arity match whose
+    # parameter C types are exactly the arguments': `time.sleep(1.5)` against
+    # `(Float64)` and `(Int)`. Anything else (none, or two) keeps the stub.
+    if len(_fit) == 1:
+        return _choose_overload_symbol(gen, fname_raw, node, _fit, _mod)
+    def _norm(t):
+        # A literal lowers to C `int`; Mojo's Int (and every integer parameter) is
+        # the 64-bit word. Both are the same argument for this choice.
+        _c = gimple_ctypes.c_client_callable_ctype(t)
+        return 'int64_t' if _c == 'int' else _c
+    _want = [_norm(t) for t in arg_ctypes]
+    _exact = []
+    for h in _fit:
+        _pts = [_norm(t) for t in gen._home_signature_ctypes(_mod, h)]
+        if _pts == _want:
+            _exact.append(h)
+    if len(_exact) != 1:
         return None
-    return _choose_overload_symbol(gen, fname_raw, node, _fit, _mod)
+    return _choose_overload_symbol(gen, fname_raw, node, _exact, _mod)
 
 
 def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):

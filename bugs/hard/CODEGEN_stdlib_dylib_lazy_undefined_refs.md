@@ -115,6 +115,21 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   the definer's (`unsafe_memset_zero` is `void` there, `int64_t` in the import).
   Gates: stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple
   465/0, lint and ratchet clean.
+  Status 2026-11-17 (time.sleep, landed): two causes, both fixed. (1)
+  `module_gen`'s overload guard dropped EVERY overload of a name whose plain
+  overloads include an `external_call[...]` body. The stdlib builds clean with
+  those overloads emitted, so that branch is removed; the generic-struct branch
+  stays. `time.sleep`'s two overloads were both missing. (2) The import choice
+  now also uses the lowered argument C types (`emit_stmts` moves the hook after
+  the arguments are lowered): when exactly one plain overload fits the arity it
+  is taken as before; when several fit, the one whose parameter types equal the
+  arguments' is taken (an integer literal's `int` matches Mojo's 64-bit `Int`).
+  `time.sleep(1)` and `time.sleep(1.5)` now name `_9f63a2` and `_f77bd1`.
+  `test_import_overload_choice.py` gained two cases: argument-type selection
+  (fails on the committed code) and external_call overload emission.
+  Undefined `_std_` names: 7 -> 6. Still open: `random` (its `Pointer`-result
+  change is parked in stash@{0}) and the `_std__gpu_intrinsics` / `bit_mask` /
+  `getpw` generic instances.
   Previously open (now done): step 3, the cross-module import. Gates:
   stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
   Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
