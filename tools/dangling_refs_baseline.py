@@ -43,11 +43,6 @@ BASELINE = {
     # CODEGEN_simd_and_array_values_erase_to_int64.md was retired on 2026-11-16:
     # both docs are historical LANDING RECORDS that legitimately name the doc
     # they merged, so the citation is deliberate, not a dangling pointer.
-    'bugs/mid/LAND-codegen-nested-bracket-generic-call-4.md': 6,
-    # Raised when CODEGEN_simd_and_array_values_erase_to_int64-part2.md was
-    # retired on 2026-11-16: this is a historical LANDING RECORD that names the
-    # doc it merged, so the citation is the record, not a dangling pointer.
-    'bugs/LAND-codegen-simd-and-array-values-erase-2.md': 1,
     # Historical LANDING RECORD: names the part8-2 doc it attempted to land,
     # which is not in the tree. Raised rather than rewound.
     'bugs/LAND-gpu-offload-validation-modular-3.md': 1,
