@@ -3915,6 +3915,14 @@ class Elaborator:
         arg_mojo = [c_to_mojo(ct) for ct in arg_ctypes]
         chosen = None
         for src, ptypes, ret in overloads:
+            # A candidate with bracket parameters is a GENERIC template: a plain
+            # call cannot select it (it needs `name[...]()`), so it never matches
+            # here. Matching it on an empty parameter list named `is_amd_gpu()`
+            # after the generic overload `is_amd_gpu[subarch]()` (both have no
+            # value parameters), and its instance was emitted under a symbol
+            # nothing defines.
+            if type_param_names(src):
+                continue
             if ptypes == arg_mojo:
                 chosen = (src, ptypes, ret)
                 break
@@ -3928,7 +3936,12 @@ class Elaborator:
         # INJECTIVELY, via the same length-prefixed encoding `mangle` uses. The
         # previous `safe_suffix('_'.join(ptypes))` was ambiguous segmentation
         # with a lossy escape, so `['A_B']` and `['A', 'B']` named one symbol.
-        mangled = mm.mangle_signature(fn_name, ptypes)
+        # An overload with NO parameters is named as the definer names it: an
+        # overloaded free function's definition takes the bare name when its
+        # parameter list is empty (codegen's overload suffix of [] is ''), so the
+        # call names the bare symbol too. `mangle_signature`'s `__void` names
+        # nothing.
+        mangled = mm.mangle_signature(fn_name, ptypes) if ptypes else fn_name
         renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
         try:
             obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
