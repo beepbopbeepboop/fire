@@ -9769,6 +9769,27 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
                 f"that value, so the fall-through must rewrite x0 before any "
                 f"instruction reads it; this one does not, or it crosses a "
                 f"branch the walk cannot see through.")
+    # A CALL. Measured 2026-11-16 on the dylib export proofs: this is the cause
+    # for both `csetval` and `branched`, and the generic sentence below does not
+    # mention it -- so a reader was left with three candidate classes and no way
+    # to pick, while the walk's own condition (`any(b["kind"] == "bl" ...)`)
+    # refused on the call. Named here so the message keeps its promise.
+    _bl_pc = next((pc for pc in sorted(p for p in words
+                                       if func_entry <= p < func_end)
+                    if (words[pc] >> 26) == 0x25), None)
+    if _bl_pc is not None:
+        return (
+            f"universal theorem: CFG decomposition unsupported for this "
+            f"function shape, and every instruction in its own code has a "
+            f"step, so the cause is not an unmodelled word: it is the call at "
+            f"{_bl_pc:#x} in {name}'s own code. The constant-fuel walk steps "
+            f"one function of one state from the entry and refuses any block "
+            f"of kind `bl` -- a call leaves that state for a callee whose "
+            f"effect is not part of this image, so no runs certificate for the "
+            f"export can be built. The other reasons this walk returns None are "
+            f"a shape with no `RET`, a block whose runs certificate is empty, "
+            f"and a fixed-fuel caller whose budget is below the instruction "
+            f"count.")
     return ("universal theorem: CFG decomposition unsupported for this function "
             "shape, and every instruction in its own code has a step, so the "
             "cause is not an unmodelled word: the walk returns None for a shape "

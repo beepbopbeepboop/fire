@@ -2444,12 +2444,6 @@ def _type_expr_to_ann(gen, node) -> str:
         return 'True' if node.value else 'False'
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.IntLiteral):
         return str(-node.operand.value)
-    # A sign chain over an integer spelling (`-shift` with shift = -8 substituted
-    # is `-(-8)`): evaluate it, so the argument is the value it denotes.
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op in ('-', '+'):
-        _inner = _as_str(gen._type_expr_to_ann(node.operand))
-        if re.fullmatch(r'-?\d+', _inner):
-            return str(-int(_inner) if node.op == '-' else int(_inner))
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.FloatLiteral):
         _text = _float_type_arg_text(node.operand.value)
         return '-' + _text if _text else ''
