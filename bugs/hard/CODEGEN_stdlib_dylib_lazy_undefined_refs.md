@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part5, CODEGEN_stdlib_dylib_lazy_undefined_refs-part6
+SPLIT: CODEGEN_stdlib_dylib_lazy_undefined_refs-part5 (part 6 fixed 2026-11-17, doc deleted)
 
 # CODEGEN: the stdlib dylib references 50 `_std_` symbols it never defines
 
@@ -65,7 +65,7 @@ build, no link), then confirming the end-to-end shape with two-module
 | part | doc | class | example symbols |
 |---|---|---|---|
 | 5 | `...-part5.md` | a body the backend cannot lower vanishes, so the caller's qualified name has no definition (its own calls get a BARE weak stub) | `std_sys_info_is_{apple,nvidia,amd}_gpu`, `std_python__cpython_CPython_as_imm` |
-| 6 | `...-part6.md` | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
+| 6 | fixed 2026-11-17, doc deleted (its probe `p6_bracketed` passes) | a BRACKETED `Span`/`StringSlice` param is `char *` in the text scan and `Span *` in the defining unit | 4 x `std_collections_string__unicode_*`, `_count_utf8_continuation_bytes`, `std_sys__amdgpu_printf_append_string_n` |
 
 Not a part:
 

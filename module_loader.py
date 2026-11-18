@@ -1406,7 +1406,12 @@ class ModuleLoader:
         # parseable); the old `int64_t *` opaque handle disagreed with the
         # definition and made cross-module references undefined at link time.
         if mojo_type.split('[', 1)[0].strip() in ('Span', 'StringSlice'):
-            return 'char *'
+            # A BARE annotation is `char *` in the defining unit (parsing_floats'
+            # `_atof(x: StringSlice)`). A BRACKETED one (`StringSlice[_]`,
+            # `Span[UInt8, _]`) lowers to the `Span *` struct pointer there, so the
+            # import must name that, or the caller references a symbol the defining
+            # unit never emits.
+            return 'Span *' if '[' in mojo_type else 'char *'
         return _mojo_type(mojo_type)
 
     def get_symbol_type(self, module_name: str, symbol_name: str) -> str:
