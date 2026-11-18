@@ -305,7 +305,7 @@ __mojo_coro_yield(MojoCoro *c, int64_t val_box)
        not catch) must run. Without this the slot holds whatever an
        earlier try at the same depth left there, and the unwind frees
        live owned locals of outer frames. */
-    mojo_cleanup_pad_checkpoint(_mojo_exc_top, repushed);
+    mojo_cleanup_pad_checkpoint(c->exc_base, repushed);
     mojo_exc_type_set(c->exc_type_save);
     mojo_exc_msg_set(c->exc_msg_save);
     mojo_exc_obj_set(c->exc_obj_save);
