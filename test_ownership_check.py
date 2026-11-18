@@ -330,22 +330,15 @@ def main():
 
     # `out` is exclusive like `mut` (the callee writes through it), so it must
     # be flagged — it is in `_CONV_EXCLUSIVE` now rather than only `mut` being.
-    ("same_name_aliases_two_out_params_is_exclusive", """
-def fill(out a: Int, out b: Int):
-    pass
-
-def main():
-    x = 1
-    fill(x, x)
-"""),
-    ("same_name_aliases_out_and_imm_params_is_exclusive", """
-def fill(out dst: Int, imm src: Int):
-    pass
-
-def main():
-    x = 1
-    fill(x, x)
-"""),
+    #
+    # These shapes are not expressible as parsed call sites anymore: an `out`
+    # argument is initialised by the callee and is not passed positionally (so
+    # `fill(x, x)` against `fill(out a, out b)` is a parser refusal, not an
+    # ownership diagnostic). Ownership checking still models `out` as exclusive,
+    # though, so assert that directly on a constructed call that the parser
+    # cannot accept.
+    #
+    # (Parser-unreachable; exercised by _out_aliasing_reject_cases() below.)
     # Triviality gate: the suppression must never leak past decided-trivial
     # types. Each case below must STAY flagged — a too-eager gate (e.g. one
     # that treats a `**` parameter's element type as the binding's type, or
@@ -424,6 +417,72 @@ def main(**kwargs: Int):
 ]
 
 
+def _out_aliasing_reject_cases():
+    """`out` parameters are exclusive borrows, but a call that aliases two of
+    them (or an `out` and another borrow) cannot be written as parsed source
+    anymore because `out` arguments are not passed at the call site. The
+    ownership checker must still treat `out` as exclusive, so assert the
+    aliasing diagnostic on a constructed call the parser cannot accept."""
+    cases = []
+
+    fill = N.FunctionDef(
+        name='fill', params=[('a', 'Int'), ('b', 'Int')], return_type=None,
+        body=[N.PassStmt(line=3, col=5)], decorators=[],
+        param_convs={'a': 'out', 'b': 'out'}, param_has_default={},
+        param_defaults={}, kwonly=[], comptime_params=[],
+        comptime_param_defaults={}, comptime_param_annotations={},
+        variadic_bracket_params=[], is_generator=False, is_async=False,
+        where_clause=None, where_else=None, captures=[],
+        has_capture_list=False, return_origin='', line=2, col=0)
+    main = N.FunctionDef(
+        name='main', params=[], return_type=None,
+        body=[
+            N.AssignStmt(target=N.IdentExpr(name='x', line=6, col=5),
+                         value=N.IntLiteral(value=1, line=6, col=9, raw='1'),
+                         line=6, col=5, type_ann=None),
+            N.ExprStmt(value=N.CallExpr(
+                func=N.IdentExpr(name='fill', line=7, col=5),
+                args=[N.IdentExpr(name='x', line=7, col=10),
+                      N.IdentExpr(name='x', line=7, col=13)],
+                kwargs=[], line=7, col=9), line=7, col=5),
+        ],
+        decorators=[], param_convs={}, param_has_default={}, param_defaults={},
+        kwonly=[], comptime_params=[], comptime_param_defaults={},
+        comptime_param_annotations={}, variadic_bracket_params=[],
+        is_generator=False, is_async=False, where_clause=None, where_else=None,
+        captures=[], has_capture_list=False, return_origin='', line=5, col=0)
+    cases.append(("same_name_aliases_two_out_params_is_exclusive", [fill, main]))
+
+    fill = N.FunctionDef(
+        name='fill', params=[('dst', 'Int'), ('src', 'Int')], return_type=None,
+        body=[N.PassStmt(line=3, col=5)], decorators=[],
+        param_convs={'dst': 'out', 'src': 'imm'}, param_has_default={},
+        param_defaults={}, kwonly=[], comptime_params=[],
+        comptime_param_defaults={}, comptime_param_annotations={},
+        variadic_bracket_params=[], is_generator=False, is_async=False,
+        where_clause=None, where_else=None, captures=[],
+        has_capture_list=False, return_origin='', line=2, col=0)
+    main = N.FunctionDef(
+        name='main', params=[], return_type=None,
+        body=[
+            N.AssignStmt(target=N.IdentExpr(name='x', line=6, col=5),
+                         value=N.IntLiteral(value=1, line=6, col=9, raw='1'),
+                         line=6, col=5, type_ann=None),
+            N.ExprStmt(value=N.CallExpr(
+                func=N.IdentExpr(name='fill', line=7, col=5),
+                args=[N.IdentExpr(name='x', line=7, col=10),
+                      N.IdentExpr(name='x', line=7, col=13)],
+                kwargs=[], line=7, col=9), line=7, col=5),
+        ],
+        decorators=[], param_convs={}, param_has_default={}, param_defaults={},
+        kwonly=[], comptime_params=[], comptime_param_defaults={},
+        comptime_param_annotations={}, variadic_bracket_params=[],
+        is_generator=False, is_async=False, where_clause=None, where_else=None,
+        captures=[], has_capture_list=False, return_origin='', line=5, col=0)
+    cases.append(("same_name_aliases_out_and_imm_params_is_exclusive", [fill, main]))
+    return cases
+
+
 def run():
     failures = []
     for name, src in ACCEPT:
@@ -435,8 +494,12 @@ def run():
         d = _diags(src)
         if not d:
             failures.append(f"REJECT case {name!r} was NOT flagged (expected a diagnostic)")
+    for name, stmts in _out_aliasing_reject_cases():
+        d = check_module(stmts)
+        if not d:
+            failures.append(f"REJECT case {name!r} was NOT flagged (expected a diagnostic)")
 
-    total = len(ACCEPT) + len(REJECT)
+    total = len(ACCEPT) + len(REJECT) + len(_out_aliasing_reject_cases())
     passed = total - len(failures)
     for f in failures:
         print("FAIL:", f)
