@@ -2,7 +2,7 @@
 
 **Branch:** `work/bug-land-formal-x86-64-idx-forms-fuzz-an-2` (task `bug-land-formal-x86-64-idx-forms-fuzz-an-2`; its tip is also saved as `refs/archive/work/bug-land-formal-x86-64-idx-forms-fuzz-an-2`, so dropping it loses nothing).
 **Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 3 commit(s) ahead of master, 5 behind it; task started 2026-11-18 04:11:58
-**Original work:** Fix the bug in bugs/LAND-formal-x86-64-idx-forms-fuzz-an.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
+**Original work:** Fix the bug (the SIB-indexed byte forms with no fuzz draw or `as` check) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or rep
 **Original claims:** bug:LAND-formal-x86-64-idx-forms-fuzz-an
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
