@@ -1,6 +1,10 @@
+SPLIT: CODEGEN_scalar_integer_dtype_representation-part1, CODEGEN_scalar_integer_dtype_representation-part2, CODEGEN_scalar_integer_dtype_representation-part3
+
 # CODEGEN: integer `Scalar[DType.*]` lowers to a 64-bit word
 
-**Status (2026-11-17): not started. This doc is the plan.**
+**Status (2026-11-18): replanned for the easy pool. The work is in the
+`CODEGEN_scalar_integer_dtype_representation-part1..3` docs; this doc keeps the
+measured evidence, the rejected fix and the gates.**
 
 ## Symptom
 
