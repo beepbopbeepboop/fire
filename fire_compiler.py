@@ -3716,6 +3716,18 @@ _BUILTIN_NAMES = frozenset({
 })
 
 
+# Builtins whose argument is consulted for its STATIC TYPE only, at compile
+# time (`type_of(x)` — real Mojo's compile-time analogue of Python's `type(x)`;
+# `__type_of` is the double-underscore spelling the stdlib also uses). They are
+# compiler-provided: no source file declares them. The consumer that explained
+# this first is `ownership_check._COMPTIME_TYPE_FUNCS` (a moved-from binding is
+# still readable as a TYPE), and `unknown_decl_check` uses the same fact to
+# accept the name in a bracket argument (`taker[type_of(x)]`). One definition,
+# because two copies of a builtin list is how one of them goes stale and a
+# valid program becomes "use of unknown declaration 'type_of'".
+_COMPTIME_TYPE_FUNCS = frozenset({'type_of', '__type_of'})
+
+
 # Calls whose result is a fresh, side-effect-free iterable — the ones the
 # compiled genexp desugar may inline into a hoisted generator function
 # (see `_inline_safe_outer_iterable`).

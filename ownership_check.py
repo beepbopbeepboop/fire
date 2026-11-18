@@ -155,8 +155,11 @@ _COMPTIME_TYPE_MEMBERS = {'type', 'origins'}
 # call instead of a member access. Found for real against Modular's actual
 # `test/memory/test_arc.mojo`: `_ = p^; ...; var vec =
 # List[type_of(p)]()` — `type_of(p)` here needs only `p`'s type (already
-# known from its declaration), not its now-moved-from runtime value.
-_COMPTIME_TYPE_FUNCS = {'type_of', '__type_of'}
+# known from its declaration), not its now-moved-from runtime value. The set
+# itself lives in `fire_compiler._COMPTIME_TYPE_FUNCS`, because
+# unknown_decl_check needs the same fact to accept the name in a bracket
+# argument (`taker[type_of(x)]`); one definition keeps the two from drifting.
+_COMPTIME_TYPE_FUNCS = N._COMPTIME_TYPE_FUNCS
 
 
 # Builtin types that are ALWAYS trivially register-passable in real Mojo, so

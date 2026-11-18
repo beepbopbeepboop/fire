@@ -81,9 +81,12 @@ _KEYWORDS = frozenset({
 # hatches (`__mlir_op.`index.add`(a, b)`); the stdlib is written in them.
 # `create_future` is the event loop's future constructor, lowered by name in
 # mojo/backend_gimple/emit_calls.py and mojo/middle/coro.py.
+# `type_of` / `__type_of` are the compile-time type builtins, whose canonical
+# set is `fire_compiler._COMPTIME_TYPE_FUNCS` (shared with ownership_check):
+# their argument's STATIC TYPE is the result, so no runtime symbol exists.
 _COMPILE_TIME_INTRINSICS = frozenset({
     'constrained', '__mlir_op', '__mlir_attr', '__mlir_type', 'create_future',
-})
+}) | N._COMPTIME_TYPE_FUNCS
 
 _RUNTIME_NAMES = frozenset({
     'self', 'Self', '__file__', '__name__', '__init__', '__class__',
