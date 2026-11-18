@@ -12420,6 +12420,8 @@ def _gmp_device_kernel_meta(self, stmts: list, _device_explicit: set, _device_fa
 
 
 def gen_module_impl(self, stmts: list):
+    from mojo.middle.out_result import lower_pointer_out_results
+    lower_pointer_out_results(stmts)
     self._stmts = stmts
     self._current_module_stmts = stmts
 

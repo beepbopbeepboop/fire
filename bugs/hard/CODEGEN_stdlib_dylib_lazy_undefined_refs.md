@@ -130,6 +130,19 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   Undefined `_std_` names: 7 -> 6. Still open: `random` (its `Pointer`-result
   change is parked in stash@{0}) and the `_std__gpu_intrinsics` / `bit_mask` /
   `getpw` generic instances.
+  Status 2026-11-17 (random, landed): `out result: Pointer[T]` is a pointer
+  RETURN, not a value the caller fills. `mojo/middle/out_result.py` lowers it
+  (the definer and the import parse both apply it), and the import scan mirrors
+  the rule, including the same "body reads the name" bail. `_struct_name_of`
+  strips the `struct ` tag so a struct private to another unit names its method
+  `<home>_<Struct>_<method>`. `test_out_param_local.py` gained a cross-module
+  pointer-result case (expects 9). Undefined `_std_` names: 6 -> 5 (random gone).
+  Still open: the gpu `mulhi`/`mulwide` instances. Found: `fast_div`'s
+  `mulhi(self._mprime.cast[.uint32](), ...)` inside a generic struct reaches the
+  Int64 overload, because `.cast[.uint32]()` lowers to a 64-bit word and loses
+  its type. That is a wrong-result bug, not only a link gap. The elaborator
+  route to the definer's symbol was tried and reverted: choosing on erased
+  argument types picked the wrong overload.
   Previously open (now done): step 3, the cross-module import. Gates:
   stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
   Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
