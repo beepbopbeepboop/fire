@@ -2,7 +2,7 @@
 
 **Branch:** `work/bug-land-formal-arm64-instruction-covera` (task `bug-land-formal-arm64-instruction-covera`; its tip is also saved as `refs/archive/work/bug-land-formal-arm64-instruction-covera`, so dropping it loses nothing).
 **Age:** last commit 2026-11-17, first unlanded commit 2026-11-17; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-17 17:15:23
-**Original work:** Fix the bug in bugs/LAND-formal-arm64-instruction-covera-2.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or r
+**Original work:** Fix the bug in the LAND formal-arm64-instruction-coverage-2 bug (its doc, deleted) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or r
 **Original claims:** bug:LAND-formal-arm64-instruction-covera-2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
