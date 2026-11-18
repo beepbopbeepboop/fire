@@ -4314,6 +4314,30 @@ test('import-overload-choice', [PY, 'test_import_overload_choice.py'],
 test('out-param-local', [PY, 'test_out_param_local.py'],
      mem='tiny',
      desc='out parameter reaches the caller, local and cross-module (estate backlog, 2026-11-17)')
+test('closure-address-of-capture', [PY, 'test_closure_address_of_capture.py'],
+     mem='tiny',
+     desc="Pointer(to=x) of a by-value capture takes the env field's address (CODEGEN closure capture)")
+test('codegen-container-param-unknown-arg', [PY, 'test_codegen_container_param_unknown_arg.py'],
+     mem='tiny',
+     desc='container parameter with an unknown argument (registered by the estate audit)')
+test('comptime-generic-alias-fold', [PY, 'test_comptime_generic_alias_fold.py'],
+     mem='tiny',
+     desc='a generic comptime alias folds (registered by the estate audit)')
+test('extend-register-refusal', [PY, 'test_extend_register_refusal.py'],
+     mem='tiny',
+     desc='extend-register refusal (registered by the estate audit)')
+test('gates-coro-jobs-not-off', [PY, 'test_gates_coro_jobs_not_off.py'],
+     mem='tiny',
+     desc='no gates.json OFF pattern may name a coro gate job (registered by the estate audit)')
+test('stdlib-import-suffix', [PY, 'test_stdlib_import_suffix.py'],
+     mem='tiny',
+     desc='stdlib import suffix (registered by the estate audit)')
+test('stdlib-syntax-quick-bench-math', [PY, 'test_stdlib_syntax_quick_bench_math.py'],
+     mem='tiny',
+     desc='quick_bench math stdlib syntax (registered by the estate audit)')
+test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
+     mem='tiny',
+     desc='land doc summary (registered by the estate audit)')
 test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
      mem='tiny',
      desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
@@ -5179,6 +5203,14 @@ BUCKETS = {
 # for the one entry it adds.
 BUCKETS['check'].append('binding-evidence')
 BUCKETS['check'].append('gates-bootstrap-not-off')
+BUCKETS['check'].append('closure-address-of-capture')
+BUCKETS['check'].append('codegen-container-param-unknown-arg')
+BUCKETS['check'].append('comptime-generic-alias-fold')
+BUCKETS['check'].append('extend-register-refusal')
+BUCKETS['check'].append('gates-coro-jobs-not-off')
+BUCKETS['check'].append('stdlib-import-suffix')
+BUCKETS['check'].append('stdlib-syntax-quick-bench-math')
+BUCKETS['check'].append('land-doc-summary')
 BUCKETS['check'].append('dylib-generic-instances')
 BUCKETS['check'].append('import-overload-choice')
 BUCKETS['check'].append('out-param-local')
