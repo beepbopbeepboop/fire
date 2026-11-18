@@ -6306,6 +6306,43 @@ def _erasure_free_context(gen) -> bool:
                 return False
     return True
 
+def _arg_reads_type_dependent_field(gen, args) -> bool:
+    """True when an argument, anywhere in its tree, reads `self.<field>` of the struct whose
+    method is being emitted and that field's annotation names a type parameter or `Self.`."""
+    sname = getattr(gen, '_current_struct_name', None)
+    tparams = getattr(gen, '_current_struct_type_params', None)
+    if not sname or not tparams:
+        return False
+    ann = getattr(gen, '_field_annotations', None) or {}
+    dep_names = {str(t) for t in tparams}
+    seen = set()
+
+    def walk(n) -> bool:
+        if id(n) in seen:
+            return False
+        seen.add(id(n))
+        if isinstance(n, gimple_ctypes.MemberExpr) and isinstance(n.obj, gimple_ctypes.IdentExpr) \
+                and n.obj.name == 'self':
+            text = str(ann.get(f'{sname}.{n.member}', ''))
+            if text and ('Self.' in text or any(re.search(rf'\b{re.escape(t)}\b', text)
+                                                 for t in dep_names)):
+                return True
+        if isinstance(n, (list, tuple)):
+            return any(walk(x) for x in n)
+        d = getattr(n, '__dict__', None)
+        if d is None:
+            return False
+        return any(walk(v) for v in d.values() if v is not None)
+
+    return any(walk(a) for a in args)
+
+
+def _is_overloaded_home(gen, name, source) -> bool:
+    """True when the module that defines NAME declares it more than once (an overload set)."""
+    src = gen._generic_source_text(source)
+    return bool(src) and len(gimple_ctypes.source_decl_ends(src, ['fn', 'def'], name, '([')) > 1
+
+
 def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     """Resolve and elaborate an overloaded imported call (slice 4): lower the
     args, pick the matching overload by their C types, and emit the call to the
@@ -6361,6 +6398,18 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     # `_func_csym` uses) BEFORE the object is built, so the object exports the name
     # the call site uses.
     _q = _as_str(getattr(gen, '_func_qualifier', lambda _n: '')(g))
+    # An overloaded call whose ARGUMENT reads a field typed by the struct's type parameters
+    # (`self._mprime.cast[.uint32]()`, field `Scalar[Self.uint_type]`) inside a generic template
+    # body: that field is the erased word here, so the overload the elaborator would pick is a
+    # guess, and the copy it names is never emitted (an undefined `mulhi__...Int64` in the dylib).
+    # The body is refused, and its caller falls back to the prototype-only form, the same path as
+    # any other unlowerable body. Calls whose arguments are concrete (`max(self.capacity() * 2,
+    # min_capacity)`) keep their choice. Raised OUTSIDE the try below, whose `except` would turn
+    # the refusal into a silent None.
+    if _arg_reads_type_dependent_field(gen, node.args or []) and _is_overloaded_home(gen, g, source):
+        raise RuntimeError(
+            f'cannot compile module: overloaded call {g}() reads a type-parameter-dependent field '
+            f'in a generic struct body; the overload is not decidable here')
     try:
         module_src = gen._generic_source_text(source)
         import elaborate

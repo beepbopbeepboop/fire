@@ -19826,7 +19826,9 @@ def gen_module_impl(self, stmts: list):
                     _nested_snap = dict(self._nested_elem_types)
                     _dval_snap = dict(self._dict_val_types)
                     _prev_tp = getattr(self, '_current_struct_type_params', None)
+                    _prev_sn = getattr(self, '_current_struct_name', None)
                     self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
+                    self._current_struct_name = _as_str(stmt.name)
                     try:
                         func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                         func_parts.append('')
@@ -19863,6 +19865,7 @@ def gen_module_impl(self, stmts: list):
                         continue
                     finally:
                         self._current_struct_type_params = _prev_tp
+                        self._current_struct_name = _prev_sn
                     self._line_src_file = _prev_line_src
                     self._pop_import_scope()
                     if self._lambda_parts:
