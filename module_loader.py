@@ -849,6 +849,16 @@ class ModuleLoader:
                             c_return_type = _ml_as_str(self._mojo_type_to_c(return_type))
                         except Exception:
                             c_return_type = 'int64_t'
+                        # An `out` parameter is the result: the definer emits the
+                        # function void and writes through the pointer, so the
+                        # extern must be void too (see emit_calls._lower_out_param_call).
+                        # Only a plain (non-generic) annotation: that is the one shape the
+                        # caller rewrite supports (a struct object it allocates).
+                        if '->' not in sig and any(
+                                _pp.split(':', 1)[0].split()[:1] == ['out']
+                                and '[' not in _pp.split(':', 1)[1]
+                                for _pp in params_str.split(',') if ':' in _pp):
+                            c_return_type = 'void'
                         c_params = []
                         _star_idx = None
                         for idx_p, (pname, ptype) in enumerate(parameters):
