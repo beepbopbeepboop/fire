@@ -1,4 +1,4 @@
-SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part2, GATE_recover_land_remainder-part3, GATE_recover_land_remainder-part4, GATE_recover_land_remainder-part5
+SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part3, GATE_recover_land_remainder-part4, GATE_recover_land_remainder-part5
 
 # GATE: recover-land backlog remainder (23 jobs) — OFF entry owner doc
 
