@@ -22,7 +22,8 @@ Command: `python3 tools/suite.py bootstrap-stage1-transitive`
 **This part is still open.** Its acceptance is a green job *plus* a closure
 with no `unavailable in compiled mode` stub, and the second half is not met
 (15 stubs, table below). Two of the red's root causes were found and fixed
-here; both are on master.
+in this lane; the first is already on master, the second lands with the land
+commit that carries this Status.
 
 1. **The dump could not finish.** `_drop_unreferenced_extern_decls`
    (`module_gen.py`, added 2026-11-15 by the stdlib-dylib lane) ran a
