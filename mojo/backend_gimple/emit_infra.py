@@ -1713,6 +1713,18 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
             # Only for genuinely mangled functions — reserved renames (pipe →
             # mojo_pipe) are handled by other decl paths and must not change here.
             if gen._func_mangleable(sym):
+                # The definer's list when its home signature names a struct private
+                # to the defining module. Recorded here, once, so every later name
+                # for this import (call sites, which are generated before the
+                # import block is written) hashes the same list as the definition.
+                import mojo.backend_gimple.emit_funcs as _efn_pv
+                _home_pv = _efn_pv._imported_private_struct_pts(gen, sym)
+                if _home_pv:
+                    _hp_by = getattr(gen, '_home_private_pts_by_name', None)
+                    if _hp_by is None:
+                        _hp_by = {}
+                        gen._home_private_pts_by_name = _hp_by
+                    _hp_by[sym] = list(_home_pv)
                 _csym = gen._func_csym(sym)
                 if _csym != sym:
                     sig = gimple_ctypes._replace_first_ident(sig, sym, _csym)

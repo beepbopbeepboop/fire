@@ -2807,11 +2807,34 @@ def _home_private_struct_pts(gen, info) -> list | None:
             _n = _n + 1
     if _n != 1:
         return None
+    # A generic template is elaborated per call, never named by an extern's
+    # overload hash, so the definer's list does not apply to it.
+    if getattr(_found, 'comptime_params', None):
+        return None
     _pts = gen._home_signature_ctypes(_mod, _found)
+    # A struct private to the home module is spelled two ways in the home unit's own
+    # signature: the tag form `struct N *`, and the bare `N *` for a struct the module
+    # defines (`_GraphemeBreakState *`, `_RandomState *`). The importer does not know
+    # either, so both take the definer's list.
+    _home_structs = set()
+    _generic_structs = set()
+    for _hs in _stmts:
+        if isinstance(_hs, gimple_ctypes.StructDef):
+            if _hs.bracket_params:
+                _generic_structs.add(_as_str(_hs.name))
+            else:
+                _home_structs.add(_as_str(_hs.name))
+    _named = False
     for _p in _pts:
-        if _as_str(_p)[:7] == 'struct ':
-            return _pts
-    return None
+        _ps = _as_str(_p)
+        _base = _ps[7:] if _ps[:7] == 'struct ' else _ps
+        if _base.endswith(' *'):
+            _base = _base[:-2].strip()
+        if _base in _generic_structs:
+            return None
+        if _ps[:7] == 'struct ' or _base in _home_structs:
+            _named = True
+    return _pts if _named else None
 
 
 def _imported_private_struct_pts(gen, bare_name: str) -> list | None:
@@ -3531,6 +3554,13 @@ def _func_csym(gen, bare_name: str, def_pts: list | None = None) -> str:
     Every definition and call site asks this function for the name, so the
     record is the authoritative answer for each bare name in this module; see
     `_func_csym_impl` for how the name is built."""
+    if def_pts is None:
+        # An imported name whose home signature names a struct private to the
+        # defining module was recorded with the definer's list when its import
+        # entry was processed; every later name for it hashes that list.
+        _hp = getattr(gen, '_home_private_pts_by_name', None)
+        if _hp and bare_name in _hp:
+            def_pts = _hp[bare_name]
     sym = _func_csym_impl(gen, bare_name, def_pts)
     rec = getattr(gen, '_func_csym_record', None)
     if rec is None:
