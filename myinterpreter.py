@@ -9822,7 +9822,7 @@ class Interpreter:
         right = self.eval_expr(expr.right)
         return self._apply_binary_op(expr, op, left, right)
 
-    def _apply_binary_op(self, expr, op, left, right) -> object:
+    def _apply_binary_op(self, expr, op, left, right):
         """Compute a binary operator's result from already-evaluated
         operands (everything except the short-circuiting 'and'/'or'/'as',
         handled directly in eval_BinaryOp before operands are evaluated).
@@ -10055,7 +10055,7 @@ class Interpreter:
         obj = self.eval_expr(expr.obj)
         return self._eval_member_of(expr, obj)
 
-    def _eval_member_of(self, expr: N.MemberExpr, obj) -> object:
+    def _eval_member_of(self, expr, obj):
         """Resolve `expr.member` against an already-evaluated `obj`.
         Factored out of eval_MemberExpr as its own named step."""
         if isinstance(obj, MojoInstance):

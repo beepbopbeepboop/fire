@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-formal-arm64-instruction-covera land?
+# Land: should finished branch bug-land-gpu-offload-validation-modular-6 land?
 
-**Branch:** `work/bug-land-formal-arm64-instruction-covera` (task `bug-land-formal-arm64-instruction-covera`; its tip is also saved as `refs/archive/work/bug-land-formal-arm64-instruction-covera`, so dropping it loses nothing).
-**Age:** last commit 2026-11-17, first unlanded commit 2026-11-17; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-17 17:15:23
-**Original work:** Fix the bug in the LAND formal-arm64-instruction-coverage-2 bug (its doc, deleted) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or r
-**Original claims:** bug:LAND-formal-arm64-instruction-covera-2
+**Branch:** `work/bug-land-gpu-offload-validation-modular-6` (task `bug-land-gpu-offload-validation-modular-6`; its tip is also saved as `refs/archive/work/bug-land-gpu-offload-validation-modular-6`, so dropping it loses nothing).
+**Age:** last commit 2026-11-17; 0 commit(s) ahead of master, 90 behind it; task started 2026-11-17 07:47:37
+**Original work:** An earlier attempt left 6 commit(s) on branch work/bug-land-gpu-offload-validation-modular-3, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted 
+**Original claims:** bug:LAND-gpu-offload-validation-modular-part8-2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-17 17:42:37: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-17; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-17 17:15:23)
-  Branch: work/bug-land-formal-arm64-instruction-covera
-  Conflicting files: see `git merge master`
+- 2026-11-17 17:12:21: conflicts with master (last commit 2026-11-17; 0 commit(s) ahead of master, 90 behind it; task started 2026-11-17 07:47:37)
+  Branch: work/bug-land-gpu-offload-validation-modular-6
+  Conflicting files: bugs/hard/GPU_offload_validation_modular.md

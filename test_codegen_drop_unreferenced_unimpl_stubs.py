@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Regression test for _drop_unreferenced_unimpl_stubs O(parts^2) -> O(parts * names).
+"""Regression tests for the two `_drop_unreferenced_*` helpers in module_gen.
 
-A stub DEFINITION is dropped iff NO other part references that stub name.
-After the speedup, every part is scanned once per candidate stub name to build
-a reference set, then each stub definition tests membership of that set (excluding
-self-reference, so a self-referencing definition stays). Byte-identical output
-guarantees the keep/drop contract holds regardless of algorithmic shape.
+`_drop_unreferenced_unimpl_stubs`: a stub DEFINITION is dropped iff NO other
+part references that stub name. After the speedup, every part is scanned once
+per candidate stub name to build a reference set, then each stub definition
+tests membership of that set (excluding self-reference, so a self-referencing
+definition stays). Byte-identical output guarantees the keep/drop contract
+holds regardless of algorithmic shape.
+
+`_drop_unreferenced_extern_decls`: a guarded extern declaration is dropped iff
+its symbol is never referenced outside its own declaration block. Its counts
+are one `\\w+` tokenisation of the whole text, never one regex per symbol: the
+whole-closure `--dump-full` of `fire.py` has tens of thousands of guarded
+externs over a ~40 MB translation unit, and the per-symbol scan made that dump
+run for tens of minutes (`bootstrap-stage1-transitive`'s 3600 s ceiling).
 """
 
 import sys
@@ -91,10 +99,72 @@ def test_no_refs_all_dropped_when_only_defs():
     assert result == []
 
 
+def extern_block(name):
+    """One guarded extern declaration block, the shape the codegen emits."""
+    return (f"#ifndef _MOJO_STUB_{name}\n"
+            f"#define _MOJO_STUB_{name}\n"
+            f"extern int64_t {name} (int64_t);\n"
+            f"#endif\n")
+
+
+def test_extern_unreferenced_dropped_referenced_kept():
+    """A guarded extern nothing else names is dropped; one named after its
+    block (a real caller) is kept verbatim."""
+    kept = extern_block('used')
+    dropped = extern_block('unused')
+    text = kept + dropped + 'int64_t r = used (1);\n'
+    out = module_gen._drop_unreferenced_extern_decls(text)
+    assert 'unused' not in out, f"unreferenced extern kept: {out!r}"
+    assert kept in out, f"referenced extern dropped: {out!r}"
+    assert 'int64_t r = used (1);' in out
+
+
+def test_extern_self_named_only_inside_block_is_dropped():
+    """The `#define` line naming the symbol does not count as a reference."""
+    text = extern_block('solo') + 'int x;\n'
+    out = module_gen._drop_unreferenced_extern_decls(text)
+    assert out == 'int x;\n', f"block not dropped cleanly: {out!r}"
+
+
+def test_extern_one_whole_text_scan():
+    """The whole-text count is ONE pass, not a regex per symbol.
+
+    This is the algorithmic half of the fix. Before it, each of the 2,000
+    symbols here got its own `re.findall` over the ~400 KB text (seconds
+    measured; the real 40 MB closure ran for tens of minutes and could not
+    finish inside the suite's 3600 s ceiling). A regression to that shape
+    fails here without depending on a wall-clock threshold.
+    """
+    n = 2000
+    body = ''.join(extern_block(f'f{i}') for i in range(n))
+    pad = 'int x = 0;\n' * 20000
+    text = body + pad
+    whole_text_scans = []
+    real_findall = module_gen.re.findall
+
+    def recording_findall(pattern, string, flags=0):
+        if len(string) > 100000:
+            whole_text_scans.append(pattern)
+        return real_findall(pattern, string, flags)
+
+    module_gen.re.findall = recording_findall
+    try:
+        out = module_gen._drop_unreferenced_extern_decls(text)
+    finally:
+        module_gen.re.findall = real_findall
+    assert not whole_text_scans, (
+        f"{len(whole_text_scans)} whole-text re.findall call(s): the count "
+        "regressed to one scan per symbol")
+    assert out == pad, f"blocks not all dropped: {len(out)} bytes left"
+
+
 if __name__ == '__main__':
     test_all_unref_dropped()
     test_one_ref_def_kept()
     test_size_shrinks()
     test_duplicates_cleaned()
     test_no_refs_all_dropped_when_only_defs()
+    test_extern_unreferenced_dropped_referenced_kept()
+    test_extern_self_named_only_inside_block_is_dropped()
+    test_extern_one_whole_text_scan()
     print('All tests passed')

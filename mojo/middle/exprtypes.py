@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _LIBM_FN_RETVALS, _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
-from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CompareChain, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -2611,35 +2611,3 @@ def _fstring_field_names(node_list: list) -> set[str]:
     return out
 
 
-def scalar_shape_arm_kind(node) -> str | None:
-    """The scalar family a return arm is BY ITS SOURCE SHAPE, or None.
-
-    The C type cannot answer this question, and that is the whole reason this
-    function exists: a String or container value is an erased `int64_t` box,
-    `None` is `int 0`, and a `Bool` value is `_Bool`, so on the C side a
-    legitimate pointer arm and a mistyped scalar arm are the same word. Only
-    shapes whose static Mojo type is a scalar in every context are named here
-    — literals, comparisons, `not`, and a sign applied to a literal. An
-    IdentExpr or a call is deliberately NOT named: `return result^` returning
-    a String is an `int64_t` on the C side and must stay legal.
-
-    Two readers, and they must agree: the return emitter's refusal of a
-    scalar arm in an ANNOTATED pointer return (emit_stmts), and
-    `infra_infer._return_arms_need_boxed_word`, which decides whether an
-    INFERRED pointer join is really a mix of a pointer and a scalar and so
-    has to become the boxed word."""
-    while isinstance(node, UnaryOp) and node.op in ('-', '+'):
-        node = node.operand
-    if isinstance(node, IntLiteral):
-        return 'int'
-    if isinstance(node, FloatLiteral):
-        return 'float'
-    if isinstance(node, BoolLiteral):
-        return 'bool'
-    if isinstance(node, CompareChain):
-        return 'bool'
-    if isinstance(node, BinaryOp) and node.op in ('==', '!=', '<', '<=', '>', '>='):
-        return 'bool'
-    if isinstance(node, UnaryOp) and node.op == 'not':
-        return 'bool'
-    return None

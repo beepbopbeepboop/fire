@@ -1640,7 +1640,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                         and isinstance(node.value, gimple_ctypes.CallExpr)
                         and isinstance(node.value.func, gimple_ctypes.IdentExpr)
                         and _as_str(node.value.func.name) in getattr(
-                            gen, '_ret_may_hold_mixed', ()))
+                            gen, '_ret_may_hold_float', ()))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
@@ -3460,12 +3460,11 @@ def _redecl_upgrade_default(gen, name: str, ctype: str) -> None:
             return
 
 
-def _is_mixed_return(gen) -> bool:
+def _is_float_mixed_return(gen) -> bool:
     """Is the body being emitted one whose return type inference widened to
-    the TAGGED WORD because its arms mix a pointer with a value no pointer can
-    hold (a float, a `_Bool`, or an unambiguous scalar arm)?
+    the TAGGED WORD because its arms mix a float with a pointer?
 
-    The answer comes from `_mixed_return_bodies`, the set
+    The answer comes from `_float_mixed_return_bodies`, the set
     `infra_infer._infer_return_type_core` records against the SAME body object,
     so this emitter cannot disagree with the declared return type: the body is
     only in the set because inference widened it to `int64_t`, and `func_ret_type`
@@ -3475,29 +3474,23 @@ def _is_mixed_return(gen) -> bool:
         return False
     _body = getattr(gen, '_cur_func_body', None)
     return _body is not None and id(_body) in getattr(
-        gen, '_mixed_return_bodies', ())
+        gen, '_float_mixed_return_bodies', ())
 
 
-def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
-    """Box one return arm of a mixed-return function into the tagged word.
+def _box_float_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
+    """Box one return arm of a float+pointer function into the tagged word.
 
     Every arm that has no `int64_t` spelling is boxed by its own kind, so a
     consumer that only sees the word (`mojo_repr_boxed`, the list kind
-    reader) still renders the value: `_Bool` -> 'b', `double` -> 'd',
-    `char *` -> 'p', `MojoList *` (tuple or list) -> 'l', `MojoBytes *` ->
-    's'. An `int`/`int64_t` arm is already a plain word and passes through
-    unchanged.
+    reader) still renders the value: `double` -> kind 'd', `char *` -> 'p',
+    `MojoList *` (tuple or list) -> 'l', `MojoBytes *` -> 's'. An `int`/`_Bool`
+    arm is already a plain word and passes through unchanged.
 
-    Any OTHER pointer kind — a dict, a set, a struct — has no box kind that
-    renders it (a box's "container" kind renders through the LIST repr, so
-    reading a dict pointer out of it would walk dict memory as a slot array).
-    It travels as its RAW word instead: `mojo_repr_boxed` falls back to the
-    integer rendering for a word it does not recognise, and every unboxing
-    consumer (`mojo_box_word`) passes it through unchanged, so a raw pointer
-    is never reinterpreted. That is the only answer an inferred mix can give
-    when one of its arms is a class the runtime has no box for — the shape
-    this compiler's own `_apply_binary_op` has, mixing `MojoString *` with
-    int/bool/float arms."""
+    Any OTHER pointer kind — a dict, a set, a struct — is refused rather than
+    guessed: a box's "container" kind renders through the LIST repr, so
+    reading a dict pointer out of it would walk dict memory as a slot array.
+    A diagnostic naming the function is the only honest answer; the shapes
+    that matter today (`comptime.eval_const`) return str/list/None/float."""
     vt = _as_str(vtype)
     if vt in ('int', 'int64_t'):
         # A plain integer has an int64_t spelling, so it IS the word.
@@ -3521,7 +3514,11 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
     if vt == 'MojoBytes *':
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_bytes',
                                          [('void *', v)])
-    return 'int64_t', gen._coerce_to_type(vt, 'int64_t', v)
+    raise TypeError(
+        f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
+        f"returns a float beside a {vt!r}; a tagged word can carry a float "
+        f"beside an int/str/list/tuple/bytes/None, but not beside this pointer "
+        f"kind (a box of it would be rendered by the wrong repr)")
 
 
 _NON_POINTER_SCALAR_ARM_CTYPES = ('double', 'float', 'int', 'int64_t', '_Bool')
@@ -3563,11 +3560,31 @@ def _annotation_scalar_family(ann: str) -> str | None:
 def _scalar_shape_arm_kind(node) -> str | None:
     """The scalar family a return arm is BY ITS SOURCE SHAPE, or None.
 
-    ONE definition, in `mojo.middle.exprtypes`, because the inference side
-    needs the same answer when it decides whether an inferred pointer join is
-    a real pointer/scalar mix (`infra_infer._return_arms_need_boxed_word`).
-    See that function for the rule and why the C type cannot answer it."""
-    return gimple_exprtypes.scalar_shape_arm_kind(node)
+    The C type cannot answer this question, and that is the whole reason this
+    function exists: a String or container value is an erased `int64_t` box,
+    `None` is `int 0`, and a `Bool` value is `_Bool`, so on the C side a
+    legitimate pointer arm and a mistyped scalar arm are the same word. Only
+    shapes whose static Mojo type is a scalar in every context are named here
+    — literals, comparisons, `not`, and a sign applied to a literal. An
+    IdentExpr or a call is deliberately NOT named: `return result^` returning
+    a String is an `int64_t` on the C side and must stay legal.
+    """
+    while isinstance(node, gimple_ctypes.UnaryOp) and node.op in ('-', '+'):
+        node = node.operand
+    if isinstance(node, gimple_ctypes.IntLiteral):
+        return 'int'
+    if isinstance(node, gimple_ctypes.FloatLiteral):
+        return 'float'
+    if isinstance(node, gimple_ctypes.BoolLiteral):
+        return 'bool'
+    if isinstance(node, gimple_ctypes.CompareChain):
+        return 'bool'
+    if (isinstance(node, gimple_ctypes.BinaryOp)
+            and node.op in ('==', '!=', '<', '<=', '>', '>=')):
+        return 'bool'
+    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == 'not':
+        return 'bool'
+    return None
 
 
 def _check_float_arm_into_annotated_pointer(gen, vtype, node=None) -> None:
@@ -3575,7 +3592,7 @@ def _check_float_arm_into_annotated_pointer(gen, vtype, node=None) -> None:
 
     A pointer C return type reaches this emitter only from an ANNOTATION
     (`-> String`, `-> MojoList *`, ...): an inferred scalar+pointer join is
-    widened to the tagged word before we get here (`_is_mixed_return`).
+    widened to the tagged word before we get here (`_is_float_mixed_return`).
     So a scalar arm is a contradiction of a static type, and Mojo rejects it
     as a type error. The old spelling, `(char *)<scalar>` cast into the
     pointer, compiled (gcc warns, not errors) and silently handed the caller
@@ -3647,7 +3664,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         # A bare `return` is `return None`, and in a tagged function a None is
         # the shared None box, not the NULL word (which `mojo_repr_boxed` would
         # read as the integer 0).
-        if _is_mixed_return(gen):
+        if _is_float_mixed_return(gen):
             _nv = gen._call_expr('int64_t', 'mojo_box_none', [])
             gen._ret(_nv)
             return
@@ -3881,12 +3898,12 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]
-        # A mixed-return function returns the TAGGED WORD: box this arm by
+        # A float+pointer function returns the TAGGED WORD: box this arm by
         # its kind so the declared `int64_t` return carries the value instead
         # of truncating it into the pointer the old join chose. AFTER the
         # bookkeeping above, which is about the value's own container shape and
         # still wants the unboxed `v`.
-        if _is_mixed_return(gen):
+        if _is_float_mixed_return(gen):
             if isinstance(node.value, gimple_ctypes.NoneLiteral) or (
                     isinstance(node.value, gimple_ctypes.IdentExpr)
                     and _as_str(node.value.name) == 'None'):
@@ -3904,7 +3921,7 @@ def _gen_stmt_ReturnStmt(gen, node):
                     'int64_t', 'mojo_box_from_bool',
                     [('int64_t', gen._to_int64(vtype, v))])
             else:
-                vtype, v = _box_mixed_return_arm(gen, vtype, v)
+                vtype, v = _box_float_mixed_return_arm(gen, vtype, v)
         ret = gen.func_ret_type
         if ret == 'void':
             gen._ret_void()
