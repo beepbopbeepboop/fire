@@ -1608,6 +1608,37 @@ the text; it does not find out whether any word can arrive there.  So:
                         f"the row names {key!r} but the branch this word "
                         f"reaches tests a different value")
 
+    def test_sp_in_rn_refusals_decode_the_words_own_fields(self):
+        """An `sp` in `Rn` does not stop the refusal naming option/imm3.
+
+        `add x0, sp, w1, uxtw` is the spelling clang emits for a stack-pointer
+        addend in the extended class. These words are refused (they are not the
+        modelled 64-bit UXTX rows), and the refusal must decode the word's OWN
+        sf/option/imm3 -- the same acceptance as the register forms, which
+        putting `sp` in `Rn` does not change. This pins the part-2 fix on the
+        spellings whose `Rn` is the reason they reach the refusal at all.
+        """
+        import formal.arm64_proof_gen as G
+        cases = [
+            ("add x0, sp, w1, uxtw", "ADD extended",
+             "option=010 (UXTW), imm3=0"),
+            ("sub x0, sp, w2, sxtw #2", "SUB extended",
+             "option=110 (SXTW), imm3=2"),
+            ("add sp, x1, w2, uxtw", "ADD extended",
+             "option=010 (UXTW), imm3=0"),
+        ]
+        for form, want_name, want_decode in cases:
+            with self.subTest(form=form):
+                word = _assembler_word(form)
+                self.assertIsNotNone(word, f"clang refuses `{form}`")
+                self.assertIsNone(
+                    G._step_branch_index(word),
+                    f"`{form}` assembles to 0x{word:08x}, which the step "
+                    f"table claims; it never reaches the refusal this pins")
+                name, why = G._unmodelled_instruction(word)
+                self.assertEqual(name, want_name)
+                self.assertIn(want_decode, why)
+
     def test_the_hardware_agrees_with_the_model_about_rn_31(self):
         """Ask the MACHINE, for the three words the model branches on.
 
