@@ -456,7 +456,11 @@ MEASURED_PEAK_GB = {
     'selfhost':                    (7.9, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    'sqliteruntime':               (2.3, 'measured'),
+    # 2.3 GB was that job's number until it was re-measured at 5.58 GB (see
+    # the registration's memwhy). The growth 1.3 -> 2.3 -> 5.58 across recent
+    # commits is an UNRESOLVED compiler memory regression, recorded rather
+    # than hidden: this table entry only sizes the class to what was measured.
+    'sqliteruntime':               (5.58, 'measured'),
     'bootstrap-stage1-transitive': (4.1, 'measured'),
     'bootstrap-stage2-cc':         (4.1, 'measured'),
     'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
@@ -2554,7 +2558,25 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
 # the 17-job `check` run its footprint inflated to the 4.0 GB ceiling and it was
 # killed (a RESOURCE verdict, reported apart from FAIL), and a later 3-job run
 # timed out at 600 s: under heavy load this job is the one to look at first.
-test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
+test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
+     # `tiny` (4) was set from a 1.3 GB peak. Re-measured 2026-11-18 with
+     # `/usr/bin/time -l` on a quiet machine: peak RSS 5.58 GB over 870 s
+     # (exit 0). The suite's own log recorded 4.2 GB and RESOURCE-KILLED the
+     # job at 532 s, so 4.2 was a partial peak, not the job's need. The
+     # ratchet's 1.5x headroom rule (class_for_peak) puts 5.58 GB at `module`
+     # (8.37 GB needed; `small` is 8). Over the 4 GB line and therefore a
+     # debt, not a fact -- see MEM_DEBT_DOC.
+     mem='module',
+     memwhy='measured 5.58 GB peak RSS 2026-11-18 (/usr/bin/time -l on '
+            'test_sqlite3_runtime.py, 870 s wall, exit 0); the suite log '
+            'recorded 4.2 GB and RESOURCE-killed it at 532 s, so that number '
+            'was a partial peak. Building the sqlite3 optional units drags in '
+            'the runtime headers and several test programs; the '
+            '1.3 -> 2.3 -> 5.58 GB growth across recent commits is an OPEN '
+            'compiler memory regression, and this class is 4.3x the measured '
+            'peak only because the headroom rule rounds 8.37 GB up to the next '
+            'rung -- reducing the peak is the real fix. See '
+            'doc/POLICY_memory_over_4gb.md.',
      deps=['preflight'], timeout=600,
      desc='optional-unit link mechanism: derivation, probe, and every '
           'test_sqlite3*.mojo built+linked+RUN on both pipelines')
