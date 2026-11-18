@@ -4424,28 +4424,17 @@ def _lcx_subscript_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
 
 
 def _root_function_def(gen, name: str):
-    """The one top-level FunctionDef a call to NAME reaches, or None.
+    """The one top-level FunctionDef named NAME in this module, or None.
 
-    A name this module defines is read from its own top-level statements; an
-    imported name from its home module's parsed statements (under the name it
-    has THERE). Only a plain (non-generic, non-overloaded) free function
-    qualifies: an overload set or a generic is resolved by the normal path."""
-    def _scan(stmts, want):
-        hits = []
+    Only a plain (non-generic, non-overloaded) free function qualifies: an
+    overload set or a generic is resolved by the normal path, not here."""
+    found = []
+    # The module being emitted: its own top-level statements (set by gen_module).
+    for stmts in [getattr(gen, '_current_module_stmts', None) or []]:
         for st in stmts or []:
-            if (type(st).__name__ == 'FunctionDef' and _as_str(st.name) == want
+            if (type(st).__name__ == 'FunctionDef' and _as_str(st.name) == name
                     and not getattr(st, 'comptime_params', None)):
-                hits.append(st)
-        return hits
-    found = _scan(getattr(gen, '_current_module_stmts', None) or [], name)
-    if not found:
-        _info = (getattr(gen, 'imported_symbols', None) or {}).get(name) or {}
-        _mod = _as_str(_info.get('module')) if _info else ''
-        # An import entry names its home function `original_name` only when it
-        # was renamed on import; otherwise the local name is the home name.
-        _orig = (_as_str(_info.get('original_name')) if _info else '') or name
-        if _mod and _orig:
-            found = _scan(gen._parsed_import(_mod)[2] or [], _orig)
+                found.append(st)
     return found[0] if len(found) == 1 else None
 
 

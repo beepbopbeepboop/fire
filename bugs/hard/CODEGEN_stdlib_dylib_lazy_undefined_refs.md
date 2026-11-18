@@ -86,16 +86,7 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   a word. A first version without those limits broke 15 stdlib files and 47
   build errors; the restriction is what the gates measured. Test:
   `test_out_param_local.py` (compiles the module and runs it, expects 7).
-  Status 2026-11-17 (step 3 landed): the cross-module case. The import scan
-  declares an `out` function `void` when its annotation is plain (no `[`), and
-  the caller rewrite finds the callee in its home module's parsed statements
-  (`emit_calls._root_function_def`). `test_out_param_local.py` now also runs a
-  two-module round trip (expects 7). Still open: the random name is NOT this
-  convention. Its `out result: Pointer[_RandomState, ...]` is a pointer RESULT,
-  not an object the caller fills; the right fix is to return the pointer
-  (`_RandomState * f(void)`), a separate change to the definer's signature and
-  the caller's use of the value.
-  Previously open (now done): step 3, the cross-module import. Gates:
+  Still open: step 3, the cross-module import (the random name). Gates:
   stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
   Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
   - Callee chosen: `mojo/backend_gimple/emit_calls.py` ~11650-11676, where

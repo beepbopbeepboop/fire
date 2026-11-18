@@ -443,11 +443,24 @@ real. But it is NOT the general "comptime member type" check:
   diagnostic to name `EnumLike`.
 
 Probed the trait list (`Writable`, `ImplicitlyCopyable`, both): all exit 0.
-So the requirement Modular enforces comes from the **`__enum` construct's
-IMPLICIT `EnumLike` conformance** (`std/builtin/enum_like.EnumLike`, which
-requires `comptime _enum_is_exhaustive: Bool`), and our compiler does not model
-that implicit conformance, so a user-declared
-`comptime _enum_is_exhaustive = 5` is never checked against it.
+**The source, located (same day).** Modular's parser:
+`mojo/lib/MojoParser/StructEmitter.cpp:1586`
+(`enumExhaustiveDeclFailedConformance`) -- "Whether a written
+`_enum_is_exhaustive` of `enumDecl` fails conformance to `EnumLike` (e.g. it is
+not a `Bool`); it is the only member of that conformance a user can write. The
+conformance reports the error."
 
-That is a narrower target than "declaration-level `rc=0`": the conformance
-machinery works; what is missing is that `__enum` implies `EnumLike`.
+So the requirement comes from a **compiler-synthesized `EnumLike` conformance
+for the enum**, and `_enum_is_exhaustive: Bool` is a member of THAT builtin
+trait. It is NOT the stdlib trait I first guessed: `std/builtin/enum_like.mojo`'s
+`trait EnumLike` requires `_enum_case_names` / `_enum_case_types` /
+`_enum_elt_type_for_case` / `_get_enum_discriminant` and does NOT mention
+`_enum_is_exhaustive` (grep confirms the name appears nowhere in the stdlib
+tree). My earlier attribution to the stdlib trait was wrong and is corrected
+here.
+
+Target, narrowed: synthesize the enum's `EnumLike` conformance with
+`_enum_is_exhaustive: Bool`, and report through the existing
+"does not implement all requirements" + "note: comptime member ... does not
+conform to trait's required type ..." machinery -- both of which already work
+for an explicit conformance.
