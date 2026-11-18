@@ -15948,6 +15948,26 @@ main()
 """)
 
 
+def test_list_str_param_read_wrong_after_empty_list_caller():
+    """`e: list[str] = []` then `ends(e)`: the empty list VARIABLE was recorded
+    as a list of ints (the annotation's element type was not read), which made
+    the `list[str]` parameter kind-mixed and its element read a boxed word cast
+    to `char *` (always False). CPython prints `closed` then `open`."""
+    test_gimple_matches_cpython("gimple_list_str_param_read_wrong_after_empty_list_caller", """\
+def ends(lines: list[str]) -> str:
+    if lines and lines[-1].endswith(':'):
+        return "open"
+    return "closed"
+
+def main():
+    e: list[str] = []
+    print(ends(e))
+    print(ends(["a", "b:"]))
+
+main()
+""")
+
+
 def test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool():
     """`a.flag or getattr(a, 'x', False) or a.some_dict`: the middle link is a
     word of unknown kind, and the last link joined it with a dict pointer, so
