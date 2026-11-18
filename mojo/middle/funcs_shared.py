@@ -520,8 +520,16 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # param then slices an int64_t and lowers to int64_t, and passing it to
     # a String-taking ctor is a `makes pointer from integer` error. Mirror
     # _imported_field_ctype's handling (std/pathlib/path.mojo:90).
-    if ptype in ('StaticString', 'StringLiteral', 'StringRef', 'StringSlice'):
-        ctype = 'char *'
+    #
+    # The rule itself lives in `param_annotation_ctype` (mojo/middle/types.py)
+    # because module_loader.py's export text scan and reflect.py's signature
+    # emitter need the SAME annotation -> parameter-ctype answer, and their
+    # own copies had boxed `StringSlice[_]` to `int64_t *` — a different C
+    # type from the definition's `Span *`, hence a different overload suffix,
+    # hence a call to a `_std_*_<hex>` symbol nothing defines (the
+    # stdlib-dylib red). One statement of the rule, three readers.
+    if is_bare_string_param_annotation(ptype):
+        ctype = param_annotation_ctype(ptype)
     if ctype == 'void':
         # _mojo_type('None') correctly maps NoneType -> void for RETURN
         # types, but a named PARAMETER can never be typed void in a
