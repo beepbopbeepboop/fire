@@ -5763,7 +5763,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
             ot, ov = 'MojoSet *', sp
         else:
-            cp = gen._cast('char *', ip)
+            cp = gen._call_expr('char *', 'mojo_word_cstr_value',
+                                [('int64_t', ip)])
             ot, ov = 'char *', cp
 
     # ── Container / pointer / scalar dispatch ────────────────────────────
