@@ -11451,8 +11451,23 @@ def _lnc_int(gen, arg_pairs: list) -> tuple[str, str] | None:
     # (mojo_box_int answered a boxed string with the pointer, the same
     # defect, and a None box with 0 where CPython raises).
     if at == 'int64_t':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_int_of_word',
-                                         [('int64_t', gen._ensure_local('int64_t', av))])
+        _iow = gen._call_expr('int64_t', 'mojo_int_of_word',
+                              [('int64_t', gen._ensure_local('int64_t', av))])
+        # `mojo_int_of_word` ALWAYS yields an integer -- identity for a
+        # numeric word, digit parse for a bare or boxed string, truncation for
+        # a double box -- so its result is a PROVABLE int word and belongs in
+        # `_int_word_vals` (see `_mark_known_int`'s contract: an operation that
+        # cannot reinterpret its operands' bits may record its result). Without
+        # this the word reached a dict site untracked, so `_char_to_cstr` fell
+        # to its `_kw` placeholder and the runtime's range-guessing twin
+        # decided the key; the INSERT of the same expression had already
+        # stringified it (`mojo_cstr_or_int_str`), so the two sides keyed the
+        # entry differently. Measured: `d = {int(id(a)): 'v'}; d[int(id(a))]`
+        # stored under "140..." and looked up in the integer domain, returning
+        # None -- or raising `unhashable type: 'list'` when a prior line made
+        # the token's kind visible.
+        gen._int_word_vals.add(_iow)
+        return 'int64_t', _iow
     if at in ('int', '_Bool'):
         return 'int64_t', gen._cast('int64_t', f"{av}")
     return None
