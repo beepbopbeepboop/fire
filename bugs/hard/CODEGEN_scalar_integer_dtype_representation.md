@@ -152,3 +152,28 @@ Still to measure (not yet recorded): subscript load/store through a pointer
 (`emit_exprs.py` subscript lowering), `.cast[T]` (`emit_calls.py`), comparisons
 and arithmetic on a `Scalar` value, the struct field layout
 (`_imported_field_ctype`), and boxing (`mojo_box_from_*`).
+
+## Status 2026-11-18: integer representation landed; mulhi still open
+
+Landed on master (`f6ba07d36`, merged as `3884a18e8`): one integer dtype table
+feeds both resolvers, `Scalar[X]` agrees with `UnsafePointer[Scalar[X]]`
+elements, and an integer SIMD is a scalar only at width 1. Gates: stdlib syntax
+610/610, dylib 1203/1203 with 0 errors, test_gimple 466/0.
+
+What `mulhi` still needs, measured:
+- `FastDiv[DType.uint32]` (in `std/utils/fast_div.mojo`) declares its fields as
+  `Scalar[Self.uint_type]`, and `comptime uint_type =
+  _uint_type_of_width[bit_width_of[Self.dtype]()]()`. The monomorphizer
+  substitutes `dtype` but never evaluates the `Self.uint_type` alias, so the
+  fields stay `int64_t` and `.cast[.uint32]()` is a no-op.
+- The concrete instance `FastDiv[DType.uint32]` therefore calls
+  `std__gpu_intrinsics_mulhi_2dbb98` (the `Int64` overload), not `..._7a3fec`
+  (`UInt32`). The instance object is built and its mulhi reference is measured
+  with `elaborate_generic_struct`.
+- The erased template (the dylib's copy) has the same undefined `mulhi` reference.
+
+Next step: evaluate `Self.<comptime alias>` values in monomorphize_source, at
+least for a call to a stdlib function whose body is a `comptime if` chain on
+constants (`_uint_type_of_width`). Then the field type becomes `uint32_t`, the
+cast truncates, and the instance's mulhi call takes the `UInt32` overload. Test:
+`FastDiv[DType.uint32]` divides correctly against integer division.
