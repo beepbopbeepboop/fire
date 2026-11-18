@@ -485,3 +485,15 @@ member a user may write), and let the existing conformance checker report the
 violation. The checker is proven -- the pinned
 `test_enum_exhaustive_mistyped` drives exactly this diagnostic through a
 user-defined trait with the same requirement. Only the synthesis is missing.
+
+**Why it is not a small patch:** the requirement list comes from a parsed
+trait body (`fire_compiler.py:6163` -- only a value-less `comptime NAME: Type`
+is a requirement), and the checker
+(`elaborate.py:_comptime_member_requirement_errors`) only runs for a base the
+struct actually lists. There is no builtin/prelude trait source in this tree
+(grep: no `trait Writable` / `trait ImplicitlyCopyable` / prelude defs), and
+`std/builtin/enum_like.mojo` does not exist in our stdlib. So the fix needs a
+builtin `EnumLike` trait definition plus synthesizing the conformance on every
+`__enum` -- a feature, not a patch. Filed as such rather than approximated by a
+special case that would emit a "trait 'EnumLike' declared here" note with no
+declaration behind it.
