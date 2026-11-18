@@ -1,5 +1,15 @@
 # SUITE: `test_dual_cpp_elaboration.py`'s Trace case uses an undeclared fixture type
 
+**Status (2026-11-18): fixed.** The fixture's `src` now declares the minimal
+`struct Trace[level: Int]:` stand-in the next step below called for (empty
+`__init__(s1: String, s2: String)` and `__enter__`/`__exit__`; the async-body
+elision is keyed on the guard type's NAME in
+`gimple_codegen._ASYNC_NOOP_LOCK_GUARD_TYPES`, and the non-async `with`
+compiles the empty methods as no-ops). Verified pre-fix `Results: 5 passed,
+1 failed` (both `Trace` reads refused by unknown_decl_check.check_module)
+and post-fix `Results: 6 passed, 0 failed`, the case building and printing
+`33`.
+
 **Status (2026-11-17): open. Pre-existing on master; found while landing the
 nested-bracket generic-call fix, which does not touch this test.**
 
@@ -39,3 +49,10 @@ callable shape the test already relies on. Then `python3
 test_dual_cpp_elaboration.py` should report 6 passed, 0 failed. The file is not
 registered in `tools/suite.py`, so no bucket was watching this one; consider
 registering it (it is a cheap build-and-run file) when it is fixed.
+
+## Done when
+
+`python3 test_dual_cpp_elaboration.py` (wrapped in `python3
+tools/memslot.py --gb 8 --`) reports `Results: 6 passed, 0 failed` -- the
+`test_trace_and_comptime_and_abort_inside_nested_async` case builds, links,
+runs and prints `33`.
