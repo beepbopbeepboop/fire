@@ -1255,7 +1255,43 @@ def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
     return '1'
 
 
+def _lower_out_param_store(gen, node) -> bool:
+    """`r = value` where `r` is an `out` parameter of the function being
+    emitted: the caller owns the object, so copy the value's contents into it
+    rather than rebinding the local pointer (which the caller never sees).
+    Struct results only (`Name *`); returns False for anything else."""
+    _cur = getattr(gen, '_current_func_node', None)
+    if _cur is None or not isinstance(node.target, gimple_ctypes.IdentExpr):
+        return False
+    _tn = _as_str(node.target.name)
+    # `out self` (a constructor or method result) is not a free-function out
+    # parameter; leave it on the path it already has.
+    if _tn == 'self' or (getattr(_cur, 'param_convs', None) or {}).get(_tn) != 'out':
+        return False
+    # Free functions only: a method's own `out` results are not handled here.
+    if not any(st is _cur for st in (getattr(gen, '_current_module_stmts', None) or [])):
+        return False
+    _vct, _vav = gen.lower_expr(node.value)
+    _vb = _as_str(_vct)
+    if not _vb.endswith(' *') or _vb[:-2].strip() not in gen.struct_field_types:
+        return False
+    # The parameter must itself be declared as that struct: a generic result
+    # (`out task: Task[...]`) whose C slot is a word is not a pointer to it.
+    _ann = None
+    for _p in (getattr(_cur, 'params', None) or []):
+        if _as_str(_p[0]) == _tn and len(_p) > 1 and _p[1] is not None:
+            _ann_full = _as_str(_p[1]).strip()
+            # A generic annotation (`Task[...]`) elaborates to a word, not a pointer.
+            _ann = None if '[' in _ann_full else _ann_full
+    if _ann != _vb[:-2].strip():
+        return False
+    gen._emit(f"  *{gen._c_names.get(_tn, _tn)} = *{_vav};")
+    return True
+
+
 def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
+    if _lower_out_param_store(gen, node):
+        return
     # `globals()[key] = value` at module scope: a store through the module's
     # namespace dict, which in the compiled path IS the `_<mod>_globals`
     # struct. Lowered to a name dispatch over the statically-known module

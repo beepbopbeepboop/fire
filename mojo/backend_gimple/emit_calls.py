@@ -4423,7 +4423,74 @@ def _lcx_subscript_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
     return None
 
 
+def _root_function_def(gen, name: str):
+    """The one top-level FunctionDef named NAME in this module, or None.
+
+    Only a plain (non-generic, non-overloaded) free function qualifies: an
+    overload set or a generic is resolved by the normal path, not here."""
+    found = []
+    # The module being emitted: its own top-level statements (set by gen_module).
+    for stmts in [getattr(gen, '_current_module_stmts', None) or []]:
+        for st in stmts or []:
+            if (type(st).__name__ == 'FunctionDef' and _as_str(st.name) == name
+                    and not getattr(st, 'comptime_params', None)):
+                found.append(st)
+    return found[0] if len(found) == 1 else None
+
+
+def _lower_out_param_call(gen, node):
+    """A call to a free function with an `out` parameter, which the caller
+    does not pass: the callee writes its result through a pointer to an object
+    the caller owns, so allocate that object here and pass it.
+
+    Rewritten to the same call with the temp in the out slot, then the temp is
+    the call's value (`def make(out r: Box)`; `var b = make()`). Only a struct
+    result is supported (`Name *` in C, `_alloc_Name()` to create it); anything
+    else returns None and takes the normal path."""
+    if not isinstance(node.func, gimple_ctypes.IdentExpr) or getattr(node, 'kwargs', None):
+        return None
+    _name = _as_str(node.func.name)
+    _fs = _root_function_def(gen, _name)
+    if _fs is None:
+        return None
+    _convs = getattr(_fs, 'param_convs', None) or {}
+    _params = _fs.params or []
+    if not any(_convs.get(_as_str(_p[0])) == 'out' for _p in _params):
+        return None
+    _outs = [_as_str(_p[0]) for _p in _params if _convs.get(_as_str(_p[0])) == 'out']
+    if len(node.args) != len(_params) - len(_outs):
+        return None
+    _seq = getattr(gen, '_out_param_seq', 0)
+    gen._out_param_seq = _seq + 1
+    _args = []
+    _pos = iter(node.args)
+    _first_tmp = None
+    for _p in _params:
+        _pn = _as_str(_p[0])
+        _pt = _as_str(_p[1]) if len(_p) > 1 and _p[1] is not None else ''
+        if _convs.get(_pn) != 'out':
+            _args.append(next(_pos))
+            continue
+        if _pn == 'self' or _pt not in gen.struct_field_types:
+            return None
+        _tmp = f"__out_{_seq}_{len(_args)}"
+        gen._declare_var(_tmp, f"{_pt} *")
+        _ct, _av = gen.lower_expr(gimple_ctypes.CallExpr(
+            func=gimple_ctypes.IdentExpr(_pt), args=[]))
+        gen._emit(f"  {gen._c_names.get(_tmp, _tmp)} = {_av};")
+        _args.append(gimple_ctypes.IdentExpr(_tmp))
+        if _first_tmp is None:
+            _first_tmp = _tmp
+    _call = gimple_ctypes.CallExpr(func=node.func, args=_args, kwargs=[],
+                                   line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
+    gen.lower_expr(_call)
+    return gen.lower_expr(gimple_ctypes.IdentExpr(_first_tmp))
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    _out_call = _lower_out_param_call(gen, node)
+    if _out_call is not None:
+        return _out_call
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and re.match(r'^__mojo_tuple_box_\d+$', _as_str(node.func.name))):
         return _lower_tuple_box_call(gen, node)

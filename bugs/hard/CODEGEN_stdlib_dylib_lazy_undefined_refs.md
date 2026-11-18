@@ -76,6 +76,18 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   3. Import side: the import scan records the out parameter's pointee type and
      the `void` return, so the extern declares `void f (T *)` and the hash uses
      the definer's list (the part-7 path, already in place).
+  Status 2026-11-17 (landed): steps 1 and 2 for LOCAL free functions. A
+  caller that omits an `out` struct argument allocates the object
+  (`emit_calls._lower_out_param_call`, at the top of `_lower_call`) and the
+  call's value is that object; an assignment to the `out` name in the body
+  copies into it (`emit_stmts._lower_out_param_store`: `*r = *value`). Scope is
+  deliberately narrow: `out self` is excluded, methods are excluded, and a
+  generic annotation (`out task: Task[...]`) is excluded because its C slot is
+  a word. A first version without those limits broke 15 stdlib files and 47
+  build errors; the restriction is what the gates measured. Test:
+  `test_out_param_local.py` (compiles the module and runs it, expects 7).
+  Still open: step 3, the cross-module import (the random name). Gates:
+  stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
   Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
   - Callee chosen: `mojo/backend_gimple/emit_calls.py` ~11650-11676, where
     `_def` (the FunctionDef) and `_sym` are resolved. `_def.param_convs` gives
