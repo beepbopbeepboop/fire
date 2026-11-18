@@ -2932,10 +2932,9 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      # `tiny` (4) was set from a 0.1 GB peak. Measured 2026-11-16 with
      # `/usr/bin/time -l`: peak RSS 4.58 GB, and at that class the job was
-     # KILLED before finishing -- RESOURCE, "not a verdict on the output", so
-     # the expect= below could not be verified in either direction. `small`
-     # (8) covers it. Over the 4 GB line and therefore a debt, not a fact --
-     # see MEM_DEBT_DOC.
+     # KILLED before finishing -- RESOURCE, "not a verdict on the output". So
+     # `small` (8) covers it. Over the 4 GB line and therefore a debt, not a
+     # fact -- see MEM_DEBT_DOC.
      mem='small',
      memwhy='measured 4.58 GB peak RSS 2026-11-16 (/usr/bin/time -l on '
             'test_formal_dylib.py, 263 s wall): the Lean dylib contract proof '
@@ -2943,12 +2942,15 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
             'ceiling before it finished, so the class was raised to `small` '
             '(8). Over the 4 GB line and therefore a debt, not a fact -- see '
             + MEM_DEBT_DOC,
-     # The reason was stale: it described hole-count checks on the
-     # overflow-trapping exports, but the three failures are GENERATED-proof
-     # `sorry` holes in test_formal_dylib.py (measured 2026-11-16, uncapped:
-     # PASS=27 FAIL=3). Re-pointed to the doc that names them.
-     expect='3 failing: the dylib export proofs still admit `sorry` holes -- see '
-            'bugs/FORMAL_dylib_export_proof_holes.md',
+     # No `expect=` any more. The three hole-count checks used to demand a
+     # PROVED `DylibExport.Total` for exports whose run can halt at the
+     # integer-overflow trap, which is a FALSE statement (measured:
+     # `runExport … add1 0x7FFFFFFFFFFFFFFF = none`), so the emitter now emits
+     # `NO TERMINATION CLAIM` instead of a `sorry` over it and the counts are
+     # 0/0/1. The marker was measured at PASS=27 FAIL=3 on 2026-11-16; the
+     # three checks are the ones that changed, and the new
+     # `an overflow-trapping export makes no termination claim` pins the
+     # emitter's verdict. The doc was deleted with the fix.
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',

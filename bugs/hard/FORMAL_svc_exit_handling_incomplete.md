@@ -96,6 +96,10 @@ contract checks on branchy exports, which are guarded obligations now.
 
 Consequences of the model change (not bugs in themselves, but to know):
 - `triple`'s termination (`_semantics_total`) is an obligation, not a theorem, because its overflow trap is an exit svc.
+  **Superseded 2026-11-17:** it is not an obligation any more and never was a *true* one -- `Total` says the run leaves
+  a final state for every argument, and an argument that traps leaves none (measured: `runExport … add1
+  0x7FFFFFFFFFFFFFFF = none`). The dylib emitter now states `NO TERMINATION CLAIM for <ident>` instead of a `sorry`
+  over that falsehood; see `formal/arm64_proof_gen.py::_dylib_can_halt`. The line below is unaffected.
 - The contract of every export with a trap path is a guarded obligation (`_spec` under `_pre`), not a proved fact.
 
 ## What is NOT in place structurally
@@ -168,6 +172,11 @@ But the three failures are NOT this doc's termination obligations. They are
 GENERATED-proof `sorry` holes: `several exports, and one with no derivable
 spec` (2 holes), `an export that binds a local still gets a proved contract`
 (3 holes), and `a conditional value is not a branch` (3 holes). None is
-described here, and a search of `bugs/` found no doc tracking them. The marker
-has been re-pointed to `bugs/FORMAL_dylib_export_proof_holes.md`, which names
-all three. This doc's own remaining work is unchanged and still unmeasured.
+described here, and a search of `bugs/` found no doc tracking them, so the
+marker was re-pointed to its own doc, which the fix deleted on 2026-11-17.
+**Resolved 2026-11-17 as the first line above
+now says:** the extra holes were `DylibExport.Total` obligations over a FALSE
+statement, so the emitter declines the claim (`NO TERMINATION CLAIM`) rather
+than naming a `sorry` over it; `test_formal_dylib.py` is PASS=31 FAIL=0 and its
+`expect=` marker is gone. This doc's own remaining work is unchanged and still
+unmeasured.

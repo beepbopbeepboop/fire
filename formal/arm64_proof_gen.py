@@ -9185,6 +9185,77 @@ def _stack_floor_guard_dead_fall(b: dict, words: dict, trap: set) -> bool:
     return _step_branch_index(w_b) == 51 and (w_b & 0xf) == 2   # B.HS
 
 
+def _cfg_trap_analysis(blocks: list, words: dict) -> tuple:
+    """The four facts about bounded stops every CFG reader needs, in ONE place.
+
+    `_gen_universal_e2e_cfg`'s reachability and `_dylib_total_proof`'s "can this
+    export's run halt" ask the same four questions of the same block partition,
+    and the answers have to BE the same answer: a difference between them would
+    be a walk that certifies a path the termination obligation calls dead (or
+    the reverse), and neither reader could see it.
+
+      * `trap`    -- `_trap_terminating`: the blocks the machine cannot return
+                     from (an exit `svc` tail, or a `BL` into one);
+      * `dead`    -- the `(block start, target)` trap edges the MODEL never
+                     takes, i.e. the stack-floor guard's `B.HS` fall-through
+                     (`_stack_floor_guard_dead_fall`);
+      * `halt`    -- the narrower set of blocks whose OWN last instruction is a
+                     known exit `svc`.  A trap `BL` is in `trap` but is not one
+                     of these: its fall-through is what halts, and the `BL`
+                     block itself still has to be certified;
+      * `leaders` -- the block starts, which `_is_svc_exit` reads to decide
+                     whether an `svc`'s `x16` is fixed inside its own block.
+
+    `words` is the pc -> word map the partition was built from.
+    """
+    trap = _trap_terminating(blocks, words)
+    leaders = frozenset(b["start"] for b in blocks)
+    dead = {(b["start"], b["targets"][0]) for b in blocks
+            if _stack_floor_guard_dead_fall(b, words, trap)}
+    halt = {b["start"] for b in blocks
+            if _is_svc_exit(words, b["instrs"][-1], leaders)}
+    return trap, dead, halt, leaders
+
+
+def _cfg_reachable_indices(blocks: list, func_entry: int, trap: set,
+                           dead_edges: set) -> set:
+    """The indices into `blocks` of the blocks a run from `func_entry` executes.
+
+    A bounded stop is ENTERED but not expanded: the machine ends there, so the
+    blocks after it are not executed and need no runs certificate.  The trap
+    block ITSELF is in the set when a live edge reaches it -- that `None` is
+    what keeps a genuinely trapping function a named obligation rather than a
+    proof about a run that halts.  A dead edge is not followed
+    (`_stack_floor_guard_dead_fall`): the arm it reaches is not part of any run
+    from `Arm64State.init`.
+
+    Indices rather than blocks because `_gen_universal_e2e_cfg`'s later passes
+    index `blocks` positionally; a caller that wants the blocks reads them
+    back.  `blocks` is ordered by start pc, so pc order is the index order.
+    """
+    by_start = {b["start"]: i for i, b in enumerate(blocks)}
+    order = sorted(range(len(blocks)), key=lambda i: blocks[i]["start"])
+    fall = {order[k]: order[k + 1] for k in range(len(order) - 1)}
+    reach, stack = set(), [by_start[func_entry]]
+    while stack:
+        i0 = stack.pop()
+        if i0 in reach:
+            continue
+        reach.add(i0)
+        b0 = blocks[i0]
+        if b0["start"] in trap:
+            continue
+        succ = [by_start[t] for t in b0["targets"]
+                if t in by_start and (b0["start"], t) not in dead_edges]
+        # A `seq` block has no `targets` of its own: its successor is the next
+        # block in pc order, which is the fall-through the machine takes.  A
+        # `ret` has none.
+        if b0["kind"] == "seq" and i0 in fall:
+            succ.append(fall[i0])
+        stack.extend(j for j in succ if j not in reach)
+    return reach
+
+
 def _overflow_normal_path(words: dict, entry: int, func_end: int):
     """The NORMAL path of an export whose only interior branches are overflow traps.
 
@@ -9869,36 +9940,22 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     blocks = _cfg_blocks(words, func_entry, func_end)
     if not blocks:
         return None
-    # The bounded-stop blocks, and the one flag the STATEMENT needs.
+    # The bounded-stop blocks, and the one flag the STATEMENT needs.  The
+    # partition, the dead trap edges and the halt set come from the shared
+    # `_cfg_trap_analysis`, so the dylib termination obligation reads the same
+    # four facts this walk does (that function says what each one is).
     #
-    # `_trap` marks every block the machine cannot return from (a `svc` tail,
-    # or a `BL` that lands in one — see `_trap_terminating`).  Of the two cuts
-    # of that set the two consumers here need, the sharper is the one for the
-    # statement: there is a path the walk closes at a trap `BL`, which is a
-    # block ENDING in a `BL` whose fall-through is in `_trap`.  The weaker
-    # "any block in `_trap`" would fire for every compiled function, because
-    # every one carries the stack-floor guard's `svc` tail, and the model
-    # steps through that tail rather than halting in it — so `none => True`
-    # would be stated for a program whose model run never halts early, a
-    # weakening of every universal theorem in the corpus for nothing.
-    _trap = _trap_terminating(blocks, words)
+    # `_trap_stop` is the sharper cut for the statement: there is a path the
+    # walk closes at a trap `BL`, i.e. a block ENDING in a `BL` whose
+    # fall-through is in `_trap`.  The weaker "any block in `_trap`" would fire
+    # for every compiled function, because every one carries the stack-floor
+    # guard's `svc` tail, and the model steps through that tail rather than
+    # halting in it — so `none => True` would be stated for a program whose
+    # model run never halts early, a weakening of every universal theorem in
+    # the corpus for nothing.
+    _trap, _dead_edges, _halt_blocks, _leaders = _cfg_trap_analysis(blocks,
+                                                                   words)
     _trap_stop = any(_is_trap_bl(b, words, _trap) for b in blocks)
-    # The trap edges the MODEL never takes: `(block start, target pc)` for the
-    # stack-floor guard's `B.HS` fall-through.  The guard is in every guarded
-    # prologue, and its trap arm is an exit `svc` — reachable in the CFG but
-    # not in any run from `Arm64State.init`, whose memory is all zero (see
-    # `_stack_floor_guard_dead_fall`).  Reachability below, and the `cbz` arm
-    # that closes the arm, both read this ONE set.
-    _dead_edges = {(b["start"], b["targets"][0]) for b in blocks
-                   if _stack_floor_guard_dead_fall(b, words, _trap)}
-    # The blocks whose own last instruction is a known exit `svc`.  `_trap`
-    # also contains a `BL` block whose fall-through is one of these (the call
-    # returns into a halt), but such a block still has to be CERTIFIED, so the
-    # halt certificate is keyed by this narrower set.
-    _blocks_by_start = {b["start"]: b for b in blocks}
-    _leaders = frozenset(_blocks_by_start)
-    _halt_blocks = {b["start"] for b in blocks
-                    if _is_svc_exit(words, b["instrs"][-1], _leaders)}
     _halt_info = {}
     # The dynamic write `svc`s this walk may ASSUME instead of refusing: one
     # helper decides, so the binder here, the refusal classifier's skip, and
@@ -9986,39 +10043,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # itself; `_cfg_blocks` orders blocks by start pc, so forward-only
     # targets mean the walk is a DAG and each instruction runs at most once.
     # `func_entry` is always a block start (`_cfg_blocks` seeds it), so the
-    # seed below cannot miss.
-    _by_start = {b["start"]: i for i, b in enumerate(blocks)}
+    # seed cannot miss.  The BFS itself is `_cfg_reachable_indices`'s, shared
+    # with the dylib termination obligation so the two cannot disagree about
+    # which blocks a run executes; the comment on that function records the
+    # bounded-stop and dead-edge rules the walk's certificates depend on.
     _order = sorted(range(len(blocks)), key=lambda i: blocks[i]["start"])
-    _fall = {_order[k]: _order[k + 1] for k in range(len(_order) - 1)}
-    _reach_i, _stack = set(), [_by_start[func_entry]]
-    while _stack:
-        _i0 = _stack.pop()
-        if _i0 in _reach_i:
-            continue
-        _reach_i.add(_i0)
-        _b0 = blocks[_i0]
-        # A bounded stop has no successor: the machine ends there (an exit
-        # `svc`) or the model answers `none` at the call that leads into one,
-        # so a block after it is not executed and needs no runs certificate.
-        # Without this the div0 trap's fall-through block -- a `svc` tail, in
-        # `_trap` -- was certified, which the corrected `svc` arm (f03896fff)
-        # made fail, so `formal/examples/mod_by_var.mojo` lost its universal
-        # theorem.  The trap block ITSELF is still certified when a live branch
-        # reaches it: that `None` is what keeps a genuinely trapping export a
-        # named obligation rather than a proof about a run that can halt.
-        if _b0["start"] in _trap:
-            continue
-        # A dead edge is not a successor: the model's `B.HS` on the stack-floor
-        # guard is taken for every state the run visits, so the trap arm is not
-        # part of the run the walk has to certify (`_dead_edges` above).
-        _succ = [_by_start[t] for t in _b0["targets"]
-                 if t in _by_start and (_b0["start"], t) not in _dead_edges]
-        # A `seq` block has no `targets` of its own: its successor is the
-        # next block in pc order, which is the fall-through the machine
-        # takes.  A `ret` has none.
-        if _b0["kind"] == "seq" and _i0 in _fall:
-            _succ.append(_fall[_i0])
-        _stack.extend(_j for _j in _succ if _j not in _reach_i)
+    _reach_i = _cfg_reachable_indices(blocks, func_entry, _trap, _dead_edges)
     _reach = [blocks[i] for i in _order if i in _reach_i]
     # A reachable block with a LIVE branch target in a halt block: that
     # edge's `go_exit` is `none`, so the universal statement needs the
@@ -10043,6 +10073,18 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             if (b["start"], t) not in _dead_edges) for b in _reach)
     _branch_trap_targets = {t for b in _reach for t in b["targets"]
                             if t in _halt_blocks}
+    # `halt_only`'s statement is `none => False`: "the run REACHES the halt
+    # address and never halts on the way".  A bounded stop the run can enter
+    # makes that FALSE -- the model answers `none` there, so for some argument
+    # there is no final state -- and this is therefore a REFUSAL, not a weaker
+    # statement.  It used to fall through to the `none => True` arm and produce
+    # a theorem `DylibExport.total_of_halts` cannot take (a type error at the
+    # application), which is the shape the branching-export test caught for the
+    # stack-floor guard's DEAD edge; a LIVE trap edge has no such escape, so
+    # the walk says so here and the dylib emitter does not claim `Total` at all
+    # (`_dylib_can_halt` reads the same reachability).
+    if halt_only and any(blocks[i]["start"] in _trap for i in _reach_i):
+        return None
     if fuel is not None:
         _acyclic = all(t > b["instrs"][-1] for b in _reach for t in b["targets"])
         # Loop-contract machinery (below, ~line 8286/10707) handles cyclic
@@ -16971,18 +17013,67 @@ def _export_extent(exports: list, entry: int, base: int, code_size: int) -> int:
     return later[0] if later else base + code_size
 
 
+def _dylib_can_halt(code: bytes, base: int, entry: int, func_end: int) -> bool:
+    """Whether a run of this export can enter a block the machine cannot leave.
+
+    An export whose body carries the integer-overflow guard does not RETURN for
+    every argument: the guard's trap tail ends in an exit `svc`, `arm64_step`
+    answers `none` there, and `DylibExport.Total` therefore has no witness for
+    an argument that traps.  That is a fact about the emitted code, not a gap
+    in a proof: measured on a dylib built from `def add1(n): return n + 1`,
+    `DylibExport.runExport dylib_image add1 0x7FFFFFFFFFFFFFFF = none`
+    (`native_decide`).
+
+    The answer is the CFG's: is a bounded stop reachable from `entry`?  The
+    partition, the dead trap edges and the reachability come from the same
+    three helpers the walk uses (`_cfg_trap_analysis`,
+    `_cfg_reachable_indices`), so the termination claim and the proof that
+    would discharge it cannot disagree about which path is a halt -- which is
+    the defect `_dylib_total_proof` used to carry, in the one direction that
+    matters (a claim the walk had already refused).
+
+    Conservative in the sound direction: an edge whose condition happens to be
+    unsatisfiable is still counted, which withholds a `Total` claim rather than
+    making a false one.  A stack-floor guard's trap arm is NOT counted -- the
+    model never takes it (`_stack_floor_guard_dead_fall`) -- so the branching
+    export whose only trap is that guard still gets its `Total` PROVED.
+    """
+    words = {base + i: int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)}
+    blocks = _cfg_blocks(words, entry, func_end)
+    if not blocks:
+        return False
+    trap, dead, _halt, _leaders = _cfg_trap_analysis(blocks, words)
+    reach = _cfg_reachable_indices(blocks, entry, trap, dead)
+    return any(blocks[i]["start"] in trap for i in reach)
+
+
 def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
-                       exports: list, exec_code_end: int = None) -> str:
+                       exports: list, exec_code_end: int = None,
+                       can_halt: bool = None) -> str:
     """`{ident}_semantics_total`, PROVED where the export's CFG allows it.
 
-    The claim is that `runExport` returns `some` for every argument.  It is
-    proved by the CFG walk's halt-only mode at `runExport`'s fixed fuel: the
-    walk steps the export block by block from its entry with `x30` at the exit,
-    and its `ret` block shows the restored `x30` IS the exit -- the prologue's
-    `stp x29, x30` and the epilogue's `ldp x29, x30` are followed through the
-    stack, not assumed.  The walk accepts a constant fuel only for an acyclic,
-    call-free export (see its `fuel` parameter); for anything else `Total` is
-    left as one named obligation over the true statement.
+    Three outcomes, and the difference between the last two is the point:
+
+      * PROVED -- the claim is that `runExport` returns `some` for every
+        argument, and the CFG walk's halt-only mode at `runExport`'s fixed fuel
+        proves it: the walk steps the export block by block from its entry with
+        `x30` at the exit, and its `ret` block shows the restored `x30` IS the
+        exit -- the prologue's `stp x29, x30` and the epilogue's
+        `ldp x29, x30` are followed through the stack, not assumed.  The walk
+        accepts a constant fuel only for an acyclic, call-free export (see its
+        `fuel` parameter).
+      * NO CLAIM (`NO TERMINATION CLAIM for …`) -- the CFG can enter a bounded
+        stop, so the run leaves no final state for the arguments that reach it
+        and `Total` is FALSE (`_dylib_can_halt`).  This used to be a
+        named `sorry` over that same false statement, which is the one hole no
+        instrument in this tree can tell from an unfinished true one
+        (`IR-2-to-integrator-lib-registration-and-total-shape.md` §3).  `Total`
+        is not stated, and the marker says exactly which fact is missing.
+      * NAMED -- anything else the walk refuses: a loop, a call, a shape with
+        no `RET`, an empty runs certificate, a dynamic `svc` that cannot be
+        assumed.  `Total` is TRUE for these and is left as one named obligation
+        over the true statement.
 
     What this replaced, and why it had to go: `{ident}_halts` and
     `{ident}_nodrop` as `sorry`s quantified over EVERY state below the exit.
@@ -17008,6 +17099,33 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     _blocks = _cfg_blocks(_words, entry, func_end)
     _svc_sites = _svc_write_assumed_sites(
         _blocks, _words, frozenset(b["start"] for b in _blocks))
+    if can_halt is None:
+        can_halt = _dylib_can_halt(code, base, entry, func_end)
+    if can_halt:
+        # `Total` says the run leaves a final state for EVERY argument.  A
+        # bounded stop it can enter makes that FALSE: `arm64_step` answers
+        # `none` at an exit `svc`, so for the arguments that trap there is no
+        # final state.  The obligation this used to emit was therefore a
+        # `sorry` over a falsehood, and `IR-2-...` §3 records why that is
+        # worse than silence: no census in this tree can tell a hole over a
+        # false statement from one over a true statement.  So the claim is
+        # not stated at all, and the marker below says which fact is missing.
+        # The RESULT is unaffected -- `{ident}_semantics_functional` is a
+        # theorem about runs that do return, and a derived contract is stated
+        # over the guarded path -- so a caller loses nothing it had.
+        return (
+            f"/- NO TERMINATION CLAIM for {ident}, and so no `DylibExport.Total`\n"
+            f"   obligation is stated for it: its control flow can enter a\n"
+            f"   bounded stop -- the integer-overflow guard's message-and-exit\n"
+            f"   tail is the usual one -- where `arm64_step` answers `none` at\n"
+            f"   the exit `svc`.  `Total` says the run leaves a final state for\n"
+            f"   EVERY argument, and an argument that traps leaves none, so the\n"
+            f"   claim is FALSE for this export and a named `sorry` over it\n"
+            f"   would be a hole over a falsehood, which no census here can\n"
+            f"   distinguish from a hole over a true one.  What is still true is\n"
+            f"   stated: {ident}_semantics_functional is a theorem about the\n"
+            f"   runs that DO return, and the result word on those runs is\n"
+            f"   `Refine.export_result_run`. -/")
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
@@ -17064,15 +17182,19 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
         # so "no proof because a dynamic svc at 0x…" is distinguishable from
         # "no proof because a loop" without re-deriving the image by hand.
         # The reason is not swallowed, and no unconditional `Total` is stated.
+        #
+        # A reachable bounded stop is NOT one of these: that makes `Total`
+        # false rather than merely unproved, and `_dylib_can_halt` has
+        # already answered for it above.
         _why = _cfg_decomposition_refusal(ident, code, base, entry)
         _why = _why.replace("-/", "- /")
         return (
             f"/-- OBLIGATION, not proved: this export's run terminates for every\n"
             f"    argument.  The constant-fuel CFG walk does not cover it: its\n"
-            f"    control flow has a loop or a call, or a path ends in an exit\n"
-            f"    `svc`, which the model steps to `none` (no final state). An\n"
-            f"    overflow trap is such a path, so termination for every argument\n"
-            f"    is not a fact of the model.\n"
+            f"    control flow has a loop or a call, or a shape the walk's\n"
+            f"    block certificates cannot describe.  This is a TRUE statement\n"
+            f"    left open -- an export whose run could halt is not given this\n"
+            f"    obligation at all (see `NO TERMINATION CLAIM`).\n"
             f"    The walk's refusal, so the reason is not swallowed:\n"
             f"    {_why} -/\n"
             f"theorem {ident}_semantics_total :\n"
@@ -17840,6 +17962,11 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
         # `Block` is `pcs` over that range AND the address its `atExit` and
         # `noEarly` are stated at, so it has to be told.
         func_end = _export_extent(exports, entry, base, exec_code_end)
+        # Whether this export's run can halt at a bounded stop.  Asked once and
+        # handed to `_dylib_total_proof`, which would otherwise ask again, and
+        # used by the no-spec contract's note below so its sentence about
+        # termination matches what the termination section really says.
+        can_halt = _dylib_can_halt(code, base, entry, func_end)
         contract = (_dylib_contract_proof(ident, base, entry, code, spec,
                                          func_end) if spec else "")
         if not contract and spec:
@@ -17912,8 +18039,12 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
                 f"   a `sorry` over a FALSE claim -- the only spec available without\n"
                 f"   one is `fun n => n`, and this export's result is whatever the\n"
                 f"   machine computed (`export_result dylib_image {ident} 7`).\n"
-                f"   Its termination is still an obligation above, and its result\n"
-                f"   is still the value the machine produced\n"
+                + ("   Its termination is NOT claimed above either: its code can\n"
+                   f"   enter a bounded stop, so `Total` is false for it (see the\n"
+                   f"   `NO TERMINATION CLAIM` note there).\n"
+                   if can_halt else
+                   f"   Its termination is still an obligation above, and its result\n")
+                + f"   is still the value the machine produced\n"
                 f"   (`{ident}_semantics_functional`, and\n"
                 f"   `Refine.export_result_run`). -/")
 
@@ -17927,7 +18058,7 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
             f"  rw [h1] at h2\n"
             f"  injection h2 with h\n"
             f"  simp [h]\n\n"
-            f"{_dylib_total_proof(ident, code, base, export['entry'], exports, exec_code_end)}\n\n"
+            f"{_dylib_total_proof(ident, code, base, export['entry'], exports, exec_code_end, can_halt)}\n\n"
             f"def {ident}_prog : Refine.Prog :=\n"
             f"  Refine.dylibExportProg dylib_image {ident}\n\n"
             f"{contract}"
