@@ -34,11 +34,9 @@ uses for the same reason a count would rot):
   3. every "defined as <sym>" the report cites is really defined in the dylib;
   4. end-to-end: the report the build actually prints to stderr no longer lists
      the four functions under "declared with no definition".
-The four are advertised by name from codegen's own symbol record (see
-build_stdlib_dylib._apply_codegen_csyms), so the build sees them as kept. The
-classifier still reports an entry whose symbol really disagrees as misresolved, and
-that path is what these checks exercise on the raw signature-derived entries, so
-they catch a regression of the classification in either state.
+State 1+2 hold today (the four are misresolved-with-definition) and keep
+holding if the codegen suffix disagreement is fixed (the four become kept);
+they catch a regression of the classification itself in either state.
 
 Run: `python3 test_export_table_suffix_mismatch.py`   (warm: ~30 s, < 1 GB;
 a COLD stdlib dylib build costs what the stdlib bucket costs — the suite's
