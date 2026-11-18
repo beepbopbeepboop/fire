@@ -143,6 +143,18 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   its type. That is a wrong-result bug, not only a link gap. The elaborator
   route to the definer's symbol was tried and reverted: choosing on erased
   argument types picked the wrong overload.
+  Status 2026-11-17 (bit.mask splat and pwd getpw, landed): an elaborated
+  call to an imported PLAIN overload compiled a private copy under the mangled
+  name nothing defines. `emit_infra._elaborate_overload_call` now calls the home
+  symbol when the arity matches exactly one plain overload, and, in an
+  erasure-free caller (no generic function or struct around the call;
+  `_erasure_free_context`), when the lowered argument C types pick one. Inside a
+  generic the typed choice is not made: `Scalar[dtype].cast[.uint32]()` lowers to
+  an int64 word there, so the choice would be a guess. Also: the import scan maps
+  a return annotation naming a struct the module IMPORTS to `struct X *` (the
+  pwd getpw externs had `int64_t`), and `module_loader` imports `re`.
+  Undefined `_std_` names: 5 -> 1 (only `mulhi(Int64, Int64)` remains; it is the
+  generic-struct cast typing above, not a link gap).
   Previously open (now done): step 3, the cross-module import. Gates:
   stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
   Hook points found 2026-11-17 (no code landed; the slice is not safe alone):

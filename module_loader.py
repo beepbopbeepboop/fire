@@ -4,6 +4,7 @@ Resolves and loads .mojo module files from the official stdlib.
 Parses imported modules and makes symbols available to the codegen.
 """
 import os
+import re
 import ctypes
 from pathlib import Path
 
@@ -931,6 +932,16 @@ class ModuleLoader:
                                 c_return_type = _ml_as_str(self._mojo_type_to_c(return_type))
                             except Exception:
                                 c_return_type = 'int64_t'
+                        # A return annotation naming a struct this module IMPORTS (`-> Passwd`
+                        # with `from .pwd import Passwd`) maps to the word above; the struct
+                        # is a pointer, so its extern returns `struct X *` (the same C type
+                        # as the definition's `X *`).
+                        if (isinstance(return_type, str) and c_return_type == 'int64_t'
+                                and re.match(r'^[A-Z]\w*$', return_type.strip())
+                                and re.search(r'^\s*from\s+[\w.]+\s+import\b.*\b'
+                                              + re.escape(return_type.strip()) + r'\b',
+                                              src_content, re.M)):
+                            c_return_type = f'struct {return_type.strip()} *'
                         # An `out` parameter is the result: the definer emits the
                         # function void and writes through the pointer, so the
                         # extern must be void too (see emit_calls._lower_out_param_call).

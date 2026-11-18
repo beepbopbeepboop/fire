@@ -6269,6 +6269,22 @@ def _to_int64(gen, ctype: str, val: str) -> str:
 
 
 
+
+def _erasure_free_context(gen) -> bool:
+    """True when the function being emitted is not inside a generic: its own
+    `def` takes no bracket parameters and its enclosing struct (if any) takes none.
+    Only there are the C types of the arguments the source's own types."""
+    _cur = getattr(gen, '_current_func_node', None)
+    if _cur is not None and getattr(_cur, 'comptime_params', None):
+        return False
+    _sname = getattr(gen, '_current_struct_name', None) or ''
+    if _sname:
+        for _st in getattr(gen, '_current_module_stmts', None) or []:
+            if (type(_st).__name__ == 'StructDef' and str(_st.name) == _sname
+                    and getattr(_st, 'bracket_params', None)):
+                return False
+    return True
+
 def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     """Resolve and elaborate an overloaded imported call (slice 4): lower the
     args, pick the matching overload by their C types, and emit the call to the
@@ -6292,6 +6308,23 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
+    # A call whose arity matches exactly ONE plain overload is that overload: no
+    # type choice is needed, so its home symbol is called rather than a private copy
+    # elaborated under the mangled name nothing else defines (stdlib `bit.mask`'s
+    # `splat(Bool)` reached from `codepoint.mojo`). Several arity matches keep the
+    # elaboration below.
+    import mojo.backend_gimple.emit_calls as _ec_el
+    _home_sym = _ec_el._imported_overload_call_symbol(gen, g, node, None)
+    if _home_sym is None and _erasure_free_context(gen):
+        # Several arity matches: choose by the lowered argument types, but only in a
+        # caller whose types are real. Inside a generic struct or function a
+        # parameter's C type can be erased to a word (`Scalar[dtype].cast[.uint32]()`
+        # lowers to int64_t), so there the choice would be a guess and it is not made.
+        _home_sym = _ec_el._imported_overload_call_symbol(
+            gen, g, node, [_ct for _ct, _ in arg_pairs])
+    if _home_sym is not None:
+        _hret = gen.func_return_types.get(_home_sym, 'int64_t')
+        return _hret, gen._call_expr(_hret, _home_sym, arg_pairs)
     try:
         module_src = gen._generic_source_text(source)
         import elaborate
