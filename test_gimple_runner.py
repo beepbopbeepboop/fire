@@ -16139,8 +16139,12 @@ main()
 
 
 def test_star_unpack_of_generator_expression_in_call():
-    """Star-unpacking a generator expression in a call must not deref the handle
-    (bug:CODEGEN_star_unpack_of_generator_expression_derefs_the_handle)."""
+    """Star-unpacking a generator expression in a call argument is an ITERABLE
+    spread, not a C pointer dereference: `f(*(... for ...))` used to lower the
+    `MojoGenerator *` handle with `_lower_UnaryOp`'s `*`, emitting
+    `_t10 = *_t6`, which gcc rejects ("storage size of '_t10' isn't known",
+    "invalid use of incomplete typedef 'MojoGenerator'"). The generator is now
+    materialized as a list and that list is unpacked."""
     test_gimple_matches_cpython("gimple_star_unpack_generator_expression_call", """\
 def cat(*parts):
     out = ""
@@ -16156,6 +16160,12 @@ def total(*nums):
 
 def main():
     texts = {"x": "1", "y": "2"}
+    # The iterable is INLINE `sorted(texts)`: that is the shape that hands the
+    # call a `MojoGenerator *` operand. The element here stays a plain
+    # f-string: `texts[p]` would also trip the separate bug where a string
+    # yielded over an inline `sorted(...)` is boxed into an int64_t value slot
+    # (bugs/CODEGEN_generator_string_values_boxed_as_int_slot.md), which is
+    # not this test's subject.
     print(cat(*(f"{p}=;" for p in sorted(texts))))
     print(total(*(x * x for x in [1, 2, 3, 4])))
 

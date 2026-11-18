@@ -10738,25 +10738,24 @@ def lower_call_args(gen, args: list) -> list:
     for a in args:
         if isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) == '*':
             # A Mojo pointer DEREFERENCE (`f(*p)`) is `_lower_UnaryOp`'s, not a
-            # spread.
+            # spread. A generator is the exception: `f(*(<generator
+            # expression>))` is an iterable unpack, and `*<generator-handle>`
+            # would dereference the incomplete `MojoGenerator` typedef (gcc:
+            # "storage size of '_t10' isn't known", "invalid use of
+            # incomplete typedef 'MojoGenerator'"). It is materialized as a
+            # list below and that list is unpacked.
             _qt = _as_str(gen._quick_type(a.operand) or '')
-            _gen_spread = False
             if (_qt.endswith(' *') and _qt not in (
-                    'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *')):
-                if _qt == 'MojoGenerator *':
-                    # `f(*(<generator expression>))`: `*` is an iterable
-                    # unpack in a call argument, not a C dereference. Emit
-                    # `*<generator-handle>` would dereference the incomplete
-                    # MojoGenerator typedef, so materialize it as a list and
-                    # unpack that list instead.
-                    _gen_spread = True
-                else:
-                    _lt, _lv = gen.lower_expr(a)
-                    out.append(_box_escaping_dict_slot_read(gen, a, _lt, _lv))
-                    continue
+                    'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *',
+                    'MojoGenerator *')):
+                _lt, _lv = gen.lower_expr(a)
+                out.append(_box_escaping_dict_slot_read(gen, a, _lt, _lv))
+                continue
             _st, _sv = gen.lower_expr(a.operand)
-            if _gen_spread or _as_str(_st) == 'MojoGenerator *':
-                _sv = _as_str(gen._materialize_as_list(_as_str(_st), _as_str(_sv)))
+            if _as_str(_st) == 'MojoGenerator *':
+                # `_quick_type` is only a hint and may not have known the
+                # operand's type, so the lowered type is the authority.
+                _sv = gen._materialize_as_list(_st, _as_str(_sv))
                 _st = 'MojoList *'
             _slots = gen._tuple_slot_types.get(_sv)
             if _slots is None:
@@ -10766,9 +10765,9 @@ def lower_call_args(gen, args: list) -> list:
                     _et, _ev = gen._tuple_elem_value(_st, _sv, _i)
                     out.append(_box_escaping_dict_slot_read(gen, None, _et, _ev))
                 continue
-            # Unknown arity: the single pass-through pair `_lower_UnaryOp`
-            # gives a spread, built from the operand already lowered rather
-            # than lowering it a second time.
+            # Unknown arity: the single pass-through pair the spread path
+            # expects, built from the operand already lowered rather than
+            # lowering it a second time.
             out.append((_st, _sv))
             continue
         _lt, _lv = gen.lower_expr(a)
