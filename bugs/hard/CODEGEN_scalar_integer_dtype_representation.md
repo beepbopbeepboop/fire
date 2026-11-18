@@ -224,27 +224,3 @@ Remaining (two separate defects, both measured):
    design. Next: decide whether the non-std call should reference the home symbol
    (hashed, needs the home object linked) or the elaborated copy (self-consistent), then
    make the test assert that.
-
-## Status 2026-11-18 (erased overload refusal landed; dylib undefined mulhi gone)
-
-Decided, and measured:
-- Erased generic-struct copies are NOT dropped from the dylib. A comment at the method
-  loop in module_gen records that skipping generic bodies broke 133 symbols that other
-  translation units call (`Span_count`), so the export policy stays.
-- The erased body's `mulhi` call was a guess: the erased argument word matched the
-  `Int64` overload, and the copy it named was never emitted. Now an overloaded call whose
-  argument reads a field typed by the struct's type parameters (`Self.` or a type
-  parameter name in the field annotation) inside a generic-struct method refuses the body
-  (`cannot compile module`), and the existing transactional fallback makes it
-  prototype-only. Concrete overloaded calls (`max(self.capacity() * 2, min_capacity)`) keep
-  their choice; a first, broader version refused those and broke `List`/`Deque` (see
-  commit history).
-- test_import_overload_choice now asserts the CHOICE (the uint32 overload, under the home's
-  hashed symbol or the elaborated copy's name), not one spelling. It passes.
-
-Gates: compile_stdlib 610/0, 0 skips; dylib 1203/1203 exports, 0 undefined `_std_`;
-test_gimple 466/0; test_import_overload_choice PASS.
-
-Remaining: the `Fd` instance in a user module still calls its elaborated copy by name
-(not the home's hashed symbol). That is a design choice, now recorded and tested by its
-choice, not by its spelling.

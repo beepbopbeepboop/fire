@@ -1238,6 +1238,12 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 temp_gen._link_objects = gen._link_objects
                 temp_gen._link_dylibs = gen._link_dylibs
                 temp_gen._link_needs_cxx_box = gen._link_needs_cxx_box
+                # Companion .cpp texts this closure built for IMPORTED
+                # modules: shared by reference so a companion discovered at
+                # any nesting depth reaches the ROOT entry point's
+                # `_refuse_dropped_companion` guard (the same reason the
+                # three link-line accumulators just above are shared).
+                temp_gen._dropped_companion_cpp = gen._dropped_companion_cpp
                 # Cross-module generator scalar contracts: share the
                 # importing side's collected hints with THIS temp_gen —
                 # gen_module applies the entries matching its own
@@ -1368,6 +1374,15 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # same as the existing generic-instantiation sites
                 # already are for that pipeline.
                 if temp_gen.generated_cpp:
+                    # This companion's DEFINITIONS are not part of any
+                    # artifact the inline entry points return (only
+                    # `compile_linked`/`compile_to_gimple_with_cpp`'s
+                    # `link_objects_out` can hand the compiled object on).
+                    # Record the text so the ROOT's `_refuse_dropped_companion`
+                    # can name the symbols the discarded `.ci` would otherwise
+                    # leave undefined; an imported generator that only the
+                    # C++ path accepts used to be a raw link error here.
+                    gen._dropped_companion_cpp.append(temp_gen.generated_cpp)
                     _link_mod_cpp_obj = gen._compile_link_inline_cpp_unit(
                         temp_gen.generated_cpp)
                     if (_link_mod_cpp_obj is not None

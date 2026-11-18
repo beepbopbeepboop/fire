@@ -1244,6 +1244,22 @@ class GimpleGen:
         # pinned (the self-hosted bootstrap forward-declares it), so this
         # rides along as an attribute instead; see compile_to_gimple_with_cpp.
         self.generated_cpp: str = ''
+        # Companion .cpp texts this compile BUILT for transitively-imported
+        # modules but cannot return: `compile_to_gimple`'s pinned
+        # 3-arg-in/1-str-out signature has nowhere to put a second artifact,
+        # so `_compile_imported_module` compiles an imported module's
+        # coroutine unit into a CAS object (for link-mode's `_link_objects`)
+        # and the inline entry points discard it. The `.ci` still NAMES those
+        # `_mojogen_*` symbols, so the result was an "Undefined symbols"
+        # link error thousands of lines from the generator that caused it
+        # (same failure `_refuse_dropped_companion` already refuses for the
+        # ROOT's own companion). Kept as the texts, not a symbol set, so the
+        # guard asks the same question of every companion: which symbols do
+        # the artifacts NAME vs DEFINE. Shared by reference across every
+        # nested temp_gen (see `_compile_imported_module`) and listed in
+        # `_PIPELINE_RESULT_ATTRS` so the end-of-compile cleanup leaves it
+        # for the entry point's guard.
+        self._dropped_companion_cpp: list[str] = []
         # Milestone C step 3 (generator METHODS on structs): the method
         # analogues of _supported_generators/_generator_api just above, keyed
         # by (struct_name, method_name) rather than by bare name — a struct
@@ -6559,7 +6575,8 @@ def _relocate_module_instance_defs(code: str) -> str:
 
 # Attributes of the returned generator that are compile RESULTS, not working state: the
 # end-of-compile cleanup in `_run_pipeline` must leave them alone.
-_PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_needs_cxx_box'})
+_PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_needs_cxx_box',
+                                    '_dropped_companion_cpp'})
 
 
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
@@ -7417,8 +7434,34 @@ def _refuse_dropped_companion(code: str, gen) -> None:
     is an intersection rather than a prefix.
     `_verify_desugared_genexps` already guards the sibling failure mode (a
     synthesized generator expression claimed by NEITHER path) for the same
-    reason."""
+    reason.
+
+    The companion can also belong to a TRANSITIVELY-IMPORTED module: the
+    pipeline builds one for every C++20-path generator it compiles, including
+    inside `_compile_imported_module`, and that site records the text in
+    `_dropped_companion_cpp` for this guard to read. `compile_to_gimple`'s
+    one-string ABI cannot return those either, so the question is asked of
+    every companion in the compile, not only the root's own."""
     cpp = getattr(gen, 'generated_cpp', '') or ''
+    # Companions this closure built for IMPORTED modules are just as
+    # unavailable to this entry point as the root's own: `_compile_imported_
+    # module` compiles them into `_link_objects` (link mode's link line) and
+    # the inline entry points return neither. Without them here, the guard
+    # returned early whenever the ROOT had no generator of its own, and an
+    # imported generator that only the C++ path accepts became the same raw
+    # link error this guard exists to prevent (`__mojogen_m_gen_value`
+    # referenced from `__gimple_main`, defined nowhere). Joining the texts
+    # keeps the one question the guard asks — named in the `.ci`, defined in
+    # a companion we cannot return — over every companion in the compile.
+    _dropped = getattr(gen, '_dropped_companion_cpp', None) or ()
+    if _dropped:
+        # Plain append loop, not a list comprehension inside the join: the
+        # self-hosted path's element typing over a list-of-str literal is the
+        # established trap this file's other emission sites avoid.
+        _parts = [cpp]
+        for _t in _dropped:
+            _parts.append(_t)
+        cpp = '\n'.join(_parts)
     if not cpp:
         return
     # `_*mojogen_…`: the emitters' own prefix may gain or lose a leading
@@ -7432,15 +7475,17 @@ def _refuse_dropped_companion(code: str, gen) -> None:
     if not missing:
         return
     raise RuntimeError(
-        "cannot compile this module to a single .ci: it uses "
+        "cannot compile this program to a single .ci: it uses "
         f"{len(missing)} C++20-coroutine generator symbol(s) "
         f"({', '.join(missing[:6])}{'...' if len(missing) > 6 else ''}) whose "
         "definitions are in a companion .cpp that compile_to_gimple cannot "
-        "return. Use compile_to_gimple_with_cpp (which returns and links that "
-        "companion), or make the generator stack-switch-eligible so it needs "
-        "no companion at all — the compiled `with` lowering already implements "
-        "@contextlib.contextmanager by driving the handle directly, so that "
-        "decorator is the usual reason a generator lands here.")
+        "return. Use compile_to_gimple_with_cpp (which returns this module's "
+        "companion and hands you the compiled objects for imported modules' "
+        "own companions through `link_objects_out`), or make the generator "
+        "stack-switch-eligible so it needs no companion at all — the compiled "
+        "`with` lowering already implements @contextlib.contextmanager by "
+        "driving the handle directly, so that decorator is the usual reason a "
+        "generator lands here.")
 
 
 def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
