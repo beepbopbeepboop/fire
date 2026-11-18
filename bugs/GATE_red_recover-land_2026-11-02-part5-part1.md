@@ -42,12 +42,13 @@ commit that carries this Status.
 
    That was measured on the lane's base (`0a932256b`) at 15:27. Master has
    since advanced 66 commits, and the integrator's gate round on 2026-11-17
-   19:58 filed a FRESH `bugs/gate-bootstrap-stage1-transitive.md`: the job
-   is red again on master for a later, different cause (it names branch
-   `work/bug-codegen-list-str-param-read-wrong-af`). That doc is the work for
-   *that* red; it is not this part's two causes, and the dump was not
-   re-measured after the advance (a whole-closure `--dump-full` is the one
-   run this lane must not start).
+   19:58 filed a fresh gate doc: the job was red again on master for a later,
+   different cause (branch `work/bug-codegen-list-str-param-read-wrong-af`).
+   That red was a false mixed-container refusal on the compiler's own
+   `_to_returns` (`mojo/middle/out_result.py`) and `_choose_overload_symbol`
+   (`mojo/backend_gimple/emit_calls.py`), fixed 2026-11-18: the job is green
+   (3 passed, 0 failed, 394 s, peak 4.8 GB) and that doc was DELETED. It was
+   not this part's two causes.
 
 2. **Locals named like sibling modules were treated as modules.**
    `_is_selfhost_sibling_alias` (`mojo/middle/methods_shared.py`) tested
