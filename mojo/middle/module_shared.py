@@ -921,8 +921,19 @@ def _gmi_prefold_toplevel_comptime(self, _node_list: list):
     for _cn in _node_list:
         if isinstance(_cn, ComptimeVarStmt):
             _cv = self._eval_const(_cn.value)
-            if _cv is not None:
+            if _cn.comptime_params:
+                # A GENERIC comptime alias (`comptime IsTriviallyDeinitable
+                # [T: AnyType]: Bool = ...`) is a TEMPLATE: an application
+                # supplies its bracket parameters, and its RHS may or may not
+                # mention them. Keep the DECLARATION (even when the RHS
+                # happens to fold without them) so `IsTriviallyDeinitable[Int]`
+                # can be substituted instead of reading as an undeclared name
+                # (see comptime._comptime_alias_template).
+                self._comptime_vals.setdefault(_cn.target, _cn)
+            elif _cv is not None:
                 self._comptime_vals.setdefault(_cn.target, _cv)
+            if isinstance(_cn.value, ListExpr):
+                self._comptime_list_asts.setdefault(_cn.target, _cn.value)
             if isinstance(_cn.value, ListExpr):
                 self._comptime_list_asts.setdefault(_cn.target, _cn.value)
         elif isinstance(_cn, IfStmt):
@@ -949,7 +960,12 @@ def _gmi_find_comptime_one(self, _node_list: list, _target, _out: dict):
     for _cn in _node_list:
         if isinstance(_cn, ComptimeVarStmt) and _cn.target == _target:
             _cv = self._eval_const(_cn.value)
-            if _cv is not None:
+            if _cn.comptime_params:
+                # A generic alias is a TEMPLATE: its RHS may name its bracket
+                # parameters, so only an application can fold it. Hand the
+                # declaration over; comptime.py substitutes it at the call.
+                _out['alias'] = _cn
+            elif _cv is not None:
                 _out['v'] = _cv
             return
         elif isinstance(_cn, IfStmt):

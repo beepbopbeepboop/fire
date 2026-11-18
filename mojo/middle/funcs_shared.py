@@ -899,7 +899,8 @@ def register_imported_symbol(gen, name: str, info: dict,
 
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     """Does `module`'s OWN top-level source define `name`? `kind` is
-    'struct' (a StructDef) or 'fn' (a top-level FunctionDef).
+    'struct' (a StructDef), 'fn' (a top-level FunctionDef), or 'comptime'
+    (a top-level `comptime NAME ...` alias).
 
     Top-level only by construction: `_parsed_import`'s statement list is
     the module's own body, so a METHOD that happens to share the name (a
@@ -909,6 +910,11 @@ def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
         return gen._find_imported_struct(module, name) is not None
     _p, _s, _stmts = gen._parsed_import(module)
     for _st in (_stmts or []):
+        if kind == 'comptime':
+            if (isinstance(_st, gimple_ctypes.ComptimeVarStmt)
+                    and _st.target == name):
+                return True
+            continue
         if isinstance(_st, gimple_ctypes.FunctionDef) and _st.name == name:
             return True
     return False
@@ -918,7 +924,8 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     """The module ref whose own source DIRECTLY defines top-level `name`,
     starting from `module` and following its `from X import name` statements
     transitively (re-export chains). None if no reachable module defines it
-    — an honest "not found", never a guess. `kind` is 'fn' or 'struct'.
+    — an honest "not found", never a guess. `kind` is 'fn', 'struct' or
+    'comptime'.
 
     `want_abs` selects the ABSOLUTIZED spelling of the same answer (`.sub`
     -> `p.sub`) instead of the one as written (`.sub`), for the callers

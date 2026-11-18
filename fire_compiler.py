@@ -1097,13 +1097,25 @@ class ComptimeForStmt:
 
 @dataclass
 class ComptimeVarStmt:
-    """Compile-time variable assignment: comptime NAME = expr"""
+    """Compile-time variable assignment: comptime NAME = expr
+
+    `comptime_params` is the bracket parameter block of a GENERIC comptime
+    alias (`comptime IsTriviallyDeinitable[T: AnyType]: Bool = ...`), in
+    declaration order. Such an alias has no value of its own — its RHS names
+    the parameters — so the evaluator cannot fold it until an APPLICATION
+    (`IsTriviallyDeinitable[Int]`) supplies them. Keeping the names (instead
+    of only skipping the brackets, which is what the parser did before) is
+    what lets that substitution happen; see mojo/middle/comptime.py's
+    `_comptime_alias_template` / `_eval_alias_application` and
+    `_gmi_find_comptime_one`.
+    """
     target: str
     value: object
     type_ann: str = None
     where_clause: str = ""
     line: int = 0
     col: int = 0
+    comptime_params: list = None
 
 
 # ── Unpacking-target representation ─────────────────────────────────
@@ -6354,8 +6366,16 @@ class Parser:
             name = self._advance().value
             type_ann = None
             where_clause = ""
-            # Skip optional type parameters: comptime Alias[T, U]: Type = ...
-            if self._peek().kind == "LBRACKET": self._skip_bracketed()
+            # `comptime Alias[T, U]: Type = ...` — CAPTURE the bracket
+            # parameters, do not only skip them. A generic comptime alias is
+            # applied at a call site (`Alias[Int]`), and the evaluator binds
+            # these names to that application's arguments; without the names
+            # the alias stays an undeclared identifier and a `comptime if`
+            # over it becomes a runtime branch on a zero word.
+            comptime_params = None
+            if self._peek().kind == "LBRACKET":
+                comptime_params, _cp_defaults, _cp_anns = \
+                    self._parse_generic_params_capture()
             # Optional type annotation: comptime MIN: Bool = False
             if self._peek().kind == "COLON":
                 self._advance()  # skip colon
@@ -6460,7 +6480,8 @@ class Parser:
                 # self-host stages were compared byte-for-byte against.
                 return [ComptimeVarStmt(target=_name, value=rhs,
                                         type_ann=type_ann,
-                                        where_clause=where_clause)
+                                        where_clause=where_clause,
+                                        comptime_params=comptime_params)
                         for _name in targets]
             if self._peek().kind == "ASSIGN":
                 self._advance()
@@ -6468,13 +6489,15 @@ class Parser:
                 rhs = self._skip_comptime_rhs()
                 return [ComptimeVarStmt(target=name, value=rhs,
                                         type_ann=type_ann,
-                                        where_clause=where_clause)]
+                                        where_clause=where_clause,
+                                        comptime_params=comptime_params)]
             # Declaration form without value, e.g. trait comptime requirement:
             #   `comptime _enum_is_exhaustive: Bool`
             if type_ann is not None or where_clause:
                 return [ComptimeVarStmt(target=name, value=None,
                                         type_ann=type_ann,
-                                        where_clause=where_clause)]
+                                        where_clause=where_clause,
+                                        comptime_params=comptime_params)]
             return ExprStmt(IdentExpr(name))
         raise SyntaxError(f"{self._loc(t)}Unexpected token after comptime: {t.value!r}")
 
