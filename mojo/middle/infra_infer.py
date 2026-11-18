@@ -2116,11 +2116,6 @@ def _acc_has_float(acc: list) -> bool:
     return False
 
 
-def _acc_has_bool(acc: list) -> bool:
-    """Does this return-arm type list hold a `_Bool` arm?"""
-    return any(_t == '_Bool' for _t in acc)
-
-
 def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
@@ -2133,14 +2128,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # identity is recorded so the return emitter boxes exactly the
         # functions this decision widened, rather than re-deriving the mix
         # from a differently-seeded type table.
-        # A `_Bool` beside a pointer is the same join (the pointer wins `join` and
-        # the bool arm was CAST to it: `True` became the pointer 1). It boxes
-        # when every pointer arm has a box kind: a str, a list or a bytes.
-        _bool_boxable = (_acc_has_bool(acc) and all(
-            _t in ('char *', 'MojoList *', 'MojoBytes *') or not _t.endswith(' *')
-            for _t in acc))
-        if ((_acc_has_float(acc) or _bool_boxable)
-                and gimple_ctypes.TypeLattice.is_pointer(_rt)):
+        if _acc_has_float(acc) and gimple_ctypes.TypeLattice.is_pointer(_rt):
             _mixed = getattr(gen, '_float_mixed_return_bodies', None)
             if _mixed is None:
                 _mixed = set()
