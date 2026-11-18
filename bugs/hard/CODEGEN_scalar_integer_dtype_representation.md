@@ -177,3 +177,18 @@ least for a call to a stdlib function whose body is a `comptime if` chain on
 constants (`_uint_type_of_width`). Then the field type becomes `uint32_t`, the
 cast truncates, and the instance's mulhi call takes the `UInt32` overload. Test:
 `FastDiv[DType.uint32]` divides correctly against integer division.
+
+## Status 2026-11-18 (alias evaluation): interpreter route does not work yet
+
+Tried evaluating `_uint_type_of_width[bit_width_of[DType.uint32]()]()` with the
+project interpreter (`python3 fire.py run`). Measured:
+- `bit_width_of[DType.uint32]()` evaluates correctly (32).
+- A local copy of the same ternary chain returns `UInt32` correctly.
+- The stdlib `_uint_type_of_width[32]()` returns `0` in the interpreter. A direct
+  `DType._uint1` read raises `AttributeError` (the stdlib chain names
+  `DType._uint1`/`_uint2`/`_uint4`, which the interpreter's `DType` lacks), and the
+  stdlib-import path swallows that error into `0`.
+
+So the alias must be evaluated structurally (a narrow evaluator for a
+width-to-DType ternary chain), or the interpreter's `DType` and stdlib-import
+evaluation must be made to match. Choose one before implementing.
