@@ -158,13 +158,7 @@ BASELINE = {
     'test_silent_noop_iter.py': 1,
     'test_string_literal_lexing.py': 2,
     'test_struct_formal.py': 1,
-    # 13 -> 14 on 2026-11-17: `an expect marker points at a doc that exists`
-    # gained one negative-control citation (`bugs/NO_SUCH_DOC.md`, one use site
-    # via a local), because removing `formal-dylib`'s marker left the survey
-    # with no live citation and the check pinned its READER synthetically
-    # instead. Deliberate, and the same class as the `NEVER_WRITTEN.md` /
-    # `SOME.md` fixtures the header names.
-    'test_suite.py': 14,
+    'test_suite.py': 13,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/dangling_doc_refs.py': 1,
     'tools/dataclass_reflection_sites.py': 2,

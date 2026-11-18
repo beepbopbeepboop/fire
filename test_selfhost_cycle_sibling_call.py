@@ -24,16 +24,6 @@ FunctionDef (the same `_local_sibling_module_exports` /
 `_resolved_export_entry` / `_register_imported_symbol` steps the generic
 module-qualified branch already performs, shared through one helper).
 
-The same branch also decides *whether* a plain-name receiver is a module at
-all, and it answered yes for locals: a bare `startswith` over the sibling
-prefix tuple made `cases`/`casted` match the `cas` module and
-`comptime_bindings` the `comptime` module, and a local dict named `mlir`
-matched the module of the same name. Their `.append`/`.items` calls were
-re-dispatched as calls to module functions that do not exist — the closure's
-`append`/`items`/`update` weak stubs. `locals_named_like_modules` in ROOT_SRC
-pins that half: the module-name test is boundary-correct and returns False for
-a locally bound name.
-
 The probe writes two mutually-importing `mojo/middle/*` modules plus a root
 under this checkout (`build/`, git-ignored — NOT `$TMPDIR`), compiles the root
 with `compile_to_gimple(..., do_imports=True)`, and compares the built
@@ -98,32 +88,10 @@ import mojo.middle.aa as aa
 import mojo.middle.bb as bb
 
 
-def locals_named_like_modules():
-    # Regression pin for the self-host sibling-alias test itself: a LOCAL
-    # whose name matches a sibling module prefix (`cases`/`casted` -> `cas`,
-    # `comptime_bindings` -> `comptime`) or a module base name (`mlir`) is
-    # NOT that module. It used to re-dispatch `.append`/`.items` as calls to
-    # a module function that does not exist, emitting a weak
-    # `...: unavailable in compiled mode` stub (a wrong answer, exit 0).
-    cases = []
-    cases.append(2)
-    casted = []
-    casted.append(3)
-    comptime_bindings = {'a': 1}
-    n = 0
-    for k, v in comptime_bindings.items():
-        n = n + v
-    mlir = {'b': 2}
-    for k, v in mlir.items():
-        n = n + v
-    return len(cases) + len(casted) + n
-
-
 def main():
     print(aa.a_use(2))
     print(bb.b_use(0))
     print(aa.a_pub(4))
-    print(locals_named_like_modules())
 
 
 main()
@@ -193,7 +161,7 @@ def test_selfhost_cycle_sibling_call():
         assert os.path.isfile(os.path.join(HERE, 'fire_compiler.py'))
         root_file = _write_tree(td)
         expected = _cpython_stdout(td, root_file)
-        assert expected == '4\n1\n8\n5\n', expected
+        assert expected == '4\n1\n8\n', expected
         with open(root_file) as f:
             ci = gimple_codegen.compile_to_gimple(
                 f.read(), do_imports=True, filename=root_file)

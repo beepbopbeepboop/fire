@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gate-recover-land-remainder-part5 land?
+# Land: should finished branch bug-formal-arm64-instruction-coverage-pa-2 land?
 
-**Branch:** `work/bug-gate-recover-land-remainder-part5` (task `bug-gate-recover-land-remainder-part5`; its tip is also saved as `refs/archive/work/bug-gate-recover-land-remainder-part5`, so dropping it loses nothing).
-**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 2 commit(s) ahead of master, 14 behind it; task started 2026-11-18 05:04:08
-**Original work:** Fix the bug in bugs/GATE_recover_land_remainder-part5.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report
-**Original claims:** bug:GATE_recover_land_remainder-part5
+**Branch:** `work/bug-formal-arm64-instruction-coverage-pa-2` (task `bug-formal-arm64-instruction-coverage-pa-2`; its tip is also saved as `refs/archive/work/bug-formal-arm64-instruction-coverage-pa-2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-15, first unlanded commit 2026-11-14; 4 commit(s) ahead of master, 282 behind it; task started 2026-11-15 23:12:04
+**Original work:** An earlier attempt left 2 commit(s) on branch work/bug-formal-arm64-instruction-coverage-pa-4, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted
+**Original claims:** bug:FORMAL_arm64_instruction_coverage-part2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-18 08:22:09: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 2 commit(s) ahead of master, 14 behind it; task started 2026-11-18 05:04:08)
-  Branch: work/bug-gate-recover-land-remainder-part5
-  Conflicting files: bugs/OPEN_WORK.md
+- 2026-11-16 00:51:20: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-14; 4 commit(s) ahead of master, 282 behind it; task started 2026-11-15 23:12:04)
+  Branch: work/bug-formal-arm64-instruction-coverage-pa-2
+  Conflicting files: formal/arm64_proof_gen.py, test_formal_call_proof_gen.py, test_selfhost_closure_parses.py

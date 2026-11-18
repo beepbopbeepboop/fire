@@ -2080,17 +2080,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
         gen._tuple_unpack_locals = {}
         _tul = gen._tuple_unpack_locals
     _tul[_as_str(getattr(func, 'name', ''))] = unpacked_locals
-    # The positive half, for the same contract: a local whose binding the
-    # pre-pass PROVED scalar (`v = 3`, `q = n + 0`) is a real number, not the
-    # `int64_t` box, so it stays proof of a non-container call site. Anything
-    # else that lands on `int64_t` (a call/attribute result the pre-pass
-    # cannot resolve, an unpack target, an unannotated parameter) is the box
-    # and says nothing about the argument's kind.
-    _csl = getattr(gen, '_confident_scalar_locals', None)
-    if _csl is None:
-        gen._confident_scalar_locals = {}
-        _csl = gen._confident_scalar_locals
-    _csl[_as_str(getattr(func, 'name', ''))] = confident_scalars
     # A conflicting name has no single C type, so its inferred type is the
     # BOX (`int64_t`), not whatever the pointer-wins lattice join answered.
     # For two container kinds the join already lands on `int64_t`; for a

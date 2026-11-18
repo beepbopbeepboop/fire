@@ -226,52 +226,14 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
                 break
     if not _in_shtree:
         return False
-    # A LOCAL or parameter whose name happens to match a module is not that
-    # module. `fire_compiler.py`'s `_check_mlir_type_argument_calls` has a local
-    # dict named `mlir`, and its `mlir.items()` was re-dispatched as a call to
-    # the `mlir` sibling module's `items`, which has no definition — a weak
-    # `items: unavailable in compiled mode` stub in the whole-closure dump.
-    # Module aliases are tracked in `_module_alias_names`, NOT in `var_types`,
-    # so this cannot shadow a real one.
-    try:
-        if module_name in getattr(gen, 'var_types', {}):
-            return False
-        if module_name in (getattr(gen, '_cur_func_params', None) or ()):
-            return False
-    except Exception:
-        pass
     if module_name in getattr(gen, '_module_alias_names', ()):
         _info = (getattr(gen, 'imported_symbols', {}) or {}).get(module_name) or {}
         _mod = _info.get('module') or module_name
-        return _is_selfhost_module_name(_mod)
+        return _mod.startswith(_SELFHOST_SIBLING_MODULE_PREFIXES)
     # A bare sibling-module base name (`regex_compile`, `ast_rewriter`,
     # `mlir`) reached without a local `import` of its own. Safe here: we
     # are already inside this compiler's own backend source.
-    return _is_selfhost_module_name(module_name)
-
-
-def _is_selfhost_module_name(name: str) -> bool:
-    """Whether `name` names one of this compiler's own sibling modules.
-
-    The tuple mixes PACKAGE prefixes (`mojo.`, `gimple_`, which really are
-    prefixes of longer module names) with MODULE BASE NAMES (`cas`,
-    `comptime`, `driver`, ...), which only name a module when they are the
-    whole name or the head of a dotted one. A bare `startswith` over the
-    whole tuple made every local beginning with a base name a module:
-    `cases`/`casted` matched `cas`, `comptime_bindings`/`comptime_members`
-    matched `comptime`, and each of their method calls (`cases.append(x)`,
-    `comptime_bindings.items()`) was re-dispatched as a call to a module
-    function that does not exist — a weak "unavailable in compiled mode"
-    stub that answered 0 (the whole-closure dump's `append`/`items`/`update`
-    stubs).
-    """
-    for p in _SELFHOST_SIBLING_MODULE_PREFIXES:
-        if p.endswith(('.', '_')):
-            if name.startswith(p):
-                return True
-        elif name == p or name.startswith(p + '.'):
-            return True
-    return False
+    return module_name.startswith(_SELFHOST_SIBLING_MODULE_PREFIXES)
 
 
 # ---------------------------------------------------------------------------

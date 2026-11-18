@@ -35,16 +35,6 @@ The rule the two backends share, stated once:
 only from comptime contexts, so an ordinary read of a `comptime` name fell
 through to the unknown-identifier placeholder and silently emitted `0`. Both
 backends resolve the name in their generic identifier path for that reason.
-
-4. `Alias[args]` over a GENERIC `comptime Alias[params]: T = <rhs>` binds
-   `params` to `args` and folds `<rhs>` at the APPLICATION (see
-   `_eval_alias_application`). Such an alias has no value of its own — its
-   RHS names its parameters — so recording only a folded value left it an
-   undeclared name, and a `comptime if` over it took rule 2's runtime branch
-   on that name's zero placeholder (a NULL boxed-list read for
-   `std.traits.IsTriviallyDeinitable[T]`). The declaration is kept in the
-   binding table (a `ComptimeVarStmt` with `comptime_params`) by both the
-   importing walk and the module prefold.
 """
 
 
@@ -52,10 +42,6 @@ import sys
 import platform
 
 import fire_compiler as _fc
-from mojo.middle.builtin_types import (
-    TRIVIAL_REGISTER_PASSABLE_TRAITS,
-    TRIVIAL_REGISTER_PASSABLE_TYPES,
-)
 
 # The AST node classes are imported by name (the way every other module in
 # mojo/middle/ does it) rather than off a namespace, so `isinstance` checks
@@ -77,22 +63,11 @@ DottedLiteral = getattr(_fc, 'DottedLiteral', None)
 SubscriptExpr = getattr(_fc, 'SubscriptExpr', None)
 SliceExpr = getattr(_fc, 'SliceExpr', None)
 Comprehension = getattr(_fc, 'Comprehension', None)
-ComptimeVarStmt = _fc.ComptimeVarStmt
-# Static ComptimeVarStmt view of a boxed handle, for the same reason
-# fire_compiler._as_comptimevar_node exists: a field read straight off a
-# boxed value lowers to runtime dispatch, which does not reliably carry this
-# struct (it turned `s.target` into the pointer's decimal address elsewhere).
-_as_comptimevar_node = _fc._as_comptimevar_node
 
 # Most elements a folded list comprehension may produce. Past this the value is
 # not folded (None), so the comptime-for it feeds falls back to the runtime
 # loop, which is the right answer for a comprehension that large anyway.
 COMPREHENSION_FOLD_CAP = 4096
-
-# Marker key in the binding table that an in-progress generic-alias expansion
-# inserts, so a self-referential alias body cannot re-enter forever. A NUL
-# prefix cannot collide with a source identifier or any other binding key.
-_ALIAS_EXPANDING_PREFIX = '\x00comptime-alias:'
 
 
 def _is_dtype_value(v) -> bool:
@@ -607,21 +582,6 @@ def conforms_to(struct_name, trait_name, bases_map):
     still answer None: nothing is known about it at all."""
     if not isinstance(struct_name, str) or not isinstance(trait_name, str):
         return None
-    # A BUILTIN SCALAR has no source-level struct declaration for the map to
-    # read, but the language's answer is not unknown: the compiler synthesizes
-    # `TrivialRegisterPassable` for these types, and that trait derives
-    # `Deinitable`, `ImplicitlyCopyable -> Copyable -> Movable` and
-    # `RegisterPassable` (std/builtin/value.mojo). This is what lets
-    # `IsTriviallyDeinitable[Int]` — a `conforms_to(T, ...) or (...)` alias —
-    # fold at an instantiation with `T = Int` instead of staying CONST_UNKNOWN
-    # and becoming a runtime branch on a zero word (the imported-generic-alias
-    # miscompile: a NULL boxed-list read for `IsTriviallyDeinitable[T]`). Any
-    # OTHER trait is still an honest None: nothing here says a scalar does not
-    # conform.
-    if struct_name in TRIVIAL_REGISTER_PASSABLE_TYPES:
-        if trait_name in TRIVIAL_REGISTER_PASSABLE_TRAITS:
-            return True
-        return None
     if not bases_map:
         return None
     if struct_name not in bases_map:
@@ -750,25 +710,7 @@ def conforms_to_closed(struct_name, trait_name, bases_map, module_name):
     return False, trait_q
 
 
-def _conforms_to_operand_name(node, bindings):
-    """`_conforms_to_name`, with a bound TYPE spelling resolved first.
-
-    A generic comptime alias's body asks about its own bracket parameter
-    (`conforms_to(T, TrivialRegisterPassable)`), and the application site binds
-    `T` to the argument's spelling (`Int`). Without this the question is asked
-    about the NAME `T`, which no struct declaration answers, so the alias could
-    never fold even when its argument's conformance is known. Only a STRING
-    binding is a spelling; a bound value (an int/float/bool) leaves the answer
-    to `_conforms_to_name`, exactly as before.
-    """
-    if bindings and isinstance(node, IdentExpr):
-        _b = bindings.get(node.name)
-        if isinstance(_b, str):
-            return _b
-    return _conforms_to_name(node)
-
-
-def _fold_conforms_to_call(node, conforms_to_pred, bindings=None):
+def _fold_conforms_to_call(node, conforms_to_pred):
     if conforms_to_pred is None:
         return None
     if not isinstance(node, CallExpr) or not isinstance(node.func, IdentExpr):
@@ -780,122 +722,14 @@ def _fold_conforms_to_call(node, conforms_to_pred, bindings=None):
     args = getattr(node, 'args', None) or []
     if len(args) != 2:
         return None
-    tname = _conforms_to_operand_name(args[0], bindings)
-    trname = _conforms_to_operand_name(args[1], bindings)
+    tname = _conforms_to_name(args[0])
+    trname = _conforms_to_name(args[1])
     if tname is None or trname is None:
         return None
     try:
         return conforms_to_pred(tname, trname)
     except Exception:
         return None
-
-
-def _comptime_alias_template(bindings, obj):
-    """The generic `comptime` alias declaration `obj` names, or None.
-
-    A GENERIC comptime alias (`comptime IsTriviallyDeinitable[T: AnyType]:
-    Bool = conforms_to(T, ...)`) has no value of its own: its RHS names its
-    bracket parameters. The binding table holds the alias's own
-    ComptimeVarStmt instead of a value (see `_gmi_prefold_toplevel_comptime`
-    and the gimple importer's `from X import NAME` walk), so an APPLICATION
-    (`IsTriviallyDeinitable[Int]`) can bind those parameters and fold the
-    body. Only a node WITH parameters is an application target; a name that
-    binds a real value is not.
-    """
-    if not bindings or not isinstance(obj, IdentExpr):
-        return None
-    _b = bindings.get(obj.name)
-    if isinstance(_b, ComptimeVarStmt):
-        _av = _as_comptimevar_node(_b)
-        if _av.comptime_params:
-            return _av
-    return None
-
-
-def _alias_type_spelling(node):
-    """The TYPE SPELLING a bracket argument denotes (`Int`, `List[Int]`), or
-    None. See `_alias_arg_value` for why a type argument must be spelled."""
-    if isinstance(node, IdentExpr):
-        return node.name
-    if isinstance(node, MemberExpr):
-        _o = _alias_type_spelling(node.obj)
-        if isinstance(_o, str) and isinstance(node.member, str):
-            return _o + '.' + node.member
-        return None
-    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
-        _base = _alias_type_spelling(node.obj)
-        if _base is None:
-            return None
-        _idx = node.index
-        if TupleExpr is not None and isinstance(_idx, TupleExpr):
-            _elems = _idx.elements or []
-        else:
-            _elems = [_idx]
-        _parts = []
-        for _e in _elems:
-            _s = _alias_type_spelling(_e)
-            if _s is None:
-                _v = eval_const(_e, {}, None)
-                if isinstance(_v, bool) or isinstance(_v, int):
-                    _s = str(_v)
-                elif isinstance(_v, str):
-                    _s = _v
-            if _s is None:
-                return None
-            _parts.append(_s)
-        return _base + '[' + ', '.join(_parts) + ']'
-    return None
-
-
-def _alias_arg_value(node, bindings, platform, conforms_to_pred):
-    """The value an alias application's bracket argument binds.
-
-    A VALUE argument (`Alias[3]`, or a bound comptime constant) folds
-    normally. A TYPE argument must bind its SPELLING: `Int` folds to the
-    `('DType', 'int')` marker, which carries no type name a conformance
-    question can consume, so `conforms_to(T, Trait)` in the alias body would
-    never see `Int`."""
-    v = eval_const(node, bindings, platform, conforms_to_pred)
-    if isinstance(v, bool) or isinstance(v, int) or isinstance(v, float):
-        return v
-    if isinstance(v, str):
-        return v
-    return _alias_type_spelling(node)
-
-
-def _eval_alias_application(node, tmpl, bindings, platform, conforms_to_pred):
-    """Evaluate `Alias[args]` against the alias declaration `tmpl`: bind its
-    bracket parameters to the application's arguments and fold its body, or
-    None when the body still cannot be decided (an unknown conformance, a
-    nested uninstantiated type, ...).
-
-    A self-referential body (`comptime A[T] = A[T]`) would otherwise re-enter
-    forever; an in-progress marker in the cloned binding table stops it (no
-    real identifier can be spelled with the NUL prefix)."""
-    if isinstance(node.obj, IdentExpr):
-        _mark = _ALIAS_EXPANDING_PREFIX + node.obj.name
-        if bindings and _mark in bindings:
-            return None
-    _params = tmpl.comptime_params or []
-    _body = tmpl.value
-    if _body is None:
-        return None
-    _idx = node.index
-    if TupleExpr is not None and isinstance(_idx, TupleExpr):
-        _args = _idx.elements or []
-    else:
-        _args = [_idx]
-    if len(_args) != len(_params):
-        return None
-    _bound = dict(bindings)
-    if isinstance(node.obj, IdentExpr):
-        _bound[_ALIAS_EXPANDING_PREFIX + node.obj.name] = True
-    for _i, _p in enumerate(_params):
-        _av = _alias_arg_value(_args[_i], bindings, platform, conforms_to_pred)
-        if _av is None:
-            return None
-        _bound[_p] = _av
-    return eval_const(_body, _bound, platform, conforms_to_pred)
 
 
 def _eval_interpolated_string(node, bindings: dict, platform=None, conforms_to_pred=None):
@@ -1043,7 +877,7 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             v = _eval_interpolated_string(node, bindings, platform, conforms_to_pred)
             return v if v is not None else node.value
         return node.value
-    _ct = _fold_conforms_to_call(node, conforms_to_pred, bindings)
+    _ct = _fold_conforms_to_call(node, conforms_to_pred)
     if _ct is not None:
         return bool(_ct)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
@@ -1172,13 +1006,7 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             return None
     if isinstance(node, IdentExpr):
         if node.name in bindings:
-            _bv = bindings.get(node.name)
-            # A generic comptime alias is a TEMPLATE, not a value: an
-            # application is what names one (`Alias[Int]`, handled below).
-            # Returning the declaration here would read as a folded constant.
-            if isinstance(_bv, ComptimeVarStmt):
-                return None
-            return _bv
+            return bindings.get(node.name)
         # A scalar type spelling in a DType position is that dtype's value
         # (`Float32` == `DType.float32` == `.float32`).  Only used where a
         # compile-time VALUE is being folded, so an ordinary type name used as
@@ -1237,16 +1065,6 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
     # access or slicing). Required so `comptime assert a[i] == ...` and similar
     # conditions over comptime collections produce compile-time diagnostics
     # (comptime collection ops beyond len()).
-    #
-    # An APPLICATION of a generic comptime alias (`IsTriviallyDeinitable[Int]`)
-    # is a subscript too, but its base is a TEMPLATE rather than a value, so it
-    # is decided by substituting the bracket arguments into the alias body
-    # before the collection-subscript fold can decline it.
-    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
-        _tmpl = _comptime_alias_template(bindings, node.obj)
-        if _tmpl is not None:
-            return _eval_alias_application(node, _tmpl, bindings, platform,
-                                           conforms_to_pred)
     _sv = _eval_subscript(node, bindings, platform, conforms_to_pred)
     if _sv is not None:
         return _sv
@@ -1548,18 +1366,14 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
             if not _const_foldable(pair[1], bindings, call_hook, conforms_to_pred):
                 return False
         return True
-    _ct = _fold_conforms_to_call(node, conforms_to_pred, bindings)
+    _ct = _fold_conforms_to_call(node, conforms_to_pred)
     if _ct is not None:
         return True
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and node.func.name == 'conforms_to'):
         return False
     if isinstance(node, IdentExpr):
-        if node.name in bindings:
-            # A generic alias template is foldable only through an
-            # APPLICATION (`Alias[Int]`), not as a bare name.
-            return _comptime_alias_template(bindings, node) is None
-        return node.name in _DTYPE_TYPE_NAMES
+        return node.name in bindings or node.name in _DTYPE_TYPE_NAMES
     # `DType.int32` / `dtype.int32`
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
@@ -1616,15 +1430,6 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
     if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
         if getattr(node, 'attrs', None):
             return False
-        # A generic comptime alias application is foldable exactly when its
-        # substituted BODY folds. Deciding this by shape alone would let a
-        # body that still cannot be decided (`downcast[T, Trait].member` for
-        # an unknown T) read as CONST_FALSE, silently pruning the true arm —
-        # the failure mode this whole path exists to avoid.
-        _tmpl = _comptime_alias_template(bindings, node.obj)
-        if _tmpl is not None:
-            return _eval_alias_application(node, _tmpl, bindings, None,
-                                           conforms_to_pred) is not None
         return (_const_foldable(node.obj, bindings, call_hook, conforms_to_pred)
                 and _const_foldable(node.index, bindings, call_hook, conforms_to_pred))
     if SliceExpr is not None and isinstance(node, SliceExpr):

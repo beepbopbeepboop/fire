@@ -297,61 +297,6 @@ def find(skip=()):
     return have, by_doc, by_file
 
 
-def sanitize_text(text):
-    """TEXT with every citation of a doc this tree no longer has rewritten to
-    the bare stem plus "(deleted)"; a citation that resolves is left untouched.
-
-    The caller is a tool that files a NEW doc whose prose quotes a task that
-    named a bug doc (`integrate.land_doc`'s `**Original work:**` line, from the
-    worker's task summary, which quotes the worker's task file, which says to fix
-    `bugs/<doc>.md`). When the branch being filed is the fix, that doc has
-    already been deleted, so the citation would be dangling from the doc's first
-    commit: a brand-new file has a 0 ceiling in the ratchet, so the doc-refs
-    gate is red the moment the doc lands, and every later landing round
-    inherits the red (observed 2026-11-17, the land doc for a task whose
-    summary named a doc deleted by the round that fixed it).
-
-    The rewrite is to the bare stem, not an annotation, because the two
-    classes answer "deleted" differently: `bare_find` skips a line that already
-    carries a `deleted_convention` word, but the `bugs/`-prefixed walk in
-    `find()` has no such skip, so a prefixed path must come OUT of the text.
-    Dropping both the `bugs/` prefix and the `.md` at once serves the two
-    classes with one spelling, and the "(deleted)" suffix is the convention
-    `bare_find` skips, so a reader (and any later, broader walk) sees the
-    reference is historical, not a pointer.
-
-    One honest gap: `bare_find` also lets a citation resolve against a `.md`
-    BESIDE the citing file, a question `sanitize_text` cannot ask (it has no
-    citing file). A name that resolves only there would be rewritten — which
-    can only happen for a file under a derived directory the walk drops, since
-    every other in-tree `.md` basename is in `md_names` — so the rewrite is
-    conservative, never the other way round.
-    """
-    have = existing_docs()
-    bug_names = {n.rsplit('/', 1)[-1] for n in have}
-    md_names = all_markdown_basenames()
-    spans = []
-    for m in REF.finditer(text):
-        name = m.group(1)                  # the cited path, e.g. `hard/FOO.md`
-        if f'bugs/{name}' not in have:
-            # the bare stem: no directory, no `.md`, so neither class can match the rewrite
-            spans.append((m.start(), m.end(), name[:-3].rsplit('/', 1)[-1]))
-    for m in BARE_REF.finditer(text):
-        stem = m.group(1)
-        if stem + '.md' not in bug_names and stem + '.md' not in md_names:
-            spans.append((m.start(), m.end(), stem))
-    spans.sort()
-    out, prev = [], 0
-    for start, end, stem in spans:
-        if start < prev:
-            continue                      # the two classes never overlap, but the merge is by position
-        out.append(text[prev:start])
-        out.append(stem + ' (deleted)')
-        prev = end
-    out.append(text[prev:])
-    return ''.join(out)
-
-
 # ── the ratchet ────────────────────────────────────────────────────────────
 # Per-file ceilings, so the corpus can only shrink and a NEW citation of a
 # deleted doc is a failure rather than a line in a census nobody diffs.

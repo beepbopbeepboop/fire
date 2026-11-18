@@ -3300,40 +3300,10 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                 # `var l = List[Float32]()` -- a VarDecl, not an AssignStmt;
                 # same one-name/one-value binding shape.
                 _note_ctor_elem(getattr(n, 'name', ''), getattr(n, 'value', None))
-                # A local declared with a container annotation (`e: list[str] = []`)
-                # carries its element type in the annotation, even when the initializer
-                # is an empty literal that says nothing.
-                _v = getattr(n, 'name', '')
-                _ann = getattr(n, 'type_ann', None)
-                _val = getattr(n, 'value', None)
-
-                # If this is a VarDecl with a container annotation and a list/set literal value
-                if _ann is not None and isinstance(_val, gimple_ctypes.ListExpr):
-                    # The annotation might be 'list[str]' or just 'str'
-                    # We need to extract the inner type if it's a container annotation
-                    _ann_str = _as_str(_ann)
-                    if '[' in _ann_str:
-                        # Extract inner type, e.g., 'str' from 'list[str]'
-                        base, rest = _ann_str.split('[', 1)
-                        inner = rest.rstrip(']').strip()
-                        if inner:  # Only if there's an inner type
-                            _ct = gen._resolve_type(inner)
-                            if _ct and _ct != 'int64_t':
-                                elem[_v] = _ct
-                elif _ann is not None and isinstance(_val, gimple_ctypes.SetExpr):
-                    _ann_str = _as_str(_ann)
-                    if '[' in _ann_str:
-                        base, rest = _ann_str.split('[', 1)
-                        inner = rest.rstrip(']').strip()
-                        if inner:
-                            _ct = gen._resolve_type(inner)
-                            if _ct and _ct != 'int64_t':
-                                elem[_v] = _ct
                 continue
             if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
                 _note_ctor_elem(n.target.name, n.value)
                 v, val = n.target.name, n.value
-
                 if isinstance(val, gimple_ctypes.ListExpr):
                     note_list_literal(v, val)
                 elif isinstance(val, gimple_ctypes.SetExpr):
@@ -3389,20 +3359,6 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     elem[v] = gen._infer_list_elem_type(val.elements)
                 elif isinstance(val, gimple_ctypes.IdentExpr) and val.name in dict_val:
                     dict_val[v] = dict_val[val.name]
-                # Handle annotated assignment like `e: list[str] = []`.
-                # This runs AFTER the literal branches so the annotation's
-                # element type overrides `note_list_literal`'s int64_t default
-                # for an empty literal.
-                if getattr(n, 'type_ann', None) is not None:
-                    _ann_str = _as_str(n.type_ann)
-                    if '[' in _ann_str:
-                        # Extract inner type, e.g., 'str' from 'list[str]'
-                        base, rest = _ann_str.split('[', 1)
-                        inner = rest.rstrip(']').strip()
-                        if inner:  # Only if there's an inner type
-                            _ct = gen._resolve_type(inner)
-                            if _ct and _ct != 'int64_t':
-                                elem[v] = _ct
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
                 v = n.target.obj.name

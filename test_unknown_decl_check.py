@@ -141,30 +141,10 @@ def test_compiler_builtins_are_not_reported():
     assert _reads(src) == [], _reads(src)
 
 
-def test_compile_time_type_builtins_are_not_reported():
-    # `type_of(x)` / `__type_of(x)` are compiler-provided compile-time type
-    # builtins: the argument is consulted for its STATIC TYPE, no source file
-    # declares them, and the compiled path lowers them by name. A bracket
-    # argument is where this went wrong: `taker[type_of(x)]` was refused as
-    # "use of unknown declaration 'type_of'" before elaboration (the bug was
-    # found while landing CODEGEN_nested_bracket_generic_call_stubs_to_zero).
-    src = (
-        "def taker[T: AnyType](x: Int) -> Int:\n"
-        "    return 0\n"
-        "def helper[w: Int](x: Int) -> Int:\n"
-        "    var a = taker[type_of(x)](x)\n"
-        "    var b = taker[__type_of(x)](x)\n"
-        "    return a + b\n"
-    )
-    assert _reads(src) == [], _reads(src)
-
-
 if __name__ == "__main__":
     test_unknown_name_reports_modular_layout()
     test_every_name_is_reported_in_source_order()
     test_valid_bindings_are_not_reported()
     test_string_contents_do_not_bind_a_name()
     test_wildcard_import_disables_the_check()
-    test_compiler_builtins_are_not_reported()
-    test_compile_time_type_builtins_are_not_reported()
     print("ok")

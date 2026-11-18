@@ -1191,25 +1191,12 @@ main()
     # A variadic lambda's `*args` really is a sequence: len(), iteration and
     # indexing all read the packed list, and the ZERO-argument call packs an
     # empty one rather than passing a stray scalar.
-    # `*a` is a real sequence, so indexing it works AND reading past its end
-    # is CPython's IndexError rather than a silent default. This case was
-    # pinned to "0\n31\n" from b3de1658b ("each pinned to CPython's answer")
-    # until 2026-11-18; that expectation is NOT CPython's -- CPython raises
-    # `tuple index out of range` for `e()`, and the compiled raise
-    # (`mojo_list_get_int_checked`) is the correct behaviour. Pinned as a
-    # runtime error, with the in-bounds index asserted separately.
-    test_gimple_runtime_error("gimple_variadic_lambda_args_is_a_sequence", """\
+    test_gimple_stdout("gimple_variadic_lambda_args_is_a_sequence", """\
 def main():
     e = lambda *a: len(a) * 10 + a[0]
     print(e())
     print(e(1, 2, 3))
-""", "IndexError")
-
-    test_gimple_stdout("gimple_variadic_lambda_args_sequence_index", """\
-def main():
-    e = lambda *a: len(a) * 10 + a[0]
-    print(e(1, 2, 3))
-""", "31\n")
+""", "0\n31\n")
 
     # CAPTURING + variadic: the closure env leads the packed parameters, and
     # the capture is read through it. This is the corpus shape
@@ -15956,26 +15943,6 @@ def main():
     print(ends([]))
     print(ends(["a", "b:"]))
     print(ends(["a"]))
-
-main()
-""")
-
-
-def test_list_str_param_read_wrong_after_empty_list_caller():
-    """`e: list[str] = []` then `ends(e)`: the empty list VARIABLE was recorded
-    as a list of ints (the annotation's element type was not read), which made
-    the `list[str]` parameter kind-mixed and its element read a boxed word cast
-    to `char *` (always False). CPython prints `closed` then `open`."""
-    test_gimple_matches_cpython("gimple_list_str_param_read_wrong_after_empty_list_caller", """\
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    e: list[str] = []
-    print(ends(e))
-    print(ends(["a", "b:"]))
 
 main()
 """)

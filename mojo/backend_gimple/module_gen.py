@@ -1909,17 +1909,6 @@ def _emit_reflection_fwd_decls(self, parts):
         parts.append("/* Forward decls for generic repr() (mutual struct references) */")
         parts.append("\n".join(repr_fwd_decls))
         parts.append('')
-    field_repr_names = set()
-    for _sn in _emitted:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
-            field_repr_names.add(_sn)
-    field_repr_fwd_decls = [f"static char * _mojo_field_repr_{sn} ({sn} *obj);"
-                            for sn in sorted(field_repr_names)]
-    if field_repr_fwd_decls:
-        parts.append("/* Forward decls for the reflective FIELD dump (no __repr__) */")
-        parts.append("\n".join(field_repr_fwd_decls))
-        parts.append('')
     elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
                            for sn in _emitted]
     # No `void *` alias of each shim is declared here: inside a `__GIMPLE`-
@@ -2363,24 +2352,6 @@ def _emit_reflection_dispatch(self, parts):
     # list` test is a linear scan of a list that can hold every struct in the
     # closure.
     elem_repr_names = set()
-    # Structs whose FIELD dump must NOT consult the user `__repr__` (the
-    # corpus pins `DunderHolder(p=R(x='c'))`, not `R<c>`; see
-    # test_gimple_runner.py's `gimple_struct_field_dump_is_not_an_address`:
-    # "a field dump is this runtime's own rendering ... so the dunder is not
-    # consulted for it, while the CONTAINER case above does consult it").
-    # A CONTAINER element still consults it -- `_mojo_elem_repr_*` is
-    # unchanged -- so this is a second, reflective-only entry point.
-    #
-    # Computed HERE, before the reflection loop, not accumulated inside it:
-    # that loop walks the structs in REVERSE declaration order, so a field
-    # dump for an early struct would otherwise ask before a later struct's
-    # name was known (measured: `elem_repr_names` empty at the first
-    # iteration, so every field fell through to the tag dispatch).
-    field_repr_names = set()
-    for _sn in reflect_structs:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
-            field_repr_names.add(_sn)
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
         _mm_arms_sn = self._getattr_method_arms.get(_as_str(sn))
@@ -2699,23 +2670,16 @@ def _emit_reflection_dispatch(self, parts):
                 owned = 'T'
             elif ftype.endswith(' *'):
                 # A field whose declared type is a struct this compile
-                # reflected is rendered through that struct's OWN dump, not
-                # through the tag-based dispatch: the field's type is written
-                # down right here, so there is nothing to discover at runtime,
-                # and `_mojo_dispatch_repr` cannot use it anyway for a
+                # reflected is rendered through that struct's ELEMENT REPR
+                # shim, not through the tag-based dispatch: the field's type is
+                # written down right here, so there is nothing to discover at
+                # runtime, and `_mojo_dispatch_repr` cannot use it anyway for a
                 # struct-allocated value (no runtime type tag -- the same gap
-                # that made `[p]` print a pointer decimal). A struct with a
-                # user `__repr__` uses `_mojo_field_repr_*`, which is the
-                # REFLECTIVE dump (the dunder is for a bare `repr()` and for a
-                # container ELEMENT, not for a field). A field of a type with
-                # neither keeps the dispatch, which is what reaches a
+                # that made `[p]` print a pointer decimal). A field of a type
+                # with no shim keeps the dispatch, which is what reaches a
                 # non-reflected struct's own dumper.
                 _fsn = ftype[:-2].strip()
-                if _fsn and _fsn in field_repr_names:
-                    val_expr = (f'({fref} ? _mojo_field_repr_{_fsn}'
-                                f'(({_fsn} *)(intptr_t){fref}) : _mojo_repr_none())')
-                    owned = 'T'
-                elif _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
+                if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
                     val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
                                 f'((int64_t)(intptr_t){fref}) : _mojo_repr_none())')
                     owned = 'T'
@@ -2814,7 +2778,6 @@ def _emit_reflection_dispatch(self, parts):
         # struct repr and the element shim below share one gate and cannot
         # drift (they are still emitted as two functions, but both defer to
         # the same user symbol when the gate is open).
-        _refl_body = repr_body
         _erep = self._struct_method_csym(sn, '__repr__', '')
         _erep_ok = self.func_return_types.get(_erep) == 'char *'
         if _erep_ok:
@@ -2825,16 +2788,6 @@ def _emit_reflection_dispatch(self, parts):
             + repr_body +
             f"}}\n"
         )
-        # The FIELD dump's own entry point: the reflective body, WITHOUT the
-        # dunder override above. Emitted only where the override exists (a
-        # struct whose dunder is absent already renders reflectively through
-        # `_mojo_repr_{sn}` / the element shim).
-        if _erep_ok:
-            refl_parts.append(
-                f"static char * _mojo_field_repr_{sn} ({sn} *obj) {{\n"
-                + _refl_body +
-                f"}}\n"
-            )
         # The ELEMENT REPR shim for a list/tuple of this struct: the walker
         # holds one `char *(*)(int64_t)` for a slot it reads as a word, and
         # this is the typed function behind it. A shim rather than a cast of
@@ -10295,17 +10248,17 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
         return False
     if _as_str(st) == 'char *' or _as_str(st) == 'double':
         return True
-    # An INTEGER observation is proof only when it is a REAL integer. The
-    # `int64_t` STORAGE DEFAULT is not: `_infer_local_var_types` leaves it on
-    # every value whose kind it cannot resolve and on every tuple-unpack
-    # target, and the value it stands for may be a container. Two such
-    # readers used to count, and both refused a container parameter that
-    # every call site feeds a list: `coro.py`'s `base, is_method,
-    # real_params, ... = _async_method_setup(...)` (the unpack exemption
-    # below), and `_to_returns`/`_choose_overload_symbol` recursing through a
-    # local bound to a `getattr`/`dict.get` result (the `int64_t` arm below).
-    # `each([4, 5])` beside `each(n)` where `n = 3` is still refused, because
-    # `n`'s binding is a PROVEN scalar (`_confident_scalar_locals`).
+    # An INTEGER observation is proof unless the name came from a
+    # multi-value UNPACK of a single iterable: `_infer_local_var_types`
+    # types each such target with the `int64_t` STORAGE DEFAULT because
+    # the per-element type is not knowable there, and the element may be a
+    # container. `coro.py`'s `base, is_method, real_params, ... =
+    # _async_method_setup(...)` feeds `_mark_coro_param_elem_kinds(
+    # real_params)`, and reading that default as "a number" refused the
+    # file for a parameter every call site passes a list. Everything else
+    # -- a literal (answered above), a call result, a parameter, an
+    # ordinary local -- keeps counting, so `each([4, 5])` beside
+    # `each(n)` where `n = 3` (or `n = f()`) is still refused.
     if isinstance(a, gimple_ctypes.IdentExpr):
         _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
             _as_str(caller_name), ())
@@ -10315,25 +10268,7 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
             # `_unpack_from_container_slot` / `_unpack_from_scalar_slot`
             # at the call site below, so this reader stays silent.
             return False
-    _st = _as_str(st)
-    if _st == 'int64_t':
-        # `int64_t` is ALSO this codegen's BOX for a value whose kind nothing
-        # resolved: a call/attribute result, an unpack target, an unannotated
-        # parameter. The box may hold a container, so it is not proof of "a
-        # str or number". Only a local the pre-pass PROVED is a scalar
-        # (`_confident_scalar_locals`) is a number here. Reading the box as a
-        # number refused a container parameter fed the very same value at
-        # another call site even though nothing in the program is a str or a
-        # number: `mojo/middle/out_result.py`'s `_to_returns` recurses a
-        # statement list through `v = getattr(st, f.name)`, and
-        # `mojo/backend_gimple/emit_calls.py`'s `_choose_overload_symbol`
-        # takes `over.get(fname_raw)`. Both modules fell out of the compiler's
-        # own closure (`# ERROR: compiling imported module`), which is what
-        # `bootstrap-stage1-transitive` rejects.
-        _conf = (getattr(self, '_confident_scalar_locals', None) or {}).get(
-            _as_str(caller_name), ())
-        return _as_str(a.name) in _conf
-    return _st in ('int', 'bool')
+    return _as_str(st) in ('int64_t', 'int', 'bool')
 
 
 def _gmh_resolve_param_containers(self):
@@ -12692,37 +12627,10 @@ def gen_module_impl(self, stmts: list):
                 continue   # a same-named local binding always wins
             _found = {}
             _gmi_find_comptime_one(self, _imp_stmts, _iname, _found)
-            if not _found:
-                # The named module may only RE-EXPORT `_iname` from a
-                # submodule (a package `__init__`: `std/traits/__init__.mojo`'s
-                # `from .deinitable import IsTriviallyDeinitable`), in which
-                # case its own body contains no ComptimeVarStmt. Follow the
-                # re-export with the shared, cycle-guarded walker — 'comptime'
-                # is the third kind it resolves, beside functions and structs —
-                # anchored at the module named by THIS import (`_fis.module`),
-                # because the hop's own `from .deinitable` is relative to it.
-                try:
-                    _home = self._find_symbol_home_module(
-                        _fis.module, _iname, 'comptime', want_abs=True)
-                except Exception:
-                    _home = None
-                if _home:
-                    _hp, _hs, _hstmts = self._parsed_import(_home)
-                    if _hstmts:
-                        _gmi_find_comptime_one(self, _hstmts, _iname, _found)
             if 'v' in _found:
                 if isinstance(_found['v'], str):
                     self._comptime_str_names.add(_as_str(_isym))
                 self._comptime_vals[_isym] = _found['v']
-            elif 'alias' in _found:
-                # A GENERIC comptime alias (`from std.traits import
-                # IsTriviallyDeinitable`): it has no value of its own — its
-                # RHS names its bracket parameters — so record the DECLARATION
-                # and let the evaluator substitute `IsTriviallyDeinitable[Int]`
-                # at the application. Without this the imported name lowered
-                # as an undeclared identifier (a zero word), and a `comptime
-                # if` over it became a runtime branch on address 0.
-                self._comptime_vals[_isym] = _found['alias']
     # Handle ImportStmt (import X; later X.NAME) - populate per-module comptime table
     for _fis in stmts:
         if isinstance(_fis, ImportStmt):
@@ -13064,6 +12972,18 @@ def gen_module_impl(self, stmts: list):
     self._local_generic_func_names = set()
     self._stripped_generic_fns = []
     self._signature_check_generic_fns = []
+    # A generic struct defined in THIS file: a plain overload that constructs
+    # one (`std/iter/__init__.mojo`'s `enumerate` building a bare
+    # `_Enumerate(...)`) makes the in-TU materializer instantiate it here,
+    # which changes that file's own struct-method emission
+    # (`_Enumerate.__next__` became prototype-only, so the dylib referenced
+    # `_std_iter___init____Enumerate___next__` and never defined it). Such
+    # plain overloads keep the historical disposition — not emitted.
+    _local_generic_structs = {
+        _lgs.name for _lgs in stmts
+        if isinstance(_lgs, StructDef)
+        and (getattr(_lgs, 'type_param_names', None) or [])
+    }
     if _gsrc:
         # A name is generic per-DECLARATION, not per-name: `std/bit/mask.mojo`
         # declares `splat[size, dtype](SIMD[.bool, size])` AND
@@ -13135,6 +13055,24 @@ def gen_module_impl(self, stmts: list):
                         and _as_str(_g_sn.func.name) == _g_self.name):
                     _local_generic_ids.add(id(_g_self))
                     break
+        if _local_generic_structs:
+            for _g_ls in stmts:
+                if (not isinstance(_g_ls, FunctionDef)
+                        or id(_g_ls) in _local_generic_ids
+                        or not (getattr(_g_ls, 'comptime_params', None) or [])
+                        or _g_ls.name not in _local_generics):
+                    continue
+                for _g_ln in _walk_ast(_g_ls.body):
+                    if not isinstance(_g_ln, CallExpr):
+                        continue
+                    _g_lf = _g_ln.func
+                    _g_lb = (_g_lf.name if isinstance(_g_lf, IdentExpr) else
+                             _g_lf.obj.name if (isinstance(_g_lf, SubscriptExpr)
+                                                and isinstance(_g_lf.obj, IdentExpr))
+                             else None)
+                    if _g_lb is not None and _as_str(_g_lb) in _local_generic_structs:
+                        _local_generic_ids.add(id(_g_ls))
+                        break
         for _gn in _local_generics:
             self._imported_generics.setdefault(_gn, self._current_filename)
         self._local_generic_func_names = set(_local_generics)
@@ -13168,18 +13106,49 @@ def gen_module_impl(self, stmts: list):
             self._local_generic_func_names = set()
 
     # A name with two or more PLAIN definitions is emitted as one definition
-    # per signature. `external_call[...]` bodies are not special-cased:
-    # declarations are typed from the call's own annotations, and the stdlib
-    # builds clean with every such overload emitted (`time.sleep`'s two
-    # overloads, 2026-11-17).
+    # per signature — but only when every body is something this build can
+    # lower without tripping an unrelated type bug. A body that constructs a
+    # generic struct DEFINED IN THIS FILE (the in-TU materializer would
+    # instantiate it here and change this file's own struct-method emission)
+    # cannot be emitted correctly here. Those names keep the historical
+    # disposition — none of their overloads is emitted — rather than turning an
+    # unrelated type bug into a module refusal. A body that uses
+    # `external_call[...]` is NOT in that set: its declaration is typed from the
+    # call's own annotations, and the stdlib builds clean with every such
+    # overload emitted (`time.sleep`'s two overloads, 2026-11-17). The stdlib-
+    # dylib overload rows (`_free`, `unsafe_memset_zero`, `splat`, `to_integer`)
+    # and the synthetic probe have neither shape.
     _plain_groups: dict = {}
     for _pog_s in stmts:
         if (isinstance(_pog_s, FunctionDef)
                 and not getattr(_pog_s, 'comptime_params', None)):
             _plain_groups.setdefault(_pog_s.name, []).append(_pog_s)
+    _unsafe_overload_ids: set = set()
+    for _pog_name in _plain_groups:
+        _pog_nodes = _plain_groups[_pog_name]
+        if len(_pog_nodes) < 2:
+            continue
+        for _pog_n in _pog_nodes:
+            for _pog_x in _walk_ast(_pog_n.body):
+                if not isinstance(_pog_x, CallExpr):
+                    continue
+                _pog_f = _pog_x.func
+                if (isinstance(_pog_f, IdentExpr)
+                        and _as_str(_pog_f.name) in _local_generic_structs):
+                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
+                    break
+                if (isinstance(_pog_f, SubscriptExpr)
+                        and isinstance(_pog_f.obj, IdentExpr)
+                        and _as_str(_pog_f.obj.name) in _local_generic_structs):
+                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
+                    break
+            if id(_pog_n) in _unsafe_overload_ids:
+                break
+    if _unsafe_overload_ids:
+        stmts = [s for s in stmts if id(s) not in _unsafe_overload_ids]
     _multi_def_names = set()
     for _mdn in _plain_groups:
-        if len(_plain_groups[_mdn]) >= 2:
+        if len(_plain_groups[_mdn]) >= 2 and id(_plain_groups[_mdn][0]) not in _unsafe_overload_ids:
             _multi_def_names.add(_mdn)
 
     self._local_def_nodes = {}

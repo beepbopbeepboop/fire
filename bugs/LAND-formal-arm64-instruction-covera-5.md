@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-formal-x86-64-idx-forms-fuzz-an land?
+# Land: should finished branch bug-land-formal-arm64-instruction-covera-5 land?
 
-**Branch:** `work/bug-land-formal-x86-64-idx-forms-fuzz-an` (task `bug-land-formal-x86-64-idx-forms-fuzz-an`; its tip is also saved as `refs/archive/work/bug-land-formal-x86-64-idx-forms-fuzz-an`, so dropping it loses nothing).
-**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 2 commit(s) ahead of master, 35 behind it; task started 2026-11-17 23:57:41
-**Original work:** Fix the bug in bugs/LAND-formal-x86-64-idx-forms-fuzz-and-as.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or
-**Original claims:** bug:LAND-formal-x86-64-idx-forms-fuzz-and-as
+**Branch:** `work/bug-land-formal-arm64-instruction-covera-5` (task `bug-land-formal-arm64-instruction-covera-5`; its tip is also saved as `refs/archive/work/bug-land-formal-arm64-instruction-covera-5`, so dropping it loses nothing).
+**Age:** last commit 2026-11-17, first unlanded commit 2026-11-17; 1 commit(s) ahead of master, 31 behind it; task started 2026-11-17 20:02:07
+**Original work:** An earlier attempt left 1 commit(s) on branch work/bug-land-formal-arm64-instruction-covera-3, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted
+**Original claims:** bug:LAND-formal-arm64-instruction-covera
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-18 01:20:06: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 2 commit(s) ahead of master, 35 behind it; task started 2026-11-17 23:57:41)
-  Branch: work/bug-land-formal-x86-64-idx-forms-fuzz-an
-  Conflicting files: bugs/OPEN_WORK.md
+- 2026-11-17 21:06:11: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-17; 1 commit(s) ahead of master, 31 behind it; task started 2026-11-17 20:02:07)
+  Branch: work/bug-land-formal-arm64-instruction-covera-5
+  Conflicting files: see `git merge master`

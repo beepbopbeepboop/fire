@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gate-recover-land-remainder-part3 land?
+# Land: should finished branch bug-land-formal-arm64-instruction-covera-6 land?
 
-**Branch:** `work/bug-gate-recover-land-remainder-part3` (task `bug-gate-recover-land-remainder-part3`; its tip is also saved as `refs/archive/work/bug-gate-recover-land-remainder-part3`, so dropping it loses nothing).
-**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 17 behind it; task started 2026-11-18 04:18:25
-**Original work:** Fix the bug in bugs/GATE_recover_land_remainder-part3.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report
-**Original claims:** bug:GATE_recover_land_remainder-part3
+**Branch:** `work/bug-land-formal-arm64-instruction-covera-6` (task `bug-land-formal-arm64-instruction-covera-6`; its tip is also saved as `refs/archive/work/bug-land-formal-arm64-instruction-covera-6`, so dropping it loses nothing).
+**Age:** last commit 2026-11-17, first unlanded commit 2026-11-14; 6 commit(s) ahead of master, 152 behind it; task started 2026-11-17 20:45:54
+**Original work:** An earlier attempt left 5 commit(s) on branch work/bug-land-formal-arm64-instruction-covera-4, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted
+**Original claims:** bug:LAND-formal-arm64-instruction-coverage-pa-2
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-18 08:22:09: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 17 behind it; task started 2026-11-18 04:18:25)
-  Branch: work/bug-gate-recover-land-remainder-part3
-  Conflicting files: tools/gates.json
+- 2026-11-17 22:10:42: conflicts with master (last commit 2026-11-17, first unlanded commit 2026-11-14; 6 commit(s) ahead of master, 152 behind it; task started 2026-11-17 20:45:54)
+  Branch: work/bug-land-formal-arm64-instruction-covera-6
+  Conflicting files: bugs/OPEN_WORK.md

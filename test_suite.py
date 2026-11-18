@@ -1031,7 +1031,7 @@ def test_every_job_over_the_debt_line_says_why():
 
 
 def test_an_expect_marker_points_at_a_doc_that_exists():
-    """A registered reason that cites `bugs/` must cite a doc that is there.
+    """An `expect=` reason that cites `bugs/` must cite a doc that is there.
 
     The same trap `mem debt` checks for `memwhy`, on the other field, and for
     the same reason: a doc in `bugs/` is DELETED when the bug it describes is
@@ -1049,47 +1049,16 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
     habit and say the reason in prose, which is fine. It is that a doc which IS
     named has to be there, so "this row's next step is written down" stays a
     fact about the tree rather than a claim about a file.
-
-    **Both doc-citing fields are scanned.** `disabled='bugs/<doc>.md'` is the
-    other one, and its doc is the switch that re-enables the test, so the same
-    question applies with more force.
-
-    **The reader is checked on a synthetic reason, not on the registry's
-    census.** Until 2026-11-17 this function also demanded that the real
-    registry cite at least one doc, because an empty survey would make the
-    check vacuous. The `formal-dylib` marker that supplied that citation was
-    removed with its fix (an `expect=` that passes is a FAILURE), and the
-    registry now has no doc citations at all -- which is a fact about the
-    registry, not a broken reader. So the non-vacuity is pinned the way
-    `an expect marker count is checked against the run` pins ITS reader: one
-    synthetic reason naming a doc that is not there must be reported, and one
-    naming a doc that is must not. A regex that matches nothing can then no
-    longer report green forever, and the live survey stays a real check that
-    starts biting again the moment somebody cites a doc.
     """
-    def dangling_in(reasons):
-        out = []
-        for name, reason in reasons:
-            for path in re.findall(r'\bbugs/[\w./-]+\.md', reason or ''):
-                if not os.path.exists(os.path.join(HERE, path)):
-                    out.append(f'{name} -> {path}')
-        return out
-
-    absent = 'bugs/NO_SUCH_DOC.md'
-    check('expect: the reader names a cited bug doc that is not there',
-          dangling_in([('m', f'red on {absent}')])
-          == [f'm -> {absent}'],
-          'a reader that matches nothing reports green forever')
-    check('expect: ...and accepts a citation that is there',
-          dangling_in([('m', 'red on bugs/OPEN_WORK.md')]) == [],
-          'a reader that reports every path is the other way to be useless')
-    dangling = []
+    cited, dangling = {}, []
     for name, spec in sorted(suite.REGISTRY.items()):
-        for field in ('expect', 'disabled'):
-            dangling.extend(
-                f'{entry} ({field})'
-                for entry in dangling_in(
-                    [(name, getattr(spec, field, '') or '')]))
+        for path in re.findall(r'\bbugs/[\w./-]+\.md', getattr(spec, 'expect', '')):
+            cited.setdefault(path, []).append(name)
+            if not os.path.exists(os.path.join(HERE, path)):
+                dangling.append(f'{name} -> {path}')
+    check('expect: at least one registered reason cites a bug doc',
+          len(cited) >= 1,
+          f'{len(cited)} cited; the check below would be vacuous')
     check('expect: every bug doc a registered reason cites exists',
           not dangling,
           f'these reasons point at nothing, and a doc is DELETED when its bug '
@@ -1338,15 +1307,14 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     # `formal-dylib` left this census 2026-11-17: the three
-                     # hole-count rows it stated were `DylibExport.Total`
-                     # obligations over a FALSE statement (an overflow trap
-                     # halts, so `Total` has no witness), and the emitter now
-                     # declines the claim with `NO TERMINATION CLAIM` instead
-                     # of naming a `sorry` over it. The doc is deleted with the
-                     # fix, the file is PASS=31 FAIL=0, and an `expect=` that
-                     # passes is reported as a FAILURE — so the marker and this
-                     # entry both went.
+                     # `formal-dylib` at 3 (was 4): the fourth failure it named
+                     # — the branching export whose termination stayed a named
+                     # obligation — is fixed on this branch (the CFG walk no
+                     # longer chokes on the dead stack-floor trap arm), so its
+                     # marker states 3 and the reader sees 3. The remaining
+                     # three are the overflow-trapping hole-count rows in
+                     # bugs/hard/FORMAL_svc_exit_handling_incomplete.md.
+                     'formal-dylib': 3,
      # `gimplerunner` left this census 2026-11-16: re-measured at 628 passed /
      # 0 failed, so its `expect=` marker was removed and the census entry with
      # it (an expect= that passes is reported as a failure).

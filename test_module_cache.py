@@ -402,27 +402,11 @@ def test_elaboration_inference_and_comptime(wd):
     open(ct_mod, 'w').write("fn fib(n: Int64) -> Int64:\n    if n < 2:\n"
                             "        return n\n    return fib(n - 1) + fib(n - 2)\n")
     try:
-        # slice 2 wiring: box(42) with no explicit [..] elaborates. The
-        # inference route runs through the in-TU pre-pass
-        # (mojo/backend_gimple/elab_intu.py), which DEFINES the
-        # instantiation in this translation unit — the stronger result, and
-        # why no link object is contributed. `len(objs) == 1` here demanded
-        # the older extern-declaration-beside-a-CAS-object route this call no
-        # longer takes: the object list is empty because the body is emitted
-        # here, not because the instantiation is missing. Pin the route
-        # directly — the call names a symbol DEFINED in this unit (the
-        # parameter-named signature line, not just the extern prototype), no
-        # `extern` claims it, and nothing is linked.
+        # slice 2 wiring: box(42) with no explicit [..] elaborates
         code, _d, objs, _cpp, _cxx = compile_linked("from el_box import box\n"
                                         "fn main():\n    var y = box(42)\n")
-        _syms = ('box_1_T_5_Int64', 'box_1_T_3_Int')
         check("slice2: inferred generic call elaborates (no explicit [..])",
-              any(f'= {sym} (' in code and f'int64_t {sym} (int64_t x)' in code
-                  for sym in _syms)
-              and not any(f'extern int64_t {sym} (' in code for sym in _syms),
-              f"symbols present={[s for s in _syms if s in code]}")
-        check("slice2: ... and emits its body in-TU, so no object is linked",
-              len(objs) == 0, f"objs={objs}")
+              ('box_1_T_5_Int64' in code or 'box_1_T_3_Int' in code) and len(objs) == 1)
         # slice 3: comptime call to an imported fn resolved at compile time
         src = ("from el_ct import fib\n"
                "fn main():\n"

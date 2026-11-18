@@ -520,16 +520,8 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # param then slices an int64_t and lowers to int64_t, and passing it to
     # a String-taking ctor is a `makes pointer from integer` error. Mirror
     # _imported_field_ctype's handling (std/pathlib/path.mojo:90).
-    #
-    # The rule itself lives in `param_annotation_ctype` (mojo/middle/types.py)
-    # because module_loader.py's export text scan and reflect.py's signature
-    # emitter need the SAME annotation -> parameter-ctype answer, and their
-    # own copies had boxed `StringSlice[_]` to `int64_t *` — a different C
-    # type from the definition's `Span *`, hence a different overload suffix,
-    # hence a call to a `_std_*_<hex>` symbol nothing defines (the
-    # stdlib-dylib red). One statement of the rule, three readers.
-    if is_bare_string_param_annotation(ptype):
-        ctype = param_annotation_ctype(ptype)
+    if ptype in ('StaticString', 'StringLiteral', 'StringRef', 'StringSlice'):
+        ctype = 'char *'
     if ctype == 'void':
         # _mojo_type('None') correctly maps NoneType -> void for RETURN
         # types, but a named PARAMETER can never be typed void in a
@@ -899,8 +891,7 @@ def register_imported_symbol(gen, name: str, info: dict,
 
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     """Does `module`'s OWN top-level source define `name`? `kind` is
-    'struct' (a StructDef), 'fn' (a top-level FunctionDef), or 'comptime'
-    (a top-level `comptime NAME ...` alias).
+    'struct' (a StructDef) or 'fn' (a top-level FunctionDef).
 
     Top-level only by construction: `_parsed_import`'s statement list is
     the module's own body, so a METHOD that happens to share the name (a
@@ -910,11 +901,6 @@ def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
         return gen._find_imported_struct(module, name) is not None
     _p, _s, _stmts = gen._parsed_import(module)
     for _st in (_stmts or []):
-        if kind == 'comptime':
-            if (isinstance(_st, gimple_ctypes.ComptimeVarStmt)
-                    and _st.target == name):
-                return True
-            continue
         if isinstance(_st, gimple_ctypes.FunctionDef) and _st.name == name:
             return True
     return False
@@ -924,8 +910,7 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     """The module ref whose own source DIRECTLY defines top-level `name`,
     starting from `module` and following its `from X import name` statements
     transitively (re-export chains). None if no reachable module defines it
-    — an honest "not found", never a guess. `kind` is 'fn', 'struct' or
-    'comptime'.
+    — an honest "not found", never a guess. `kind` is 'fn' or 'struct'.
 
     `want_abs` selects the ABSOLUTIZED spelling of the same answer (`.sub`
     -> `p.sub`) instead of the one as written (`.sub`), for the callers
@@ -1956,14 +1941,7 @@ def _scan_from_imports_flat(src: str) -> list:
     [mod0, names0, mod1, names1, ...] — a flat list (not a list of
     2-tuples, not a tuple return) so the self-hosted backend can iterate
     it by index without boxing. A parenthesised, multi-line import list
-    (`from X import (\n a,\n b,\n)`) is joined into one names string.
-
-    The matching `)` of a parenthesised list is found by a depth-counted
-    scan that skips `#` comments and quoted string literals, so a `)` inside
-    either (e.g. a TODO/JIRA id in a comment) cannot truncate the list — the
-    same hazard `elaborate._bracket_depth_by_line` documents and solves for
-    source text.
-    """
+    (`from X import (\n a,\n b,\n)`) is joined into one names string."""
     out: list = []
     lines = src.split('\n')
     _i = 0
@@ -1980,76 +1958,13 @@ def _scan_from_imports_flat(src: str) -> list:
         _mod = _rest[:_p].strip()
         _names = _rest[_p + 7:].lstrip()
         if _names.startswith('('):
-            depth = 1
-            _in_str = None  # None, or '"', "'", '"""', "'''", '`'
-            _collected = []
-            _done = False
-            _first = True
-            _seg = _names[1:]
-            while not _done:
-                if _first:
-                    _s = _seg
-                    _first = False
-                else:
-                    if _i >= _n:
-                        break
-                    _s = lines[_i]
-                    _i += 1
-                _j = 0
-                _sn = len(_s)
-                while _j < _sn and not _done:
-                    _c = _s[_j]
-                    if _in_str:
-                        if _in_str in ('"""', "'''"):
-                            if _s.startswith(_in_str, _j):
-                                _collected.append(_in_str)
-                                _j += 3
-                                _in_str = None
-                                continue
-                        else:
-                            if _c == '\\' and _in_str != '`':
-                                _collected.append(_c)
-                                if _j + 1 < _sn:
-                                    _collected.append(_s[_j + 1])
-                                    _j += 2
-                                else:
-                                    _j += 1
-                                continue
-                            if _c == _in_str:
-                                _in_str = None
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    if _c == '#':
-                        break
-                    if _s.startswith('"""', _j) or _s.startswith("'''", _j):
-                        _in_str = _s[_j:_j + 3]
-                        _collected.append(_in_str)
-                        _j += 3
-                        continue
-                    if _c in ('"', "'", '`'):
-                        _in_str = _c
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    if _c in '([{':
-                        depth += 1
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    if _c in ')]}':
-                        depth -= 1
-                        if depth == 0:
-                            _done = True
-                            break
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    _collected.append(_c)
-                    _j += 1
-                if not _done and _in_str is not None and _in_str not in ('"""', "'''"):
-                    _in_str = None
-            _names = ''.join(_collected)
+            _names = _names[1:]
+            while (')' not in _names) and (_i < _n):
+                _names = _names + ' ' + lines[_i].strip()
+                _i += 1
+            _cut = _names.find(')')
+            if _cut >= 0:
+                _names = _names[:_cut]
         out.append(_mod)
         out.append(_names)
     return out

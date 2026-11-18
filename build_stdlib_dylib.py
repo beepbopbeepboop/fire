@@ -1051,7 +1051,7 @@ def _template_shape(template_src: str, name: str):
                 break
             bare = ptype.split('=')[0].strip()
             try:
-                ct = ModuleLoader._mojo_type_to_c(bare, param=True)
+                ct = ModuleLoader._mojo_type_to_c(bare)
             except Exception:
                 ct = 'int64_t'
             c_params.append('int64_t' if ct == 'void' else ct)
@@ -2250,7 +2250,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 856
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 837
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it

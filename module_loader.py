@@ -994,7 +994,7 @@ class ModuleLoader:
                                 else:
                                     bare_type = ptype
                                 try:
-                                    c_type = self._mojo_type_to_c(bare_type, param=True)
+                                    c_type = self._mojo_type_to_c(bare_type)
                                 except Exception:
                                     c_type = 'int64_t'
                                 # A named parameter can never be typed 'void' in C
@@ -1428,7 +1428,7 @@ class ModuleLoader:
             return {}
 
     @staticmethod
-    def _mojo_type_to_c(mojo_type: str, param: bool = False) -> str:
+    def _mojo_type_to_c(mojo_type: str) -> str:
         """Convert Mojo type annotation to C type.
 
         This used to maintain its own small type_map (a second, independent
@@ -1468,17 +1468,8 @@ class ModuleLoader:
         top level, so a top-level import here would be a circular partial-
         init failure; by the time `load_module` is actually called at
         runtime both modules are fully loaded.
-
-        `param=True` asks for a PARAMETER's type instead of a general/return
-        one. The two differ for the string wrappers only, and that difference
-        is the whole point: a bare `StringSlice` parameter is `char *` in the
-        definition while `_mojo_type` (the return-type rule) boxes it to
-        int64_t, and `StringSlice[_]` is the fat-pointer `Span *`. The
-        parameter rule is `param_annotation_ctype`, the ONE statement of it
-        that `funcs_shared._param_ctype` also uses — see its docstring for
-        the stdlib-dylib undefined-reference this drift used to cause."""
+        """
         from gimple_codegen import _mojo_type
-        from mojo.middle.types import param_annotation_ctype
         mojo_type = mojo_type.strip()
 
         # A few shapes this text-only extractor can hand in that aren't a
@@ -1502,15 +1493,28 @@ class ModuleLoader:
         # default instead of a pointer type.
         if mojo_type == 'UnsafePointer':
             return 'int64_t *'
-        # Span/StringSlice: _mojo_type correctly resolves bracketed forms to
-        # 'Span *' and bare ones to boxed int64_t, but PARAMETER spellings
-        # differ (bare -> char *, bracketed -> Span *) per the shared rule.
-        # Every generated TU carries `typedef struct Span Span;` in its
-        # prelude, so returning Span * is parseable.
-        if param:
-            return param_annotation_ctype(mojo_type)
+        # Span/StringSlice: _mojo_type correctly resolves these to 'Span *'
+        # (the fat-pointer struct GimpleGen seeds into struct_field_types
+        # and typedefs into the preamble of a module IT is compiling), but
+        # this call site emits a bare `extern <type> sym(...);` declaration
+        # into a DIFFERENT file's translation unit that has no reason to
+        # have that typedef too -- "unknown type name 'Span'". Unlike
+        # MojoList/MojoDict/MojoSet (always available via fire_runtime.h,
+        # included everywhere), Span has no globally-available typedef.
+        # The defining unit's real lowering for these parameter annotations
+        # is `char *` (see e.g. parsing_floats._atof(StringSlice) -> char *),
+        # which is parseable in any TU without a local typedef. Returning the
+        # real lowering here keeps the text-scan import signature's overload
+        # suffix in agreement with the defining unit (and the extern itself
+        # parseable); the old `int64_t *` opaque handle disagreed with the
+        # definition and made cross-module references undefined at link time.
         if mojo_type.split('[', 1)[0].strip() in ('Span', 'StringSlice'):
-            return 'Span *' if '[' in mojo_type else _mojo_type(mojo_type)
+            # A BARE annotation is `char *` in the defining unit (parsing_floats'
+            # `_atof(x: StringSlice)`). A BRACKETED one (`StringSlice[_]`,
+            # `Span[UInt8, _]`) lowers to the `Span *` struct pointer there, so the
+            # import must name that, or the caller references a symbol the defining
+            # unit never emits.
+            return 'Span *' if '[' in mojo_type else 'char *'
         return _mojo_type(mojo_type)
 
     def get_symbol_type(self, module_name: str, symbol_name: str) -> str:
