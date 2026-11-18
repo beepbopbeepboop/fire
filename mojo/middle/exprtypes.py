@@ -2093,14 +2093,10 @@ def dict_literal_val_ctype(gen, pairs) -> str:
 
 
 def _struct_name_of(ctype: str) -> str:
-    """Extract the bare struct name from a C type like 'const Foo *' → 'Foo', or
-    from its tag spelling 'struct Foo *' → 'Foo' (a struct private to another
-    unit is typed that way in an import signature)."""
+    """Extract the bare struct name from a C type like 'const Foo *' → 'Foo'."""
     s = ctype
     if s.startswith('const '):
         s = s[6:]
-    if s.startswith('struct '):
-        s = s[7:]
     return s.replace(' *', '').strip()
 
 def is_bound_method_value(gen, node, obj_ctype: str) -> bool:
