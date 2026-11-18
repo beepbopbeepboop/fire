@@ -5791,8 +5791,8 @@ class GimpleGen:
         return ginf._closure_info_for_ident(self, name)
     def _generator_value_ctype_for_next(self, arg):
         return ginf._generator_value_ctype_for_next(self, arg)
-    def _collect_return_types(self, stmts: list, acc: list, arms: list = None):
-        return ginf._collect_return_types(self, stmts, acc, arms)
+    def _collect_return_types(self, stmts: list, acc: list):
+        return ginf._collect_return_types(self, stmts, acc)
     def _coerce_to_type(self, src_type: str, dst_type: str, value: str) -> str:
         return ginf._coerce_to_type(self, src_type, dst_type, value)
     def _cpp_container_cast_prefix(self, kind: str, via_intptr: bool) -> str:

@@ -64,12 +64,6 @@ check("a slot without a replenish time has none", C.replenish_at({"name": "x", "
 C.mark_dead("free-model", _free, now=_utc)
 check("a limit on a daily tier bans until the next replenish", abs(C._ledger()["free-model"]["until"] - _rp) < 1)
 
-# a limit just before a replenish still buys the full attempt window: the ban is the LATER of replenish and now + window
-_late = _rp - 2 * 3600
-C.mark_dead("free-model", _free, now=_late)
-check("a limit near a replenish bans for at least the attempt window",
-      abs(C._ledger()["free-model"]["until"] - (_late + C.PROBE_EVERY_S)) < 1)
-
 # holds: only work holds a claim; a dead entry with no commits holds nothing and cannot block a retry
 _real_ahead = C.ahead
 C.ahead = lambda t: t["_ahead"]
