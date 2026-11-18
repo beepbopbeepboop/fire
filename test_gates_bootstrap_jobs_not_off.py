@@ -24,7 +24,10 @@ BOOTSTRAP_JOBS = (
 REMAINDER_DOC = "bugs/hard/GATE_recover_land_remainder.md"
 # A job the remainder entry owns for a different backlog and must keep owning
 # (acceptance: narrowing the entry may not re-enable the rest of its jobs).
-REMAINDER_JOBS_STILL_OFF = ("mojoc", "gimplerunner")
+# `gimplerunner` used to be listed here; the recover-land gimple triage proved
+# it green and re-enabled it.  `mojoc` is the bootstrap resource blowup and is
+# still red, so the entry must keep owning it.
+REMAINDER_JOBS_STILL_OFF = ("mojoc",)
 
 
 def load_off():

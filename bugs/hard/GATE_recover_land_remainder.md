@@ -6,7 +6,7 @@ SPLIT: GATE_recover_land_remainder-part1, GATE_recover_land_remainder-part4
 
 The OFF entry in `tools/gates.json` matching
 
-    ^(gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|selfhost)$
+    ^(mojoc|selfhost)$
 
 previously named the deleted `bugs/mid/GATE_red_recover_land_2026-11-02` doc, which was removed
 in `d44f44787` ("Fixed root cause (coro.module_qualifier missing as module
@@ -63,12 +63,31 @@ in the check bucket), which fails if any of the six names an OFF entry again.
 The part-5 backlog doc `GATE_recover_land_remainder-part5` (deleted) went with
 this evidence.
 
-Still OFF, still this doc's backlog: `gimplegenerators`, `gimplerunner`,
-`globcompiled`, `linkmode` (part 4; `test_gates_gimple_jobs_not_off.py` is not
-landed here), `modcache`, `mojoc`, `selfhost`. The part-5 branch's
+Still OFF, still this doc's backlog: `mojoc`, `selfhost`. The part-5 branch's
 `test_suite.py` UNREGISTERED declarations were dropped instead of landed:
 all eight files are registered as named jobs on master, so declaring them
 UNREGISTERED would trip the estate audit both ways.
+
+### 2026-11-18: the five gimple codegen jobs are green; all five re-enabled
+
+`gimplegenerators`, `gimplerunner`, `globcompiled`, `linkmode` and `modcache`
+are green on current HEAD and have left the pattern (measured with
+`tools/memslot.py --gb 8`):
+
+- `test_gimple_generator_runner.py` — 515 passed, 0 failed
+- `test_gimple_runner.py` — 634 passed, 0 failed
+- `test_glob_compiled.py` — PASS (13 lines identical to CPython)
+- `test_link_mode.py` — 56 passed, 0 failed
+- `test_module_cache.py` — 183 passed, 0 failed
+
+The last two reds were fixed on master after the gimple triage branch was cut:
+`28b1029c0` re-records the coroutine PAD cleanup checkpoint on resume (the
+`@contextmanager` `finally` UAF,
+`gimple_user_contextmanager_param_restore_finally`), and `1a07cc096` links
+and runs the elaborated `slice4` overload (the modcache failure).
+`test_gates_gimple_jobs_not_off.py` pins that no OFF pattern matches the five
+again, and the bootstrap pin now lists only `mojoc` as still owned by this
+entry.
 
 ## Original context (carried over from the deleted `GATE_red_recover_land_2026-11-02` doc)
 

@@ -318,38 +318,12 @@ def x86_trunc32 (v : UInt64) : UInt64 := UInt64.ofNat (v.toNat % 4294967296)
 @[simp] theorem x86_trunc32_one : x86_trunc32 1 = 1 := rfl
 
 
-/-- A 64-bit effective address: the unsigned base-plus-scaled-index, plus the
-    SIGNED displacement, truncated modulo 2^64.
-
-    **The truncation is the instruction, not bookkeeping.** An x86-64 effective
-    address is `base + index*scale + disp` computed modulo 2^64, so a register
-    holding `2^64 - 1` added to a base at the bottom of the region lands one
-    byte BELOW it, and a negative displacement from a base near zero lands near
-    the top of the address space. The model used to spell the address as
-    `(Int.ofNat (base + index) + disp).toNat`, and `Int.toNat` CLAMPS a negative
-    result to 0 rather than wrapping it, while a sum above 2^64 was simply out
-    of range for a Nat: measured through `formal/x86_64_model_fuzz.py`, a
-    `movzx rax, [r13+r14]` with `r14 = 2^64 - 1` loaded window offset 63 on the
-    hardware and address `MEMBASE_ABS + 2^64 - 1` in the model, which is outside
-    the window `mem_N` answers, so the model reported 0. `Int.emod` is the
-    Euclidean remainder, so `.toNat` of it is total and exact for both arms.
-
-    Stated here rather than at each of the model's memory operands because
-    every one of them -- the `[base + disp]` forms, the SIB-indexed forms, the
-    RIP-relative arm, and `lea` -- goes through `x86_mem_addr`; see the decoder's
-    `_modrm_fields` comment, which names it as the one place the address is
-    computed. -/
-def x86_eff_addr (baseIndex : Nat) (disp : Int) : Nat :=
-  ((Int.ofNat baseIndex + disp) % (2 ^ 64 : Int)).toNat
-
 /-- The effective address of an r/m memory operand, plus how many bytes follow
     the ModRM byte (SIB, then displacement).
 
     `atp` is the address of the ModRM byte and `endAddr` the address one past
     the instruction's last byte — a RIP-relative displacement is measured from
-    there, not from the ModRM byte. `none` means mod=3 (a register operand).
-    Every arm's address is `x86_eff_addr`, so the 64-bit wrap is applied to the
-    final sum once, after the signed displacement. -/
+    there, not from the ModRM byte. `none` means mod=3 (a register operand). -/
 def x86_mem_addr (s : X86State) (code : Nat → UInt8) (rex modrm : UInt8)
     (atp endAddr : Nat) : Option (Nat × Nat) :=
   let m := modrm.toNat
@@ -373,24 +347,18 @@ def x86_mem_addr (s : X86State) (code : Nat → UInt8) (rex modrm : UInt8)
     -- The SIB index register, when the SIB carries one, adds `index * 2^scale`
     -- to the address.  Index field 4 means "no index" — the shape of every
     -- displacement form this backend emits — so the contribution is 0 there and
-    -- every existing SIB step is unchanged.  **But only when `REX.X` is clear**:
-    -- the field is three bits and REX.X is its fourth, so `index = 4` with
-    -- `REX.X = 1` is R12, not "no index".  That is the case
-    -- `formal/x86_64_model_fuzz.py`'s indexed draws reach as soon as the index
-    -- register is R12 (`mov [r13+r12], r10`), and reading it as no index puts
-    -- the access at the base instead of `base + 2^64 - 36`.  The
-    -- float-repr helper's `[base + index]` byte forms
-    -- (`encode_mov_rm8_r8_idx`, `encode_movzx_r64_rm8_idx`) are the ones that
-    -- read a real index register, and `x86_rex_x` extends it, exactly as
-    -- `x86_rex_b` extends the base.
+    -- every existing SIB step is unchanged.  The float-repr helper's
+    -- `[base + index]` byte forms (`encode_mov_rm8_r8_idx`,
+    -- `encode_movzx_r64_rm8_idx`) are the ones that read a real index register,
+    -- and `x86_rex_x` extends it, exactly as `x86_rex_b` extends the base.
     let indexContribution : Nat :=
       if noSib then 0
       else
         let sib := code (atp + 1)
         let indexField := (sib.toNat >>> 3) &&& 7
-        if indexField = 4 && x86_rex_x rex = 0 then 0
+        if indexField = 4 then 0
         else (x86_get_reg s (indexField + x86_rex_x rex)).toNat * 2 ^ ((sib.toNat >>> 6) &&& 3)
-    some (x86_eff_addr (base + indexContribution) disp, sibExtra + dispN)
+    some ((Int.ofNat (base + indexContribution) + disp).toNat, sibExtra + dispN)
 
 /-- The low `n` bytes as a mask, for `n ≤ 7`; all ones from 8 up.
 
@@ -1080,11 +1048,7 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     let endAddr := rip + 3 + extra
     match x86_mem_addr s code rex modrm modrmPos endAddr with
     | some (addr, _) =>
-      -- `addr` is already truncated to 64 bits by `x86_eff_addr`, so `lea`'s
-      -- register write is the bare `UInt64.ofNat` of it; the `% 2^64` this
-      -- used to carry was the address computation's, made redundant when the
-      -- wrap moved into `x86_mem_addr` where every memory operand shares it.
-      some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) (UInt64.ofNat addr) with rip := endAddr }
+      some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) (UInt64.ofNat (addr % 18446744073709551616)) with rip := endAddr }
     | none => none
   else if op = 0x6b && w then
     -- imul r64, r/m64, imm8 — the THREE-operand form with a one-byte scale.
@@ -2992,7 +2956,7 @@ theorem x86_step_mov_rm64_mem_disp8 (s : X86State) (code : Nat → UInt8)
     (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
-    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp) 8) with
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8) with
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
@@ -3034,7 +2998,7 @@ theorem x86_step_mov_rm64_mem_disp32 (s : X86State) (code : Nat → UInt8)
     (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
-    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp) 8) with
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8) with
         rip := m + 7 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
@@ -3073,7 +3037,7 @@ theorem x86_step_mov_mem_disp8 (s : X86State) (code : Nat → UInt8)
     (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp) (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
@@ -3098,7 +3062,7 @@ theorem x86_step_mov_mem_nodisp (s : X86State) (code : Nat → UInt8)
     (h_rm_ne5 : rm ≠ 5)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat 0)
+        mem := mem_write_bytes s.mem (x86_get_reg s (rm + x86_rex_b rex)).toNat
             (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 3 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
@@ -3118,7 +3082,7 @@ theorem x86_step_mov_rm64_mem_nodisp (s : X86State) (code : Nat → UInt8)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem
-        (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat 0) 8) with rip := m + 3 } := by
+        (x86_get_reg s (rm + x86_rex_b rex)).toNat 8) with rip := m + 3 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_rm, h_rm_ne4, h_rm_ne5,
@@ -3143,7 +3107,7 @@ theorem x86_step_mov_mem_disp32 (s : X86State) (code : Nat → UInt8)
     (h_rm_ne : rm ≠ 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp) (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 7 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
@@ -3152,13 +3116,12 @@ theorem x86_step_mov_mem_disp32 (s : X86State) (code : Nat → UInt8)
 /-- `lea r64, [base + disp32]` (REX.W 8D /r, mod=2, rm != 4).
 
     `lea` differs from `mov` in one way that matters here and one that does not.
-    The one that matters: the model writes the computed address to a REGISTER
-    (`UInt64.ofNat addr`, where `x86_mem_addr`/`x86_eff_addr` has already
-    truncated it to 64 bits) whereas `mov` reads at the address itself, so the
-    successor is a register write and not a memory read.  The one that does
-    not: it still goes through `x86_mem_addr`, so the address is the same
-    expression and the exclusions (`rm != 4`, and here no RIP-relative case
-    because mod=2) are the same.
+    The one that matters: the model truncates the computed address to 64 bits
+    (`UInt64.ofNat (addr % 2^64)`) whereas `mov` reads at the address itself, so
+    the successor is a register WRITE of a truncated value and not a memory
+    read.  The one that does not: it still goes through `x86_mem_addr`, so the
+    address is the same expression and the exclusions (`rm != 4`, and here no
+    RIP-relative case because mod=2) are the same.
 
     `disp32` is the only mode the backend emits for `lea` — `lea rax, [rbx+8]`
     would be a disp8 `lea` and there is none in the corpus — so this is one
@@ -3176,7 +3139,7 @@ theorem x86_step_lea_rm64_disp32 (s : X86State) (code : Nat → UInt8)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some { x86_set_reg s dst
-        (UInt64.ofNat (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp)) with
+        (UInt64.ofNat ((Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat % 18446744073709551616)) with
         rip := m + 7 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
@@ -3220,7 +3183,7 @@ theorem x86_step_lea_r64_rip (s : X86State) (code : Nat → UInt8)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some { x86_set_reg s dst
-        (UInt64.ofNat (x86_eff_addr (m + 7) disp)) with
+        (UInt64.ofNat ((Int.ofNat (m + 7) + disp).toNat % 18446744073709551616)) with
         rip := m + 7 } := by
   -- `x86_mem_addr` builds its return length as `sibExtra + dispN` and the model
   -- adds that to `atp`, so its `Int.ofNat` argument arrives as `m + 3 + 4`
@@ -3256,14 +3219,13 @@ theorem x86_step_mov_mem_sib_rsp (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0) :
+    (h_rb : x86_rex_b rex = 0) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (x86_eff_addr s.rsp.toNat 0) (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem s.rsp.toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
-        h_rx]
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb]
 
 /-- `mov qword [rsp + disp8], r64` (REX.W 89 /r, ModRM 44: mod=1 rm=4, SIB 24:
     scale 0, index none, base rsp) -- the CALLER half of the stack-argument
@@ -3299,14 +3261,14 @@ theorem x86_step_mov_mem_sib_disp8 (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0) :
+    (h_rb : x86_rex_b rex = 0) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (x86_eff_addr (x86_get_reg s 4).toNat disp) (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s 4).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 5 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
-        h_rb, h_rx]
+        h_rb]
 
 /-- `mov qword [rsp + disp32], r64` (REX.W 89 /r, ModRM 84: mod=2 rm=4, SIB 24).
     The same store with a displacement too wide for the byte above, so it is
@@ -3329,14 +3291,14 @@ theorem x86_step_mov_mem_sib_disp32 (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0) :
+    (h_rb : x86_rex_b rex = 0) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (x86_eff_addr (x86_get_reg s 4).toNat disp) (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s 4).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 8 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
-        h_rb, h_rx]
+        h_rb]
 
 -- The two SIB-INDEXED byte forms: the same opcodes as the displacement forms
 -- above, but the SIB carries a real index register, so the effective address is
@@ -3362,7 +3324,7 @@ theorem x86_step_mov_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
     (h_rb : x86_rex_b rex = 8) (h_rx : x86_rex_x rex = 0) :
     x86_step s code = some { s with
         mem := mem_write_bytes s.mem
-                (x86_eff_addr ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat) 0)
+                (Int.ofNat ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat)).toNat
                 (x86_get_reg s (reg + x86_rex_r rex)) 1,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
@@ -3384,7 +3346,7 @@ theorem x86_step_movzx_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
     x86_step s code = some
       { x86_set_reg s (reg + x86_rex_r rex)
           (mem_read_bytes s.mem
-               (x86_eff_addr ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat) 0) 1)
+               (Int.ofNat ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat)).toNat 1)
         with rip := m + 5 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_narrow_extend,
@@ -3420,10 +3382,7 @@ theorem x86_step_movzx_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
     `h_rm : modrm.toNat &&& 7 = 4` is what SELECTS the SIB byte (rm=4 is the
     escape), so it is pinned to 4 here rather than carried as a parameter, and
     `h_rb : x86_rex_b rex = 0` is what makes the SIB's base field `4` mean RSP
-    rather than R12.  `h_rx : x86_rex_x rex = 0` is the same fact one field
-    over: the SIB's index field is three bits and REX.X is its fourth, so `4`
-    means "no index" only while REX.X is clear — with it set that field names
-    R12. -/
+    rather than R12. -/
 theorem x86_step_mov_rm64_sib_rsp (s : X86State) (code : Nat → UInt8)
     (m : Nat) (rex modrm : UInt8) (reg dst : Nat)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
@@ -3431,14 +3390,14 @@ theorem x86_step_mov_rm64_sib_rsp (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 0) (h_rm : modrm.toNat &&& 7 = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0)
+    (h_rb : x86_rex_b rex = 0)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some
-      { x86_set_reg s dst (mem_read_bytes s.mem (x86_eff_addr s.rsp.toNat 0) 8) with rip := m + 4 } := by
+      { x86_set_reg s dst (mem_read_bytes s.mem s.rsp.toNat 8) with rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
-        h_rx, h_dst]
+        h_dst]
 
 /-! The two disp8 memory forms every spilled-argument function uses.  These are
 the instructions that make a proof about the stack need the separation lemmas
@@ -3452,7 +3411,7 @@ theorem x86_step_mov_mem_disp8_rdi (s : X86State) (code : Nat → UInt8) (m : Na
     (disp : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x89)
     (h_b2 : code (m + 2) = 0x7d) (h_disp : read_i8 (code (m + 3)) = disp) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (x86_eff_addr s.rbp.toNat disp) s.rdi 8,
+        mem := mem_write_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat s.rdi 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_mem_addr,
         x86_rm_write, h_rip, h_b0, h_b1, h_b2, h_disp]
@@ -3463,7 +3422,7 @@ theorem x86_step_mov_rax_mem_disp8 (s : X86State) (code : Nat → UInt8) (m : Na
     (disp : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x8b)
     (h_b2 : code (m + 2) = 0x45) (h_disp : read_i8 (code (m + 3)) = disp) :
     x86_step s code = some { s with
-        rax := mem_read_bytes s.mem (x86_eff_addr s.rbp.toNat disp) 8,
+        rax := mem_read_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, h_rip, h_b0, h_b1, h_b2, h_disp]

@@ -4256,6 +4256,10 @@ UNREGISTERED = {
     'test_coro_module_qualifier_attr.py': _STANDALONE_TEST_REASON,
     'test_dylib_dedup.py': _STANDALONE_TEST_REASON,
     'test_float_bit_reinterpret.py': _STANDALONE_TEST_REASON,
+    # Declared rather than registered because the landing that added it was
+    # told not to touch tools/suite.py; it is a 0.0 s table pin and wants a
+    # bucket (beside gates-bootstrap-not-off / gates-coro-jobs-not-off).
+    'test_gates_gimple_jobs_not_off.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,

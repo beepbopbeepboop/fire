@@ -3772,9 +3772,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
     #: not off the last step alone, because the state a step starts in is
     #: written by every step before it. Re-measured on the merged tree, the line
     #: `const2.mojo` emits is exactly the string below.
-    _GUARD = ("try (simp [hs7, UInt64.ofNat, hdec4, x86_eff_addr, "
-              "x86_flags_sub, x86_get_reg, x86_rex_b, x86_rex_r, "
-              "x86_set_reg])")
+    _GUARD = ("try (simp [hs7, UInt64.ofNat, hdec4, x86_flags_sub, "
+              "x86_get_reg, x86_rex_b, x86_rex_r, x86_set_reg])")
 
     def _patched_const2(self):
         """`(patched, at)` — `const2.mojo`'s emitted proof with ONE guard broken.
