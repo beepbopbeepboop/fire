@@ -11042,7 +11042,19 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         # emit_funcs.py's function-scoped pre-pass); resolving it here would
         # run outside that scope and lose the module qualifier.
         _recorded_csym = _as_str(sym_info.get('csym')) if sym_info.get('csym') else None
-        safe = _recorded_csym or self._func_csym(_as_str(sym_name))
+        # An import whose home signature names a struct private to the defining
+        # module is hashed with the DEFINER's parameter list (the importer still
+        # declares the struct as a word). The tiers that would supply that list
+        # are only registered later in this pass, so ask for it here.
+        _safe_home_pts = None
+        if not _recorded_csym:
+            try:
+                _safe_home_pts = _ggf_dup._home_private_struct_pts(self, {
+                    'module': sym_info.get('module'),
+                    'original_name': sym_info.get('original_name') or sym_name})
+            except Exception:
+                _safe_home_pts = None
+        safe = _recorded_csym or self._func_csym(_as_str(sym_name), _safe_home_pts or None)
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
                 _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}

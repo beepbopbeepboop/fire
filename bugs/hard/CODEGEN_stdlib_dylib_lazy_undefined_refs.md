@@ -35,6 +35,20 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   `Name` there makes the importer lower `.field` as a typed `->` against a
   struct it never defines. 32 -> 31 undefined `_std_` names, the one that went
   being `_std_benchmark_benchmark__run_impl_9f63a2`; none new.
+  Follow-up 2026-11-17: the same rule missed a home struct spelled BARE
+  (`_GraphemeBreakState *` in `_grapheme_break.mojo`, not the tag form
+  `struct N *`). The private-struct test now accepts both spellings, skipping
+  generic home structs (`SIMD`, whose call sites are elaborated per instance
+  and must keep the scanned hash). The definer list is recorded once, in the
+  early import pass (`emit_infra`, `_home_private_pts_by_name`), because call
+  sites are generated before the import block is written. Grapheme pair
+  `..._is_grapheme_break_c427b8` and `..._reset_grapheme_state_to_other_9f63a2`
+  now resolve to the definer's `5d88b0` / `de8baa`. 10 -> 8 undefined.
+  Still open: `_std_random__rng__get_global_random_state_55072c`. The definer
+  is `void f(_RandomState *)` (an `out` parameter) and the importer declares
+  `int64_t f(int64_t *)`; hashing the definer's list alone creates a
+  conflicting-types error at the call site, so the out-parameter calling
+  convention must be fixed together with the hash, not one or the other.
 - part 8: two same-name free functions in one module each get a definition
   under their own mangled symbol, and a call names one of them — by
   arity/argument types inside the module, by the defining unit's first
