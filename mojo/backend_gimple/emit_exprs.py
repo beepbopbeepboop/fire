@@ -7129,6 +7129,25 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _sig_params = gen._LIBC_SIGS[cname][1]
         while len(arg_pairs) < len(_sig_params):
             arg_pairs.append((_sig_params[len(arg_pairs)], '0'))
+        # Type arguments from the callee's known C signature when one exists, so
+        # (for example) an int64_t null passed for a `struct timespec *` parameter
+        # becomes a pointer rather than a word, and the call matches the platform
+        # prototype the headers provide.
+        _coerced_pairs = []
+        _i = 0
+        while _i < len(arg_pairs):
+            _at, _av = _as_str(arg_pairs[_i][0]), _as_str(arg_pairs[_i][1])
+            if _i < len(_sig_params):
+                _dst = _as_str(_sig_params[_i])
+                if _dst != _at and _dst != '...':
+                    try:
+                        _av = gen._coerce_to_type(_at, _dst, _av)
+                        _at = _dst
+                    except Exception:
+                        pass
+            _coerced_pairs.append((_at, _av))
+            _i += 1
+        arg_pairs = _coerced_pairs
     # First use wins: pin the prototype's parameter types and coerce later calls to match.
     # Never register LIBC functions - let system headers provide them
     if cname not in gen._external_protos and (

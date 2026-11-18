@@ -4349,7 +4349,7 @@ class GimpleGen:
         # Time functions
         'time', 'clock', 'difftime', 'mktime', 'strftime',
         'gmtime', 'localtime', 'asctime', 'ctime',
-        'clock_gettime', 'clock_gettime_nsec_np',
+        'clock_gettime', 'clock_gettime_nsec_np', 'nanosleep', 'clock_nanosleep',
         # Signal
         'signal', 'raise',
         # Wide char (wchar.h)
@@ -4451,6 +4451,8 @@ class GimpleGen:
         'unsetenv': ('int', ['char *']),
         'clock_gettime': ('int', ['int', 'struct timespec *']),
         'clock_gettime_nsec_np': ('int64_t', ['int']),
+        'nanosleep': ('int', ['const struct timespec *', 'struct timespec *']),
+        'clock_nanosleep': ('int', ['int', 'int', 'const struct timespec *', 'struct timespec *']),
     }
 
     # ── _lower_call sub-handlers ──────────────────────────────────────────
