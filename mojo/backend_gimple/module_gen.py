@@ -11989,6 +11989,26 @@ def _gmp_collect_free_params(self, _free_params: dict, all_functions: list) -> N
                 if _pe_k in _pe_nested:
                     _pe_ne = _as_str(_pe_nested[_pe_k])
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), _pe_ne)
+        # The container-KIND half of the same evidence, folded into the same
+        # table a function's own call sites feed: `emit_funcs.gen_func` seeds
+        # `_actual_types` from `_param_container_types`, which is what lets a
+        # coroutine body's boxed container parameter dispatch as the list/dict
+        # it is instead of going through `_materialize_as_list`'s runtime
+        # probes. A genexp's captured dict is the case that needs it.
+        _pc_body = getattr(_fp_s, '_mojo_coro_param_container_kinds', None)
+        if _pc_body:
+            _pc_d = self._param_container_types.setdefault(_as_str(_fp_s.name), {})
+            for _pc_k in _pc_body:
+                _pc_d[_as_str(_pc_k)] = _as_str(_pc_body[_pc_k])
+        # ...and the dict VALUE kind, into the table `gen_func` already seeds
+        # `_dict_val_types` from (`_pdv`): the value type a dict parameter's
+        # `d[k]` reads with, which without it falls to the boxed/repr slot.
+        _pdvk_body = getattr(_fp_s, '_mojo_coro_param_dict_val_kinds', None)
+        if _pdvk_body:
+            _pdvk_d = self._param_dict_val_types.setdefault(
+                _as_str(_fp_s.name), {})
+            for _pdvk_k in _pdvk_body:
+                _pdvk_d[_as_str(_pdvk_k)] = _as_str(_pdvk_body[_pdvk_k])
         _pi_body = getattr(_fp_s, '_mojo_coro_param_int_lists', None)
         if _pi_body:
             _pi_d = self._coro_int_list_params.setdefault(_as_str(_fp_s.name), set())

@@ -3983,6 +3983,32 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             gen._elem_types[_pe_bare] = e
             if ne:
                 gen._nested_elem_types[_pe_bare] = ne
+    # The CONTAINER-KIND half of that contract, and the reason it has to be
+    # seeded here rather than left to `param_binding_ctype`: a stack-switch
+    # generator body receives every source parameter as an `int64_t` ABI word
+    # (`var p = __mojo_gen_arg(...)`), so the declared C type of a container
+    # parameter is ALWAYS the box. `param_binding_ctype` can rewrite an
+    # ordinary function's declaration and declaration+definition agree; a
+    # generator body's declaration is fixed by the ABI and cannot.
+    #
+    # ONLY `MojoDict *` is seeded, deliberately. A dict's KIND is what makes
+    # `sorted(d)` sort string keys and `d[k]` a dict read at all; without it
+    # both fell to the int64_t path (the doc's `texts[p]` lowered as
+    # `mojo_list_get_int((MojoList *)texts, ...)`). A LIST's kind, by
+    # contrast, is not seeded: its element type already rides in
+    # `_elem_types` (the contract above), and forcing `_actual_types` to
+    # `MojoList *` changed the `enumerate` lowering from the kind-aware boxed
+    # read to `mojo_list_get_int`, so a float list param printed its raw IEEE
+    # bits (`generator_enumerate_float_element_*`). `_lower_builtin_sorted`
+    # takes the element type directly instead (see its own note).
+    # `_reset_func` has just emptied `_actual_types`, so each entry here is
+    # this function's own evidence.
+    _pct: dict = getattr(gen, '_param_container_types', {}).get(node.name, {})
+    for _pct_key in _pct:
+        _pct_bare = _as_str(_pct_key)
+        _pct_t = _as_str(_pct[_pct_bare])
+        if _pct_t == 'MojoDict *':
+            gen._actual_types[_pct_bare] = _pct_t
     # ...and the dict-VALUE half of the same contract, for the same reason and
     # beside it. A dict parameter has no binding site inside the callee, so
     # without this every `d[k]` / `d.items()` in the body fell to the
