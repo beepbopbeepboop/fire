@@ -4203,10 +4203,14 @@ class TestGuardedValueIdentity(unittest.TestCase):
                     rhs = "some { s with pc := s.pc + 4 }"
                 bodies.append(rhs[len("some "):] if rhs.startswith("some ") else rhs)
             # The generator's own preamble (code, per-instruction lemmas, image),
-            # cut before the first obligation, which is a sorry by design.
+            # cut before the termination section.  That section is no longer a
+            # named `sorry`: `triple`'s overflow trap halts, so `Total` is false
+            # for it and the emitter declines the claim by name
+            # (`NO TERMINATION CLAIM`).  Either shape is a fine place to cut --
+            # what this probe needs is everything BEFORE it.
             pre = generate_dylib_proof(code, built["info"], built["exports"],
                                        {"triple": "(fun n => (n * (3 : UInt64)))"})
-            cut = pre.index("/-- OBLIGATION, not proved: this export's run terminates")
+            cut = pre.index("/- NO TERMINATION CLAIM for dylib_export_0_triple")
             n = len(bodies)
             out = [pre[:cut],
                    "\ndef start (n : UInt64) : Arm64State :=\n"
