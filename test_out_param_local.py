@@ -1,9 +1,10 @@
-"""A free function's `out` parameter reaches the caller.
+"""A free function's `out` parameter reaches the caller, in the same module and
+across an import.
 
 `def make(out r: Box)` writes its result through a pointer the caller owns. A
 caller that omits the argument (`var b = make()`) must get that result: the
 callee copies into the caller's object, and the caller allocates the object and
-passes it. Pinned here by compiling the module to C and running it.
+passes it. Pinned here by compiling the modules to C and running them.
 """
 import os
 import shutil
@@ -80,7 +81,85 @@ def test_out_param_round_trip():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+A_SRC = """
+struct Box(Copyable):
+    var v: Int
+
+def make(out r: Box):
+    r = Box(7)
+"""
+
+B_SRC = """
+from xmod_a import Box, make
+
+def use() -> Int:
+    var b = make()
+    return b.v
+"""
+
+MAIN_X = """#include <stdio.h>
+int64_t xmod_b_use(void);
+int main(void) { printf("%lld\\n", (long long)xmod_b_use()); return 0; }
+"""
+
+
+def test_out_param_cross_module():
+    gcc = _gcc()
+    if gcc is None:
+        print('SKIP: no gcc available')
+        return True
+    here = os.path.dirname(os.path.abspath(__file__))
+    inc = os.path.join(here, 'runtime')
+    tmp = tempfile.mkdtemp(prefix='out_param_x_')
+    try:
+        srcs = {}
+        for name, text in (('xmod_a', A_SRC), ('xmod_b', B_SRC)):
+            path = os.path.join(tmp, name + '.mojo')
+            with open(path, 'w') as f:
+                f.write(text)
+            srcs[name] = (path, text)
+        # xmod_b imports xmod_a; the loader resolves it from the directory of the source.
+        sys.path.insert(0, tmp)
+        try:
+            c_out = {}
+            for name, (path, text) in srcs.items():
+                c_out[name] = b.compile_module_to_c(text, path, name)
+        finally:
+            sys.path.remove(tmp)
+        objs = []
+        for name, c_text in c_out.items():
+            cp = os.path.join(tmp, name + '.c')
+            with open(cp, 'w') as f:
+                f.write(c_text)
+            o = os.path.join(tmp, name + '.o')
+            r = subprocess.run([gcc, '-w', '-fgimple', '-D__MOJO_STDLIB_MODE__', '-I' + inc,
+                                '-c', cp, '-o', o], capture_output=True, text=True)
+            assert r.returncode == 0, r.stderr[:800]
+            objs.append(o)
+        rt = os.path.join(tmp, 'rt.o')
+        r = subprocess.run([gcc, '-w', '-fgimple', '-D__MOJO_STDLIB_MODE__', '-I' + inc,
+                            '-c', os.path.join(inc, 'fire_runtime.c'), '-o', rt],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[:800]
+        mp = os.path.join(tmp, 'main.c')
+        with open(mp, 'w') as f:
+            f.write(MAIN_X)
+        mo = os.path.join(tmp, 'main.o')
+        r = subprocess.run([gcc, '-w', '-I' + inc, '-c', mp, '-o', mo],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[:800]
+        exe = os.path.join(tmp, 'run')
+        r = subprocess.run([gcc, '-o', exe, mo] + objs + [rt, '-lm'],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[:800]
+        out = subprocess.run([exe], capture_output=True, text=True).stdout.strip()
+        assert out == '7', f'cross-module out result was {out!r}, expected 7'
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == '__main__':
-    ok = test_out_param_round_trip()
+    ok = test_out_param_round_trip() and test_out_param_cross_module()
     print('PASS' if ok else 'FAIL')
     sys.exit(0 if ok else 1)
