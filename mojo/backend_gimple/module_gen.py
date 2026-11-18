@@ -12999,18 +12999,6 @@ def gen_module_impl(self, stmts: list):
     self._local_generic_func_names = set()
     self._stripped_generic_fns = []
     self._signature_check_generic_fns = []
-    # A generic struct defined in THIS file: a plain overload that constructs
-    # one (`std/iter/__init__.mojo`'s `enumerate` building a bare
-    # `_Enumerate(...)`) makes the in-TU materializer instantiate it here,
-    # which changes that file's own struct-method emission
-    # (`_Enumerate.__next__` became prototype-only, so the dylib referenced
-    # `_std_iter___init____Enumerate___next__` and never defined it). Such
-    # plain overloads keep the historical disposition — not emitted.
-    _local_generic_structs = {
-        _lgs.name for _lgs in stmts
-        if isinstance(_lgs, StructDef)
-        and (getattr(_lgs, 'type_param_names', None) or [])
-    }
     if _gsrc:
         # A name is generic per-DECLARATION, not per-name: `std/bit/mask.mojo`
         # declares `splat[size, dtype](SIMD[.bool, size])` AND
@@ -13082,24 +13070,6 @@ def gen_module_impl(self, stmts: list):
                         and _as_str(_g_sn.func.name) == _g_self.name):
                     _local_generic_ids.add(id(_g_self))
                     break
-        if _local_generic_structs:
-            for _g_ls in stmts:
-                if (not isinstance(_g_ls, FunctionDef)
-                        or id(_g_ls) in _local_generic_ids
-                        or not (getattr(_g_ls, 'comptime_params', None) or [])
-                        or _g_ls.name not in _local_generics):
-                    continue
-                for _g_ln in _walk_ast(_g_ls.body):
-                    if not isinstance(_g_ln, CallExpr):
-                        continue
-                    _g_lf = _g_ln.func
-                    _g_lb = (_g_lf.name if isinstance(_g_lf, IdentExpr) else
-                             _g_lf.obj.name if (isinstance(_g_lf, SubscriptExpr)
-                                                and isinstance(_g_lf.obj, IdentExpr))
-                             else None)
-                    if _g_lb is not None and _as_str(_g_lb) in _local_generic_structs:
-                        _local_generic_ids.add(id(_g_ls))
-                        break
         for _gn in _local_generics:
             self._imported_generics.setdefault(_gn, self._current_filename)
         self._local_generic_func_names = set(_local_generics)
@@ -13133,49 +13103,18 @@ def gen_module_impl(self, stmts: list):
             self._local_generic_func_names = set()
 
     # A name with two or more PLAIN definitions is emitted as one definition
-    # per signature — but only when every body is something this build can
-    # lower without tripping an unrelated type bug. A body that constructs a
-    # generic struct DEFINED IN THIS FILE (the in-TU materializer would
-    # instantiate it here and change this file's own struct-method emission)
-    # cannot be emitted correctly here. Those names keep the historical
-    # disposition — none of their overloads is emitted — rather than turning an
-    # unrelated type bug into a module refusal. A body that uses
-    # `external_call[...]` is NOT in that set: its declaration is typed from the
-    # call's own annotations, and the stdlib builds clean with every such
-    # overload emitted (`time.sleep`'s two overloads, 2026-11-17). The stdlib-
-    # dylib overload rows (`_free`, `unsafe_memset_zero`, `splat`, `to_integer`)
-    # and the synthetic probe have neither shape.
+    # per signature. `external_call[...]` bodies are not special-cased:
+    # declarations are typed from the call's own annotations, and the stdlib
+    # builds clean with every such overload emitted (`time.sleep`'s two
+    # overloads, 2026-11-17).
     _plain_groups: dict = {}
     for _pog_s in stmts:
         if (isinstance(_pog_s, FunctionDef)
                 and not getattr(_pog_s, 'comptime_params', None)):
             _plain_groups.setdefault(_pog_s.name, []).append(_pog_s)
-    _unsafe_overload_ids: set = set()
-    for _pog_name in _plain_groups:
-        _pog_nodes = _plain_groups[_pog_name]
-        if len(_pog_nodes) < 2:
-            continue
-        for _pog_n in _pog_nodes:
-            for _pog_x in _walk_ast(_pog_n.body):
-                if not isinstance(_pog_x, CallExpr):
-                    continue
-                _pog_f = _pog_x.func
-                if (isinstance(_pog_f, IdentExpr)
-                        and _as_str(_pog_f.name) in _local_generic_structs):
-                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
-                    break
-                if (isinstance(_pog_f, SubscriptExpr)
-                        and isinstance(_pog_f.obj, IdentExpr)
-                        and _as_str(_pog_f.obj.name) in _local_generic_structs):
-                    _unsafe_overload_ids.update(id(_n) for _n in _pog_nodes)
-                    break
-            if id(_pog_n) in _unsafe_overload_ids:
-                break
-    if _unsafe_overload_ids:
-        stmts = [s for s in stmts if id(s) not in _unsafe_overload_ids]
     _multi_def_names = set()
     for _mdn in _plain_groups:
-        if len(_plain_groups[_mdn]) >= 2 and id(_plain_groups[_mdn][0]) not in _unsafe_overload_ids:
+        if len(_plain_groups[_mdn]) >= 2:
             _multi_def_names.add(_mdn)
 
     self._local_def_nodes = {}
