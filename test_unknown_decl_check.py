@@ -159,6 +159,25 @@ def test_compile_time_type_builtins_are_not_reported():
     assert _reads(src) == [], _reads(src)
 
 
+def test_awaitable_protocol_constructors_are_not_reported():
+    # `create_future()` / `Future()` / `Event()` are the Awaitable protocol's
+    # no-arg constructors; no source file declares them and the compiled path
+    # lowers them by name to the `__mojo_future_new` / `__mojo_event_new`
+    # shims (mojo/backend_gimple/emit_calls.py, emit_methods.py,
+    # mojo/middle/coro.py). The unknown-decl pass landed in 0d277236a
+    # whitelisting only `create_future`, and refused the gate's
+    # coro-future-await job's bare `Event()` as "use of unknown declaration
+    # 'Event'" (job red on master from that commit on).
+    src = (
+        "import asyncio\n"
+        "def f():\n"
+        "    var a = create_future()\n"
+        "    var b = Future()\n"
+        "    var c = Event()\n"
+    )
+    assert _reads(src) == [], _reads(src)
+
+
 if __name__ == "__main__":
     test_unknown_name_reports_modular_layout()
     test_every_name_is_reported_in_source_order()
@@ -167,4 +186,5 @@ if __name__ == "__main__":
     test_wildcard_import_disables_the_check()
     test_compiler_builtins_are_not_reported()
     test_compile_time_type_builtins_are_not_reported()
+    test_awaitable_protocol_constructors_are_not_reported()
     print("ok")

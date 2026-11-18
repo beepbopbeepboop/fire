@@ -180,29 +180,6 @@ def _mem_modrm(base: Reg, disp: int, reg: Reg) -> tuple:
     return _modrm(mod, reg.value & 7, rm), extra
 
 
-def _sib_modrm(base: Reg, index: Reg, reg: Reg) -> tuple:
-    """(modrm byte, SIB byte, extra bytes) for `[base + index]`, scale 1.
-
-    rm=4 in the ModRM byte selects a SIB byte rather than naming RSP, and the
-    SIB is where BOTH registers live: its base field names `base` and its index
-    field names `index`, so each needs its own REX extension (`B` and `X`) and
-    neither fits in the ModRM's r/m field. `[RBP + index]`/`[R13 + index]` have
-    no mod=00 spelling — mod=00 with base=101 is the no-base disp32 form — so
-    those two carry a disp8 of 0, exactly as `_rm_disp` does for the
-    displacement forms.
-
-    Shared by the two indexed BYTE forms so they cannot disagree about where
-    the SIB byte sits, which base needs a displacement byte, or how REX.B/REX.X
-    name the two registers.
-    """
-    mod, extra = 0, b""
-    if base.value in (Reg.RBP.value, Reg.R13.value):
-        mod, extra = 1, bytes([0])
-    modrm = _modrm(mod, reg.value & 7, 4)
-    sib = ((index.value & 7) << 3) | (base.value & 7)
-    return modrm, sib, extra
-
-
 # ── push / pop / ret / leave ──────────────────────────────────────────
 
 def encode_push_r64(reg: Reg) -> bytes:
@@ -505,20 +482,17 @@ def encode_mov_rm8_r8_idx(base: Reg, index: Reg, src: Reg) -> bytes:
 
     The digits store of the float-repr helper.  Verified:
     `movb %al, (%rcx, %rdi)` = `88 04 39`.
-
-    The REX byte is omitted when it has no bit to set UNLESS `src` is SPL, BPL,
-    SIL or DIL (values 4-7), which are only themselves WITH a prefix: without
-    one those ModRM bytes name AH/CH/DH/BH, so omitting the null REX here
-    stored the high byte of a different register.  That is the same rule
-    `_byte_rex_required` states for `andb`/`orb`, and it is what makes
-    `movb %sil, (%rbp, %rbx)` assemble to the bytes GNU as produces.
     """
-    modrm, sib, extra = _sib_modrm(base, index, src)
+    mod, extra = 0, b""
+    if base.value in (Reg.RBP.value, Reg.R13.value):
+        mod, extra = 1, bytes([0])
+    modrm = _modrm(mod, src.value & 7, 4)
+    sib = ((index.value & 7) << 3) | (base.value & 7)
     rex = _rex(r=1 if src.value >= 8 else 0,
                x=1 if index.value >= 8 else 0,
                b=1 if base.value >= 8 else 0)
     out = []
-    if rex != 0x40 or _byte_rex_required(src):
+    if rex != 0x40:
         out.append(rex)
     out.extend([0x88, modrm, sib])
     return bytes(out) + extra
@@ -528,22 +502,22 @@ def encode_movzx_r64_rm8_idx(dst: Reg, base: Reg, index: Reg) -> bytes:
     """movzx dst, [base + index] — 0F B6 /r + SIB, a byte zero-extended.
 
     The digits load of the float-repr helper.  No REX.W: the destination is
-    written as a 32-bit register, which zero-extends.  `as` spells
-    `movzbl (%rcx, %rsi), %eax` as `0f b6 04 31`; this encoder is that
-    instruction with the null REX byte described below, `40 0f b6 04 31`.
-
-    The REX byte is emitted even when it is null, like its displacement sibling
-    `encode_movzx_r64_rm8`: the two then differ from `as`'s REX.W spelling in
-    the W bit alone, which is the shape `test_x86_64_encoders.py`'s
-    `REX_VARIANT_CASES` checks. Omitting the null prefix instead puts a prefix
-    on one side and none on the other, which that differential (rightly) treats
-    as a different register.
+    written as a 32-bit register, which zero-extends.  Verified:
+    `movzbl (%rcx, %rsi), %eax` = `0f b6 04 31`.
     """
-    modrm, sib, extra = _sib_modrm(base, index, dst)
+    mod, extra = 0, b""
+    if base.value in (Reg.RBP.value, Reg.R13.value):
+        mod, extra = 1, bytes([0])
+    modrm = _modrm(mod, dst.value & 7, 4)
+    sib = ((index.value & 7) << 3) | (base.value & 7)
     rex = _rex(r=1 if dst.value >= 8 else 0,
                x=1 if index.value >= 8 else 0,
                b=1 if base.value >= 8 else 0)
-    return bytes([rex, 0x0F, 0xB6, modrm, sib]) + extra
+    out = []
+    if rex != 0x40:
+        out.append(rex)
+    out.extend([0x0F, 0xB6, modrm, sib])
+    return bytes(out) + extra
 
 
 def encode_mov_r32_r32(dst: Reg, src: Reg) -> bytes:
