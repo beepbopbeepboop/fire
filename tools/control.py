@@ -753,7 +753,11 @@ def mark_dead(model, sl, until=None, now=None):
     if until and until > now:
         end = until + RESET_MARGIN_S
     elif replenish_at(sl, now):
-        end = replenish_at(sl, now)     # a daily free tier: back when its tokens come back, not a fixed block
+        # a daily free tier: back when its tokens come back, not a fixed block — but never SOONER than one attempt
+        # window: the replenish is a wall-clock time, so a limit that lands just before it would otherwise buy an
+        # hour of quiet, and the next attempt would burn the same exhausted quota (2026-11-17: 12 h of work needs
+        # 12 h of quota, so a limit event always buys at least PROBE_EVERY_S)
+        end = max(replenish_at(sl, now), now + PROBE_EVERY_S)
     else:
         hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
         end = now + hours * 3600
@@ -2110,10 +2114,24 @@ def cmd_sync(a):
         # A pid that is gone is not running. Record that, so the registry stops saying "running" for a worker that is
         # not (2026-11-10: a killed README worker stayed "running" for hours, shown by ps and claims). A task whose
         # session is still live is left alone, and an unreadable listing (live is None) changes nothing.
+        newly_dead = []
         with registry() as reg:
             for n in dead_running:
                 if n not in live and n in reg and reg[n].get("state") == "running":
                     reg[n]["state"] = "exited-err"
+                    newly_dead.append(n)
+        # Record a limit death HERE, on the pass that records the death: limit_hit reads the worker's work.log from
+        # its worktree, and the cleanup later in this same pass deletes a dead worker's tree. The ban's other
+        # readers (swarm's retire_dead, refill's bounce) run after that cleanup, so a limit death recorded there
+        # finds no log and the ban never lands — the exhausted model is then re-fed its next worker, which dies in
+        # a second (2026-11-17: two quota deaths left the ledger untouched and the model kept spawning).
+        for n in newly_dead:
+            t = tasks.get(n, {})
+            if t.get("pool") and t.get("model") and t.get("model") not in dead_models() and limit_hit(t):
+                _sl = find_slot(t["pool"])
+                if _sl is not None:
+                    h = mark_dead(t["model"], _sl, limit_reset(t))
+                    print("  banned %s for %.1f h: its worker hit a usage limit" % (t["model"], h), flush=True)
     if dead_running:
         print("sync: running-but-dead-in-registry=%d" % len(dead_running))
         for n in dead_running:
@@ -2154,6 +2172,12 @@ def cmd_sync(a):
             if sl is not None and m not in dead_models() and auth_failed(t):
                 hours = mark_dead(m, sl)
                 print("  banned %s for %.1f h: its worker could not authenticate" % (m, hours))
+                continue
+            # A usage-limit death is never restarted on the same model: the day's quota is spent, the next worker
+            # would die in a second, and the doc re-feeds to another model instead. (The ban usually lands in the
+            # state update above and is then caught by no_restart_reason; this covers the trees it missed.)
+            if limit_hit(t):
+                print("  skipped %s: its worker died on a usage limit; the doc is re-fed, not restarted" % n)
                 continue
             # Pool guard: never restart a worker whose slot is disabled (count 0) or already full,
             # and never one whose model is banned — a banned model's new worker only fails again.
