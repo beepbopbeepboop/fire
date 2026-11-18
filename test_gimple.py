@@ -14915,6 +14915,19 @@ def g(bits: Int64) -> Float64:
                  must_have=["mojo_float_from_bits (", "mojo_double_from_bits ("],
                  must_not_have=["/* indirect call via"])
 
+    # A `_Bool` return arm beside a string arm is boxed into the tagged word, not
+    # cast to the string pointer (`True` used to become the pointer 1). Run
+    # against CPython: pick(1, 2) is "s", pick(0, 0) is True, pick(0, 1) is False.
+    test_c_shape("bool_and_str_return_arms_box_into_the_word",
+                 """\
+def pick(a: Int, b: Int):
+    if a > 0:
+        return "s"
+    return a == b
+""",
+                 must_have=["mojo_box_from_bool (", "mojo_box_from_str ("],
+                 must_not_have=["/* indirect call via"])
+
     # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
     #
     # The Array fill-unroll coerces its fill value to the element type, and a
