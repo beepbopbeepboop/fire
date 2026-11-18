@@ -3116,6 +3116,19 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     # `arg_mojo` carries that type, and it binds `dtype` exactly as a scalar C
     # type does, with width 1.
     lit = _LITERAL_DTYPE.get(arg_mojo) if arg_mojo else None
+    # A parameter the enclosing function declares as `SIMD[D, N]` (after
+    # monomorphization) proves both the dtype and the width.
+    _sm = re.fullmatch(r'\s*SIMD\[\s*([\w.]+)\s*,\s*(\d+)\s*\]\s*', arg_mojo or '')
+    if _sm:
+        m = _SIMD_ANN_RE.match(ann)
+        if m and m.group(1) in pnames:
+            out = {m.group(1): _sm.group(1)}
+            if m.group(2) is not None:
+                if m.group(2) not in pnames:
+                    return {}
+                out[m.group(2)] = _sm.group(2)
+            return out
+        return {}
     if lit is None and arg_ctype == 'int64_t':
         return {}
     dtype = lit if lit is not None else c_to_mojo(arg_ctype)

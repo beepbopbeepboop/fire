@@ -2775,3 +2775,18 @@ double mojo_f8_round(double x, int ebits, int mbits, int bias, int kind);
 int64_t     mojo_box_from_f8(double v, const char *spelling);
 int         mojo_is_f8_box(int64_t v);
 const char *mojo_f8_spelling(int64_t v);
+
+/* CPU lowering of `llvm_intrinsic[...]` (emit_calls._lower_llvm_intrinsic): integer
+ * bit operations at an explicit width w (8, 16, 32 or 64). Results are masked to w
+ * bits, as the intrinsic's own type is w bits wide. */
+int64_t mojo_fshl(int64_t a, int64_t b, int64_t s, int64_t w);
+int64_t mojo_fshr(int64_t a, int64_t b, int64_t s, int64_t w);
+int64_t mojo_ctpop(int64_t x, int64_t w);
+int64_t mojo_ctlz(int64_t x, int64_t w);
+int64_t mojo_cttz(int64_t x, int64_t w);
+int64_t mojo_bswap(int64_t x, int64_t w);
+int64_t mojo_usub_sat(int64_t a, int64_t b, int64_t w);
+/* A llvm_intrinsic with no CPU lowering, reached at run time: prints its name and
+ * exits nonzero. Never returns, so no value is ever read from it. */
+void mojo_unsupported_intrinsic(const char *name);
+
