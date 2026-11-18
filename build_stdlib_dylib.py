@@ -1051,7 +1051,7 @@ def _template_shape(template_src: str, name: str):
                 break
             bare = ptype.split('=')[0].strip()
             try:
-                ct = ModuleLoader._mojo_type_to_c(bare)
+                ct = ModuleLoader._mojo_type_to_c(bare, param=True)
             except Exception:
                 ct = 'int64_t'
             c_params.append('int64_t' if ct == 'void' else ct)

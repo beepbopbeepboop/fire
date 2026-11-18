@@ -127,12 +127,12 @@ PAIR = (
     '    return 2\n'
 )
 SUF_INT = GimpleGen.overload_suffix_for(['int64_t'])
-SUF_CHAR = GimpleGen.overload_suffix_for(['char *'])
+SUF_SPAN = GimpleGen.overload_suffix_for(['Span *'])
 sel_int = B._select_generic_template(PAIR, 'pick', SUF_INT)
-sel_char = B._select_generic_template(PAIR, 'pick', SUF_CHAR)
+sel_span = B._select_generic_template(PAIR, 'pick', SUF_SPAN)
 check('a typed request selects the template with that erased signature',
       bool(sel_int) and '(x: T)' in sel_int
-      and bool(sel_char) and 'Span[T]' in sel_char)
+      and bool(sel_span) and 'Span[T]' in sel_span)
 check('a suffix-less (variadic) request with differing candidates is declined',
       B._select_generic_template(PAIR, 'pick', '') is None)
 check('an unmatched suffix is declined',
