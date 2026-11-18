@@ -51,3 +51,10 @@ the LAND nested-bracket-generic-call-4 bug (its doc, deleted) had quoted the sam
 of status line, including the two cases-generator analyzer docs deleted by the
 compiled-analyzer landing; that line now names the bugs instead of the paths,
 which is the fix `--ratchet` asks for.
+
+## Done when
+
+`tools/test_land_doc_summary.py` passes: it files a land doc whose summary names a
+deleted bug doc, and the doc that `land_doc` writes carries the bare stem plus
+"(deleted)" instead of the dangling path, so `dangling_doc_refs --ratchet` stays
+green the moment the doc is filed.
