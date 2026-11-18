@@ -95,66 +95,6 @@ Parts 1-3, 4, 7, 8 and 9 landed and their docs were deleted when they landed:
   not an object the caller fills; the right fix is to return the pointer
   (`_RandomState * f(void)`), a separate change to the definer's signature and
   the caller's use of the value.
-  Status 2026-11-17 (overload selection for an imported name): the import scan
-  records a name defined more than once as a variadic `name(...)` stub, which
-  names no overload, so `bitset.mojo`'s `unsafe_memset_zero(ptr, count)` bound
-  to the bare stub. `emit_calls._imported_overload_call_symbol` now picks the
-  overload from the HOME module's own statements (following a package
-  re-export to the defining module), and declares it. It decides ONLY when
-  exactly one plain (non-generic) overload fits the call's arity and the call
-  supplies every parameter; anything else keeps the stub. Both call paths use
-  it (`_lower_named_call` and the statement path in `emit_stmts`).
-  `test_import_overload_choice.py` fails on the committed code and passes here.
-  Undefined `_std_` names: 8 -> 7 (`unsafe_memset_zero` resolved).
-  Not done, found while doing it: (a) a defaulted or ambiguous overload set
-  (`assert_equal`, `b64encode`, `time.sleep`) still falls back: the imported
-  call path does not fill defaults, and the chooser does not see argument types;
-  (b) `std.time.time` emits NO `sleep` symbol at all, so `_std_time_time_sleep`
-  stays undefined whatever the caller names; (c) the scan takes an overload
-  set's return type from its LAST overload, so the declaration can differ from
-  the definer's (`unsafe_memset_zero` is `void` there, `int64_t` in the import).
-  Gates: stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple
-  465/0, lint and ratchet clean.
-  Status 2026-11-17 (time.sleep, landed): two causes, both fixed. (1)
-  `module_gen`'s overload guard dropped EVERY overload of a name whose plain
-  overloads include an `external_call[...]` body. The stdlib builds clean with
-  those overloads emitted, so that branch is removed; the generic-struct branch
-  stays. `time.sleep`'s two overloads were both missing. (2) The import choice
-  now also uses the lowered argument C types (`emit_stmts` moves the hook after
-  the arguments are lowered): when exactly one plain overload fits the arity it
-  is taken as before; when several fit, the one whose parameter types equal the
-  arguments' is taken (an integer literal's `int` matches Mojo's 64-bit `Int`).
-  `time.sleep(1)` and `time.sleep(1.5)` now name `_9f63a2` and `_f77bd1`.
-  `test_import_overload_choice.py` gained two cases: argument-type selection
-  (fails on the committed code) and external_call overload emission.
-  Undefined `_std_` names: 7 -> 6. Still open: `random` (its `Pointer`-result
-  change is parked in stash@{0}) and the `_std__gpu_intrinsics` / `bit_mask` /
-  `getpw` generic instances.
-  Status 2026-11-17 (random, landed): `out result: Pointer[T]` is a pointer
-  RETURN, not a value the caller fills. `mojo/middle/out_result.py` lowers it
-  (the definer and the import parse both apply it), and the import scan mirrors
-  the rule, including the same "body reads the name" bail. `_struct_name_of`
-  strips the `struct ` tag so a struct private to another unit names its method
-  `<home>_<Struct>_<method>`. `test_out_param_local.py` gained a cross-module
-  pointer-result case (expects 9). Undefined `_std_` names: 6 -> 5 (random gone).
-  Still open: the gpu `mulhi`/`mulwide` instances. Found: `fast_div`'s
-  `mulhi(self._mprime.cast[.uint32](), ...)` inside a generic struct reaches the
-  Int64 overload, because `.cast[.uint32]()` lowers to a 64-bit word and loses
-  its type. That is a wrong-result bug, not only a link gap. The elaborator
-  route to the definer's symbol was tried and reverted: choosing on erased
-  argument types picked the wrong overload.
-  Status 2026-11-17 (bit.mask splat and pwd getpw, landed): an elaborated
-  call to an imported PLAIN overload compiled a private copy under the mangled
-  name nothing defines. `emit_infra._elaborate_overload_call` now calls the home
-  symbol when the arity matches exactly one plain overload, and, in an
-  erasure-free caller (no generic function or struct around the call;
-  `_erasure_free_context`), when the lowered argument C types pick one. Inside a
-  generic the typed choice is not made: `Scalar[dtype].cast[.uint32]()` lowers to
-  an int64 word there, so the choice would be a guess. Also: the import scan maps
-  a return annotation naming a struct the module IMPORTS to `struct X *` (the
-  pwd getpw externs had `int64_t`), and `module_loader` imports `re`.
-  Undefined `_std_` names: 5 -> 1 (only `mulhi(Int64, Int64)` remains; it is the
-  generic-struct cast typing above, not a link gap).
   Previously open (now done): step 3, the cross-module import. Gates:
   stdlib-syntax 610/610, dylib 1203/1203 with 0 errors, test_gimple 465/0.
   Hook points found 2026-11-17 (no code landed; the slice is not safe alone):
