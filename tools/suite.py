@@ -4363,6 +4363,9 @@ test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
 test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
      mem='tiny',
      desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
+test('gates-runtime-not-off', [PY, 'test_gates_runtime_jobs_not_off.py'],
+     mem='tiny',
+     desc='recover-land remainder: no gates.json OFF pattern may name a runtime/utility job')
 test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
@@ -5225,6 +5228,7 @@ BUCKETS = {
 # for the one entry it adds.
 BUCKETS['check'].append('binding-evidence')
 BUCKETS['check'].append('gates-bootstrap-not-off')
+BUCKETS['check'].append('gates-runtime-not-off')
 BUCKETS['check'].append('closure-address-of-capture')
 BUCKETS['check'].append('codegen-container-param-unknown-arg')
 BUCKETS['check'].append('comptime-generic-alias-fold')
