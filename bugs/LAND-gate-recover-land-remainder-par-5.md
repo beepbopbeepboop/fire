@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-gate-recover-land-remainder-par-4 land?
+# Land: should finished branch bug-land-gate-recover-land-remainder-par-5 land?
 
-**Branch:** `work/bug-land-gate-recover-land-remainder-par-4` (task `bug-land-gate-recover-land-remainder-par-4`; its tip is also saved as `refs/archive/work/bug-land-gate-recover-land-remainder-par-4`, so dropping it loses nothing).
-**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 16 behind it; task started 2026-11-18 13:42:59
-**Original work:** Fix the bug in bugs/LAND-gate-recover-land-remainder-par-2.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or r
-**Original claims:** bug:LAND-gate-recover-land-remainder-par-2
+**Branch:** `work/bug-land-gate-recover-land-remainder-par-5` (task `bug-land-gate-recover-land-remainder-par-5`; its tip is also saved as `refs/archive/work/bug-land-gate-recover-land-remainder-par-5`, so dropping it loses nothing).
+**Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 4 commit(s) ahead of master, 8 behind it; task started 2026-11-18 13:43:01
+**Original work:** An earlier attempt left 3 commit(s) on branch work/bug-land-gate-recover-land-remainder-par-3, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted
+**Original claims:** bug:LAND-gate-recover-land-remainder-part5
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-18 17:24:24: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 16 behind it; task started 2026-11-18 13:42:59)
-  Branch: work/bug-land-gate-recover-land-remainder-par-4
-  Conflicting files: bugs/hard/GATE_recover_land_remainder.md, tools/gates.json
+- 2026-11-18 16:24:00: conflicts with master (last commit 2026-11-18, first unlanded commit 2026-11-18; 4 commit(s) ahead of master, 8 behind it; task started 2026-11-18 13:43:01)
+  Branch: work/bug-land-gate-recover-land-remainder-par-5
+  Conflicting files: test_gates_runtime_jobs_not_off.py, tools/suite.py
