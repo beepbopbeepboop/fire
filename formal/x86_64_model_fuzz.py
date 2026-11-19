@@ -184,12 +184,9 @@ DATA_OFF = 0x020000
 DATA_N = 128
 """The compared memory window, in bytes. Every memory operand the pool emits
 addresses `[membase + disp]` (or `[membase + index]`, with the index loaded
-from an immediate whose WINDOW OFFSET may be negative — see `_index_off`)
-inside the window and inside it ALONE — a byte outside would be compared against
-the model's `0` for an address the CPU never had.  A negative index is a
-register holding `2^64 + off`, so the `base + index` sum wraps through the top
-of the address space on both halves; that is the case
-`x86_eff_addr` states."""
+from a small non-negative immediate — see `_index_off`) inside the window and
+inside it ALONE — a byte outside would be compared against the model's `0` for
+an address the CPU never had."""
 
 #: Region-RELATIVE. The absolute value (`REGION_BASE + STACK_TOP`) is what both
 #: halves are given, and it has to be absolute in the harness too: a
@@ -431,20 +428,17 @@ def _index_off(r, size):
     """The value loaded into an index register, as a WINDOW OFFSET.
 
     The two indexed byte forms carry no displacement field at all, so the whole
-    offset from `MEMBASE` is the index register's value.  It is drawn over the
-    same range as `_disp` -- the entire window, negative half included -- and a
-    NEGATIVE offset here is a register holding `2^64 + off`, the two's-complement
-    value `encode_mov_r64_imm32` loads for a negative immediate.  That is the
-    case this pool has to be able to draw: `base + index` wraps modulo 2^64 on
-    the hardware, so `MEMBASE_ABS + (2^64 - n)` is window offset `MEMBASE - n`
-    and not an address near the top of the address space.  `x86_eff_addr` states
-    that truncation once for every memory operand; before it existed this draw
-    was pinned to the non-negative half, because a negative one was a model bug
-    (the address was added as a `Nat`, so `2^64 - n` stayed there and the model
-    read outside the window) rather than the address arithmetic this pool
-    compares.
+    offset from `MEMBASE` is the index register's value.  It is drawn from the
+    window's UPPER half (non-negative) on purpose: `x86_mem_addr` adds the
+    index as a `Nat` and has no 64-bit wraparound, so a "negative" offset would
+    be a register holding `2^64 - n`, which the CPU wraps back below MEMBASE and
+    the model does not — a real difference in the model's address ARITHMETIC,
+    not the base+index form this pool exists to cover.  Drawing it positive
+    keeps both halves on the same address, and the lower half is already
+    covered by the `[base + disp]` forms that draw `_disp` over the whole
+    window.
     """
-    return r.randrange(-DATA_N // 2, DATA_N // 2 - size + 1)
+    return r.randrange(0, DATA_N // 2 - size + 1)
 
 
 def _mem_idx(r, size):
