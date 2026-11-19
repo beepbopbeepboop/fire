@@ -5891,7 +5891,24 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             _chk = gen._call_expr('int64_t', 'mojo_int_divisor', [('int64_t', rv)])
             rv = _chk if res_type == 'int64_t' else gen._cast(res_type, _chk)
         t = gen._new_temp(res_type)
-        gen._binop_into(f"{t}", f"{lv}", f"{c_op}", f"{rv}")
+        # Narrow fixed-width integer arithmetic (a `Scalar[DType.*]` value with
+        # a real C type below the 64-bit word, e.g. uint8_t/uint32_t): when BOTH
+        # operands share that type, the result takes it and the emitted C casts
+        # the operation back to it — C integer promotion makes `uint8_t + uint8_t`
+        # an `int`, so without the cast-back the value widens instead of
+        # wrapping/truncating to the dtype width (measured: `Scalar[DType.
+        # uint8](250) + Scalar[DType.uint8](10)` printed 260; the width answer
+        # is 4). Comparisons answer `_Bool` (`res_type != lt`) and int64_t/int
+        # operations are unchanged. The cast is the statement's single outer
+        # operation over the binary op, which `gcc -fgimple` accepts as one
+        # GIMPLE statement (a bare `t = a + b;` into a narrow temp is the
+        # "non-trivial conversion" it rejects instead).
+        if (lt == rt and lt in gimple_ctypes._NARROW_INT_CTYPES
+                and res_type == lt and c_op in gimple_ctypes._BIN_OPS
+                and op not in gimple_ctypes._CMP_OPS):
+            gen._emit(f"  {t} = ({res_type})({lv} {c_op} {rv});")
+        else:
+            gen._binop_into(f"{t}", f"{lv}", f"{c_op}", f"{rv}")
     # `lv {c_op} rv` on two values already PROVEN to be integers is another
     # integer: the `_int_word_vals` producer this closes is `d[base + 1]` /
     # `d[i * 2]` / `d[n >> 3]`, whose results were fresh temps nothing had

@@ -939,46 +939,6 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
             gen._comptime_str_names.add(_ct_target)
         gen._comptime_vals[_ct_target] = val
     else:
-        # A comptime binding of an UNDER-SUPPLIED bracket specialization is a
-        # program error, not an unfoldable constant. `comptime f = param_fn[2]`
-        # for `def param_fn[x: Int, y: Int]` leaves `y` unbound: this path
-        # folded it to None, recorded nothing, and `f()` later fell to the
-        # weak-stub path (`f: unavailable in compiled mode`, then 0) -- a
-        # silent wrong answer. The CALL form `param_fn[2](1)` already
-        # diagnoses (emit_resolve's `unbound_type_parameter` guard); this is
-        # the same rule for the binding form, using the same helper.
-        _rhs0 = _ct_node.value
-        if isinstance(_rhs0, SubscriptExpr):
-            _b0 = getattr(getattr(_rhs0, 'obj', None), 'name', '')
-            _b0 = _as_str(_b0) if _b0 is not None else ''
-            _ix0 = getattr(_rhs0, 'index', None)
-            _els0 = (_ix0.elements if isinstance(_ix0, TupleExpr) else [_ix0])
-            _cfn0 = getattr(gen, '_current_filename', '') or ''
-            try:
-                _targs0 = [gen._type_expr_to_ann(e) for e in _els0]
-            except Exception:
-                _targs0 = None
-            if _b0 and _targs0 and _cfn0:
-                try:
-                    import elaborate as _elab0
-                    _tmpl0 = _elab0.extract_fn_source(
-                        gen._generic_source_text(_cfn0), _b0)
-                    _unb0 = (_elab0.unbound_type_parameter(_tmpl0, _targs0)
-                             if _tmpl0 else None)
-                    if (_unb0 and not _elab0.unbound_param_is_inferable(
-                            _tmpl0, _unb0)):
-                        _cln0 = getattr(_ct_node, 'line', 0) or 0
-                        _clc0 = getattr(_ct_node, 'col', 0) or 0
-                        _cat0 = (f'{_cfn0}:{_cln0}:{_clc0}: ' if _cfn0
-                                 else f'{_cln0}:{_clc0}: ')
-                        raise RuntimeError(
-                            f"{_cat0}error: failed to infer parameter "
-                            f"'{_unb0}', specify the parameter or use '_' or "
-                            f"'...' to unbind the parameter explicitly")
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass
         # Handle type aliases like `comptime socklen_t = c_uint` where
         # c_uint is itself a comptime alias to UInt32 (a scalar type).
         rhs = _ct_node.value

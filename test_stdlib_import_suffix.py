@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A cross-module free-function CALL must name the symbol its DEFINITION emits.
 
-Regression for the `stdlib-dylib` red (the from-scratch stdlib dylib job): a
+Regression for the `stdlib-dylib` red (`bugs/mid/gate-stdlib-dylib.md`): a
 stdlib module compiled ALONE (as `build_stdlib_dylib.build` does, one worker
 process per module) resolves an imported function's parameter ctypes from
 `module_loader.py`'s export text scan, while the defining module emits them

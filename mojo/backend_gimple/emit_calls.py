@@ -4093,10 +4093,11 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
         # exactly as the interpreter's `_MojoSIMDType.__getitem__` does for
         # `fire.py run`; a width that does not fold (`SIMD[dtype, width]`
         # inside a still-generic body) is not this guard's to decide.
+        _simd_w = None
         if base == 'SIMD' and len(_idxs) >= 2:
-            _w = gen._eval_const_int(_idxs[1])
-            if _w is not None:
-                _simd_width.reject_invalid_width(_w, _dtype_arg_name(_idxs[0]))
+            _simd_w = gen._eval_const_int(_idxs[1])
+            if _simd_w is not None:
+                _simd_width.reject_invalid_width(_simd_w, _dtype_arg_name(_idxs[0]))
         _dt_ctype = _dtype_cast_ctype(_idxs[0]) if _idxs else None
         # Fallback: resolve a bare/spelled dtype name to its C type.
         if _dt_ctype is None and _idxs:
@@ -4134,6 +4135,22 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
             # `_dtype_token_ctype`; a conversion INTO the dtype is allowed,
             # and the two uses with no rule are refused at the coercion
             # and binary-operation chokepoints (mojo.middle.float8_dtype).
+            _target = _dt_ctype
+        elif (_dt_ctype in gimple_ctypes._NARROW_INT_CTYPES
+                and (base == 'Scalar'
+                     or len(_idxs) == 1 or _simd_w == 1)):
+            # An INTEGER dtype is a real C word exactly where the ANNOTATION
+            # resolver gives one: `Scalar[DType.x]` always, and a width-1
+            # `SIMD[DType.x, 1]` (a width-1 SIMD is a scalar; the two are
+            # the same type) — the same split `_simd_float_dtype_ctype`
+            # makes, which is what keeps the constructor's local and the
+            # declared variable agreeing. A WIDER integer SIMD is a vector
+            # and keeps the int64_t word (pinned by test_codegen_erased_
+            # container_values: `SIMD[DType.int32, 4](1)` -> `int64_t i;`).
+            # `int64_t` itself is the word, never this arm. The arg is
+            # converted INTO the dtype, truncating above the width
+            # (`Scalar[DType.uint8](256)` is 0), through `_coerce_to_type`
+            # below.
             _target = _dt_ctype
         else:
             _target = 'int64_t'

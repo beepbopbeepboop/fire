@@ -1374,6 +1374,15 @@ _SIMD_INT_DTYPE_CTYPE = {
     'int64': 'int64_t', 'uint64': 'uint64_t',
 }
 
+# The fixed-width integer C types STRICTLY BELOW the 64-bit word: a
+# `Scalar[DType.*]` of one of these is the dtype's own width, so the codegen
+# casts arithmetic back to it after the operation (C integer promotion would
+# widen it) and compares it directly as that type (an unsigned dtype above
+# 2^31 is not compared as a negative signed value). `int64_t` is the word
+# this backend uses for every untyped integer, and its operations are
+# unchanged — hence the exclusion.
+_NARROW_INT_CTYPES = frozenset(_SIMD_INT_DTYPE_CTYPE.values()) - {'int64_t'}
+
 
 def _simd_float_dtype_ctype(inner: str) -> str | None:
     """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of

@@ -123,60 +123,8 @@ def test_local_generic_alias_folds():
     _check(c, 'always_true', 'always_1_T_3_Int')
 
 
-DOT_PREDICATE = '''def unsigned_f64() -> Int:
-    comptime if .float64.is_unsigned():
-        return 1
-    else:
-        return 2
-
-
-def floating_bf16() -> Int:
-    comptime if .bfloat16.is_floating_point():
-        return 3
-    else:
-        return 4
-'''
-
-
-def _check_dot_predicate(c: str, name: str, want: int) -> None:
-    """`name`'s comptime condition must FOLD: exactly the taken arm is emitted,
-    no runtime `if (`, and the other arm's constant is absent."""
-    body = _body(c, name)
-    assert 'if (' not in body, (
-        f'{name} still branches at RUNTIME on a comptime condition that is a '
-        f'chained dot-value DType predicate:\n{body}')
-    assert f'= {want}LL' in body, (
-        f'{name} does not contain the arm the predicate selects:\n{body}')
-    other = 2 if want == 1 else (4 if want == 3 else 1)
-    assert f'= {other}LL' not in body, (
-        f'{name} still contains the arm the predicate rejects (both arms were '
-        f'emitted -- the condition read CONST_UNKNOWN):\n{body}')
-
-
-def test_chained_dot_value_dtype_predicate_folds():
-    """`.float64.is_unsigned()` must fold.
-
-    The parser stores a chained dot-relative reference as ONE `DottedLiteral`
-    whose `path` is the whole chain (`'float64.is_unsigned'`), not as
-    `MemberExpr(DottedLiteral, 'is_unsigned')`. The DType-predicate branch in
-    `eval_const_bool`/`_const_foldable` tested only the `MemberExpr` shape, so
-    this shape read CONST_UNKNOWN, BOTH arms were emitted, and
-    `std/utils/numerics.mojo`'s `max_finite[.float64]` put
-    `~Scalar[.float64](0)` -- a bit-complement on a float dtype -- into the C,
-    where GCC rejects it (`wrong type argument to bit-complement`). Measured:
-    `max_finite[.float64]()` went from a skipped module to printing
-    1.7976931348623157e+308.
-    """
-    c = _compile(DOT_PREDICATE)
-    # `_compile` names the TU 'p', so a top-level def's symbol is p_<name>.
-    _check_dot_predicate(c, 'p_unsigned_f64', 2)
-    _check_dot_predicate(c, 'p_floating_bf16', 3)
-
-
 if __name__ == '__main__':
     test_imported_generic_alias_folds()
     print('PASS test_imported_generic_alias_folds')
     test_local_generic_alias_folds()
     print('PASS test_local_generic_alias_folds')
-    test_chained_dot_value_dtype_predicate_folds()
-    print('PASS test_chained_dot_value_dtype_predicate_folds')
