@@ -16254,6 +16254,59 @@ main()
 """)
 
 
+def test_for_loop_over_plain_function_returning_a_generator():
+    """`for x in f(...)` where `f` RETURNS a generator without being one.
+
+    bug:CODEGEN_loop_over_plain_function_returning_generator. `_mojo_iter` in
+    myinterpreter.py returns a generator on one path and `iter(value)` on the
+    other, so its static return type is `MojoGenerator *` but the per-function
+    `_generator_var_api` table (deliberately reset between functions) has no
+    entry for the handle at the consumer. The loop used to be dropped with
+    `mojo_unsupported_iter`, so the compiled body ran ZERO times while CPython
+    printed the values.
+
+    Both runtime shapes are pinned: the generator-returning path (`make(3)`)
+    and the `iter(list)` path (`make([7, 8])`), plus a `break` from each arm
+    and a string-yielding generator (`"w:" + w`) whose yielded word is a
+    `char *`, not an int.
+    """
+    test_gimple_matches_cpython("gimple_for_over_gen_returning_function", """\
+def count(n):
+    i = 0
+    while i < n:
+        yield i
+        i += 1
+def make(v):
+    if isinstance(v, int):
+        return count(v)
+    return iter(v)
+def main():
+    for x in make(3):
+        print(x)
+    for y in make([7, 8]):
+        print(y)
+main()
+""")
+    test_gimple_matches_cpython("gimple_for_over_gen_returning_function_arms", """\
+def words(n):
+    i = 0
+    while i < n:
+        yield "w" + str(i)
+        i += 1
+def make(v):
+    if isinstance(v, int):
+        return words(v)
+    return iter(v)
+def main():
+    for a in make(2):
+        print(a)
+    for b in make(["c", "d"]):
+        print(b)
+        break
+main()
+""")
+
+
 def test_list_slice_of_mixed_list_reads_slots_as_values():
     """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
     test_gimple_matches_cpython("gimple_list_slice_mixed", """\
@@ -16320,6 +16373,10 @@ if __name__ == '__main__':
         print(f"ERR: {e}")
     try:
         test_list_str_param_read_wrong_after_empty_list_caller()
+    except Exception as e:
+        print(f"ERR: {e}")
+    try:
+        test_for_loop_over_plain_function_returning_a_generator()
     except Exception as e:
         print(f"ERR: {e}")
     main()

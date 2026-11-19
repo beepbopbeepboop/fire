@@ -1186,8 +1186,14 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                                               destroy_after=destroy_after,
                                               shadow_name=shadow_name)
             else:
-                gimple_ctypes._debug_note('for loop over MojoGenerator* with no known API (unreachable in Milestone B scope)', it_val)
-                gen._emit_unsupported_iter(it_type, node)
+                # The API is unknown static-side (the handle escaped another
+                # function through a plain call): drive the handle at run
+                # time. See _gen_for_unknown_generator.
+                gimple_ctypes._debug_note(
+                    'for loop over MojoGenerator* with no known API: driving '
+                    'the handle at run time', it_val)
+                _gen_for_unknown_generator(gen, var, it_val, node.body,
+                                           node=node, shadow_name=shadow_name)
         elif ((it_type.endswith(' *') and it_type != 'void *')
               or it_type.endswith('*')):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
@@ -3961,6 +3967,133 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
                 gen._copy(f"{cvn}", raw)
             else:
                 gen._safe_coerce_emit('int64_t', vt, raw, cvn)
+
+
+def _gen_for_unknown_generator(gen, var: str, gen_val: str, body: list,
+                               node=None, shadow_name=None):
+    """`for x in <a MojoGenerator* whose API is not known statically>:`.
+
+    A `MojoGenerator *` normally carries its resume/value/destroy API in
+    `_generator_var_api`, recorded where the generator value was CONSTRUCTED.
+    That table is per-function (it must be emptied between functions — see
+    `_reset_func` and `test_gimple_lint.py`'s `value tables`), so a value that
+    ESCAPES one function and comes back through a plain call arrives with the
+    handle intact and the API unknown. `_mojo_iter` (myinterpreter.py) is the
+    shape: it returns `_mojo_struct_iter_steps(...)` on one path and
+    `iter(value)` on the other, so its static return type is
+    `MojoGenerator *` while the runtime word can also be an ordinary
+    container/iterator (bug:CODEGEN_loop_over_plain_function_returning_
+    generator; `for value in _mojo_iter(x):` used to be dropped with
+    `mojo_unsupported_iter`).
+
+    Two arms, decided at RUN time from the word itself — no static guess:
+
+    * a live generator handle (`__mojo_async_iscoroutine` is the runtime's
+      live-handle registry lookup, so nothing is read out of a non-handle) is
+      driven LAZILY through the generic entry points the per-generator
+      trampolines themselves funnel into: resume / value / destroy. Lazy is
+      what keeps a `break` (and an unbounded generator) meaning what it means
+      in Python.
+    * anything else goes through `mojo_iter_word`, the runtime's documented
+      dispatch for "a word of unknown kind" (list, list-iterator, dict keys,
+      set, str/bytes, a handle registered by a call through a function value)
+      and is iterated as the list it yields. That is the arm `make([7, 8])`
+      needs: `iter(v)` lowers to the value itself, so the handle-typed word
+      really is the argument list.
+
+    Any other word (an int, a bogus pointer) raises the runtime's catchable
+    `TypeError: object is not iterable` from `mojo_iter_word`, which is
+    CPython's answer, instead of the old diagnostic-plus-zero-iterations.
+
+    The target is bound as a word of UNKNOWN KIND (`_dyn_word_locals`): the
+    generic handle protocol carries no value-kind, so an int or a string
+    pointer is just the yielded slot word and printing/str/== must ask the
+    runtime (`mojo_cstr_or_int_str`, `_tagged_arith_select` and friends) —
+    the same representation `next(word)` produces. A generator whose declared
+    yield kind is `double`/`bool` therefore binds its raw slot bits; see
+    bugs/CODEGEN_unknown_generator_loop_yields_untagged_word.md for the
+    measurement and the fix (register the handle's vkind where it escapes).
+    """
+    word = gen._to_int64('MojoGenerator *', gen_val)
+    # Declared BEFORE either arm: both arms must name the identical C
+    # variable (only one ever runs), the same rule the dict/list dual
+    # dispatch follows (`share_var_with_sibling_arm`).
+    _one = _single_loop_target_name(var)
+    if _one is not None:
+        var = _one
+    elif for_target_is_tuple(var):
+        # A real MULTI-slot target over a generator whose yield arity is
+        # unknown: unpacking needs to know the yielded word is the tuple's
+        # list, which is exactly the fact this path does not have. Refuse by
+        # name, the same refusal `_gen_for_generator_iter` raises for a
+        # generator whose yields are not tuples — the loop is not lowered
+        # with an unstatically-typable target.
+        _callee = '<unknown>'
+        _it = getattr(node, 'iterable', None)
+        if (isinstance(_it, gimple_ctypes.CallExpr)
+                and isinstance(getattr(_it, 'func', None),
+                               gimple_ctypes.IdentExpr)):
+            _callee = _as_str(_it.func.name)
+        raise coro_mod.multi_slot_for_refusal(var, _callee)
+    gen._declare_var(var, 'int64_t', force=(var == shadow_name))
+    gen._dyn_word_locals.add(_as_str(var))
+    if shadow_name:
+        gen._dyn_word_locals.add(_as_str(shadow_name))
+
+    bb_handle = gen._new_bb()
+    bb_container = gen._new_bb()
+    bb_after = gen._new_bb()
+    is_handle = gen._rt_call('_Bool', '__mojo_async_iscoroutine', [word])
+    gen._cond_goto(is_handle, bb_handle, bb_container)
+
+    gen._emit_label(bb_container)
+    lst = gen._rt_call('MojoList *', 'mojo_iter_word', [word])
+    # Its slots may be kind-tagged (a drained generator records each
+    # element's kind), so read them by kind rather than as raw int64_t.
+    gen._maybe_kinds_vals.add(_as_str(lst))
+    gen._gen_for_list(var, lst, body, shadow_name=shadow_name,
+                      share_var_with_sibling_arm=True)
+    gen._goto(bb_after)
+
+    gen._emit_label(bb_handle)
+    bb_cond = gen._new_bb()
+    bb_body = gen._new_bb()
+    bb_post = gen._new_bb()
+    bb_handle_after = gen._new_bb()
+    gen._goto(bb_cond)
+    gen._emit_label(bb_cond)
+    none_word = gen._rt_call('int64_t', 'mojo_box_none', [])
+    more64 = gen._rt_call('int64_t', '__mojo_gen_resume', [word, none_word])
+    # The generic entry point answers an int64_t (the per-generator
+    # trampolines re-narrow it to _Bool); a raw-GIMPLE comparison must be
+    # made at the value's own type, so materialize the zero and compare.
+    zero64 = gen._new_val('int64_t', '0LL')
+    more = gen._cmp(more64, '!=', zero64)
+    gen._cond_goto(more, bb_body, bb_handle_after)
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    val = gen._rt_call('int64_t', '__mojo_gen_value', [word])
+    gen._copy(f"{gen._cname(var)}", val)
+    gen.loop_stack.append((bb_post, bb_handle_after))
+    gen._gen_loop_body(body)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+    gen._goto(bb_post)
+    gen._emit_label(bb_post)
+    gen._goto(bb_cond)
+    # `break` lands on bb_handle_after too, so the destroy below runs on
+    # every way out of the loop, exactly like the known-API arm.
+    gen._emit_label(bb_handle_after)
+    # Ownership: only a generator this loop's own iterable expression
+    # CREATED (`for x in f(...)`) is destroyed here. A handle held in a
+    # variable may be re-read later, and destroying it here made a second
+    # consumption a use-after-free — the same rule `_gen_for_iter` applies
+    # to the known-API arm (`destroy_after`).
+    if isinstance(getattr(node, 'iterable', None), gimple_ctypes.CallExpr):
+        gen._rt_void('__mojo_gen_destroy', [word])
+    gen._goto(bb_after)
+
+    gen._emit_label(bb_after)
 
 
 def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
