@@ -32,7 +32,7 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
-    'bugs/gate-bootstrap-stage2-cc.md': 2,
+    'bugs/mid/gate-bootstrap-stage2-cc.md': 2,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 1,
