@@ -2,8 +2,8 @@
 """An OVERLOADED imported stdlib function keeps the variadic signature its
 export record publishes; a non-overloaded one keeps its concrete parameters.
 
-Pinning test for the `stdlib-dylib` unexpected-skip class in
-`bugs/gate-stdlib-dylib.md`. `module_loader`'s export scan cannot represent
+Pinning test for the `stdlib-dylib` unexpected-skip class (the from-scratch
+stdlib dylib job). `module_loader`'s export scan cannot represent
 several same-name signatures in its single-signature model, so it publishes an
 overloaded function as a variadic extern (`ret name (...)` with
 `c_parameters: []`). One importer rebuild instead reconstructed every extern
