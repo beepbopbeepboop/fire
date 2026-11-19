@@ -278,20 +278,13 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
             conds, hs, simp_lems,
             extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
         if _t is not None:
-            if len(conds) > 4:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
-            else:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
+            proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
         else:
-            if len(conds) > 4:
-                mid = len(conds) // 2
-                by_cases1 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid))
-                by_cases2 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid, len(conds)))
-                hs_mid = ", ".join(f"h{i}" for i in range(mid)) + (", " if mid > 0 else "")
-                hs_all = ", ".join(f"h{i}" for i in range(len(conds)))
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases1} simp_all +decide [{hs_mid}{simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]\n  {by_cases2} simp_all +decide [{hs_all}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
-            else:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases} simp_all +decide [{hs}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+            # One split and one `simp_all`; see the same decision and its
+            # measurement in `arm64_proof_gen.py`'s emitter.  A two-phase split
+            # leaves the second `simp_all` a partially-unfolded term whose
+            # unsplit `if` tests exhaust simp's step budget.
+            proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases} simp_all +decide [{hs}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
     # `AP._call_func_lean` rather than a local spelling: this is the sixth copy
     # of this `fun name arg => ...` and it has to be the same function the arm64
     # generator builds, because `eval_eq_mojo` on both sides is the statement

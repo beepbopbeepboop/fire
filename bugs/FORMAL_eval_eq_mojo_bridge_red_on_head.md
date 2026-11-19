@@ -13,6 +13,71 @@ The failures were confirmed not to be caused by the work that touched
 `lib/ProofLib.lean` or on generated text that the change does not emit, and the
 two Lean ones are a program (`bigbody`) with no calls at all.
 
+## Status 2026-11-19 (`work-7663`): four of the five are fixed; `bigbody`'s
+## kernel-memory wall is the machine half, not the bridge
+
+Read the sections below as the original report; this entry corrects item 2's
+attribution and records what landed.
+
+**Fixed, and each was a real defect rather than a stale expectation:**
+
+* item 1 (both `lib/ProofLib.lean` pins). The library gained the second call
+  handler (`evalExpr callFunc callFunc2 …`) after the pins were written, so
+  both regexes now include it: `evalExpr`'s `bnot` arm and `evalExpr_unop`'s
+  `"bnot"` arm, and the signed-comparison count now matches
+  `sKey (evalExpr callFunc callFunc2 l env) …`. The library's arms are right;
+  the pins were reading a signature that no longer exists.
+* item 3b (`TestTheNestedExprRoutes`' recursor fixture). Besides the `env`
+  typing (`Nat` where the hypothesis applies it to a name), the fixture never
+  declared `ev`/`evArgs` at all, so `E.rec` was being applied to unknown
+  identifiers; and its list motive stated the fold at the accumulator `1`, which
+  the `cons` case cannot use. The fixture is now self-contained (it reuses
+  `MUTUAL_DEFS`), the environment is `String -> Nat` as `MojoEnv` is, and the
+  list motive is `∀ acc, …`. `RECURSE_ROUTE` elaborates and the three routes
+  typecheck.
+* item 3a (`[n] = mojo n`). The emitted site now carries the arity-2 handler
+  too, so the needle is `[n] ((fun name arg0 arg1 => 0)) = mojo n` — the
+  argument list AND the handler, not a substring that would also match the old
+  text.
+* item 2's BRIDGE half. The two-phase emission (`by_cases` over half the
+  conditions, `simp_all`, then the rest) is the failure: the mid-proof
+  `simp_all` rewrites a goal whose `mojo`/`_go` are already unfolded but whose
+  remaining `if` tests are still open, and the second pass exhausts simp's step
+  budget (`simp` failed: maximum number of steps exceeded, 4 goals; measured on
+  the isolated `bigbody` bridge with `lib/ProofLib.olean` built). One split and
+  one `simp_all` closes the same bridge in one pass, so both generators emit
+  that. A Lean-free pin (`test_a_many_condition_bridge_is_split_once`) fails on
+  the two-phase text.
+
+**Item 2's remaining half is NOT the universal bridge and NOT the call
+bridge.** With the bridge replaced by `sorry`, the generated file still dies at
+`(kernel) excessive memory consumption detected`, and the machine half alone
+needs more than 7.9 GB at `-M` (the generated-proof budget is 6 144 MB). Three
+real charges were found and removed on the way, all in
+`formal/arm64_proof_gen.py`, with Lean-free pins in the same test:
+
+* the universal emitter's decode lemmas ran to `len(code)` instead of
+  `_exec_code_limit(code)`, emitting 43 lemmas for the interned trap messages
+  (332 vs 289). Each is an `rfl` over the WHOLE code list;
+* every `…_sr_{i}` re-derived its word with `native_decide` even though the
+  file already declares `…_insn_{i}` by `rfl` (289 native compilations and
+  289 full `List.getD` walks removed);
+* `_step_facts`' closed `UInt32` discriminator and the "`BL` past the slice"
+  word read were `native_decide`; they are `decide`/`rfl` now. The `BL` one is
+  written once per CFG PATH, so `bigbody`'s 64 paths asked Lean's native
+  compiler for the same closed decision 320 times. `native_decide` occurrences
+  in the `bigbody` proof: 4 809 → 247.
+
+That cuts the wall but does not close it: the machine proof enumerates all
+2^6 paths of the six independent `if`s, and its 1 156 declarations still exceed
+the 6 GB generated-proof ceiling on their own. The next step is the one the
+earlier `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n` doc ended at -- a
+compositional / contract-shaped machine proof instead of one certificate per
+CFG path -- or a justified raise of a generated proof's `-M`, which is an
+owner decision (`doc/POLICY_memory_over_4gb.md`). Until then `bigbody` cannot
+be the fixture this file checks with `check_proof_cached`, and the named
+command below does not exit 0.
+
 ## The five, grouped by root cause
 
 1. **`lib/ProofLib.lean` no longer has either spelling the test pins.**

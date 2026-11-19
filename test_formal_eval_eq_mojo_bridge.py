@@ -235,12 +235,104 @@ class TestBridgeSimpset(unittest.TestCase):
             "entry would name an unknown constant and the file would not "
             "typecheck")
         n_signed = len(re.findall(
-            r"=> if sKey \(evalExpr callFunc [lr] env\) [<>=≤≥]+ sKey", lib))
+            r"=> if sKey \(evalExpr callFunc callFunc2 [lr] env\) [<>=≤≥]+ sKey",
+            lib))
         self.assertGreater(
             n_signed, 0,
             "`evalExpr` no longer renders a comparison as `sKey l < sKey r`; "
             "the bridge's `sKey` entry has to be re-derived from whatever "
             "replaced it, not left as a token")
+
+    def test_a_many_condition_bridge_is_split_once(self):
+        """`bigbody`'s six argument-dependent conditions: ONE `simp_all`.
+
+        A two-phase emission (`by_cases` over half the conditions, `simp_all`,
+        then the rest) was measured WORSE on exactly this fixture: the
+        mid-proof `simp_all` rewrites a goal whose `mojo`/`_go` are already
+        unfolded but whose remaining `if` tests are still open, and the second
+        pass over that term exhausts simp's step budget (`simp` failed:
+        maximum number of steps exceeded, 4 goals).  The single split closes
+        the bridge in one pass.  This is the Lean-free half of that
+        measurement, so a re-introduced split is reported without a Lean run.
+        """
+        text = _read(self.proofs["bigbody"])
+        tac = _bridge_tactic(text)
+        self.assertIsNotNone(tac, "bigbody emitted no `eval_eq_mojo` bridge")
+        self.assertEqual(
+            tac.count("simp_all"), 1,
+            f"the six-condition bridge has {tac.count('simp_all')} `simp_all` "
+            f"passes, not one; the two-phase split leaves the second pass a "
+            f"partially-unfolded goal and it exhausts simp's budget:\n{tac}")
+
+    def test_step_lemma_facts_are_decided_and_decoded_not_recomputed(self):
+        """Three kernel-memory charges removed from the emitted proof.
+
+        Each is the same shape of waste: a fact the file already has, or a
+        CLOSED word test, paid for again once per instruction/path.
+          * `hinsn` is the `…_insn_{i}` theorem already declared by `rfl`;
+            restating it with `native_decide` makes the kernel re-walk the
+            whole code image once per step lemma.
+          * a `_step_facts` discriminator is a closed `UInt32` test and is
+            `decide`, not `native_decide` (one native compilation per fact,
+            ~23 per branch instruction).
+          * a `BL` past the code slice is a closed word read once the pc is
+            rewritten out, so its `hinsn` is `rfl`, not `native_decide`; the
+            CFG emitter writes one copy per PATH, so `bigbody`'s 64 paths
+            asked the native compiler for the same decision 320 times.
+        """
+        text = _read(self.proofs["bigbody"])
+        self.assertIn(
+            "arm64_read_insn bigbody_code 4294968256 = (2847898621 : UInt32)"
+            " := bigbody_insn_0", text,
+            "`_sr_0` still re-derives its word with `native_decide` instead "
+            "of reading the `bigbody_insn_0` lemma that states it")
+        self.assertIn(
+            "have hw : ((2847898621 : UInt32) &&& 0xffc00000) = 0xa9800000"
+            " := by decide", text,
+            "a closed `_step_facts` discriminator is still a "
+            "`native_decide`, i.e. one native compilation per fact")
+        self.assertNotRegex(
+            text, r"rw \[hpc_\d+\]\n\s+native_decide",
+            "a `BL` past the code slice still asks `native_decide` for a "
+            "closed word read, once per CFG path")
+
+    def test_the_decode_lemmas_stop_at_the_executable_region(self):
+        """No `…_insn_{i}` for an interned string's words.
+
+        `_exec_code_limit` is where the function bodies end and the interned
+        strings begin.  A decode lemma for a data word is an `rfl` over the
+        WHOLE code list, so on an image with 1 220 bytes of trap messages those
+        lemmas are ~40 full kernel walks that no proof reads.  The step lemmas
+        already stop there; the decode lemmas did not.
+        """
+        import formal.arm64_proof_gen as AP
+
+        text = _read(self.proofs["bigbody"])
+        m = re.search(r"def bigbody_code_list : List UInt8 :=\n  \[(.*?)\]",
+                      text, re.DOTALL)
+        self.assertIsNotNone(m, "the proof declares no `bigbody_code_list`")
+        listed = bytes(int(x, 16) for x in
+                       re.findall(r"0x([0-9a-fA-F]{2})", m.group(1)))
+        # The emitted list is `code + [0xc0, 0x03, 0x5f, 0xd6]` (the RET
+        # sentinel `_gen_code_defs` appends); `_exec_code_limit` is asked about
+        # the code WITHOUT it, as every emitter does.
+        self.assertEqual(listed[-4:], b"\xc0\x03\x5f\xd6",
+                         "no appended RET sentinel in `bigbody_code_list`")
+        code = listed[:-4]
+        end = AP._exec_code_limit(code)
+        self.assertLess(end, len(code),
+                        "the fixture interns no string, so this asserts "
+                        "nothing -- it needs a program whose image carries "
+                        "the runtime's diagnostic messages")
+        last = end // 4 - 1
+        self.assertIn(f"theorem bigbody_insn_{last} ", text,
+                      f"the decode lemmas stopped before the executable "
+                      f"region's last word ({last})")
+        self.assertNotIn(
+            f"theorem bigbody_insn_{last + 1} ", text,
+            "a decode lemma is declared for a word PAST `_exec_code_limit`, "
+            "i.e. for an interned string's bytes; each is a full `getD` walk "
+            "the proof never reads")
 
 
 class TestBridgeTypechecks(unittest.TestCase):
@@ -479,11 +571,16 @@ class TestTheBridgeBindsEveryParameter(unittest.TestCase):
                           "the AST does not carry the parameter NAME as a list")
             # The two statement shapes that carry the argument, spelled out
             # rather than pattern-matched across lines: the universal theorem's
-            # `n` and one of the numbered `eval_eq_mojo_<v>` tests. The callFunc
-            # between `evalFunc ast` and the argument wraps over three lines,
-            # so a line-oriented check would be checking the wrong line.
-            for want in ("[n] = mojo n",
-                         "[(UInt64.ofNat 0)] = mojo (UInt64.ofNat 0)"):
+            # `n` and one of the numbered `eval_eq_mojo_<v>` tests. The two
+            # handlers (`callFunc` for unary and `callFunc2` for two-argument
+            # calls) sit between `evalFunc ast` and the argument and wrap over
+            # three lines, so a line-oriented check would be checking the wrong
+            # line; the argument list and the literal `callFunc2` are pinned
+            # together because "the list is passed" and "the arity-2 handler is
+            # passed" are the same call now.
+            for want in ("[n] ((fun name arg0 arg1 => 0)) = mojo n",
+                         "[(UInt64.ofNat 0)] ((fun name arg0 arg1 => 0))"
+                         " = mojo (UInt64.ofNat 0)"):
                 self.assertIn(want, text,
                               f"no `{want}` in the proof: an `evalFunc` site "
                               f"still passes a bare argument where the bridge "
@@ -666,13 +763,13 @@ class TestBitwiseNotIsNotLogicalNot(unittest.TestCase):
         lib = _read(PROOFLIB)
         self.assertRegex(
             lib,
-            r'\| MojoExpr\.unop "bnot" operand => evalExpr callFunc operand env \^\^\^ '
-            r'\(0xFFFFFFFFFFFFFFFF : UInt64\)',
+            r'\| MojoExpr\.unop "bnot" operand => evalExpr callFunc callFunc2 '
+            r'operand env \^\^\^ \(0xFFFFFFFFFFFFFFFF : UInt64\)',
             "`evalExpr` does not evaluate `unop \"bnot\"` as a bitwise "
             "complement; it falls through to the identity arm and the model's "
             "`~n` is `n`")
         self.assertRegex(
-            lib, r'\| "bnot" => evalExpr callFunc operand env \^\^\^ '
+            lib, r'\| "bnot" => evalExpr callFunc callFunc2 operand env \^\^\^ '
                 r'\(0xFFFFFFFFFFFFFFFF : UInt64\)',
             "`evalExpr_unop` does not state `bnot` either, so the congruence "
             "and `evalFunc_eq_mojo_all` chain describes a different function "
@@ -1143,37 +1240,40 @@ NESTED_HEADER = """inductive E where
 """
 
 RFL_PROOFS = """def handler : String -> Nat -> Nat := fun n a => if n = "main" then a else 0
-example : ev handler 0 (.call "main" [.int 1, .int 2]) = 2 := rfl
-example : ev handler 0 (.int 5) = 5 := rfl
-example : ev handler 0 (.call "other" [.int 1, .int 2]) = 0 := rfl
+example : ev handler (fun _ => 0) (.call "main" [.int 1, .int 2]) = 2 := rfl
+example : ev handler (fun _ => 0) (.int 5) = 5 := rfl
+example : ev handler (fun _ => 0) (.call "other" [.int 1, .int 2]) = 0 := rfl
 """
 
 # Route 1, the doc's first choice: a `mutual` block, with the argument fold
 # written as an explicit recursion on `args` so the recursive application is a
-# visible subterm.
-MUTUAL_ROUTE = """mutual
-  def ev (cf : String -> Nat -> Nat) (env : Nat) (e : E) : Nat :=
+# visible subterm.  The environment is a FUNCTION, as `MojoEnv` is
+# (`String → UInt64`): the recursor route below states congruence pointwise
+# (`∀ x, env x = env' x`), which is the hypothesis `evalExpr_congr` carries.
+MUTUAL_DEFS = """mutual
+  def ev (cf : String -> Nat -> Nat) (env : String -> Nat) (e : E) : Nat :=
     match e with
     | .int v => v
-    | .var _ => env
+    | .var n => env n
     | .call n args => cf n (evArgs cf env args 1)
-  def evArgs (cf : String -> Nat -> Nat) (env : Nat) (args : List E) (acc : Nat) : Nat :=
+  def evArgs (cf : String -> Nat -> Nat) (env : String -> Nat) (args : List E) (acc : Nat) : Nat :=
     match args with
     | [] => acc
     | a :: as => evArgs cf env as (acc * ev cf env a)
 end
+"""
 
-""" + RFL_PROOFS
+MUTUAL_ROUTE = MUTUAL_DEFS + "\n" + RFL_PROOFS
 
 # The spelling the doc quotes a "failed to infer structural recursion" error
 # for.  It is here because that error DOES NOT REPRODUCE: the file elaborates,
 # and what it compiles to is a well-founded fixpoint that does not reduce -- so
 # `evalExpr_int` and its 25 siblings lose `rfl` with nothing in the output
 # pointing at the fold.
-FOLDL_ROUTE = """def ev (cf : String -> Nat -> Nat) (env : Nat) (e : E) : Nat :=
+FOLDL_ROUTE = """def ev (cf : String -> Nat -> Nat) (env : String -> Nat) (e : E) : Nat :=
   match e with
   | .int v => v
-  | .var _ => env
+  | .var n => env n
   | .call n args => cf n (args.foldl (fun acc a => acc * ev cf env a) 1)
 
 """ + RFL_PROOFS
@@ -1184,28 +1284,34 @@ INDUCTION_ROUTE = """theorem ev_congr (e1 e2 : E) (h : e1 = e2) : True := by
 """
 
 
-# The recursor route -- which is what `evalExpr_congr`'s proof ACTUALLY uses, so
-# it is a toolchain fact of the same kind as the three above and belongs beside
-# them: `MojoExpr.rec` is the COMBINED recursor, and it asks for a motive for
-# the argument LIST as well as for the node, plus `nil`/`cons` alternatives.
-# A toolchain that made `MojoExpr.rec` take only the node's motive would break
-# the congruence lemma every generated `eval_eq_mojo` reaches, and the error
-# would be an arity mismatch hundreds of lines from `MojoExpr`.
-RECURSE_ROUTE = """theorem ev_congr (cf : String -> Nat -> Nat) (e : E)
-    {env env' : Nat} (h : ∀ x, env x = env' x) : ev cf env e = ev cf env' e := by
+# The recursor route -- the route `evalExpr_congr` used while the AST node was
+# narrow, and a toolchain fact of the same kind as the three above: `E.rec` is
+# the COMBINED recursor, and it asks for a motive for the argument LIST as well
+# as for the node, plus `nil`/`cons` alternatives.  A toolchain that made the
+# recursor take only the node's motive would break any congruence proof in this
+# shape, and the error would be an arity mismatch hundreds of lines from `E`.
+# (The library's `evalExpr_congr` is stated over a pointwise-equal environment
+# and now closes by `funext`; this fixture keeps the recursor route alive as
+# the available alternative, and the `acc`-general list motive is what makes its
+# `cons` case provable rather than an `ih` at the fold's initial accumulator.)
+RECURSE_ROUTE = MUTUAL_DEFS + """
+theorem ev_congr (cf : String -> Nat -> Nat) (e : E)
+    {env env' : String -> Nat} (h : ∀ x, env x = env' x) : ev cf env e = ev cf env' e := by
   refine E.rec
-    (motive_1 := fun e => ∀ {env env' : Nat},
+    (motive_1 := fun e => ∀ {env env' : String -> Nat},
       (∀ x, env x = env' x) -> ev cf env e = ev cf env' e)
-    (motive_2 := fun args => ∀ {env env' : Nat},
-      (∀ x, env x = env' x) -> evArgs cf env args 1 = evArgs cf env' args 1)
-    (fun v env env' _ => rfl)
-    (fun n env env' hh => hh n)
-    (fun n args ih env env' hh => by simp only [ev, ih hh])
-    (fun env env' _ => rfl)
-    (fun hd tl ih1 ih2 env env' hh => by simp only [evArgs, ih1 hh, ih2 hh])
-    e env env' h
+    (motive_2 := fun args => ∀ (acc : Nat) {env env' : String -> Nat},
+      (∀ x, env x = env' x) -> evArgs cf env args acc = evArgs cf env' args acc)
+    (fun v => by intro env env' hh; rfl)
+    (fun n => by intro env env' hh; exact hh n)
+    (fun n args ih => by intro env env' hh; simp only [ev, ih 1 hh])
+    (fun acc => by intro env env' hh; rfl)
+    (fun hd tl ih1 ih2 acc => by
+      intro env env' hh
+      simp only [evArgs, ih1 hh, ih2 (acc * ev cf env' hd) hh])
+    e h
 
-example : ∀ (cf : String -> Nat -> Nat) (env : Nat) (e : E), ev cf env e = ev cf env e :=
+example : ∀ (cf : String -> Nat -> Nat) (env : String -> Nat) (e : E), ev cf env e = ev cf env e :=
   fun _ _ _ => rfl
 """
 
@@ -1282,7 +1388,7 @@ class TestTheNestedExprRoutes(unittest.TestCase):
                          "looking for it:\n" + out)
 
     def test_the_COMBINED_recursor_takes_a_motive_for_the_LIST_too(self):
-        """The route `evalExpr_congr` actually takes, pinned.
+        """The combined-recursor route, pinned as available.
 
         `test_induction_cannot_be_used_on_a_nested_inductive` says `induction`
         is refused; this says what IS available instead, because "the recursor"

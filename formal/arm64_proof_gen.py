@@ -4307,6 +4307,27 @@ def _exec_code_limit(code: bytes) -> int:
     return (max(rets) + 4) if rets else len(code)
 
 
+def _hinsn_tactic(name: str, i: int, pc: int, w: int, decoded: int) -> str:
+    """The `hinsn` line of a step lemma, read from the decode lemma when one exists.
+
+    `{name}_insn_{i}` states exactly this fact (`arm64_read_insn {name}_code
+    {pc} = <w>`) and proves it by `rfl`.  Restating it with `native_decide`
+    asks the kernel's interpreter for that `List.getD` walk over the whole
+    image (code AND the interned strings after it) once per step lemma, and on
+    an image with many step lemmas that is a real charge against Lean's `-M`
+    ceiling: measured on the `bigbody` fixture (289 instructions, 2 377-byte
+    image) it removed 289 native compilations and 289 full image walks and moved
+    the file's memory wall hundreds of lines later (the wall itself is the
+    machine half's 2^6 path certificates, not this).  A site PAST the decode
+    region (an extern call site outside `_exec_code_limit`) has no
+    `…_insn_{i}` to read, so it keeps the computation -- `decoded` is the count
+    `_gen_decode_lemmas` emitted.
+    """
+    proof = f"{name}_insn_{i}" if i < decoded else "by native_decide"
+    return (f"have hinsn : arm64_read_insn {name}_code {pc} = "
+            f"({w} : UInt32) := {proof}")
+
+
 def _gen_decode_lemmas(name: str, code: bytes, base: int,
                        limit: int = None) -> str:
     """Generate per-instruction decode lemmas (each rfl-provable)."""
@@ -5791,17 +5812,28 @@ def _step_facts(w: int, idx: int) -> tuple:
     `_step_rhs` describes.
 
     Returns (facts, fact_names) with `fact_names` naming only what was emitted.
+
+    Each fact is a CLOSED `UInt32` bit/comparison test, and it is proved with
+    `decide`, not `native_decide`: `native_decide` asks Lean's native compiler
+    for every fact, and a branch instruction near the end of the table emits
+    ~23 of them, so a generated proof with 289 step lemmas compiled thousands
+    of tiny shared objects.  On the `bigbody` fixture (measured 2026-11-19)
+    that was 4 809 `native_decide`s in the proof, and this change plus the
+    image-read ones below took it to 247 and moved the file's memory wall
+    hundreds of lines later.  `decide` reduces the same closed proposition
+    without a compiler process.  (The remaining wall is the machine half's
+    2^6 path certificates -- see `bugs/FORMAL_eval_eq_mojo_bridge_red_on_head.md`.)
     """
     facts = []
     for j, (mask, b) in enumerate(_STEP_CONDS):
         lhs = (f"({w} : UInt32) = ({b} : UInt32)" if mask is None
                else f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)")
         if j == idx:
-            facts.append(f"have h{j} : ({lhs}) := by native_decide")
+            facts.append(f"have h{j} : ({lhs}) := by decide")
         elif _cond_matches(mask, b, w):
             continue          # shadowed by an earlier entry; see above
         else:
-            facts.append(f"have h{j} : \u00ac ({lhs}) := by native_decide")
+            facts.append(f"have h{j} : \u00ac ({lhs}) := by decide")
     return facts, ", ".join(f"h{j}" for j in range(len(_STEP_CONDS))
                             if f"have h{j} :" in " ".join(facts))
 
@@ -11390,14 +11422,21 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                       f"{EXIT} {fuel_1} = none := by")
                     A(f"{IND}  -- the `BL` lands past the code slice, where the "
                       f"map answers the tail of the appended terminal `ret`; "
-                      f"`native_decide` needs a CLOSED goal, so the pc "
-                      f"projection is rewritten out first")
+                      f"the pc projection is rewritten out first, and the "
+                      f"remaining goal is a CLOSED `UInt32` computation over "
+                      f"the concrete code map, so `rfl` closes it")
                     A(f"{IND}  have hpc_{bi} : ({call_state}).pc = {entry} "
                       f":= by rfl")
                     A(f"{IND}  have hinsn_{bi} : arm64_read_insn {C} "
                       f"({call_state}).pc = (0x{_none_word:08x} : UInt32) := by")
                     A(f"{IND}    rw [hpc_{bi}]")
-                    A(f"{IND}    native_decide")
+                    # `rfl`, not `native_decide`: this fact is the same per
+                    # call site and the CFG emitter writes one copy per PATH,
+                    # so `bigbody` (64 paths) asked Lean's native compiler for
+                    # the same closed decision 320 times -- part of what took
+                    # that generated proof over its memory ceiling.
+                    # It is `rfl`-provable because both sides are closed.
+                    A(f"{IND}    rfl")
                     A(f"{IND}  have hstep_{bi} : arm64_step {call_state} {C} "
                       f"= none := by")
                     A(f"{IND}    unfold arm64_step")
@@ -13172,6 +13211,9 @@ def _gen_step_lemmas(name: str, code: bytes, base: int,
     """
     plan = _step_result_plan(code, limit)
     end = len(code) if limit is None else limit
+    # `_gen_decode_lemmas` emitted one `…_insn_{i}` per word of this region;
+    # see `_hinsn_tactic` for why the steps read it instead of re-evaluating.
+    decoded = (end - end % 4) // 4
     words = [int.from_bytes(code[i:i + 4], "little")
              for i in range(0, end - end % 4, 4)]
     blocks = []
@@ -13206,8 +13248,7 @@ def _gen_step_lemmas(name: str, code: bytes, base: int,
         _facts, fact_names = _step_facts(w, idx)
         facts.extend(_facts)
         tactics = [
-            f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
-            f":= by native_decide",
+            _hinsn_tactic(name, i, pc, w, decoded),
         ]
         tactics.extend(facts)
         tactics.extend([
@@ -13324,6 +13365,10 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
     blocks = []
     plan = _step_result_plan(code, limit)
     end = len(code) if limit is None else limit
+    # `_gen_decode_lemmas` emits one `…_insn_{i}` per word of exactly this
+    # region, so the step lemmas can read their `hinsn` from it instead of
+    # re-evaluating the image (see `_hinsn_tactic`).
+    decoded = (end - end % 4) // 4
     _words_list = [int.from_bytes(code[i:i + 4], "little")
                    for i in range(0, end - end % 4, 4)]
     word_by_pc = {base + i * 4: w for i, w in enumerate(_words_list)}
@@ -13374,9 +13419,8 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
                 f"theorem {name}_sr_{i} (s : Arm64State) (h : s.pc = {pc})\n"
                 f"    (hx : {hx_type}) :\n"
                 f"  arm64_step s {name}_code = {concl} := by\n"
-                f"  have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
-                f":= by native_decide\n"
-                f"  have hw : (({w} : UInt32) &&& 0xffe0001f) = 0xd4000001 := by native_decide\n"
+                f"  {_hinsn_tactic(name, i, pc, w, decoded)}\n"
+                f"  have hw : (({w} : UInt32) &&& 0xffe0001f) = 0xd4000001 := by decide\n"
                 f"  {_closer}")
             continue
         if idx in _WORK_STEP_BY_IDX:
@@ -13387,13 +13431,13 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
                     pos = _p
                     break
             if len(tests) == 1:
-                _hproof = "by native_decide"
+                _hproof = "by decide"
             elif pos == len(tests) - 1:
-                _hproof = "by native_decide"
+                _hproof = "by decide"
                 for _p in range(len(tests) - 1):
                     _hproof = f"Or.inr ({_hproof})"
             else:
-                _hproof = "Or.inl (by native_decide)"
+                _hproof = "Or.inl (by decide)"
                 for _p in range(pos):
                     _hproof = f"Or.inr ({_hproof})"
             # An ADRP's result depends on the PROGRAM COUNTER, so
@@ -13430,8 +13474,7 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
             blocks.append(
                 f"theorem {name}_sr_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
                 f"  arm64_step s {name}_code = {rhs} := by\n"
-                f"  have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
-                f":= by native_decide\n"
+                f"  {_hinsn_tactic(name, i, pc, w, decoded)}\n"
                 f"  have hw : {_word_test(tests, f'({w} : UInt32)')} := {_hproof}\n"
                 f"  {_closer}")
             continue
@@ -13447,8 +13490,7 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
         _facts, fact_names = _step_facts(w, idx)
         facts.extend(_facts)
         tactics = [
-            f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
-            f":= by native_decide",
+            _hinsn_tactic(name, i, pc, w, decoded),
         ]
         tactics.extend(facts)
         if idx == 30:  # CSET: decide the cond-field select on the literal word
@@ -15503,16 +15545,19 @@ def generate_arm64_proof(prog, code, info) -> str:
             if _t is not None:
                 eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
             else:
-                if len(conds) > 4:
-                    mid = len(conds) // 2
-                    by_cases1 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid))
-                    by_cases2 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid, len(conds)))
-                    hs_mid = ", ".join(f"h{i}" for i in range(mid)) + (", " if mid > 0 else "")
-                    hs_all = ", ".join(f"h{i}" for i in range(len(conds)))
-                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases1} simp_all +decide [{hs_mid}{simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]\n  {by_cases2} simp_all +decide [{hs_all}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
-                else:
-                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases} simp_all +decide [{hs_join}{simp_lems}, " \
-                       f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+                # ONE split, ONE `simp_all`.  A two-phase emission (`by_cases`
+                # over half the conditions, `simp_all`, then the rest) was tried
+                # here and is WORSE on the class it was meant to help: the
+                # mid-proof `simp_all` rewrites a goal that has already had
+                # `mojo`/`_go` unfolded but still carries the unsplit `if`
+                # tests, and the second pass over that term exhausts simp's
+                # step budget.  Measured on the `bigbody` fixture (six
+                # argument-dependent conditions) with `lib/ProofLib.olean`
+                # built, one Lean run each: two-phase -> `simp` failed: maximum
+                # number of steps exceeded (4 goals) at the second `simp_all`;
+                # this text -> the bridge closes in one pass, 0 sorries.
+                eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases} simp_all +decide [{hs_join}{simp_lems}, " \
+                   f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
     else:
         eval_eq_mojo_proof = None
 
@@ -15579,7 +15624,18 @@ def generate_arm64_proof(prog, code, info) -> str:
         raise NotImplementedError(
             "externs declared but no call sites recorded (codegen gap): run test unsupported")
 
-    decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
+    # **The decode lemmas cover the EXECUTABLE region only, not the string
+    # data.**  `_exec_code_limit` is that boundary and its docstring carries the
+    # measurement: the whole `__TEXT` section has every interned string appended
+    # after the last function's `RET`, and a per-word scan to `len(code)` emits
+    # an `…_insn_{i}` for every data word.  Each of those is an `rfl` over the
+    # WHOLE `code_list`, and no proof reads a data word's decode lemma, so they
+    # are pure charge against Lean's `-M` ceiling: measured on the `bigbody`
+    # fixture (six conditions, no calls) 43 of its 332 decode lemmas were for
+    # the two interned trap messages.  The frame and dylib emitters already
+    # pass the limit; this site did not.
+    _code_end = _exec_code_limit(code)
+    decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr, _code_end)
     # **The step lemmas cover the EXECUTABLE region only, not the string data.**
     # `_exec_code_limit` is that boundary and its docstring carries the
     # measurement; it is shared with the frame and dylib emitters so the three
@@ -15589,7 +15645,6 @@ def generate_arm64_proof(prog, code, info) -> str:
     # sit in the helper's general path, which follows the image's last `RET`
     # (the helper's own epilogue). The plan must reach them or the file names
     # a `…_sr_{idx}` it never declared; see `_gen_step_result_lemmas`.
-    _code_end = _exec_code_limit(code)
     step_code = code[:_code_end]
     _sr_plan = _step_result_plan(code, _code_end)
     _sr_extra = [i for i in ((c["addr"] - base_addr) // 4 for c in extern_calls)
