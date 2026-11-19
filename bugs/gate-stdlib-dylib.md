@@ -21,6 +21,57 @@ The job is green on a tree with the `disabled=` argument removed from `tools/sui
 
 The job itself is the integrator's to run (`python3 tools/suite.py stdlib-dylib`); a worker does not run it.
 
+## Status (2026-11-19): part 6 is already on master; the residual skip fix is a dead lane's unlanded commit; doc stays
+
+**Measured, not re-asserted.** Both Done-when quick tests pass on this tree,
+each run under `tools/memslot.py --gb 8`:
+
+    python3 test_stdlib_import_suffix.py   -> PASS (0.1 GB; call symbols + export-record ctypes)
+    python3 test_stdlib_dylib_ratchet.py   -> PASS (0.1 GB; synthetic dylib, names the missing symbol)
+
+**Part 6 is already on master, twice over.** `2a76b8e55` ("land: ADAPT
+bug-gate-stdlib-dylib-3 suffix rule onto master") landed this branch's
+`5b1f033a5` rule — `mojo.middle.types.param_annotation_ctype` plus the three
+readers (`funcs_shared._param_ctype`, `module_loader`'s scan, `reflect._param_mt`)
+and the 209-line `test_stdlib_import_suffix.py`; `ed92614db` landed the
+bracketed `Span *` half. So the 2026-11-17 Status's "next step" (land
+`5b1f033a5`) is done on master, not pending. The parts 8/9 blockers named
+there also landed (`2b992be66` gives same-name free-function overloads their
+own definitions; `30c4597ef` emits cross-module generic free-function
+instances), and `942bc269c` replaced the `nm -u` contract with the
+`dlopen(RTLD_LAZY)` load contract and removed `disabled=` from the job on
+master.
+
+**The one residual this branch cannot finish.** The unexpected-skips fix is
+`56470f49b` on `work/fix-proof-fix-gate-stdlib-dylib` (emit variadic `(...)`
+externs for an overloaded imported function whose export signature has no
+concrete parameters, plus three `EXPECTED_FAILURES` entries). It is NOT on
+master: `git show master:mojo/backend_gimple/emit_infra.py` has no
+`info.get('variadic')` branch, and master's `compile_stdlib.EXPECTED_FAILURES`
+does not name those modules. Its lane is dead: `control.py status` shows it
+`exited-err` after 0 s, and its `work.log` is the provider's "Free usage limit
+reached" error, while its `gate:stdlib-dylib` claim is still registered. Its
+files (`mojo/backend_gimple/emit_infra.py`, `compile_stdlib.py`) are that
+lane's claim, so this round did not edit them.
+
+**Why the doc is not deleted here.** On this base `tools/suite.py:2506` still
+carries `disabled='bugs/gate-stdlib-dylib.md'`; deleting the doc while the
+skips fix is absent makes `tools/suite.py` refuse to load its registry, and
+removing `disabled=` would declare green a job this base cannot pass. On
+master the job is enabled and its current red is a DIFFERENT filing:
+`83b4bccad` re-filed `bugs/gate-stdlib-dylib.md` for the eight stdlib files
+that fail elaboration on `work/bug-codegen-scalar-integer-dtype-represe-4`
+(the `bugs/mid/gate-stdlib-dylib.md` copy is the placeholder). That red
+belongs to that branch's lane, not here.
+
+**Next step.** Land/adapt `56470f49b` on master — keep the variadic-extern
+half, but drop its `std/simd.mojo` `EXPECTED_FAILURES` entry, since master's
+own comment at `compile_stdlib.py:110` records that module as clean since
+2026-11-14 — then run `python3 tools/suite.py stdlib-dylib`; when it is green,
+delete this doc and the `bugs/mid/` placeholder in the same commit and run
+`python3 tools/dangling_doc_refs.py --ratchet`. Both Done-when quick tests
+already pass here.
+
 ## Status (2026-11-17): part 6 is measured complete; the red this doc was re-filed for is the UNEXPECTED-SKIPS class, owned by another lane
 
 **This branch's root cause is fixed and now pinned for all of part 6.** The
