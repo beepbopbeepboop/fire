@@ -27,6 +27,41 @@ CPython's answer. It is one stub class's pin, not the job's substitute.
 `python3 test_selfhost_no_dataclasses_fields_pin.py` and
 `python3 test_selfhost_iter_structdefs_no_nested_gen.py` are the pins for the
 `object`, `_dc_fields` and `_yield_from` stub classes (causes 8-10).
+`python3 test_dump_full_reports_closure_stubs.py` is the pin for the job's
+own verdict: `--dump-full` must report a stub the `.ci` it wrote carries, so
+`reject=CLOSURE_INCOMPLETE` sees it instead of the job passing blind
+(2026-11-19, below).
+
+## Status 2026-11-19 (the job now observes its own artifact; the closure is still unmeasured)
+
+**What landed in this round.** The acceptance's second half ("no
+`unavailable in compiled mode` stub") was not observable in the job that is
+supposed to prove it: `reject=CLOSURE_INCOMPLETE` is a regex over the CHILD'S
+OUTPUT, and `--dump-full` wrote the stubs only into `fire.ci` and printed
+`✓ Generated fire.ci`, exiting 0. `bootstrap-stage1-transitive` could
+therefore pass with every stub present, and the only census was a manual grep
+of a 120 MB artifact. `fire.py`'s `--dump-full` branch now scans the text it
+just wrote (one `in`, not a per-line pass — cause 1 below is the cost of the
+last whole-text scan) and, only when it finds one, prints
+`closure: <name>.ci carries an unavailable in compiled mode stub` to stderr.
+stderr is part of the child's output (`tools/procrun.py` merges it into the
+run transcript), so the existing reject fails the job, with no regex change
+and no new suite registration. Pinned by
+`test_dump_full_reports_closure_stubs.py`, measured red before the change
+(`--dump-full` on a `locals()` fixture printed only `✓ Generated prog.ci`
+while `prog.ci` carried the stub) and green after, and it also asserts a
+clean closure stays quiet so the report cannot become unconditional noise.
+
+**Still open, and it is one measurement.** The ten root causes below are
+fixed with their pins, but the closure itself has not been re-measured since
+those fixes: that needs
+`python3 tools/suite.py bootstrap-stage1-transitive`, which runs the
+whole-closure dump and is the integrator's job, not a light worker's. With
+the report above in place that single run IS the census — a stub makes the
+job red and names the artifact, and stub-freeness is the job's own PASS — so
+the next reading is a verdict rather than a grep. The risk named in the
+2026-11-18 Status stands: a stub thought dead may persist for a different
+reason, and master may have grown a new one.
 
 ## Status 2026-11-18 (ten root causes fixed; the closure is still unmeasured)
 
@@ -276,9 +311,11 @@ reading. The count must be re-measured by
 claimed: a stub thought dead may persist for a different reason, and a new one
 may have appeared on master since the measurement.
 
-The job's `reject=CLOSURE_INCOMPLETE` only reads the child's OUTPUT, and
-`--dump-full` writes the stubs to `fire.ci` (it prints just
-`✓ Generated fire.ci`), so the job can pass with them present. They are
-stage2's and stage3's failure mode (their binaries CALL them), which is
+Until 2026-11-19 this last paragraph said the job's `reject=` only reads the
+child's OUTPUT while `--dump-full` wrote the stubs to `fire.ci` and printed
+just `✓ Generated fire.ci`, so the job could pass with them present. That
+hole is closed: the dump reports a stub it wrote (see the 2026-11-19 Status),
+so the reject now sees stage1's artifact too, the same way it already saw
+stage2/stage3's (their binaries CALL the stubs), which is
 `bugs/hard/GATE_red_recover-land_2026-11-02-part5-part2.md`'s chain.
 
