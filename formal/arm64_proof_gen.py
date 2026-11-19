@@ -6590,30 +6590,56 @@ def _cbz_reg_const(block, words: dict, r: int):
     return known.get(r)
 
 
-def _block_state_defs(S: str, n: int):
-    """The generated composed-state `def`s a block's first `n` steps go through.
-
-    A run's state after step `k` is `{name}_{tag}_qS{k}` and after that step's
-    effect `{name}_{tag}_qT{k}`, each defined in terms of the one before it, so
-    the chain is what has to be unfolded to see any single field — and only the
-    chain up to the step being asked about, because `simp only` over the WHOLE
-    block would flatten the innermost step effect too and leave a goal about the
-    raw record update.
-    """
-    return ([f"{S}_qS{k}" for k in range(n)]
-            + [f"{S}_qT{k}" for k in range(n)])
-
-
-#: The two record helpers a composed `qT` body can put BETWEEN the state and the
+#: The record helpers a composed `qT` body can put BETWEEN the state and the
 #: field being asked about: a step's effect is often `{ (arm64_set_reg 31 …) with
 #: nzcv := … }`, and `arm64_set_reg 31` is the identity only because the `match`
 #: is reduced.  Unfolding them is textual, so it costs what a rewrite costs.
 _STATE_HELPERS = ["arm64_reg", "arm64_set_reg"]
 
 
-def _block_state_unfold(S: str, n: int):
-    """`_block_state_defs` plus the record helpers, for a `simp only [...]`."""
-    return _STATE_HELPERS + _block_state_defs(S, n)
+def _pc_fact_defs(S: str, k: int, pc_writes) -> list:
+    """The composed-state `def`s one `hpc{k}` side condition has to unfold.
+
+    ONLY the state the fact is about, plus the step whose effect produced it
+    when that step moved the pc — `qS{k}` is then DEFINED as `qT{k-1} st`, so
+    the pc is inside `qT{k-1}`'s body rather than in the successor's own
+    `with pc := …`.  Unfolding the whole history (`qS0 … qS{k}` and
+    `qT0 … qT{k-1}`) is not a bigger proof of the same fact: every extra
+    `qT` is a whole composed record whose fields the goal never reads, and a
+    block long enough to reach the proof's memory ceiling fails on it.  The
+    kernel counts those terms even when `simp` does not reduce them.
+    """
+    names = [f"{S}_qS{k}"]
+    if k > 0 and pc_writes[k - 1]:
+        names.append(f"{S}_qT{k - 1}")
+    return names
+
+
+def _seq_fact_defs(S: str, k: int) -> list:
+    """The defs `runs_cons_seq`'s `hseq` needs for step `k`.
+
+    `hseq` is `(qT{k} st).pc = (qS{k} st).pc`.  `qT{k}`'s body can put the
+    register write inside an `arm64_set_reg` application, so the helper is
+    needed to reach the `pc` field; nothing earlier in the chain is, because
+    the projection is syntactic once the step's own body is unfolded.  The
+    FIRST step is the one case that also needs `qS0`: its body is the literal
+    `st`, so the unfolded goal is `(qS0 st).pc = st.pc` and the successor's
+    name has to be unfolded too.
+    """
+    names = [f"{S}_qT{k}", "arm64_set_reg"]
+    if k == 0:
+        names.insert(0, f"{S}_qS0")
+    return names
+
+
+def _jump_fact_defs(S: str, k: int) -> list:
+    """The defs a `show (qT{k} st).pc = …` needs for a jump step.
+
+    `qT{k}` is the step's own effect: a `RET` states `pc := (qS{k} st).x30.toNat`
+    and a branch states its target, so the body of that one `def` is the whole
+    proof and its predecessor's state must stay folded.
+    """
+    return [f"{S}_qT{k}"]
 
 
 def _state_proof(names, paren: bool = False):
@@ -6667,7 +6693,7 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
         if k + 1 < m:
             A(f"have hS{k + 1} : arm64_reg {r} ({S}_qS{k + 1} {st}) = "
               f"arm64_reg {r} ({S}_qT{k} {st}) := "
-              + _state_proof(_block_state_unfold(S, k + 2)))
+              + _state_proof([f"{S}_qS{k + 1}", "arm64_reg"]))
         if wr is not None and r in wr and rhs is not None:
             expr = _written_expr(rhs, r)
             if expr is not None:
@@ -6683,7 +6709,7 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
         A(f"  simp only [{S}_qT{k}, arm64_reg, arm64_set_reg]")
     if wpos is None:
         A(f"have hS0 : arm64_reg {r} ({S}_qS0 {st}) = arm64_reg {r} {st} := "
-          + _state_proof(_STATE_HELPERS + [f"{S}_qS0"]))
+          + _state_proof([f"{S}_qS0", "arm64_reg"]))
         chain = "hT0.trans hS0"
         for k in range(1, m):
             chain = f"hT{k}.trans (hS{k}.trans ({chain}))"
@@ -6820,13 +6846,15 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     #
     # `hpc{k}` is the side condition `runs_cons_seq`/`runs_cons_jump` wants, and
     # it is stated over the COMPOSED state, so it is discharged by unfolding the
-    # block's own `def`s rather than by `rfl` — see `_state_proof` for the
-    # reduction `rfl` asks for and why it is not free.  Each `k` unfolds only
-    # the chain up to itself, which is all its own projection needs.
-    defs_unfold = _block_state_unfold(S, m)
+    # `def` that exposes its `pc` rather than by `rfl` — see `_state_proof` for
+    # the reduction `rfl` asks for and why it is not free.  `_pc_fact_defs`
+    # names exactly that one def (plus the step's own effect when the pc was
+    # written there); unfolding the earlier chain adds records the projection
+    # never reads and is what pushed a proof over Lean's kernel memory ceiling.
+    ret_pc_defs = _jump_fact_defs(S, m - 1)
 
     def _pc_proof(k):
-        proof = _state_proof(_block_state_unfold(S, k + 1))
+        proof = _state_proof(_pc_fact_defs(S, k, pc_writes))
         # A jump step's `qS{k}` is its predecessor's post-step state, whose
         # `pc` is `(qS{k-1}).pc + 4`; `simp` exposes the arithmetic but does
         # not decide it, and `hpc{k-1}` is in context.
@@ -6870,7 +6898,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                 f"  have h16_{k} : arm64_reg 16 ({S}_qS{k} st) = {final} := by\n"
                 f"    have hq : arm64_reg 16 ({S}_qS{k} st) = "
                 f"arm64_reg 16 ({S}_qT{k - 1} st) := "
-                f"{_state_proof(_block_state_unfold(S, k + 1))}\n"
+                f"{_state_proof([f'{S}_qS{k}', 'arm64_reg'])}\n"
                 f"    rw [hq]\n"
                 + "\n".join("    " + line for line in chain))
             hx_facts.append(
@@ -6944,7 +6972,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                   f"(by simp only [{S}_qT0]; omega)]")
             else:
                 A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
-                  f"(by first | (simp only [{S}_qT0, {S}_qS0] <;> done) | rfl),")
+                  f"{_state_proof(_seq_fact_defs(S, 0), paren=True)},")
                 A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
@@ -6959,7 +6987,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             else:
                 A(f"  rw [runs_cons_seq ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
                   f"{code_name} 0 hs{k - 1} "
-                  f"{_state_proof(_block_state_unfold(S, k), paren=True)},")
+                  f"{_state_proof(_seq_fact_defs(S, k - 1), paren=True)},")
                 A(f"      show ({S}_qS{k - 1} st).pc + 4 = {run_pcs[k]} "
                   f"from by rw [hpc{k - 1}]]")
             A(f"  exact runs_zero {code_name} ({S}_qS{k} st)")
@@ -6997,7 +7025,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             if last_is_ret:
                 A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0")
                 A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat "
-                  f"from {_state_proof(_block_state_unfold(S, 1))}]; exact hjump)]")
+                  f"from {_state_proof(_jump_fact_defs(S, 0))}]; exact hjump)]")
             else:
                 A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0 "
                   f"(by simp only [{S}_qT0]; omega)]")
@@ -7017,13 +7045,14 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
               f"{code_name} 0 hs{m - 1}")
             if last_is_ret:
                 A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat "
-                  f"from {_state_proof(defs_unfold)}]; exact hjump)]")
+                  f"from {_state_proof(ret_pc_defs)}]; exact hjump)]")
             else:
                 A(f"      (by simp only [{S}_qT{m - 1}]; omega)]")
             A(f"  exact runs_zero {code_name} ({S}_qT{m - 1} st)")
         else:
             A(f"  rw [runs_cons_seq ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
-              f"{code_name} 0 hs{m - 1} {_state_proof(defs_unfold, paren=True)},")
+              f"{code_name} 0 hs{m - 1} "
+              f"{_state_proof(_seq_fact_defs(S, m - 1), paren=True)},")
             A(f"      show ({S}_qS{m - 1} st).pc + 4 = {run_pcs[-1] + 4} "
               f"from by rw [hpc{m - 1}]]")
             A(f"  exact runs_zero {code_name} "
@@ -10021,7 +10050,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # into every generated proof's kernel working set: the whnf timeout at
     # `print1_b4_self1` and the excessive-memory in `mod_proof`'s b6/b7 chain
     # (b7 is the helper's `fr_copy1` byte-copy loop) are those certificates
-    # (`bugs/FORMAL_call_proofgen_red_on_head.md`, 2026-10-31).  The
+    # (measured in the 2026-10-31 call-proofgen red run).  The
     # loop now skips them to the placeholder, and the loop-discovery passes
     # below skip them the same way, so the helper's own loops can no longer
     # shadow a real one (the `sum_range` symptom in the same doc).
@@ -15440,6 +15469,19 @@ def generate_arm64_proof(prog, code, info) -> str:
         # deepif, elif3, ifonly, ifonly2, ifparam, twoifs).  The x86-64
         # generator has had `sKey` in this set for the same reason.
         simp_lems = f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
+        # A call to another function of this image evaluates through
+        # `evalExpr`'s `MojoExpr.call` arm as `callFunc name (evalArgs …)`, and
+        # `evalArgs` is not one of the defs the first `simp only` unfolds.  A
+        # straight-line entry that CALLS therefore left the call's argument
+        # packed in an `evalArgs` application that `simp` had no rule for, and
+        # the universal `eval_eq_mojo` was unprovable -- measured on
+        # `SAME_IMAGE_CALL["same_image_leaf"]`:
+        # `⊢ leaf_go (evalArgs …) = leaf_go n`.  Added only for a body that
+        # makes a call, so a program with none keeps its byte-identical proof.
+        # The three builtins have their own `evalExpr` arms and no `evalArgs`.
+        if any(_call_name(c) not in ("len", "str_len", "strlen")
+               for c in _calls_in(fn)):
+            simp_lems += ", evalArgs"
         if len(conds) == 0:
             eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  simp +decide [{hs_join}{simp_lems}]"
         else:
