@@ -28,6 +28,7 @@ from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to, eval_const_int)
+from mojo.middle.comptime_fn import resolve_struct_aliases
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
 
@@ -3858,7 +3859,6 @@ class Elaborator:
         # _uint_type_of_width[bit_width_of[Self.dtype]()]()`) takes its value here, so the fields
         # typed with it name the concrete dtype rather than staying erased. Done once on the
         # template so the instance object, its signature and its cache key all see the same text.
-        from mojo.middle.comptime_fn import resolve_struct_aliases
         tmpl = resolve_struct_aliases(tmpl, targs, module_src)
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
