@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_scalar_integer_dtype_representation-part1, CODEGEN_scalar_integer_dtype_representation-part2 (part3 fixed and deleted)
+SPLIT: CODEGEN_scalar_integer_dtype_representation-part1, CODEGEN_scalar_integer_dtype_representation-part2 (part2 fixed and deleted 2026-11-19; part3 fixed and deleted)
 
 # CODEGEN: integer `Scalar[DType.*]` lowers to a 64-bit word
 
