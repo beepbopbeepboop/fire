@@ -32,26 +32,11 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
-    # A point-in-time record, not a claim: this land doc quotes a `git status`
-    # listing of its worktree, and the file names in that listing were real
-    # files when the snapshot was taken and are gone now. Rewording them would
-    # falsify the record, so the citation is deliberate. (The names are not
-    # spelled here on purpose: the count moves as the record is appended to,
-    # and `--write-baseline` rewrites this file, so a comment that names them
-    # would be lost on the next regeneration.)
-    # Raised 5 -> 6 and the erase-3 entry added when
-    # CODEGEN_simd_and_array_values_erase_to_int64.md was retired on 2026-11-16:
-    # both docs are historical LANDING RECORDS that legitimately name the doc
-    # they merged, so the citation is deliberate, not a dangling pointer.
-    # Historical LANDING RECORD: names the part8-2 doc it attempted to land,
-    # which is not in the tree. Raised rather than rewound.
-    'bugs/LAND-gpu-offload-validation-modular-3.md': 1,
-    # Historical LANDING RECORD naming a part doc that is not in the tree.
-    'bugs/LAND-formal-arm64-instruction-covera.md': 1,
-    'bugs/mid/LAND-codegen-simd-and-array-values-erase-3.md': 1,
+    'bugs/gate-bootstrap-stage2-cc.md': 2,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 1,
+    'bugs/mid/LAND-codegen-simd-and-array-values-erase-3.md': 1,
     'build_stdlib_dylib.py': 1,
     'consolidate_string_pool.py': 1,
     'doc/ABI.md': 7,
@@ -62,7 +47,7 @@ BASELINE = {
     'fire_compiler.py': 1,
     'formal/admitted.py': 1,
     'formal/arm64_codegen.py': 4,
-    'formal/arm64_proof_gen.py': 8,
+    'formal/arm64_proof_gen.py': 7,
     'formal/build.py': 19,
     'formal/dataclass_transform.py': 6,
     'formal/imports.py': 21,
@@ -98,7 +83,7 @@ BASELINE = {
     'test_formal.py': 1,
     'test_formal_admitted.py': 1,
     'test_formal_bracketed_method_field_set.py': 1,
-    'test_formal_call_proof_gen.py': 20,
+    'test_formal_call_proof_gen.py': 18,
     'test_formal_closures.py': 1,
     'test_formal_container_methods.py': 2,
     'test_formal_core_hostmods.py': 2,
@@ -158,12 +143,6 @@ BASELINE = {
     'test_silent_noop_iter.py': 1,
     'test_string_literal_lexing.py': 2,
     'test_struct_formal.py': 1,
-    # 13 -> 14 on 2026-11-17: `an expect marker points at a doc that exists`
-    # gained one negative-control citation (`bugs/NO_SUCH_DOC.md`, one use site
-    # via a local), because removing `formal-dylib`'s marker left the survey
-    # with no live citation and the check pinned its READER synthetically
-    # instead. Deliberate, and the same class as the `NEVER_WRITTEN.md` /
-    # `SOME.md` fixtures the header names.
     'test_suite.py': 14,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/dangling_doc_refs.py': 1,
@@ -207,10 +186,6 @@ BASELINE = {
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
-    # Synthetic fixture, not a citation: test_swarm_replan writes a throwaway
-    # `hard/Xcase.md` into its own temp dir and asserts SPLIT parsing on it, so
-    # the string is test data. Added when c2be80506 introduced the fixture.
-    'tools/test_swarm_replan.py': 1,
     'fire.py': 1,
     'formal/arm64_codegen.py': 1,
     'formal/arm64_proof_gen.py': 1,
@@ -257,4 +232,5 @@ BARE_BASELINE = {
     'tools/test_orch_review.py': 1,
     'tools/test_swarm_class_refresh.py': 3,
     'tools/test_swarm_feed.py': 6,
+    'tools/test_swarm_replan.py': 1,
 }

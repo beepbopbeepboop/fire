@@ -4548,6 +4548,19 @@ test('reg-gate-rthdrscan', [PY, 'test_gate_rthdrscan.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-gimple-function-scoped-alias-extern', [PY, 'test_gimple_function_scoped_alias_extern.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-gimple-function-scoped-import-extern', [PY, 'test_gimple_function_scoped_import_extern.py'], mem='tiny',
+     desc='function-scoped non-aliased import in a class method: the import-extern '
+          'preamble (post scope-pop) must mangle the same symbol the call site uses '
+          '(bootstrap-stage2-cc, module_loader.ModuleLoader._mojo_type_to_c)')
+test('reg-gimple-imported-container-global-field', [PY, 'test_gimple_imported_container_global_field.py'], mem='tiny',
+     desc='module-attribute import of a container global (X = N.X, owner pass '
+          'started but not scanned): the mirror field must keep the owner\'s '
+          'boxed int64_t spelling, not the raw semantic pointer '
+          '(bootstrap-stage2-cc, fire_compiler/ownership_check _COMPTIME_TYPE_FUNCS)')
+test('reg-gimple-set-op-boxed-operand-ptr', [PY, 'test_gimple_set_op_boxed_operand_ptr.py'], mem='tiny',
+     desc='set op over a dict-items loop local (kinds - {None}): the boxed-operand '
+          'arm must not unbox a pointer word as a double via mojo_box_double '
+          '(bootstrap-stage2-cc, coro._scan_callsite_param_kinds)')
 test('reg-inferred-param-dependency-diagnostic', [PY, 'test_inferred_param_dependency_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-inferred-where-clause-diagnostic', [PY, 'test_inferred_where_clause_diagnostic.py'], mem='tiny',
