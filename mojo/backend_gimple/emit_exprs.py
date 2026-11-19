@@ -4800,6 +4800,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # below renders it by its run-time kind (`mojo_cstr_or_int_str`). Unboxing it
     # to a double here made `_f + '@'` (a path from `_files: list`) a
     # `double + char *` gcc error in the self-hosted fire.ci.
+    # A boxed word whose RECORDED kind is a pointer is the pointer itself,
+    # not a float box: a dict-items value slot is read BOXED (the slot's
+    # kind is a runtime fact, `mojo_list_get_boxed`), but a slot that stores
+    # a container pointer hands back the raw pointer word, and
+    # `mojo_box_double` would read those bits as IEEE-754. The set-op in
+    # coro.py's _scan_callsite_param_kinds (`kinds - {None}` over the
+    # set-typed `kinds` loop local) then emitted `_t = mojo_box_double
+    # (kinds); _t2 = (MojoSet *)_t;` and gcc refused the double->pointer
+    # conversion (bootstrap-stage2-cc, `invalid types in conversion to
+    # integer` at coro.py:6387). Keeping the word is lossless:
+    # `mojo_box_double` of a NON-box answers `(double)v` anyway, so an
+    # arithmetic consumer computes the same number, and the container-kind
+    # resolution below (`_resolve_container_kind`) recovers the pointer kind
+    # from `_actual_types` and casts where the operator needs it. A genuine
+    # double slot records no pointer kind and still unboxes. (Not a nested
+    # helper on purpose: the self-hosted backend erases a closure's `gen`
+    # capture to int64_t — see `_lb_as_set`'s docstring.)
+    _lv_ptr_kind = _as_str(gen._get_actual_type(lt, lv)).endswith(' *') \
+        if lv in getattr(gen, '_boxed_vals', ()) else False
     if lv in getattr(gen, '_boxed_vals', ()) and rt == 'char *' and op == '+':
         gen._dyn_word_vals.add(lv)
     elif lv in getattr(gen, '_boxed_vals', ()):
@@ -4811,9 +4830,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         elif lv in _tagged and rt not in ('double', 'float'):
             lv = gen._rt_call('int64_t', 'mojo_box_int', [f"{lv}"])
             lt = 'int64_t'
-        else:
+        elif not _lv_ptr_kind:
             lv = gen._rt_call('double', 'mojo_box_double', [f"{lv}"])
             lt = 'double'
+    _rv_ptr_kind = _as_str(gen._get_actual_type(rt, rv)).endswith(' *') \
+        if rv in getattr(gen, '_boxed_vals', ()) else False
     if rv in getattr(gen, '_boxed_vals', ()) and lt == 'char *' and op == '+':
         gen._dyn_word_vals.add(rv)
     elif rv in getattr(gen, '_boxed_vals', ()):
@@ -4825,7 +4846,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         elif rv in _tagged and lt not in ('double', 'float'):
             rv = gen._rt_call('int64_t', 'mojo_box_int', [f"{rv}"])
             rt = 'int64_t'
-        else:
+        elif not _rv_ptr_kind:
             rv = gen._rt_call('double', 'mojo_box_double', [f"{rv}"])
             rt = 'double'
 
