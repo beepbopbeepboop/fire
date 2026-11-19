@@ -2008,20 +2008,23 @@ _CAST_SCALAR_CTYPES = frozenset({
     '_Bool', 'int8_t', 'int16_t', 'int32_t', 'uint8_t', 'uint16_t',
     'uint32_t', 'uint64_t', 'float', 'double', '__fp16'})
 
-_DTYPE_CAST_CTYPES = {
-    'bool': '_Bool', 'int8': 'int8_t', 'int16': 'int16_t', 'int32': 'int32_t',
-    'int64': 'int64_t', 'uint8': 'uint8_t', 'uint16': 'uint16_t',
-    'uint32': 'uint32_t', 'uint64': 'uint64_t', 'float16': '__fp16',
-    'float32': 'float', 'float64': 'double', 'index': 'int64_t',
-    'uindex': 'uint64_t',
-}
+#: The C types a `bitcast[...]` / `SIMD[...](from_bits=)` target may name: the
+#: real float scalars. An integer target stays the int64_t word (the bits are
+#: read through that word), and float8/float16 are not bitcast targets.
+_FLOAT_BITCAST_CTYPES = frozenset({'float', 'double'})
 
 
 def _float_dtype_arg_ctype(e):
     """The C float type named by a dtype bracket argument, in any of its
     spellings — `DType.float32`, the dot-relative `.float32`, or the scalar
     name `Float32` an elaborated instantiation substitutes for a dtype
-    parameter — or None when it is not a float dtype."""
+    parameter — or None when it is not a float dtype.
+
+    FLOAT-only on purpose: this feeds `bitcast[...]` and
+    `SIMD[...](from_bits=)`, where an integer target is still the `int64_t`
+    word and a float8/float16 target has no bit pattern this codegen can
+    reinterpret. The shared resolver answers the integer dtypes too; this
+    filters its answer to the real float C types."""
     if isinstance(e, gimple_ctypes.DottedLiteral):
         key = _as_str(e.path)
     elif (isinstance(e, gimple_ctypes.MemberExpr)
@@ -2032,7 +2035,10 @@ def _float_dtype_arg_ctype(e):
         key = _as_str(e.name)
     else:
         return None
-    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(key)
+    ctype = gimple_ctypes._dtype_token_ctype(key)
+    if ctype in _FLOAT_BITCAST_CTYPES:
+        return ctype
+    return None
 
 
 def _lower_bitcast_call(gen, node):
@@ -2106,10 +2112,7 @@ def _dtype_cast_ctype(e):
         s = _as_str(e.member)
     else:
         return None
-    _f8 = _float8_dtype.float8_ctype(s)
-    if _f8 is not None:
-        return _f8
-    return _DTYPE_CAST_CTYPES.get(s)
+    return gimple_ctypes._dtype_token_ctype(s)
 
 
 def _comptime_conforms_to_pred(gen):
@@ -4098,18 +4101,10 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
             if _w is not None:
                 _simd_width.reject_invalid_width(_w, _dtype_arg_name(_idxs[0]))
         _dt_ctype = _dtype_cast_ctype(_idxs[0]) if _idxs else None
-        # Fallback: resolve a bare/spelled dtype name to its C type.
-        if _dt_ctype is None and _idxs:
-            try:
-                _dt_name = gen._type_expr_to_ann(_idxs[0]) if hasattr(gen, '_type_expr_to_ann') else None
-                if _dt_name:
-                    _dt_ctype = _DTYPE_CAST_CTYPES.get(str(_dt_name).replace('DType.', '').lstrip('.'))
-            except Exception:
-                _dt_ctype = None
-        # The SCALAR TYPE NAME spelling (`SIMD[Float32, 4](1.5)`): the table
-        # above is keyed by the lowercase dtype spelling, and
-        # `_dtype_cast_ctype` only reads `DType.x`/`.x`. The shared resolver
-        # normalises every spelling to the one float table.
+        # The SCALAR TYPE NAME spelling (`SIMD[Float32, 4](1.5)`): the shared
+        # resolver normalises every spelling to the one dtype table. A
+        # `_dtype_cast_ctype` miss is a `DType.x`/`.x` shape this arm does not
+        # know, so this widening pass is the second and last lookup.
         if _dt_ctype is None and _idxs:
             try:
                 _dt_name = gen._type_expr_to_ann(_idxs[0]) if hasattr(gen, '_type_expr_to_ann') else None
@@ -4128,9 +4123,11 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
                 if _cv:
                     _dt_ctype = gimple_ctypes._dtype_token_ctype(
                         _cv.get(_as_str(_e0.name)))
-        if (_dt_ctype in ('float', 'double', '__fp16')
+        if (_dt_ctype in _CAST_SCALAR_CTYPES
                 or _float8_dtype.float8_spelling_of_ctype(_dt_ctype) is not None):
-            # A float8 dtype's private C type arrives here from
+            # Any scalar C type the dtype table answers is the constructor's
+            # target: a `Scalar[DType.uint8](250)` is a `uint8_t`, not the
+            # erased word. A float8 dtype's private C type arrives here from
             # `_dtype_token_ctype`; a conversion INTO the dtype is allowed,
             # and the two uses with no rule are refused at the coercion
             # and binary-operation chokepoints (mojo.middle.float8_dtype).
@@ -14072,8 +14069,14 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # the pointer helper below and emitted `_mojo_at_int64_t (double_value, i)`
     # (invalid C: expected `int64_t *`, have `double`) — the regression that
     # made test_simd/test_math fail to compile once a float SIMD constructor
-    # started producing its scalar C type (2026-11-12).
-    if ot in ('float', 'double', '__fp16'):
+    # started producing its scalar C type (2026-11-12). The same failure came
+    # back for integer dtypes once `_dtype_token_ctype` answered them
+    # (`_swisstable`'s `ctrl[i]` over `SIMD[.uint8, GROUP_WIDTH]`), which is
+    # why this reads the dtype table's C types rather than a float tuple.
+    # `int64_t` and `_Bool` are already handled just above (their own
+    # word/boxed-list arms), so they are not re-routed here.
+    if (ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
+            and ot not in ('int64_t', '_Bool')):
         return ot, ov
     # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
     et = gimple_ctypes._elem_type(ot)
