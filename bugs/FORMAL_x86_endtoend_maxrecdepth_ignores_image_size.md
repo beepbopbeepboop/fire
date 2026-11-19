@@ -56,10 +56,11 @@ Raising the option in the generated files:
     call_both_arms:  set_option maxRecDepth 1000  →  4000
     elif_call:       set_option maxRecDepth 1000  →  4000
 
-removes the ceiling error and BOTH cascades in each file. What remains in
-each is the `imul` error pair documented in
-`FORMAL_x86_endtoend_abs_step_imul_modrm_second_opcode.md` (measured: after
-the raise, each file fails only on its `x86_imul_ovf` goals).
+removes the ceiling error and BOTH cascades in each file.  What had been the
+only other error in each — the `imul` pair, the walk reading its ModRM from
+the second opcode byte and writing the wrong register — is fixed by the
+2026-11-19 walk correction (`_abs_step` now decodes `raw[3]`, matching
+`_resolve`); with both, the examples have no remaining error.
 
 ## What the emitter has to change
 

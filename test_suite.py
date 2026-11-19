@@ -1314,7 +1314,15 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # the fixed mojo_repr_bool spelling) all 39 cases pass and the marker is
     # gone, so a census still stating it would fail on the registry's own
     # state.
-                     'formal-x86-endtoend': 13,
+                     # The 2026-11-19 `imul` walk correction took five of the
+                     # nine off the failure list (annot_params, call_helper,
+                     # chain, localmul, mixed_width now fork and prove), so
+                     # the checked count moves 13 -> 8; the remaining eight
+                     # are the four examples that overlay a sibling bug
+                     # (multi_export, pair / call_both_arms, elif_call), the
+                     # `group3:not` hmem lie (unary_ops) and the three memory
+                     # ceilings.
+                     'formal-x86-endtoend': 8,
 # NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
                      # is in this census any more, and that is the union of the two
                      # sides of the 2026-10-17 merge, each of which dropped one of

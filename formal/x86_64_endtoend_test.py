@@ -2002,6 +2002,48 @@ def _abs_step(prev, form, raw, addr, length):
             st.put(dst, _u64(b | 0xFFFFFFFFFFFFFF00) if b & 0x80 else b)
         return st
 
+    if form == "imul_r64_r64":
+        # `REX 0F AF /r`: FOUR bytes with the two-byte escape in the middle, so
+        # the ModRM is `raw[3]` and not `raw[2]` — the same off-by-one
+        # `_resolve`'s own branch for this form records, and reading `raw[2]`
+        # here would take the `0xAF` second opcode for a ModRM.  Measured on
+        # `49 0f af c3` (`imul rax, r11`) that read reg/rm = 5/7, extended both
+        # by the REX to 13/15, and wrote `rbp <- rbp * r15` while leaving `rax`
+        # alone; the flags it computed from those operands then DECIDED the
+        # overflow guard, which a multiply by the theorem's quantified input
+        # must leave undecided.  The walk and the model have to read the same
+        # byte or the emitted `hval` fact states a register write the machine
+        # does not make.
+        #
+        # Four flags, not none: `e54d2f4e` corrected the model's `imul` arm,
+        # which had been setting no flags at all, and this walk had followed it
+        # here.  A walk that does not track them cannot DECIDE a `jcc` after an
+        # `imul`, and the flags are cheap arithmetic on a product it already
+        # computes.
+        #
+        # CF and OF are `x86_imul_ovf`: the 128-bit SIGNED product against the
+        # 64-bit signed range, which is NOT `res != sext64(res)`.  This arm
+        # carried the model's own wrong version for one commit, so the rule is
+        # spelled out rather than abbreviated: `_imul_ovf` is transcribed from
+        # `lib/X86.lean`'s definition and is the only place in this file that
+        # answers the question.
+        rex = raw[0] if raw[0] & 0xF0 == 0x40 else 0
+        modrm = raw[3]
+        reg, rm = (modrm >> 3) & 7, modrm & 7
+        dst = reg + (8 if rex & 4 else 0)
+        src = rm + (8 if rex & 1 else 0)
+        a, b = st.get(dst), st.get(src)
+        if a is None or b is None:
+            st.put(dst, None)
+            st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
+            return st
+        res = _u64(a * b)
+        ovf = _imul_ovf(a, b)
+        st.put(dst, res)
+        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
+                        cf=ovf, of_=ovf)
+        return st
+
     if len(raw) < 3:
         # A form with no ModRM byte that is not handled above. Wiping rather than
         # raising is the point: `_abs_step` runs inside the TREE walk, so an
@@ -2198,30 +2240,6 @@ def _abs_step(prev, form, raw, addr, length):
         of_ = (n == 1 and ((_msb(a) != _msb(res)) if op == "shl"
                            else (_msb(a) if op == "shr" else False)))
         st.set_flags(res == 0, _msb(res), cf, of_)
-        return st
-    if form == "imul_r64_r64":
-        # Four flags, not none: `e54d2f4e` corrected the model's `imul` arm,
-        # which had been setting no flags at all, and this walk had followed it
-        # here.  A walk that does not track them cannot DECIDE a `jcc` after an
-        # `imul`, and the flags are cheap arithmetic on a product it already
-        # computes.
-        #
-        # CF and OF are `x86_imul_ovf`: the 128-bit SIGNED product against the
-        # 64-bit signed range, which is NOT `res != sext64(res)`.  This arm
-        # carried the model's own wrong version for one commit, so the rule is
-        # spelled out rather than abbreviated: `_imul_ovf` is transcribed from
-        # `lib/X86.lean`'s definition and is the only place in this file that
-        # answers the question.
-        a, b = st.get(dst), st.get(src)
-        if a is None or b is None:
-            st.put(dst, None)
-            st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
-            return st
-        res = _u64(a * b)
-        ovf = _imul_ovf(a, b)
-        st.put(dst, res)
-        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
-                        cf=ovf, of_=ovf)
         return st
     if form == "setcc":
         # The NARROW write, matching `x86_set_reg_narrow` rather than the whole
