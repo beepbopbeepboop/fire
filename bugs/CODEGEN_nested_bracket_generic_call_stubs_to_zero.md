@@ -94,3 +94,33 @@ own gaps. Reverted; the rendering is the right direction but needs those gaps cl
    `_amdgpu`); close them one at a time. Measure after each with the DType/string probe above.
 4. Tighten `test_concrete_unrenderable_type_arg_is_not_refused` to assert `121` once step 3 lands,
    then delete this doc in the same commit (and run `tools/dangling_doc_refs.py --ratchet`).
+
+## Status (2026-11-19) — step 3 measured again; the rendering is correct, three callee gaps block it
+
+Rendering `StringLiteral` (`repr(value)`, non-bytes) and `DottedLiteral` (`'.' + path`) in
+`resolve_shared._type_expr_to_ann` makes the probe (`ident[.uint32]` + `tag["abc"]` inside
+`wrap[1]`, expected `15 + 105 + 1 = 121`) print `121` (was `1`). Not landed: with it,
+`compile_stdlib.py` goes from 0 to **2 unexpected** failures (608 passed), and one more shape runs away:
+
+1. `test/builtin/test_sort_issue_1018.mojo`: `_sort_test[.int8, "int8"]` is now elaborated and its
+   body calls `sort(p)` with **no import** (it is a prelude name, `std/prelude/__init__.mojo:127`).
+   The call lowers to a bare `_sort`: undefined at link time, and `gcc -c failed` under
+   `compile_stdlib`. A plain `main` calling `sort(p)` with no import fails the same way, so this is
+   an existing prelude gap that the stub used to hide. `from std.builtin.sort import sort` builds but
+   prints `sort: unavailable in compiled mode`, so the real `sort` is uncompilable too. Registering
+   `'sort': 'std.builtin.sort'` in `GimpleGen._PRELUDE_GENERICS` (the `alloc` mechanism) was tried and
+   reverted: it elaborates the real `sort`, which fails with `invalid conversion in gimple call` at
+   `std/collections/counter.mojo:948` and `invalid use of void expression` at the call.
+2. `std/simd.mojo`: codegen fails at
+   `SIMD_5_dtype_14__x002Ebfloat16_6_length_1_2.mojo:423` (the `SIMD[.bfloat16, 1]` instantiation).
+   The doc's earlier note ("Int and UInt do not conform to DevicePassable") is the same family.
+3. **Runaway elaboration.** The real `_sort_test` body (`from std.random import rand`, `rand(p)`,
+   `sort(p)`, `print(...)`) in a plain `main` calling `_sort_test[.int8, "int8"](300, 3_000)` ran 43
+   minutes at 100% CPU with RSS growing 4.4 -> 7.1 GB and never finished (killed with the owner's
+   OK). The `elaboration depth` guard did not fire, so this is a non-recursive blow-up, not a cycle.
+   It is the first thing to bisect (drop `rand`, then `sort`, then the prints).
+
+Next step: (a) bisect the runaway in item 3 first; (b) make an unimported prelude `sort`
+resolve to the same honest stub as the imported one, or compile it; (c) close the `SIMD[.bfloat16]`
+gap; (d) re-apply the two-line rendering and require `compile_stdlib.py` `U` = 0, then
+`test_concrete_unrenderable_type_arg_is_not_refused` asserts `121` and this doc goes.
