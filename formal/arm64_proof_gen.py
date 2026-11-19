@@ -15342,7 +15342,15 @@ def generate_arm64_proof(prog, code, info) -> str:
     # default, which answers 0, so a two-argument user call made the concrete
     # proposition false while the universal one (and `eval_eq_mojo_test`) was
     # stated correctly.
-    _ast_call_env2 = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
+    #
+    # `_cf2_text` is bound unconditionally just above, so the
+    # `if '_cf2_text' in locals()` probe this used to carry could only answer
+    # True on the reference path — and it is a bare `locals()` call, which the
+    # compiled path cannot lower: the self-host closure emitted an
+    # `unavailable in compiled mode` weak stub for it, whose `0` answer made
+    # the probe False and every two-argument `callFunc2` fall back to the
+    # constant 0 environment.
+    _ast_call_env2 = _cf2_text
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not

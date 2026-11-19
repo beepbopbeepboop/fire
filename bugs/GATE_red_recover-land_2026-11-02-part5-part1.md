@@ -22,15 +22,16 @@ Quick pinning test (cheap, for a light worker; run it beside the job):
 global may not emit a function stub; the emitted C must build and print
 CPython's answer. It is one stub class's pin, not the job's substitute.
 
-## Status 2026-11-18 (five root causes fixed; the closure still carries dead weak stubs)
+## Status 2026-11-18 (six root causes fixed; four stub classes remain)
 
 **This part is still open.** Its acceptance is a green job *plus* a closure
 with no `unavailable in compiled mode` stub, and the second half is not met.
-Five of the red's root causes have been found and fixed; the first is on
-master, the second and third land with earlier commits on this branch, and
-the fourth and fifth land with the commit that carries this Status. The
-closure was not re-measured in this round (a whole-closure dump is the
-integrator's job), so the stub count below is stale until
+Six of the red's root causes have been found and fixed; the first is on
+master, the second and third land with earlier commits on this branch, the
+fourth and fifth with the commit that carried the previous Status, and the
+sixth (`locals()`) with the commit that carries this Status. The closure was
+not re-measured in this round either (a whole-closure dump is the integrator's
+job), so the stub count below is stale until
 `python3 tools/suite.py bootstrap-stage1-transitive` runs.
 
 1. **The dump could not finish.** `_drop_unreferenced_extern_decls`
@@ -129,12 +130,39 @@ locate a survivor by the quoted call, not by the number.
    not re-measured, so confirm the `multi_kind_locals` row is gone by
    re-running the job.
 
+6. **The compiler's own source called `locals()`.** A bare `locals()` call is
+   a builtin the GIMPLE path cannot lower at all (unlike `globals()`, cause 4),
+   so every call site in the closure emitted the `locals: unavailable in
+   compiled mode` weak stub and every read of it in the self-hosted binary was
+   the stub's `0`/absent answer. Five call sites in three modules, all of them
+   a DEAD guard whose name is bound unconditionally on every path, so CPython
+   and the constant answer agree and only the compiled binary took the other
+   branch:
+   - `mojo/backend_gimple/emit_stmts.py`, struct-subscript `__setitem__`
+     fallback: `obj_v if 'obj_v' in locals() or True else addr` (`obj_v` is
+     bound on both arms of the `_arr_tgt` test above; the `or True` already
+     made the probe decorative).
+   - `formal/build.py`, `compile_formal`'s `structs_by_name` build: neither
+     `structs_by_name` nor (at that point) a probe for `structs` was ever
+     absent — `structs` is bound unconditionally by the `_prepare_functions`
+     unpack (None on the refusal path) — so the block is now the plain
+     `globals().get('structs_by_name')` fallback plus the `structs is not
+     None` comprehension, and `prog` takes `structs=structs`.
+   - `formal/arm64_proof_gen.py`, `_ast_call_env2 = _cf2_text if '_cf2_text'
+     in locals() else ...`: `_cf2_text` is assigned eight lines above with no
+     branch, so the fallback was unreachable. Pinned by
+     `test_selfhost_no_locals_pin.py`, which walks `fire.py`'s syntactic
+     import closure (the set `bootstrap-stage1-transitive` compiles, and the
+     same walk that reaches `formal/build.py` through
+     `build_stdlib_dylib.py`'s function-local import) and fails on any call to
+     the builtin. Measured red before this change: the five sites above.
+
 | stub(s) | emitted because | probe / next step |
 |---|---|---|
 | `globals` (2 call sites) | **FIXED 2026-11-18** (cause 4 above): `getattr(globals(), '_FOREIGN_CALLABLES', {})` in `mojo/middle/types.py:2948`, i.e. `globals()` in FUNCTION scope; `is_module_globals_call` now lowers it and the snapshot covers the module's own globals in function scope | pin: `test_globals_in_function_scope.py`; re-measure the job's stub count |
-| `locals` | `'obj_v' in locals()` in `emit_stmts.py:2843` | same shape; `_cur_func_body`/`var_types` already know the local set |
+| `locals` (5 call sites) | **FIXED 2026-11-18** (cause 6 above): `emit_stmts.py`'s `'obj_v' in locals()` and four dead `locals()` probes in `formal/build.py` / `formal/arm64_proof_gen.py`. Cause 4's `globals()` lowering does NOT cover it — `locals()` has no module struct to read | pin: `test_selfhost_no_locals_pin.py`; re-measure the job's stub count. **One stub LINE for the whole dump is expected even before the fix** (`#ifndef _MOJO_STUB_locals`): three modules can emit it and only the first survives, which is why the previous round attributed this row to `emit_stmts.py` alone |
 | `_EXPR_DISPATCH`, `_STMT_DISPATCH`, `_BIN_OPS`, `_CMP_OPS`, `_FLOAT`, `_SIGNED`, `_UNSIGNED` | **FIXED 2026-11-18** (cause 3 above): imported module-level DICT/SET globals from `generated_dispatch`; `_gmp_emit_imported_symbol_stubs` emitted a function stub for each `_imp_syms` entry with no signature, while their real lowering is the `_<mod>__mojo_global_get_<name>` accessor. The pass now skips an entry whose accessor is registered | pin: `test_imported_global_stub.py`; re-measure the job's stub count |
-| `object` | same pass, but **not** a registered global — do not assume cause 3 removed it. `object` is an imported builtin/type name, never called | `grep '[^_a-z]object *(' fire.ci` finds no call — it is a type, not a function; find which import registers it (it is not in any `import object` statement) and then skip type-only imported names |
+| `object` | same pass, but **not** a registered global — do not assume cause 3 removed it. `object` is an imported builtin/type name, never called | `grep '[^_a-z]object *(' fire.ci` finds no call — it is a type, not a function; find which import registers it (it is not in any `import object` statement, and no module in the tree imports a name `object` at all — checked with an `ast` walk over every `.py`). **This round did not crack it**: no source import names `object`, and it is not a set-global export, so the entry is written by one of the non-import writers (a function-scoped alias, or the module-attribute/`_unresolved_import_aliases` route); instrument `_gmp_emit_imported_symbol_stubs` to print `sym_info` for `_sn == 'object'` on the next whole-closure dump |
 | `multi_kind_locals` (3 call sites) | **FIXED 2026-11-18** (cause 5 above): `ginf.multi_kind_locals(gen)` in `emit_stmts.py:1924,1979,3828`; `ginf` is `emit_infra`, which only STAR-imports it from `mojo.middle.infra_infer`. `_find_symbol_home_module` now follows `from X import *` re-export edges | pin: `test_star_reexport_resolution.py`; re-measure the job's stub count |
 | `lower`, `mojo_register` | `gimple_codegen.gimple_gen_coro.lower(...)` / `.register(...)` in `emit_resolve.py:1297,1301` — a call through a MODULE ATTRIBUTE (`mod.submod.fn`), which the two-hop/module-qualified branches do not treat as a submodule function | the same two-line call in a fixture; resolve `gimple_gen_coro` as the module `mojo.middle.coro` |
 | `_dc_fields` (10 call sites) | `from dataclasses import fields as _dc_fields` in `cpp_core.py`; CPython's `dataclasses` is not in the closure, so the imported alias gets the by-design unresolved-external stub — but this one IS called (`cpp_core.py:2874` etc.) | decide whether the compiled path reaches `_rewrite_node`'s `fields(type(node))`; if it does this is a silent wrong answer, and a static `__dataclass_fields__` walk is the lowering |
@@ -142,19 +170,20 @@ locate a survivor by the quoted call, not by the number.
 
 The four `_mojo_gpu_*` weak definitions are the documented GPU no-op stubs and
 were not counted above. The dispatch-table stubs (cause 3), the function-scope
-`globals` stubs (cause 4), and the star-reexported `multi_kind_locals` stubs
-(cause 5) are fixed in this lane; the remaining rows are separate causes, and
-none is a one-symbol registration of the part-1/part-2 shape. The two fixed by
-cause 2 were that shape, which is why they are here.
+`globals` stubs (cause 4), the star-reexported `multi_kind_locals` stubs
+(cause 5) and the `locals` stubs (cause 6) are fixed in this lane; the
+remaining rows are separate causes, and none is a one-symbol registration of
+the part-1/part-2 shape. The two fixed by cause 2 were that shape, which is
+why they are here.
 
 The last measurement of the full closure (before cause 3) was 15 stubs; causes
-3–5 remove the seven dispatch-table stubs, the two `globals` call sites, and
-the three `multi_kind_locals` call sites in that measurement, which would leave
-`locals`, `object`, `lower`, `mojo_register`, `_dc_fields`, and `_yield_from`.
-That is arithmetic from the table, not a reading — the number and the
-membership are stale until `bootstrap-stage1-transitive` runs (a stub thought
-dead may persist for a different reason, and a new one may have appeared on
-master since the measurement).
+3–6 remove the seven dispatch-table stubs, the two `globals` call sites, the
+three `multi_kind_locals` call sites and the `locals` stub in that measurement,
+which would leave `object`, `lower`, `mojo_register`, `_dc_fields`, and
+`_yield_from`. That is arithmetic from the table, not a reading — the number
+and the membership are stale until `bootstrap-stage1-transitive` runs (a stub
+thought dead may persist for a different reason, and a new one may have
+appeared on master since the measurement).
 
 The job's `reject=CLOSURE_INCOMPLETE` only reads the child's OUTPUT, and
 `--dump-full` writes the stubs to `fire.ci` (it prints just

@@ -2876,9 +2876,23 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             else:
                                 # Last-resort: try to dispatch to __setitem__ if the
                                 # method exists but wasn't caught by earlier checks.
+                                #
+                                # `obj_v` is bound on BOTH arms of the
+                                # `_arr_tgt` test above, so the former
+                                # `'obj_v' in locals()` probe read True there
+                                # in real Python and its `or True` made the
+                                # condition constant anyway. It is spelled
+                                # plainly here because a bare `locals()` call
+                                # is one of the builtins the compiled path
+                                # still cannot lower: the self-host closure
+                                # emitted an `unavailable in compiled mode`
+                                # weak stub for it, and evaluating the probe
+                                # tested `'obj_v' in <stub's 0>` before the
+                                # `or True` short-circuit could discard it.
+                                # Pinned by test_selfhost_no_locals_pin.py.
                                 _fallback_r = gmp._lower_struct_subscript_dunder(
                                     gen, ot if ot.endswith(' *') else f'{elem_t} *',
-                                    obj_v if 'obj_v' in locals() or True else addr,
+                                    obj_v,
                                     '__setitem__', [(it, idx_v), (vtype, v)])
                                 if _fallback_r is not None:
                                     return  # handled by __setitem__
