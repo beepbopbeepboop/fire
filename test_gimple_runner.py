@@ -16305,6 +16305,46 @@ def main():
         break
 main()
 """)
+    # A generator whose declared yield kind is `double`/`bool`, escaping through
+    # a plain function's `return`: the generic handle protocol the consumer
+    # drives carries no value-kind, so the loop target used to bind the
+    # DOUBLE'S BIT PATTERN — 0.5 printed as 4602678819172646912 — and a bool
+    # as 1/0. The handle is registered with its vkind at the `return` that
+    # lets it escape, and the loop reads the value by that kind.
+    # bug:CODEGEN_unknown_generator_loop_yields_untagged_word.
+    test_gimple_matches_cpython("gimple_for_over_gen_returning_function_float", """\
+def fr(n):
+    i = 0
+    while i < n:
+        yield i * 0.5
+        i += 1
+def make(v):
+    if isinstance(v, int):
+        return fr(v)
+    return iter(v)
+def main():
+    for x in make(3):
+        print(x)
+        print(x * 2)
+main()
+""")
+    test_gimple_matches_cpython("gimple_for_over_gen_returning_function_bool", """\
+def flags(n):
+    i = 0
+    while i < n:
+        yield i % 2 == 0
+        i += 1
+def make(v):
+    if isinstance(v, int):
+        return flags(v)
+    return iter(v)
+def main():
+    for b in make(3):
+        print(b)
+    for c in make(["x", "y"]):
+        print(c)
+main()
+""")
 
 
 def test_list_slice_of_mixed_list_reads_slots_as_values():

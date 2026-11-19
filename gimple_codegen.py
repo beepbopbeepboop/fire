@@ -3491,6 +3491,7 @@ class GimpleGen:
         'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_gen_note':       ('int64_t', ['int64_t', 'void *']),
         'mojo_gen_note_a3':    ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_gen_handle_value': ('int64_t', ['int64_t']),
         'mojo_gen_throw_set':  ('void', ['int64_t', 'int64_t', 'char *', 'void *']),
         'mojo_gen_throw_take': ('int', ['int64_t', 'int64_t *', 'char **', 'void **']),
         'mojo_gen_cm_is_handle': ('int', ['int64_t']),

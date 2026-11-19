@@ -3754,11 +3754,22 @@ def _gen_stmt_ReturnStmt(gen, node):
             # to _tagged_word_vals: that set is for tagged generator words only and
             # falsely triggers MIXED_NAME_NON_INT64_REFUSAL when a dict read name is
             # later rebound to a non-int64 C type.
-        # A generator handle leaving a function whose return slot is a plain word
-        # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
-        # the consumer can only drain it if the run time knows which generator it is.
-        if (vtype == 'MojoGenerator *' and v in gen._generator_var_api
-                and _as_str(gen.func_ret_type) != 'MojoGenerator *'):
+        # A generator handle leaving a function, in EITHER shape of return slot.
+        # The run time has to be told which generator it is before the handle
+        # escapes, because a consumer that sees only the word has no other way
+        # to learn the yield's kind:
+        #   * a plain-word slot (`def iglob(...): it = _iglob(...); return it`,
+        #     consumed as `list(iglob(...))`) hands over the note's answer, an
+        #     int64_t carrying the handle;
+        #   * a `MojoGenerator *` slot (`def make(v): return fr(v)`) hands over
+        #     the handle itself, which the consumer can only drive through the
+        #     GENERIC `__mojo_gen_resume` / `__mojo_gen_value` pair -- and those
+        #     carry no value-kind. Registering it here is what lets
+        #     `mojo_gen_handle_value` box a double/bool yield by its kind
+        #     instead of leaving the double's BIT PATTERN in the loop target
+        #     (`print(x)` showed 4602678819172646912 for 0.5). The note's
+        #     side effect is all this shape wants, so `v` stays the handle.
+        if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
             _gapi = gen._generator_var_api[v]
             if _as_str(_gapi.get('base') or '').startswith('__mgco_'):
                 _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
@@ -3766,9 +3777,11 @@ def _gen_stmt_ReturnStmt(gen, node):
                 if _vk is not None:
                     _hw = gen._to_int64(vtype, v)
                     _kv = gen._new_val('int64_t', str(_vk))
-                    v = gen._call_expr('int64_t', 'mojo_gen_note_a3',
-                                       [('int64_t', _hw), ('int64_t', _kv)])
-                    vtype = 'int64_t'
+                    _vout = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                           [('int64_t', _hw), ('int64_t', _kv)])
+                    if _as_str(gen.func_ret_type) != 'MojoGenerator *':
+                        v = _vout
+                        vtype = 'int64_t'
         # A function that is used as a VALUE (passed or stored, never only
         # called) is invoked by a consumer that cannot know its return type,
         # so a string/float list it returns carries its slot kind (the
