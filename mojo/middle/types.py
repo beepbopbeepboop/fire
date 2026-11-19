@@ -1327,6 +1327,18 @@ _DTYPE_CTYPE = {
 #: dtype added there cannot be left out of the lane arms.
 _DTYPE_SCALAR_CTYPES = frozenset(_DTYPE_CTYPE.values())
 
+# The fixed-width integer C types STRICTLY BELOW the 64-bit word: a
+# `Scalar[DType.*]` of one of these is the dtype's own width, so the codegen
+# casts arithmetic back to it after the operation (C integer promotion would
+# widen it) and compares it directly as that type (an unsigned dtype above
+# 2^31 is not compared as a negative signed value). `int64_t` is the word
+# this backend uses for every untyped integer, and its operations are
+# unchanged — hence the exclusion. Derived from the one table `_DTYPE_CTYPE`
+# (the integer dtypes, `int64` and its `index` alias left out).
+_NARROW_INT_CTYPES = frozenset(
+    _DTYPE_CTYPE[d] for d in ('int8', 'uint8', 'int16', 'uint16',
+                              'int32', 'uint32', 'uint64'))
+
 
 def _dtype_token_ctype(tok):
     """Scalar C type for a dtype TOKEN, or None when the token names no dtype

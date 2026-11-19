@@ -1960,6 +1960,19 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             if (ctype in ('int', 'int64_t') and vtype == 'double'
                     and tname not in ginf.multi_kind_locals(gen)):
                 ctype = 'double'
+            # `a = Scalar[DType.uint8](250)` — the plain-assignment spelling
+            # of a narrow-dtype local. The pre-pass cannot see the ctor's
+            # dtype (it has no SIMD/Scalar rule) and hints the word, but the
+            # freshly-lowered value's ctype is the dtype's own width: pin the
+            # slot to it, exactly as the double rule above pins `q = 2.5`.
+            # Without it the value is widened to the word at this store and
+            # the arithmetic below computes in 64-bit (measured: `250 + 10`
+            # printed 260 where the width answer is 4). Same multi-kind
+            # exclusion: a name rebound to two kinds keeps the honest box.
+            if (ctype in ('int', 'int64_t')
+                    and vtype in gimple_ctypes._NARROW_INT_CTYPES
+                    and tname not in ginf.multi_kind_locals(gen)):
+                ctype = vtype
             # Every "trust ground truth" rule below reads the pre-pass's
             # `int`/`int64_t` hint as a STALE SCALAR that the freshly-lowered
             # value refines, and pins the slot to this value's kind. That
