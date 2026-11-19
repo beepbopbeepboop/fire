@@ -43,7 +43,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/FORMAL_call_proofgen_red_on_head.md` | **unclaimed** | `test_formal_call_proof_gen.py` is red on master (27 of 301) |
+| `bugs/FORMAL_eval_eq_mojo_bridge_red_on_head.md` | **unclaimed** | `test_formal_eval_eq_mojo_bridge.py` is red on head (5 failures) |
 | `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` | **unclaimed** | `svc` exit handling is not structurally complete |
 
 ### `formal/x86_64_endtoend_test` — 1 document, 0 claimed

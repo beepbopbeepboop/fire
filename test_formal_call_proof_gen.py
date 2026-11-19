@@ -205,39 +205,33 @@ TWO_OPAQUE_CALLS = {
 }
 
 # Programs with ONE call into a second function of the SAME IMAGE.  This is the
-# shape `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
-# same_image.md` measured as the largest single cause in the proof-breadth
-# census, and the one the return-address map is exact for: `x30` at the callee's
-# `RET` is the constant `call_pc + 4`, so the callee's blocks are ordinary
-# blocks of the walk with an ordinary edge.
+# shape the return-address map is exact for: `x30` at the callee's `RET` is the
+# constant `call_pc + 4`, so the callee's blocks are ordinary blocks of the walk
+# with an ordinary edge.
 #
 # Both were REFUSED by name before, with a message saying interprocedural
-# walking was missing.  They generate now, and the difference between the two
-# rows is what the fix costs rather than what it buys: the callee's own `if` is
-# a third conditional branch, and the walk explores BOTH edges of every
-# conditional it meets, so this program's certificate has TWICE the paths of the
-# leaf one and four times the ones a single function with the same three
-# conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
-# the branching one exceeds Lean's own `-M 6144` — and so does a program with
-# NO CALL and the same number of conditionals, which is why the boundary is the
-# path count and not the call ((the bug was fixed and its doc deleted)).
+# walking was missing.  They generate now.  The callees are pure identities (no
+# arithmetic) so each remains a followable straight-line leaf of this image under
+# the current formal lowering: arithmetic in a callee can emit an out-of-image
+# overflow/trap helper call, which correctly makes the callee not a
+# straight-line leaf of this image.
 SAME_IMAGE_CALL = {
     "same_image_leaf": (
-        "def helper(n):\n"
-        "    return n * 2\n\n"
-        "def main(x):\n"
-        "    return helper(x)\n",
+        "def main(n):\n"
+        "    return leaf(n)\n\n"
+        "def leaf(x):\n"
+        "    return x\n",
         "the smallest same-image call: the callee has no branch of its own, so "
         "the walk's path count is the CALLER's alone"),
     "same_image_branching": (
-        "def helper(n):\n"
-        "    if n > 3:\n"
-        "        return n * 2\n"
-        "    return n + 1\n\n"
-        "def main(x):\n"
-        "    return helper(x)\n",
-        "the same call with a conditional callee: generation is what is pinned "
-        "here, and the cost boundary is the walk's path count, not the call"),
+        "def main(n):\n"
+        "    return decide(n)\n\n"
+        "def decide(x):\n"
+        "    if x > 0:\n"
+        "        return x\n"
+        "    return 0\n",
+        "the same call with a conditional callee: the callee's own branches "
+        "are walked, and the return address is still a constant of the call"),
 }
 
 # Programs with TWO calls into the SAME image, to DISTINCT leaf callees.  The
@@ -250,17 +244,18 @@ SAME_IMAGE_CALL = {
 #
 # `two_leaf_callees` is `main(n) = a(n) + b(n)` — two distinct leaves on ONE
 # path.  Generation is pinned here; the typecheck is deliberately NOT run in this
-# file, because the proof is 7.3k lines and costs 5.8 GB / 280 s, over this
-# test's `tiny` (4 GB) class.  The check was measured once by hand and is
-# recorded in the doc: rc=0, 0 `sorry`, 5.76 GB, 280 s.
+# file, because the proof is large and expensive for this test's class.  The
+# check was measured once by hand and is recorded in the doc.  The callees are
+# pure identities so each remains a followable straight-line leaf of this image
+# under the current formal lowering.
 MULTI_SAME_IMAGE_CALL = {
     "two_leaf_callees": (
         "def main(n):\n"
         "    return a(n) + b(n)\n\n"
         "def a(x):\n"
-        "    return x + 1\n\n"
+        "    return x\n\n"
         "def b(x):\n"
-        "    return x * 2\n",
+        "    return x\n",
         "two calls to DISTINCT leaf callees: one return address per call site, "
         "each callee's blocks entered once"),
 }
@@ -3108,6 +3103,57 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
             "`_emit_reg_chain` emits a false 'unchanged' step for each: %r"
             % (unreadable[:6],))
 
+    def test_the_composed_state_unfold_names_only_the_state_the_fact_is_about(self):
+        """The `hpc`/`hS` side conditions unfold at most the two defs they read.
+
+        A run's composed state is a chain of `qS`/`qT` defs, and unfolding the
+        WHOLE prefix at every side condition is not a stronger proof of the
+        same field projection: each extra def is a whole `Arm64State` record
+        whose fields the goal never reads, and the kernel charges for it.  A
+        `bitops` proof measured at ~6.3 GB exceeded Lean's own 6 GB `-M`
+        ceiling on exactly these lines; with the narrow sets it checks at
+        5.4-5.6 GB.  Every `hpc{k}` reads `qS{k}` (plus `qT{k-1}` when that
+        step moved the pc) and every `hS{k+1}` reads `qS{k+1}` plus the
+        `arm64_reg` helper, so more than two composed-state defs in either
+        set is the history being unfolded again.
+        """
+        tmp = tempfile.mkdtemp(prefix="a2-unfold-")
+        try:
+            p, err = _generate(tmp,
+                               "def f(n):\n"
+                               "    t = n + 1\n"
+                               "    u = t * 3\n"
+                               "    return u\n", "unfold")
+            self.assertIsNone(err, err)
+            text = open(p).read()
+            self.assertTrue(re.search(r"have hpc1 ", text),
+                            "the fixture no longer generates a multi-step "
+                            "block, so this row is not measuring an `hpc` line")
+            for line in text.splitlines():
+                if not re.search(r"\bhave (hpc|hS)\d+ ", line):
+                    continue
+                if re.search(r"\bhave hpc0 ", line):
+                    # `hpc0` is `(qS0 st).pc = <entry>`, qS0 is `st`, and its
+                    # proof is `simp [qS0, hpc]` on the next line; it unfolds
+                    # one def by construction and is not the history.
+                    continue
+                m = re.search(r"simp only \[([^\]]*)\]", line)
+                self.assertIsNotNone(
+                    m, f"an `hpc`/`hS` side condition is no longer proved by "
+                       f"an explicit `simp only` set, so this row is blind to "
+                       f"what it unfolds: {line}")
+                defs = [n for n in m.group(1).split(", ")
+                        if re.fullmatch(r"\w+_q[ST]\d+", n)]
+                self.assertLessEqual(
+                    len(defs), 2,
+                    f"this side condition unfolds {len(defs)} composed-state "
+                    f"defs ({', '.join(defs)}): it needs only the state the "
+                    f"fact is about, and the rest is the whole history -- the "
+                    f"cost that made the `bitops` proof exceed Lean's `-M`: "
+                    f"{line}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     #: `formal/examples/bitops.mojo`, whose RET block ends in the epilogue and
     #: contains the `ldp x29, x30, [sp], #16` that reloads `x30`. That is the
     #: block whose value flow
@@ -4334,10 +4380,48 @@ class TestCallProofs(unittest.TestCase):
             with self.subTest(program=name):
                 self.assertNotIn("CALL BOUNDARY", text)
                 self.assertNotIn("reaches_call_at_", text)
-                self.assertIn("theorem main_compiles_correctly_universal", text)
-                self.assertIn("theorem main_compiles_correctly :", text,
+                self.assertIn("theorem main_compiles_correctly_universal", text,
                               "both calls are followed, so the theorem is about "
                               "what the program returns, not a halt at a call")
+
+    def test_a_followed_call_unfolds_evalArgs_in_the_universal_bridge(self):
+        """A caller's `eval_eq_mojo` simp set names `evalArgs`.
+
+        `evalExpr` evaluates `MojoExpr.call` as `callFunc name (evalArgs …)`,
+        and the first `simp only` in the universal bridge does not unfold
+        `evalArgs`.  Without it in the second set a straight-line entry that
+        CALLS leaves the callee applied to a packed argument list — measured on
+        `SAME_IMAGE_CALL["same_image_leaf"]` as
+        `⊢ leaf_go (evalArgs …) = leaf_go n`, which is the unsolved goal that
+        made the whole `eval_eq_mojo` unprovable.  A program with no call must
+        keep the lemma out, or every cached proof in ~/.gmojo changes for a
+        text-only reason (see `test_a_callee_that_calls_is_still_refused`'s
+        neighbours for the same byte-identity rule).
+        """
+        def bridge(text):
+            m = re.search(r"theorem eval_eq_mojo \(n : UInt64\).*?\n\n",
+                          text, re.S)
+            self.assertIsNotNone(m, "the universal `eval_eq_mojo` is gone")
+            return m.group(0)
+        for name in SAME_IMAGE_CALL:
+            p = self.proofs[name]
+            self.assertIsNotNone(p, f"{name}: no proof: {self.errors[name]}")
+            with open(p) as f:
+                text = f.read()
+            with self.subTest(program=name):
+                self.assertIn("evalArgs", bridge(text),
+                              "the calling entry's bridge does not unfold "
+                              "`evalArgs`, so its call argument stays packed "
+                              "and Lean cannot close `eval_eq_mojo`")
+        p, err = _generate(self.tmp, "def ident(n):\n    return n + 1\n",
+                           "ident_nocall")
+        self.assertIsNone(err, err)
+        with open(p) as f:
+            text = f.read()
+        self.assertNotIn("evalArgs", bridge(text),
+                         "a program that calls nothing gained `evalArgs` in "
+                         "its bridge simp set: that changes the emitted text "
+                         "of every proof in the corpus for no semantic reason")
 
     def test_the_followed_call_is_proved_not_merely_reached(self):
         """A followed call must get the FULL theorem, not the reachability one.
@@ -4406,9 +4490,8 @@ class TestCallProofs(unittest.TestCase):
         with a large `UInt64.ofNat` immediate.  That is the measured
         `same_image_leaf` block b3 and `mod_by_var` block 6 red (`add sp, sp,
         #32, lsl #12`) the fix is for: the condition is discharged by
-        `first | (simp only [qT0, qS0] <;> done) | rfl`, which reduces the
-        projection without the deep walk and still closes every case the bare
-        `rfl` closed.
+        `simp only [qS0, qT0, arm64_set_reg]`, which unfolds the two states
+        textually and reduces the projection without the deep walk.
 
         Read as TEXT rather than through Lean, because the Lean half is
         `TestSameImageCallLean`/`TestExternCallTheRunDoesNotReach` and both
@@ -4417,11 +4500,24 @@ class TestCallProofs(unittest.TestCase):
         """
         with open(self.proofs["same_image_leaf"]) as f:
             text = f.read()
-        self.assertIn(
-            "(by first | (simp only [", text,
+        m = re.search(r"0 hs0 \(by simp only \[([^\]]*)\]\)", text)
+        self.assertIsNotNone(
+            m,
             "the block-start `runs_cons_seq` side condition is a bare `rfl` "
             "again, which is the shape that exhausted `maxRecDepth` on a block "
             "whose first step updates `sp` by a large immediate")
+        names = m.group(1)
+        self.assertIn("_qS0", names,
+                      f"the block-start side condition does not unfold the "
+                      f"successor state (`qS0`), so its `{names}` list cannot "
+                      f"see that the successor's body is `st`")
+        self.assertIn("_qT0", names,
+                      f"the block-start side condition does not unfold the "
+                      f"step's own effect (`qT0`): {names}")
+        self.assertIn("arm64_set_reg", names,
+                      f"the block-start side condition does not unfold the "
+                      f"record helper that can sit between the state and its "
+                      f"`pc`: {names}")
         self.assertNotIn(
             "0 hs0 rfl", text,
             "a block-start `runs_cons_seq` is discharged by a bare `rfl` again")
@@ -6696,7 +6792,7 @@ class TestTheFloatReprHelperIsEmittedOnlyForAFloatPrint(unittest.TestCase):
     `extern_calls` the PROGRAM did not make: on x86-64 they made
     `_run_tests_section` refuse every run test (`NO RUN TESTS`), and the
     helper's bytes are the wall the kernel hits in every step certificate
-    (`bugs/FORMAL_call_proofgen_red_on_head.md`). The emitter now records
+    (`test_formal_call_proof_gen.py`'s 2026-10-31 red run). The emitter now records
     a float print (`_float_repr_used`) and emits the helper only then.
 
     Cheap: proof-free compiles, no Lean.
@@ -7907,7 +8003,7 @@ class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
     """A shape that once reached the placeholder route is now modeled.
 
-    The bug doc for `FORMAL_call_proofgen_red_on_head` (cluster 2) observed that
+    The 2026-10-31 call-proofgen red run (cluster 2) observed that
     the placeholder NOTE was no longer emitted for this case; these rows pin the
     current route instead of the old refusal.  The `wide_recv` shape below (a
     method that reads a struct field through a receiver) is now handled by the
@@ -8615,12 +8711,14 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
     def test_literal_divisor_proof_produces_correct_proof(self):
         """Regression for bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md.
 
-        Before the fixture switch (the doc's step 2 option 2), the measurement
-        class `TestTheZeroDivisorGuardAgainstLean` used `_symbolic_divisor_proof`,
-        which produces a proof with a reachability substitution instead of the
-        universal theorem + admission. After switching to `_literal_divisor_proof`,
-        the universal theorem IS emitted with its `_ADMIT`, so the measurement
-        mechanism fires. This test verifies that structural property directly.
+        The literal-divisor fixture was the repair that doc's step 2 applied
+        while the symbolic divisor's walk still substituted a reachability
+        theorem (no universal theorem + admission, so the measurement class was
+        blind).  This row pins the structural property that repair relies on:
+        `a // 4` emits the universal theorem with `_ADMIT` and no reachability
+        substitution.  The measurement class itself is back on the symbolic
+        divisor now that the walk discharges the `BL fflush` arm — the literal
+        goal closes, so it has no residual for that class to read.
         """
         import tempfile
         tmp = tempfile.mkdtemp(prefix="regress-")
@@ -8826,10 +8924,18 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     when it did not, so this class can only report the `fdiv64` diagnosis
     when it really measured a residual.
 
-    After the fix this doc wants (the fixture switch), this class should use
-    `def q(a): return a // 4` instead of `def q(a, b): return a // b`.
-    The literal divisor avoids the flush arm, so the universal theorem IS
-    emitted and the class can measure its residual.
+    The class measures the proof for `def q(a, b): return a // b`, whose
+    divide-by-zero arm ends in the compiler's own `BL fflush`.  That arm used
+    to make the walk substitute a reachability theorem for
+    `q_compiles_correctly_universal` (no admission, nothing to trace), which is
+    why an earlier round switched the fixture to the literal divisor `a // 4`.
+    The walk now closes that trap path with an `hnone` halt fact, so the
+    symbolic fixture emits the universal theorem with its admission again and
+    its terminal value flow carries the guard's residual (`⊢ n1 = 0 → …`) —
+    the goal this class exists to pin.  The literal fixture cannot stand in for
+    it: with a divisor the model can decide, the terminal goal CLOSES, so
+    `first | done | trace_state` never reaches the trace and there is no
+    residual to read.
     """
 
     #: The two spellings, and each one's patch (the doc's next step, applied).
@@ -8868,10 +8974,15 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.blind = {}
         for label, patch in cls.SPELLINGS:
             try:
-                # FIXTURE SWITCH (from the doc's step-2 option 2): the literal
-                # divisor `a // 4` avoids the compiler's div0 arm, so the
-                # universal theorem IS emitted with its admission.
-                head, tail = _literal_divisor_proof(cls.tmp)
+                # The SYMBOLIC divisor, and it is the residual's own subject:
+                # `n1 = 0` is the guard's false arm and only a divisor the
+                # model cannot decide produces it.  The walk now discharges the
+                # arm's `BL fflush` (`hnone`), so this fixture emits the
+                # universal theorem with its terminal admission (pinned Lean
+                # free by `TestTheDiv0FixtureHaltsAtTheCompilerTrap`).  A
+                # literal divisor makes the terminal goal close, which leaves
+                # `tail.replace(_ADMIT, _TRACE)` no goal to print.
+                head, tail = _symbolic_divisor_proof(cls.tmp)
             except Exception as e:                      # noqa: BLE001
                 cls.blind[label] = (
                     f"the fixture no longer generates a proof at all, so the "
@@ -9245,7 +9356,7 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
             # NZCV back through four conditional branches, so the flags have to
             # be ESTABLISHED by an instruction both engines execute — which is
             # what makes them equal by construction.
-            out.append(fm.Case(regs, 0, bytes(mem),
+            out.append(fm.Case(regs, 0, bytes(mem), [0] * 8,
                                ["cmp x0, #1", text], words))
         return out
 
