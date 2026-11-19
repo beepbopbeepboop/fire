@@ -290,10 +290,10 @@ _FORMS = {
     # come last on the load and there is no `rr` on the store at all any more.
     "mov_r64_rm64_sib": ("x86_step_mov_rm64_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
-                          "rm", "reg", "rb", "dst", "dst_lt"]),
+                          "rm", "reg", "rb", "rx", "dst", "dst_lt"]),
     "mov_rm64_r64_sib": ("x86_step_mov_mem_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
-                          "rm", "reg", "rb"]),
+                          "rm", "reg", "rb", "rx"]),
     # The two SIB stores WITH a displacement, which is what a call site emits for
     # every argument past the register file: the outgoing area is addressed
     # through `rsp`, and at any displacement that needs the SIB byte, because
@@ -309,10 +309,10 @@ _FORMS = {
     # out than the non-SIB forms', because the SIB byte is in between.
     "mov_rm64_r64_sib_disp8": ("x86_step_mov_mem_sib_disp8", False,
                                ["rip", "b0", "b1", "b2", "b3", "disp", "rex",
-                                "w", "mod", "rm", "reg", "rb"]),
+                                "w", "mod", "rm", "reg", "rb", "rx"]),
     "mov_rm64_r64_sib_disp32": ("x86_step_mov_mem_sib_disp32", False,
                                 ["rip", "b0", "b1", "b2", "b3", "disp32",
-                                 "rex", "w", "mod", "rm", "reg", "rb"]),
+                                 "rex", "w", "mod", "rm", "reg", "rb", "rx"]),
     # `dst` is the CONCRETE destination register, which the lemma needs because
     # `x86_set_reg` is a `match` on its index and `simp` will not reduce one on
     # a non-literal.  See the note on the lemma.
@@ -1141,7 +1141,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             # read out of the ModRM/REX bytes and the addressing-mode exclusions
             # are tests on that same rm, so every one is a literal here.
             sc.append(sc_("decide"))
-        elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
+        elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rx", "rr", "cc",
                    "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2", "notrex",
                    "not66", "digit", "ndigit2"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a

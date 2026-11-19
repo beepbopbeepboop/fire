@@ -465,12 +465,14 @@ def _rex_mem_hyps(addr, rex, modrm, opcode, mode, rm_ne, dst=None, sib=False):
     computed wrongly would have satisfied every hypothesis in this list and
     proved nothing about where the value lands.
 
-    `sib` adds the two facts a SIB operand carries and a `[rbp + disp]` one does
+    `sib` adds the facts a SIB operand carries and a `[rbp + disp]` one does
     not: the SIB byte itself, which sits BETWEEN the ModRM and the displacement
     (so the displacement is at `m + 4` and not `m + 3`), and `REX.B = 0`, which is
     what makes the SIB's base field `4` mean RSP rather than R12.  Neither is
     derivable from the other three byte facts, so a row for a SIB form without
-    them would check the wrong displacement offset.
+    them would check the wrong displacement offset.  It also states `REX.X = 0`:
+    that is the bit that turns the SIB's index field `4` from "no index" into
+    R12, and every row here is a no-index operand.
     """
     hyps = _rex_mod3_hyps(addr, rex, modrm, opcode,
                           reg=(modrm >> 3) & 7, mode=mode, dst=dst)
@@ -480,6 +482,12 @@ def _rex_mem_hyps(addr, rex, modrm, opcode, mode, rm_ne, dst=None, sib=False):
         hyps.append("%d < 16" % dst)
     if sib:
         hyps.append("x86_rex_b %d = 0" % rex)
+        # `REX.X` is the fourth bit of the SIB index field, so `index = 4` with
+        # X set is R12 rather than "no index".  Every SIB row here is a no-index
+        # operand (`[rsp]`, `[rsp+disp]`), so the fact is checkable at each one;
+        # without it these lemmas would be applied at a `REX.X` they do not
+        # state and the access would be at `base + r12`.
+        hyps.append("x86_rex_x %d = 0" % rex)
     for r in rm_ne:
         hyps.append("%d ≠ %d" % (modrm & 7, r))
     return hyps

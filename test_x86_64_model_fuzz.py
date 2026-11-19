@@ -691,5 +691,75 @@ class TestTheEffectiveAddressWraps(unittest.TestCase):
                          % (status, detail))
 
 
+class TestTheSibIndexIsFourBits(unittest.TestCase):
+    """SIB index field 4 with `REX.X` set is R12, not "no index".
+
+    Found by the wrapping draw the class above enables: `_index_off` can pick
+    R12 as the index, and `mov [r13+r12], r10` with R12 = `2^64 - 36` then
+    exposes a second hole in `x86_mem_addr`.  The index field is three bits and
+    `REX.X` is its fourth, so `100b` means "no index" only while `REX.X` is
+    clear; the model tested the field alone and dropped the index, writing at
+    `MEMBASE` (window offset 64) where the CPU writes at `MEMBASE - 36`
+    (offset 28).  The fuzz verdict was two differing memory words, one from each
+    half's store.
+    """
+
+    OFFSET = F.DATA_N // 2 - 36
+
+    def _program(self):
+        regs = [0] * 16
+        regs[F.R.RSP.value] = F.STACK_TOP_ABS
+        regs[F.R.R13.value] = F.MEMBASE_ABS
+        regs[F.R.R12.value] = (1 << 64) - 36
+        regs[F.R.R10.value] = 0x5a
+        return F.Program(
+            0,
+            [("mov [R13+R12], R10",
+              F.X.encode_mov_rm8_r8_idx(F.R.R13, F.R.R12, F.R.R10))],
+            regs, [0] * 8,
+            {"cf": False, "zf": False, "sf": False, "of_": False},
+            [0] * F.DATA_N)
+
+    def _lean_and_lib(self):
+        root = F.L._default_root()
+        lean = F.L.find_lean(root)
+        if not lean:
+            self.skipTest("no `lean` binary found")
+        lib = os.path.join(root, "lib")
+        F.L.ensure_library(lean, lib)
+        return lean, lib
+
+    def _model_byte(self, got):
+        word = got[0]["memq"][self.OFFSET // 8]
+        return (word >> (8 * (self.OFFSET % 8))) & 0xFF
+
+    def test_the_model_writes_at_base_plus_r12(self):
+        lean, lib = self._lean_and_lib()
+        prog = self._program()
+        exit_pc = F.REGION_BASE + F.CODE_OFF + len(prog.code)
+        with F.L.scratch_dir("x86_sib_x_model_test") as workdir:
+            got = F.run_model(lean, [prog], exit_pc, lib, workdir)
+        self.assertIn(0, got, "the model reported nothing for the program")
+        self.assertEqual(
+            self._model_byte(got), 0x5a,
+            "`[r13+r12]` with r12 = 2^64 - 36 is window offset %d, not offset "
+            "%d where the model wrote" % (self.OFFSET, F.DATA_N // 2))
+
+    def test_the_documented_program_reports_AGREE(self):
+        if not shutil_which("clang"):
+            self.skipTest("clang is not on PATH")
+        lean, lib = self._lean_and_lib()
+        prog = self._program()
+        with F.L.scratch_dir("x86_sib_x_agree_test") as workdir:
+            try:
+                res, _stub = F.evaluate(lean, [prog], lib, workdir)
+            except (RuntimeError, OSError) as exc:
+                self.skipTest("the native half did not run here: %s" % exc)
+        status, detail = res[0][1], res[0][2]
+        self.assertEqual(status, "AGREE",
+                         "`mov [r13+r12], r10` at r12 = 2^64 - 36: %s %s"
+                         % (status, detail))
+
+
 if __name__ == "__main__":
     unittest.main()

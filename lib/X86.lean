@@ -373,16 +373,22 @@ def x86_mem_addr (s : X86State) (code : Nat → UInt8) (rex modrm : UInt8)
     -- The SIB index register, when the SIB carries one, adds `index * 2^scale`
     -- to the address.  Index field 4 means "no index" — the shape of every
     -- displacement form this backend emits — so the contribution is 0 there and
-    -- every existing SIB step is unchanged.  The float-repr helper's
-    -- `[base + index]` byte forms (`encode_mov_rm8_r8_idx`,
-    -- `encode_movzx_r64_rm8_idx`) are the ones that read a real index register,
-    -- and `x86_rex_x` extends it, exactly as `x86_rex_b` extends the base.
+    -- every existing SIB step is unchanged.  **But only when `REX.X` is clear**:
+    -- the field is three bits and REX.X is its fourth, so `index = 4` with
+    -- `REX.X = 1` is R12, not "no index".  That is the case
+    -- `formal/x86_64_model_fuzz.py`'s indexed draws reach as soon as the index
+    -- register is R12 (`mov [r13+r12], r10`), and reading it as no index puts
+    -- the access at the base instead of `base + 2^64 - 36`.  The
+    -- float-repr helper's `[base + index]` byte forms
+    -- (`encode_mov_rm8_r8_idx`, `encode_movzx_r64_rm8_idx`) are the ones that
+    -- read a real index register, and `x86_rex_x` extends it, exactly as
+    -- `x86_rex_b` extends the base.
     let indexContribution : Nat :=
       if noSib then 0
       else
         let sib := code (atp + 1)
         let indexField := (sib.toNat >>> 3) &&& 7
-        if indexField = 4 then 0
+        if indexField = 4 && x86_rex_x rex = 0 then 0
         else (x86_get_reg s (indexField + x86_rex_x rex)).toNat * 2 ^ ((sib.toNat >>> 6) &&& 3)
     some (x86_eff_addr (base + indexContribution) disp, sibExtra + dispN)
 
@@ -3250,13 +3256,14 @@ theorem x86_step_mov_mem_sib_rsp (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) :
+    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0) :
     x86_step s code = some { s with
         mem := mem_write_bytes s.mem (x86_eff_addr s.rsp.toNat 0) (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb]
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
+        h_rx]
 
 /-- `mov qword [rsp + disp8], r64` (REX.W 89 /r, ModRM 44: mod=1 rm=4, SIB 24:
     scale 0, index none, base rsp) -- the CALLER half of the stack-argument
@@ -3292,14 +3299,14 @@ theorem x86_step_mov_mem_sib_disp8 (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) :
+    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0) :
     x86_step s code = some { s with
         mem := mem_write_bytes s.mem (x86_eff_addr (x86_get_reg s 4).toNat disp) (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 5 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
-        h_rb]
+        h_rb, h_rx]
 
 /-- `mov qword [rsp + disp32], r64` (REX.W 89 /r, ModRM 84: mod=2 rm=4, SIB 24).
     The same store with a displacement too wide for the byte above, so it is
@@ -3322,14 +3329,14 @@ theorem x86_step_mov_mem_sib_disp32 (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) :
+    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0) :
     x86_step s code = some { s with
         mem := mem_write_bytes s.mem (x86_eff_addr (x86_get_reg s 4).toNat disp) (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 8 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
-        h_rb]
+        h_rb, h_rx]
 
 -- The two SIB-INDEXED byte forms: the same opcodes as the displacement forms
 -- above, but the SIB carries a real index register, so the effective address is
@@ -3413,7 +3420,10 @@ theorem x86_step_movzx_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
     `h_rm : modrm.toNat &&& 7 = 4` is what SELECTS the SIB byte (rm=4 is the
     escape), so it is pinned to 4 here rather than carried as a parameter, and
     `h_rb : x86_rex_b rex = 0` is what makes the SIB's base field `4` mean RSP
-    rather than R12. -/
+    rather than R12.  `h_rx : x86_rex_x rex = 0` is the same fact one field
+    over: the SIB's index field is three bits and REX.X is its fourth, so `4`
+    means "no index" only while REX.X is clear — with it set that field names
+    R12. -/
 theorem x86_step_mov_rm64_sib_rsp (s : X86State) (code : Nat → UInt8)
     (m : Nat) (rex modrm : UInt8) (reg dst : Nat)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
@@ -3421,14 +3431,14 @@ theorem x86_step_mov_rm64_sib_rsp (s : X86State) (code : Nat → UInt8)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 0) (h_rm : modrm.toNat &&& 7 = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0)
+    (h_rb : x86_rex_b rex = 0) (h_rx : x86_rex_x rex = 0)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some
       { x86_set_reg s dst (mem_read_bytes s.mem (x86_eff_addr s.rsp.toNat 0) 8) with rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
-        h_dst]
+        h_rx, h_dst]
 
 /-! The two disp8 memory forms every spilled-argument function uses.  These are
 the instructions that make a proof about the stack need the separation lemmas
