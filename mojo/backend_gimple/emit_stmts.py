@@ -2930,7 +2930,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             gen._emit(f"  *{addr} = {v_cast};")
                     elif (isinstance(ot, str)
                           and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
-                          and ot not in ('int64_t', '_Bool')):
+                          and ot != 'int64_t'):
                         # Scalar-erased SIMD/Scalar lane WRITE (same model and
                         # reason as the read arm in `_lower_subscript`, and as
                         # the MultiAssign chain's copy): the erased value IS the
@@ -3368,7 +3368,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 gen._rt_void(f"mojo_list_set_{suf}", [lp, idx64, f"{v}"])
         elif (isinstance(ot, str)
               and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
-              and ot not in ('int64_t', '_Bool')):
+              and ot != 'int64_t'):
             # Scalar-erased SIMD/Scalar lane WRITE for `value[i] += x` too:
             # the erased value IS the lane, so the read-modify-write result
             # (`v`, already computed through the fake BinaryOp above) is
@@ -5587,7 +5587,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._emit(f"  *{addr} = {v_cast};")
             elif (isinstance(ot, str)
                   and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
-                  and ot not in ('int64_t', '_Bool')):
+                  and ot != 'int64_t'):
                 # Scalar-erased SIMD/Scalar lane WRITE, mirroring the read arm
                 # in `_lower_subscript` (and for the same reason: a scalar has
                 # no legal Mojo subscript, so this is a lane of the erased

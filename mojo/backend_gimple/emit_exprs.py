@@ -4601,6 +4601,30 @@ def _lower_float8_binary(gen, op, left_node, lt, lv, right_node, rt, rv,
     raise RuntimeError(_float8_dtype.operation_diagnostic(f8))
 
 
+def _narrow_int_binop(gen, lv: str, c_op: str, rv: str, dt: str) -> str:
+    """`lv c_op rv` on two values of the NARROW integer C type `dt`, answered
+    in `dt`'s own width.
+
+    `gcc -fgimple` takes a cast only as a statement over a name, never over a
+    parenthesised expression (`t = (uint64_t)(a | b);` is "expected expression
+    before '('"), so the operation cannot be cast in place. It runs in a wide
+    word instead -- `uint64_t` for an unsigned dtype, `int64_t` otherwise, so
+    no operation overflows the word it runs in -- and the result is truncated
+    back to `dt` by its own conversion statement, which is what gives the
+    dtype its wrap. A `uint64_t` dtype is already the wide word and runs
+    directly. Returns the result temp, of type `dt`."""
+    wide = 'uint64_t' if dt.startswith('uint') else 'int64_t'
+    if dt == wide:
+        t = gen._new_temp(dt)
+        gen._binop_into(f"{t}", f"{lv}", f"{c_op}", f"{rv}")
+        return t
+    a = gen._cast(wide, lv)
+    b = gen._cast(wide, rv)
+    w = gen._new_temp(wide)
+    gen._binop_into(f"{w}", f"{a}", f"{c_op}", f"{b}")
+    return gen._cast(dt, w)
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -5890,24 +5914,20 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         if c_op in ('/', '%') and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool':
             _chk = gen._call_expr('int64_t', 'mojo_int_divisor', [('int64_t', rv)])
             rv = _chk if res_type == 'int64_t' else gen._cast(res_type, _chk)
-        t = gen._new_temp(res_type)
         # Narrow fixed-width integer arithmetic (a `Scalar[DType.*]` value with
         # a real C type below the 64-bit word, e.g. uint8_t/uint32_t): when BOTH
-        # operands share that type, the result takes it and the emitted C casts
-        # the operation back to it — C integer promotion makes `uint8_t + uint8_t`
-        # an `int`, so without the cast-back the value widens instead of
-        # wrapping/truncating to the dtype width (measured: `Scalar[DType.
-        # uint8](250) + Scalar[DType.uint8](10)` printed 260; the width answer
-        # is 4). Comparisons answer `_Bool` (`res_type != lt`) and int64_t/int
-        # operations are unchanged. The cast is the statement's single outer
-        # operation over the binary op, which `gcc -fgimple` accepts as one
-        # GIMPLE statement (a bare `t = a + b;` into a narrow temp is the
-        # "non-trivial conversion" it rejects instead).
+        # operands share that type, the result is the dtype's own width. C
+        # integer promotion makes `uint8_t + uint8_t` an `int`, so the operation
+        # must run in a wider word and be truncated back to the dtype's width
+        # (measured: `Scalar[DType.uint8](250) + Scalar[DType.uint8](10)`
+        # printed 260; the width answer is 4). Comparisons answer `_Bool`
+        # (`res_type != lt`) and int64_t/int operations are unchanged.
         if (lt == rt and lt in gimple_ctypes._NARROW_INT_CTYPES
                 and res_type == lt and c_op in gimple_ctypes._BIN_OPS
                 and op not in gimple_ctypes._CMP_OPS):
-            gen._emit(f"  {t} = ({res_type})({lv} {c_op} {rv});")
+            t = _narrow_int_binop(gen, lv, c_op, rv, lt)
         else:
+            t = gen._new_temp(res_type)
             gen._binop_into(f"{t}", f"{lv}", f"{c_op}", f"{rv}")
     # `lv {c_op} rv` on two values already PROVEN to be integers is another
     # integer: the `_int_word_vals` producer this closes is `d[base + 1]` /

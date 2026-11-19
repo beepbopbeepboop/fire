@@ -15340,10 +15340,14 @@ main()
     checks = [
         (r'\buint8_t a;', 'the uint8 local is declared at the dtype width'),
         (r'\buint32_t e;', 'the uint32 local is declared at the dtype width'),
-        (r' = \(uint8_t\)\(\w+ \+ \w+\);',
-         'the add result is a uint8_t temp cast back from the promoted op'),
-        (r' = \(uint8_t\)\(\w+ - \w+\);',
-         'the sub result is a uint8_t temp cast back from the promoted op'),
+        # GIMPLE takes a cast only over a name, so the op runs in a wide word
+        # into its own temp and the result is truncated by a second statement
+        # (`t = (uint8_t)w;`); a cast around the parenthesised op is rejected
+        # by gcc -fgimple ("expected expression before '('").
+        (r'(_t\d+) = _t\d+ \+ _t\d+;\n(?:#line [^\n]*\n)?\s*_t\d+ = \(uint8_t\)\1;',
+         'the add runs in a wide word and is truncated back to uint8_t'),
+        (r'(_t\d+) = _t\d+ - _t\d+;\n(?:#line [^\n]*\n)?\s*_t\d+ = \(uint8_t\)\1;',
+         'the sub runs in a wide word and is truncated back to uint8_t'),
         (r'uint8_t \* p;', 'the pointer local is the element type'),
         (r'_mojo_at_uint8_t \(',
          'the subscript runs the uint8_t element helper (one byte)'),
