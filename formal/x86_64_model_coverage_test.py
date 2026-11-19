@@ -958,6 +958,58 @@ SUCCESSOR_FORMS = (
 )
 
 
+def walk_samples():
+    """`(form, encoding)` for the WALK-side model, one per `_FORMS` form.
+
+    The three tables in this file answer three different questions about one
+    instruction, and a form can be covered by two of them and not the third:
+
+      * `samples()`   — can `x86_step` STEP these bytes?  (the model)
+      * `step_lemmas()` — can the step lemma be APPLIED at a real encoding?
+      * `SUCCESSOR_FORMS` — is the emitter's successor the model's successor?
+      * and this one — can `_abs_step`, the END-TO-END emitter's constant
+        propagation, FOLLOW the form?
+
+    The fourth is the one that was missing, and its absence is why
+    `formal/examples/unary_ops.mojo` failed with `unsolved goals` instead of a
+    named coverage gap: `group3:not` had a decoder name, a model step, a
+    coverage sample and a step lemma, and `_abs_step` had no branch for it, so
+    the walk wiped every register at the first `~n` and every later store was
+    address-less.  `_abs_step` is where an unmodelled form becomes a false fact
+    rather than a report, so it needs its own coverage question.
+
+    The encodings are `SUCCESSOR_FORMS`' own: that table carries at least one
+    real encoding for every `_FORMS` form (`test_formal_successor_coverage.py`
+    asserts the coverage in both directions; it has 47 rows for 45 forms
+    because a destination that changes what the instruction WRITES gets its own
+    row), and a second hand-written table would be a second thing to keep in
+    step with the encoder.
+    """
+    return [(form, enc) for form, enc, _probe, _state in SUCCESSOR_FORMS]
+
+
+def walk_failures():
+    """`[(form, why)]` for every form `_abs_step` does not model.
+
+    A form is MODELLED when the abstract state after stepping it still knows at
+    least one register.  `_Abs.wipe` is `_abs_step`'s own word for "I do not
+    model this form" -- it is the fall-through at the bottom of the function --
+    and it sets all sixteen registers unknown, so it is distinguishable from
+    every real branch without reading the code: no form in `_FORMS` legitimately
+    ends with every register unknown.  (`X86State.init` starts with thirteen
+    known zeros and a literal RSP, and the branches that make a register unknown
+    leave the other fifteen alone.)
+    """
+    out = []
+    for form, enc in walk_samples():
+        after = ET._abs_step(ET._Abs(), form, enc, BASE, len(enc))
+        if after is None:
+            out.append((form, "no abstract state at all"))
+        elif not any(v is not None for v in after.regs):
+            out.append((form, "the walk WIPED every register"))
+    return out
+
+
 def divide_cases():
     """[(label, kind, hi, lo, d, want)] — `x86_div128`/`x86_idiv128` against
     EXACT INTEGER ARITHMETIC.
@@ -1666,6 +1718,21 @@ def main():
               "would be meaningless")
         for u in undecodable:
             print("  " + u)
+        return 1
+
+    # **The WALK, which is the fourth table and the one that reports a gap as a
+    # false fact instead.**  `_abs_step` has no typechecker: an unmodelled form
+    # is a WIPE, and a wipe makes every later store address-less, so the
+    # end-to-end emitter's failure is `unsolved goals` on a `hmem` fact rather
+    # than a coverage line naming the form.  Asking the function directly —
+    # Lean-free, before any of the work below — turns that into a name.
+    walk = walk_failures()
+    if walk:
+        print("FAIL: _abs_step does not model %d form(s) `_FORMS` will walk — "
+              "an unmodelled form wipes the abstract state and the emitter then "
+              "states a false `hmem` about a later store" % len(walk))
+        for form, why in walk:
+            print("  %s: %s" % (form, why))
         return 1
 
     # A PRIVATE, self-removing directory, and ABSOLUTE paths handed to lean.
