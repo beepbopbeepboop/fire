@@ -4847,38 +4847,54 @@ def _pattern_class_struct_name(gen, func):
     return None
 
 
+def _collect_structdefs(coll, seen: set, out: list) -> None:
+    """Append every `StructDef` in `coll` to `out`, in walk order.
+
+    The collector behind `_iter_structdefs`. It is a module-level function
+    taking its state as parameters, not a generator nested in another
+    function: a nested generator that reads an enclosing-scope variable is a
+    shape the coroutine path cannot compile (it has no capture model for
+    one), so the self-host closure emitted a weak stub named `_yield_from`
+    for it and the compiled compiler skipped every call under it. No
+    generator is needed here at all — `out` is appended as the walk
+    proceeds.
+    """
+    if not coll:
+        return
+    # dict module_name -> stmts
+    if isinstance(coll, dict):
+        for v in coll.values():
+            _collect_structdefs(v, seen, out)
+        return
+    try:
+        for s in coll:
+            if isinstance(s, gimple_ctypes.StructDef):
+                sid = id(s)
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                out.append(s)
+    except TypeError:
+        return
+
+
 def _iter_structdefs(gen):
     """Yield StructDef objects visible to this generator, best-effort."""
     seen = set()
-    def _yield_from(coll):
-        if not coll:
-            return
-        # dict module_name -> stmts
-        if isinstance(coll, dict):
-            for v in coll.values():
-                yield from _yield_from(v)
-            return
-        try:
-            for s in coll:
-                if isinstance(s, gimple_ctypes.StructDef):
-                    sid = id(s)
-                    if sid in seen:
-                        continue
-                    seen.add(sid)
-                    yield s
-        except TypeError:
-            return
+    found = []
     for name in ('_module_stmts', 'module_stmts', '_all_transitive_stmts_ordered',
                  '_all_struct_defs', 'all_struct_defs', 'stmts', '_stmts',
                  '_parsed_stmts', '_root_stmts'):
-        yield from _yield_from(getattr(gen, name, None))
+        _collect_structdefs(getattr(gen, name, None), seen, found)
     # Also scan any list-valued attrs that look like stmt lists as last resort.
     try:
         for k, v in list(getattr(gen, '__dict__', {}).items()):
             if isinstance(v, list) and v and isinstance(v[0], (gimple_ctypes.StructDef,)):
-                yield from _yield_from(v)
+                _collect_structdefs(v, seen, found)
     except Exception:
         pass
+    for s in found:
+        yield s
 
 
 def _structdef_for_name(gen, name):

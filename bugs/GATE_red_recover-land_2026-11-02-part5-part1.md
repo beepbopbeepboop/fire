@@ -17,25 +17,32 @@ This is a follow-up replan part of `bugs/hard/GATE_red_recover-land_2026-11-02-p
 File: `tools/suite.py` (registry entry for `bootstrap-stage1-transitive`; the job is the test)
 Command: `python3 tools/suite.py bootstrap-stage1-transitive`
 
-Quick pinning test (cheap, for a light worker; run it beside the job):
+Quick pinning tests (cheap, for a light worker; run them beside the job):
 `python3 test_imported_global_stub.py` — an imported module-level DICT/SET
 global may not emit a function stub; the emitted C must build and print
 CPython's answer. It is one stub class's pin, not the job's substitute.
 `python3 test_module_attr_module_call.py` is the same kind of pin for the
 `lower`/`mojo_register` stub class (cause 7).
+`python3 test_bare_object_ctor_no_stub.py`,
+`python3 test_selfhost_no_dataclasses_fields_pin.py` and
+`python3 test_selfhost_iter_structdefs_no_nested_gen.py` are the pins for the
+`object`, `_dc_fields` and `_yield_from` stub classes (causes 8-10).
 
-## Status 2026-11-18 (seven root causes fixed; three stub classes remain)
+## Status 2026-11-18 (ten root causes fixed; the closure is still unmeasured)
 
-**This part is still open.** Its acceptance is a green job *plus* a closure
-with no `unavailable in compiled mode` stub, and the second half is not met.
-Seven of the red's root causes have been found and fixed; the first is on
-master, the second and third land with earlier commits on this branch, the
-fourth and fifth with the commit that carried the previous Status, the sixth
-(`locals()`) with the commit before this one, and the seventh
-(module-attribute module calls) with the commit that carries this Status. The
-closure was not re-measured in this round either (a whole-closure dump is the
-integrator's job), so the stub count below is stale until
-`python3 tools/suite.py bootstrap-stage1-transitive` runs.
+**This part is still open, pending one whole-closure measurement.** Its
+acceptance is a green job *plus* a closure with no `unavailable in compiled
+mode` stub, and the second half cannot be observed without the integrator's
+whole-closure dump. Ten of the red's root causes have been found and fixed.
+Causes 1-7 are described in the rest of this Status; causes 8-10 are the
+three stub classes the previous measurement had left (`object`, `_dc_fields`,
+`_yield_from`), fixed with this round's commit. Each has a cheap pin that was
+measured red before its fix and is green after it, but the closure itself was
+not re-measured (a whole-closure dump is the integrator's job), so the count
+and membership below are still stale until
+`python3 tools/suite.py bootstrap-stage1-transitive` runs. The remaining
+risk named at the end of the previous Status stands: a stub thought dead may
+persist for a different reason, and master may have grown a new one.
 
 1. **The dump could not finish.** `_drop_unreferenced_extern_decls`
    (`module_gen.py`, added 2026-11-15 by the stdlib-dylib lane) ran a
@@ -193,34 +200,81 @@ locate a survivor by the quoted call, not by the number.
    (`gimple_gen_coro` -> `mojo.middle.coro`) through `_module_attr_module`,
    and that a from-imported CLASS (`Parser`) does not resolve as a module.
 
+8. **A bare `object()` emitted a stub its placeholder lowering never used.**
+   `_lower_named_call` (`mojo/backend_gimple/emit_calls.py`) already had a
+   real lowering for the bare base-object constructor (a quiet null
+   placeholder), but the `_is_unknown` test ran first. `object` is unknown
+   by construction — no definition, no import entry — so `_lnc_unknown`
+   emitted a weak `int64_t object (...)` stub, and only then did the
+   placeholder arm return. The call site used the placeholder, making the
+   stub dead, but it was still a stub in the dumped `.ci`. The arm now runs
+   BEFORE `_is_unknown`. The closure carried it from the compiler's own
+   source: `mojo/middle/funcs_shared.py`'s `_PARSE_FAILED = object()`.
+   Pinned by `test_bare_object_ctor_no_stub.py` (measured red before the fix:
+   that exact stub line in the emitted C; green after, and the emitted C
+   builds and prints CPython's answer).
+
+9. **`from dataclasses import fields as _dc_fields` is not lowerable, and
+   the walks that used it saw an empty field list.** `cpp_core.py`'s AST
+   copy/rewrite walks called the alias in ten comprehensions/expressions.
+   The MODULE-QUALIFIED `dataclasses.fields(x)` is modelled (the reflection
+   dispatch `_mojo_dispatch_fields`), but a from-imported bare name is an
+   unresolved import alias: `_lnc_unknown` emitted the weak `_dc_fields`
+   stub returning 0. In the self-hosted compiler every one of those walks
+   therefore copied nothing. The ten sites now read `__dataclass_fields__`
+   through one `_cpp_field_names` helper — the same ordered mapping
+   `dataclasses.fields` reads, and the guards at those sites already used
+   it. For fire_compiler's AST dataclasses the two agree exactly: none
+   declares a `ClassVar`/`InitVar` pseudo-field, the only entries
+   `fields()` filters out. Pinned by
+   `test_selfhost_no_dataclasses_fields_pin.py`, which walks `fire.py`'s
+   closure and rejects the from-import spelling (measured red before: the
+   nine `cpp_core.py` import sites; green after).
+
+10. **The structdef walk was a nested generator that captures.** The helper
+    used to be `def _yield_from(coll)`, a generator defined INSIDE
+    `emit_stmts._iter_structdefs` (itself a generator) and reading the
+    enclosing `seen` set. The coroutine path has no capture model for a
+    nested generator, so the imported-module compile (`relaxed_imports`)
+    skipped it and emitted the weak `_yield_from` stub; every call under it
+    read 0 in the compiled compiler. The walk needs no generator at all:
+    `_collect_structdefs` is a module-level collector that appends to a list
+    as it descends, and `_iter_structdefs` yields that list in the same
+    order with the same per-`id` de-duplication. Pinned by
+    `test_selfhost_iter_structdefs_no_nested_gen.py`: an AST pin on the real
+    function, a behaviour check on order/de-duplication, and a compile of
+    the REAL current source as an imported sibling module (measured red
+    before: the `_yield_from` stub; green after).
+
 | stub(s) | emitted because | probe / next step |
 |---|---|---|
 | `globals` (2 call sites) | **FIXED 2026-11-18** (cause 4 above): `getattr(globals(), '_FOREIGN_CALLABLES', {})` in `mojo/middle/types.py:2948`, i.e. `globals()` in FUNCTION scope; `is_module_globals_call` now lowers it and the snapshot covers the module's own globals in function scope | pin: `test_globals_in_function_scope.py`; re-measure the job's stub count |
 | `locals` (5 call sites) | **FIXED 2026-11-18** (cause 6 above): `emit_stmts.py`'s `'obj_v' in locals()` and four dead `locals()` probes in `formal/build.py` / `formal/arm64_proof_gen.py`. Cause 4's `globals()` lowering does NOT cover it — `locals()` has no module struct to read | pin: `test_selfhost_no_locals_pin.py`; re-measure the job's stub count. **One stub LINE for the whole dump is expected even before the fix** (`#ifndef _MOJO_STUB_locals`): three modules can emit it and only the first survives, which is why the previous round attributed this row to `emit_stmts.py` alone |
 | `_EXPR_DISPATCH`, `_STMT_DISPATCH`, `_BIN_OPS`, `_CMP_OPS`, `_FLOAT`, `_SIGNED`, `_UNSIGNED` | **FIXED 2026-11-18** (cause 3 above): imported module-level DICT/SET globals from `generated_dispatch`; `_gmp_emit_imported_symbol_stubs` emitted a function stub for each `_imp_syms` entry with no signature, while their real lowering is the `_<mod>__mojo_global_get_<name>` accessor. The pass now skips an entry whose accessor is registered | pin: `test_imported_global_stub.py`; re-measure the job's stub count |
-| `object` | same pass, but **not** a registered global — do not assume cause 3 removed it. `object` is an imported builtin/type name, never called | `grep '[^_a-z]object *(' fire.ci` finds no call — it is a type, not a function; find which import registers it (it is not in any `import object` statement, and no module in the tree imports a name `object` at all — checked with an `ast` walk over every `.py`). **This round did not crack it**: no source import names `object`, and it is not a set-global export, so the entry is written by one of the non-import writers (a function-scoped alias, or the module-attribute/`_unresolved_import_aliases` route); instrument `_gmp_emit_imported_symbol_stubs` to print `sym_info` for `_sn == 'object'` on the next whole-closure dump |
+| `object` | **FIXED 2026-11-18** (cause 8 above): NOT the imported-symbol pass — a bare `object()` call reached `_lnc_unknown` first, which emitted the weak stub before the placeholder arm returned. `mojo/middle/funcs_shared.py`'s `_PARSE_FAILED = object()` is the closure's source | pin: `test_bare_object_ctor_no_stub.py`; re-measure the job's stub count. The old note here ("find which import registers it") was a false lead: no import ever did — the writer is the call site, and the fix is the ordering |
 | `multi_kind_locals` (3 call sites) | **FIXED 2026-11-18** (cause 5 above): `ginf.multi_kind_locals(gen)` in `emit_stmts.py:1924,1979,3828`; `ginf` is `emit_infra`, which only STAR-imports it from `mojo.middle.infra_infer`. `_find_symbol_home_module` now follows `from X import *` re-export edges | pin: `test_star_reexport_resolution.py`; re-measure the job's stub count |
 | `lower`, `mojo_register` | **FIXED 2026-11-18** (cause 7 above): `gimple_codegen.gimple_gen_coro.lower(...)` / `.register(...)` in `emit_resolve.py:1297,1301` — a call through a MODULE ATTRIBUTE (`mod.submod.fn`) where the attribute is a module the base module imported. The old code stripped the hub qualifier and then looked for a module FILE named `gimple_gen_coro`; the call fell to the generic scalar-receiver dispatch (`string_lower` / `int64_t.register() stubbed`). `_module_attr_module` now resolves the attribute through the base module's own imports and the call is re-dispatched on `mojo.middle.coro` | pin: `test_module_attr_module_call.py`; re-measure the job's stub count |
-| `_dc_fields` (10 call sites) | `from dataclasses import fields as _dc_fields` in `cpp_core.py`; CPython's `dataclasses` is not in the closure, so the imported alias gets the by-design unresolved-external stub — but this one IS called (`cpp_core.py:2874` etc.) | decide whether the compiled path reaches `_rewrite_node`'s `fields(type(node))`; if it does this is a silent wrong answer, and a static `__dataclass_fields__` walk is the lowering |
-| `_yield_from` | registered for a generator/async function the lowering skipped; no call site exists in the `.ci` | find the skipped function with `MOJO_DEBUG`/the generator pre-pass note; either lower it or record the accepted gap |
+| `_dc_fields` (10 call sites) | **FIXED 2026-11-18** (cause 9 above): `from dataclasses import fields as _dc_fields` in `cpp_core.py`; the module-qualified spelling is modelled, the from-import alias is not, so it became a weak stub returning 0 and every AST rewrite walk saw an empty field list. The call sites now use `__dataclass_fields__` through `_cpp_field_names` | pin: `test_selfhost_no_dataclasses_fields_pin.py`; re-measure the job's stub count |
+| `_yield_from` | **FIXED 2026-11-18** (cause 10 above): the nested generator `def _yield_from(coll)` in `emit_stmts._iter_structdefs` captured the enclosing `seen`; the coroutine path cannot compile a capturing nested generator, so the imported-module compile skipped it and stubbed it. Replaced by the module-level `_collect_structdefs` collector; `_iter_structdefs` is a plain generator over the collected list | pin: `test_selfhost_iter_structdefs_no_nested_gen.py`; re-measure the job's stub count |
 
 The four `_mojo_gpu_*` weak definitions are the documented GPU no-op stubs and
 were not counted above. The dispatch-table stubs (cause 3), the function-scope
 `globals` stubs (cause 4), the star-reexported `multi_kind_locals` stubs
 (cause 5), the `locals` stubs (cause 6) and the module-attribute module calls
-(cause 7) are fixed in this lane; the remaining rows are separate causes, and
-none is a one-symbol registration of the part-1/part-2 shape. The two fixed by
-cause 2 were that shape, which is why they are here.
+(cause 7) are fixed in this lane, as are the `object` (cause 8), `_dc_fields`
+(cause 9) and `_yield_from` (cause 10) rows. Every row this table carried is
+fixed; none was a one-symbol registration of the part-1/part-2 shape, and the
+two fixed by cause 2 were that shape, which is why they are here.
 
 The last measurement of the full closure (before cause 3) was 15 stubs; causes
-3–7 remove the seven dispatch-table stubs, the two `globals` call sites, the
-three `multi_kind_locals` call sites, the `locals` stub and the
-`lower`/`mojo_register` pair in that measurement, which would leave `object`,
-`_dc_fields`, and `_yield_from`. That is arithmetic from the table, not a
-reading — the number and the membership are stale until
-`bootstrap-stage1-transitive` runs (a stub thought dead may persist for a
-different reason, and a new one may have appeared on master since the
-measurement).
+3–10 remove every row in that measurement — the seven dispatch-table stubs,
+the two `globals` call sites, the three `multi_kind_locals` call sites, the
+`locals` stub, the `lower`/`mojo_register` pair, and the `object`,
+`_dc_fields` and `_yield_from` rows. That is arithmetic from the table, not a
+reading. The count must be re-measured by
+`python3 tools/suite.py bootstrap-stage1-transitive` before the acceptance is
+claimed: a stub thought dead may persist for a different reason, and a new one
+may have appeared on master since the measurement.
 
 The job's `reject=CLOSURE_INCOMPLETE` only reads the child's OUTPUT, and
 `--dump-full` writes the stubs to `fire.ci` (it prints just
