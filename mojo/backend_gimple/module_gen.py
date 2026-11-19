@@ -11040,6 +11040,32 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         sym_info = _as_dict(_imp_syms[_sn])
         if sym_info.get('return_type') == 'unknown':
             continue
+        # An imported module-level GLOBAL is not a function, and this pass used
+        # to emit a dead weak "unavailable in compiled mode" stub for it: the
+        # export entry (`module_loader`'s `'kind': 'global_var'`) carries a
+        # `c_return_type` but no `signature`, so it fell through to the
+        # by-design unresolved-symbol stub below.
+        #
+        # Its reads are already lowered through the defining module's
+        # `<mod>__mojo_global_get_<name>` accessor, registered for this name by
+        # `_emit_imported_global_accessors`, which runs before this pass in the
+        # same `gen_module_impl`. That registration IS the proof the real
+        # lowering exists for every use site, which is why the gate is the
+        # accessor map's own membership rather than the export's `kind` alone:
+        # a global the accessor pass could not resolve (no export entry, no
+        # qualifier) is not made callable by a stub either, and skipping it
+        # here turns a silent wrong answer into an implicit-declaration error
+        # at the one site that would have needed a real lowering.
+        #
+        # The self-host closure's own imported dispatch tables
+        # (`_EXPR_DISPATCH`, `_STMT_DISPATCH`, the aliased `_SIGNED`/`_FLOAT`/
+        # ... from `generated_dispatch`) were every one of its remaining
+        # dead stubs of this class. The key is the LOCAL bound name (the
+        # alias), while the emitted C symbol can be the defining name (an
+        # `X as Y` import registers `Y` and resolves `Y`'s accessor to `X`'s),
+        # so test `_sn` — this loop's own key — and not `safe`.
+        if _sn in self._imported_global_accessors:
+            continue
         # The `'signature' not in sym_info` escape hatch is LOAD-BEARING, not
         # an oversight: for a symbol this whole program defines but the module
         # being emitted only IMPORTS, the definition's own forward-declaration

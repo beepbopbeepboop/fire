@@ -2401,9 +2401,20 @@ def compile_formal(source_path: str, output: str = None,
             from formal.arm64_proof_gen import generate_arm64_proof
             generate_proof = generate_arm64_proof
         # Build structs_by_name if not in scope
+        #
+        # The `locals().get('structs_by_name')` / `'structs' in locals()`
+        # probes this replaces could only ever answer "absent": neither name
+        # is a PARAMETER of `compile_formal` (`structs` is the local bound by
+        # the `_prepare_functions` unpack above, unconditionally, and
+        # `structs_by_name` is not a local at all), and a bare `locals()`
+        # call is one of the builtins the compiled path cannot lower — the
+        # self-host closure emitted an `unavailable in compiled mode` weak
+        # stub for it, whose `0` answer the probes were reading. The `globals()`
+        # probe is kept (that lowering exists) because `structs_by_name` is
+        # still a name some host may define at module scope.
         try:
-            _sb = locals().get('structs_by_name') or globals().get('structs_by_name')
-            if _sb is None and 'structs' in locals() and structs is not None:
+            _sb = globals().get('structs_by_name')
+            if _sb is None and structs is not None:
                 _sb = {getattr(s, 'name', None): s for s in structs if getattr(s, 'name', None)}
         except Exception:
             _sb = None
@@ -2411,7 +2422,7 @@ def compile_formal(source_path: str, output: str = None,
                                admitted=result["admitted"],
                                admitted_calls=_admitted_calls(
                                    source_path, result["admitted"]),
-                               structs=(locals().get('structs') or None),
+                               structs=structs,
                                structs_by_name=_sb)
         # Also attach to info for convenience
         try:

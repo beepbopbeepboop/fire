@@ -2876,9 +2876,23 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             else:
                                 # Last-resort: try to dispatch to __setitem__ if the
                                 # method exists but wasn't caught by earlier checks.
+                                #
+                                # `obj_v` is bound on BOTH arms of the
+                                # `_arr_tgt` test above, so the former
+                                # `'obj_v' in locals()` probe read True there
+                                # in real Python and its `or True` made the
+                                # condition constant anyway. It is spelled
+                                # plainly here because a bare `locals()` call
+                                # is one of the builtins the compiled path
+                                # still cannot lower: the self-host closure
+                                # emitted an `unavailable in compiled mode`
+                                # weak stub for it, and evaluating the probe
+                                # tested `'obj_v' in <stub's 0>` before the
+                                # `or True` short-circuit could discard it.
+                                # Pinned by test_selfhost_no_locals_pin.py.
                                 _fallback_r = gmp._lower_struct_subscript_dunder(
                                     gen, ot if ot.endswith(' *') else f'{elem_t} *',
-                                    obj_v if 'obj_v' in locals() or True else addr,
+                                    obj_v,
                                     '__setitem__', [(it, idx_v), (vtype, v)])
                                 if _fallback_r is not None:
                                     return  # handled by __setitem__
@@ -4846,38 +4860,54 @@ def _pattern_class_struct_name(gen, func):
     return None
 
 
+def _collect_structdefs(coll, seen: set, out: list) -> None:
+    """Append every `StructDef` in `coll` to `out`, in walk order.
+
+    The collector behind `_iter_structdefs`. It is a module-level function
+    taking its state as parameters, not a generator nested in another
+    function: a nested generator that reads an enclosing-scope variable is a
+    shape the coroutine path cannot compile (it has no capture model for
+    one), so the self-host closure emitted a weak stub named `_yield_from`
+    for it and the compiled compiler skipped every call under it. No
+    generator is needed here at all — `out` is appended as the walk
+    proceeds.
+    """
+    if not coll:
+        return
+    # dict module_name -> stmts
+    if isinstance(coll, dict):
+        for v in coll.values():
+            _collect_structdefs(v, seen, out)
+        return
+    try:
+        for s in coll:
+            if isinstance(s, gimple_ctypes.StructDef):
+                sid = id(s)
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                out.append(s)
+    except TypeError:
+        return
+
+
 def _iter_structdefs(gen):
     """Yield StructDef objects visible to this generator, best-effort."""
     seen = set()
-    def _yield_from(coll):
-        if not coll:
-            return
-        # dict module_name -> stmts
-        if isinstance(coll, dict):
-            for v in coll.values():
-                yield from _yield_from(v)
-            return
-        try:
-            for s in coll:
-                if isinstance(s, gimple_ctypes.StructDef):
-                    sid = id(s)
-                    if sid in seen:
-                        continue
-                    seen.add(sid)
-                    yield s
-        except TypeError:
-            return
+    found = []
     for name in ('_module_stmts', 'module_stmts', '_all_transitive_stmts_ordered',
                  '_all_struct_defs', 'all_struct_defs', 'stmts', '_stmts',
                  '_parsed_stmts', '_root_stmts'):
-        yield from _yield_from(getattr(gen, name, None))
+        _collect_structdefs(getattr(gen, name, None), seen, found)
     # Also scan any list-valued attrs that look like stmt lists as last resort.
     try:
         for k, v in list(getattr(gen, '__dict__', {}).items()):
             if isinstance(v, list) and v and isinstance(v[0], (gimple_ctypes.StructDef,)):
-                yield from _yield_from(v)
+                _collect_structdefs(v, seen, found)
     except Exception:
         pass
+    for s in found:
+        yield s
 
 
 def _structdef_for_name(gen, name):

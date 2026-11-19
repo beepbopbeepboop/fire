@@ -12100,6 +12100,30 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     if fname in gimple_codegen._SELFHOST_HARDCODED_FUNCS:
         ret_type = gen._selfhost_func_return_type(fname)
 
+    # `object()` — the bare base-object constructor: this model has no
+    # Python-object representation, so lower to a quiet null placeholder.
+    # Before this, `object()` fell through to the unknown-name weak stub,
+    # which PRINTS "object: unavailable in compiled mode" on every call —
+    # and module-init code calls it eagerly (`c_common/__init__.py`'s
+    # `NOT_SET = object()`, the compiler's own `funcs_shared._PARSE_FAILED`),
+    # polluting stdout once per process for any program whose transitive
+    # closure contains that idiom. Mirrors the coroutine-body emitter's own
+    # existing `object()` case (which returns an opaque allocation, same "no
+    # representation, stay quiet" intent).
+    #
+    # This MUST precede the `_is_unknown` test below. That test is true for
+    # `object` (no definition, no import entry), and `_lnc_unknown` emits a
+    # weak "unavailable in compiled mode" DEFINITION for it before this arm
+    # can return the real lowering. The definition is then dead — the call
+    # site below emits the constant 0 — but it is still a stub in the
+    # dumped `.ci`, which is exactly what `bootstrap-stage1-transitive`'s
+    # closure-completeness half counts. Only the construction is claimed;
+    # `object` as a bare value of a user-visible name is left alone.
+    if (fname_raw == 'object' and not node.args
+            and not gen._locally_binds_name('object')
+            and 'object' not in gen.func_return_types):
+        return 'int64_t', gen._new_val('int64_t', '0')
+
     # Auto-stub completely unknown names (e.g. bracket params like `cmp_fn: fn(T,T)->Bool`
     # that the parser skips). Without a declaration GCC gives "implicit function declaration".
     # Skip the self-host hardcoded forward-declared symbols — gen_module's
@@ -12142,20 +12166,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and fname_raw not in gen._mangled_funcs):
         if fname not in gen._renamed_builtin_calls:
             gen._renamed_builtin_calls[fname] = ret_type
-
-    # `object()` — the bare base-object constructor: this model has no
-    # Python-object representation, so lower to a quiet null placeholder.
-    # Before this, `object()` fell through to the unknown-name weak stub,
-    # which PRINTS "object: unavailable in compiled mode" on every call —
-    # and module-init code calls it eagerly (`c_common/__init__.py`'s
-    # `NOT_SET = object()`), polluting stdout once per process for any
-    # program whose transitive closure contains that idiom. Mirrors the
-    # coroutine-body emitter's own existing `object()` case (which returns
-    # an opaque allocation, same "no representation, stay quiet" intent).
-    if (fname_raw == 'object' and not node.args
-            and not gen._locally_binds_name('object')
-            and 'object' not in gen.func_return_types):
-        return 'int64_t', gen._new_val('int64_t', '0')
 
     _args = node.args
     if (fname_raw == 'bool' and len(_args) == 1 and not node.kwargs
