@@ -25,14 +25,14 @@ the known case of this class; the other two are the same class arriving at the
 same wall from different proofs.
 
 `list_literal_index` is the newest of the three and got HERE because of the
-`FORMAL_x86_64_mov_rm64_imm32_successor_pins_rax` fix: the rax-pinned walk
-used to take its guard's TRAP arm (JZ → exit(2)) with a wrong ZF, so its
-success path was never proved and its cost never paid. With the general
+general step lemma landing (commit `90797f88e`): the old rax-pinned walk used
+to take its guard's TRAP arm (JZ → exit(2)) with a wrong ZF, so its success
+path was never proved and its cost never paid. With the general
 `x86_step_mov_rm64_imm32` the success path now elaborates (the
-`x86_set_flag4` simp-set correction in the shift rows, commit
-`69bcf55b0`, was the last elaboration blocker), and its per-step `hval`
-chain — the 47-successor, 26-lemma scale the coverage run reports — peaks
-above the 6144 MB the runner gives it.
+`x86_set_flag4` simp-set correction in the shift rows, commit `69bcf55b0`,
+was the last elaboration blocker), and its per-step `hval` chain — the
+47-successor, 26-lemma scale the coverage run reports — peaks above the
+6144 MB the runner gives it.
 
 ## What the class means for the suite
 
