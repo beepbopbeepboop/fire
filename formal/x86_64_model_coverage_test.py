@@ -874,10 +874,18 @@ SUCCESSOR_FORMS = (
     ("alu_ri32:add_reg", b'H\x81\xc0\x01\x00\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("alu_ri32:and", b'H\x81\xe0\xff\x00\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("mov_r64_rm64_reg", b'H\x8b\x03', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
-    ("mov_r64_rm64_sib", b'H\x8b\x03', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
-    ("mov_rm64_r64_sib", b'H\x89\x03', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
-    ("mov_rm64_r64_sib_disp8", b'H\x89C\x04', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
-    ("mov_rm64_r64_sib_disp32", b'H\x89\x83#\x01\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    # The four SIB rows must carry a SIB byte, and only a base of `rsp` (or
+    # `r12`) forces one at these displacements: `48 8b 03` is `mov rax, [rbx]`,
+    # which is `mov_r64_rm64_nodisp`, not this form.  Their earlier bytes were
+    # exactly that — a non-SIB ModRM — so the `disp8` row crashed `_resolve`
+    # reading `raw[4]` of a four-byte instruction and the other three compared
+    # against the wrong instruction.  These are `X.encode_mov_r64_rm64` and
+    # `X.encode_mov_rm64_r64`'s own output with `base=RSP`, for `[rsp]`,
+    # `[rsp+8]` and `[rsp+0x180]`, so the SIB escape cannot drift again.
+    ("mov_r64_rm64_sib", b'H\x8b\x04$', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("mov_rm64_r64_sib", b'H\x89\x04$', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("mov_rm64_r64_sib_disp8", b'H\x89D$\x08', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("mov_rm64_r64_sib_disp32", b'H\x89\x84$\x80\x01\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("mov_r64_rm64_disp8", b'H\x8bC\x08', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("mov_r64_rm64_disp32", b'H\x8b\x83\x00\x04\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("mov_r64_rm64_nodisp", b'H\x8b\x03', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),

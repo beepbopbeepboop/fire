@@ -465,24 +465,38 @@ class TestThePoolDrawsABasePlusIndex(unittest.TestCase):
         """Both registers and the offset come from the pools' own bounds.
 
         `_index_off` is the whole offset from MEMBASE (the SIB forms carry no
-        displacement), so a negative one would wrap on the CPU and not in
-        `x86_mem_addr` — a different bug, filed, that this draw must stay out
-        of. `GENERAL` is what excludes RSP, which SIB's index field encodes as
-        "no index at all", and R13/R14, which are the bases.
+        displacement), and it is drawn over the whole window including the
+        NEGATIVE half.  A negative offset is a register holding `2^64 + off`,
+        so the `base + index` sum WRAPS through the top of the address space —
+        that is the wrap `x86_eff_addr` states, and the address it lands on is
+        still a window offset.  `GENERAL` is what excludes RSP, which SIB's
+        index field encodes as "no index at all", and R13/R14, which are the
+        bases.
         """
         rng = random.Random(3)
+        wrapped = 0
         for _ in range(200):
             for size in (1, 2, 4, 8):
                 base, index, off = F._mem_idx(rng, size)
                 self.assertIn(base, F.MEM_BASES)
                 self.assertIn(index, F.GENERAL)
                 self.assertNotEqual(base, index)
-                self.assertGreaterEqual(off, 0,
-                                        "a negative offset wraps on the CPU "
-                                        "and not in the model")
-                self.assertLessEqual(off, F.DATA_N // 2 - size,
-                                     "an access of %d byte(s) at %d leaves "
-                                     "the compared window" % (size, off))
+                if off < 0:
+                    wrapped += 1
+                addr = (F.MEMBASE_ABS + off) % (1 << 64)
+                self.assertGreaterEqual(
+                    addr, F.REGION_BASE + F.DATA_OFF,
+                    "an access at window offset %d leaves the compared window"
+                    % off)
+                self.assertLessEqual(
+                    addr + size, F.REGION_BASE + F.DATA_OFF + F.DATA_N,
+                    "an access of %d byte(s) at %d leaves the compared window"
+                    % (size, off))
+        self.assertGreater(
+            wrapped, 0,
+            "the draw never produced a negative offset, so the pool never "
+            "compares a `base + index` sum that wraps — the case "
+            "`x86_eff_addr` exists for")
 
     def test_the_access_is_sib_indexed_with_the_loaded_register(self):
         """The bytes, not just the text: ModRM names SIB, and the SIB names
@@ -500,7 +514,7 @@ class TestThePoolDrawsABasePlusIndex(unittest.TestCase):
                 self.assertEqual(len(drawn), 2,
                                  "the index has to be loaded first")
                 (load_text, load_bytes), (access_text, access_bytes) = drawn
-                m = _re.fullmatch(r"mov (\w+), (\d+)", load_text)
+                m = _re.fullmatch(r"mov (\w+), (-?\d+)", load_text)
                 self.assertIsNotNone(m, load_text)
                 index = F.R[m.group(1)]
                 off = int(m.group(2))
@@ -574,7 +588,7 @@ class TestThePoolDrawsABasePlusIndex(unittest.TestCase):
                     self.assertEqual(rex & 1, 1 if base.value >= 8 else 0)
                     self.assertFalse((rex >> 3) & 1, "REX.W must be clear")
 
-                addr = F.MEMBASE_ABS + off
+                addr = (F.MEMBASE_ABS + off) % (1 << 64)
                 self.assertGreaterEqual(addr, F.REGION_BASE + F.DATA_OFF)
                 self.assertLessEqual(addr + 1,
                                      F.REGION_BASE + F.DATA_OFF + F.DATA_N,
@@ -591,6 +605,90 @@ def _program(items, regs=None):
     return F.Program(0, items, regs, [0x2222222222222222] * 8,
                      {"cf": True, "zf": False, "sf": False, "of_": False},
                      [0] * F.DATA_N)
+
+
+class TestTheEffectiveAddressWraps(unittest.TestCase):
+    """`base + index*scale + disp` is computed modulo 2^64, like the hardware.
+
+    The measured defect — `base + index*scale + disp` was added as a `Nat`, so a
+    sum above 2^64 was not truncated and a negative one clamped at 0 — is one
+    `movzx rax, [r13+r14]` at `r14 = 2^64 - 1`: R13 is `MEMBASE_ABS`, so
+    `r13 + r14` wraps on the CPU to `MEMBASE_ABS - 1`, window offset 63, and the
+    hardware loads the `0x13` parked there.  The model used to add the index as
+    a `Nat` with no truncation, land at `MEMBASE_ABS + 2^64 - 1`, read `0` from
+    outside `[dataLo, dataLo+dataN)`, and report `rax = 0`.
+
+    The program is constructed directly rather than drawn from the pool so the
+    regression is this exact address and not a seed; the pool's own draw of the
+    same case is pinned by `TestThePoolDrawsABasePlusIndex`.
+    """
+
+    WINDOW_OFFSET = F.DATA_N // 2 - 1
+    """Where `MEMBASE_ABS - 1` lands in the compared window: `MEMBASE` is the
+    window's centre, so one byte below it is `DATA_N//2 - 1`."""
+
+    def _wrapping_program(self):
+        regs = [0] * 16
+        regs[F.R.RSP.value] = F.STACK_TOP_ABS
+        regs[F.R.R13.value] = F.MEMBASE_ABS
+        regs[F.R.R14.value] = (1 << 64) - 1
+        mem = [0] * F.DATA_N
+        mem[self.WINDOW_OFFSET] = 0x13
+        return F.Program(
+            0,
+            [("movzx RAX, [R13+R14]",
+              F.X.encode_movzx_r64_rm8_idx(F.R.RAX, F.R.R13, F.R.R14))],
+            regs, [0] * 8,
+            {"cf": False, "zf": False, "sf": False, "of_": False}, mem)
+
+    def _lean_and_lib(self):
+        root = F.L._default_root()
+        lean = F.L.find_lean(root)
+        if not lean:
+            self.skipTest("no `lean` binary found")
+        lib = os.path.join(root, "lib")
+        F.L.ensure_library(lean, lib)
+        return lean, lib
+
+    def test_the_model_loads_the_wrapped_address(self):
+        """The model-only half: `rax` is the byte at `MEMBASE_ABS - 1`.
+
+        This is the assertion that fails on the pre-fix tree — the address it
+        computed was outside the window `mem_N` answers, so it read 0 — and it
+        needs no CPU, so the regression is checked wherever Lean runs.
+        """
+        prog = self._wrapping_program()
+        lean, lib = self._lean_and_lib()
+        exit_pc = F.REGION_BASE + F.CODE_OFF + len(prog.code)
+        with F.L.scratch_dir("x86_eff_addr_model_test") as workdir:
+            got = F.run_model(lean, [prog], exit_pc, lib, workdir)
+        self.assertIn(0, got, "the model reported nothing for the program")
+        self.assertIsNotNone(got[0], "x86_step returned none")
+        self.assertEqual(
+            got[0]["regs"][0], 0x13,
+            "the effective address must wrap: `r13 + (2^64 - 1)` is "
+            "`MEMBASE_ABS - 1`, window offset %d, where the `0x13` is; the "
+            "model read %#x" % (self.WINDOW_OFFSET, got[0]["regs"][0]))
+
+    def test_the_documented_program_reports_AGREE(self):
+        """The `Done when`'s acceptance: the CPU and the model agree.
+
+        A model-only assertion cannot tell a correct wrap from a second wrong
+        answer that happens to land in the window; the hardware dump can.
+        """
+        if not shutil_which("clang"):
+            self.skipTest("clang is not on PATH")
+        prog = self._wrapping_program()
+        lean, lib = self._lean_and_lib()
+        with F.L.scratch_dir("x86_eff_addr_agree_test") as workdir:
+            try:
+                res, _stub = F.evaluate(lean, [prog], lib, workdir)
+            except (RuntimeError, OSError) as exc:
+                self.skipTest("the native half did not run here: %s" % exc)
+        status, detail = res[0][1], res[0][2]
+        self.assertEqual(status, "AGREE",
+                         "`movzx rax, [r13+r14]` at r14 = 2^64 - 1: %s %s"
+                         % (status, detail))
 
 
 if __name__ == "__main__":
