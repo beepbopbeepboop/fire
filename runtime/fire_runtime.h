@@ -2510,9 +2510,6 @@ char *mojo_str_join(char *sep, MojoList *parts);
  * no separator argument at all — see gimple_codegen.py's shlex.join dispatch). */
 char *mojo_shlex_join(MojoList *parts);
 
-/* textwrap.dedent(text): see the definition for the exact (CPython 3.14) rule. */
-char *mojo_textwrap_dedent(char *text);
-
 /* ── SIMD select helper ──────────────────────────────────────────────────
  * Lowers SIMD[_Bool,N].select(a, b) → cond ? a : b for scalar path.   */
 static inline int64_t _Bool_select(int64_t cond, int64_t a, int64_t b) {

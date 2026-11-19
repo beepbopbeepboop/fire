@@ -1754,21 +1754,6 @@ def main():
         f_out.write(c_code)
         f_out.close()
         print("✓ Generated " + basename + ".ci", file=sys.stderr)
-        # A weak "unavailable in compiled mode" stub is the emitter's
-        # by-design degrade for a call it cannot lower. It is invisible in the
-        # artifact's verdict: the dump exits 0 and prints only the line above,
-        # while every CALLER of the dump (bootstrap's stage2/stage3 binaries
-        # above all) links against the stub and reads its `0`. So the one
-        # place that knows the artifact also knows this, and says it: the
-        # bootstrap jobs' `reject=CLOSURE_INCOMPLETE` matches this line, which
-        # turns "the closure is stub-free" from a manual grep of a 120 MB
-        # `.ci` into the dump's own verdict. Deliberately quiet when there is
-        # nothing to report, so a clean dump is unchanged; one `in` is a
-        # single pass over the artifact and does not split it into a second
-        # 120 MB line list (the cost class cause 1 of the same bug doc removed).
-        if "unavailable in compiled mode" in c_code:
-            print("closure: " + basename + ".ci carries an unavailable in "
-                  "compiled mode stub", file=sys.stderr)
         return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files

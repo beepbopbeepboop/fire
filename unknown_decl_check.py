@@ -252,18 +252,7 @@ def format_diagnostic(filename: str, src: str, node) -> str:
 
 
 def check_module(stmts: list, src: str, filename: str = "") -> None:
-    """Raise SyntaxError listing every unknown-declaration read in `stmts`.
-
-    This is Modular's MOJO diagnostic. A Python source (`.py`) resolves names
-    lazily: a read of an unbound name is a runtime NameError, and a function
-    that never runs it (dead code after a `raise`, a branch never taken) is a
-    valid program. Real: CPython's Tools/c-analyzer/c_common/tables.py reads
-    the undefined `_resolve_column` after an unconditional `raise`, and the
-    check turned that file's build into a compile error. Python sources are
-    therefore not checked.
-    """
-    if filename.endswith('.py'):
-        return
+    """Raise SyntaxError listing every unknown-declaration read in `stmts`."""
     reads = unknown_reads(stmts)
     if not reads:
         return

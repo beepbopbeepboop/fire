@@ -9331,81 +9331,6 @@ def _conformance_trait_bases_from_source(gen):
     return extra
 
 
-def _comptime_conformance_map(gen) -> dict:
-    """The declared `{decl: [base, ...]}` map this generator knows, merged from
-    the struct bases, trait bases, the instantiation's extra bases and the
-    trait declarations read from the source text. The ONE builder every
-    comptime conformance question reads (`_conforms_to_pred`, and
-    `conforms_to_closed` for diagnostics)."""
-    sb = getattr(gen, '_struct_bases', None) or {}
-    tb = getattr(gen, '_trait_bases', None) or {}
-    ex = getattr(gen, '_conformance_bases_extra', None) or {}
-    tbt = _conformance_trait_bases_from_source(gen) or {}
-    bases = dict(ex)
-    bases.update(sb)
-    bases.update(tb)
-    for k, v in tbt.items():
-        if v or k not in bases:
-            bases[k] = v
-    return bases
-
-
-def _imported_struct_def(gen, name):
-    """The StructDef of a struct this module IMPORTS by name (`from M import N
-    [as name]`) from the defining module's own parsed source, or None when
-    `name` is not such an import. Imported structs are absent from
-    `_struct_bases` in the single-translation-unit path (`do_imports` off), so
-    a condition about `String` could never see its declared conformances.
-    The home is found through re-exports (`_find_symbol_home_module`), the
-    same walk every other struct resolution uses."""
-    edge = (getattr(gen, '_top_from_import_homes', None) or {}).get(name)
-    if not edge:
-        return None
-    module, orig = edge
-    try:
-        # want_abs: the spelling `_find_imported_struct` can PARSE from here.
-        # The relative spelling (`.string`) is only meaningful inside the
-        # re-exporting module.
-        home = gen._find_symbol_home_module(module, orig, 'struct', want_abs=True)
-        return gen._find_imported_struct(home, orig) if home else None
-    except Exception:
-        return None
-
-
-def _struct_def_node(gen, name):
-    """The StructDef a comptime fold can read for NAME: this module's own
-    struct, else an imported one, else None."""
-    sd = (getattr(gen, '_struct_def_nodes', None) or {}).get(name)
-    return sd if sd is not None else _imported_struct_def(gen, name)
-
-
-def _imported_struct_bases(gen, name):
-    sd = _imported_struct_def(gen, name)
-    if sd is None:
-        return None
-    return list(getattr(sd, 'bases', None) or [])
-
-
-def _struct_deinit_trivial(gen, name):
-    """Whether NAME's destructor is trivial, as True / False, or None when this
-    module cannot see the struct or the rule does not decide it.
-
-    The rule is `ownership_check._struct_def_is_trivial`, the one the
-    move-lifetime pass already applies: a user `__deinit__` (or a user copy or
-    move constructor) makes the destructor non-trivial, and a struct whose
-    fields are all trivially register-passable is trivial. Only the decided
-    answers are returned; an undecided field stays None."""
-    sd = _struct_def_node(gen, name)
-    if sd is None:
-        return None
-    from ownership_check import _struct_def_is_trivial
-    try:
-        verdict = _struct_def_is_trivial(sd, {name: sd})
-    except Exception:
-        return None
-    return verdict if isinstance(verdict, bool) else None
-
-
 def _conforms_to_pred(gen):
     """Predicate for comptime `conforms_to(T, Trait)` folding, or None.
 
@@ -9414,19 +9339,21 @@ def _conforms_to_pred(gen):
     compiler-synthesized `TrivialRegisterPassable` and the traits it derives),
     and a module whose only structs are the builtins — the doc's synthetic
     `maybe[Int]` module is one — must still be able to fold
-    `conforms_to(Int, TrivialRegisterPassable)`.
-
-    An imported struct's declared bases and destructor triviality are read
-    from its home module the first time a fold names it (lazily: the home is
-    parsed only when a question asks)."""
+    `conforms_to(Int, TrivialRegisterPassable)`."""
     try:
-        bases = _comptime_conformance_map(gen)
+        sb = getattr(gen, '_struct_bases', None) or {}
+        tb = getattr(gen, '_trait_bases', None) or {}
+        ex = getattr(gen, '_conformance_bases_extra', None) or {}
+        tbt = _conformance_trait_bases_from_source(gen) or {}
+        bases = dict(ex)
+        bases.update(sb)
+        bases.update(tb)
+        for k, v in tbt.items():
+            if v or k not in bases:
+                bases[k] = v
+        return lambda t, tr, _b=bases: comptime_eval.conforms_to(t, tr, _b)
     except Exception:
         return None
-    return comptime_eval.ConformancePredicate(
-        bases,
-        declare_missing=lambda n: _imported_struct_bases(gen, n),
-        deinit_trivial=lambda n: _struct_deinit_trivial(gen, n))
 
 
 def _eval_const_int(gen, node) -> int | None:

@@ -2117,13 +2117,6 @@ class GimpleGen:
         # never reaches it, e.g. a temp_gen used only for signature probing)
         # sees "no bases" instead of raising AttributeError.
         self._struct_bases: dict[str, list] = {}
-        # local name -> (module, struct name) for each TOP-LEVEL
-        # `from M import N [as L]` of the module being compiled, recorded by
-        # gen_module. The comptime conformance fold reads an imported
-        # struct's declared bases from its home module through this edge.
-        self._top_from_import_homes: dict[str, tuple] = {}
-        # name -> StructDef for this module's own structs (see module_gen).
-        self._struct_def_nodes: dict[str, object] = {}
         # struct name → {alias_name: value AST}; expanded at member access.
         self._struct_comptime_aliases: dict[str, dict] = {}
         # Bare names of user free functions whose C symbol is overload-mangled by
