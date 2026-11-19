@@ -78,6 +78,25 @@ owner decision (`doc/POLICY_memory_over_4gb.md`). Until then `bigbody` cannot
 be the fixture this file checks with `check_proof_cached`, and the named
 command below does not exit 0.
 
+## Status 2026-11-19 (second round): 35 tests run with Lean on; `bigbody` is the only failure
+
+Measured on a worktree from master with `lib/ProofLib.olean` built
+(`tools/suite.py prooflib`): `python3 test_formal_eval_eq_mojo_bridge.py`
+runs 35 tests in ~1 500 s, one fails (`bigbody`). The earlier 27-test run in
+8 s was a false pass: its Lean half skipped for want of the olean.
+
+* `bigbody` standalone (`check_proof_cached` on its generated proof) was
+  killed by `tools/memcap.py` at an 8 GB ceiling and again at 24 GB, before
+  Lean finished. One `lean` process was at ~7 GB while running. So the
+  machine half is not merely over the per-proof `-M 6144`; the tree is well
+  past the policy's 24 GB `module` class. This is a RESOURCE result, not a
+  verdict on the proof.
+* Consequence: `bigbody` cannot be checked in a bucket at its current cost.
+  The two remaining routes are the ones already recorded above: a
+  compositional machine proof (not one certificate per CFG path), or an owner
+  decision to raise the generated-proof budget (`doc/POLICY_memory_over_4gb.md`).
+  Neither is a one-round change, so this round stops at the measurement.
+
 ## The five, grouped by root cause
 
 1. **`lib/ProofLib.lean` no longer has either spelling the test pins.**
