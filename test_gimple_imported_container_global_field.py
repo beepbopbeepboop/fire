@@ -38,6 +38,7 @@ sys.path.insert(0, _HERE)
 
 import build_config  # noqa: E402
 import gimple_codegen  # noqa: E402
+from exec_budget import COMPILE_TIMEOUT_S  # noqa: E402
 
 RUNTIME_INC = os.path.join(_HERE, 'runtime')
 
@@ -104,7 +105,7 @@ def main():
         cc = subprocess.run(
             [build_config.find_gcc(), '-fgimple', '-fsyntax-only', '-Os', '-g',
              '-ftrivial-auto-var-init=zero', f'-I{RUNTIME_INC}', c_file],
-            capture_output=True, text=True, timeout=120)
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
         if 'int-conversion' in cc.stderr or 'makes pointer from integer' in cc.stderr \
                 or 'makes integer from pointer' in cc.stderr:
             failures.append('gcc: ' + cc.stderr.strip()[:800])
