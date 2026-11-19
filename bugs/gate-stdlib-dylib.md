@@ -14,12 +14,72 @@ Reproduce on master (`python3 tools/suite.py stdlib-dylib`), then fix the cause.
 
 ## Done when
 
-The job is green on a tree with the `disabled=` argument removed from `tools/suite.py`, AND both quick tests below pass:
+The job is green on a tree with the `disabled=` argument removed from `tools/suite.py`, AND the quick tests below pass:
 
 1. `python3 test_stdlib_dylib_ratchet.py` (the ratchet's own synthetic-dylib test).
 2. `python3 test_stdlib_import_suffix.py` (written 2026-11-15; red before that round's fix, green after). It compiles `string_span.mojo` and `_unicode.mojo` with `compile_module_to_c` and requires every `_unicode` call in `string_span` to name the symbol `_unicode` emits, and pins the export record's parameter ctypes (`Span *` for `StringSlice[_]`, `char *` for bare `StringSlice`).
+3. `python3 test_stdlib_import_extern_variadic.py` (written 2026-11-19). It pins the unexpected-skip class's root cause: the export record publishes the overloaded `std.time.sleep` as variadic (`...`, empty `c_parameters`), and the generated C of a synthetic importer and of `std/testing/assert_aborts.mojo` must declare that symbol variadic, never `(void)` — with a non-variadic control (`_unicode.is_lowercase`) so the test cannot pass by calling everything variadic.
 
 The job itself is the integrator's to run (`python3 tools/suite.py stdlib-dylib`); a worker does not run it.
+
+## Status (2026-11-19, this round): the residual skip fix is SUPERSEDED on master, so nothing from it is needed here; a pinning test now covers the class; the doc stays because this base cannot carry the job's switch
+
+**All three quick tests pass on this tree**, each run under
+`tools/memslot.py --gb 8 --label t`:
+
+    python3 test_stdlib_import_suffix.py          -> PASS (0.1 GB)
+    python3 test_stdlib_dylib_ratchet.py          -> PASS (0.0 GB)
+    python3 test_stdlib_import_extern_variadic.py -> PASS (0.0 GB; new)
+
+RED-before for the new test is measured, not asserted: running it with
+`_emit_stdlib_import_externs` wrapped to replace the imported `sleep` extern
+with `(void)` — exactly what the regression below emitted — fails four checks
+(`synthetic importer: every extern is variadic`, `synthetic importer: no (void)
+prototype`, and both for `std/testing/assert_aborts.mojo`). The tree's own
+emitter keeps the export record's text, so the test is green here.
+
+**The earlier 2026-11-19 Status's next step (`56470f49b`) is obsolete, twice
+over.** That commit patched `_emit_stdlib_import_externs` where the importer
+rebuilt every extern signature from `c_parameters`; an overloaded export has
+`c_parameters: []` and only the text `ret name (...)`, so the rebuild produced
+`(void)` and `sleep(x)` in `std/testing/assert_aborts.mojo` became a NEW dylib
+skip. But:
+
+- `5a0dcec4a` (master, 2026-11-15 12:32 — twelve minutes after `56470f49b`)
+  removed that rebuild entirely: the importer now emits
+  `gimple_ctypes.c_client_sanitize_signature_text(sig)`, so the export record's
+  `(...)` is kept. This branch's base predates the rebuild (`ae41bf838`) and
+  needs no patch: `std/testing/assert_aborts.mojo` compiles here and emits
+  `extern int64_t std_time___init___sleep (...)`.
+- `942bc269c` (master, 2026-11-12 14:53 — ten minutes after this branch's merge
+  base `88ccccf1d`) replaced the ratchet's `nm -u`-vs-`nm -gU` contract with
+  the `dlopen(..., RTLD_LAZY)` load contract, re-enabled the job, and deleted
+  this doc. The 29 "no definition under any suffix" references it left are
+  reported as lazy notes, not a failure; parts 8/9 then landed (`2b992be66`,
+  `30c4597ef`).
+- The three modules `56470f49b` wanted in `EXPECTED_FAILURES`
+  (`std/compile/compile.mojo`, `std/ffi/__init__.mojo`, `std/simd.mojo`) all
+  compile on this base with `compile_module_to_c` (measured: 35020, 123139 and
+  535409 bytes of C, no exception), so no entry is warranted, and this base's
+  `EXPECTED_FAILURES` is empty.
+
+**Why the doc still is not deleted here.** Deleting it requires removing
+`disabled='bugs/gate-stdlib-dylib.md'` from `tools/suite.py` in the same commit
+(the marker is the doc's existence switch), and on this base the job cannot
+pass: the ratchet predates `942bc269c` and still fails on the lazy references
+parts 8/9 exist to fix, neither of which is in this branch. Removing
+`disabled=` would declare green a job this base cannot pass; deleting the doc
+with the marker still present makes `tools/suite.py` refuse to load its
+registry. The delete belongs to the tree that carries `942bc269c` — which is
+where it already happened. Master has since re-filed the same path for a
+different red (`83b4bccad`: eight files failing elaboration on
+`work/bug-codegen-scalar-integer-dtype-represe-4`), so a delete from this stale
+base must not overwrite that filing either.
+
+**Next step: none on this branch.** The branch's remaining value is the new
+pinning test (independent of the job). On master the job is already enabled on
+the load contract, and its open red is the re-filed eight-file elaboration bug
+owned by that other branch's lane — not this one.
 
 ## Status (2026-11-19): part 6 is already on master; the residual skip fix is a dead lane's unlanded commit; doc stays
 
@@ -61,7 +121,7 @@ removing `disabled=` would declare green a job this base cannot pass. On
 master the job is enabled and its current red is a DIFFERENT filing:
 `83b4bccad` re-filed `bugs/gate-stdlib-dylib.md` for the eight stdlib files
 that fail elaboration on `work/bug-codegen-scalar-integer-dtype-represe-4`
-(the `bugs/mid/gate-stdlib-dylib.md` copy is the placeholder). That red
+(the placeholder copy filed under `bugs/mid/` is that re-filing). That red
 belongs to that branch's lane, not here.
 
 **Next step.** Land/adapt `56470f49b` on master — keep the variadic-extern
