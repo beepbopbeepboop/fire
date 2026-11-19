@@ -1,5 +1,6 @@
 === REPORT fix-proof-bug-gate-suite-self-test ===
-COMMITS: 5f6f89082 gate: suite-self-test is green on master — delete the bug doc
+COMMITS: ce026b117 review: NOTESTCASE for gate-suite-self-test deletion
+5f6f89082 gate: suite-self-test is green on master — delete the bug doc
 VERIFIED: python3 test_suite.py suite-self-test passed (411 passed, 0 failed); python3 tools/memslot.py --gb 8 --label t -- python3 tools/suite.py suite-self-test passed (1 passed, 0 failed, 0 skipped)
 NOT DONE: 
 BUGS FILED: 
