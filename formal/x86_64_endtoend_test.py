@@ -235,8 +235,17 @@ _FORMS = {
     "push_r64": ("x86_step_push_rbp", False, ["rip", "b0"]),
     "alu_ri32:sub_rsp": ("x86_step_sub_rsp_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
-    "mov_rm64_imm32": ("x86_step_mov_rax_imm32", True,
-                       ["rip", "b0", "b1", "b2", "imm"]),
+    # `REX.W C7 /0 id`, general over the REX byte and over the destination the
+    # ModRM names: the old row pinned the lemma's ModRM to the literal `0xc0`
+    # (RAX), so at `48 c7 c7 …` — `mov rdi, 2`, which the backend emits — the
+    # byte side condition was false and its guard admitted the step as a
+    # counted hole instead of proving it. `rex`, `w`, `mod`, `rm`, `dst`,
+    # `dst_lt` are the lemma's own hypotheses after the four bytes; `dst` is
+    # the CONCRETE destination read out of the encoding, because `x86_set_reg`
+    # is a `match` on its index and `simp` will not reduce one on a non-literal.
+    "mov_rm64_imm32": ("x86_step_mov_rm64_imm32", True,
+                       ["rip", "b0", "b1", "b2", "rex", "w", "mod", "rm",
+                        "dst", "dst_lt", "imm"]),
     "alu_ri32:add_rsp": ("x86_step_add_rsp_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
     # The digit-immediate ALU forms the backend emits outside the rsp pair.
@@ -610,7 +619,15 @@ _SUCCS = {
     "alu_ri8:cmp":
         "{ $s with rip := $next, zf := ($fs).zf, sf := ($fs).sf, "
         "cf := ($fs).cf, of_ := ($fs).of_ }",
-    "mov_rm64_imm32": "{ $s with rax := $imm, rip := $next }",
+    # `mov r/m64, imm32`: the destination is the ModRM `rm` field extended by
+    # REX.B, read out of the encoding by the `_resolve` branch below and
+    # supplied as a literal `$dst`. `x86_set_reg` and not a field projection
+    # because `$dst` names the register rather than spelling every one of the
+    # sixteen cases, and `($imm)` parenthesised always, for the reason the
+    # `takes_imm` note gives: an unparenthesised negative literal in
+    # application position is a binary minus.
+    "mov_rm64_imm32":
+        "{ x86_set_reg $s $dst ($imm) with rip := $next }",
     # No `alu_ri32:add` row, and its absence is a measurement rather than an
     # oversight: `_shapes` renames the decoder's `alu_ri32:add`/`alu_ri32:sub`
     # to `..._rsp` or `..._reg` by the ModRM byte (ModRM c4 is `add rsp`,
@@ -1183,6 +1200,19 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_args = " %d %d %d %d %d" % (rex, modrm, reg, rm, dst)
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$rm": str(rm),
                       "$dst": str(dst)}
+    elif form == "mov_rm64_imm32":
+        # `REX.W C7 /0 id`: the REX is `raw[0]`, the ModRM `raw[2]` and the
+        # immediate `raw[3:7]`.  The DESTINATION is the rm field extended by
+        # REX.B — `x86_set_reg` is a `match` on its index, so the successor
+        # names one register and the lemma carries the equation tying it to
+        # the encoding.  This is what the old rax-pinned row got wrong: it
+        # named RAX for every `C7` and its byte guard had to fail at `mov
+        # rdi, 2` rather than the step proving it.
+        rex, modrm = raw[0], raw[2]
+        rm = modrm & 7
+        dst = rm + (8 if rex & 1 else 0)
+        extra_args = " %d %d %d %d" % (rex, modrm, rm, dst)
+        extra_succ = {"$rex": str(rex), "$rm": str(rm), "$dst": str(dst)}
     elif form in ("alu_ri32:add_reg", "alu_ri32:sub_reg", "alu_ri32:and",
                   "alu_ri8:cmp"):
         # `REX.W 81 /digit id` or `83 /digit ib`, so the ModRM is `raw[2]` and the
@@ -1942,7 +1972,15 @@ def _abs_step(prev, form, raw, addr, length):
         st.put(_R_DX, None if a is None else (_u64(-1) if _msb(a) else 0))
         return st
     if form == "mov_rm64_imm32":
-        st.put(_R_AX, int.from_bytes(raw[3:7], "little", signed=True))
+        # The model writes the sign-extended immediate into the ModRM `rm`
+        # field extended by REX.B, and NOT into RAX: the register the successor
+        # names, read out of the same bytes the model decodes. `raw[0]` is the
+        # REX (the decoder requires REX.W for this form) and the value is
+        # `UInt64.ofInt` of the four bytes, i.e. taken mod 2^64 like the
+        # register file everywhere else in this walk.
+        rex = raw[0] if raw[0] & 0xF0 == 0x40 else 0
+        dst = (raw[2] & 7) + (8 if rex & 1 else 0)
+        st.put(dst, _u64(int.from_bytes(raw[3:7], "little", signed=True)))
         return st
     if form == "movzx_r64_r8":
         a = st.get(_R_AX)
@@ -2274,7 +2312,7 @@ _SIMP_FORMS = {
     "push_r64": ("x86_get_reg", "mem_write_bytes"),
     "alu_ri32:sub_rsp": ("x86_get_reg", "x86_flags_sub"),
     "alu_ri32:add_rsp": ("x86_get_reg", "x86_flags_add"),
-    "mov_rm64_imm32": (),
+    "mov_rm64_imm32": ("x86_set_reg", "x86_rex_b"),
     "alu_ri32:add_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_add"),
     "alu_ri32:sub_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_sub"),
     "alu_ri32:and": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_logic"),
@@ -2323,9 +2361,24 @@ _SIMP_FORMS = {
     # project through a shift leaves the goal open. `x86_set_reg`, `UInt64.ofNat`,
     # `x86_trunc32` and `x86_sign_extend32` were the pre-correction spelling and
     # are not in the term any more.
-    "shift_imm8:shl": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
-    "shift_imm8:shr": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
-    "shift_imm8:sar": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
+    #
+    # `x86_set_flag4` goes with `x86_shift_post` and not only beside it: the
+    # wrapper's count-nonzero branch ends in `x86_set_flag4 (x86_set_reg s i
+    # res) …`, so a projection that has to get PAST the shift (a `hval` fact's
+    # `s.mem`, one step after any shift) stops at `x86_set_flag4` without the
+    # name and hands `decide` a term with the predecessor state still in it —
+    # "Expected type must not contain free variables" on the whole file. The
+    # `imul` row names the same definition for the same reason, because its
+    # successor applies it directly; the shift row had it latent, behind a
+    # definition, and stayed green until a path that carried `hval` facts past
+    # a shift — `list_literal_index`, whose success path the rax-pinned walk
+    # used to take the trap arm of instead — reached one.
+    "shift_imm8:shl": ("x86_get_reg", "x86_rex_b", "x86_shift_post",
+                       "x86_set_flag4"),
+    "shift_imm8:shr": ("x86_get_reg", "x86_rex_b", "x86_shift_post",
+                       "x86_set_flag4"),
+    "shift_imm8:sar": ("x86_get_reg", "x86_rex_b", "x86_shift_post",
+                       "x86_set_flag4"),
     "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
                      "x86_set_flag4", "x86_imul_ovf"),
     "cqo": ("x86_cqo",),
