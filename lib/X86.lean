@@ -1968,12 +1968,46 @@ theorem x86_step_mov_rbx_rax (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some { x86_set_reg s 3 s.rax with rip := m + 3 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_b1, h_b2]
 
-/-- `mov rax, imm32` sign-extended (REX.W C7 /0 id). -/
-theorem x86_step_mov_rax_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat) (imm : Int)
-    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0xc7) (h_b2 : code (m + 2) = 0xc0)
+/-- `mov r/m64, imm32` sign-extended (REX.W C7 /0 id), general over the REX byte
+    and over the destination register the ModRM names.
+
+    The destination is a CONCRETE argument with `h_dst` beside it, for the reason
+    `x86_step_imul_r64_imm` states: `x86_set_reg` is a `match` on its index and
+    `simp` will not reduce a match on a non-literal, so the model's index
+    `rm + x86_rex_b rex` and the conclusion's `dst` have to be tied by an
+    equation rather than left as two spellings of one register. `h_dst_lt` states
+    the range the match's fallback arm makes load-bearing: a `dst` outside 0..15
+    would reduce `x86_set_reg` to the identity, i.e. a step that writes nothing,
+    and the statement would still look right.
+
+    This replaced a rax-pinned statement whose `h_b2` was the literal byte `0xc0`:
+    the ModRM is a FACT ABOUT THE MACHINE, not about the example, and the backend
+    emits `48 c7 c7 …` (`mov rdi, 2`, ModRM `0xc7`, rm = 7) for a local and
+    `49 c7 c7 …` (`mov r15, …`) for a parameter. Applied at those bytes the old
+    `h_b2` was false, the end-to-end emitter's side-condition guard ADMITTED the
+    failure as a counted hole, and the file proved `terminates` about a step that
+    writes RDI — a wrong successor with a green-ish report, the exact quiet-hole
+    failure the byte guard exists to prevent. `x86_step_mov_rm64_r64_reg` is the
+    shape this copies: concrete `dst`, `h_dst` and `h_dst_lt` beside it. -/
+theorem x86_step_mov_rm64_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm dst : Nat) (imm : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xc7)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : rm + x86_rex_b rex = dst) (h_dst_lt : dst < 16)
     (h_imm : read_i32_le code (m + 3) = imm) :
-    x86_step s code = some { s with rax := UInt64.ofInt imm, rip := m + 7 } := by
-  simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_b1, h_b2, h_imm]
+    x86_step s code = some
+      { x86_set_reg s dst (UInt64.ofInt imm) with rip := m + 7 } := by
+  -- `x86_is_rex` deliberately OUT of the set, for the reason `x86_step_mov_rm64_
+  -- r64_reg`'s proof has: with the REX a VARIABLE, unfolding `x86_is_rex` first
+  -- leaves `rex.toNat ≥ 64 && …` undecidable and the dispatcher's `if` in
+  -- `x86_step` takes the plain arm with the REX as its opcode — a goal about
+  -- `x86_step_plain s code rex`. Left opaque, `code s.rip` rewrites to `rex`
+  -- and `h_rex` closes the condition before any unfolding can lose it.
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_rm, h_dst, h_dst_lt, h_imm]
 
 -- `cmp rax, rbx`: ModRM 0xc3 is reg=rax (source), rm=rbx (destination), so
 -- the flags come from RBX - RAX -- i.e. the comparison is `cmp rbx, rax` in

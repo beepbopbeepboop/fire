@@ -561,6 +561,35 @@ def step_lemmas():
                 enc,
                 _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode,
                                digit=digit)))
+    # `mov r/m64, imm32`, at the two destinations the corpus emits: a local
+    # goes into `rdi` (rm = 7, REX.B clear) and a parameter into `r15` (rm = 7,
+    # REX.B set).  The destination is the ModRM `rm` field extended by REX.B —
+    # the opposite field sense from the `reg`-field forms the shared helper
+    # states (`dst = reg + x86_rex_r`), so the list is written from the
+    # lemma's own hypotheses rather than through `_rex_mod3_hyps`.  The two
+    # rows are what makes a regression to the old RAX-pinned statement red
+    # HERE: at `mov rdi, 2` a successor that writes `rax` agrees with nothing
+    # the model computes, and the old statement's `code (m + 2) = 0xc0` does
+    # not hold at the `0xc7` the backend really emits.
+    for reg, imm in ((R.RDI, 2), (R.R15, 10)):
+        enc = X.encode_mov_r64_imm32(reg, imm)
+        rex, modrm = enc[0], enc[2]
+        rm = modrm & 7
+        dst = rm + (8 if rex & 1 else 0)
+        m = BASE + 16 * len(out)
+        out.append(Lemma(
+            "x86_step_mov_rm64_imm32", "mov %s, %d" % (reg.name, imm), enc,
+            ["s.rip = %d" % m,
+             "code %d = %d" % (m, rex),
+             "code %d = 0xc7" % (m + 1),
+             "code %d = %d" % (m + 2, modrm),
+             "x86_is_rex %d = true" % rex,
+             "x86_rex_w %d = true" % rex,
+             "(%d : UInt8).toNat >>> 6 = 3" % modrm,
+             "(%d : UInt8).toNat &&& 7 = %d" % (modrm, rm),
+             "%d + x86_rex_b %d = %d" % (rm, rex, dst),
+             "%d < 16" % dst,
+             "read_i32_le code %d = %d" % (m + 3, imm)]))
     # The memory-operand `mov`/`lea` shapes, at every mode the corpus uses and at
     # both a negative and a positive displacement.  `wide_recv`'s frame lives at
     # `rbp - 0x410`, so a lemma that read the disp32 UNSIGNED would put every
@@ -878,6 +907,16 @@ SUCCESSOR_FORMS = (
     ("push_r64", b'U', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("alu_ri32:sub_rsp", b'H\x81\xec\x08\x00\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("mov_rm64_imm32", b'H\xc7\xc0A\x00\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    # The two rows the rax-pinned successor could not see: the destination is
+    # the ModRM `rm` field extended by REX.B, and the model writes THAT
+    # register, not RAX.  `X86State.init` puts 10 in `rdi`, so a successor that
+    # still writes `rax` differs from the model on the probed field for the
+    # `rdi` row (10 vs 2) and for the `r15` row (0 stays 0 while rax takes the
+    # 10).  These are the encodings the corpus itself emits (`mov rdi, 2` for a
+    # local, `mov r15, 10` for a parameter), so a regression to the rax-only
+    # successor is red here rather than a counted hole in two examples.
+    ("mov_rm64_imm32", X.encode_mov_r64_imm32(R.RDI, 2), "fun t => (t.rip, t.rdi, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
+    ("mov_rm64_imm32", X.encode_mov_r64_imm32(R.R15, 10), "fun t => (t.rip, t.r15, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("alu_ri32:add_rsp", b'H\x81\xc4\x08\x00\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("alu_ri32:add_reg", b'H\x81\xc0\x01\x00\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
     ("alu_ri32:and", b'H\x81\xe0\xff\x00\x00\x00', "fun t => (t.rip, t.rax, t.zf, t.sf, t.cf, t.of_)", "{ X86State.init 10 %d with zf := true, sf := true, cf := true, of_ := true }"),
