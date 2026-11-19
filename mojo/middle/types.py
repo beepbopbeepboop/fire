@@ -1302,18 +1302,30 @@ def _body_builds_struct_tuple(body) -> bool:
     return False
 
 
-# Dtype spellings for float SIMD annotations -> scalar C type. The one table
-# for this mapping: `_mojo_type` below, `emit_calls._float_dtype_arg_ctype`
-# and the `Scalar[X]` / `SIMD[X, 1]` arm of `infra_infer._resolve_type` (reached
-# as `GimpleGen._resolve_type`) all read it, so there is no second table.
-_SIMD_FLOAT_DTYPE_CTYPE = {
-    'DType.float32': 'float',
-    'Float32': 'float',
-    'float32': 'float',
-    'DType.float64': 'double',
-    'Float64': 'double',
-    'float64': 'double',
+# One dtype spelling -> scalar C type table. A `Scalar[DType.uint32]` is a
+# 32-bit unsigned word, not the 64-bit word every unknown `Scalar` erased to,
+# and the float entries are the same answer floats have always had. This is the
+# ONE table for the mapping: `_mojo_type` / `_simd_dtype_ctype` below,
+# `emit_calls._dtype_cast_ctype` / `_float_dtype_arg_ctype` and the
+# `Scalar` / `SIMD` arm of `infra_infer._resolve_type` (reached as
+# `GimpleGen._resolve_type`) all resolve through `_dtype_token_ctype`, so the
+# annotation resolver and the constructor lowerer cannot drift apart.
+_DTYPE_CTYPE = {
+    'bool': '_Bool',
+    'int8': 'int8_t', 'uint8': 'uint8_t',
+    'int16': 'int16_t', 'uint16': 'uint16_t',
+    'int32': 'int32_t', 'uint32': 'uint32_t',
+    'int64': 'int64_t', 'uint64': 'uint64_t',
+    'index': 'int64_t', 'uindex': 'uint64_t',
+    'float16': '__fp16',
+    'float32': 'float', 'float64': 'double',
 }
+
+#: Every C type above is a scalar-erased dtype value: a `SIMD[dtype, N]` of
+#: one is one C scalar regardless of N, so `value[i]` is the value itself (a
+#: lane READ/WRITE, not pointer arithmetic). Derived from the one table so a
+#: dtype added there cannot be left out of the lane arms.
+_DTYPE_SCALAR_CTYPES = frozenset(_DTYPE_CTYPE.values())
 
 
 def _dtype_token_ctype(tok):
@@ -1325,7 +1337,7 @@ def _dtype_token_ctype(tok):
     (`gen._comptime_vals` stores `comptime dt = DType.float32` as
     `"('DType', 'float32')"`), a `DType.float32` / `dtype.float32` / leading-dot
     spelling, or a bare `float32` / `Float32` / `f32` / `f64`.  Reads the one
-    table `_SIMD_FLOAT_DTYPE_CTYPE`, so the annotation resolver
+    table `_DTYPE_CTYPE`, so the annotation resolver
     (`infra_infer._resolve_type`) and the constructor lowerer
     (`emit_calls`' `SIMD`/`Scalar` arm) cannot drift apart.
 
@@ -1362,37 +1374,18 @@ def _dtype_token_ctype(tok):
         sl = 'float32'
     elif sl == 'f64':
         sl = 'float64'
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl) or _SIMD_INT_DTYPE_CTYPE.get(sl)
+    return _DTYPE_CTYPE.get(sl)
 
 
-# Integer dtypes, one table with the float one. A `Scalar[DType.uint32]` is a 32-bit
-# unsigned word, not the 64-bit word every unknown `Scalar` erased to.
-_SIMD_INT_DTYPE_CTYPE = {
-    'int8': 'int8_t', 'uint8': 'uint8_t',
-    'int16': 'int16_t', 'uint16': 'uint16_t',
-    'int32': 'int32_t', 'uint32': 'uint32_t',
-    'int64': 'int64_t', 'uint64': 'uint64_t',
-}
-
-
-def _simd_float_dtype_ctype(inner: str) -> str | None:
-    """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
-    `<dtype>` when it is a float dtype spelling, else None (integer or
-    unresolvable -> caller keeps the conservative `int64_t` fallback)."""
+def _simd_dtype_ctype(inner: str) -> str | None:
+    """For a `SIMD[<dtype>, N]` or `Scalar[<dtype>]` bracket, return the
+    scalar C type of `<dtype>`, or None when the spelling names no dtype this
+    codegen gives its own C type (the caller keeps the conservative `int64_t`
+    fallback)."""
     parts = _split_top_level_commas(inner)
     if not parts:
         return None
-    dt = _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
-    if dt is not None:
-        return dt
-    # An INTEGER dtype is a scalar only at width 1 (`Scalar[X]`, `SIMD[X, 1]`). A wider
-    # integer SIMD is a vector and keeps the word fallback; the float arm above is
-    # unchanged (it has always erased any width to its scalar).
-    if len(parts) == 1 or parts[1].strip() == '1':
-        dt = _dtype_token_ctype(parts[0].strip())
-        if dt is not None and dt in _SIMD_INT_DTYPE_CTYPE.values():
-            return dt
-    return _float8_dtype.float8_ctype(parts[0].strip())
+    return _dtype_token_ctype(parts[0].strip())
 
 
 def _mojo_type(ann: str | type | None) -> str:
@@ -1478,10 +1471,11 @@ def _mojo_type(ann: str | type | None) -> str:
         if base == 'Optional':
             return _mojo_type(_split_top_level_commas(inner)[0].strip())
         if base == 'SIMD':
-            # `SIMD[<float dtype>, N]` (any N) is scalar-erased to the C type
-            # of the dtype. Integer and unresolvable dtypes fall through to
-            # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
-            # `infra_infer._resolve_type`, not here.
+            # `SIMD[<dtype>, N]` (any N) is scalar-erased to the C type of the
+            # dtype. Integer and unresolvable dtypes fall through to the
+            # `int64_t` box only when the dtype spelling is unknown; a known
+            # one is a scalar whatever its width (a SIMD value is one C scalar
+            # in this representation). `Scalar[...]` resolves above.
             #
             # The lane count is validated here as well as at the constructor
             # (`emit_calls._lower_call`): an ANNOTATION is the other spelling
@@ -1493,7 +1487,7 @@ def _mojo_type(ann: str | type | None) -> str:
                 _w = _simd_width.concrete_width(_parts[1])
                 if _w is not None:
                     _simd_width.reject_invalid_width(_w, _parts[0])
-            dt = _simd_float_dtype_ctype(inner)
+            dt = _simd_dtype_ctype(inner)
             if dt is not None:
                 return dt
         if base in ('Literal', 'typing.Literal'):

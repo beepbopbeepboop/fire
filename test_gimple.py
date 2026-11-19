@@ -15460,6 +15460,8 @@ main()
                   'two_same_name_free_functions_get_distinct_symbols')
     _run_isolated(test_local_generic_struct_in_own_module_keeps_methods_and_plain_overloads,
                   'local_generic_struct_in_own_module_keeps_methods_and_plain_overloads')
+    _run_isolated(test_scalar_integer_dtype_resolution,
+                  'scalar_integer_dtype_resolution')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
@@ -15652,6 +15654,127 @@ def pick(x: Int) -> Int:
             for line in stderr.splitlines()[:8]:
                 print(f"      {line}")
         _FAIL += 1
+
+
+def test_scalar_integer_dtype_resolution():
+    """One integer dtype -> ONE C type, through every annotation spelling.
+
+    Regression for CODEGEN_scalar_integer_dtype_representation-part1: an
+    integer `Scalar[DType.X]` used to erase to `int64_t` everywhere except the
+    float table, so `UnsafePointer[Scalar[DType.uint8]]`'s element and a
+    `Scalar[DType.uint8]` parameter were two C types for one Mojo type (`gcc`
+    then rejected a read of one through the other), and a
+    `Scalar[DType.uint8](250)` local stayed a word.
+
+    Asserts the resolver answers (every spelling, plus the pointer element and
+    the `SIMD` bracket), the repro's lowered signature, the narrow local and
+    pointer declarations, and that gcc accepts the struct-field / lane access
+    shapes the stdlib writes (`_swisstable`'s `ctrl[i]`, philox's
+    `counter[i] += v`)."""
+    global _PASS, _FAIL
+    import mojo.middle.types as _types
+    name = 'scalar_integer_dtype_resolution'
+    problems = []
+
+    resolved = [
+        ('Scalar[DType.uint8]', 'uint8_t'),
+        ('Scalar[DType.int16]', 'int16_t'),
+        ('SIMD[DType.uint32, 4]', 'uint32_t'),
+        ('UnsafePointer[Scalar[DType.uint8]]', 'uint8_t *'),
+        ('Scalar[DType.float32]', 'float'),
+        ('SIMD[DType.float64, 2]', 'double'),
+    ]
+    for ann, want in resolved:
+        got = _types._mojo_type(ann)
+        if got != want:
+            problems.append(f'_mojo_type({ann!r}) = {got!r}, want {want!r}')
+
+    token_cases = [
+        ('DType.uint8', 'uint8_t'),
+        ('.uint8', 'uint8_t'),
+        ('uint8', 'uint8_t'),
+        ('UInt8', 'uint8_t'),
+        (('DType', 'int16'), 'int16_t'),
+        ("('DType', 'int16')", 'int16_t'),
+        ('index', 'int64_t'),
+        ('uindex', 'uint64_t'),
+    ]
+    for tok, want in token_cases:
+        got = _types._dtype_token_ctype(tok)
+        if got != want:
+            problems.append(f'_dtype_token_ctype({tok!r}) = {got!r}, want {want!r}')
+
+    repro = """\
+def first(ctrl: UnsafePointer[Scalar[DType.uint8]], target: Scalar[DType.uint8]) -> Bool:
+    for i in range(4):
+        if ctrl[i] == target:
+            return True
+    return False
+"""
+    ok, c_src, stderr = gimple_compiles(repro)
+    if not ok:
+        problems.append('the repro did not compile')
+        problems.extend(stderr.splitlines()[:6])
+    elif not re.search(r'^_Bool first_[0-9a-f]+ \(uint8_t \* ctrl, uint8_t target\)$',
+                       c_src, re.M):
+        problems.append("the repro's definition is not "
+                        "`_Bool first_<hash> (uint8_t * ctrl, uint8_t target)`")
+
+    decls = """\
+def main():
+    var a = Scalar[DType.uint8](250)
+    var p = UnsafePointer[Scalar[DType.uint8]].alloc(4)
+    print(a, p[0])
+"""
+    ok_d, c_decls, stderr_d = gimple_compiles(decls)
+    if not ok_d:
+        problems.append('the local/pointer declarations did not compile')
+        problems.extend(stderr_d.splitlines()[:6])
+    else:
+        for decl in ('uint8_t a;', 'uint8_t * p;'):
+            if not re.search(r'^\s*' + re.escape(decl) + r'$', c_decls, re.M):
+                problems.append(f'missing narrow declaration `{decl}`')
+
+    shapes = """\
+struct Group:
+    var b: Scalar[DType.uint8]
+    var lane: SIMD[DType.uint32, 4]
+
+    def __init__(out self, b: Scalar[DType.uint8]):
+        self.b = b
+        self.lane = SIMD[DType.uint32, 4](0)
+
+    def bump(mut self, i: Int, v: Scalar[DType.uint32]):
+        self.lane[i] += v
+
+    def lane_at(self, i: Int) -> Scalar[DType.uint32]:
+        return self.lane[i]
+
+
+def match(ctrl: UnsafePointer[Scalar[DType.uint8]], target: Scalar[DType.uint8]) -> Bool:
+    var i = 0
+    while i < 4:
+        if ctrl[i] == target:
+            return True
+        i += 1
+    return False
+"""
+    ok_s, c_shapes, stderr_s = gimple_compiles(shapes)
+    if not ok_s:
+        problems.append('the struct-field / lane-access shape did not compile')
+        problems.extend(stderr_s.splitlines()[:6])
+    else:
+        for shap in ('uint8_t b;', 'uint32_t lane;'):
+            if shap not in c_shapes:
+                problems.append(f'the struct field was not narrowed: missing `{shap}`')
+
+    if problems:
+        print(f"FAIL  {name}:")
+        for p in problems:
+            print(f"      {p}")
+        raise AssertionError('; '.join(problems[:4]))
+    print(f"PASS  {name}")
+    _PASS += 1
 
 
 if __name__ == '__main__':

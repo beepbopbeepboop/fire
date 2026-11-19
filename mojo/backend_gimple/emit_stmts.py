@@ -2915,12 +2915,16 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             v_cast = gen._new_temp(elem_t)
                             gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
                             gen._emit(f"  *{addr} = {v_cast};")
-                    elif isinstance(ot, str) and ot in ('float', 'double', '__fp16'):
+                    elif (isinstance(ot, str)
+                          and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
+                          and ot not in ('int64_t', '_Bool')):
                         # Scalar-erased SIMD/Scalar lane WRITE (same model and
                         # reason as the read arm in `_lower_subscript`, and as
                         # the MultiAssign chain's copy): the erased value IS the
                         # lane, so assign the slot instead of emitting
-                        # `scalar[i] = x`, which gcc rejects.
+                        # `scalar[i] = x`, which gcc rejects. Every dtype C
+                        # type is here, not just the floats: an integer SIMD
+                        # value is one narrow C scalar too.
                         if vtype == ot:
                             gen._copy(f"{obj_v}", f"{v}")
                         else:
@@ -3349,6 +3353,21 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 suf = gimple_ctypes.TypeLattice.list_suffix(elem)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
                 gen._rt_void(f"mojo_list_set_{suf}", [lp, idx64, f"{v}"])
+        elif (isinstance(ot, str)
+              and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
+              and ot not in ('int64_t', '_Bool')):
+            # Scalar-erased SIMD/Scalar lane WRITE for `value[i] += x` too:
+            # the erased value IS the lane, so the read-modify-write result
+            # (`v`, already computed through the fake BinaryOp above) is
+            # assigned to the slot. Without this, gcc sees `uint8_t[i]` and
+            # rejects it with "subscripted value is neither array nor pointer
+            # nor vector" (real: philox's `self._counter[0] += lo`).
+            if vtype == ot:
+                gen._copy(obj_v, v)
+            else:
+                _wv = gen._new_temp(ot)
+                gen._safe_coerce_emit(vtype, ot, v, _wv)
+                gen._copy(obj_v, _wv)
         elif _dsa_sn and not gen._struct_defines_method(_dsa_sn, '__setitem__'):
             # `d[k] += v` on a builtin-`dict` subclass: read-modify-write
             # through the backing MojoDict (the read half already went
@@ -5553,13 +5572,16 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     v_cast = gen._new_temp(elem_t)
                     gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
                     gen._emit(f"  *{addr} = {v_cast};")
-            elif ot in ('float', 'double', '__fp16'):
+            elif (isinstance(ot, str)
+                  and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
+                  and ot not in ('int64_t', '_Bool')):
                 # Scalar-erased SIMD/Scalar lane WRITE, mirroring the read arm
                 # in `_lower_subscript` (and for the same reason: a scalar has
                 # no legal Mojo subscript, so this is a lane of the erased
                 # value). The erased value IS the lane, so assign the slot
                 # instead of emitting `scalar[i] = x`, which gcc rejects with
                 # "subscripted value is neither array nor pointer nor vector".
+                # Every dtype C type takes this arm, not just the floats.
                 if vtype == ot:
                     gen._copy(obj_v, v)
                 else:

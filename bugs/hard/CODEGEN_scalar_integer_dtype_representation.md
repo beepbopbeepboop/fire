@@ -1,10 +1,12 @@
-SPLIT: CODEGEN_scalar_integer_dtype_representation-part1, CODEGEN_scalar_integer_dtype_representation-part2 (part3 fixed and deleted)
+SPLIT: CODEGEN_scalar_integer_dtype_representation-part2 (part1 fixed and deleted, part3 fixed and deleted)
 
 # CODEGEN: integer `Scalar[DType.*]` lowers to a 64-bit word
 
 **Status (2026-11-18): replanned for the easy pool. The work is in the
-`CODEGEN_scalar_integer_dtype_representation-part1..2` docs; part3 (imported overload choice in a concrete specialised generic) is fixed. This doc keeps the
-measured evidence, the rejected fix and the gates.**
+`CODEGEN_scalar_integer_dtype_representation-part2` doc; part1 (one dtype ->
+C type resolver) and part3 (imported overload choice in a concrete specialised
+generic) are fixed. This doc keeps the measured evidence, the rejected fix and
+the gates.**
 
 ## Symptom
 
