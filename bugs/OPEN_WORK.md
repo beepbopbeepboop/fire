@@ -46,11 +46,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `bugs/FORMAL_call_proofgen_red_on_head.md` | **unclaimed** | `test_formal_call_proof_gen.py` is red on master (27 of 301) |
 | `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` | **unclaimed** | `svc` exit handling is not structurally complete |
 
-### `formal/x86_64_model_fuzz` — 1 document, 0 claimed
+### `formal/x86_64_endtoend_test` — 1 document, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/FORMAL_x86_64_mem_addr_effective_address_not_wrapped.md` | **unclaimed** | `x86_mem_addr` does not wrap the effective address to 64 bits |
+| `bugs/FORMAL_x86_64_mov_rm64_imm32_successor_pins_rax.md` | **unclaimed** | `mov r/m64, imm32` is proved as `mov rax, imm32` |
 
 ---
 

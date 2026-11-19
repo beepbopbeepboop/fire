@@ -1021,7 +1021,7 @@ theorem peephole_x86_store_load_disp8 (s : X86State) (code : Nat → UInt8)
   rw [hs1] at e1
   have ht1 : t1 = { s with
       mem := mem_write_bytes s.mem
-        (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat
+        (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp)
         (x86_get_reg s (reg + x86_rex_r rex)) 8,
       rip := m + 4 } := Option.some.inj e1
   have h_rip1 : t1.rip = m + 4 := by rw [ht1]
@@ -1035,11 +1035,11 @@ theorem peephole_x86_store_load_disp8 (s : X86State) (code : Nat → UInt8)
   have h_src : x86_get_reg t1 (reg + x86_rex_r rex) = x86_get_reg s (reg + x86_rex_r rex) := by
     rw [ht1]; rfl
   have h_mem : t1.mem = mem_write_bytes s.mem
-      (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat
+      (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp)
       (x86_get_reg s (reg + x86_rex_r rex)) 8 := by
     rw [ht1]
   have h_read : mem_read_bytes t1.mem
-      (Int.ofNat (x86_get_reg t1 (rm + x86_rex_b rex)).toNat + disp).toNat 8
+      (x86_eff_addr (x86_get_reg t1 (rm + x86_rex_b rex)).toNat disp) 8
       = x86_get_reg s (reg + x86_rex_r rex) := by
     rw [h_base, h_mem, mem_read_bytes_write_same]
     simp [lowMask_eight]
@@ -1343,7 +1343,7 @@ theorem peephole_x86_load_pair_disp8 (s : X86State) (code : Nat → UInt8)
     have hbase_lt : rm + x86_rex_b rex < 16 := by omega
     exact x86_get_reg_set_reg_other (rm + x86_rex_b rex) dst s _ hbase_lt h_dst_lt (Ne.symm h_ne)
   have hdst1 : x86_get_reg t1 dst = mem_read_bytes s.mem
-      (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8 := by
+      (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp) 8 := by
     rw [ht1]
     exact x86_get_reg_set_reg_same s dst _ h_dst_lt
   have e2 := x86_step_mov_rm64_mem_disp8 t1 code (m + 4) rex modrm reg rm dst disp
@@ -1351,7 +1351,7 @@ theorem peephole_x86_load_pair_disp8 (s : X86State) (code : Nat → UInt8)
   rw [hs2] at e2
   have ht2 := Option.some.inj e2
   rw [ht2, hmem1, hbase1]
-  have hval : mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8
+  have hval : mem_read_bytes s.mem (x86_eff_addr (x86_get_reg s (rm + x86_rex_b rex)).toNat disp) 8
       = x86_get_reg t1 dst := hdst1.symm
   rw [hval, x86_set_reg_self t1 dst h_dst_lt]
   simp [hmem1]
