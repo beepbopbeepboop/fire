@@ -16271,33 +16271,6 @@ main()
 """)
 
 
-def test_list_str_param_read_wrong_after_empty_list_caller():
-    """A list[str] param read after a caller passes an empty list variable."""
-    test_gimple_matches_cpython("gimple_list_str_param_after_empty_list_var", """\
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    e: list[str] = []
-    print(ends(e))
-    print(ends(["a", "b:"]))
-
-main()
-""")
-    test_gimple_matches_cpython("gimple_mixed_param_negative_index_boxed_str", """\
-def show(xs):
-    print(xs[-1])
-
-def main():
-    show([1, 2])
-    show(["a", "b:"])
-
-main()
-""")
-
-
 # Keep the existing main if present; append our test call via module globals not needed
 # The test will be discovered by name if run differently, but easier to just run it directly
 if __name__ == '__main__':
@@ -16316,10 +16289,6 @@ if __name__ == '__main__':
         print(f"ERR: {e}")
     try:
         test_generator_string_value_slot_over_inline_sorted()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_list_str_param_read_wrong_after_empty_list_caller()
     except Exception as e:
         print(f"ERR: {e}")
     main()

@@ -1886,14 +1886,10 @@ int mojo_is_listiter(int64_t v)
     return _pr_has(&_reg_listiter, (uint64_t)v);
 }
 
-static int64_t _norm_idx(MojoList *l, int64_t i);
-
 int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 {
-    if (!l) return 0;
-    int64_t idx = _norm_idx(l, i);
-    if (idx < 0 || idx >= l->len) return 0;
-    char _k = mojo_list_slot_kind(l, idx);
+    if (!l || i < 0 || i >= l->len) return 0;
+    char _k = mojo_list_slot_kind(l, i);
     /* An int slot is its own answer and stays the bare word: a box is a heap
      * cell per (list, slot), and taxing every int in a mixed list to serve the
      * uncommon kinds would be the wrong trade. Every OTHER kind is boxed —
@@ -1901,7 +1897,7 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
      * double has no int64_t spelling, and a `char *` slot's word is a bare
      * pointer a consumer cannot tell from an int. */
     if (_k == 'i' || _k == MOJO_KIND_OBJ)
-        return l->data[idx];
+        return l->data[i];
     /* A nested CONTAINER slot is its own answer too: its word is the list/dict
      * pointer, which every consumer uses AS a container. Boxing it hands the
      * consumer the box header where a MojoList is expected -- `a, b, c =
@@ -1910,31 +1906,31 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
      * compiler in `coro.lower`. Nothing is lost: the box only ever carried the
      * kind, and a container's repr needs no kind to be told apart. */
     if (_k == MOJO_KIND_LIST)
-        return l->data[idx];
+        return l->data[i];
     uint64_t addr = (uint64_t)(uintptr_t)l;
     int fresh = 0;
     _KindRow *r = _kinds_row_for_write(addr, &fresh);
     if (fresh || !r->boxes) {
         void **nb = (void **)calloc((size_t)l->len, sizeof(void *));
-        if (!nb) return l->data[idx];
+        if (!nb) return l->data[i];
         if (r->boxes) free(r->boxes);
         r->boxes = nb;
     }
-    if (idx >= l->len) return l->data[idx];
-    if (!r->boxes[idx]) {
+    if (i >= l->len) return l->data[i];
+    if (!r->boxes[i]) {
         MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-        if (!bx) return l->data[idx];
+        if (!bx) return l->data[i];
         bx->magic = MOJO_BOX_MAGIC;
         /* The slot's own word, bit for bit: a list stores a double that way
          * (see the MojoList comment in fire_runtime.h), and reinterpreting
          * it is what mojo_list_get_double does. Storing the double TRUNCATED
          * to an int64_t instead would read back 2.5 as 2.0. */
-        bx->bits = l->data[idx];
+        bx->bits = l->data[i];
         bx->kind = _k;
         _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-        r->boxes[idx] = bx;
+        r->boxes[i] = bx;
     }
-    return (int64_t)(uintptr_t)r->boxes[idx];
+    return (int64_t)(uintptr_t)r->boxes[i];
 }
 
 /* A double travels as its IEEE-754 BITS inside an int64_t — in a list slot
