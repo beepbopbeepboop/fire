@@ -114,13 +114,30 @@ Rendering `StringLiteral` (`repr(value)`, non-bytes) and `DottedLiteral` (`'.' +
 2. `std/simd.mojo`: codegen fails at
    `SIMD_5_dtype_14__x002Ebfloat16_6_length_1_2.mojo:423` (the `SIMD[.bfloat16, 1]` instantiation).
    The doc's earlier note ("Int and UInt do not conform to DevicePassable") is the same family.
-3. **Runaway elaboration.** The real `_sort_test` body (`from std.random import rand`, `rand(p)`,
-   `sort(p)`, `print(...)`) in a plain `main` calling `_sort_test[.int8, "int8"](300, 3_000)` ran 43
-   minutes at 100% CPU with RSS growing 4.4 -> 7.1 GB and never finished (killed with the owner's
-   OK). The `elaboration depth` guard did not fire, so this is a non-recursive blow-up, not a cycle.
-   It is the first thing to bisect (drop `rand`, then `sort`, then the prints).
+3. **Runaway import-closure compile (bisected 2026-11-19, under `tools/memcap.py`).** Not an
+   elaboration cycle. With the rendering applied, a plain `fire.py build` of
+   `from std.random import rand` + a generic `_t[dtype: DType, name: StaticString]` whose body does
+   `rand(p)`, called as `_t[.int8, "int8"](300, 3_000)`, never finishes (15 min timeout, then killed;
+   an earlier unwrapped run reached 7 GB). Controls, same imports, each under 8 GB: direct `rand(p)`
+   in `main` builds in 71 s (0.1 GB); the generic defined but never called builds in 69 s; the
+   generic with `sort` only fails fast at link (item 1); the generic with neither builds. A stack
+   sample at 150 s is in `_gmp_compile_imports` -> `_compile_imported_module` -> `gen_module`
+   recursion, ~60 levels deep (`std.random` -> `.philox` -> `std._gpu.intrinsics` -> `std._gpu`
+   -> `.host.info` -> `std.sys` -> ... -> `std.python._cpython` -> `std.os.path` -> `std.memory.Pointer`),
+   i.e. the `do_imports=True` inline closure `fire.py build` always uses
+   (`build_executable` -> `compile_to_gimple_cached(do_imports=True)`), emitting `# ERROR: compiling
+   imported module ...: cannot compile in-process: a bracketed call X[...]() needs the generic
+   instantiated, which the single-unit path does not do; link mode (fire build) does`. So the
+   instantiated generic's `rand` reference makes the main build pull in the whole `philox`/`_gpu`
+   closure inline, where it is not cached. `std/_gpu/intrinsics.mojo`, `std/random/philox.mojo`
+   and `std/random/_rng.mojo` are three of the eight files `bugs/gate-stdlib-dylib.md` lists red on
+   the dtype-representation branch, so that gate failure and this one probably share the cause.
+   Diagnostic recipe: `tools/memcap.py --limit-gb 8 -- python3 <wrapper> build x.mojo` where the
+   wrapper does `signal.alarm(150)` and prints `_compile_imported_module`'s `module_name` per frame.
 
-Next step: (a) bisect the runaway in item 3 first; (b) make an unimported prelude `sort`
+Next step: (a) find why the instantiated `rand` use compiles its import closure uncached and
+inline (item 3), probably by comparing the module-cache keys of the `std.random` closure between the
+direct-call build (71 s) and the generic build; (b) make an unimported prelude `sort`
 resolve to the same honest stub as the imported one, or compile it; (c) close the `SIMD[.bfloat16]`
 gap; (d) re-apply the two-line rendering and require `compile_stdlib.py` `U` = 0, then
 `test_concrete_unrenderable_type_arg_is_not_refused` asserts `121` and this doc goes.
