@@ -2361,9 +2361,24 @@ _SIMP_FORMS = {
     # project through a shift leaves the goal open. `x86_set_reg`, `UInt64.ofNat`,
     # `x86_trunc32` and `x86_sign_extend32` were the pre-correction spelling and
     # are not in the term any more.
-    "shift_imm8:shl": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
-    "shift_imm8:shr": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
-    "shift_imm8:sar": ("x86_get_reg", "x86_rex_b", "x86_shift_post"),
+    #
+    # `x86_set_flag4` goes with `x86_shift_post` and not only beside it: the
+    # wrapper's count-nonzero branch ends in `x86_set_flag4 (x86_set_reg s i
+    # res) …`, so a projection that has to get PAST the shift (a `hval` fact's
+    # `s.mem`, one step after any shift) stops at `x86_set_flag4` without the
+    # name and hands `decide` a term with the predecessor state still in it —
+    # "Expected type must not contain free variables" on the whole file. The
+    # `imul` row names the same definition for the same reason, because its
+    # successor applies it directly; the shift row had it latent, behind a
+    # definition, and stayed green until a path that carried `hval` facts past
+    # a shift — `list_literal_index`, whose success path the rax-pinned walk
+    # used to take the trap arm of instead — reached one.
+    "shift_imm8:shl": ("x86_get_reg", "x86_rex_b", "x86_shift_post",
+                       "x86_set_flag4"),
+    "shift_imm8:shr": ("x86_get_reg", "x86_rex_b", "x86_shift_post",
+                       "x86_set_flag4"),
+    "shift_imm8:sar": ("x86_get_reg", "x86_rex_b", "x86_shift_post",
+                       "x86_set_flag4"),
     "imul_r64_r64": ("x86_get_reg", "x86_set_reg", "x86_rex_b",
                      "x86_set_flag4", "x86_imul_ovf"),
     "cqo": ("x86_cqo",),
