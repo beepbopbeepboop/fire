@@ -15278,6 +15278,89 @@ print(g.SIGTERM > 0)
 
     _parser_struct_and_symbols()
 
+    test_scalar_integer_narrow_arithmetic()
+
+
+def test_scalar_integer_narrow_arithmetic():
+    """A `Scalar[DType.*]` integer BELOW the 64-bit word keeps its dtype's
+    real C type through arithmetic, comparison, subscript and `.cast`:
+
+    - arithmetic CASTS BACK to the narrow type after the operation — C
+      integer promotion makes `uint8_t + uint8_t` an `int`, so without it
+      `250 + 10` prints 260 where the width answer is 4;
+    - comparisons run the two real types directly, with no `int64_t`
+      coercion (an unsigned value above 2^31 is not compared as a
+      negative signed value);
+    - a subscript load/store through `UnsafePointer[Scalar[...]]` temps
+      at the ELEMENT type — one byte for `uint8` — not a 64-bit word that
+      reads/writes neighbouring elements;
+    - `.cast[DType.x]()` is a real C conversion: a value above the target
+      width loses its high bits (256 -> 0), and a cast to the same width
+      keeps the value (4000000000 -> 4000000000).
+
+    The generated-C half pins the TYPES the statements used, because two
+    of the four printed values are the same answer either way:
+    `4000000000 > 1` is True with or without the signed coercion, and
+    `Int(Scalar[DType.uint32](4000000000))` fits in a 64-bit word, so for
+    those the narrow declaration and the unsigned comparison are the only
+    evidence. The runtime half pins the printed values end to end."""
+    global _PASS, _FAIL
+    src = """\
+def main():
+    a = Scalar[DType.uint8](250)
+    b = Scalar[DType.uint8](10)
+    print(Int(a + b))
+    c = Scalar[DType.uint8](0)
+    d = Scalar[DType.uint8](1)
+    print(Int(c - d))
+    p = UnsafePointer[Scalar[DType.uint8]].alloc(4)
+    p[0] = Scalar[DType.uint8](250)
+    print(Int(p[0]))
+    e = Scalar[DType.uint32](4000000000)
+    f = Scalar[DType.uint32](1)
+    print(e > f)
+    print(Int(e))
+    g = Scalar[DType.uint32](256)
+    print(Int(g.cast[DType.uint8]()))
+    h = Scalar[DType.uint32](4000000000)
+    print(Int(h.cast[DType.uint32]()))
+
+main()
+"""
+    from gimple_codegen import compile_to_gimple
+    try:
+        c = compile_to_gimple(src, do_imports=False, filename='narrow_arithmetic.py')
+    except Exception as e:
+        print(f"FAIL  gimple_scalar_integer_narrow_arithmetic_c_types: {e}")
+        _FAIL += 1
+        return
+    # Temp names (_tNN) and declaration order are not part of the contract,
+    # so each check matches the SHAPE of the statement at its type, never a
+    # particular temp.
+    checks = [
+        (r'\buint8_t a;', 'the uint8 local is declared at the dtype width'),
+        (r'\buint32_t e;', 'the uint32 local is declared at the dtype width'),
+        (r' = \(uint8_t\)\(\w+ \+ \w+\);',
+         'the add result is a uint8_t temp cast back from the promoted op'),
+        (r' = \(uint8_t\)\(\w+ - \w+\);',
+         'the sub result is a uint8_t temp cast back from the promoted op'),
+        (r'uint8_t \* p;', 'the pointer local is the element type'),
+        (r'_mojo_at_uint8_t \(',
+         'the subscript runs the uint8_t element helper (one byte)'),
+        (r' = e > f;', 'the uint32 comparison runs on the real types'),
+        (r' = \(uint8_t\)_t\d+;', '.cast[DType.uint8]() emits a real uint8_t cast'),
+    ]
+    missed = [why for rx, why in checks if re.search(rx, c) is None]
+    if missed:
+        print(f"FAIL  gimple_scalar_integer_narrow_arithmetic_c_types: emitted C "
+              f"misses: {missed}")
+        _FAIL += 1
+        return
+    print("PASS  gimple_scalar_integer_narrow_arithmetic_c_types")
+    _PASS += 1
+    test_gimple_stdout("gimple_scalar_integer_narrow_arithmetic", src,
+                       "4\n255\n250\nTrue\n4000000000\n0\n4000000000\n")
+
 
 def main():
     global _FAIL
