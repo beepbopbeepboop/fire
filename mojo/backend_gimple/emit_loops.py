@@ -4005,19 +4005,14 @@ def _gen_for_unknown_generator(gen, var: str, gen_val: str, body: list,
     `TypeError: object is not iterable` from `mojo_iter_word`, which is
     CPython's answer, instead of the old diagnostic-plus-zero-iterations.
 
-    The target is bound as a word of UNKNOWN KIND (`_dyn_word_locals`,
-    `_boxed_vals`/`_tagged_word_vals` when the handle's yields may be boxed):
-    the generic handle protocol carries no value-kind in the WORD, so an int
-    or a string pointer is just the yielded slot word and printing/str/==
-    must ask the runtime (`mojo_cstr_or_int_str`, `mojo_repr_boxed`,
-    `_tagged_arith_select` and friends) — the same representation `next(word)`
-    produces. The KIND itself is not guessed: a handle registered by
-    `mojo_gen_note_a3` at the `return` that let it escape is read through
-    `mojo_gen_handle_value`, which boxes a declared `double`/`bool` yield so
-    `print(x)` shows 0.5 / True instead of the slot's bits. A handle whose
-    signature is still unregistered (a separately compiled module, a
-    container round-trip) keeps the raw word: that is the honest answer for a
-    kind nobody recorded.
+    The target is bound as a word of UNKNOWN KIND (`_dyn_word_locals`): the
+    generic handle protocol carries no value-kind, so an int or a string
+    pointer is just the yielded slot word and printing/str/== must ask the
+    runtime (`mojo_cstr_or_int_str`, `_tagged_arith_select` and friends) —
+    the same representation `next(word)` produces. A generator whose declared
+    yield kind is `double`/`bool` therefore binds its raw slot bits; see
+    bugs/CODEGEN_unknown_generator_loop_yields_untagged_word.md for the
+    measurement and the fix (register the handle's vkind where it escapes).
     """
     word = gen._to_int64('MojoGenerator *', gen_val)
     # Declared BEFORE either arm: both arms must name the identical C
@@ -4077,16 +4072,7 @@ def _gen_for_unknown_generator(gen, var: str, gen_val: str, body: list,
     gen._cond_goto(more, bb_body, bb_handle_after)
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    # The value is read by the handle's REGISTERED yield kind where there is
-    # one (`mojo_gen_handle_value` boxes a double/bool so the target can be
-    # rendered as the value it is), and left as the raw slot word otherwise.
-    # Either way the target is a word of unknown kind, so it is also marked as
-    # a boxed/tagged word: the sibling container arm already does that for the
-    # shared variable (share_var_with_sibling_arm), and this arm needs the same
-    # treatment for its OWN body, which is emitted separately.
-    gen._boxed_vals.add(gen._cname(var))
-    gen._tagged_word_vals.add(gen._cname(var))
-    val = gen._rt_call('int64_t', 'mojo_gen_handle_value', [word])
+    val = gen._rt_call('int64_t', '__mojo_gen_value', [word])
     gen._copy(f"{gen._cname(var)}", val)
     gen.loop_stack.append((bb_post, bb_handle_after))
     gen._gen_loop_body(body)

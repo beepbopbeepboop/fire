@@ -797,10 +797,6 @@ void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy
 MojoList *mojo_iter_gen_handle(int64_t w);
 int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */
-/* One non-raising step's VALUE of a handle registered by mojo_gen_note_a3,
- * read by that kind and BOXED where the word alone cannot carry it (bool,
- * double); an unregistered handle keeps the generic entry point's raw word. */
-int64_t mojo_gen_handle_value(int64_t w);
 int64_t mojo_gen_default_word(void *start, int64_t idx);
 void mojo_gen_throw_set(int64_t hw, int64_t type, char *msg, void *obj);
 int mojo_gen_throw_take(int64_t hw, int64_t *type, char **msg, void **obj);

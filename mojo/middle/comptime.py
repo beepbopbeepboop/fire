@@ -365,31 +365,6 @@ def _dtype_spelling_name(text) -> str | None:
     return s or None
 
 
-def _chained_dot_predicate(func_node):
-    """`(dtype_spelling, method)` for a chained dot-relative call, else None.
-
-    The parser stores a chained dot-relative reference as ONE `DottedLiteral`
-    whose `path` is the WHOLE chain -- `.float64.is_unsigned` arrives as
-    `path='float64.is_unsigned'`, not as `MemberExpr(DottedLiteral('float64'),
-    'is_unsigned')`. So every consumer that wants to test a DType predicate has
-    to split the chain itself; the split lives here once.
-
-    `('.float64', 'is_unsigned')` is returned for that node. A path with no dot,
-    or an empty head/method, is not a predicate call and answers None. Resolved
-    by class NAME so this module needs no new import from the self-hosted
-    parser (same reason `_const_foldable` guards its own DottedLiteral use).
-    """
-    if type(func_node).__name__ != 'DottedLiteral':
-        return None
-    p = getattr(func_node, 'path', None)
-    if not isinstance(p, str) or '.' not in p:
-        return None
-    head, method = p.rsplit('.', 1)
-    if not head or not method:
-        return None
-    return '.' + head, method
-
-
 def dtype_predicate_for_spelling(text, method: str) -> bool | None:
     """Evaluate a DType predicate for a concrete spelling of a dtype.
 
@@ -1228,16 +1203,6 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             _dv = _eval_dtype_predicate(_dn, _dm)
             if _dv is not None:
                 return _dv
-    # The same predicate reached through a chained dot-value: `.float64.is_unsigned()`.
-    # Without this the condition reads CONST_UNKNOWN, BOTH arms are emitted, and
-    # `max_finite[.float64]` put `~Scalar[.float64](0)` -- a bit-complement on a
-    # float dtype -- into the C, where GCC rejects it.
-    if isinstance(node, CallExpr) and not node.args and not node.kwargs:
-        _ch = _chained_dot_predicate(node.func)
-        if _ch is not None:
-            _dv = dtype_predicate_for_spelling(_ch[0], _ch[1])
-            if _dv is not None:
-                return bool(_dv)
     # Dict/list method calls on comptime-known values
     if isinstance(node, CallExpr) and isinstance(node.func, MemberExpr) and not node.kwargs:
         _obj = node.func.obj
@@ -1607,13 +1572,6 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
             and not node.args and not node.kwargs):
         _dn = _resolve_dtype_name(node.func.obj, bindings)
         if _dn is not None and _eval_dtype_predicate(_dn, node.func.member) is not None:
-            return True
-    # The chained dot-value spelling of the same predicate (see
-    # `_chained_dot_predicate`). Shape-only, like the branch above: a path this
-    # folder cannot resolve stays CONST_UNKNOWN rather than reading as false.
-    if isinstance(node, CallExpr) and not node.args and not node.kwargs:
-        _ch = _chained_dot_predicate(node.func)
-        if _ch is not None and dtype_predicate_for_spelling(*_ch) is not None:
             return True
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name == 'sys' and node.member == 'platform'):

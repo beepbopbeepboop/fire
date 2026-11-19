@@ -11040,32 +11040,6 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         sym_info = _as_dict(_imp_syms[_sn])
         if sym_info.get('return_type') == 'unknown':
             continue
-        # An imported module-level GLOBAL is not a function, and this pass used
-        # to emit a dead weak "unavailable in compiled mode" stub for it: the
-        # export entry (`module_loader`'s `'kind': 'global_var'`) carries a
-        # `c_return_type` but no `signature`, so it fell through to the
-        # by-design unresolved-symbol stub below.
-        #
-        # Its reads are already lowered through the defining module's
-        # `<mod>__mojo_global_get_<name>` accessor, registered for this name by
-        # `_emit_imported_global_accessors`, which runs before this pass in the
-        # same `gen_module_impl`. That registration IS the proof the real
-        # lowering exists for every use site, which is why the gate is the
-        # accessor map's own membership rather than the export's `kind` alone:
-        # a global the accessor pass could not resolve (no export entry, no
-        # qualifier) is not made callable by a stub either, and skipping it
-        # here turns a silent wrong answer into an implicit-declaration error
-        # at the one site that would have needed a real lowering.
-        #
-        # The self-host closure's own imported dispatch tables
-        # (`_EXPR_DISPATCH`, `_STMT_DISPATCH`, the aliased `_SIGNED`/`_FLOAT`/
-        # ... from `generated_dispatch`) were every one of its remaining
-        # dead stubs of this class. The key is the LOCAL bound name (the
-        # alias), while the emitted C symbol can be the defining name (an
-        # `X as Y` import registers `Y` and resolves `Y`'s accessor to `X`'s),
-        # so test `_sn` — this loop's own key — and not `safe`.
-        if _sn in self._imported_global_accessors:
-            continue
         # The `'signature' not in sym_info` escape hatch is LOAD-BEARING, not
         # an oversight: for a symbol this whole program defines but the module
         # being emitted only IMPORTS, the definition's own forward-declaration
@@ -21153,68 +21127,9 @@ def gen_module_impl(self, stmts: list):
                     == self.imported_symbols[value.obj.name].get('module')):
             _mx_t = self._global_var_types[value.member]
             if _mx_t.endswith(' *'):
-                # `_mx_t` is the OWNER's SEMANTIC type; the C FIELD spelling
-                # belongs to the owner's declared struct field, and this
-                # import mirror must match it: the read loads the owner's
-                # field through its accessor and the store below copies the
-                # word into this module's mirror field, so the two fields
-                # must be the same C type by construction. For a plain
-                # container global (`x = frozenset({...})`) the owner's scan
-                # boxed the field as `int64_t` while the semantic type stays
-                # `MojoSet *`; declaring the mirror `_mx_t` raw then wrote
-                # `MojoSet *` into the SHARED bare-name-keyed
-                # `_global_c_decl_types` between the owner's field-freeze
-                # (boxed, int64_t) and the owner's body-emission, so the
-                # owner's own store re-typed its RHS `MojoSet *` against the
-                # frozen `int64_t` field ("assignment to 'int64_t' from
-                # 'MojoSet *'"), the import store met the inverse
-                # ("assignment to 'MojoSet *' from 'int64_t'"), and the
-                # mirror's own `in` read loaded a pointer into the
-                # boxed-word slot the set-membership lowering expects.
-                # Consulting `_module_global_field_type` — the exact list the
-                # owner's typedef, initializer and accessor are generated
-                # from — keeps the mirror and the owner's field in lockstep
-                # for every spelling: box where the owner boxes (plain
-                # containers, boxed generator handles), raw where the owner
-                # keeps it raw (dispatch tables, struct pointers).
-                #
-                # The triple is USUALLY missing here: this scan runs LATE in
-                # this module's own pass, while a module's top-level stores
-                # are emitted (the `_gen_toplevel` pass) BEFORE its own
-                # declaration scan — and the closure compiles modules in
-                # import-walk order, so the owner's whole pass (its scan,
-                # which boxes the container entry, and its freeze, which
-                # freezes the boxed field) typically has not run yet. With
-                # no triple, answer from the owner's own convention instead
-                # of the semantic type: dispatch tables declare their field
-                # raw (`_gmi_declare_table_global`), plain containers are
-                # boxed (`int64_t`) by every one of the owner's scan arms
-                # and the Phase-1.7 seeder, and the freeze then keeps the
-                # box by `_own_overlay_global_ctype`'s rule 4 as long as no
-                # entry elsewhere clobbers it — which is exactly what
-                # writing the box here (instead of `_mx_t`) guarantees for
-                # the shared entry this module's own freeze will read.
-                # Writing `_mx_t` raw instead is the gate's failure: the
-                # mirror field froze `MojoSet *` (rule 1) against the
-                # owner's boxed `int64_t` field, and BOTH stores then met
-                # the other module's spelling (bootstrap-stage2-cc).
-                _owner_mod = self.imported_symbols[value.obj.name].get('module')
-                _owner_field = self._module_global_field_type(
-                    _owner_mod, value.member)
-                if _owner_field is not None:
-                    _oc_t = _owner_field[0]
-                else:
-                    _tbl_t = dispatch_table_global_ctype(value.member)
-                    if _tbl_t is not None:
-                        _oc_t = _tbl_t
-                    elif _mx_t in ('MojoDict *', 'MojoList *', 'MojoSet *',
-                                   'MojoGenerator *'):
-                        _oc_t = 'int64_t'
-                    else:
-                        _oc_t = _mx_t
-                global_decls.append(f"{_oc_t} {gname};")
+                global_decls.append(f"{_mx_t} {gname};")
                 self._global_var_types[gname] = _mx_t
-                self._global_c_decl_types[gname] = _oc_t
+                self._global_c_decl_types[gname] = _mx_t
             elif _mx_t == '_Bool':
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'

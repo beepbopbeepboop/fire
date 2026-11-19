@@ -58,7 +58,7 @@ import mojo.backend_gimple.emit_infra as ginf
 from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
-    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _module_attr_module, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
+    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
     _home_signature_ctypes, _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
@@ -939,46 +939,6 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
             gen._comptime_str_names.add(_ct_target)
         gen._comptime_vals[_ct_target] = val
     else:
-        # A comptime binding of an UNDER-SUPPLIED bracket specialization is a
-        # program error, not an unfoldable constant. `comptime f = param_fn[2]`
-        # for `def param_fn[x: Int, y: Int]` leaves `y` unbound: this path
-        # folded it to None, recorded nothing, and `f()` later fell to the
-        # weak-stub path (`f: unavailable in compiled mode`, then 0) -- a
-        # silent wrong answer. The CALL form `param_fn[2](1)` already
-        # diagnoses (emit_resolve's `unbound_type_parameter` guard); this is
-        # the same rule for the binding form, using the same helper.
-        _rhs0 = _ct_node.value
-        if isinstance(_rhs0, SubscriptExpr):
-            _b0 = getattr(getattr(_rhs0, 'obj', None), 'name', '')
-            _b0 = _as_str(_b0) if _b0 is not None else ''
-            _ix0 = getattr(_rhs0, 'index', None)
-            _els0 = (_ix0.elements if isinstance(_ix0, TupleExpr) else [_ix0])
-            _cfn0 = getattr(gen, '_current_filename', '') or ''
-            try:
-                _targs0 = [gen._type_expr_to_ann(e) for e in _els0]
-            except Exception:
-                _targs0 = None
-            if _b0 and _targs0 and _cfn0:
-                try:
-                    import elaborate as _elab0
-                    _tmpl0 = _elab0.extract_fn_source(
-                        gen._generic_source_text(_cfn0), _b0)
-                    _unb0 = (_elab0.unbound_type_parameter(_tmpl0, _targs0)
-                             if _tmpl0 else None)
-                    if (_unb0 and not _elab0.unbound_param_is_inferable(
-                            _tmpl0, _unb0)):
-                        _cln0 = getattr(_ct_node, 'line', 0) or 0
-                        _clc0 = getattr(_ct_node, 'col', 0) or 0
-                        _cat0 = (f'{_cfn0}:{_cln0}:{_clc0}: ' if _cfn0
-                                 else f'{_cln0}:{_clc0}: ')
-                        raise RuntimeError(
-                            f"{_cat0}error: failed to infer parameter "
-                            f"'{_unb0}', specify the parameter or use '_' or "
-                            f"'...' to unbind the parameter explicitly")
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass
         # Handle type aliases like `comptime socklen_t = c_uint` where
         # c_uint is itself a comptime alias to UInt32 (a scalar type).
         rhs = _ct_node.value
@@ -2445,18 +2405,10 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
         store[key] = list(pts)
 
 
-def _commit_home_def_pts(gen, node) -> list:
+def _commit_home_def_pts(gen, node) -> None:
     """Commit the EMITTING compilation's own signature into the shared
     `_home_def_param_types` store — the authoritative twin of
     `_record_home_def_pts` (a first-wins guess until this commit).
-
-    Returns the node's own signature list (possibly empty) in EVERY branch
-    — the caller (gen_func) uses it to pick THIS definition's suffix for an
-    overload set, so the annotation is `list`, not `None`: a `-> None` here
-    makes the self-hosted bootstrap type the call's result `void` and
-    declare `_def_pts` void (`bootstrap-stage2-cc`: `variable or field
-    '_def_pts' declared void` + `invalid use of void expression` in
-    gen_func's symbol mirror).
 
     Called from gen_func BEFORE `safe = gen._func_csym(node.name)` builds
     the emitted definition's symbol, with the function node, and commits
@@ -2665,32 +2617,6 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
         shared_home = getattr(gen, '_imported_func_home', None)
         if shared_home and bare_name in shared_home:
             candidate_quals.append(shared_home[bare_name])
-    if not candidate_quals:
-        # Last-resort candidate: the symbol's OWN import entry, the exact
-        # mirror of _func_qualifier's tier 4 (same guards: a 'signature' is
-        # present, `return_type` is not `unknown`, the module is real). A
-        # FUNCTION-BODY import binds its home only in the enclosing function's
-        # scope frame (record_flat=False, _gen_stmt_FromImportStmt's body
-        # pass), and gen_module's import-extern preamble runs after that frame
-        # is popped, so every tier above misses in the preamble while
-        # _func_qualifier STILL answers the name half from the entry — the
-        # param half then hashes the empty list and the extern goes out
-        # UNSUFFIXED next to the call site's suffixed symbol:
-        #   module_loader.py: implicit declaration of function
-        #   'mojo_middle_types_param_annotation_ctype_9f63a2' ...
-        #   conflicting types ... have 'char *(int64_t)'
-        # (bootstrap-stage2-cc). The one-half answer the entry carries is also
-        # what the call site hashed while the frame was live, so reading it
-        # here keeps name and params on one binding. The store keys below are
-        # (sanitized home module, name), so a same-bare-name entry from a
-        # different module (a reflected struct or global) cannot hit.
-        _imp_entry = _as_dict(
-            _as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
-        if (_imp_entry and _as_str(_imp_entry.get('signature'))
-                and _imp_entry.get('return_type') != 'unknown'):
-            _entry_mod = _as_str(_imp_entry.get('module'))
-            if _entry_mod and _entry_mod != 'unknown':
-                candidate_quals.append(_entry_mod)
     for q in candidate_quals:
         _sq = _sanitize(q)
         if _def_store:

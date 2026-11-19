@@ -1004,21 +1004,8 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     if not stmts:
         return None
     for st in stmts:
-        if not isinstance(st, gimple_ctypes.FromImportStmt):
-            continue
-        if getattr(st, 'wildcard', False):
-            # `from X import *` re-exports every public name of X into this
-            # module's namespace without listing them, so the defining home of
-            # `name` is wherever X (or X's own re-export chain) defines it.
-            # Recurse with `name` unchanged — a star import never renames —
-            # and keep the cycle/depth guards the walk already has.
-            sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
-            r = _find_symbol_home_module(gen, sub, name, kind, depth + 1,
-                                         want_abs=want_abs)
-            if r:
-                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
-                cache[key] = _raw
-                return _raw
+        if not (isinstance(st, gimple_ctypes.FromImportStmt)
+                and not getattr(st, 'wildcard', False)):
             continue
         for _fip6 in (getattr(st, 'name_alias_strs', None) or []):
             nm = gimple_ctypes._fi_name(_fip6)
@@ -1042,127 +1029,6 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 cache[key] = _raw
                 return _raw
     return None
-
-def _module_attr_module(gen, module: str, attr: str):
-    """The MODULE ref that `module`'s own namespace binds `attr` to, or
-    None when `attr` is not a module binding of `module`.
-
-    `a.b.f(...)` is real Python for "the module object `a` exposes as its
-    attribute `b`, then its function `f`" — `import pkg.sub as s` in one
-    module makes `s.f()` valid from every module that can reach that one
-    through `import pkg.mod`. Only the TWO spellings Python itself provides
-    are answered: a plain import (`import M [as N]`) and a module brought
-    in by `from ... import N` (a submodule file, never a function of the
-    same name — that is checked against the filesystem, because
-    `from M import helper` binds a FUNCTION and `M.helper.attr` is not a
-    module attribute).
-
-    Why this is not folded into `_find_symbol_home_module`: that walk
-    answers "which module DEFINES this function/struct name" through
-    `from X import name` re-exports, keyed on the symbol's own bare name.
-    This one answers "which MODULE OBJECT does this module's namespace
-    hold", keyed on an ATTRIBUTE of a module, and its caller re-dispatches
-    a `<module>.<function>` call rather than mangling a symbol.
-
-    The self-host closure's `gimple_codegen.gimple_gen_coro.lower(...)` /
-    `.register(...)` (`mojo/backend_gimple/emit_resolve.py`) are this
-    shape: `gimple_codegen.py` does `import mojo.middle.coro as
-    gimple_gen_coro`, so the outer module's attribute is a module, not a
-    sibling module of the caller and not a file named
-    `gimple_codegen/gimple_gen_coro.py`. Without this the call fell
-    through every module-qualified branch to the generic scalar-receiver
-    dispatch, which emitted `string_lower(...)` for `lower` and an
-    `int64_t.register() stubbed` word for `register` — an exit-0 silent
-    wrong answer, and the weak `lower`/`mojo_register` stubs in the
-    `--dump-full` closure.
-    """
-    if not module or not attr:
-        return None
-    _path, _src, stmts = gen._parsed_import(module)
-    if not stmts:
-        return None
-    for _st in stmts:
-        if isinstance(_st, gimple_ctypes.ImportStmt):
-            for _m, _a in gimple_ctypes._import_targets(_st):
-                _mod = _as_str(_m)
-                _alias = _as_str(_a)
-                # `import a.b` binds `a` (the package the submodule hangs
-                # off), while an aliased import binds the alias to the
-                # WHOLE dotted target. Same rule `_gen_stmt_ImportStmt`
-                # uses for the local name.
-                if _alias:
-                    _local = _alias
-                    _target = _mod
-                else:
-                    # `import a.b` binds `a` (the package the submodule
-                    # hangs off). Built by per-character concatenation,
-                    # NOT `_mod[:_i]` slicing: a sliced string hashes
-                    # wrongly as a dict key on the self-hosted path (see
-                    # `_fi_name`'s docstring in mojo/middle/types.py), and
-                    # `_local` is compared with the caller's attribute and
-                    # the target goes straight into `_module_alias_names`.
-                    _i = _mod.find('.')
-                    if _i >= 0:
-                        _local = ''
-                        for _ci in range(_i):
-                            _local += _mod[_ci]
-                    else:
-                        _local = _mod
-                    _target = _local
-                if _local == attr and _target:
-                    return _target
-        elif isinstance(_st, gimple_ctypes.FromImportStmt):
-            if getattr(_st, 'wildcard', False):
-                continue
-            for _fip in (getattr(_st, 'name_alias_strs', None) or []):
-                _nm = gimple_ctypes._fi_name(_fip)
-                _al = gimple_ctypes._fi_alias(_fip)
-                if (_al or _nm) != attr:
-                    continue
-                _joined = gimple_ctypes._join_import_member(
-                    _as_str(_st.module), _nm)
-                _ref = (gen._abs_module(_joined, module)
-                        if _joined.startswith('.') else _joined)
-                if _module_ref_is_source(gen, _ref, _path):
-                    return _ref
-    return None
-
-def _module_ref_is_source(gen, ref: str, base_path: str) -> bool:
-    """Does `ref` name a real module FILE reachable from the module whose
-    source is `base_path`? Used to tell a `from PKG import name` that binds
-    a SUBMODULE from one that binds an ordinary function/constant of the
-    same name: only the former makes `PKG.name.attr` a module attribute
-    read."""
-    if not ref:
-        return False
-    try:
-        import imports as _imp
-        if _imp.resolve_source(ref):
-            return True
-    except Exception:
-        pass
-    try:
-        if gen._submodule_source_path(ref):
-            return True
-    except Exception:
-        pass
-    # A RELATIVE from-import is resolved against the module that wrote it,
-    # whose directory is the only correct place to look: the current
-    # file's directory is a different package whenever the caller is not
-    # the base module itself. `_abs_module` already turned `.sub` into
-    # `pkg.sub`; its leaf file lives beside the declaring module's file
-    # (`pkg/` for both `pkg/__init__.py` and `pkg/hub.py`).
-    _parts = ref.split('.') if ref else []
-    _leaf = _parts[len(_parts) - 1] if _parts else ''
-    _dir = os.path.dirname(base_path or '')
-    if _dir and _leaf:
-        for _cand in (os.path.join(_dir, _leaf + '.py'),
-                      os.path.join(_dir, _leaf, '__init__.py'),
-                      os.path.join(_dir, _leaf + '.mojo'),
-                      os.path.join(_dir, _leaf, '__init__.mojo')):
-            if os.path.isfile(_cand):
-                return True
-    return False
 
 def _reexported_defining_qualifier(gen, module: str, name: str,
                                    kind: str = 'fn') -> str:

@@ -2876,23 +2876,9 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             else:
                                 # Last-resort: try to dispatch to __setitem__ if the
                                 # method exists but wasn't caught by earlier checks.
-                                #
-                                # `obj_v` is bound on BOTH arms of the
-                                # `_arr_tgt` test above, so the former
-                                # `'obj_v' in locals()` probe read True there
-                                # in real Python and its `or True` made the
-                                # condition constant anyway. It is spelled
-                                # plainly here because a bare `locals()` call
-                                # is one of the builtins the compiled path
-                                # still cannot lower: the self-host closure
-                                # emitted an `unavailable in compiled mode`
-                                # weak stub for it, and evaluating the probe
-                                # tested `'obj_v' in <stub's 0>` before the
-                                # `or True` short-circuit could discard it.
-                                # Pinned by test_selfhost_no_locals_pin.py.
                                 _fallback_r = gmp._lower_struct_subscript_dunder(
                                     gen, ot if ot.endswith(' *') else f'{elem_t} *',
-                                    obj_v,
+                                    obj_v if 'obj_v' in locals() or True else addr,
                                     '__setitem__', [(it, idx_v), (vtype, v)])
                                 if _fallback_r is not None:
                                     return  # handled by __setitem__
@@ -3768,22 +3754,11 @@ def _gen_stmt_ReturnStmt(gen, node):
             # to _tagged_word_vals: that set is for tagged generator words only and
             # falsely triggers MIXED_NAME_NON_INT64_REFUSAL when a dict read name is
             # later rebound to a non-int64 C type.
-        # A generator handle leaving a function, in EITHER shape of return slot.
-        # The run time has to be told which generator it is before the handle
-        # escapes, because a consumer that sees only the word has no other way
-        # to learn the yield's kind:
-        #   * a plain-word slot (`def iglob(...): it = _iglob(...); return it`,
-        #     consumed as `list(iglob(...))`) hands over the note's answer, an
-        #     int64_t carrying the handle;
-        #   * a `MojoGenerator *` slot (`def make(v): return fr(v)`) hands over
-        #     the handle itself, which the consumer can only drive through the
-        #     GENERIC `__mojo_gen_resume` / `__mojo_gen_value` pair -- and those
-        #     carry no value-kind. Registering it here is what lets
-        #     `mojo_gen_handle_value` box a double/bool yield by its kind
-        #     instead of leaving the double's BIT PATTERN in the loop target
-        #     (`print(x)` showed 4602678819172646912 for 0.5). The note's
-        #     side effect is all this shape wants, so `v` stays the handle.
-        if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
+        # A generator handle leaving a function whose return slot is a plain word
+        # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
+        # the consumer can only drain it if the run time knows which generator it is.
+        if (vtype == 'MojoGenerator *' and v in gen._generator_var_api
+                and _as_str(gen.func_ret_type) != 'MojoGenerator *'):
             _gapi = gen._generator_var_api[v]
             if _as_str(_gapi.get('base') or '').startswith('__mgco_'):
                 _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
@@ -3791,11 +3766,9 @@ def _gen_stmt_ReturnStmt(gen, node):
                 if _vk is not None:
                     _hw = gen._to_int64(vtype, v)
                     _kv = gen._new_val('int64_t', str(_vk))
-                    _vout = gen._call_expr('int64_t', 'mojo_gen_note_a3',
-                                           [('int64_t', _hw), ('int64_t', _kv)])
-                    if _as_str(gen.func_ret_type) != 'MojoGenerator *':
-                        v = _vout
-                        vtype = 'int64_t'
+                    v = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                       [('int64_t', _hw), ('int64_t', _kv)])
+                    vtype = 'int64_t'
         # A function that is used as a VALUE (passed or stored, never only
         # called) is invoked by a consumer that cannot know its return type,
         # so a string/float list it returns carries its slot kind (the
@@ -4860,54 +4833,38 @@ def _pattern_class_struct_name(gen, func):
     return None
 
 
-def _collect_structdefs(coll, seen: set, out: list) -> None:
-    """Append every `StructDef` in `coll` to `out`, in walk order.
-
-    The collector behind `_iter_structdefs`. It is a module-level function
-    taking its state as parameters, not a generator nested in another
-    function: a nested generator that reads an enclosing-scope variable is a
-    shape the coroutine path cannot compile (it has no capture model for
-    one), so the self-host closure emitted a weak stub named `_yield_from`
-    for it and the compiled compiler skipped every call under it. No
-    generator is needed here at all — `out` is appended as the walk
-    proceeds.
-    """
-    if not coll:
-        return
-    # dict module_name -> stmts
-    if isinstance(coll, dict):
-        for v in coll.values():
-            _collect_structdefs(v, seen, out)
-        return
-    try:
-        for s in coll:
-            if isinstance(s, gimple_ctypes.StructDef):
-                sid = id(s)
-                if sid in seen:
-                    continue
-                seen.add(sid)
-                out.append(s)
-    except TypeError:
-        return
-
-
 def _iter_structdefs(gen):
     """Yield StructDef objects visible to this generator, best-effort."""
     seen = set()
-    found = []
+    def _yield_from(coll):
+        if not coll:
+            return
+        # dict module_name -> stmts
+        if isinstance(coll, dict):
+            for v in coll.values():
+                yield from _yield_from(v)
+            return
+        try:
+            for s in coll:
+                if isinstance(s, gimple_ctypes.StructDef):
+                    sid = id(s)
+                    if sid in seen:
+                        continue
+                    seen.add(sid)
+                    yield s
+        except TypeError:
+            return
     for name in ('_module_stmts', 'module_stmts', '_all_transitive_stmts_ordered',
                  '_all_struct_defs', 'all_struct_defs', 'stmts', '_stmts',
                  '_parsed_stmts', '_root_stmts'):
-        _collect_structdefs(getattr(gen, name, None), seen, found)
+        yield from _yield_from(getattr(gen, name, None))
     # Also scan any list-valued attrs that look like stmt lists as last resort.
     try:
         for k, v in list(getattr(gen, '__dict__', {}).items()):
             if isinstance(v, list) and v and isinstance(v[0], (gimple_ctypes.StructDef,)):
-                _collect_structdefs(v, seen, found)
+                yield from _yield_from(v)
     except Exception:
         pass
-    for s in found:
-        yield s
 
 
 def _structdef_for_name(gen, name):

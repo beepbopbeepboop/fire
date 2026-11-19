@@ -4040,53 +4040,6 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
     return None
 
 
-def _lmc_hub_module_ref(gen, alias: str) -> str:
-    """The MODULE ref a local alias names: `gimple_ctypes` ->
-    `mojo.middle.types`, `gimple_codegen` -> `gimple_codegen`, and a bare
-    sibling module name (`ast_rewriter`) -> itself."""
-    _info = (getattr(gen, 'imported_symbols', None) or {}).get(alias)
-    if isinstance(_info, dict):
-        _mod = _info.get('module')
-        if isinstance(_mod, str) and _mod:
-            return _mod
-    return alias
-
-
-def _lmc_resolve_module_attr(gen, base_ref: str, attr: str):
-    """The module ref that `base_ref` binds `attr` to, registered in this
-    generation unit as a module namespace, or None.
-
-    `base_ref` is a MODULE ref (not the local alias a source statement
-    used), so `base_ref.attr` is a read of that module's namespace. The
-    answer comes from the defining module's own import statements
-    (`gimple_codegen._module_attr_module`, which parses its source once and
-    caches it) — never from a name guess, because the same attribute name
-    can be an ordinary function or constant.
-
-    Registration is what makes the re-dispatched `<target>.<member>(...)`
-    call lower as a module-qualified call instead of an attribute read on
-    an opaque int64_t marker: both `_selfhost_sibling_member_kind` and the
-    generic module-qualified branch gate on `_module_alias_names`, and both
-    read the alias's `imported_symbols` entry for the target module. An
-    entry with `return_type: 'unknown'` is the exact module-marker shape
-    `_gen_stmt_ImportStmt` writes, and the imported-symbol stub pass skips
-    that shape.
-    """
-    try:
-        ref = gen._module_attr_module(base_ref, attr)
-    except Exception:
-        ref = None
-    if not ref:
-        return None
-    if ref not in gen._module_alias_names:
-        gen._module_alias_names.add(ref)
-    if ref not in gen.imported_symbols:
-        gen.imported_symbols[ref] = {
-            'module': ref, 'return_type': 'unknown',
-        }
-    return ref
-
-
 def _lmc_two_hop_module_call(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, str] | None:
     """`pkg.mod.f(...)` after `import pkg.mod`.
 
@@ -4122,33 +4075,6 @@ def _lmc_two_hop_module_call(gen, node: gimple_ctypes.CallExpr, func) -> tuple[s
             kwargs=[],
             line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
         return _lower_method_call(gen, _th_node)
-    # `base.member.f(...)` where `base.member` is a MODULE the base module
-    # itself imported (`gimple_codegen.gimple_gen_coro.lower(...)`: the
-    # compiler's own `gimple_codegen.py` does `import mojo.middle.coro as
-    # gimple_gen_coro`, so the attribute is a module object, not a
-    # submodule file `gimple_codegen/gimple_gen_coro.py` and not a sibling
-    # of the caller). The submodule branch above cannot see it, and the
-    # generic receiver dispatch then reads `lower` as a string method
-    # (`string_lower`) and `register` as an `int64_t.register() stubbed`
-    # word — exit 0, wrong answer. Resolve the attribute through the base
-    # module's own namespace and re-dispatch on the real module ref.
-    if _th_base in getattr(gen, '_module_alias_names', ()):
-        _th_info = (getattr(gen, 'imported_symbols', None) or {}).get(_th_base)
-        _th_base_ref = ((_th_info.get('module')
-                         if isinstance(_th_info, dict) else None)
-                        or _th_base)
-        _th_ref = _lmc_resolve_module_attr(gen, _th_base_ref, func.obj.member)
-        if _th_ref:
-            _th_node = gimple_ctypes.CallExpr(
-                func=gimple_ctypes.MemberExpr(
-                    obj=gimple_ctypes.IdentExpr(
-                        name=_th_ref, line=getattr(func.obj, 'line', 0)),
-                    member=func.member,
-                    line=getattr(func, 'line', 0), col=getattr(func, 'col', 0)),
-                args=list(node.args),
-                kwargs=[],
-                line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-            return _lower_method_call(gen, _th_node)
     return None
 
 
@@ -4191,24 +4117,11 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
     if (isinstance(inner_obj, gimple_ctypes.MemberExpr)
             and isinstance(inner_obj.obj, gimple_ctypes.IdentExpr)
             and _is_selfhost_sibling_alias(gen, inner_obj.obj.name)):
-        # Resolve the HUB's attribute as a name in the hub's OWN namespace
-        # when the hub re-exports a module under an alias that is not that
-        # module's tail (`import mojo.middle.coro as gimple_gen_coro` in
-        # `gimple_codegen.py`). Stripping the hub alone would leave the
-        # bare alias `gimple_gen_coro`, which names no file anywhere, so
-        # the call fell through every module-qualified branch: `lower`
-        # became `string_lower` and `register` an `int64_t.register()
-        # stubbed` word in the self-hosted closure's own source. Resolving
-        # through the hub's imports yields `mojo.middle.coro`, whose
-        # `def lower` / `def register` are real registrations.
-        _hub_ref = _lmc_hub_module_ref(gen, inner_obj.obj.name)
-        _hub_attr = _lmc_resolve_module_attr(gen, _hub_ref, inner_obj.member)
         _rewritten = gimple_ctypes.CallExpr(
             func=gimple_ctypes.MemberExpr(
                 obj=gimple_ctypes.MemberExpr(
                     obj=gimple_ctypes.IdentExpr(
-                        name=_hub_attr or inner_obj.member,
-                        line=getattr(node, 'line', 0)),
+                        name=inner_obj.member, line=getattr(node, 'line', 0)),
                     member=inner_member),
                 member=outer_member),
             args=list(node.args),
@@ -4223,13 +4136,10 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
     # them and re-dispatch on `<real_module>.<member>(...)`.
     if (isinstance(inner_obj, gimple_ctypes.IdentExpr)
             and _is_selfhost_sibling_alias(gen, inner_obj.name)):
-        _hub_ref = _lmc_hub_module_ref(gen, inner_obj.name)
-        _hub_attr = _lmc_resolve_module_attr(gen, _hub_ref, inner_member)
         _rewritten = gimple_ctypes.CallExpr(
             func=gimple_ctypes.MemberExpr(
                 obj=gimple_ctypes.IdentExpr(
-                    name=_hub_attr or inner_member,
-                    line=getattr(node, 'line', 0)),
+                    name=inner_member, line=getattr(node, 'line', 0)),
                 member=outer_member),
             args=list(node.args),
             kwargs=list(getattr(node, 'kwargs', None) or []))

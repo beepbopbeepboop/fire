@@ -18713,32 +18713,6 @@ static MojoGenSig *_gen_handle_peek(int64_t w)
     return 0;
 }
 
-/* The VALUE of one step of a registered handle, read through the yield kind
- * the signature was registered with: the double entry point answers a real
- * double (which only ever travels when BOXED — a word has no double
- * spelling), the bool entry point a 0/1, and every other kind its own word.
- * `box_bool` is 1 for a consumer that has no static type for the value and
- * must therefore be handed a word it can render by kind (`print(x)` showing
- * True, not 1) and 0 for the two callers whose code already knows the value
- * is a bool (`next()`'s own answer, the context manager's __enter__), which
- * is the shape they have always had.
- *
- * The one switch for all three callers: `mojo_next_word`, `mojo_gen_cm_enter`
- * and `mojo_gen_handle_value` differ only in what they do with the step
- * (next() raises StopIteration on exhaustion, the context manager does not,
- * and the loop reads a boxed word), never in how a step's value is read. */
-static int64_t _gen_sig_value(MojoGenSig *sg, void *h, int box_bool)
-{
-    switch (sg->vkind) {
-    case 1: {
-        int64_t b = ((bool (*)(void *))sg->value)(h) ? 1 : 0;
-        return box_bool ? mojo_box_from_bool(b) : b;
-    }
-    case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
-    default: return ((int64_t (*)(void *))sg->value)(h);
-    }
-}
-
 /* Per-handle throw state for generator context manager exit: when exiting a
  * `with` block with an exception, the context manager protocol throws the
  * exception into the generator at its yield point. Keyed by handle address. */
@@ -18790,7 +18764,11 @@ int64_t mojo_gen_cm_enter(int64_t w)
         /* Did not yield - treat as exhausted/error. */
         return 0;
     }
-    return _gen_sig_value(sg, h, 0);
+    switch (sg->vkind) {
+    case 1: return ((bool (*)(void *))sg->value)(h) ? 1 : 0;
+    case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
+    default: return ((int64_t (*)(void *))sg->value)(h);
+    }
 }
 
 /* __exit__ for a generator-based context manager on the normal path:
@@ -18831,28 +18809,6 @@ void mojo_gen_cm_exit_exc(int64_t w)
     ((void (*)(void *))sg->destroy)(h);
 }
 
-/* One non-raising step's VALUE for a compiled generator handle that travels as
- * a word of unknown kind (`for x in <handle>` in emit_loops'
- * `_gen_for_unknown_generator`, whose resume already decided that there IS a
- * value). `sg->vkind` is the yield kind the handle was REGISTERED with
- * (`mojo_gen_note_a3`), and the value is read through that kind's own entry
- * point: the double entry point answers a real double, which is BOXED because
- * a word has no double spelling of its own, and a bool is boxed so the loop
- * target still renders True / False. An int (and the vkind-5 word that may
- * hold a str pointer) needs no box: it IS its word. A handle whose signature
- * is unregistered is read through the generic entry point and left raw — the
- * loop code was never told a kind, so it has none to read by.
- *
- * This is `mojo_next_word`'s value switch minus the StopIteration raise: the
- * loop's own resume call owns exhaustion, and a step that swallowed it would
- * turn every generator into an infinite one. */
-int64_t mojo_gen_handle_value(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_peek(w);
-    if (!sg) return _a3_value((void *)(intptr_t)w);
-    return _gen_sig_value(sg, (void *)(intptr_t)w, 1);
-}
-
 /* ───────── next(word[, default]) ─────────
  * `next(x)` where `x` is a word of unknown kind: a generator handle the run time has been told
  * about (`mojo_gen_note*`, `mojo_gen_call_with`, a dynamic call) is stepped one value; anything
@@ -18889,7 +18845,11 @@ int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
         mojo_raise();
         return 0;
     }
-    return _gen_sig_value(sg, h, 0);
+    switch (sg->vkind) {
+    case 1: return ((bool (*)(void *))sg->value)(h) ? 1 : 0;
+    case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
+    default: return ((int64_t (*)(void *))sg->value)(h);
+    }
 }
 
 /* ── csv.reader (tabled foreign callable) ────────────────────────────── */

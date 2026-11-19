@@ -3491,7 +3491,6 @@ class GimpleGen:
         'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_gen_note':       ('int64_t', ['int64_t', 'void *']),
         'mojo_gen_note_a3':    ('int64_t', ['int64_t', 'int64_t']),
-        'mojo_gen_handle_value': ('int64_t', ['int64_t']),
         'mojo_gen_throw_set':  ('void', ['int64_t', 'int64_t', 'char *', 'void *']),
         'mojo_gen_throw_take': ('int', ['int64_t', 'int64_t *', 'char **', 'void **']),
         'mojo_gen_cm_is_handle': ('int', ['int64_t']),
@@ -5232,8 +5231,6 @@ class GimpleGen:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):
         return gfn._parsed_import(self, module)
-    def _module_attr_module(self, module: str, attr: str):
-        return gfn._module_attr_module(self, module, attr)
     def _home_signature_ctypes(self, module: str, fs) -> list:
         return gfn._home_signature_ctypes(self, module, fs)
     def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
