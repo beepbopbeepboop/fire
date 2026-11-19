@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pin: a bare `object()` constructor leaves no weak stub in the emitted C.
 
-`bugs/GATE_red_recover-land_2026-11-02-part5-part1.md`'s `object` row: the
+`bugs/mid/GATE_red_recover-land_2026-11-02-part5-part1.md`'s `object` row: the
 self-host closure carries `NOT_SET = object()` (`funcs_shared._PARSE_FAILED`,
 and real stdlib code's `c_common/__init__.py` has the same idiom), and the
 compiled path has no Python object representation, so the constructor is

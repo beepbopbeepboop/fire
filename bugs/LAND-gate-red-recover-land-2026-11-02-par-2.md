@@ -33,4 +33,4 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 ## Status
 - 2026-11-19 14:47:41: conflicts with master (last commit 2026-11-19, first unlanded commit 2026-11-19; 1 commit(s) ahead of master, 196 behind it; task started 2026-11-19 03:18:51)
   Branch: work/bug-gate-red-recover-land-2026-11-02-par-2
-  Conflicting files: bugs/GATE_red_recover-land_2026-11-02-part5-part1.md
+  Conflicting files: bugs/mid/GATE_red_recover-land_2026-11-02-part5-part1.md
