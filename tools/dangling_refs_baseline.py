@@ -43,11 +43,6 @@ BASELINE = {
     # CODEGEN_simd_and_array_values_erase_to_int64.md was retired on 2026-11-16:
     # both docs are historical LANDING RECORDS that legitimately name the doc
     # they merged, so the citation is deliberate, not a dangling pointer.
-    # Historical LANDING RECORD: names the part8-2 doc it attempted to land,
-    # which is not in the tree. Raised rather than rewound.
-    'bugs/LAND-gpu-offload-validation-modular-3.md': 1,
-    # Historical LANDING RECORD naming a part doc that is not in the tree.
-    'bugs/LAND-formal-arm64-instruction-covera.md': 1,
     'bugs/mid/LAND-codegen-simd-and-array-values-erase-3.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
@@ -62,7 +57,7 @@ BASELINE = {
     'fire_compiler.py': 1,
     'formal/admitted.py': 1,
     'formal/arm64_codegen.py': 4,
-    'formal/arm64_proof_gen.py': 8,
+    'formal/arm64_proof_gen.py': 7,
     'formal/build.py': 19,
     'formal/dataclass_transform.py': 6,
     'formal/imports.py': 21,
@@ -98,7 +93,7 @@ BASELINE = {
     'test_formal.py': 1,
     'test_formal_admitted.py': 1,
     'test_formal_bracketed_method_field_set.py': 1,
-    'test_formal_call_proof_gen.py': 20,
+    'test_formal_call_proof_gen.py': 18,
     'test_formal_closures.py': 1,
     'test_formal_container_methods.py': 2,
     'test_formal_core_hostmods.py': 2,
