@@ -465,6 +465,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_gen_cm_exit_normal': ['void', 'int64_t'],
     'mojo_gen_cm_is_handle': ['int', 'int64_t'],
     'mojo_gen_default_word': ['int64_t', 'void *', 'int64_t'],
+    'mojo_gen_handle_value': ['int64_t', 'int64_t'],
     'mojo_gen_note': ['int64_t', 'int64_t', 'void *'],
     'mojo_gen_note_a3': ['int64_t', 'int64_t', 'int64_t'],
     'mojo_gen_sig_register': ['void', 'void *', 'void *', 'void *', 'void *', 'int', 'int', 'char **', 'int', 'int64_t *', 'uint8_t *', 'uint8_t *'],
