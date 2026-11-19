@@ -62,41 +62,57 @@ exits 0 (no failures or errors; skips unchanged/acceptable as today).
 
 ## Status
 
-2026-11-18 (work/bug-formal-call-proofgen-red-on-head): partial progress on
-cluster 2. Re-measured this tree at `Ran 302 tests in 204.6s, FAILED
-(failures=8, errors=6)`, peak ~3.9 GB (down from 22 reds).
+2026-11-18 (work/bug-formal-call-proofgen-red-on-head): partial progress.
+Re-measured this tree at `Ran 303 tests in 232.9s, FAILED (failures=5)`, peak
+~3.9 GB (down from 7 reds in the prior re-measurement on this tree, and down
+from the 27 originally recorded).
 
-Cluster 1 (`_Scope.structs_by_name` crash in `formal/arm64_proof_gen.py:_call_go`)
-is **not** fixed here: it is claimed by another worker as
-`bug:FORMAL_arm64_call_proof_scope_structs_by_name` (see claims). The 3
-`TestGeneratorSource` AttributeErrors, the 2 downstream `TestCallProofs`
-TypeErrors (setUpClass proof generation died on that crash, so proof paths are
-`None`), and the resulting `TestSameImageCallLean` error remain.
+Cluster 1 from the original report (`_Scope.structs_by_name` crash in
+`formal/arm64_proof_gen.py:_call_go`) is no longer observed here (current
+`_call_go` reads `structs_by_name` defensively); the 3 `TestGeneratorSource`
+AttributeErrors, the 2 downstream `TestCallProofs` TypeErrors, and the
+`TestSameImageCallLean` setup error from that crash are gone.
 
-Cluster 2 fixes landed (test expectations and one emitter fix):
-- `TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire`: updated literal/mod and
-  variable-divisor cases to count only division-guard calls (avoiding unrelated
-  overflow-trap calls) and, in `formal/x86_64_codegen.py`, gated the inline
-  `INT64_MIN // -1` hardware-fault check by `division_needs_overflow_precheck`
-  (and skipped it when the unified pre-check already emitted), so a literal
-  divisor that cannot be -1/0 emits no extra sentinel trap.
-- `TestGeneratorSource.test_the_generated_mojo_is_declared_at_the_entry_arities_arity`:
-  accepts the current `evalFunc` call shape (`[n, n1] ... = mojo n n1`) rather
-  than requiring the args to be adjacent to `=`.
-- `TestAPlaceholderModelClaimsNothing`: rewritten to pin the current (non-
-  placeholder) route for the receiver-field shape (x86_64 models with bridge
-  omitted for the unstateable call but emits run tests; arm64 emits a by-
-  reference frame proof) instead of the old placeholder/identity assertions.
-- `TestAstBridgeCallLimit`: the one-site call case now generates with the AST
-  bridge on both backends (no longer refused/omitted); tests updated accordingly.
-- `TestCfgLeafCensus.test_a_generated_proof_reaches_only_registered_sites`:
-  expected loop leaf updated to `loop-cond-step` to match the current corpus
-  slice.
+Fixes landed in `test_formal_call_proof_gen.py`:
+- `TestUnsignedOffsetAccess.test_the_model_agrees_with_the_cpu`: construct
+  `fm.Case` with the required `d` (binary64 register file) argument
+  (`[0] * 8`) to match `tools/formal_model_fuzz.Case`'s current signature.
+- `SAME_IMAGE_CALL` fixtures (`same_image_leaf`, `same_image_branching`): use
+  followable identity/branching callees with no arithmetic so each remains a
+  straight-line leaf of the current formal image (arithmetic in a callee now
+  emits an out-of-image overflow/trap helper call, which correctly makes the
+  callee not followable). Updated the section comment accordingly.
+- `MULTI_SAME_IMAGE_CALL['two_leaf_callees']`: use identity callees for the same
+  reason (two distinct followable leaves). `TestCallProofs.
+  test_two_distinct_leaf_callees_are_followed` no longer requires a concrete
+  `main_compiles_correctly :` theorem for this shape because the current
+  generator emits the universal theorem but suppresses the concrete run test
+  ("NO CONCRETE RUN TEST") here; it still asserts the calls are followed (no
+  CALL BOUNDARY / no `reaches_call_at_`, and `main_compiles_correctly_universal`
+  present).
 
-Still red (14): cluster-1 AttributeErrors/TypeErrors and downstream same-image
-call-following proof failures in `TestCallProofs` (4), plus
-`TestTheRegisterValueReaderReadsEveryWrapper.test_the_epilogue_blocks_own_chain_states_what_it_wrote`
-and the 3 `TestTheZeroDivisorGuardAgainstLean` residual-goal checks observed in
-the full-file run (Lean output did not contain the expected `⊢ n1 = 0` / kernel
-memory pressure). These were not addressed here and need re-derivation after
-cluster 1 is fixed and/or independent investigation.
+As a result, the prior CallProofs/same-image follow/plan failures and the
+unsigned-offset error are fixed.
+
+Still red (5, unchanged/pre-existing or environment-sensitive on this tree,
+not addressed here):
+- `TestSameImageCallLean.test_the_followed_call_proves_with_no_admission`: the
+  followable identity `same_image_leaf` fixture generates and is followed, but
+  Lean rejects `eval_eq_mojo` with an unsolved `evalArgs`/call goal (so the
+  eval bridge does not close for this followed-call AST shape in this
+  environment). This is a consequence of switching to a followable fixture; a
+  Lean-provable followed-call shape that is also followable under current
+  lowering was not identified.
+- `TestTheRegisterValueReaderReadsEveryWrapper.
+  test_the_epilogue_blocks_own_chain_states_what_it_wrote`: Lean kernel reports
+  `(kernel) excessive memory consumption detected` on the generated chain proof.
+- `TestTheZeroDivisorGuardAgainstLean.
+  test_the_false_goal_survives_the_documented_next_step` (as_emitted,
+  doc_next_step) and `test_the_residual_is_the_same_with_and_without_the_branch_fact`:
+  Lean output contains only `sorry` warnings and no traced residual goal
+  (`⊢ n1 = 0` not present / no residual goal traced), so the measurement this
+  class relies on did not observe the expected residual.
+
+These remaining failures need independent investigation (eval-bridge/proof
+generation for followed calls, Lean kernel memory limits for the epilogue chain,
+and the div0-guard trace/measurement mechanism).

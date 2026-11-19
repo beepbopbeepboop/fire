@@ -290,10 +290,10 @@ _FORMS = {
     # come last on the load and there is no `rr` on the store at all any more.
     "mov_r64_rm64_sib": ("x86_step_mov_rm64_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
-                          "rm", "reg", "rb", "rx", "dst", "dst_lt"]),
+                          "rm", "reg", "rb", "dst", "dst_lt"]),
     "mov_rm64_r64_sib": ("x86_step_mov_mem_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
-                          "rm", "reg", "rb", "rx"]),
+                          "rm", "reg", "rb"]),
     # The two SIB stores WITH a displacement, which is what a call site emits for
     # every argument past the register file: the outgoing area is addressed
     # through `rsp`, and at any displacement that needs the SIB byte, because
@@ -309,10 +309,10 @@ _FORMS = {
     # out than the non-SIB forms', because the SIB byte is in between.
     "mov_rm64_r64_sib_disp8": ("x86_step_mov_mem_sib_disp8", False,
                                ["rip", "b0", "b1", "b2", "b3", "disp", "rex",
-                                "w", "mod", "rm", "reg", "rb", "rx"]),
+                                "w", "mod", "rm", "reg", "rb"]),
     "mov_rm64_r64_sib_disp32": ("x86_step_mov_mem_sib_disp32", False,
                                 ["rip", "b0", "b1", "b2", "b3", "disp32",
-                                 "rex", "w", "mod", "rm", "reg", "rb", "rx"]),
+                                 "rex", "w", "mod", "rm", "reg", "rb"]),
     # `dst` is the CONCRETE destination register, which the lemma needs because
     # `x86_set_reg` is a `match` on its index and `simp` will not reduce one on
     # a non-literal.  See the note on the lemma.
@@ -550,7 +550,7 @@ _SHIFT_SUCC = ("{ x86_shift_post $s ($rm + x86_rex_b $rex) $digit "
 #: be checked against it separately.
 _LOAD_WITH_DISP_SUCC = (
     "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
-    "(x86_eff_addr (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat ($disp)) 8) "
+    "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat 8) "
     "with rip := $next }")
 
 #: The successor of a SIB-addressed STORE through a displacement, for both
@@ -565,7 +565,7 @@ _LOAD_WITH_DISP_SUCC = (
 #: about what the SIB byte means.
 _SIB_STORE_WITH_DISP_SUCC = (
     "{ $s with mem := mem_write_bytes $s.mem "
-    "(x86_eff_addr (x86_get_reg $s 4).toNat ($disp)) "
+    "(Int.ofNat (x86_get_reg $s 4).toNat + $disp).toNat "
     "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }")
 
 #: Successor expressions, matching each lemma's conclusion.  `$s` is the
@@ -624,10 +624,10 @@ _SUCCS = {
         "{ x86_set_reg $s ($reg + x86_rex_r $rex) "
         "(x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next }",
     "mov_r64_rm64_sib":
-        "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
-        "(x86_eff_addr $s.rsp.toNat 0) 8) with rip := $next }",
+        "{ x86_set_reg $s $dst (mem_read_bytes $s.mem $s.rsp.toNat 8) with "
+        "rip := $next }",
     "mov_rm64_r64_sib":
-        "{ $s with mem := mem_write_bytes $s.mem (x86_eff_addr $s.rsp.toNat 0) "
+        "{ $s with mem := mem_write_bytes $s.mem $s.rsp.toNat "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
     "mov_rm64_r64_sib_disp8":
         _SIB_STORE_WITH_DISP_SUCC,
@@ -637,13 +637,11 @@ _SUCCS = {
     # extended by REX.B, so it is `$rm + x86_rex_b $rex` rather than the `5 +
     # …` this table used to hard-code for `rbp`.
     #
-    # `x86_eff_addr` is the model's own 64-bit address function and is not
-    # decoration: it adds the SIGNED displacement and truncates the sum modulo
-    # 2^64, so writing `base + disp` on a `Nat` would be a different expression
-    # that happens to agree for a non-negative displacement and does not for a
-    # negative one — and every spilled argument is at a negative offset.
-    # Quoting the function rather than inlining the arithmetic keeps the wrap
-    # stated once, in `lib/X86.lean`; see `x86_eff_addr`'s docstring.
+    # `Int.ofNat … + $disp` is the model's own `Int` arithmetic and is not
+    # decoration: the address is `(Int.ofNat base + disp).toNat`, so writing
+    # `base + disp` on a `Nat` would be a different expression that happens to
+    # agree for a non-negative displacement and does not for a negative one --
+    # and every spilled argument is at a negative offset.
     #
     # ONE string for both displacement widths, because the successor does not
     # mention the width: `$disp` is the decoded number and `$next` is the
@@ -655,31 +653,30 @@ _SUCCS = {
     "mov_r64_rm64_disp32":
         _LOAD_WITH_DISP_SUCC,
     # No displacement at all: the address is the base register itself, so the
-    # displacement argument of `x86_eff_addr` is the literal 0.
+    # `Int.ofNat … + 0` round trip is gone and the instruction is one byte
+    # shorter.
     "mov_r64_rm64_nodisp":
         "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
-        "(x86_eff_addr (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat 0) 8) "
-        "with rip := $next }",
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat 8) with rip := $next }",
     "mov_rm64_r64_disp8":
         "{ $s with mem := mem_write_bytes $s.mem "
-        "(x86_eff_addr (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat ($disp)) "
+        "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
     "mov_rm64_r64_nodisp":
         "{ $s with mem := mem_write_bytes $s.mem "
-        "(x86_eff_addr (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat 0) "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
     "mov_rm64_r64_disp32":
         "{ $s with mem := mem_write_bytes $s.mem "
-        "(x86_eff_addr (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat ($disp)) "
+        "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
-    # `lea`: the address goes into a REGISTER, truncated to 64 bits (by
-    # `x86_eff_addr`, so the `UInt64.ofNat` here is just the register width).
-    # A `mov` successor would read memory at that address instead, which is the
-    # whole difference between the two instructions.
+    # `lea`: the address goes into a REGISTER, truncated to 64 bits.  A `mov`
+    # successor would read memory at that address instead, which is the whole
+    # difference between the two instructions.
     "lea_r64_rm64_disp32":
-        "{ x86_set_reg $s $dst (UInt64.ofNat (x86_eff_addr "
-        "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat ($disp))) "
-        "with rip := $next }",
+        "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat % "
+        "18446744073709551616)) with rip := $next }",
     # The RIP-relative `lea`: same register write, but the base is the END of
     # this instruction rather than a register's value, and there is no `$rm` in
     # the expression at all — which is the point.  A copy of the row above with
@@ -687,19 +684,18 @@ _SUCCS = {
     # would surface as a `Type mismatch` or a `sorry` naming neither the form
     # nor the byte.
     #
-    # `x86_eff_addr ($m + 7) $disp` verbatim, because this row is compared
-    # against the lemma's own conclusion by `exact Option.some.inj` and nothing
-    # rewrites in between: the model's own argument is `m + 3 + 4` (`x86_mem_addr`
-    # builds its return length as `sibExtra + dispN`), which is the same NUMBER
-    # and a different TERM, and a successor stating the model's spelling comes
-    # back unproved against a lemma stating the length.  Measured both ways:
-    # writing `m + 3 + 4` here and there closes by `rfl` too, but it makes the
-    # table a copy of how the model happens to spell a length rather than a copy
-    # of what the instruction does, and the two sides then have to be changed
-    # together.
+    # `Int.ofNat ($m + 7)` verbatim, because this row is compared against the
+    # lemma's own conclusion by `exact Option.some.inj` and nothing rewrites in
+    # between: the model's own term is `↑m + 3 + 4 + disp` (`x86_mem_addr` builds
+    # its return length as `sibExtra + dispN`), which is the same NUMBER and a
+    # different TERM, and a successor stating the model's spelling comes back
+    # unproved against a lemma stating the length.  Measured both ways: writing
+    # `m + 3 + 4` here and there closes by `rfl` too, but it makes the table a
+    # copy of how the model happens to spell a length rather than a copy of what
+    # the instruction does, and the two sides then have to be changed together.
     "lea_r64_rip":
-        "{ x86_set_reg $s $dst (UInt64.ofNat (x86_eff_addr ($m + 7) ($disp))) "
-        "with rip := $next }",
+        "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat ($m + 7) + $disp).toNat "
+        "% 18446744073709551616)) with rip := $next }",
     "mov_rm64_r64_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $next }",
@@ -1141,7 +1137,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             # read out of the ModRM/REX bytes and the addressing-mode exclusions
             # are tests on that same rm, so every one is a literal here.
             sc.append(sc_("decide"))
-        elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rx", "rr", "cc",
+        elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
                    "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2", "notrex",
                    "not66", "digit", "ndigit2"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
@@ -1984,15 +1980,15 @@ def _abs_step(prev, form, raw, addr, length):
     rex_r, rex_b = (8 if rex & 4 else 0), (8 if rex & 1 else 0)
     mod = modrm >> 6
     dst, src = reg + rex_r, rm + rex_b
-    # The address of a memory operand. `x86_eff_addr base disp` is the model's
-    # own spelling: `Int.ofNat base + disp` truncated modulo 2^64, so a
-    # displacement that carries the address below zero wraps to the top of the
-    # address space exactly as the CPU does.  It used to clamp negatives to 0,
-    # which was the model's `Int.toNat` doing the same, and both were wrong.
+    # The address of a memory operand. `Int.ofNat v.toNat + disp` then `.toNat`
+    # is the model's own spelling, and `Int.toNat` of a negative `Int` is 0 —
+    # so a displacement that carries the address below zero is a read of 0
+    # here, which is what the model does rather than a guess.
     def _addr(base, disp=0):
         if base is None:
             return None
-        return _u64(base + disp)
+        v = base + disp
+        return _u64(v if v >= 0 else 0)
 
     def _disp(raw_off, wide):
         if wide:
@@ -2281,28 +2277,18 @@ _SIMP_FORMS = {
     "alu_ri8:cmp": ("x86_get_reg", "x86_flags_sub"),
     "mov_r64_rm64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
     "mov_rm64_r64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
-    "lea_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_eff_addr"),
-    "lea_r64_rip": ("x86_set_reg", "UInt64.ofNat", "x86_eff_addr"),
-    "mov_r64_rm64_sib": ("x86_get_reg", "x86_set_reg", "mem_read_bytes",
-                         "x86_eff_addr"),
-    "mov_rm64_r64_sib": ("x86_get_reg", "x86_set_reg", "mem_write_bytes",
-                         "x86_eff_addr"),
-    "mov_r64_rm64_disp8": ("x86_get_reg", "x86_set_reg", "mem_read_bytes",
-                           "x86_eff_addr"),
-    "mov_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "mem_read_bytes",
-                            "x86_eff_addr"),
-    "mov_r64_rm64_nodisp": ("x86_get_reg", "x86_set_reg", "mem_read_bytes",
-                            "x86_eff_addr"),
-    "mov_rm64_r64_disp8": ("x86_get_reg", "x86_set_reg", "mem_write_bytes",
-                           "x86_eff_addr"),
-    "mov_rm64_r64_disp32": ("x86_get_reg", "x86_set_reg", "mem_write_bytes",
-                            "x86_eff_addr"),
-    "mov_rm64_r64_nodisp": ("x86_get_reg", "x86_set_reg", "mem_write_bytes",
-                            "x86_eff_addr"),
-    "mov_rm64_r64_sib_disp8": ("x86_get_reg", "x86_set_reg", "mem_write_bytes",
-                               "x86_eff_addr"),
-    "mov_rm64_r64_sib_disp32": ("x86_get_reg", "x86_set_reg", "mem_write_bytes",
-                                "x86_eff_addr"),
+    "lea_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "x86_rex_b"),
+    "lea_r64_rip": ("x86_set_reg", "UInt64.ofNat"),
+    "mov_r64_rm64_sib": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_rm64_r64_sib": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_r64_rm64_disp8": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_r64_rm64_nodisp": ("x86_get_reg", "x86_set_reg", "mem_read_bytes"),
+    "mov_rm64_r64_disp8": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_disp32": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_nodisp": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_sib_disp8": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
+    "mov_rm64_r64_sib_disp32": ("x86_get_reg", "x86_set_reg", "mem_write_bytes"),
     "movzx_r64_r8": ("UInt64.ofNat",),
     "movsx_r64_r8": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_sign_extend8"),
     "alu_rr:add": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r",
@@ -3329,7 +3315,6 @@ _MEM_LEMMAS = ("x86_set_reg_mem", "x86_set_xmm_mem", "x86_flags_logic_mem",
 #: above, and a REGISTER read out of a shift's successor is a projection the
 #: simplifier can only reduce once the wrapper is unfolded.
 _WRAPPER_DEFS = ("x86_get_reg", "x86_set_reg", "x86_set_xmm", "x86_mem_addr",
-                 "x86_eff_addr",
                  "x86_flags_logic", "x86_flags_add", "x86_flags_sub",
                  "x86_set_reg_narrow", "x86_mask", "x86_set_flag4",
                  "x86_shift_post")
@@ -3627,7 +3612,7 @@ def emit(path, expected):
     a("  have hrax : %s.rax = %d := by" % (prev, expected))
     a("    try (simp [%s, i0, x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r," % hs)
     a("      x86_flags_sub, x86_flags_add, x86_flags_logic, x86_sign_extend8,")
-    a("      x86_mem_addr, x86_eff_addr, x86_trunc32]) <;>")
+    a("      x86_mem_addr, x86_trunc32]) <;>")
     a("    first | decide | omega")
     a("    all_goals sorry")
     a("  have hrip : %s.rip = 0 := by" % prev)
@@ -3637,7 +3622,7 @@ def emit(path, expected):
     a("      fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
     a("    simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add," % hs)
     a("      x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r, x86_flags_logic,")
-    a("      x86_mem_addr, x86_eff_addr, x86_trunc32] <;>")
+    a("      x86_mem_addr, x86_trunc32] <;>")
     a("    try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>")
     a("    try (simp only [mem_read_bytes, ite_true]) <;>")
     a("    first | decide | omega")

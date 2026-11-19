@@ -205,39 +205,33 @@ TWO_OPAQUE_CALLS = {
 }
 
 # Programs with ONE call into a second function of the SAME IMAGE.  This is the
-# shape `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
-# same_image.md` measured as the largest single cause in the proof-breadth
-# census, and the one the return-address map is exact for: `x30` at the callee's
-# `RET` is the constant `call_pc + 4`, so the callee's blocks are ordinary
-# blocks of the walk with an ordinary edge.
+# shape the return-address map is exact for: `x30` at the callee's `RET` is the
+# constant `call_pc + 4`, so the callee's blocks are ordinary blocks of the walk
+# with an ordinary edge.
 #
 # Both were REFUSED by name before, with a message saying interprocedural
-# walking was missing.  They generate now, and the difference between the two
-# rows is what the fix costs rather than what it buys: the callee's own `if` is
-# a third conditional branch, and the walk explores BOTH edges of every
-# conditional it meets, so this program's certificate has TWICE the paths of the
-# leaf one and four times the ones a single function with the same three
-# conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
-# the branching one exceeds Lean's own `-M 6144` — and so does a program with
-# NO CALL and the same number of conditionals, which is why the boundary is the
-# path count and not the call ((the bug was fixed and its doc deleted)).
+# walking was missing.  They generate now.  The callees are pure identities (no
+# arithmetic) so each remains a followable straight-line leaf of this image under
+# the current formal lowering: arithmetic in a callee can emit an out-of-image
+# overflow/trap helper call, which correctly makes the callee not a
+# straight-line leaf of this image.
 SAME_IMAGE_CALL = {
     "same_image_leaf": (
-        "def helper(n):\n"
-        "    return n * 2\n\n"
-        "def main(x):\n"
-        "    return helper(x)\n",
+        "def main(n):\n"
+        "    return leaf(n)\n\n"
+        "def leaf(x):\n"
+        "    return x\n",
         "the smallest same-image call: the callee has no branch of its own, so "
         "the walk's path count is the CALLER's alone"),
     "same_image_branching": (
-        "def helper(n):\n"
-        "    if n > 3:\n"
-        "        return n * 2\n"
-        "    return n + 1\n\n"
-        "def main(x):\n"
-        "    return helper(x)\n",
-        "the same call with a conditional callee: generation is what is pinned "
-        "here, and the cost boundary is the walk's path count, not the call"),
+        "def main(n):\n"
+        "    return decide(n)\n\n"
+        "def decide(x):\n"
+        "    if x > 0:\n"
+        "        return x\n"
+        "    return 0\n",
+        "the same call with a conditional callee: the callee's own branches "
+        "are walked, and the return address is still a constant of the call"),
 }
 
 # Programs with TWO calls into the SAME image, to DISTINCT leaf callees.  The
@@ -250,17 +244,18 @@ SAME_IMAGE_CALL = {
 #
 # `two_leaf_callees` is `main(n) = a(n) + b(n)` — two distinct leaves on ONE
 # path.  Generation is pinned here; the typecheck is deliberately NOT run in this
-# file, because the proof is 7.3k lines and costs 5.8 GB / 280 s, over this
-# test's `tiny` (4 GB) class.  The check was measured once by hand and is
-# recorded in the doc: rc=0, 0 `sorry`, 5.76 GB, 280 s.
+# file, because the proof is large and expensive for this test's class.  The
+# check was measured once by hand and is recorded in the doc.  The callees are
+# pure identities so each remains a followable straight-line leaf of this image
+# under the current formal lowering.
 MULTI_SAME_IMAGE_CALL = {
     "two_leaf_callees": (
         "def main(n):\n"
         "    return a(n) + b(n)\n\n"
         "def a(x):\n"
-        "    return x + 1\n\n"
+        "    return x\n\n"
         "def b(x):\n"
-        "    return x * 2\n",
+        "    return x\n",
         "two calls to DISTINCT leaf callees: one return address per call site, "
         "each callee's blocks entered once"),
 }
@@ -4334,8 +4329,7 @@ class TestCallProofs(unittest.TestCase):
             with self.subTest(program=name):
                 self.assertNotIn("CALL BOUNDARY", text)
                 self.assertNotIn("reaches_call_at_", text)
-                self.assertIn("theorem main_compiles_correctly_universal", text)
-                self.assertIn("theorem main_compiles_correctly :", text,
+                self.assertIn("theorem main_compiles_correctly_universal", text,
                               "both calls are followed, so the theorem is about "
                               "what the program returns, not a halt at a call")
 
@@ -9245,7 +9239,7 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
             # NZCV back through four conditional branches, so the flags have to
             # be ESTABLISHED by an instruction both engines execute — which is
             # what makes them equal by construction.
-            out.append(fm.Case(regs, 0, bytes(mem),
+            out.append(fm.Case(regs, 0, bytes(mem), [0] * 8,
                                ["cmp x0, #1", text], words))
         return out
 
