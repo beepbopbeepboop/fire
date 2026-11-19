@@ -573,6 +573,16 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
     _sk = _as_str(sym_name)
     _reg_isym = _as_dict(self.imported_symbols)
     if _sk in self.struct_field_types:
+        # The name is already a class HERE, so there is nothing to register
+        # as an imported function — but this gen may still lack the class's
+        # METHOD signatures: `func_return_types` is re-seeded per
+        # `gen_module`, and the struct passes only see the modules THIS gen
+        # inlined, so a class whose defining module a sibling subtree
+        # compiled has a layout but no methods. `_note_struct_import_alias`
+        # publishes them (and is a no-op for a name that is not a class of
+        # the named module).
+        if not s.wildcard:
+            self._note_struct_import_alias(s.module, _sk, orig_name)
         return
     if not s.wildcard and self._from_import_name_is_submodule(s.module, orig_name):
         _reg_isym[_sk] = {
