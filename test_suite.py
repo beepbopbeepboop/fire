@@ -2257,6 +2257,8 @@ STALE_PER_CHILD_BUDGETS = {
     'test_gimple_class_method_import_inlined.py': 2,
     'test_gimple_imported_container_global.py': 3,
     'test_gimple_set_op_boxed_container_local.py': 3,
+    # tools/ pin, 2026-11-20: four subprocess timeouts on a compile/run.
+    'tools/test_orchestrator_wedge.py': 4,
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
@@ -2347,6 +2349,8 @@ STALE_PER_CHILD_BUDGETS = {
     'test_gimple_class_method_import_inlined.py': 2,
     'test_gimple_imported_container_global.py': 3,
     'test_gimple_set_op_boxed_container_local.py': 3,
+    # tools/ pin, 2026-11-20: four subprocess timeouts on a compile/run.
+    'tools/test_orchestrator_wedge.py': 4,
     'test_invalid_downcast_build.py': 1,
     'test_overload_diagnostic.py': 1,
     'test_predicate_where_diagnostic.py': 1,
@@ -4313,8 +4317,6 @@ UNREGISTERED = {
     'test_casesgen_dataclass_ctor_literal_union_build.py': _STANDALONE_TEST_REASON,
     'test_casesgen_decorated_method_gate.py': _STANDALONE_TEST_REASON,
     'test_casesgen_preseed_takeover_union_elems.py': _STANDALONE_TEST_REASON,
-    # Runs directly (`python3 <file>`); names its cause in its docstring.
-    'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_export_table_suffix_mismatch.py': _STANDALONE_TEST_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
@@ -4350,6 +4352,10 @@ UNREGISTERED = {
     # .ci it just wrote (so a reject= job can see it on stdout); runs directly.
     'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
+    # tools/ pins, 2026-11-20; each runs directly (`python3 <file>`) and
+    # names its cause in its own docstring.
+    'tools/test_integrate_probe_loop.py': _STANDALONE_TEST_REASON,
+    'tools/test_orchestrator_wedge.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
     'test_match_class_pattern.py': _STANDALONE_TEST_REASON,
@@ -5381,6 +5387,35 @@ def test_every_test_file_is_registered():
           'not run by any registered spec, not in UNREGISTERED, and in no '
           'declared family: '
           + ', '.join(undeclared))
+
+    # A REGISTERED test file whose job command is `python3 <file>` must have a
+    # `__main__`, or the job is a silent no-op: the interpreter runs only the
+    # top level (imports + defs) and exits 0, so none of its tests ever run.
+    # Measured 2026-11-20: three such files (test_module_loader_stdlib.py,
+    # test_docstring_mojo_blocks.py, test_tuple_enumerate_var_refinement.py)
+    # were registered jobs that had never executed a single test -- see
+    # bugs/SUITE_module_loader_stdlib_job_is_noop.md. suite.py has no pytest
+    # driver, so `__main__` is the only way these jobs get teeth.
+    noop = []
+    for _f in sorted(on_disk):
+        if os.path.basename(_f) not in named:
+            continue
+        try:
+            _tree = ast.parse(open(_f, errors='replace').read(), filename=_f)
+        except SyntaxError:
+            continue
+        _has_main = any(isinstance(_n, ast.If)
+                        and '__main__' in ast.dump(_n.test) for _n in _tree.body)
+        _has_test = any(isinstance(_n, ast.FunctionDef)
+                        and _n.name.startswith('test')
+                        for _n in ast.walk(_tree))
+        if _has_test and not _has_main:
+            noop.append(_f)
+    check('the estate: a registered test file with tests has a __main__',
+          not noop,
+          'these are registered jobs whose command is `python3 <file>` and '
+          'which define tests but no `__main__`, so the job runs none of them: '
+          + ', '.join(noop))
 
     # The other two directions, which is what stops the list becoming a
     # permanent excuse. Both are the anti-rot discipline tools/suite.py already
