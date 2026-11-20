@@ -280,5 +280,5 @@ The job's `reject=CLOSURE_INCOMPLETE` only reads the child's OUTPUT, and
 `--dump-full` writes the stubs to `fire.ci` (it prints just
 `✓ Generated fire.ci`), so the job can pass with them present. They are
 stage2's and stage3's failure mode (their binaries CALL them), which is
-`bugs/mid/GATE_red_recover-land_2026-11-02-part5-part2.md`'s chain.
+`bugs/hard/GATE_red_recover-land_2026-11-02-part5-part2.md`'s chain.
 
