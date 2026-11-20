@@ -1030,6 +1030,50 @@ def test_every_job_over_the_debt_line_says_why():
           f'nothing, and the next step for each job is written down nowhere')
 
 
+# Jobs whose real COLD pass does not fit the default timeout, with the
+# measurement that says so. Every other job is bounded by the default and must
+# stay there: the default is the hang detector, so a job that opts out of it
+# owes the number that makes its pass legitimate rather than a wedge.
+#
+# `linkmode` runs 56 end-to-end `driver.compile_program` builds. Each one is a
+# cold compile whenever the compiler fingerprint changes (the CAS key covers
+# the codegen sources), so a gate landing a codegen change pays the whole sweep
+# cold. Measured from `build/suite-timings.jsonl`: 1,349-3,352 s over the
+# 2026-11-02..11-19 gates, 3,298.6 s on head 8e1d4ee43 (the last pass), and
+# four 2026-11-19 gate runs reported [TIMEOUT] at the old 3600 s default.
+MEASURED_COLD_PASS_S = {
+    'linkmode': 3298.6,
+}
+
+
+def test_a_job_whose_cold_pass_outruns_the_default_names_its_own_timeout():
+    """A pass measured longer than the default must not run under the default.
+
+    The default is not a budget to raise for everything — it is what catches a
+    genuine wedge in an hour, and 3600 s is still ~6x every ordinary job. But a
+    job killed at that default while doing complete, correct work reports
+    [TIMEOUT], which says nothing about whether its output was right. So a job
+    with a measured cold pass over the line names its own `timeout=`, with 2x
+    headroom over the measurement, and this is the check that keeps the name
+    and the measurement from drifting apart.
+    """
+    for name, measured_s in sorted(MEASURED_COLD_PASS_S.items()):
+        spec = suite.REGISTRY.get(name)
+        check(f'timeout: {name} is a registered job', spec is not None,
+              'a measurement of a job that no longer exists checks nothing')
+        if spec is None:
+            continue
+        check(f'timeout: {name} does not run on the {suite.DEFAULT_JOB_TIMEOUT_S:g} s default',
+              spec.timeout is not None,
+              f'{name} measured {measured_s:g} s cold, which is at or over the '
+              f'default: it must name its own timeout')
+        effective = spec.timeout or suite.DEFAULT_JOB_TIMEOUT_S
+        check(f'timeout: {name} has 2x headroom over its measured cold pass',
+              effective >= 2 * measured_s,
+              f'{effective:g} s for a {measured_s:g} s pass — a loaded gate '
+              f'would kill it again, which is the [TIMEOUT] this pins')
+
+
 def test_an_expect_marker_points_at_a_doc_that_exists():
     """A registered reason that cites `bugs/` must cite a doc that is there.
 
@@ -2206,13 +2250,6 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # that is not a call keyword at all, and it walks `build/` and the other derived
 # trees this one skips.
 STALE_PER_CHILD_BUDGETS = {
-    # Four pins that arrived with the 2026-11-19 closure-stub /
-    # imported-container merge. Each literal is a real child budget (a
-    # compile/link/run of one fixture); the counts are the ast walk's.
-    'test_dump_full_reports_closure_stubs.py': 1,
-    'test_gimple_class_method_import_inlined.py': 2,
-    'test_gimple_imported_container_global.py': 3,
-    'test_gimple_set_op_boxed_container_local.py': 3,
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
@@ -2263,6 +2300,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_regress_scriptutil_generator_closure.py': 3,
     'test_regress_yield_from_module_generator.py': 2,
     'test_regress_yield_from_word_iterator.py': 3,
+    'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
@@ -4265,8 +4303,6 @@ UNREGISTERED = {
     'test_casesgen_dataclass_ctor_literal_union_build.py': _STANDALONE_TEST_REASON,
     'test_casesgen_decorated_method_gate.py': _STANDALONE_TEST_REASON,
     'test_casesgen_preseed_takeover_union_elems.py': _STANDALONE_TEST_REASON,
-    # Runs directly (`python3 <file>`); names its cause in its docstring.
-    'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_export_table_suffix_mismatch.py': _STANDALONE_TEST_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
@@ -7108,6 +7144,7 @@ def main():
                test_every_compiler_job_is_capped,
                test_every_job_is_reserved_before_it_starts,
                test_the_timeout_clock_starts_after_admission,
+               test_a_job_whose_cold_pass_outruns_the_default_names_its_own_timeout,
                test_a_reservation_the_budget_cannot_fit_is_reported,
                test_a_fanout_item_is_capped_and_reserved_like_any_other_job,
                test_a_registered_fanout_item_is_wrapped_in_the_built_argv,
