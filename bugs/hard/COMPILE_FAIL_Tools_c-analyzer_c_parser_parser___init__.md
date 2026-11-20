@@ -6,6 +6,86 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-11-19 — the C++ companions of the whole import chain compile; the new first error is a C-side one that the old refusal was hiding
+
+Re-measured from a fresh copy (`.tmp/ca/` from `Python-3.14.6/Tools/c-analyzer/`, `python3
+fire.py build -o .tmp/out/rN .tmp/ca/c_parser/parser/__init__.py`, arm64). At the start of
+the round the build died in `c_parser/info.py`'s link-mode companion
+(`link_inline_module.cpp`: `_fmt_line`, 8 g++ errors) and, behind it, in the root's own
+`gen_module` with `RuntimeError: unresolved callee 'anonymous_names(...)'`. Both are gone.
+
+### What landed (all in `mojo/backend_gimple/`; tests in `test_gimple_generator_runner.py`)
+
+1. `cpp_core.py`: `<list-local>.extend([a, b, ...])` on a `MojoList *` (a list/tuple literal
+   argument) is the sequence of its own `append`s, so the element-type registry is updated as
+   for a spelled-out `.append`. It used to fall to the generic `obj.member(...)` text
+   (`request for member 'extend' ... of pointer type`).
+2. `cpp_core.py` + `cpp_async.py`: `_cpp_str_word_polymorphic_locals`. A local bound to a
+   string on one path and to a member read off an untyped word on another (`parent = ''`
+   then `parent = parsed.parent`) is declared `int64_t`, not `char *` from its first
+   assignment; `isinstance(parent, str)` on it then goes to the existing runtime
+   `mojo_boxed_is_str`.
+3. `cpp_core.py`: `a, = word` / `a, b = word` on an untyped word (`data, = data` in
+   `_fmt_line`) iterates the word once through `mojo_iter_word` and reads the slots back with
+   `mojo_list_get_boxed` instead of `(word)[i]` on an integer.
+4. `cpp_core.py`: `ClassName.<attr>` read off a module-level class NAME in a generator body
+   (`KIND.FUNCTION`) resolves like `cls.<attr>` (class-attribute global, else
+   `mojo_class_getattr`); `_cpp_expr_static_ctype` answers a module-global field that holds a
+   user struct (`KIND__FUNCTION`: `KIND *`), and `_cpp_word_vs_object_pointer` (plus a
+   `_mj_word_bits` helper in the `.cpp` preamble, `module_gen.py`) makes `word is KIND.X` a
+   valid comparison (was "ISO C++ forbids comparison between pointer and integer").
+5. `cpp_core.py`: `if data:` / `x if data else y` on an UNTYPED word (parameter, str-or-object
+   local, or a `mojo_getattr_any` member read) uses `mojo_truthy_word`; a non-NULL pointer to
+   `''` was true (`f'<{data}>' if data else '-'` printed `<>`).
+6. `module_gen.py`: the refusal "closure factory with `nonlocal` in a module with a
+   generator" no longer fires for a MODULE-LEVEL factory (only a factory nested in another
+   function is lifted by the coroutine path). `cpp_core.py::_cpp_fn_returns_closure`: a local
+   bound to a call of a module function that returns a nested def (`anon = anonymous_names()`)
+   is a callable word, so `anon(x)` dispatches through `mojo_dyn_call` instead of
+   "unresolved callee 'anon(...)'".
+
+Regressions (fail before, pass after): `generator_list_extend_of_a_literal`,
+`generator_str_or_object_local_and_word_unpack`,
+`toplevel_nonlocal_factory_called_from_a_generator` (`run_dynamic_object_generator_tests`,
+`run_toplevel_nonlocal_factory_beside_generator_tests`).
+
+### Measured now
+
+* Imported-module floors (`.iterutil` `next(...)`, `..info` materialization) and every g++
+  error in `__init___gen.cpp` / `link_inline_module.cpp` are GONE; no `# ERROR: compiling
+  imported module` line remains and the root `gen_module` completes.
+* The build now reaches the C compiler and fails with 41 errors, ALL downstream of one cause
+  in `c_parser/info.py` (previously masked because the root never got past the refusal):
+  `info_KIND__render_data_row_item` / `info_KIND___getattr__` / `info_KIND__from_raw` ...
+  "implicit declaration ... did you mean `info_Enum__...`", plus the "unexpected RHS"/"invalid
+  conversion in gimple call" that follow from them.
+
+### Root cause of what is left, and the next step
+
+`@enum.unique class KIND(enum.Enum)` (info.py:22) has the dotted base `enum.Enum`.
+`fire_compiler.py`'s class-base parser keeps only the TRAILING name (`bases == ['Enum']`; that
+is deliberate, it is what makes `commondialog.Dialog` resolve for tkinter's filedialog), but
+`info.py` ALSO defines `class Enum(TypeDeclaration)` at line 1268, so `KIND` is resolved as a
+subclass of the local `Enum` struct: it inherits `Enum`'s (and `TypeDeclaration`'s ...)
+methods, which are emitted as `info_Enum__*`, while the calls on `cls`/`self` of `KIND`'s
+classmethods name `info_KIND__*`. Two facts make a sound fix possible: (a) Python itself
+cannot let a class use a same-module class as a base before that class exists, and
+`KIND` (line 22) is defined 1246 lines before `Enum` (line 1268); (b) the qualifier text is
+available at parse time. Plan: add a parallel `base_qualifiers` list to `StructDef` (like
+`base_constraints`), filled by the dotted-base loop above; in `gen_module_impl`, before
+`_struct_bases` / `_struct_bases_map` are built, treat a base whose trailing name is a
+local struct that is defined at or after the derived class, or whose qualifier names an
+imported module other than the current one, as an EXTERNAL base (drop it from the
+local-merge list but keep it for `_gmi_transform_enum_classes`' `is_enum` test, which already
+matches `'.Enum'`). Test: a two-class module `import enum; class K(enum.Enum): ...;
+class Enum: ...` with a classmethod on `K` that calls another method, compared with CPython.
+Needs the stdlib compile + dylib gate (shared AST).
+
+Separate, found while writing the factory regression and NOT fixed: a nested closure with a
+DEFAULT parameter (`def anon_name(prefix='anon-')`), returned from a factory and called
+with no argument from compiled `main()`, reads a garbage default (`\xfd{...`) on the plain C
+path; the regression passes the argument explicitly. Worth its own doc.
+
 ## Status 2026-10-29 — the companion's constructor-call lowering landed; 11 g++ errors are 8
 
 Re-measured from a copy of the upstream tree (`.tmp/ca/` from

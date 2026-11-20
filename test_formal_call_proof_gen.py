@@ -7742,7 +7742,7 @@ def _svc_census(words, base, code):
 class TestSvcProvenanceCensus(unittest.TestCase):
     """Every emitted `svc`'s x16, and every write's x0 use, measured.
 
-    Part 1 of the (deleted) svc-exit-handling bug was "measure
+    Part 1 of `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` is "measure
     before assuming": the proof walk now distinguishes an exit `svc` (x16 = 1,
     a halt) from a write `svc` (x16 = 4, a fall-through whose x0 return value
     the model does not model), and that distinction is only as good as the

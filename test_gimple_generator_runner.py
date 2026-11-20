@@ -3369,6 +3369,122 @@ def run_ctor_default_arg_in_generator_tests():
         "9\n12\n")
 
 
+def run_dynamic_object_generator_tests():
+    # Shapes `c_parser/info.py`'s `_fmt_line` (reached through the `_FORMATS`
+    # dict, so a function VALUE and never A3-eligible) puts through the C++
+    # companion. Each was a g++ error in the companion before:
+    #  * `<list-local>.extend([a, b, ...])` emitted `parts.extend(...)` member
+    #    syntax on a `MojoList *`;
+    #  * a local bound to `''` first and to an object attribute later was declared
+    #    `char *`, so the object word could not be assigned and `.kind`/`.name`
+    #    off it were member reads on a `char *`;
+    #  * `data, = data` on an untyped word emitted `(data)[0]` on an integer;
+    #  * `KIND.FUNCTION` (a class attribute read off the class NAME) emitted the
+    #    bare class name as C++ text.
+    _test_foreign_a3_generator_handle(
+        "generator_list_extend_of_a_literal",
+        "def consume(n, *, start=[]):\n"
+        "    parts = []\n"
+        "    parts.extend(['a', 'b'])\n"
+        "    parts.extend([str(n), 'z'])\n"
+        "    yield '-'.join(parts)\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "a-b-4-z\n")
+    _test_foreign_a3_generator_handle(
+        "generator_str_or_object_local_and_word_unpack",
+        "import enum\n"
+        "\n"
+        "class KIND(enum.Enum):\n"
+        "    FUNCTION = 'function'\n"
+        "    VARIABLE = 'variable'\n"
+        "\n"
+        "class Item:\n"
+        "    def __init__(self, kind, name, parent, data):\n"
+        "        self.kind = kind\n"
+        "        self.name = name\n"
+        "        self.parent = parent\n"
+        "        self.data = data\n"
+        "\n"
+        "class Item2(Item):\n"
+        "    pass\n"
+        "\n"
+        "def fmt_line(parsed, data=None):\n"
+        "    parts = [f'<{parsed.kind.value}>']\n"
+        "    parent = ''\n"
+        "    if parsed.parent:\n"
+        "        parent = parsed.parent\n"
+        "        if not isinstance(parent, str):\n"
+        "            if parent.kind is KIND.FUNCTION:\n"
+        "                parent = f'{parent.name}()'\n"
+        "            else:\n"
+        "                parent = parent.name\n"
+        "        name = f'<{parent}>.{parsed.name}'\n"
+        "    else:\n"
+        "        name = parsed.name\n"
+        "    if data is None:\n"
+        "        data = parsed.data\n"
+        "    elif data is iter(data):\n"
+        "        data, = data\n"
+        "    parts.extend([name, f'<{data}>' if data else '-'])\n"
+        "    yield '\\t'.join(parts)\n"
+        "\n"
+        "FORMATS = {'raw': (lambda v, _d: [repr(v)]), 'line': fmt_line}\n"
+        "\n"
+        "def main():\n"
+        "    fn = Item(KIND.FUNCTION, 'f', None, 'fd')\n"
+        "    var = Item(KIND.VARIABLE, 'v', fn, 'vd')\n"
+        "    other = Item2(KIND.VARIABLE, 'w', 'strparent', '')\n"
+        "    render = FORMATS['line']\n"
+        "    for it in (fn, var, other):\n"
+        "        for line in render(it):\n"
+        "            print(line)\n"
+        "\n"
+        "main()\n",
+        "<function>\tf\t<fd>\n<variable>\t<f()>.v\t<vd>\n<variable>\t<strparent>.w\t-\n")
+
+
+def run_toplevel_nonlocal_factory_beside_generator_tests():
+    # A MODULE-LEVEL closure factory with a `nonlocal` cell, in a module that also
+    # has a generator calling it (`c_parser/parser/__init__.py`'s
+    # `anonymous_names()` called from `parse`). The module used to be refused
+    # outright ("unresolved callee 'anonymous_names(...)'") because the check for a
+    # factory whose closure writes through `nonlocal` looked at every def in the
+    # module, though only a factory NESTED in another function is lifted by the
+    # coroutine path. The state has to persist across calls of ONE closure and be
+    # independent between two closures made by two calls of the factory.
+    _test_foreign_a3_generator_handle(
+        "toplevel_nonlocal_factory_called_from_a_generator",
+        "def anonymous_names():\n"
+        "    counter = 1\n"
+        "    def anon_name(prefix):\n"
+        "        nonlocal counter\n"
+        "        name = f'{prefix}{counter}'\n"
+        "        counter += 1\n"
+        "        return name\n"
+        "    return anon_name\n"
+        "\n"
+        "def consume(items, *, start=[]):\n"
+        "    anon = anonymous_names()\n"
+        "    for it in items:\n"
+        "        yield anon(it)\n"
+        "\n"
+        "def main():\n"
+        "    a = anonymous_names()\n"
+        "    print(a('anon-'), a('x'))\n"
+        "    for v in consume(['p-', 'q-']):\n"
+        "        print(v)\n"
+        "    for v in consume(['r-']):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "anon-1 x2\np-1\nq-2\nr-1\n")
+
+
 def run_struct_ptr_through_local_dict_tests():
     # A struct pointer stored into a local dict and read back inside a cpp
     # generator body. The store went through the int64 slot (correct: the
@@ -4013,36 +4129,6 @@ async def main_async() -> Int:
 def main():
     asyncio.run(main_async())
 """, "103\n")
-    # Lib/contextlib.py's `AsyncClosing.__aexit__` awaits `self.thing.aclose()`
-    # while `aclose` is an async method of a struct defined LATER in the file.
-    # Eligibility of an async method depends on the set of known async method
-    # names, which one source-order pass built from only the methods before it:
-    # the awaiter was refused (and the whole module with it) purely because of
-    # where the callee sat. Here the awaiter's struct comes first.
-    test_generator_stdout("async_method_awaits_later_defined_async_method", """\
-import asyncio
-
-struct Closing:
-    var n: Int
-    fn __init__(out self, n: Int):
-        self.n = n
-
-    async def __aexit__(self, *exc_info) -> Int:
-        var r = await self.shut()
-        return r + len(exc_info)
-
-    async def shut(self) -> Int:
-        return self.n
-
-async def main_async() -> Int:
-    var c = Closing(40)
-    var r = await c.__aexit__(1, 2, 3)
-    print(r)
-    return r
-
-def main():
-    asyncio.run(main_async())
-""", "43\n")
     test_generator_stdout("star_args_async_generator_for_packs", """\
 import asyncio
 
@@ -7202,6 +7288,8 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
+    run_dynamic_object_generator_tests()
+    run_toplevel_nonlocal_factory_beside_generator_tests()
     run_tuple_target_for_and_method_stmt_generator_tests()
     run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()

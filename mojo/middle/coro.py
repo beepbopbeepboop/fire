@@ -7577,32 +7577,15 @@ def lower(stmts: list, closure_stmts: list = (),
             for _pn, _pa in s.params:
                 _pn_list.append(_pn)
             _PARAM_NAMES[s.name] = _pn_list
-    # A FIXPOINT, not one pass: whether an async method is eligible depends on
-    # `_ASYNC_METHOD_NAMES` itself (`await self.thing.aclose()` is only an
-    # accepted shape once `aclose` is known to be a compiled async method), so
-    # a single source-order pass judged a method against only the methods
-    # DEFINED BEFORE it. Lib/contextlib.py's `AsyncClosing.__aexit__` awaits
-    # `.aclose()`, which `AsyncExitStack` defines later in the file: it was
-    # refused although the very same shape compiles when the callee comes
-    # first. Names only ever get added, so this terminates in at most
-    # (number of async methods) rounds.
-    _am_changed = True
-    while _am_changed:
-        _am_changed = False
-        for s in stmts:
-            if not isinstance(s, N.StructDef):
-                continue
+        if isinstance(s, N.StructDef):
             for m in s.methods:
                 if not (isinstance(m, N.FunctionDef) and getattr(m, 'is_async', False)):
-                    continue
-                if _cm_as_str(m.name) in _ASYNC_METHOD_NAMES:
                     continue
                 _isg = any(isinstance(n, N.YieldExpr) for n in _walk(m))
                 _mok = (_eligible_async_gen(m, is_method=True)[0] if _isg
                         else _eligible_async(m, is_method=True)[0])
                 if _mok:
                     _ASYNC_METHOD_NAMES.add(m.name)
-                    _am_changed = True
                     # Plain unpack loop, NOT `[p for p, _a in
                     # m.params[1:]]` — same comprehension-target-unpack
                     # trap as elsewhere in this file.

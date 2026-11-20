@@ -7,27 +7,6 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source scan, not the earlier 100-file Lib/ sample.)
 
-
-## Status 2026-11-19 — build regression fixed (unknown-decl check rejected a `.py`); one runtime gap left
-
-Re-measured on current master: `python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py`
-had REGRESSED to a build error, `tables.py:335:20: error: use of unknown declaration '_resolve_column'`.
-That is real CPython source (`ColumnSpec._normalize` reads the undefined `_resolve_column` in dead code
-after an unconditional `raise NotImplementedError`), valid Python (a NameError only if run). The cause was
-`unknown_decl_check.check_module` (Modular's Mojo diagnostic, added after the 11-13/11-14 entries), which
-ran on Python sources too. Fixed in `unknown_decl_check.check_module`: a `.py` filename is not checked.
-Regression `test_python_source_names_resolve_lazily` in `test_unknown_decl_check.py` (the `.mojo`
-spelling is still rejected). After the fix the build exits 0 (peak 0.6 GB) and
-`test_gimple_tables_consumer_link.py` PASSes.
-
-**Remaining:** running the standalone `.tmp/ca/tables_out` exits 1 with
-`NotImplementedError: textwrap.dedent: module 'textwrap' is not compiled into this binary`, raised at
-module init by `ColumnSpec.REGEX = re.compile(textwrap.dedent(...))` (tables.py:~251). The runtime raises
-by design for any uncompiled stdlib module (`mojo_module_not_compiled`); `textwrap` has no runtime
-implementation. Next step: add `textwrap.dedent` as a runtime/builtin-table entry (pure string function:
-strip the common leading whitespace of non-blank lines, blank lines normalised to empty), then the
-Done-when run `.tmp/ca/tables_out` exits 0 again and this doc can be deleted.
-
 ## Status 2026-11-14 — part 1 fixed and its doc deleted; consumer program builds and runs
 
 A consumer program that imports `c_common.tables.read_table` now builds AND

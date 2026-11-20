@@ -2224,11 +2224,6 @@ STALE_PER_CHILD_BUDGETS = {
     # moves to `BUDGET_IS_THE_SUBJECT`.
     'test_bootstrap_hotspots.py': 1,
     'test_dict_slot_read_regression.py': 2,
-    # +1 with c69448afe ("DType/string bracket args in generic instances"):
-    # `_build_and_run(src, timeout=1500)` -- a COMPILE-and-RUN of one source
-    # through the real backend, so the 1500 s is a genuine child budget and
-    # not a leftover.
-    'test_elaboration_recursion_diagnostic.py': 1,
     'test_formal_admitted_two_args.py': 1,
     'test_formal_dylib.py': 2,
     'test_formal_fstring_printf_regress.py': 1,

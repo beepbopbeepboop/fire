@@ -1126,6 +1126,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # because they are yielded as a tuple element (see
     # cpp_core._cpp_word_lambda_names / _cpp_lambda_word_expr).
     gen._cpp_word_lambda_names = gcc_._cpp_word_lambda_names(gen, fn)
+    gen._cpp_str_word_locals = gcc_._cpp_str_word_polymorphic_locals(gen, fn, param_ctypes)
     # Locals of this unit that hold a TAGGED word (a generator's boxed slot
     # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
     gen._cpp_tagged_word_names = set()
@@ -1415,6 +1416,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_func_scope_decls = None
         gen._cpp_list_local_elem_types = {}
         gen._cpp_word_lambda_names = set()
+        gen._cpp_str_word_locals = set()
         gen._cpp_module_global_ctypes = None
         gen._cpp_nested_helper_syms = {}
         gen._cpp_closure_factory_names = set()
