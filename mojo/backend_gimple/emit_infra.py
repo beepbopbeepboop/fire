@@ -142,6 +142,17 @@ def _reset_func(gen, body: list = None, params: list = None,
     # not the variable's real one. Only the NAMES are needed, and only
     # during the reduction, so this is a reference-cheap set built once.
     gen._cur_func_params = set()
+    # The declaration's OWN annotation per parameter, resolved to the C type
+    # it names. Kept beside the names because the annotation is the first
+    # binding of the parameter -- the half every body-only mixed-kind scan
+    # (`mixed_value_locals`, `mixed_scalar_locals`, `mixed_container_locals`)
+    # cannot see. A body that stores a different kind is then a genuine mix,
+    # not a same-kind rebind. Empty for an unannotated parameter.
+    gen._cur_param_ann = {}
+    # Caches keyed on the annotation/body pair, cleared here because both are
+    # per-function (`boxed_param_names`, the per-parameter conflict answer).
+    gen._cur_boxed_params = None
+    gen._param_conflict_cache = {}
     # NOT `for _p in (params or ()):` -- `params: list = None` makes the
     # `or`'s left operand a MojoList*-or-None union against a real MojoList
     # (the `()` literal) on the right. Self-hosted, mixed-type `or`/`and`
@@ -170,6 +181,17 @@ def _reset_func(gen, body: list = None, params: list = None,
             if (isinstance(_p, (tuple, list)) and len(_p) > 1 and _p[1] is None
                     and not _as_str(_p[0]).startswith('*')):
                 gen._cur_untyped_params.add(_as_str(_p[0]))
+            if (isinstance(_p, (tuple, list)) and len(_p) > 1
+                    and _p[1] is not None
+                    and not _as_str(_p[0]).startswith('*')):
+                # An annotated parameter's declared kind, for the mixed-kind
+                # scans. A resolution this compile cannot perform is silence,
+                # exactly as an unannotated parameter is.
+                try:
+                    gen._cur_param_ann[_as_str(_p[0])] = _as_str(
+                        _resolve_type(gen, _p[1]))
+                except Exception:
+                    pass
     # The lambda beta-reduction's cache is keyed by body IDENTITY (see
     # mojo/middle/lambdareduce.reducible_lambdas), so it deliberately
     # SURVIVES `_reset_func` — a lifted closure resets too, and a one-slot
@@ -950,6 +972,9 @@ class FuncState:
         self.fs_cur_func_body: list = []
         self.fs_cur_func_params: set = set()
         self.fs_cur_untyped_params: set = set()
+        self.fs_cur_param_ann: dict = {}
+        self.fs_cur_boxed_params: object = None
+        self.fs_param_conflict_cache: dict = {}
         self.fs_opaque_container_locals: set = set()
         self.fsbb_counter: int = 0
         self.fstemp_counter: int = 0
@@ -1065,6 +1090,9 @@ def save_func_state(gen) -> FuncState:
     st.fs_cur_func_body = gen._cur_func_body
     st.fs_cur_func_params = gen._cur_func_params
     st.fs_cur_untyped_params = gen._cur_untyped_params
+    st.fs_cur_param_ann = gen._cur_param_ann
+    st.fs_cur_boxed_params = gen._cur_boxed_params
+    st.fs_param_conflict_cache = gen._param_conflict_cache
     st.fs_opaque_container_locals = gen._opaque_container_locals
     st.fsbb_counter = gen.bb_counter
     st.fstemp_counter = gen.temp_counter
@@ -1191,6 +1219,9 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._cur_func_body = st.fs_cur_func_body
     gen._cur_func_params = st.fs_cur_func_params
     gen._cur_untyped_params = st.fs_cur_untyped_params
+    gen._cur_param_ann = st.fs_cur_param_ann
+    gen._cur_boxed_params = st.fs_cur_boxed_params
+    gen._param_conflict_cache = st.fs_param_conflict_cache
     gen._opaque_container_locals = st.fs_opaque_container_locals
     gen.bb_counter = st.fsbb_counter
     gen.temp_counter = st.fstemp_counter
@@ -4371,6 +4402,17 @@ def mixed_container_locals(gen) -> set:
             for h in (getattr(s, 'handlers', None) or []):
                 walk(getattr(h, 'body', None))
     walk(gen._cur_func_body)
+    # The annotation is the parameter's FIRST binding. A body that stores a
+    # different container kind is the same "no single C type" case as a local
+    # rebound between two container kinds: `def f(x: list): x = {"a": 1}` was
+    # declared `int64_t` by the annotation/body conflict rule but was not in
+    # this set, so the return slot kept reading the dict pointer as one kind
+    # and printed its address. A LOCAL annotation is deliberately not added:
+    # it is a deliberate single type, and `_declare_var` honours it.
+    for _pn in (getattr(gen, '_cur_param_ann', None) or {}):
+        _pct = gen._cur_param_ann.get(_pn)
+        if _as_str(_pct) in gimple_ctypes._CONTAINER_KIND_TYPES:
+            kinds.setdefault(_as_str(_pn), set()).add(_as_str(_pct))
     mixed = set()
     for _n, _ks in kinds.items():
         if len(_ks) > 1:
@@ -4577,8 +4619,49 @@ def mixed_value_locals(gen) -> set:
     for _n, _ks in kinds.items():
         if _ks == {'container', 'scalar'} and _n not in annotated:
             mixed.add(_n)
+    # A PARAMETER whose annotation the body contradicts is the same
+    # box-holding word, with the annotation as its first binding. Its reads
+    # must dispatch by kind exactly like a local's (print/str go through
+    # `_repr_boxed_container`, arithmetic through the box helpers), so it
+    # joins this set even though no body ASSIGNMENT alone would have made it
+    # mixed. The annotation itself is not a `VarDecl` with `type_ann`, so the
+    # `annotated` exclusion above does not apply to it.
+    mixed |= boxed_param_names(gen)
     gen._mixed_value_locals = mixed
     return mixed
+
+
+def boxed_param_names(gen) -> set:
+    """The parameters of the function being lowered whose ANNOTATION the body
+    contradicts, so the slot is the tagged `int64_t` word rather than the
+    annotation's C type.
+
+    `_param_ctype` already made that declaration decision (`funcs_shared`);
+    this is the body-side half: a box name must have every store boxed by
+    kind and every read dispatched by kind, exactly like a local the body
+    itself rebinds (`mixed_value_locals`). Computed from the SAME
+    `param_annotation_conflicts` rule the resolver uses, so the declaration
+    and the stores cannot disagree about which parameters are boxed.
+
+    Only the two categories that need a box are included. A
+    container-vs-container disagreement is already a bare word in both arms
+    (`mixed_container_locals`), and a same-family numeric rebinding is
+    deliberately not a conflict, so neither needs the runtime tag."""
+    cached = getattr(gen, '_cur_boxed_params', None)
+    if cached is not None:
+        return cached
+    out: set = set()
+    for _pn in (getattr(gen, '_cur_param_ann', None) or {}):
+        _pct = gen._cur_param_ann.get(_pn)
+        try:
+            _conf = param_annotation_conflicts(gen, _as_str(_pn), _pct,
+                                              gen._cur_func_body)
+        except Exception:
+            _conf = None
+        if _conf == 'value' or _conf == 'scalar':
+            out.add(_as_str(_pn))
+    gen._cur_boxed_params = out
+    return out
 
 
 def mixed_box_name(gen, name) -> bool:
@@ -4588,40 +4671,47 @@ def mixed_box_name(gen, name) -> bool:
     answer: a name bound to more than one scalar kind (`mixed_scalar_locals`),
     a name bound to a container beside a scalar (`mixed_value_locals`), and a
     name bound to a tagged generator word beside plain values
-    (`tagged_mixed_name`). The store arms, the declaration and the `var`
-    initializer all ask this, never the predicates separately."""
+    (`tagged_mixed_name`). A PARAMETER whose annotation the body contradicts
+    (`boxed_param_names`) is a fourth: its slot is the box for the same
+    reason, and the body's stores/reads must use the same representation.
+    The store arms, the declaration and the `var` initializer all ask this,
+    never the predicates separately."""
     _n = _as_str(name)
     return (_n in mixed_scalar_locals(gen) or _n in mixed_value_locals(gen)
+            or _n in boxed_param_names(gen)
             or tagged_mixed_name(gen, _n))
 
 
-def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
-    """The store of `v` (C type `vtype`, from `value_node`) into the
-    box-holding local `name`, as `(v, vtype)` ready to store into the
-    `int64_t` box. Returns the input unchanged for a value that needs no box.
+def box_word_value(gen, value_node, vtype: str, v: str) -> tuple:
+    """The tagged-word spelling of one value, as `(v, vtype)` ready to store
+    into an `int64_t` box. Shared by the store into a box-holding NAME
+    (`box_mixed_store`) and the argument bound for a box-holding PARAMETER
+    (`_box_param_call_args`), so a callee cannot receive a differently-boxed
+    value than a local of the same kind would hold.
 
     A float or str is boxed by its kind (`mojo_box_from_double` /
     `mojo_box_from_str`), a Python bool by `mojo_box_from_bool` so it renders
-    True/False. A plain int is boxed with `mojo_box_int`, because the local's
-    reads are by kind and a bare word there would be read as a box. A value
+    True/False, and a literal `None` by `mojo_box_none` so it stays distinct
+    from the integer 0 (the two share a bare word otherwise). A plain int is
+    boxed with `mojo_box_int`, because the consumers read by kind and a bare
+    word would be read as an unboxed integer. A container is its own word: it
+    has no box kind, and the runtime recognises it by its registry membership
+    (`mojo_cstr_or_int_str`, `mojo_len_word`, `mojo_truthy_word`). A value
     that already IS a box (a tagged word, or another box-holding name copied
-    over) is never re-boxed: `mojo_box_int` on a float box would truncate it.
-    Only a box-holding local of C type `int64_t` is boxed; anything else
-    keeps its own type and the caller's refusal decides it."""
-    if gen.var_types.get(_as_str(name), 'int64_t') != 'int64_t':
-        return v, vtype
+    over) is never re-boxed: `mojo_box_int` on a float box would truncate
+    it."""
+    if isinstance(value_node, gimple_ctypes.NoneLiteral) \
+            or (isinstance(value_node, gimple_ctypes.IdentExpr)
+                and _as_str(value_node.name) == 'None'):
+        return gen._call_expr('int64_t', 'mojo_box_none', []), 'int64_t'
     if vtype in gimple_ctypes._CONTAINER_KIND_TYPES:
-        # A container is its own word, not a boxed value: the box has no kind
-        # byte for it, and the runtime recognises a container by its registry
-        # membership (`mojo_cstr_or_int_str`, `mojo_len_word`,
-        # `mojo_truthy_word`), which is how a container's identity is read
-        # everywhere else. Only a container stored into a `mixed_value_locals`
-        # name reaches here.
         return gen._to_int64(vtype, v), 'int64_t'
     if vtype == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)]), 'int64_t'
     if vtype == 'char *':
         return gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', v)]), 'int64_t'
+    if vtype == 'MojoBytes *':
+        return gen._call_expr('int64_t', 'mojo_box_from_bytes', [('void *', v)]), 'int64_t'
     if vtype in ('int', 'int64_t', '_Bool'):
         if v in getattr(gen, '_boxed_vals', ()) or v in getattr(gen, '_tagged_word_vals', ()):
             return v, 'int64_t'
@@ -4630,6 +4720,20 @@ def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
             return gen._call_expr('int64_t', 'mojo_box_from_bool', [('int64_t', _w)]), 'int64_t'
         return gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', _w)]), 'int64_t'
     return v, vtype
+
+
+def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
+    """The store of `v` (C type `vtype`, from `value_node`) into the
+    box-holding local `name`, as `(v, vtype)` ready to store into the
+    `int64_t` box. Returns the input unchanged for a value that needs no box.
+
+    Only a box-holding local of C type `int64_t` is boxed; anything else
+    keeps its own type and the caller's refusal decides it. The per-kind
+    dispatch itself is `box_word_value` — the same one a call argument for a
+    box-holding parameter goes through."""
+    if gen.var_types.get(_as_str(name), 'int64_t') != 'int64_t':
+        return v, vtype
+    return box_word_value(gen, value_node, vtype, v)
 
 
 def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: bool = False):
@@ -8468,6 +8572,69 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
             out.append(('int64_t', gen._rt_call('int64_t', 'mojo_box_from_double', [_as_str(_av)])))
         else:
             out.append((_at, _av))
+    return out
+
+
+def _box_param_call_args(gen, callee: str, arg_pairs: list,
+                         arg_nodes: list = None,
+                         kwargs: list = None) -> list:
+    """Box each argument bound for a PARAMETER whose annotation its body
+    contradicts (`infra_infer.param_boxed_names`), so the `int64_t` slot
+    receives a tagged word that still says what kind the value is.
+
+    Positional, like `_box_float_call_args`: after the call's own padding,
+    slot `i` is the callee parameter `_func_param_names[callee][i]`. The
+    per-kind boxing is `box_word_value`, the same function a store into a
+    box-holding local uses, so the callee cannot see one spelling from a
+    local and another from a call. A callee with no boxed parameter returns
+    the pairs unchanged, and a pair with no aligned AST node (a synthesized
+    default or a spread expansion) is left alone rather than boxed blind."""
+    _names = getattr(gen, '_param_box_names', {}).get(_as_str(callee))
+    if not _names:
+        return arg_pairs
+    _pnames = getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or []
+    # Positional alignment is the precondition for choosing a parameter by
+    # index. A spread has no one node per slot, so it is left alone rather
+    # than boxing the wrong argument; a keyword argument is placed at its
+    # parameter's slot by NAME below, which is the same table the call's own
+    # padding used.
+    if arg_nodes is None or len(arg_nodes) > len(arg_pairs):
+        return arg_pairs
+    for _a in arg_nodes:
+        if isinstance(_a, gimple_ctypes.UnaryOp) \
+                and _as_str(_a.op) in ('*', '**'):
+            return arg_pairs
+    _by_slot: dict = {}
+    for _i in range(len(arg_nodes)):
+        _by_slot[_i] = arg_nodes[_i]
+    for _kw in (kwargs or []):
+        _kn = _as_str(_kw[0])
+        _kv = _kw[1]
+        if isinstance(_kv, gimple_ctypes.UnaryOp) \
+                and _as_str(_kv.op) == '**':
+            return arg_pairs
+        _ki = -1
+        for _j in range(len(_pnames)):
+            if _as_str(_pnames[_j]) == _kn:
+                _ki = _j
+                break
+        if _ki < 0:
+            return arg_pairs
+        _by_slot[_ki] = _kv
+    out = []
+    for _i, _ap in enumerate(arg_pairs):
+        _at = _as_str(_ap[0])
+        _av = _as_str(_ap[1])
+        _pn = _as_str(_pnames[_i]) if _i < len(_pnames) else None
+        if _pn is None or _pn not in _names:
+            out.append((_at, _av))
+            continue
+        _node = _by_slot.get(_i)
+        if _node is None:
+            out.append((_at, _av))
+            continue
+        _bv, _bt = box_word_value(gen, _node, _at, _av)
+        out.append((_bt, _bv))
     return out
 
 

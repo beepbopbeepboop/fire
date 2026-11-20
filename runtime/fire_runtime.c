@@ -9340,6 +9340,22 @@ int mojo_set_contains_str(MojoSet *s, char *v)
  */
 void mojo_set_add_word(MojoSet *s, int64_t w)
 {
+    /* A tagged word read back from a kind-carrying list (`mojo_list_get_boxed`
+     * hands a str slot back as a kind-'p' BOX, not the bare pointer) must join
+     * the set under the kind it carries. `mojo_boxed_is_str` deliberately
+     * rejects boxes, so without this arm a `frozenset([selected])` over a
+     * mixed-kind list added the box's ADDRESS as an integer slot and printed
+     * `{4383...}` where CPython prints `{''}`. */
+    if (mojo_is_str_box(w)) {
+        mojo_set_add_str(s, (char *)(intptr_t)mojo_str_box_word(w));
+        return;
+    }
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        if (bx->kind == 'n') { mojo_set_add_none(s); return; }
+        if (bx->kind == 's') { mojo_set_add_bytes(s, (MojoBytes *)(intptr_t)bx->bits); return; }
+        w = bx->bits;
+    }
     if (mojo_boxed_is_str(w)) mojo_set_add_str(s, (char *)(intptr_t)w);
     else mojo_set_add_int(s, w);
 }
@@ -9347,6 +9363,13 @@ void mojo_set_add_word(MojoSet *s, int64_t w)
 int mojo_set_contains_word(MojoSet *s, int64_t w)
 {
     if (!s) return 0;
+    if (mojo_is_str_box(w))
+        return mojo_set_contains_str(s, (char *)(intptr_t)mojo_str_box_word(w));
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        if (bx->kind == 'n') return mojo_set_contains_none(s);
+        w = bx->bits;
+    }
     if (mojo_set_contains_int(s, w)) return 1;
     return mojo_boxed_is_str(w) && mojo_set_contains_str(s, (char *)(intptr_t)w);
 }
@@ -9354,6 +9377,10 @@ int mojo_set_contains_word(MojoSet *s, int64_t w)
 void mojo_set_discard_word(MojoSet *s, int64_t w)
 {
     if (!s) return;
+    if (mojo_is_str_box(w)) {
+        mojo_set_discard_str(s, (char *)(intptr_t)mojo_str_box_word(w));
+        return;
+    }
     mojo_set_discard_int(s, w);
     if (mojo_boxed_is_str(w)) mojo_set_discard_str(s, (char *)(intptr_t)w);
 }
@@ -9648,6 +9675,34 @@ int mojo_in_dispatch_str(int64_t container, char *needle)
 int mojo_in_dispatch_int(int64_t container, int64_t needle)
 {
     if (container == 0) return 0;
+    /* A kind-'p' STRING box: `mojo_boxed_is_str` deliberately rejects every
+     * box, so a boxed str needle fell through to the integer predicates and
+     * compared the box's own ADDRESS. This is the tagged-word spelling of a
+     * string, and the container-side answer is the same one a bare string
+     * needle gets. */
+    if (mojo_is_str_box(needle))
+        return mojo_in_dispatch_str(container,
+                                    (char *)(intptr_t)mojo_str_box_word(needle));
+    /* A non-string box (None / bool / int / double / bytes / container). A
+     * None box must test the container's None slot, not the word 0 it shares
+     * with the integer 0: `None in {0}` is False and `None in (None,)` is
+     * True. Every other box's `bits` is the value itself for the integer
+     * domains (a bool box holds 0/1), which is exactly what the predicates
+     * below compare. A double box's bits are IEEE-754, not an integer, so it
+     * keeps the old (integer-view) answer rather than pretending. */
+    if (mojo_is_boxed(needle)) {
+        MojoBox *nbx = (MojoBox *)(intptr_t)needle;
+        if (nbx->kind == 'n') {
+            if (mojo_is_registered_dict(container))
+                return mojo_dict_contains_none((MojoDict *)(intptr_t)container);
+            if (mojo_is_registered_list(container))
+                return mojo_list_contains_none((MojoList *)(intptr_t)container);
+            if (mojo_is_registered_set(container))
+                return mojo_set_contains_none((MojoSet *)(intptr_t)container);
+            return 0;
+        }
+        needle = nbx->bits;
+    }
     if (mojo_boxed_is_str(needle))
         return mojo_in_dispatch_str(container, (char *)(intptr_t)needle);
     if (mojo_is_registered_dict(container))

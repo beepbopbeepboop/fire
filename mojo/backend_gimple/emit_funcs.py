@@ -4014,11 +4014,13 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         bare = pname.lstrip('*')
         if pname.startswith('*'):
             ctype = 'MojoList *'
-        elif ptype is None:
-            ctype = (gen._inferred_param_types.get(node.name, {}).get(pname)
-                     or gen._resolve_type(ptype))
         else:
-            ctype = gen._resolve_type(ptype)
+            # The functioning signature's own resolver, not a second direct
+            # `_resolve_type`: an annotated parameter whose body contradicts
+            # the annotation is the tagged `int64_t` word (`_param_ctype`),
+            # and return inference must see that same type or the body's
+            # `return selected` is typed by the annotation the body disproves.
+            ctype = gen._param_ctype(pname, ptype, node)
         gen.var_types[bare] = ctype
         # Register in _actual_types so _get_actual_type resolves the real
         # type for for-loop iterables and other dispatch paths.
@@ -5610,8 +5612,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen.var_types[bare] = 'MojoList *'
             gen._actual_types[bare] = 'MojoList *'
         else:
-            ctype = gen._resolve_type(ptype)
             if ptype is None:
+                ctype = gen._resolve_type(ptype)
                 # The cross-call refinement (Pass 1.3e: every call site passes a
                 # string / float) is what the definition's signature declares, so
                 # the return-type inference below must read the parameter as it.
@@ -5619,6 +5621,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                     f"{struct_name}_{node.name}", {}).get(pname)
                 if _refined in ('char *', 'double'):
                     ctype = _refined
+            else:
+                ctype = gen._param_ctype(pname, ptype, node)
             gen.var_types[bare] = ctype
             if ctype != 'int64_t':
                 gen._actual_types[bare] = ctype
