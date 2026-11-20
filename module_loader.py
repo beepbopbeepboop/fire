@@ -7,6 +7,7 @@ import os
 import re
 import ctypes
 from pathlib import Path
+from mojo.middle.global_ctypes import dispatch_table_global_ctype
 
 # C keywords / gcc-reserved identifiers that cannot be used as parameter
 # names in a generated extern (mirrors gimple_codegen._C_KEYWORDS +
@@ -1169,8 +1170,14 @@ class ModuleLoader:
                     _sgn = _ml_set_global_name(_ls)
                     if _sgn and _sgn not in exports:
                         _local_set_globals.add(_sgn)
+                        # The owner declares this global from the same dispatch
+                        # table (mojo/middle/global_ctypes.py), so the importer's
+                        # extern must agree or gcc rejects the two declarations.
+                        _sgn_ctype = dispatch_table_global_ctype(_sgn)
+                        if _sgn_ctype is None:
+                            _sgn_ctype = 'int64_t'
                         exports[_sgn] = {
-                            'kind': 'global_var', 'c_return_type': 'int64_t',
+                            'kind': 'global_var', 'c_return_type': _sgn_ctype,
                             'home_module_path': path}
                         continue
                     if not _scan_container_literals:

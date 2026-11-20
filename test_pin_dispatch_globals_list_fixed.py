@@ -45,11 +45,13 @@ assert gimple_ctypes.dispatch_table_global_ctype('NOT_A_TABLE_NAME') is None
 assert gimple_ctypes.dispatch_table_global_ctype('_STMT_DISPATCH') is not None
 
 # The mapping itself must be a dict, not a tuple, so it can carry types.
-assert isinstance(gimple_ctypes._DISPATCH_TABLE_GLOBAL_CTYPES, dict)
+import mojo.middle.global_ctypes as _global_ctypes  # the table's home (a leaf module)
+assert isinstance(_global_ctypes._DISPATCH_TABLE_GLOBAL_CTYPES, dict)
 
-# Total coverage: the table must contain exactly all 24 names documented.
-expected = 24
-actual = len(gimple_ctypes._DISPATCH_TABLE_GLOBAL_CTYPES)
+# Total coverage: the table must contain exactly all 27 names documented (24, plus the
+# three frozenset globals whose set type the importer and owner must agree on).
+expected = 27
+actual = len(_global_ctypes._DISPATCH_TABLE_GLOBAL_CTYPES)
 assert actual == expected, f"table has {actual} entries, expected {expected}"
 
 print("PINNING PASS: dispatch_table_global_ctype correct for all table globals")

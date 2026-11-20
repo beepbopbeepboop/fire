@@ -36,6 +36,7 @@ import os
 import re
 
 import fire_compiler as N
+from fire_compiler import _COMPTIME_TYPE_FUNCS
 
 # Fields whose IdentExpr (directly, or inside a tuple/list target) is a
 # declaration rather than a read.
@@ -93,7 +94,7 @@ _KEYWORDS = frozenset({
 _COMPILE_TIME_INTRINSICS = frozenset({
     'constrained', '__mlir_op', '__mlir_attr', '__mlir_type', 'create_future',
     'Event', 'Future',
-}) | N._COMPTIME_TYPE_FUNCS
+}) | _COMPTIME_TYPE_FUNCS
 
 _RUNTIME_NAMES = frozenset({
     'self', 'Self', '__file__', '__name__', '__init__', '__class__',
