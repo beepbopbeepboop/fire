@@ -2087,15 +2087,12 @@ test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
 # registration is the thing that was wrong.
 test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True, mem='tiny',
      deps=['preflight'], timeout=1500,
-     # The cases shell out to `fire.py build`, so the entry point and the
-     # link-mode files it reaches are part of this job's subject, not just
-     # GIMPLE_SOURCES: the stdlib-dylib fix that made this job affordable is a
-     # change in driver.py/build_stdlib_dylib.py, and without them here a
-     # cached PASS recorded before that change would be replayed and the fix
-     # would never run.
+     # The cases build through `fire.build_executable` in a `python3 -c`
+     # subprocess, so `fire.py` itself and the content-addressed codegen cache
+     # it uses are part of this job's subject: a change to either must not be
+     # hidden by a cached PASS recorded before it.
      extra=GIMPLE_SOURCES + ['test_silent_noop_iter.py', 'build_config.py',
-                             'fire.py', 'driver.py', 'cas.py',
-                             'build_stdlib_dylib.py',
+                             'fire.py', 'cas.py',
                              RUNTIME_SRC, RUNTIME_HDR],
      desc='the silent no-op class: no loop may iterate zero times, read a '
           'container as another kind, or drop reversed/findall order')

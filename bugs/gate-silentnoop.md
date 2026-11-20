@@ -7,7 +7,8 @@ It is red on `master`: reproduce it there (`python3 tools/suite.py silentnoop`),
 
 ## Done when
 
+`test_silentnoop_builds_without_the_shared_stdlib_dylib` and
 `test_client_stdlib_dylib_is_reused_until_an_input_changes` in
-`test_runtime_dylib.py` passes, and a case's `fire.py build` in a fresh tree
-(a `git archive` with no `build/`) no longer pays for the whole stdlib dylib
-inside its own 300 s budget.
+`test_runtime_dylib.py` pass: a case builds without link mode (so a fresh tree
+does not pay for the stdout dylib inside a 300 s budget), and a warm client
+build is answered by the currency stamp instead of re-deriving 664 modules.
