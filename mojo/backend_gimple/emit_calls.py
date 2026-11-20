@@ -4885,12 +4885,29 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _gen = (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
             and node.func.obj.name in gen._imported_generics) or \
            (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generics)
-    # A bracketed call to a SIBLING generic of the instantiation this unit is
-    # compiling (monomorphize.instantiate's `generic_paths`): explicit only, see
-    # emit_resolve._elaborate_generic_call.
+    # A call to a SIBLING generic of the instantiation this unit is compiling
+    # (monomorphize.instantiate's `generic_paths`), bracketed or bare: the
+    # sibling map is only ever non-empty inside an isolated instantiation TU,
+    # and a call that cannot elaborate declines and takes the ordinary path
+    # (see emit_resolve._elaborate_generic_call). A BARE call that names the
+    # instantiation's own function (`sin(...)` inside `sin_5_...`'s body) is a
+    # self-call, not a sibling call: it keeps the ordinary stub the same way
+    # every other bare self-call in this gate does (a live one is
+    # unmaterializable — the bracketed form carries the self-recursion
+    # diagnostic, `self_recursive_uninstantiable`; a comptime-dead one must
+    # not fail the build — measured on std.math's `sin`, whose narrowing arm
+    # `comptime if size_of[dtype]() < size_of[.float32](): return sin(...)`
+    # is dead for every dtype >= .float32 and elaborating it raised the
+    # self-recursion refusal on an ordinary `from std.math import sin` module).
+    _sib = getattr(gen, '_sibling_generic_paths', None) or {}
+    _cfn = getattr(gen, 'current_func_name', None)
+    _bare = node.func.name if isinstance(node.func, gimple_ctypes.IdentExpr) else None
+    _bare_self = _bare is not None and bool(_cfn) and (
+        _bare == _cfn or _cfn.startswith(_bare + '_'))
     _gen = _gen or (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                     and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                    and node.func.obj.name in (getattr(gen, '_sibling_generic_paths', None) or {}))
+                    and node.func.obj.name in _sib) \
+        or (_bare is not None and _bare in _sib and not _bare_self)
     if _gen:
         res = gen._elaborate_generic_call(node)
         if res is not None:

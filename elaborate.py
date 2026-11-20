@@ -30,6 +30,7 @@ from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to, eval_const_int)
 from mojo.middle.comptime_fn import resolve_struct_aliases
 from gimple_codegen import _mojo_type
+from mojo.middle.exprtypes import _is_concrete_type_arg
 from mojo.middle.types import _body_builds_struct_tuple
 
 
@@ -280,6 +281,57 @@ def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = Non
     return candidates[0]
 
 
+def _arity_overload_clash(module_src: str, fn_name: str, tmpl: str) -> bool:
+    """Whether a DIFFERENT same-named generic in the same module can mangle to
+    the SAME symbol as `tmpl`'s instantiations.
+
+    `mangle` is a function of (name, {type-param: value}) only — the VALUE
+    ARITY of the call is not in the name. Two same-named overloads with the
+    SAME type-parameter names and DIFFERENT value-parameter arities therefore
+    produce the identical symbol for every shared type-arg set: `std/builtin/
+    sort`'s `sort(span)` and `sort(span, cmp_fn)` are both `sort[T, origin,
+    stable]`, so for `T=Int, origin=MutOrigin, stable=False` they are ONE
+    symbol — the moment the 1-arg instance's own body call elaborated (its
+    `sort[stable=False](span, _cmp_fn)` selects the 2-arg overload), the
+    translation unit declared the 2-arg instance's extern beside its own
+    1-arg definition and gcc failed with "too many arguments to function"
+    (measured 2026-11-20 on the sort single-unit chain). When such a sibling
+    exists, the caller folds `ArgC` into the type args so each arity mangles
+    to its own symbol — the same fold the variadic pack case already makes,
+    keyed on arity (never on the name: the plan is to disambiguate overloads
+    by arity, not to special-case `sort`)."""
+    try:
+        candidates = extract_fn_sources(module_src, fn_name)
+    except Exception:
+        return False
+    if len(candidates) < 2:
+        return False
+
+    def _shape(c):
+        try:
+            for s in Parser(py_tokenize(textwrap.dedent(c))).parse_module():
+                if isinstance(s, FunctionDef) and s.name == fn_name:
+                    n = len([1 for pn, _ in s.params
+                             if pn != 'self' and not pn.startswith('*')])
+                    return n, set(type_param_names(c))
+        except Exception:
+            return None
+    own = _shape(tmpl)
+    if own is None:
+        return False
+    own_arity, own_pnames = own
+    for c in candidates:
+        if c.strip() == tmpl.strip():
+            continue
+        other = _shape(c)
+        if other is None:
+            continue
+        other_arity, other_pnames = other
+        if other_arity != own_arity and other_pnames == own_pnames:
+            return True
+    return False
+
+
 def extract_overloads(module_src: str, fn_name: str):
     """All non-generic overloads of fn_name: list of (src, [param_mojo_types],
     ret_mojo_type), one per definition, by indentation."""
@@ -342,6 +394,24 @@ def type_param_names(template_src: str) -> list:
             if p.strip() and not _is_param_marker(p.strip())]
 
 
+def _partition_top_level_eq(param: str):
+    """`(head, '=', default)` split at the first `=` OUTSIDE any bracket, or
+    `(param, '', '')` when there is none. A bracket parameter's annotation can
+    itself carry a keyword: `origin: Origin[mut=mut] = MutOrigin` (std's
+    `Span`) splits at the `=` inside `Origin[...]` under a plain `partition`,
+    and the default then reads `mut]`. Every reader of a bracket-parameter head
+    splits through here so they cannot disagree about where the default starts."""
+    depth = 0
+    for i, ch in enumerate(param):
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif ch == '=' and depth == 0:
+            return param[:i], '=', param[i + 1:]
+    return param, '', ''
+
+
 def type_param_defaults(template_src: str):
     """Map each bracket-parameter name that has a DEFAULT to that default's
     source text: `def size_of[type: AnyType, target: CompilationTarget =
@@ -368,9 +438,9 @@ def type_param_defaults(template_src: str):
     out = {}
     for p in split_top_level_commas(m.params):
         p = p.strip()
-        if not p or _is_param_marker(p) or '=' not in p:
+        head, eq, dflt = _partition_top_level_eq(p)
+        if not p or _is_param_marker(p) or not eq:
             continue
-        head, _, dflt = p.partition('=')
         out[head.split(':')[0].strip()] = dflt.strip()
     return out
 
@@ -423,7 +493,7 @@ def type_param_kinds(template_src: str):
         p = p.strip()
         if not p or _is_param_marker(p):
             continue
-        head = p.split('=', 1)[0].strip()
+        head = _partition_top_level_eq(p)[0].strip()
         _name, sep, annot = head.partition(':')
         # The annotation's own head: `List[T]` -> `List`, `Origin[mut=x]` ->
         # `Origin`, `Movable where …` -> `Movable`.
@@ -558,11 +628,70 @@ def unbound_param_is_inferable(template_src: str, name: str) -> bool:
                      _argument_list_text(template_src)) is not None
 
 
+#: The origin aliases whose `mut` is fixed, and that value. `Origin[mut=mut]`
+#: is the only annotation a deduced `mut` is read from in the stdlib; a
+#: `MutOrigin`/`ImmOrigin` argument pins it, anything else leaves it unknown.
+_ORIGIN_ALIAS_MUT = {'MutOrigin': 'True', 'ImmOrigin': 'False'}
+_ORIGIN_MUT_ANNOT = re.compile(r'^\s*Origin\s*\[\s*mut\s*=\s*(\w+)\s*\]')
+
+
+def _deduce_prefix_from_rest(template_src: str, params, supplied, k: int):
+    """The full ordered args for a struct bracket that names ONLY the
+    parameters after its `//` separator, or None when a deduced one cannot be
+    read.
+
+    Mojo's `//` makes the leading `k` parameters deduced: a caller writes
+    `Span[Int, MutOrigin]`, never the `mut` that the origin implies. Each
+    deduced parameter is bound from an explicit argument whose parameter is
+    annotated `Origin[mut=<that deduced name>]`, through the origin alias's
+    fixed `mut` (`_ORIGIN_ALIAS_MUT`). A deduced parameter no argument pins
+    is refused, exactly as `complete_explicit_type_args` refuses it for
+    functions. Explicit arguments are never overridden by a deduction, and
+    the explicit list must fit the parameters after the `//`."""
+    rest = params[k:]
+    if len(supplied) > len(rest):
+        return None
+    annots = {}
+    for p in split_top_level_commas(mm.head_match(template_src).params):
+        p = p.strip()
+        if not p or _is_param_marker(p):
+            continue
+        head = _partition_top_level_eq(p)[0]
+        name, _colon, annot = head.partition(':')
+        annots[name.strip()] = annot
+    deduced = {}
+    for i, arg in enumerate(supplied):
+        m = _ORIGIN_MUT_ANNOT.match(annots.get(rest[i], ''))
+        mut_name = m.group(1) if m else None
+        if mut_name in params[:k] and arg.strip() in _ORIGIN_ALIAS_MUT:
+            value = _ORIGIN_ALIAS_MUT[arg.strip()]
+            if deduced.get(mut_name, value) != value:
+                return None  # two origins that disagree about one `mut`
+            deduced[mut_name] = value
+    defaults = type_param_defaults(template_src)
+    for p in params[:k]:
+        if p not in deduced:
+            # Nothing pins it: a provable default (`mut: Bool = True`) is the
+            # only other source, and absent that the bracket cannot bind.
+            d = _default_type_arg(defaults.get(p, ''))
+            if d is None:
+                return None
+            deduced[p] = d
+    return [deduced[p] for p in params[:k]] + list(supplied)
+
+
 def bind_type_args(template_src: str, type_args):
     """{param: concrete} for a template's bracket parameters, filling any the
     caller did not supply from their DEFAULT (`type_param_defaults`). None when
     a parameter is missing and has no provable default, or when the template has
     no bracket parameters at all.
+
+    A `//` separator (`struct Span[mut: Bool, //, T, origin: Origin[mut=mut],
+    *, address_space: ...]`) makes the leading parameters DEDUCED, so a bracket
+    that is shorter than the full parameter list names only the parameters after
+    the `//`, and the deduced prefix is read from them (`_deduce_prefix_from_rest`).
+    A full-length list is taken as written, which is what the instance's own
+    mangled mentions spell.
 
     Supplied arguments are taken POSITIONALLY — the same `zip` the caller
     already used — and only the trailing ones can come from a default, because
@@ -582,6 +711,11 @@ def bind_type_args(template_src: str, type_args):
     if not any(p.startswith('*') for p in params):
         if len(supplied) > len(params):
             supplied = supplied[:len(params)]
+    k = deduced_param_count(template_src)
+    if k and len(supplied) < len(params) and not any(p.startswith('*') for p in params):
+        supplied = _deduce_prefix_from_rest(template_src, params, supplied, k)
+        if supplied is None:
+            return None
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
     if _first_unbound_type_param(params, supplied, defaults) is not None:
         return None
@@ -638,10 +772,10 @@ def parse_bounds(template_src: str):
             # without this the bound read as the whole
             # 'CompilationTarget = CompilationTarget.current()' and every
             # conformance check silently degraded to "unknown trait, accept".
-            bound = bound.partition('=')[0]
+            bound = _partition_top_level_eq(bound)[0]
             bounds[name.strip()] = bound.strip() or None
         else:
-            bounds[p.partition('=')[0].strip()] = None
+            bounds[_partition_top_level_eq(p)[0].strip()] = None
     return bounds
 
 
@@ -3056,6 +3190,8 @@ def inferred_ctype_is_specific(ctype) -> bool:
 
 _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
+_SPAN_ANN_RE = re.compile(r'^Span\[\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*\]$')
+_LIST_MOJO_RE = re.compile(r'List\[(.+)\]')
 
 
 #: The dtype a literal of a proven Mojo scalar type binds. `Int` is the 64-bit
@@ -3120,6 +3256,56 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
         # `Foo *` cannot say: a `Foo *` is equally a `Pointer[Foo]`.
         bound = arg_mojo if arg_mojo else c_to_mojo(arg_ctype)
         return {} if bound is None else {ann: bound}
+    # `Span[T, o]` <- a List. A `List[X]` is a `MojoList *` at runtime and its
+    # C type erases the element type `X`, so the element binds `T` ONLY from a
+    # Mojo type the caller proves (`arg_mojo == 'List[Int8]'`). Without that
+    # proof the parameter is declined, exactly as every other unprovable shape
+    # is. The origin binds to the erased origin (`ERASED_TYPE_ARG`), which is
+    # what the call's Span argument is. The stdlib's `sort[T, origin]`
+    # (`std/builtin/sort.mojo`) is the first template written this way.
+    # `Span[T, o]` <- a Span. A nested chain of Span-taking generics passes
+    # the SAME proven Span down the chain (`sort` calls `_sort` calls
+    # `_insertion_sort`, each with `span: Span[T, origin]`): the argument's
+    # C type is still the erased `Span *`, so the element/origin bind ONLY
+    # from a Mojo type the caller proves (`arg_mojo == 'Span[Int,
+    # MutOrigin]'` — read from the caller's own monomorphized parameter
+    # annotation). Both slots of the proven argument must be CONCRETE type
+    # arguments: a still-generic `Span[T, origin]` passing into another
+    # `Span[T, o]` is symbol-for-symbol and never converges, so it binds
+    # nothing, exactly as every other unprovable shape does. If the
+    # annotation's own origin slot is concrete, the proven argument must
+    # agree with it — a `Span[Int, MutOrigin]` is not a `Span[Int,
+    # ImmOrigin]`.
+    m = _SPAN_ANN_RE.match(ann)
+    if m and m.group(1) in pnames:
+        # A Span the caller carries in a BOXED slot (`List[Span[X, o]].pop()`
+        # lowers to an `int64_t` word) is still a Span: the proof is the
+        # caller's Mojo type, and the call site casts the word back to
+        # `Span *` (`emit_resolve._coerce_span_args`). Accepting only the
+        # `Span *` C type here declined exactly std.builtin.sort's
+        # `_quicksort`, whose `interval` is popped from a
+        # `List[Span[T, origin]]`.
+        if arg_ctype in ('Span *', 'int64_t'):
+            sp = _SPAN_ANN_RE.fullmatch((arg_mojo or '').strip())
+            if sp is None:
+                return {}
+            _x, _y = sp.group(1).strip(), sp.group(2).strip()
+            if not (_is_concrete_type_arg(_x) and _is_concrete_type_arg(_y)):
+                return {}
+            _ao = m.group(2).strip()
+            if _ao not in pnames and _ao != _y:
+                return {}
+            out = {m.group(1): _x}
+            if _ao in pnames:
+                out[_ao] = _y
+            return out
+        lst = _LIST_MOJO_RE.fullmatch((arg_mojo or '').strip())
+        if lst is None or arg_ctype != 'MojoList *':
+            return {}
+        out = {m.group(1): lst.group(1).strip()}
+        if m.group(2) in pnames:
+            out[m.group(2)] = ERASED_TYPE_ARG
+        return out
     # `Scalar[dtype]` and `SIMD[dtype, width]`. SIMD is erased to `int64_t`, so
     # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
     # nothing. Any other scalar C type (`double`, `float`, `int32_t`) cannot be
@@ -3813,7 +3999,15 @@ class Elaborator:
         # producing a real argument-count mismatch at the other call site.
         # Fold the call arity into the instantiation identity so each arity
         # gets its own mangled symbol/cache entry.
-        if arg_count is not None and any(p.startswith('*') for p in params):
+        #
+        # Same fold for arity OVERLOADS that share a name and the same
+        # type-parameter names (`_arity_overload_clash`): without it the two
+        # `sort` overloads above collide on one symbol for the same type
+        # args, and the caller's own translation unit fails to compile the
+        # moment the sibling call elaborates.
+        if arg_count is not None and (
+                any(p.startswith('*') for p in params)
+                or _arity_overload_clash(module_src, fn_name, tmpl)):
             targs['ArgC'] = arg_count
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
