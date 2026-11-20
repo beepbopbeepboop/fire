@@ -3520,6 +3520,14 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
         t = gen._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
         return 'char *', t
 
+    # textwrap.dedent(text): a pure string function with no compiled `textwrap` behind
+    # it (the module is not in the binary, so the call raised NotImplementedError at
+    # run time: c_common/tables.py runs it at import, in `ColumnSpec.REGEX`).
+    if module_name == 'textwrap' and method_name == 'dedent' and len(node.args) == 1:
+        arg_type, arg_val = gen.lower_expr(node.args[0])
+        t = gen._call_expr('char *', 'mojo_textwrap_dedent', [('char *', arg_val)])
+        return 'char *', t
+
     # os.getcwd() -> char* (runtime helper int_getcwd, a real getcwd(3)
     # call). This call shape had NO lowering case anywhere in this file
     # (or gimple_gen_exprs.py/gimple_gen_calls.py — confirmed via a full

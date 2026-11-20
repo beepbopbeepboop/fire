@@ -15407,6 +15407,7 @@ def main():
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_none_argument_is_none_in_the_callee,
+                  test_textwrap_dedent_matches_cpython,
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
@@ -15996,6 +15997,42 @@ c(0)
 c(5)
 print(d(None), d(""), d("0"))
 print(0 == None, 0 != None)
+""")
+
+
+def test_textwrap_dedent_matches_cpython():
+    """`textwrap.dedent` is a runtime helper (the module itself is not compiled into the
+    binary, so the call used to raise NotImplementedError; c_common/tables.py runs it at
+    import). The corpus is the rule's corners: tabs and spaces share no margin, a blank
+    or whitespace-only line normalises to empty, a ragged margin, no trailing newline,
+    a single line, empty and all-blank input, and a margin set by the SMALLEST line."""
+    test_gimple_matches_cpython("gimple_textwrap_dedent_matches_cpython", r"""
+import textwrap
+
+cases = [
+    "",
+    "   ",
+    "\n",
+    "\n\n   \n",
+    "hello",
+    "  hello",
+    "    a\n    b\n",
+    "    a\n      b\n    c",
+    "  a\n\n  b",
+    "  a\n   \n  b\n",
+    "\ta\n\tb\n",
+    "\ta\n  b\n",
+    "  a\n\tb\n",
+    "    a\n  b\n      c\n",
+    "\n    first\n      second\n    third\n  ",
+    "x\n  y\n",
+    "  \t a\n  \t b",
+    "  \t a\n  \tb",
+    "no margin\n  indented\n",
+    "   trailing space   \n   next   \n",
+]
+for c in cases:
+    print(repr(textwrap.dedent(c)))
 """)
 
 
