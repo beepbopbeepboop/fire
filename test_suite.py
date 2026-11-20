@@ -5394,7 +5394,7 @@ def test_every_test_file_is_registered():
     # Measured 2026-11-20: three such files (test_module_loader_stdlib.py,
     # test_docstring_mojo_blocks.py, test_tuple_enumerate_var_refinement.py)
     # were registered jobs that had never executed a single test -- see
-    # bugs/SUITE_module_loader_stdlib_job_is_noop.md. suite.py has no pytest
+    # the no-op registered-job class. suite.py has no pytest
     # driver, so `__main__` is the only way these jobs get teeth.
     noop = []
     for _f in sorted(on_disk):

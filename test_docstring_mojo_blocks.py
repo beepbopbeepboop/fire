@@ -85,7 +85,7 @@ if __name__ == '__main__':
     # Registered as a `cmd` job whose command is `python3 <this file>`, so with
     # no `__main__` the interpreter ran only the top level (imports + defs) and
     # exited 0 -- none of the `test_*` functions below ever ran. Same no-op
-    # class as bugs/SUITE_module_loader_stdlib_job_is_noop.md. Every function
+    # class as the no-op registered-job class. Every function
     # here is fixture-free, so they can be run directly.
     import traceback
 
