@@ -5245,8 +5245,6 @@ class GimpleGen:
         return gfn._home_signature_ctypes(self, module, fs)
     def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
         return gfn._note_struct_import_alias(self, module, alias, orig_name)
-    def _publish_imported_class(self, module: str, name: str) -> bool:
-        return gfn._publish_imported_class(self, module, name)
     def _note_struct_attr_alias(self, module: str, alias: str, member: str):
         return gfn._note_struct_attr_alias(self, module, alias, member)
     def _local_sibling_module_exports(self, module: str):
