@@ -1837,10 +1837,22 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
     stdlib/test set). Safe to call unconditionally (like
     `_emit_stdlib_import_externs`, right next to which this runs): a
     module with no `global_var`-kind import is an untouched no-op.
+
+    Every `from X import` in the module is consumed, a function-scoped one
+    included (`_walk_func_stmts(into_defs=True)`): a function that binds a
+    sibling's global itself, with no module-scope twin, reads it through the
+    same accessor, and an unregistered name falls to the no-signature
+    `extern int64_t NAME (...)` weak stub instead (cas.py's
+    `from module_loader import STDLIB_PATH` in `_stdlib_fingerprint`).
     """
-    for stmt in stmts:
-        if not isinstance(stmt, gimple_ctypes.FromImportStmt):
-            continue
+    _from_imports: list = []
+
+    def _collect(s):
+        if isinstance(s, gimple_ctypes.FromImportStmt):
+            _from_imports.append(s)
+
+    _walk_func_stmts(stmts, _collect, into_defs=True)
+    for stmt in _from_imports:
         # `_as_str`: a bare `.module` FIELD read used unguarded below in
         # string concatenation (`mod + '.py'`) and as a resolver
         # argument — the established self-hosted trap (working `==` but
@@ -4254,21 +4266,24 @@ def tagged_recv_name(gen, name) -> bool:
                for v in values)
 
 
-def _walk_func_stmts(stmts, visit):
+def _walk_func_stmts(stmts, visit, into_defs=False):
     """Call `visit` on every statement of a function body, nested bodies
-    included, never descending into a nested `def` (its locals are its own)."""
+    included. By default a nested `def` is skipped whole (its locals are its
+    own); `into_defs=True` also visits the `def` and walks its body, for a
+    whole-module scan (the accessor pass wants every `from X import` an
+    importer binds, in a `def` body or not)."""
     if not stmts:
         return
     for s in stmts:
-        if isinstance(s, gimple_ctypes.FunctionDef):
+        if isinstance(s, gimple_ctypes.FunctionDef) and not into_defs:
             continue
         visit(s)
         for attr in ('then_body', 'else_body', 'body', 'finalbody'):
-            _walk_func_stmts(getattr(s, attr, None), visit)
+            _walk_func_stmts(getattr(s, attr, None), visit, into_defs)
         for _c, eb in (getattr(s, 'elifs', None) or ()):
-            _walk_func_stmts(eb, visit)
+            _walk_func_stmts(eb, visit, into_defs)
         for h in (getattr(s, 'handlers', None) or ()):
-            _walk_func_stmts(getattr(h, 'body', None), visit)
+            _walk_func_stmts(getattr(h, 'body', None), visit, into_defs)
 
 
 def _scalar_mixed_prescan(gen, body) -> tuple:
