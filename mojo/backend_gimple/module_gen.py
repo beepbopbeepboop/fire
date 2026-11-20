@@ -5884,6 +5884,13 @@ def _gmp_emit_generator_cpp_units(self) -> None:
             'template <class T> static inline _MjWord _mj_w(T v) {',
             '    if constexpr (std::is_pointer_v<T>) return _MjWord{(int64_t)(intptr_t)v};',
             '    else return _MjWord{(int64_t)v}; }',
+            '/* One side of a `word == global` comparison whose C type is only final',
+            '   once the whole module is lowered: a pointer is compared by its bits,',
+            '   any other value is left exactly as it is (see',
+            '   `_cpp_word_vs_object_pointer` in cpp_core). */',
+            'template <class T> static inline auto _mj_word_bits(T v) {',
+            '    if constexpr (std::is_pointer_v<T>) return (int64_t)(intptr_t)v;',
+            '    else return v; }',
             '',
             '/* Milestone D: RAII `finally:` translation (see',
             '   GimpleGen._cpp_try_stmt) -- runs an arbitrary capturing',
@@ -11810,8 +11817,18 @@ def _gmp_discover_closures(self, stmts: list) -> None:
             # keeps the factory as an ordinary function: its `{mut}` local is
             # heap-boxed and shared by every call of the returned closure.
             _fns = [fn for fn in _walk_ast(stmts) if isinstance(fn, FunctionDef)]
+            # A MODULE-LEVEL factory is never lifted by the coroutine path (that
+            # lift is of a def nested in a generator/async body); it is compiled
+            # as the ordinary function it is, whose `{mut}` local is heap-boxed
+            # and shared by every call of the closure it returns, and a
+            # generator may call it like any other module function
+            # (c_parser/parser/__init__.py's `anonymous_names()` from `parse`).
+            # Only a factory nested inside another function is refused.
+            _top_level_ids = set(id(_st) for _st in stmts)
             if any(getattr(fn, 'is_generator', False) or getattr(fn, 'is_async', False) for fn in _fns):
                 for fn in _fns:
+                    if id(fn) in _top_level_ids:
+                        continue
                     if _closures._is_closure_factory_with_nonlocal(fn):
                         raise RuntimeError(f"unresolved callee '{fn.name}(...)'")
         except RuntimeError:
