@@ -1222,7 +1222,7 @@ def test_module_body_classification(tmpdir, verbose):
         # module-level folder grew an arm for it (`model.fold_module_value`).
         # It is body-only-by-omission: both emitters lower a `FloatLiteral` with
         # `int(expr.value)` ("formal is int-only; truncate toward zero") and
-        # `formal/types.py` types it `DEFAULT_INT_TYPE`, so the build KNEW the
+        # `formal/type_vocab.py` types it `DEFAULT_INT_TYPE`, so the build KNEW the
         # value and the folder declined to say so — `collect_module_symbols`
         # recorded the name `rebound`, `module_body` declined the store, and a
         # dylib was refused for having a body at all. Measured on this

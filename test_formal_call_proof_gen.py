@@ -9446,7 +9446,7 @@ class TestANarrowTypedParameterGetsItsRange(unittest.TestCase):
         """
         import formal.build as fb
         import formal.arm64_proof_gen as G
-        from formal.types import function_var_types
+        from formal.type_vocab import function_var_types
         for stem, _narrow, _bound in self.PROBES:
             text = self.texts[stem]
             with open(os.path.join(HERE, "formal", "examples",
@@ -9748,7 +9748,7 @@ class TestUnaryPlusIsTheIdentityAndNotIsNot(unittest.TestCase):
         """The typed fold is a separate copy of the same three-case arm."""
         import fire_compiler as F
         import formal.arm64_proof_gen as G
-        from formal.types import parse_type_name
+        from formal.type_vocab import parse_type_name
         mod = F.Parser(F.py_tokenize("def up(n: Int):\n    return +n\n")
                        ).parse_module()
         f = mod[0]

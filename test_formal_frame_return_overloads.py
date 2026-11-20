@@ -502,7 +502,7 @@ CONTAINER_SIZE_ROWS = [
     # than as a struct, and the row is worded that way on purpose.)
     ("a_blob_of_a_struct_annotated_parameter_is_not_sized",
      "def f(p: Point) -> List[Int]:\n    return [p.a]\n", {}, {"f"}),
-    # …and `Dict` is a BLOB, not a word, which is why `formal/types.py`'s
+    # …and `Dict` is a BLOB, not a word, which is why `formal/type_vocab.py`'s
     # `DICT_TYPE_NAMES` is deliberately not one of the five.  Same rule, a
     # vocabulary that could plausibly have been included by accident.
     ("a_blob_of_a_dict_annotated_parameter_is_not_sized",

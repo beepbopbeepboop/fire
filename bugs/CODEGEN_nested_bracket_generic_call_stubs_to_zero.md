@@ -130,8 +130,9 @@ Rendering `StringLiteral` (`repr(value)`, non-bytes) and `DottedLiteral` (`'.' +
    instantiated, which the single-unit path does not do; link mode (fire build) does`. So the
    instantiated generic's `rand` reference makes the main build pull in the whole `philox`/`_gpu`
    closure inline, where it is not cached. `std/_gpu/intrinsics.mojo`, `std/random/philox.mojo`
-   and `std/random/_rng.mojo` are three of the eight files `bugs/gate-stdlib-dylib.md` lists red on
-   the dtype-representation branch, so that gate failure and this one probably share the cause.
+   and `std/random/_rng.mojo` are three of the eight files the stdlib-dylib gate listed red while the
+   dtype-representation branch was in flight (that gate went green on master, 2026-11-19), so that gate
+   failure and this one probably shared the cause.
    Diagnostic recipe: `tools/memcap.py --limit-gb 8 -- python3 <wrapper> build x.mojo` where the
    wrapper does `signal.alarm(150)` and prints `_compile_imported_module`'s `module_name` per frame.
 

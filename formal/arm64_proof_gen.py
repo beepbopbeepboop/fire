@@ -27,7 +27,7 @@ import struct
 import fire_compiler as F
 # `model` for `entry_arity` / `entry_arg_values` -- the ONE reader of what the
 # startup stub passes the entry function, so the proof's entry state and the
-# binary's registers are two renderings of one list.  `formal/types.py` imports
+# binary's registers are two renderings of one list.  `formal/type_vocab.py` imports
 # the same module, so this costs nothing that was not already being loaded.
 # ONE name for it, not two: this file said both `model` and `model as M`, and a
 # second spelling of one module is a second place for the two to disagree.
@@ -43,7 +43,7 @@ RESULT_BEARING_EXTERNS = frozenset({"strlen"})
 # to disagree about what an annotation means.
 from formal import specs as SPECS
 from formal.arm64_codegen import var_register_map, _SCRATCH
-from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
+from formal.type_vocab import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
                           mask_of, parse_type_name, _range_args,
@@ -1589,7 +1589,7 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             if hasattr(F, 'FloatLiteral') and isinstance(e.operand, F.FloatLiteral):
                 is_float = True
             elif vtypes is not None:
-                from formal import types as T
+                from formal import type_vocab as T
                 to = T.infer_expr(e.operand, vtypes, call_types) if hasattr(T, 'infer_expr') else None
                 if to is not None and getattr(to, 'name', '') in ('Float64', 'float64', 'Float'):
                     is_float = True
@@ -1651,7 +1651,7 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             if hasattr(F, 'FloatLiteral') and (isinstance(e.left, F.FloatLiteral) or isinstance(e.right, F.FloatLiteral)):
                 is_float = True
             elif vtypes is not None:
-                from formal import types as T
+                from formal import type_vocab as T
                 tl = T.infer_expr(e.left, vtypes, call_types) if hasattr(T, 'infer_expr') else None
                 tr = T.infer_expr(e.right, vtypes, call_types) if hasattr(T, 'infer_expr') else None
                 # If either is float type
@@ -1680,7 +1680,7 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
                 if hasattr(F, 'FloatLiteral') and (isinstance(e.left, F.FloatLiteral) or isinstance(e.right, F.FloatLiteral)):
                     is_float = True
                 elif vtypes is not None:
-                    from formal import types as T
+                    from formal import type_vocab as T
                     tl = T.infer_expr(e.left, vtypes, call_types) if hasattr(T, 'infer_expr') else None
                     tr = T.infer_expr(e.right, vtypes, call_types) if hasattr(T, 'infer_expr') else None
                     if tl is not None and getattr(tl, 'name', '') in ('Float64', 'float64', 'Float'):
@@ -1845,7 +1845,7 @@ def _expr_bool_go(e, param: str, env: dict, vtypes: dict = None,
             if hasattr(F, 'FloatLiteral') and (isinstance(e.left, F.FloatLiteral) or isinstance(e.right, F.FloatLiteral)):
                 is_float = True
             elif vtypes is not None:
-                from formal import types as T
+                from formal import type_vocab as T
                 tl = T.infer_expr(e.left, vtypes, call_types) if hasattr(T, 'infer_expr') else None
                 tr = T.infer_expr(e.right, vtypes, call_types) if hasattr(T, 'infer_expr') else None
                 if tl is not None and getattr(tl, 'name', '') in ('Float64', 'float64', 'Float'):
@@ -2409,11 +2409,11 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
         # representation (`_t_wrap`), which is what makes `var a: Int8 = 3`
         # model as the sign-extended 3 the machine keeps rather than as the bare
         # word.  `VarDecl` is the only arm that wraps — a plain `Assign` has no
-        # annotation of its own and takes the type `formal.types.
+        # annotation of its own and takes the type `formal.type_vocab.
         # function_var_types` inferred for the name.
         #
         # The type comes from `vtypes` and not from `st.type_ann`, because
-        # `formal.types.function_var_types` is the one reader of that question —
+        # `formal.type_vocab.function_var_types` is the one reader of that question —
         # it walks `VarDecl` itself, reads the annotation through
         # `parse_type_name` and falls back to inferring from the value — so a
         # second read of the annotation here is a second answer waiting to
@@ -3204,7 +3204,7 @@ def _narrow_param_bound(fn) -> list:
     is the range in which `t{w}s (t{w}u (x)) = x` holds: `t8s` is the identity
     on `0..127` and `t8u` on `0..255`, and the walk's SXTB-then-SXTW pair is
     `t32u (t8s …)` for a signed parameter and `t32u (t8u …)` for an unsigned
-    one.  `formal/types.py::function_var_types` is the ONE reader of a
+    one.  `formal/type_vocab.py::function_var_types` is the ONE reader of a
     parameter's declared type and this asks it, so a second table of widths
     cannot disagree with the one the codegen narrows by.
 
@@ -3222,7 +3222,7 @@ def _narrow_param_bound(fn) -> list:
     """
     if fn is None:
         return []
-    from formal.types import function_var_types
+    from formal.type_vocab import function_var_types
     try:
         vtypes = function_var_types(fn, None)
     except Exception:                        # noqa: BLE001 - unresolvable types
@@ -3301,7 +3301,7 @@ def _narrow_lemma_texts(fn) -> list:
     `_narrow_param_bound`, so a proof cannot gain a lemma without also gaining
     the hypothesis that uses it.
     """
-    from formal.types import function_var_types
+    from formal.type_vocab import function_var_types
     try:
         vtypes = function_var_types(fn, None)
     except Exception:                        # noqa: BLE001 - unresolvable types
@@ -3337,7 +3337,7 @@ def _narrow_simp_args(fn) -> list:
     is a proof that stops elaborating for a reason no reader can see from the
     emission.
     """
-    from formal.types import function_var_types
+    from formal.type_vocab import function_var_types
     try:
         vtypes = function_var_types(fn, None)
     except Exception:                        # noqa: BLE001 - unresolvable types

@@ -536,7 +536,7 @@ CASES = [
     # `formal/arm64_codegen.py`'s `_emit_frame_constructor`).  The check read it
     # as "a call to 'P'", found no frame there, and refused the program as a
     # declaration no call site agrees with — which is the opposite of what the
-    # call site does.  `formal/types.py`'s `mask_of(IntType(w, False))` is the
+    # call site does.  `formal/type_vocab.py`'s `mask_of(IntType(w, False))` is the
     # shipped instance of a false refusal fixed by 3e8b0803's `_frame_valued_calls`
     #
     # `p.a * 10 + p.b` rather than a sum, so a read at the wrong SLOT says which

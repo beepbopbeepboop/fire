@@ -232,7 +232,7 @@ def _sys_py() -> str:
     """The interpreter to call for the CPython column.
 
     `sys.executable`, NOT `python3` from `PATH`: the repository needs 3.10+
-    (`str | None` annotations at module scope in `formal/types.py` are a
+    (`str | None` annotations at module scope in `formal/type_vocab.py` are a
     hard `TypeError` on 3.9) and the `python3` a shell happens to resolve can
     be an older one than the one running this file. Using the running
     interpreter is the only way the CPython column is comparable to the two

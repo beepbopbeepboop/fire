@@ -58,7 +58,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 import fire_compiler as F
 import formal.model as M
-from formal.types import DTYPE_TYPE_NAMES, STRING_TYPE_NAMES, TYPE_NAMES
+from formal.type_vocab import DTYPE_TYPE_NAMES, STRING_TYPE_NAMES, TYPE_NAMES
 
 sys.path.insert(0, os.path.join(HERE, "tools"))
 from formal_frame_field_census import frame_bound_structs   # noqa: E402

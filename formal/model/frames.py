@@ -919,11 +919,11 @@ def is_none_expr(node) -> bool:
 #     address a program can hold is 0.  This is also the word `x is None` has
 #     ALREADY meant for a reference on this path, so choosing it makes the
 #     Optional answer and the reference answer the same answer.
-#   * a `Bool` — a Bool is a word holding 0 or 1 (`formal.types`' own note),
+#   * a `Bool` — a Bool is a word holding 0 or 1 (`formal.type_vocab`' own note),
 #     so 2 is outside its domain.
 #   * a NARROW integer (`Int8`/`Int16`/`Int32`, `UInt8`/`UInt16`/`UInt32`) — the
 #     word `1 << w` IS the value `2^w`, and a `w`-bit type's values live in a
-#     64-bit register sign-extended (`formal/types.py`), so the set of words it
+#     64-bit register sign-extended (`formal/type_vocab.py`), so the set of words it
 #     can hold is the value range `[-2^(w-1), 2^(w-1)-1]` and `2^w` is outside
 #     every one of them.
 #
@@ -931,7 +931,7 @@ def is_none_expr(node) -> bool:
 # them is a REFUSAL rather than the 0 the fold produces today:
 #
 #   * `Int`, `Int64`, `UInt`, `UInt64` — every one of the 2^64 words is a value
-#     of the type (`formal.types`: values live in 64-bit registers, signed
+#     of the type (`formal.type_vocab`: values live in 64-bit registers, signed
 #     types sign-extended), so there is no word left over.
 #   * `Float64` — every 64-bit pattern is a double, NaNs included.
 #   * `DType` — a type TAG is an index and 0 is a legal one.
@@ -1126,18 +1126,18 @@ def optional_reg_refusal(annotation, where: str = None) -> str:
 
 # A scalar type name -> `(width in BITS, signed)`, or None for a name that is
 # not one.  The ONE width table this section reads, and it is here rather than
-# taken from `formal.types.TYPE_NAMES` for the reason `STRING_TYPE_CTORS` above
+# taken from `formal.type_vocab.TYPE_NAMES` for the reason `STRING_TYPE_CTORS` above
 # names its own list "so this module does not have to import types to say it":
 # a representation is a fact about the TARGET, and the target's machine word is
 # not a property of whichever module happens to have loaded.
 #
-# It has to agree with `formal.types.TYPE_NAMES` entry for entry, and
+# It has to agree with `formal.type_vocab.TYPE_NAMES` entry for entry, and
 # `test_formal_optional.py::the_niche_table_and_the_scalar_types_agree` is what
 # keeps it there — the same "one reader plus a test that the second table has
 # not drifted" discipline `POINTEE_WIDTHS` above states.  Two tables of widths
 # with no test between them is how a `Int32` niche becomes an `Int64` one.
 SCALAR_TYPE_WIDTHS = {
-    # A Bool is a word holding 0 or 1 (`formal.types`' own note), so its width
+    # A Bool is a word holding 0 or 1 (`formal.type_vocab`' own note), so its width
     # is 1 and `signed` is carried as None because there is no signedness to
     # get wrong about at one bit. BOTH spellings: `Bool` is Mojo's and `bool`
     # is the unannotated Python one, and a reader who annotates either must get
@@ -1148,7 +1148,7 @@ SCALAR_TYPE_WIDTHS = {
     "UInt8": (8, False), "UInt16": (16, False), "UInt32": (32, False),
     "UInt64": (64, False),
     "Float64": (64, True),
-    # The UNANNOTATED `int` and Mojo `Int` are `Int64` (formal.types'
+    # The UNANNOTATED `int` and Mojo `Int` are `Int64` (formal.type_vocab'
     # `DEFAULT_INT_TYPE`), so they are the full-width row and the branch below
     # refuses a 64-bit width precisely because there is no word left.
     "int": (64, True), "Int": (64, True), "UInt": (64, False),
@@ -1210,7 +1210,7 @@ def optional_none_word(payload, decls: dict = None):
          cell, never 0, and this row is why the function takes `decls`;
       5. a SCALAR (`SCALAR_TYPE_WIDTHS`) — the word `1 << width`, or 2 for a
          `Bool`, and nothing at all at width 64.  A `w`-bit integer's value
-         lives in a 64-bit register SIGN-EXTENDED (`formal/types.py`), so the
+         lives in a 64-bit register SIGN-EXTENDED (`formal/type_vocab.py`), so the
          set of WORDS it can hold is its own value range and `1 << w` — the
          value `2^w` — is outside every one of them.  `Float32` is absent from
          the table, and that table's own comment is the reason why.
@@ -2501,7 +2501,7 @@ def fold_module_value(node, names=None):
     **The float arm is the module-level one, and where it sits is the whole
     argument for it.**  `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`
     each lower a `FloatLiteral` with `int(expr.value)` — "formal is int-only;
-    truncate toward zero (matches a C cast)" — and `formal/types.py` types it as
+    truncate toward zero (matches a C cast)" — and `formal/type_vocab.py` types it as
     `DEFAULT_INT_TYPE` for the same reason, so a module-level float constant was
     the ONE literal whose value both backends already knew and neither folder
     answered.  The consequence was not a missing capability but a wrong
@@ -2564,7 +2564,7 @@ def fold_module_value(node, names=None):
     if got is not None and got[0] == "value":
         return got[1]
     # `int()`, not `round()` and not a bit pattern: it is the expression both
-    # emitters evaluate for a `FloatLiteral` and `formal/types.py`'s
+    # emitters evaluate for a `FloatLiteral` and `formal/type_vocab.py`'s
     # `DEFAULT_INT_TYPE` already means, so this arm and the emitters cannot
     # disagree about the word a float constant is. A `bool` cannot arrive here
     # (`fold_literal_expr` returns one for a `BoolLiteral` and returned above),
@@ -2619,7 +2619,7 @@ _FOLD_WORD_OPERANDS = frozenset({">>"})
 
 # The signed 64-bit range a folded module constant has to land in. The formal
 # path's word is 64 bits wide (`formal/arm64_proof_gen.py`'s `UInt64` model, and
-# `formal/types.py`'s `DEFAULT_INT_TYPE`), and a module-level slot is a word in
+# `formal/type_vocab.py`'s `DEFAULT_INT_TYPE`), and a module-level slot is a word in
 # `__DATA`: an initializer whose value does not fit one has no representation
 # here, so it is not folded and its read keeps the refusal it already had.
 _FOLD_INT_MIN = -(1 << 63)

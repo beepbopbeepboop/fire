@@ -1761,7 +1761,7 @@ def test_cross_module_writable_global_via_auto_accessors(tmpdir, _shared, verbos
 #
 # `Bool` and `Int8` are spelled as the PyTHON names too, and `String` is spelled
 # the same way in BOTH. In Mojo the three are the builtin scalar type names the
-# niche table reads (`formal/types.py`'s `BOOL_TYPE_NAMES`, `TYPE_NAMES` and
+# niche table reads (`formal/type_vocab.py`'s `BOOL_TYPE_NAMES`, `TYPE_NAMES` and
 # `STRING_TYPE_NAMES`, which already carries `str` beside `String`), and in
 # Python they are the aliases this header defines — so the two runs differ in the
 # meaning of two names rather than in the file's shape.

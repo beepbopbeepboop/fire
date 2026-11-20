@@ -1057,7 +1057,7 @@ class ValueKinds:
 
         The vocabulary test `_param_list`'s parameter seeding uses — `int_names`
         and `string_names` are the build's own annotation vocabularies, read
-        from `formal/types.py` by both backends — and it answers None for
+        from `formal/type_vocab.py` by both backends — and it answers None for
         everything else, which is the safe direction: a container annotation
         (`List[Int]`), a `-> T` return type in a position that is not a
         declared type, and a name that is not in either vocabulary leave the

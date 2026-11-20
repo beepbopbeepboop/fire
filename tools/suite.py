@@ -2928,7 +2928,7 @@ test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
             'formal/arm64_proof_gen.py', 'formal/x86_64_proof_gen.py',
             'formal/arm64_codegen.py', 'formal/x86_64_codegen.py',
             'formal/build.py', 'formal/lean.py',
-            'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
+            'formal/type_vocab.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
             'lib/X86.lean', 'lib/work.lean'],
      desc='proof generation on programs that CALL: a call must not raise, the '
           'model must be the model of the call, and no declaration may be '
@@ -3210,7 +3210,7 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 test('formal-x86-machine-model', [PY, 'formal/x86_64_model_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
      extra=['formal/x86_64_model_test.py', 'formal/x86_64.py', 'lib/X86.lean'],
-     expect='red with zero WRONG rows (measured 2026-10-29): agree 91, and 3 '
+     expect='red with zero WRONG rows (re-measured 2026-11-19): agree 92 of 94, and 3 '
             'runs the model stops before returning (NO-RUN) — `accum_max` '
             '(the plan builds, so the model stops at a byte it accepted), '
             '`printf_int` (a `movsxd_r64_r32` step is not wired) and '
@@ -3514,7 +3514,7 @@ test('formal-external-call', [PY, 'test_formal_external_call.py'],
 # cheap enough that either is defensible and it is not worth the second argument.
 test('formal-typed-flag', [PY, 'test_formal_typed_flag.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_typed_flag.py', 'formal/model', 'formal/types.py',
+     extra=['test_formal_typed_flag.py', 'formal/model', 'formal/type_vocab.py',
             'formal/build.py'],
      desc="the `typed` model flag: one definition, and not vacuous")
 # `json`: RFC 8259 on the formal backend, every case computed twice — once
@@ -3924,7 +3924,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
             'formal/admitted.py', 'formal/model', 'formal/imports.py',
             'formal/arm64.py', 'formal/arm64_proof_gen.py',
             'formal/macho_linker.py', 'formal/macho.py', 'formal/elf.py',
-            'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
+            'formal/type_vocab.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
             'lib/X86.lean', 'lib/work.lean', 'lib/Contracts.lean',
             'lib/IEEE754.lean'] + FORMAL_BUILD_INPUTS,
      # `formal/examples/*.mojo` is in the key and not decoration: this job's

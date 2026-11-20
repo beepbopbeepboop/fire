@@ -33,7 +33,7 @@ from types import SimpleNamespace
 
 import fire_compiler as F
 from formal import model as M
-from formal import types as FT
+from formal import type_vocab as FT
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
 from formal.macho_linker import (EXTERN_ENTRYOFF, EXTERN_GLOBALS_ENTRYOFF,
@@ -3647,7 +3647,7 @@ def _frame_valued_calls(site_fn, structs_by_name, returns_frame, fns):
     `f(r)` is, and the emitters lower them; a check that cannot see them reads
     those two programs as "the declaration is contradicted at every call site"
     when the call site is handing over precisely the value the declaration
-    promised.  That is `formal/types.py`'s `mask_of(IntType(w, False))` and it
+    promised.  That is `formal/type_vocab.py`'s `mask_of(IntType(w, False))` and it
     is the whole of the false-refusal half of the 13-file
     `frame_declared_parameter_refusal` row in
     `bugs/FORMAL_declared_parameter_against_its_call_sites.md` §2.
@@ -18799,7 +18799,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # into a dylib (formal/imports.py's `build_module_dylib`), so its
     # dataclasses are lowered and checked when IT is compiled — and doing it
     # again here reported another file's class against this file. Measured: with
-    # the imported declarations included, `formal/types.py` was refused for a
+    # the imported declarations included, `formal/type_vocab.py` was refused for a
     # `field(default_factory=…)` in a class declared in `fire_compiler.py`,
     # under a message that named neither the class nor the field.
     #
@@ -19404,7 +19404,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # Published for the reason `_MODULE_SYMBOLS` is: the consumers are a
     # per-function walk inside each backend and the linker, and none of them has
     # the module statements in hand.
-    # `formal.types`' annotation vocabularies, so the KIND of a slot the module
+    # `formal.type_vocab`' annotation vocabularies, so the KIND of a slot the module
     # body fills by a call is the callee's declared return type read through the
     # ONE `declared_type_kind` both backends read, and so a slot holding a DICT
     # is recognised as one from the same annotation. Taken from the caller for

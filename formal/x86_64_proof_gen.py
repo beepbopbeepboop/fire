@@ -43,7 +43,7 @@ the theorem ACCEPTED, so a `sorry` here is a claim of trust, not a proof — the
 audit tooling in the toy project counts exactly these.
 """
 
-from formal.types import (DEFAULT_INT_TYPE, function_var_types,
+from formal.type_vocab import (DEFAULT_INT_TYPE, function_var_types,
                           parse_type_name, resolve, uses_typed_model)
 from formal.x86_64 import ARG_REGS  # noqa: F401 — read by `_x86_entry`
 # `specs` for the `@refines(...)` annotation — the ONE reader of it, shared with

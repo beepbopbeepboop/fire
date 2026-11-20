@@ -4104,7 +4104,7 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
     bodies for the WRITES, because the two live in different places: the value is
     stated once, at module level, and the writes are stated inside the bodies.
 
-    `int_names` / `string_names` are `formal.types`' annotation vocabularies,
+    `int_names` / `string_names` are `formal.type_vocab`' annotation vocabularies,
     taken from the caller for the reason `declared_type_kind` takes them from the
     caller: the two backends must not answer "what does this annotation mean"
     from two private lists, and a default of empty leaves the answer the
@@ -4213,7 +4213,7 @@ def _body_store_shape(value, by_name: dict, rets: dict, int_names, string_names,
     are one representation: `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and
     `Dict[String, Int]` are all a bare `char *`-shaped word, so a kind that
     said "dict" would be a lie about the other three. What says it is the
-    annotation's BASE NAME, through the one `formal.types` vocabulary both
+    annotation's BASE NAME, through the one `formal.type_vocab` vocabulary both
     backends share (`DICT_TYPE_NAMES`), which is the same evidence
     `global_slot_is_dict` reads off a dict LITERAL's initializer. A callee that
     declares NOTHING claims nothing here either, so the dict-vs-sequence question

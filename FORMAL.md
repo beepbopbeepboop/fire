@@ -693,7 +693,7 @@ is true on both backends.
 ### Phase 7 — frontend breadth
 
 Containers, floats (the model is int-only; floats truncate toward zero on emit,
-`formal/types.py:166`), generics / Stage 5 monomorphization, `try`/`except`,
+`formal/type_vocab.py:166`), generics / Stage 5 monomorphization, `try`/`except`,
 classes. This is where the formal sweep's codegen families shrink, and it is last
 because each of these compounds with the above rather than preceding it.
 

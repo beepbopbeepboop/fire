@@ -11308,7 +11308,7 @@ CONDITIONAL_ARM_CASES = [
 #
 # `_frame_valued_calls`'s own docstring says a parameter declared as a framed
 # struct is corroborated by "a construction, or a frame-returning call", and
-# lists `formal/types.py`'s `mask_of(IntType(w, False))` as the false refusal
+# lists `formal/type_vocab.py`'s `mask_of(IntType(w, False))` as the false refusal
 # that fixing it was worth. The returned-frame half of that was DEAD: the check
 # handed the identity-keyed `returns_frame` to `model.frame_returning_predicate`,
 # whose contract is `(callee_name, bound_name)`, so every lookup of a name in a
@@ -14208,7 +14208,7 @@ SUBSCRIPT_CASES = [
     # cases and a reader could not tell which bracket element to look at — and it
     # cannot be told from the type either, because `static_string.mojo`'s
     # `__mlir_type.`!kgen.string`` initializer is itself an MLIR template
-    # (measured on that tree's `lib/ProofLib.lean`-adjacent `formal/types.py`:
+    # (measured on that tree's `lib/ProofLib.lean`-adjacent `formal/type_vocab.py`:
     # `int64_t` is `{ kgen.int_t<Si> }` for the same reason). The sentence
     # therefore names the two SHAPES a bare name can have, which is the honest
     # answer: this call cannot distinguish them.
@@ -15898,7 +15898,7 @@ WAVE6_TRUTHY_CASES = [
     # 0xFFFF...FD against 7 with unsigned condition codes and answers FALSE
     # where CPython answers TRUE.
     #
-    # `formal/types.py`'s `_negative_constant_type` is the fix and the ONE
+    # `formal/type_vocab.py`'s `_negative_constant_type` is the fix and the ONE
     # reader of the question: a value the build can FOLD and knows to be
     # negative cannot be unsigned, whichever of the two spellings wrote it.
     # Both rows below are that one rule on the two shapes it applies to, and
@@ -25885,7 +25885,7 @@ def check_interpolated_literal_bound_census(verbose=False):
     interpolated_literal_segments` for the fields, `interpolated_literal_bound`
     for the verdict, and `ValueKinds` — the same class both backends ask "what
     does this name in this function hold" — for a bare name's DECLARED type,
-    per function, from `formal/types.py`'s own vocabularies.
+    per function, from `formal/type_vocab.py`'s own vocabularies.
 
     **Three rows are asserted as DIRECTIONS (floors) and one as an equality
     that has to be `>= 1`, and none of them is a threshold.** What a reader is
@@ -25903,7 +25903,7 @@ def check_interpolated_literal_bound_census(verbose=False):
         _STDLIB_PATH = getattr(module_loader, "STDLIB_PATH", None)
     except Exception:
         _STDLIB_PATH = None
-    import formal.types as _types
+    import formal.type_vocab as _types
     build = __import__("formal.build", fromlist=["build"])
     M = _TYPE_VALUE_MODEL
     here = _os.path.dirname(_os.path.abspath(__file__))

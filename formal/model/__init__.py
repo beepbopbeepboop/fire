@@ -32,7 +32,7 @@ import re
 from typing import NamedTuple
 
 import fire_compiler as F
-from formal.types import (BOOL_TYPE_NAMES, DTYPE_TYPE_NAMES,
+from formal.type_vocab import (BOOL_TYPE_NAMES, DTYPE_TYPE_NAMES,
                           FLOAT_TYPE_NAMES, STRING_TYPE_NAMES, TYPE_NAMES)
 from formal.diagnostics import (CodegenError, MATCH_REFUSED_KINDS, spelled,  # noqa: F401
                                     match_pattern_kind, match_pattern_refusal,

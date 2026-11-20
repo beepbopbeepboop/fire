@@ -569,7 +569,7 @@
   "formal/macho_linker.py": "codegen/dependency",
   "formal/model.py": "not-answerable/host-import",
   "formal/monomorph.py": "codegen/dependency",
-  "formal/types.py": "not-answerable/host-import",
+  "formal/type_vocab.py": "not-answerable/host-import",
   "formal/x86_64.py": "codegen/dependency",
   "formal/x86_64_codegen.py": "not-answerable/host-import",
   "formal/x86_64_decode.py": "codegen/dependency",

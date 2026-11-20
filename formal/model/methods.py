@@ -1945,7 +1945,7 @@ def _is_integer_expression(fn, e, depth=0) -> bool:
     inference.
 
     The conservative direction, and it is the only one available: this path's
-    shared type reader (`formal.types.infer_expr`) answers a bare name with the
+    shared type reader (`formal.type_vocab.infer_expr`) answers a bare name with the
     DEFAULT INTEGER TYPE, so it cannot tell `k` (an `Int`) from `q` (a pointer)
     and using it here would scale `p + q`.  So a name counts only when the
     function DECLARES it as one of `INT_TYPE_CTORS`, a literal counts because a
@@ -4144,7 +4144,7 @@ MLIR_BOOL_METHODS = {
                      "holds, and an unannotated word is an integer here, so "
                      "`(receiver != 0)` would answer 1 for a `char *` that "
                      "happens to be non-null. The missing thing is the DECLARED "
-                     "TYPE and not a kind: `formal.types.BOOL_TYPE_NAMES` "
+                     "TYPE and not a kind: `formal.type_vocab.BOOL_TYPE_NAMES` "
                      "names the annotations that carry it and "
                      "`model.annotation_is_bool` is the one reader of them. "
                      "Annotate the receiver `Bool`",
