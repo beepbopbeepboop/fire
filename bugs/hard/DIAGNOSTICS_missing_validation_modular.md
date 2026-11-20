@@ -497,27 +497,3 @@ builtin `EnumLike` trait definition plus synthesizing the conformance on every
 `__enum` -- a feature, not a patch. Filed as such rather than approximated by a
 special case that would emit a "trait 'EnumLike' declared here" note with no
 declaration behind it.
-
-## Status (2026-11-19): signature diagnostics anchored at the parameter, all reported
-
-Landed (measured with the real FileCheck lines, `fire.py build` + `FileCheck`):
-
-* `failed_binding_deferrals.mojo` now PASSES. The `violated constraint` /
-  `lacking evidence` diagnostics from `_check_fn_signature_binding_violations`
-  are anchored at the OFFENDING PARAMETER (or the `->` return type), not at the
-  `def`: `module_gen._signature_item_positions` reads the declaration text
-  (`FunctionDef.params` carries no positions), skipping the `[...]` list and
-  comments/strings. Falls back to the function position when unreadable.
-* `_check_signature_binding_violations` collects every offending signature and
-  raises them together (it used to stop at the first, which hid the
-  `successful_binding` "lacking evidence" the second CHECK wants).
-* `autoparam_dependency_errors.mojo` now PASSES. `fire_compiler`'s
-  `_check_inferred_param_dependencies` and `_check_variadic_element_types` were
-  run in sequence, so the first raise hid the second's diagnostic; they now
-  report together.
-* Regression: `test_signature_diagnostic_anchors.py`.
-
-Remaining: the rest of the "Still open (large)" list above, notably the
-`EnumLike` synthesis (`enum_exhaustive_errors`), the same-module generic
-discriminator (`moco_4400`), `identifier_source_range`, and `tuple_*`. The
-combined autoparam errors are ordered by check, not by source line.

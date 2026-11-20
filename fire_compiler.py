@@ -9570,18 +9570,8 @@ class Parser:
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
         _check_mlir_type_argument_calls(stmts, self._filename)
-        # Both are declaration-signature diagnostics over the same module, so
-        # report them together (a module with one of each shows both, as the
-        # real compiler does) rather than letting the first raise hide the rest.
-        _sig_errors = []
-        for _sig_check in (_check_inferred_param_dependencies,
-                           _check_variadic_element_types):
-            try:
-                _sig_check(stmts, self._filename)
-            except RuntimeError as _e:
-                _sig_errors.append(str(_e))
-        if _sig_errors:
-            raise RuntimeError("\n".join(_sig_errors))
+        _check_inferred_param_dependencies(stmts, self._filename)
+        _check_variadic_element_types(stmts, self._filename)
         _check_docstring_self_imports(stmts, self._filename)
         return stmts
 

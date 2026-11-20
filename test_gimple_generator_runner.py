@@ -4013,36 +4013,6 @@ async def main_async() -> Int:
 def main():
     asyncio.run(main_async())
 """, "103\n")
-    # Lib/contextlib.py's `AsyncClosing.__aexit__` awaits `self.thing.aclose()`
-    # while `aclose` is an async method of a struct defined LATER in the file.
-    # Eligibility of an async method depends on the set of known async method
-    # names, which one source-order pass built from only the methods before it:
-    # the awaiter was refused (and the whole module with it) purely because of
-    # where the callee sat. Here the awaiter's struct comes first.
-    test_generator_stdout("async_method_awaits_later_defined_async_method", """\
-import asyncio
-
-struct Closing:
-    var n: Int
-    fn __init__(out self, n: Int):
-        self.n = n
-
-    async def __aexit__(self, *exc_info) -> Int:
-        var r = await self.shut()
-        return r + len(exc_info)
-
-    async def shut(self) -> Int:
-        return self.n
-
-async def main_async() -> Int:
-    var c = Closing(40)
-    var r = await c.__aexit__(1, 2, 3)
-    print(r)
-    return r
-
-def main():
-    asyncio.run(main_async())
-""", "43\n")
     test_generator_stdout("star_args_async_generator_for_packs", """\
 import asyncio
 

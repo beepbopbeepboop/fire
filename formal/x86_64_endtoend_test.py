@@ -1074,16 +1074,16 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     Both the straight-line and the path-tree emitters go through here, so a form
     cannot be wired up in one and forgotten in the other.
 
-    `prev_defs` are the definitions of the PREVIOUS step's form, and they are in
-    the `rip` side condition for the reason the `x86_exec_go_exit_step` one
-    carries the same list: that condition is `s_k.rip = <literal>`, and `s_k` is
-    described by `hs_k`, which is the PREVIOUS step's SUCCESSOR -- so proving it
-    means projecting through whatever wrapper that successor is built on.  A
-    successor that is not a bare `{s with …}` is exactly the two rows that were
-    stale until this pass (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for
-    `imul`), and without the names the condition does not close and is ADMITTED,
-    which is the quiet failure: the proof still elaborates and the report reads
-    "proved with a `sorry`" about a fact that is a `simp` set away.
+    `fs_path` sizes the `rip` side condition's `simp`, for the reason the
+    `x86_exec_go_exit_step` one carries the same list: that condition is
+    `s_k.rip = <literal>`, and `s_k` is described by `hs_k`, which is the
+    PREVIOUS step's SUCCESSOR -- so proving it means projecting through whatever
+    wrapper that successor is built on.  A successor that is not a bare
+    `{s with …}` is exactly the two rows that were stale until this pass
+    (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for `imul`), and without
+    the names the condition does not close and is ADMITTED, which is the quiet
+    failure: the proof still elaborates and the report reads "proved with a
+    `sorry`" about a fact that is a `simp` set away.
 
     `rip` overrides a successor's program counter with a LITERAL, which is only
     ever right where the tree knows the address the machine goes to next and the
@@ -1092,9 +1092,9 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     the step is still the model's; see `emit_terminates`.
 
     `fs_path` is the FORM of every step walked before this one on this path, and
-    it sizes the `rip` side condition's `simp`: the state this step starts in is
-    written by all of them, so folding it needs every definition they used and
-    not only the last one's.  See `_path_simp`.
+    it is what sizes that `simp`: the state this step starts in is written by all
+    of them, so folding it needs every definition they used and not only the
+    last one's.  See `_path_simp`.
 
     `code_name` is the NAME of the code function in the generated file, because a
     successor may quote the model's own reader (`UInt64.ofInt (read_i32_le rc
@@ -3768,16 +3768,17 @@ def emit(path, expected):
 
     prev, k = "i0", 0
     chain = []
-    prev_form = None
+    # The FORMS walked so far, for the reason `_resolve` documents: this step's
+    # `rip` fact is about `s_k`, which every earlier step's successor wrote, so
+    # the fold has to name every one of their definitions and not only the last
+    # one's.  The path-tree emitter threads the same list (`fs_path`) through
+    # its walk; this loop is linear, so it is accumulated here.
+    fs_path = ()
     for insn, form, raw in shapes:
         addr = base + insn.offset
-        # `prev_form`'s definitions, for the reason `_resolve` documents: this
-        # step's `rip` fact is about the state the PREVIOUS step's successor
-        # describes.
         call, succ = _resolve(form, raw, addr, prev, k, (), None, insn.length,
-                              prev_defs=_SIMP_FORMS.get(prev_form, ())
-                              if prev_form else ())
-        prev_form = form
+                              fs_path=fs_path)
+        fs_path += (form,)
         nxt = "s%d" % (k + 1)
         a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
         a("    %s" % call)
