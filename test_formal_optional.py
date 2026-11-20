@@ -809,7 +809,7 @@ def check_table(tmpdir, verbose):
     """
     sys.path.insert(0, HERE)
     from formal import model as M
-    from formal import types as FT
+    from formal import type_vocab as FT
 
     failures = []
 
@@ -847,7 +847,7 @@ def check_table(tmpdir, verbose):
         failures.append("Float32: answered with a niche, but the type has no "
                         "representation on this target to have one")
 
-    # (2) `SCALAR_TYPE_WIDTHS` agrees with `formal.types.TYPE_NAMES` entry for
+    # (2) `SCALAR_TYPE_WIDTHS` agrees with `formal.type_vocab.TYPE_NAMES` entry for
     #     entry. Two width tables with nothing between them is how a 32-bit
     #     niche becomes a 64-bit one, and the 64-bit row is the one with NO
     #     answer - so the disagreement is not a wrong niche but a REFUSAL where
@@ -856,12 +856,12 @@ def check_table(tmpdir, verbose):
     for name, it in FT.TYPE_NAMES.items():
         row = M.SCALAR_TYPE_WIDTHS.get(name)
         if row is None:
-            failures.append(f"{name}: in formal.types.TYPE_NAMES and not in "
+            failures.append(f"{name}: in formal.type_vocab.TYPE_NAMES and not in "
                             f"model.SCALAR_TYPE_WIDTHS")
             continue
         if row[0] != it.width or (row[1] is not None
                                   and bool(row[1]) != bool(it.signed)):
-            failures.append(f"{name}: formal.types says width={it.width} "
+            failures.append(f"{name}: formal.type_vocab says width={it.width} "
                             f"signed={it.signed}, model says {row}")
     for name in FT.BOOL_TYPE_NAMES:
         if name not in M.SCALAR_TYPE_WIDTHS:
@@ -1035,7 +1035,7 @@ def _as_value(word: int) -> int:
 
     This is what makes the niche check the right check, and getting it wrong is
     what made the first version of it fail: an `Int8` value lives in a 64-bit
-    register SIGN-EXTENDED (`formal/types.py`), so the set of WORDS an `Int8` can
+    register SIGN-EXTENDED (`formal/type_vocab.py`), so the set of WORDS an `Int8` can
     hold is the set of VALUES it can hold — `[-128, 127]` — and NOT the set of
     8-bit patterns. Reading the niche `256` as "an 8-bit pattern" says 0, which
     is a value of the type, and concludes (falsely) that `Optional[Int8]` has no

@@ -79,7 +79,7 @@ def ellipsis_refusal(node):
 # honest "unsupported" rather than a silent zero.
 
 # Integer type constructors -> their width/signedness. Mirrors
-# formal.types.TYPE_NAMES, which is the authority; this is the subset that is
+# formal.type_vocab.TYPE_NAMES, which is the authority; this is the subset that is
 # meaningful as a *value* conversion.
 INT_TYPE_CTORS = {
     "int": (64, False), "Int": (64, True),
@@ -98,7 +98,7 @@ IDENTITY_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice",
 # a name of its own because `String(s)` is a char * — which is a fact a caller
 # can act on (print formats it with %s) — while `Pointer(p)` is a word, and
 # treating the two alike would mean handing printf an address to dereference.
-# The same list as formal.types.STRING_TYPE_NAMES, named here so this module
+# The same list as formal.type_vocab.STRING_TYPE_NAMES, named here so this module
 # does not have to import types to say it.
 STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 

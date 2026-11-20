@@ -55,7 +55,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 import fire_compiler as F
 import formal.model as M
-from formal.types import STRING_TYPE_NAMES, TYPE_NAMES
+from formal.type_vocab import STRING_TYPE_NAMES, TYPE_NAMES
 
 SKIP_DIRS = {".git", ".tmp", "build", "__pycache__", "cas", "node_modules",
              "formal/examples"}

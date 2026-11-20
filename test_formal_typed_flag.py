@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The `typed` model flag: what it decides, and that it is not vacuous.
 
-`formal/types.py::uses_typed_model` is one predicate both proof generators call,
+`formal/type_vocab.py::uses_typed_model` is one predicate both proof generators call,
 and this file pins what it answers rather than what it is called. Three
 properties, in the order a reader wants them:
 
@@ -39,7 +39,7 @@ sys.path.insert(0, HERE)
 import fire_compiler as F                                    # noqa: E402
 from formal import model as M                                # noqa: E402
 from formal.build import parse_module                        # noqa: E402
-from formal.types import (DEFAULT_INT_TYPE, function_var_types,  # noqa: E402
+from formal.type_vocab import (DEFAULT_INT_TYPE, function_var_types,  # noqa: E402
                           parse_type_name, resolve, uses_typed_model)
 
 FAILURES = []

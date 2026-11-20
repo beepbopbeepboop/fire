@@ -132,7 +132,7 @@ def main(n):
 
 # The same, spelled `@dataclasses.dataclass` with the module imported rather
 # than the name from-imported. Both spellings occur in the corpus this closes
-# (`formal/types.py` and `ownership_check.py` respectively) and they are
+# (`formal/type_vocab.py` and `ownership_check.py` respectively) and they are
 # DIFFERENT AST shapes — a bare string and a dotted string — so a transform that
 # recognised only one of them would pass the other file's test suite here.
 DOTTED_DECORATOR = """
@@ -903,7 +903,7 @@ def main(n):
     return 0
 """
 
-# The same question with no call on it, which is how `formal/types.py:289`
+# The same question with no call on it, which is how `formal/type_vocab.py:289`
 # spells it. A separate entry point so the two cannot say different things.
 REFLECTION_ATTRIBUTE = """
 import dataclasses

@@ -17,7 +17,7 @@ Proof generation is intentionally NOT wired up yet.
 """
 
 from formal.arm64 import *
-from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
+from formal.type_vocab import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, _range_args, TYPE_NAMES,
                           STRING_TYPE_NAMES, DICT_TYPE_NAMES,
@@ -4754,7 +4754,7 @@ dylib_exports: list = None, globals_base: int = None,
 
         The decision is model.ValueKinds' (it has to come out the same on both
         backends); this only supplies the hooks that are this backend's:
-        the annotation vocabularies from formal.types, a callee's kind from its
+        the annotation vocabularies from formal.type_vocab, a callee's kind from its
         declared return type or its return statements, the local-slot key for a
         field chain, and — since a field's DECLARED type is a fact about the
         struct rather than about this function — `_declared_kind` below."""

@@ -5,7 +5,7 @@ with each other AND with CPython running the same text.
 The arm64 formal path is the reference between the two backends: it is the
 mature one (proofs typecheck against lib/ProofLib.lean for it), so agreement
 between them is much stronger evidence than either being self-consistent. Both
-are built from the same fire_compiler AST and the same formal/types.py integer
+are built from the same fire_compiler AST and the same formal/type_vocab.py integer
 lattice, so any disagreement is a codegen bug in one of them.
 
 **CPython is the third column, and it is the one that can say an example is
@@ -40,7 +40,7 @@ has and CPython does not, and none of them changes what the program computes:
     is a statement the language allows to be missing and Python's is not, and
     the missing body is unreachable code either way.
   * `Int`, `Int8` … `UInt64` become `int` — annotation NAMES. (They are read
-    from `formal/types.py::TYPE_NAMES`, so a new width cannot leave this
+    from `formal/type_vocab.py::TYPE_NAMES`, so a new width cannot leave this
     behind.) A `-> Int` return annotation is a no-op in CPython for the same
     reason.
   * `@spec(...)`, `@require(...)` and `@ensure(...)` lines are DROPPED: they
@@ -204,7 +204,7 @@ def cpython_answer(path: str, test_input: int):
     nothing wrong. The shims and why each is spelling-only are in the module
     docstring.
     """
-    from formal.types import TYPE_NAMES
+    from formal.type_vocab import TYPE_NAMES
 
     with open(path, encoding="utf-8") as f:
         source = f.read()

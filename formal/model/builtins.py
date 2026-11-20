@@ -2162,7 +2162,7 @@ def _runtime_abi_entry(scan: dict) -> dict:
 # `_ctype_is_word` answers is "can a formal value be this", and a formal value
 # is a 64-bit word holding an INTEGER, so the floating-point scalars are not
 # values here at all: a float literal is truncated toward zero on the way in
-# (formal/types.py), which is the right answer for arithmetic on this path and
+# (formal/type_vocab.py), which is the right answer for arithmetic on this path and
 # exactly the wrong one for handing a word to a callee that will read it as a
 # `double`.
 #
@@ -4689,7 +4689,7 @@ def is_container_kind(kind) -> bool:
     are all `LIST_PREFIX` or `LIST_PREFIX + ":" + element` (the byte blob is
     `list_kind(BYTE_BLOB_ELEM_KIND)`, so the prefix covers it), and a frame
     address is `FRAME_KIND`.  `print_call_spelling` asks the question once, so
-    a new blob kind joins by being named in `formal/types.py`.
+    a new blob kind joins by being named in `formal/type_vocab.py`.
     """
     if not isinstance(kind, str):
         return False

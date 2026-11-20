@@ -2847,7 +2847,7 @@ def _candidate_shapes(module_name: str, ext: str) -> tuple:
     Phase 0 is the name AS SPELLED: `<name>.mojo` and `<name>/__init__.mojo`
     (a package). Phase 1 is the same two spelled with the LEAF only. The leaf
     fallback is what makes a package-relative dotted import of a sibling work:
-    inside `formal/`, `import formal.types` looks for `formal/formal/types.mojo`
+    inside `formal/`, `import formal.type_vocab` looks for `formal/formal/types.mojo`
     (the path spelled from the project root, which is `formal/` itself here) and
     finds nothing, but the sibling really is `types` in the very directory the
     import was written in. `module_loader` resolves the same two shapes for the
@@ -2994,7 +2994,7 @@ def resolve_module_path(module_name: str, relative_to: str = None,
          `HOST_MODULES` (or its first dotted component is), the answer is
          "CPython standard library, nothing to compile" and no sibling is
          consulted. This has to come BEFORE pass 3 rather than after it,
-         because this repository contains `formal/types.py` and
+         because this repository contains `formal/type_vocab.py` and
          `mojo/middle/types.py` — a `.py` sibling whose basename is a host
          module name. Looking at siblings first would silently rebind a file's
          ordinary `from types import SimpleNamespace` to a same-named local

@@ -144,9 +144,9 @@ MODULE_NAME = "dataclasses"
 #
 # Four spellings, all of which occur in the corpus this closes:
 #
-#   @dataclass                      formal/types.py, type_system.py
+#   @dataclass                      formal/type_vocab.py, type_system.py
 #   @dataclasses.dataclass          ownership_check.py, fault_tolerance.py
-#   @dataclass(frozen=True)         formal/types.py
+#   @dataclass(frozen=True)         formal/type_vocab.py
 #   @dataclass(<options>)           any
 #
 # The first two are stored by `fire_compiler`'s decorator block as a plain
@@ -343,7 +343,7 @@ def _is_false(value_node) -> bool:
 # the name of the missing capability rather than left to fail three layers up
 # as an unbound symbol.
 #
-# `__dataclass_fields__` is in the list because `formal/types.py` reads it, and
+# `__dataclass_fields__` is in the list because `formal/type_vocab.py` reads it, and
 # it is the same question with a different spelling.
 REFLECTION_NAMES = frozenset((
     "is_dataclass", "fields", "asdict", "astuple", "replace", "make_dataclass",
@@ -383,7 +383,7 @@ def reflection_refusal(callee: str) -> str:
 def reflection_member_refusal(name: str) -> str:
     """The refusal for READING `x.__dataclass_fields__` (not calling it).
 
-    `formal/types.py:289` spells the same question without a call, so it needs
+    `formal/type_vocab.py:289` spells the same question without a call, so it needs
     its own entry point and the same words; routed through `reflection_refusal`
     so the two cannot say different things about the same missing capability."""
     if name.rsplit(".", 1)[-1] != "__dataclass_fields__":
@@ -847,7 +847,7 @@ def _field_name(f) -> str:
     `x: int = 5` — and `x: int = field(default=5)` — are an `AssignStmt` whose
     `.target` is the `IdentExpr` that carries it. `struct_field_names` reads
     both, so anything that wants to NAME a field in a diagnostic has to as
-    well, and a reader who is told `formal/types.py` line 12 is bad deserves to
+    well, and a reader who is told `formal/type_vocab.py` line 12 is bad deserves to
     be told WHICH field."""
     name = getattr(f, "name", None)
     if isinstance(name, str) and name:
@@ -1286,7 +1286,7 @@ def check_reflection_calls(functions: list, module_names: set) -> None:
                 elif _is_dynamic_attribute(node):
                     # `hasattr(x, "__dataclass_fields__")` — the same question
                     # with the member name as a STRING rather than a member
-                    # access, which is how formal/types.py:289 spells it. The
+                    # access, which is how formal/type_vocab.py:289 spells it. The
                     # call is to a builtin, not to a name the import bound, so
                     # nothing about the import's spelling reaches here; what
                     # identifies it is the NAME being asked about.

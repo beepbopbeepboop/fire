@@ -1193,9 +1193,9 @@ def test_repository_sibling_resolves(tmpdir, _shared):
 def test_package_relative_dotted_import_resolves(tmpdir, _shared):
     """A dotted import of a sibling INSIDE the same package.
 
-    This is the shape `formal/x86_64_codegen.py`'s `import formal.types` has:
+    This is the shape `formal/x86_64_codegen.py`'s `import formal.type_vocab` has:
     the project root is the file's own directory, so the full dotted path
-    spells to `formal/formal/types.py` and finds nothing, and the name
+    spells to `formal/formal/type_vocab.py` and finds nothing, and the name
     resolves through the leaf instead — `types.py`, in the very directory the
     import was written in."""
     root = os.path.join(tmpdir, "pkgrel")
@@ -1379,7 +1379,7 @@ def test_a_dotted_stdlib_import_resolves_to_the_module_it_names(tmpdir,
 def test_host_module_still_refused_despite_same_named_sibling(tmpdir, _shared):
     """The precedence that must NOT be reordered: host module before `.py`.
 
-    This repository contains `formal/types.py` and `mojo/middle/types.py` —
+    This repository contains `formal/type_vocab.py` and `mojo/middle/types.py` —
     sibling sources whose basename is a CPython standard-library module. If a
     sibling were consulted first, an ordinary `from types import
     SimpleNamespace` would silently rebind to a same-named local module: the

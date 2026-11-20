@@ -1832,7 +1832,7 @@ def _plain_word_names(fn) -> set:
     passes a word unless the caller passed a frame — which is the case
     `frame_declared_parameter_refusal` exists for and which the emitters enforce
     per call site. An annotated one is a word only when the annotation is one of
-    the scalar or string vocabularies `formal/types.py` publishes
+    the scalar or string vocabularies `formal/type_vocab.py` publishes
     (`TYPE_NAMES`, `STRING_TYPE_NAMES`, `BOOL_TYPE_NAMES`, `FLOAT_TYPE_NAMES`,
     `DTYPE_TYPE_NAMES`): a `Dict` is a blob and a struct is a frame, so
     `DICT_TYPE_NAMES` is deliberately not among them, and an annotation none of
@@ -1867,7 +1867,7 @@ _PLAIN_WORD_LITERALS = (F.IntLiteral, F.FloatLiteral, F.StringLiteral,
                         F.BoolLiteral, F.NoneLiteral)
 
 #: The annotations `_plain_word_names` accepts for a parameter, and the five
-#: vocabularies `formal/types.py` publishes rather than a list written here: a
+#: vocabularies `formal/type_vocab.py` publishes rather than a list written here: a
 #: fourth copy of "what does this annotation mean" is the one that drifts.
 _PLAIN_WORD_TYPE_NAMES = (frozenset(TYPE_NAMES)
                           | STRING_TYPE_NAMES | BOOL_TYPE_NAMES
@@ -3271,7 +3271,7 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
     produces the pre-existing unclassified refusal rather than a new one.
 
     `int_names` / `string_names` are the backend's annotation vocabularies
-    (`formal.types.TYPE_NAMES` / `STRING_TYPE_NAMES`) rather than constants
+    (`formal.type_vocab.TYPE_NAMES` / `STRING_TYPE_NAMES`) rather than constants
     here, for the reason every other shared table in this file takes them from
     the caller: the two backends must not answer this question from two private
     lists, and a name is a string, not a representation.
@@ -3289,9 +3289,9 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
     the same widening the construct already made for a local, so leaving the
     field spelling refused would have been the inconsistency.
 
-    A separate argument, and NOT defaulted to `formal.types.DTYPE_TYPE_NAMES`
+    A separate argument, and NOT defaulted to `formal.type_vocab.DTYPE_TYPE_NAMES`
     here, for the reason the two above are not: this module deliberately does
-    not import `formal.types` (`STRING_TYPE_CTORS`' own comment), and a default
+    not import `formal.type_vocab` (`STRING_TYPE_CTORS`' own comment), and a default
     would give this function a fourth answer its model-internal callers do not
     pass — `one_word_value_text_evidence` and `dylib_export_return_kind` ask
     "is this holder / this export a TEXT value", where a type tag is not text
@@ -3381,7 +3381,7 @@ def declared_type_is_dict(ann, dict_names=("Dict", "dict")) -> bool:
     containers, while this one maps a type to a SPELLING of a subscript. Merging
     them would have to make one of the two answers wrong.
 
-    `dict_names` is the caller's vocabulary (`formal.types.DICT_TYPE_NAMES`),
+    `dict_names` is the caller's vocabulary (`formal.type_vocab.DICT_TYPE_NAMES`),
     for the same reason every other shared table here takes it from the caller:
     a name is a string, and the two backends must not answer this from two
     private lists.
@@ -3398,7 +3398,7 @@ def annotation_is_bool(ann, bool_names=()) -> bool:
 
     NOT `declared_type_kind(ann) == INT_KIND` and deliberately not: a kind says
     what a value IS, and both an `Int` and a `Bool` are `INT_KIND` on this path
-    (a Bool is a word holding 0 or 1, and `formal.types.BOOL_TYPE_NAMES`' own
+    (a Bool is a word holding 0 or 1, and `formal.type_vocab.BOOL_TYPE_NAMES`' own
     comment is the argument). What `pop.select` needs is the narrower fact —
     "is this 0 or 1" — because that is what makes `x != 0` the right lowering of
     `x.__mlir_bool__()` rather than a `char *`'s "is this address non-zero", and

@@ -4282,7 +4282,7 @@ def integer_text_width(bits: int) -> int:
 
 # The four widths this path actually declares. Keyed on the bit width rather
 # than on a type name, because a name is a spelling the two backends share as
-# vocabularies (`formal/types.py`) and a width is arithmetic — and because a
+# vocabularies (`formal/type_vocab.py`) and a width is arithmetic — and because a
 # `Int` alias or a `SIMD[UInt8, 4]` element is the same question asked of a
 # different spelling.
 INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}

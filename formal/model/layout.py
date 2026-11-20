@@ -556,7 +556,7 @@ MLIR_UNGUARDED_OPS = {
                    "integer here, so a select answered kind-blind would test a "
                    "`char *` for non-zero and answer 1. The missing thing is "
                    "therefore the declaration and not a kind: "
-                   "`formal.types.BOOL_TYPE_NAMES` names the annotations that "
+                   "`formal.type_vocab.BOOL_TYPE_NAMES` names the annotations that "
                    "carry it and `annotation_is_bool` is the one reader of "
                    "them. `std/utils/_select.mojo` declares `condition: Bool` "
                    "and IS lowered, so this row is reached only by a program "
@@ -3950,7 +3950,7 @@ def shift_signedness(left_type):
     decision from the saturation one because it has a different cause.
 
     Both backends ask `cmp_signed(common_type(ttype(left), ttype(right)))`,
-    and `common_type` is signed-wins (`formal/types.py`). That is the right
+    and `common_type` is signed-wins (`formal/type_vocab.py`). That is the right
     rule for an ARITHMETIC operator, where the two operands genuinely
     combine. It is the wrong rule for a shift, because the right operand of a
     shift is not a value being combined with the left one — it is a COUNT.
@@ -4252,7 +4252,7 @@ def int_value_fits(result_type, value) -> bool:
 def resolve_type(t):
     """`types.resolve` without the import: model.py imports no formal module.
 
-    `formal/types.py` imports THIS module, so importing it back here would be
+    `formal/type_vocab.py` imports THIS module, so importing it back here would be
     a cycle; `model.py` has always read a `None` type as "the default"
     (`literal_default_word`, `optional_none_word` and the `NONE_WORD` family all
     do), and this is that reading in one named place. The default is the signed
@@ -4267,7 +4267,7 @@ def resolve_type(t):
 
 
 class _IntTypeShape:
-    """The two attributes of `formal/types.py`'s `IntType` this module reads.
+    """The two attributes of `formal/type_vocab.py`'s `IntType` this module reads.
 
     A tiny stand-in rather than the class itself, for the reason in
     `resolve_type`: `types` imports `model`, so `model` cannot import `types`.

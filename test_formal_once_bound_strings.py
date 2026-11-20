@@ -14,7 +14,7 @@ again.
 import sys
 import unittest
 
-import formal.build  # noqa: F401  (import order: formal.model needs formal.types first)
+import formal.build  # noqa: F401  (import order: formal.model needs formal.type_vocab first)
 import fire_compiler as F
 from formal import model as M
 

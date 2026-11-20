@@ -3050,7 +3050,7 @@ TYPE_KIND = "type"
 # **Scope: binary64 only.**  A `Float32` is four bytes with a different
 # exponent bias, and its bits are NOT a sub-pattern of a double's, so a word
 # holding one cannot be a `FLOAT_KIND` here: `Float32` is deliberately not in
-# `formal.types.FLOAT_TYPE_NAMES` and is refused by name rather than accepted
+# `formal.type_vocab.FLOAT_TYPE_NAMES` and is refused by name rather than accepted
 # and misread.  `float16`/`bfloat16` and the `float8_*` family are the same
 # story.  See `bugs/FORMAL_float_binary64_only.md`.
 FLOAT_KIND = "float64"

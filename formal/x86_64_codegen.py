@@ -30,7 +30,7 @@ had and that the proof model in lib/ProofLib.lean does not describe. They
 raise CodegenError naming the construct rather than silently miscompiling.
 """
 
-from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
+from formal.type_vocab import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, mask_of, TYPE_NAMES,
                           STRING_TYPE_NAMES, DICT_TYPE_NAMES,
@@ -122,7 +122,7 @@ _RECV_CELL_LOCAL = "__receiver_cell"
 # Condition-code pairs for the six comparisons, as (unsigned, signed) setcc
 # mnemonics. The literal's type picks the row: `int` is unsigned 64-bit, so
 # `n < 0` on an unannotated parameter is an unsigned comparison — the same
-# lattice formal/types.py encodes and the arm64 backend follows.
+# lattice formal/type_vocab.py encodes and the arm64 backend follows.
 _CMP_CONDS = {
     "<=": ("setbe", "setle"),
     "<": ("setb", "setl"),
@@ -12402,7 +12402,7 @@ preference.
 
         The decision is model.ValueKinds' (it has to come out the same on both
         backends); this supplies the hooks that are this backend's: the
-        annotation vocabularies from formal.types, a callee's kind from its
+        annotation vocabularies from formal.type_vocab, a callee's kind from its
         declared return type or its return statements, the local-slot key
         for a field chain, and — since a field's DECLARED type is a fact about
         the struct rather than about this function — `_declared_kind` below."""

@@ -677,7 +677,7 @@ def _typed_model(source, root_name):
     """
     import formal.arm64_proof_gen as G
     from formal.build import parse_module
-    from formal.types import (DEFAULT_INT_TYPE, function_var_types,
+    from formal.type_vocab import (DEFAULT_INT_TYPE, function_var_types,
                               parse_type_name, resolve)
     from types import SimpleNamespace
     import fire_compiler as F
