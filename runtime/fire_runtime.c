@@ -10992,19 +10992,6 @@ char *mojo_repr_str(char *s) {
     return buf;
 }
 
-/* repr() of a `str`-typed value that may be None. A NULL char * is how this
- * runtime spells None for a str-typed slot (an Optional[str] field, a
- * `str`-annotated parameter given None, a str-returning function's None
- * return), so repr renders it as `None`, as CPython does. The bare
- * mojo_repr_str keeps its NULL-is-'' behaviour for callers that use a NULL
- * as an empty string. Only the codegen sites that repr a statically char *
- * value route here, so str()/print() of the same value, which already print
- * None, and the integer 0 (a word, not a char *) are unaffected. */
-char *mojo_repr_str_or_none(char *s) {
-    if (!s) return strdup("None");
-    return mojo_repr_str(s);
-}
-
 /* Python str(True)/str(False) → "True"/"False", not "1"/"0". str()/f-string
  * lowering routes a statically-_Bool value here instead of the int path. */
 char *mojo_bool_to_str(int b) {
