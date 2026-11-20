@@ -800,6 +800,7 @@ MEASURED_PEAK_GB = {
     'no-new-casts':                           (0.10, 'measured'),  # 0.7 s
     'rthdrscan':                              (0.11, 'measured'),  # 0.7 s
     'gimple-lint':                            (0.50, 'measured'),  # 10 s; four --dump children, the largest (myinterpreter.py) 0.5 GB
+    'pydiff-ratchet':                         (1.00, 'estimated'),  # ~3 min; 8 compiles at a time, each well under 1 GB (not yet measured)
     'doc-refs':                               (0.15, 'measured'),  # 1.4 s
     'returned-frame-layout':                  (0.09, 'measured'),  # 0.8 s
     'formal-typed-flag':                      (0.08, 'measured'),  # 0.8 s
@@ -1921,6 +1922,16 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # with garbage upper bits; measured with gcc-mp-15 on arm64). So this is the
 # only job that type-checks every statement the backend emits. Its BASELINE
 # counts may only shrink.
+# Every program in tools/pydiff_ok.txt must print what CPython prints (the
+# corpus is tools/pydiff_corpus; the finder is tools/pydiff.py). The list may
+# only grow, so a fix that lands is locked in and a regression is named.
+test('pydiff-ratchet', [PY, 'test_pydiff_ratchet.py'], cache=True, mem='tiny',
+     extra=GIMPLE_SOURCES + ['test_pydiff_ratchet.py', 'tools/pydiff.py',
+                             'tools/pydiff_ok.txt', 'runtime/fire_runtime.h',
+                             'runtime/fire_runtime.c', 'test_gimple_runner.py'] + sorted(
+         os.path.relpath(p, REPO)
+         for p in glob.glob(os.path.join(REPO, 'tools', 'pydiff_corpus', '*', '*.py'))),
+     desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)')
 test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + sorted(
          os.path.relpath(p, REPO)
@@ -4779,7 +4790,7 @@ BUCKETS = {
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'gimple-lint', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'pydiff-ratchet', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's

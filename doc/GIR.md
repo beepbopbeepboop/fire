@@ -235,6 +235,35 @@ that is meant to be behaviour-preserving:
 - **Stage 5b. One value-info record.** The name-keyed tables become fields
   of one `ValueInfo` object per temp. `int64_t` splits into
   Int / Erased(T) / DynWord / Box in the value's info.
+- **Stage 5c. Optional values (measured 2026-11-20; first slice landed).**
+  Why the split in 5b matters, measured on `tools/pydiff_corpus`: of 240
+  programs only 60 matched CPython, and the largest single cause (about a
+  quarter of the wrong ones) is that `None` and the integer 0 are the same
+  word. `def find(...): ... return i ... return None` is emitted as an
+  `int64_t` function and `return None` is `0LL`; `print(find(..))` shows `0`,
+  `find(xs, 0) is None` is True. The runtime already has the answer: a TAGGED
+  WORD, where `None` is the shared box `mojo_box_none()` (a pointer to a
+  kind-`n` box), an int is the plain word, and `mojo_word_is_none` /
+  `mojo_repr_boxed` / `mojo_box_word` read it. Generators and "mixed return"
+  functions (pointer beside a scalar) already use it; the plain-function path
+  only used it when one arm was a pointer. What is missing is the DECISION
+  "this value may be None, carry it tagged", and it cannot be taken from the
+  C type, because `int64_t` is an int, a None, a String and a struct pointer
+  at once (`infra_infer._return_arms_need_boxed_word`'s note: "`None` is never
+  evidence", since for an erased pointer None must stay NULL). So the rule
+  needs the 5b split: a value is `Int` (provably a number), `Erased(T)` (a
+  pointer whose None is NULL), `DynWord` (tagged) or `Box`.
+  Landed: a function with a `None` arm and a provably scalar arm (a literal or
+  a comparison, `scalar_shape_arm_kind`) returns the tagged word
+  (`_return_arms_are_int_or_none`). NOT done: an arm that is a name or a call
+  (`return i`, the common case) is still not evidence, so `find` above is
+  unchanged. Next, in order: (1) infer a LOCAL as `Int` when every binding is
+  an int literal, arithmetic on `Int`s, `len(..)` or a comparison, and let
+  that count as evidence; (2) a parameter default `= None` makes the
+  parameter `DynWord`, and a call passing `None` passes `mojo_box_none()`
+  (see `bugs/CODEGEN_none_prints_as_zero_and_equals_zero.md`); (3) `dict.get`
+  and list slots read back as `DynWord`. Do NOT define `x == None` as
+  `x == 0`: that was tried and reverted (it makes `0 == None` true).
 - **Stage 6, counted loops (started 2026-11-14).** `gen._loop_head(idx, n,
   bb_cond, bb_body, bb_post, bb_after, stmt)` and `gen._loop_tail(idx,
   bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of

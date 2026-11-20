@@ -923,22 +923,15 @@ def probe(batch, stdlib=True):
     r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if stdlib else []) +
                        ["--probe", "--only"] + batch,
                        capture_output=True, text=True, cwd=C.MAIN)
-    verdict, merged, failing, _ = classify_probe(r.stdout + r.stderr)
-    return verdict, merged, failing, r.stdout + r.stderr
-
-
-def classify_probe(out):
-    """(verdict, merged, failing) for one probe's output. GREEN/RED: the gate ran. BUSY: another integrator holds the
-    lock. ERROR: the probe itself died with an exception (integrate.py prints PROBE ERROR). EMPTY: no verdict at all
-    (a refusal, or a process that ended without reporting). Only GREEN and RED say anything about the batch."""
+    out = r.stdout + r.stderr
     if "another integrator" in out:                  # the lock is held (the post-landing verifier runs under it)
-        return "BUSY", [], []
+        return "BUSY", [], [], out
     pm = re.search(r"^PROBE (GREEN|RED): ?(.*)$", out, re.M)
     if not pm:
-        return ("ERROR" if re.search(r"^PROBE ERROR", out, re.M) else "EMPTY"), [], []
+        return "EMPTY", [], [], out
     fm = re.search(r"^FAILED_JOBS: ?(.*)$", out, re.M)
     failing = fm.group(1).split() if fm else []      # JOBS only: a failing file is not a job (see failed_files)
-    return pm.group(1), pm.group(2).split(), failing
+    return pm.group(1), pm.group(2).split(), failing, out
 
 
 def failed_files(out):
@@ -966,73 +959,6 @@ def find_culprit(seq, failing, stdlib=True):
         else:
             return None, []
     return seq[hi - 1], failing or []
-
-
-# A batch whose probe gave no verdict twice in a row is not probed a third time: a model reads the evidence and decides
-# (probe_triage.py). Two is the bound on blind retries; it is the reason this loop cannot run all night.
-PROBE_STRIKE_LIMIT = 2
-
-
-def save_state(st):
-    with open(state_path(), "w") as f:
-        json.dump(st, f, indent=1)
-
-
-def batch_key(batch, tasks):
-    """The identity of a probe attempt: the sorted names AND each branch's tip. A strike against this key means 'this
-    exact batch failed to produce a verdict'; a new commit on any branch is a new key, so real progress is never blocked."""
-    parts = []
-    for n in sorted(batch):
-        sha = C.git("rev-parse", "--verify", "-q", tasks[n]["branch"], cwd=C.MAIN, check=False)
-        parts.append("%s@%s" % (n, sha or "?"))
-    return " ".join(parts)
-
-
-def strike_probe(st, key):
-    """Count one probe of KEY that gave no verdict. Returns the strikes so far, and saves the ledger."""
-    ledger = st.setdefault("probe_strikes", {})
-    rec = ledger.setdefault(key, {"n": 0, "parked": False, "retried": False})
-    rec["n"] += 1
-    while len(ledger) > 200:                # keep the ledger small: drop the oldest keys (dicts keep insertion order)
-        ledger.pop(next(iter(ledger)))
-    save_state(st)
-    return rec["n"]
-
-
-def clear_probe_strikes(st, key):
-    if st.get("probe_strikes", {}).pop(key, None) is not None:
-        save_state(st)
-
-
-def probe_parked(st, key):
-    return bool(st.get("probe_strikes", {}).get(key, {}).get("parked"))
-
-
-def resolve_stuck_batch(st, key, batch, tasks, out, verdict):
-    """Two probes of KEY gave no verdict. A Sonnet triager reads the evidence and returns ONE decision; the swarm
-    applies it. The triager can file a branch's LAND doc (which caps it), allow one retry, or park the batch. It
-    cannot land anything, edit gates.json, or mark a test expected-fail: the decision set is closed in probe_triage."""
-    import probe_triage as PT
-    rec = st["probe_strikes"][key]
-    log("triage: %s gave no verdict %d times in a row; asking the reviewer (%s)" % (verdict, rec["n"], PT.MODEL))
-    try:
-        decision = PT.ask(batch, out, verdict)
-    except Exception as e:                  # no usable decision: park, which is the safe default (no re-probe, no landing)
-        log("triage: no usable decision (%r); parking the batch" % (e,))
-        decision = {"action": "park", "branch": None, "reason": "triage failed: %s" % e}
-    log("triage: %s %s: %s" % (decision["action"], decision.get("branch") or "", decision.get("reason", "")[:300]))
-    if decision["action"] == "land_doc":
-        name = decision["branch"]
-        I._cap_merge_fix(name, "land doc: %s: probe triage: %s" % (name, decision.get("reason", "")[:200]))
-        I.land_doc(name, tasks[name], "probe keeps giving no verdict: %s" % decision.get("reason", "")[:200],
-                   "Branch: %s\nTriage: %s" % (tasks[name]["branch"], decision.get("reason", "")))
-        batch.remove(name)
-    elif decision["action"] == "retry" and not rec["retried"]:
-        rec["retried"] = True               # one retry per key, then it parks
-        rec["n"] = 0
-    else:
-        rec["parked"] = True
-    save_state(st)
 
 
 def land():
@@ -1071,43 +997,23 @@ def land():
     batch, landed = list(names), False
     if LAND_BATCH:
         batch = batch[:LAND_BATCH]                     # drain: a red full gate poisons few; the rest land next pass
-    st = load_state()
     while batch:
-        key = batch_key(batch, tasks)
-        if probe_parked(st, key):
-            # Escalated and parked: this exact batch (names AND branch tips) is not probed again until a tip moves or
-            # the triage decision changes the candidate set. This is the bound that stops the loop.
-            log("landing: parked, not re-probed (%s); it waits for a branch to change" % " ".join(batch)[:200])
-            break
         log("landing: probing %d branch(es) behind the %s gate: %s" % (
             len(batch), "light --stdlib" if build else "full", " ".join(batch)[:300]))
         _t0 = time.time()
         verdict, merged, failing, out = probe(batch, stdlib=build)
         log("landing: probe %s in %.0f s (merged %d of %d)" % (verdict, time.time() - _t0, len(merged), len(batch)))
-        if verdict in ("EMPTY", "ERROR"):   # no verdict: say what it printed, and count it against this batch
-            log("landing: probe gave no verdict (%s); its last lines: %s" % (
-                verdict, " | ".join(out.strip().splitlines()[-4:])[:400]))
-        for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its LAND doc
+        if verdict == "EMPTY":      # no PROBE line at all: the probe died or found nothing to merge; say what it printed
+            log("landing: probe printed no verdict; its last lines: %s" % " | ".join(out.strip().splitlines()[-4:])[:400])
+        for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
             if c in batch:
                 log("conflict %s: filing its LAND doc" % c)
-                try:
-                    I.hand_to_land_doc(c, tasks[c], I.conflict_section(out, c))
-                except (Exception, SystemExit) as e:
-                    # One branch's doc failing must not end the pass for every other branch. The branch is capped before
-                    # the doc is filed (hand_to_land_doc), so it is not a candidate on the next pass either way.
-                    log("conflict %s: its LAND doc could not be filed (%r); it is left capped" % (c, e))
+                I.hand_to_land_doc(c, tasks[c], I.conflict_section(out, c))
                 batch.remove(c)
         if verdict == "BUSY":
             log("integrator busy (another integrator round holds the lock); landing waits for the next pass")
             break
-        if verdict in ("EMPTY", "ERROR"):
-            n = strike_probe(st, key)
-            if n >= PROBE_STRIKE_LIMIT:
-                resolve_stuck_batch(st, key, batch, tasks, out, verdict)
-            break
-        if verdict == "GREEN" or verdict == "RED":
-            clear_probe_strikes(st, key)
-        if not merged:
+        if verdict == "EMPTY" or not merged:
             break
         if verdict == "GREEN":
             r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if build else []) + ["--only"] + merged,
@@ -1122,10 +1028,7 @@ def land():
         culprit, failing = find_culprit(merged, failing, stdlib=build)
         if culprit is None:
             log("red: the batch is red but the culprit search was inconclusive (a sub-probe gave no GREEN/RED); "
-                "nothing is held and no gate doc is filed")
-            n = strike_probe(st, key)
-            if n >= PROBE_STRIKE_LIMIT:
-                resolve_stuck_batch(st, key, batch, tasks, out, "RED-INCONCLUSIVE")
+                "nothing is held and no gate doc is filed, the next pass retries")
             break
         log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))

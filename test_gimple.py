@@ -272,378 +272,6 @@ def cpython_stdout(mojo_src: str):
     return py.stdout
 
 
-def test_prelude_sort_without_import_is_an_honest_stub():
-    """A prelude `sort` call with no import must BUILD, not fail at link time.
-
-    `sort` is a prelude name (`std/prelude/__init__.mojo` re-exports it from
-    std.builtin.sort), so Mojo code calls it without an import. The generic
-    unknown-name path already emits a weak "unavailable in compiled mode"
-    DEFINITION for a name nothing in the compile defines — the same honest
-    stub an imported-but-not-yet-compilable `sort` gets — but module_gen's
-    declaration-only `_util_pairs` row for `sort` won the shared
-    `_MOJO_STUB_sort` guard and suppressed it, leaving a bare call to a
-    symbol nothing defines. The build then died with
-    `Undefined symbols ... "_sort"` instead of printing the stub's message.
-
-    Assert the contract from the bug doc's step 1: no import, an honest weak
-    stub (the message, not a link failure), and the program's own answer.
-    """
-    global _PASS, _FAIL
-    name = 'prelude_sort_without_import_is_an_honest_stub'
-    got, c_src, err = program_stdout("""\
-def main() raises:
-    var p = List(length=5, fill=Scalar[DType.int8](3))
-    sort(p)
-    print(len(p))
-""")
-    problems = []
-    if got is None:
-        problems.append(err or 'the program did not build and run')
-    else:
-        if 'sort: unavailable in compiled mode' not in got:
-            problems.append(f'the honest stub message is missing from '
-                            f'stdout {got!r}')
-        if not got.rstrip().endswith('5'):
-            problems.append(f'compiled stdout {got!r} does not end with the '
-                            f"program's own `5`")
-    if 'void sort(...);' in c_src:
-        problems.append('the declaration-only `void sort(...)` stub is back '
-                        '(it wins the _MOJO_STUB_sort guard and suppresses '
-                        'the weak definition)')
-    if problems:
-        print(f"FAIL  {name}: " + '; '.join(problems))
-        for line in (c_src or '').splitlines():
-            if 'sort' in line and '#line' not in line:
-                print(f"      C: {line}")
-        _FAIL += 1
-    else:
-        print(f"PASS  {name}  (stdout={got!r})")
-        _PASS += 1
-
-
-def test_span_param_binds_only_from_a_proven_list():
-    """`Span[T, origin]` infers `T` from a List argument ONLY when the caller
-    proves the list's element type.
-
-    This is the first step of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`:
-    `std.builtin.sort.sort[T, origin](span: Span[T, origin])` is called with a
-    `List`, and before this rule `_unify_param_ann` declined the `Span`
-    annotation outright, so the call never reached the elaborator. A
-    `MojoList *` erases its element type, so the binding is taken from the
-    Mojo type the call site proves (`List[Int8]`) and `origin` binds to the
-    erased origin. Without that proof, or for a non-list argument, the
-    template stays unbound (declined), exactly as before.
-    """
-    import elaborate
-    src = ('def sort[T: Copyable, origin: MutOrigin, //, *, stable: Bool = False]'
-           '(span: Span[T, origin]):\n    pass\n')
-    problems = []
-    got = elaborate.infer_type_args(src, ['MojoList *'], ['List[Int8]'])
-    # `stable` is a keyword-only bracket parameter with a default; the
-    # template default fills it, so the full ordered binding has three entries.
-    want = ['Int8', elaborate.ERASED_TYPE_ARG, 'False']
-    if got != want:
-        problems.append(f"List[Int8] proven: got {got!r}, want {want!r}")
-    got = elaborate.infer_type_args(src, ['MojoList *'], None)
-    if got is not None:
-        problems.append(f'unproven List bound {got!r}; want None (declined)')
-    got = elaborate.infer_type_args(src, ['int64_t *'], ['Pointer[Int8, MutOrigin]'])
-    if got is not None:
-        problems.append(f'a Pointer argument bound {got!r}; want None (declined)')
-    if problems:
-        raise AssertionError('; '.join(problems))
-    print("PASS  span_param_binds_only_from_a_proven_list")
-
-
-def test_span_param_binds_from_a_proven_span():
-    """`Span[T, o]` infers T/o from a SPAN argument ONLY when the caller
-    proves its concrete Mojo type — the nested chain of Span-taking
-    generics (std.builtin.sort's `sort` -> `_sort` -> `_insertion_sort`,
-    each `span: Span[T, origin]`) passes the SAME proven Span down; the
-    argument's C type is the erased `Span *`, so the proof is the caller's
-    own monomorphized parameter annotation (`Span[Int, MutOrigin]`).
-
-    Second step of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`, beside
-    the List case of `test_span_param_binds_only_from_a_proven_list`. A
-    still-generic proof (`Span[T, origin]` inside a body that is itself
-    not yet an instance) is symbol-for-symbol and never converges, so it
-    binds nothing — and a proven origin that disagrees with a CONCRETE
-    origin the annotation already names is a different type, not a
-    binding.
-    """
-    import elaborate
-    src = ('def sink[T, o](span: Span[T, o]):\n    pass\n')
-    problems = []
-    got = elaborate.infer_type_args(src, ['Span *'], ['Span[Int, MutOrigin]'])
-    if got != ['Int', 'MutOrigin']:
-        problems.append(f'proven Span bound {got!r}, want [Int, MutOrigin]')
-    got = elaborate.infer_type_args(src, ['Span *'], ['Span[T, MutOrigin]'])
-    if got is not None:
-        problems.append(f'a still-generic proof bound {got!r}; want None')
-    got = elaborate.infer_type_args(src, ['Span *'], None)
-    if got is not None:
-        problems.append(f'an unproven Span bound {got!r}; want None')
-    # A Span carried in a BOXED slot (`List[Span[X, o]].pop()` lowers to an
-    # `int64_t` word) is still a proven Span; the call site casts it back to
-    # `Span *` (`emit_resolve._coerce_span_args`). Without this the same
-    # proof was ignored whenever the C type was the boxed word.
-    got = elaborate.infer_type_args(src, ['int64_t'], ['Span[Int, MutOrigin]'])
-    if got != ['Int', 'MutOrigin']:
-        problems.append(f'boxed proven Span bound {got!r}, '
-                        f'want [Int, MutOrigin]')
-    got = elaborate.infer_type_args(src, ['int64_t'], None)
-    if got is not None:
-        problems.append(f'an unproven boxed Span bound {got!r}; want None')
-    # A concrete origin the annotation already names must AGREE with the
-    # proven argument; a different origin is a different type.
-    src2 = 'def sink[T](span: Span[T, MutOrigin]):\n    pass\n'
-    got = elaborate.infer_type_args(src2, ['Span *'], ['Span[Int, MutOrigin]'])
-    if got != ['Int']:
-        problems.append(f'matching concrete origin bound {got!r}, want [Int]')
-    got = elaborate.infer_type_args(src2, ['Span *'], ['Span[Int, ImmOrigin]'])
-    if got is not None:
-        problems.append(f'a disagreeing origin bound {got!r}; want None')
-    if problems:
-        raise AssertionError('; '.join(problems))
-    print("PASS  span_param_binds_from_a_proven_span")
-
-
-def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
-    """A `Span *` parameter given a BOXED `int64_t` argument gets a
-    `(Span *)` cast at the call site, but ONLY when the caller proved that
-    word is a Span. This is the call-site half of the proof
-    `test_span_param_binds_from_a_proven_span` pins: std.builtin.sort's
-    `_quicksort` pops `interval` from a `List[Span[T, origin]]`, so the value
-    arrives as an `int64_t` slot of a word-storing list, and the sibling
-    helper's parameter is `Span *`. An unproved `int64_t` is left alone: the
-    cast is a consequence of the proof, not a guess from the ABI.
-    """
-    import mojo.backend_gimple.emit_resolve as er
-
-    class G:
-        _struct_allocs_needed = set()
-
-        def __init__(self):
-            self.n = 0
-            self.lines = []
-
-        def _new_temp(self, ctype):
-            self.n += 1
-            self.lines.append(f'/* temp {ctype} */')
-            return f'_t{self.n}'
-
-        def _emit(self, text):
-            self.lines.append(text)
-
-        def _rt_into(self, dest, name, args):
-            self.lines.append(f'  {dest} = {name}();')
-
-    problems = []
-    g = G()
-    out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')],
-                               span_proofs=[True])
-    if out != [('Span *', '_t1')]:
-        problems.append(f'proved boxed Span became {out!r}, '
-                        f'want [(Span *, _t1)]')
-    if not any('(Span *) interval' in ln for ln in g.lines):
-        problems.append(f'the cast is missing from {g.lines!r}')
-    g = G()
-    out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')],
-                               span_proofs=[False])
-    if out != [('int64_t', 'interval')]:
-        problems.append(f'unproved int64_t was rewritten to {out!r}')
-    out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')])
-    if out != [('int64_t', 'interval')]:
-        problems.append(f'a call with no proof information rewrote {out!r}')
-    # A `MojoList *` argument builds the Span header from fields, and the
-    # field reads MUST go through temps: `gcc -fgimple` rejects a
-    # component_ref as a memory-store RHS ("invalid RHS for gimple memory
-    # store") and a cast over one ("invalid operand in unary operation") —
-    # both measured on std.collections.counter's `sort(items, comparator)`.
-    g = G()
-    out = er._coerce_span_args(g, ['Span *'], [('MojoList *', 'items')])
-    if out[0][0] != 'Span *':
-        problems.append(f'a List argument was not converted: {out!r}')
-    text = '\n'.join(g.lines)
-    if '->_len = items->len' in text or '->_data = (char *) items->data' in text:
-        problems.append(f'the span store uses a raw component_ref: {text!r}')
-    if ('= items->len;' not in text or '= items->data;' not in text
-            or '->_len = _t' not in text or '->_data = _t' not in text):
-        problems.append(f'the field reads are not materialized: {text!r}')
-    if problems:
-        raise AssertionError('; '.join(problems))
-    print("PASS  boxed_span_arg_is_cast_to_a_span_only_when_proven")
-
-
-def test_arity_overloads_mangle_to_distinct_symbols():
-    """Two same-named generic overloads with the SAME type-parameter names
-    and DIFFERENT value arities must mangle to DIFFERENT symbols for the
-    same type args — `mangle` is a function of (name, {type-param: value})
-    only, so without the arity in the identity they are ONE symbol.
-
-    Measured on std.builtin.sort's `sort(span)` / `sort(span, cmp_fn)`
-    (both `sort[T, origin, stable]`): the moment the 1-arg instance's own
-    body call elaborated the 2-arg overload, its translation unit declared
-    the 2-arg extern beside its own 1-arg definition and gcc failed with
-    "too many arguments to function". `elaborate_generic_call` folds the
-    call arity into the identity (`ArgC`) for any such overload pair —
-    keyed on arity, not on the name (the doc's plan: disambiguate
-    overloads by arity, never special-case `sort`).
-    """
-    import elaborate
-    el = elaborate.Elaborator()
-    src = ('def dup[T](a: T) -> T:\n    return a\n'
-           'def dup[T](a: T, b: T) -> T:\n    return a\n')
-    problems = []
-    one = el.elaborate_generic_call(src, 'dup', ['Int'], arg_count=1)
-    two = el.elaborate_generic_call(src, 'dup', ['Int'], arg_count=2)
-    if one is None or two is None:
-        problems.append(f'an arity overload declined: {one!r} / {two!r}')
-    elif one['symbol'] == two['symbol']:
-        problems.append(f'both arities mangle to {one["symbol"]!r}')
-    if problems:
-        raise AssertionError('; '.join(problems))
-    print(f"PASS  arity_overloads_mangle_to_distinct_symbols  "
-          f"(one={one['symbol']}, two={two['symbol']})")
-
-
-def _proven_local_types(src, params=()):
-    """`emit_resolve._proven_local_types` on the first function of `src`, via
-    a minimal generator stand-in (the proof reads only the body, the
-    parameter names and the type-expression renderer)."""
-    from fire_compiler import py_tokenize, Parser, FunctionDef
-    import mojo.backend_gimple.emit_resolve as er
-    mod = Parser(py_tokenize(src)).parse_module()
-    fn = next(s for s in mod if isinstance(s, FunctionDef))
-    fake = type('G', (), {})()
-    fake._cur_func_body = fn.body
-    fake._cur_func_params = set(params)
-    # The proof renders a `List[...]` bracket argument through the generator's
-    # own type-expression renderer, which recurses through this attribute.
-    fake._type_expr_to_ann = lambda n: er._type_expr_to_ann(fake, n)
-    return er._proven_local_types(fake)
-
-
-def test_proven_list_local_keeps_element_type_across_inplace_store():
-    """Step 2a of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`: a local
-    bound exactly once by a `List(...)` constructor (from `fill`'s literal)
-    or a `List[X]` annotation keeps its proven element type — in particular
-    ACROSS in-place stores like `p[0] = 3`, whose subscript target mutates
-    the object instead of rebinding the name — so the Done-when `sort(p)`
-    can prove `List[Int]` to a `Span[T, o]` parameter. A plain
-    re-assignment ends the proof, a read alias inherits nothing, and a
-    parameter is not a local (its annotation is read by the parameter
-    check, not the local proof).
-    """
-    def _proven(src, params=()):
-        return _proven_local_types(src, params)
-
-    problems = []
-    got = _proven("""\
-def f():
-    var p = List(length=3, fill=0)
-    p[0] = 3
-    p[1] = 1
-    p[2] = 2
-    return p
-""")
-    if got.get('p') != 'List[Int]':
-        problems.append(f'in-place store: p proven as {got.get("p")!r}, '
-                        f'want List[Int]')
-    got = _proven("""\
-def f():
-    var q: List[Float64] = List(length=2, fill=0)
-    q[0] = 1.0
-    return q
-""")
-    if got.get('q') != 'List[Float64]':
-        problems.append(f'annotation: q proven as {got.get("q")!r}, '
-                        f'want List[Float64]')
-    got = _proven("""\
-def f():
-    var r = List(length=1, fill=1)
-    r = 5
-    return r
-""")
-    if 'r' in got:
-        problems.append(f'rebound r still proven {got["r"]!r}')
-    got = _proven("""\
-def f():
-    var r = List(length=1, fill=1)
-    var s = r
-    return s
-""")
-    if got.get('s') is not None:
-        problems.append(f'read alias s proven {got["s"]!r}; want unproven')
-    if got.get('r') != 'List[Int]':
-        problems.append(f'r should stay proven List[Int], '
-                        f'got {got.get("r")!r}')
-    got = _proven("def f(x: List[Int]):\n    return x\n", params=('x',))
-    if 'x' in got:
-        problems.append(f'parameter x proven {got["x"]!r}; want not a local')
-    if problems:
-        raise AssertionError('; '.join(problems))
-    print("PASS  proven_list_local_keeps_element_type_across_inplace_store")
-
-
-def test_proven_span_local_from_a_list_projection():
-    """Step 2b of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`: a local
-    bound to a ONE-STEP projection out of a proven container inherits its
-    element type — specifically std.builtin.sort's `_quicksort` shape
-
-        var stack = List[Span[T, origin]](capacity=...)
-        var interval = stack.pop()
-
-    where `interval: Span[T, origin]` is passed to the bare sibling helpers
-    (`_insertion_sort(interval, cmp_fn)`, `_sort3(...)`,
-    `_quicksort_partition_*`). Before this proof, the `Span *` argument's
-    element/origin could not be named, so every one of those calls declined
-    and fell to the `unavailable in compiled mode` weak stub.
-
-    The element is read from a non-slice subscript as well as `.pop()`, and
-    a rebind of the projected local ends the proof exactly as it does for
-    the list itself.
-    """
-    problems = []
-    got = _proven_local_types("""\
-def f():
-    var stack = List[Span[Int, MutOrigin]](capacity=4)
-    var interval = stack.pop()
-    var first = stack[0]
-    return interval
-""")
-    if got.get('stack') != 'List[Span[Int, MutOrigin]]':
-        problems.append(f'stack proven as {got.get("stack")!r}, '
-                        f'want List[Span[Int, MutOrigin]]')
-    if got.get('interval') != 'Span[Int, MutOrigin]':
-        problems.append(f'pop projection proven as {got.get("interval")!r}, '
-                        f'want Span[Int, MutOrigin]')
-    if got.get('first') != 'Span[Int, MutOrigin]':
-        problems.append(f'index projection proven as {got.get("first")!r}, '
-                        f'want Span[Int, MutOrigin]')
-    got = _proven_local_types("""\
-def f():
-    var stack: List[Span[Int, MutOrigin]] = List(length=2, fill=0)
-    var interval = stack.pop()
-    interval = 0
-    return interval
-""")
-    if 'interval' in got:
-        problems.append(f'rebound interval still proven {got["interval"]!r}')
-    got = _proven_local_types("""\
-def f():
-    var stack = List[Int](capacity=4)
-    var value = stack[0]
-    return value
-""")
-    if got.get('value') != 'Int':
-        problems.append(f'List[Int] element proven as {got.get("value")!r}, '
-                        f'want Int')
-    if problems:
-        raise AssertionError('; '.join(problems))
-    print("PASS  proven_span_local_from_a_list_projection")
-
-
 def defined_param_ctype(c_src: str, func_name: str, param_name: str) -> str:
     """The C type `param_name` is declared with in `func_name`'s DEFINITION.
 
@@ -1706,6 +1334,52 @@ def _run_isolated(thunk, label):
         print(f"FAIL {label}: {type(e).__name__}: {e}")
 
 
+def test_prelude_sort_without_import_is_an_honest_stub():
+    """A prelude `sort` call with no import must BUILD, not fail at link time.
+
+    `sort` is a prelude name (`std/prelude/__init__.mojo` re-exports it from
+    std.builtin.sort), so Mojo code calls it without an import. module_gen's
+    declaration-only `_util_pairs` row for `sort` once won the shared
+    `_MOJO_STUB_sort` guard and suppressed the weak "unavailable in compiled
+    mode" definition the unknown-name path emits, leaving a bare call to a
+    symbol nothing defines — the build died with
+    `Undefined symbols ... "_sort"`. The row was dropped (commit
+    00ba62d61), so the existing weak definition stands: the program links
+    and prints the honest stub, then the program's own answer.
+
+    Asserts the contract from the bug doc's step 1: no import, an honest weak
+    stub (the message, not a link failure), and the program's own `5`.
+    """
+    global _PASS, _FAIL
+    name = 'prelude_sort_without_import_is_an_honest_stub'
+    got, c_src, err = program_stdout("""\
+def main() raises:
+    var p = List(length=5, fill=Scalar[DType.int8](3))
+    sort(p)
+    print(len(p))
+""")
+    problems = []
+    if got is None:
+        problems.append(err or 'the program did not build and run')
+    else:
+        if 'sort: unavailable in compiled mode' not in got:
+            problems.append(f'the honest stub message is missing from '
+                            f'stdout {got!r}')
+        if not got.rstrip().endswith('5'):
+            problems.append(f'compiled stdout {got!r} does not end with the '
+                            f"program's own `5`")
+    if 'void sort(...);' in c_src:
+        problems.append('the declaration-only `void sort(...)` stub is back '
+                        '(it wins the _MOJO_STUB_sort guard and suppresses '
+                        'the weak definition)')
+    if problems:
+        print(f"FAIL  {name}: " + '; '.join(problems))
+        for line in (c_src or '').splitlines():
+            if 'sort' in line and '#line' not in line:
+                print(f"      C: {line}")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}  (stdout={got!r})")
 
 
 def run_tests():
@@ -15865,18 +15539,6 @@ main()
 
     _run_isolated(test_prelude_sort_without_import_is_an_honest_stub,
                   'prelude_sort_without_import_is_an_honest_stub')
-    _run_isolated(test_span_param_binds_only_from_a_proven_list,
-                  'span_param_binds_only_from_a_proven_list')
-    _run_isolated(test_span_param_binds_from_a_proven_span,
-                  'span_param_binds_from_a_proven_span')
-    _run_isolated(test_boxed_span_arg_is_cast_to_a_span_only_when_proven,
-                  'boxed_span_arg_is_cast_to_a_span_only_when_proven')
-    _run_isolated(test_arity_overloads_mangle_to_distinct_symbols,
-                  'arity_overloads_mangle_to_distinct_symbols')
-    _run_isolated(test_proven_list_local_keeps_element_type_across_inplace_store,
-                  'proven_list_local_keeps_element_type_across_inplace_store')
-    _run_isolated(test_proven_span_local_from_a_list_projection,
-                  'proven_span_local_from_a_list_projection')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

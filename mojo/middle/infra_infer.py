@@ -2178,6 +2178,119 @@ def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
     return False
 
 
+def _mentions_name(node, name: str) -> bool:
+    """Does any identifier in `node` (a statement or expression) spell `name`?"""
+    for n in gimple_exprtypes._walk_ast(node):
+        if isinstance(n, gimple_ctypes.IdentExpr) and _as_str(n.name) == name:
+            return True
+    return False
+
+
+def _local_is_provably_int(body: list, name: str) -> bool:
+    """Is the local `name` an integer wherever it is read in `body`?
+
+    Yes when ALL of these hold, which together make its kind a fact about the
+    source and not a guess about a C type:
+
+      * a statement directly in `body` (not under an `if`/loop) assigns it an
+        integer literal, and no statement before that one mentions the name
+        (so it cannot be a parameter or an earlier binding's value);
+      * every other binding of it, anywhere in `body` outside nested defs, is
+        `name = <int literal>` or `name op= <int literal>` with `op` one of
+        `+ - * // %`;
+      * it is not a `for` target, a `with`/`except ... as` name, a tuple
+        target, or a declaration.
+
+    This is what lets `return i` count as scalar evidence (`find` below), where
+    a bare name otherwise cannot: its C type `int64_t` is also what an erased
+    String or struct pointer is spelled.
+
+        def find(items, target):
+            i = 0
+            for x in items:
+                if x == target:
+                    return i
+                i += 1
+            return None
+    """
+    first = -1
+    for k in range(len(body)):
+        st = body[k]
+        if isinstance(st, gimple_ctypes.AssignStmt) \
+                and isinstance(st.target, IdentExpr) \
+                and _as_str(st.target.name) == name \
+                and gimple_exprtypes.scalar_shape_arm_kind(st.value) == 'int':
+            first = k
+            break
+        if _mentions_name(st, name):
+            return False
+    if first < 0:
+        return False
+    bindings = _each_binding(body)
+    for b in bindings:
+        if isinstance(b, gimple_ctypes.AssignStmt):
+            if isinstance(b.target, IdentExpr) and _as_str(b.target.name) == name:
+                if gimple_exprtypes.scalar_shape_arm_kind(b.value) != 'int':
+                    return False
+            elif _mentions_name(b.target, name):
+                return False
+        elif isinstance(b, gimple_ctypes.AugAssignStmt):
+            if isinstance(b.target, IdentExpr) and _as_str(b.target.name) == name:
+                if _as_str(b.op).rstrip('=') not in ('+', '-', '*', '//', '%'):
+                    return False
+                if gimple_exprtypes.scalar_shape_arm_kind(b.value) != 'int':
+                    return False
+            elif _mentions_name(b.target, name):
+                return False
+        elif isinstance(b, gimple_ctypes.ForStmt):
+            if _mentions_name(b.target, name):
+                return False
+        elif isinstance(b, gimple_ctypes.MultiAssignStmt):
+            for t in (b.targets or []):
+                if _mentions_name(t, name):
+                    return False
+        elif isinstance(b, gimple_ctypes.VarDecl):
+            if _as_str(b.name) == name:
+                return False
+        elif isinstance(b, gimple_ctypes.WithStmt):
+            if _mentions_name(b.items, name):
+                return False
+        elif isinstance(b, gimple_ctypes.TryStmt):
+            for h in (b.handlers or []):
+                if _as_str(getattr(h, 'name', '') or '') == name:
+                    return False
+    return True
+
+
+def _return_arms_are_int_or_none(acc: list, arms: list, body: list = None) -> bool:
+    """Does an unannotated function return `None` on one path and a PROVABLY
+    scalar value (an int/bool literal, a comparison) on another?
+
+    Its return type is then the tagged word: `None` is the shared None box,
+    not the NULL word, because the NULL word is also the integer 0 and the
+    caller could not tell `find(xs, 0)` returning 0 from "not found". The
+    evidence rule is `_return_arms_need_boxed_word`'s, and for the same
+    reason: an `int64_t` arm that is a name or a call may be an erased
+    String or struct pointer, whose None really is the NULL word, so only a
+    scalar SHAPE (`scalar_shape_arm_kind`) counts. A function with no `None`
+    arm is not touched."""
+    _has_none = False
+    _has_scalar = False
+    for _i in range(len(acc)):
+        _t = _as_str(acc[_i])
+        _node = arms[_i] if _i < len(arms) else None
+        if _t != 'void' and _is_none_return_arm(_node):
+            _has_none = True
+        elif _t in ('int', 'int64_t', '_Bool', 'double', 'float') \
+                and gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
+            _has_scalar = True
+        elif _t in ('int', 'int64_t') and body is not None \
+                and isinstance(_node, IdentExpr) \
+                and _local_is_provably_int(body, _as_str(_node.name)):
+            _has_scalar = True
+    return _has_none and _has_scalar
+
+
 def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
@@ -2190,8 +2303,10 @@ def _infer_return_type_core(gen, body: list) -> str:
         # instead, and body identity is recorded so the return emitter boxes
         # exactly the functions this decision widened, rather than re-deriving
         # the mix from a differently-seeded type table.
-        if gimple_ctypes.TypeLattice.is_pointer(_rt) \
-                and _return_arms_need_boxed_word(acc, arms):
+        if (gimple_ctypes.TypeLattice.is_pointer(_rt)
+                and _return_arms_need_boxed_word(acc, arms)) \
+                or (_rt in ('int', 'int64_t')
+                    and _return_arms_are_int_or_none(acc, arms, body)):
             _mixed = getattr(gen, '_mixed_return_bodies', None)
             if _mixed is None:
                 _mixed = set()

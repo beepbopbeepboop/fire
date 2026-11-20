@@ -15412,6 +15412,7 @@ def main():
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
+                  test_none_beside_a_scalar_arm_returns_the_tagged_word,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -16119,6 +16120,48 @@ def main():
     u = {None: 0}
     print(None in u, 0 in u, len(u))
 
+main()
+""")
+
+
+def test_none_beside_a_scalar_arm_returns_the_tagged_word():
+    """A function that returns `None` on one path and a literal or a
+    comparison on another used to return the NULL word for `None`, which is
+    also the integer 0: `print(f(0))` showed `0`, `h(0) is None` was True and
+    `h(1) is None` agreed with it. `None` is now the shared None box in such a
+    function (`infra_infer._return_arms_are_int_or_none`), and `h(0) == 0`
+    stays True while `h(0) is None` is False."""
+    test_gimple_matches_cpython("gimple_none_beside_a_scalar_arm", """\
+def f(n):
+    if n > 0:
+        return 5
+    return None
+
+def g(n):
+    if n > 5:
+        return n > 7
+    return None
+
+def h(n):
+    if n == 0:
+        return 0
+    return None
+
+def main():
+    print(f(1))
+    print(f(0))
+    print(f(1) is None)
+    print(f(0) is None)
+    x = f(0)
+    if x is None:
+        print("none")
+    else:
+        print("val", x)
+    print(g(9), g(6), g(1))
+    print(h(0), h(1))
+    print(h(0) is None, h(1) is None)
+    print(h(0) == 0)
+    print(f(1) + 1)
 main()
 """)
 
