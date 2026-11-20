@@ -34,3 +34,11 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 - 2026-11-20 01:32:23: conflicts with master (last commit 2026-11-19, first unlanded commit 2026-11-19; 3 commit(s) ahead of master, 94 behind it; task started 2026-11-19 18:07:36)
   Branch: work/fix-replan-gate-red-recover-land-2026-11-02-part5-p
   Conflicting files: bugs/GATE_red_recover-land_2026-11-02-part5-part2-part1.md
+- 2026-11-20: DECISION: DROP. The branch's finished work is doc-only (it replan
+  `bugs/GATE_red_recover-land_2026-11-02-part5-part2` into `part1`/`part2` halves; no code in it).
+  master already carries that final doc set: `bugs/GATE_red_recover-land_2026-11-02-part5_part2-part1.md`
+  exists on master at its final form (with the 2026-11-19 planning-round Status entry), and the
+  underlying code defect (function-scoped sibling import of a module-level global emitting a weak
+  `_funcptr_` stub) is fixed on master by commit `a87b98a29` (`codegen: no function stub for an
+  imported module-level global`), pinned by `bugs/GATE_red_recover-land_2026-11-02-part5-part2-part1.md`.
+  The branch therefore holds nothing master lacks; it is obsolete. Land nothing.

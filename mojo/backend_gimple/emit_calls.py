@@ -2121,11 +2121,8 @@ def _comptime_conforms_to_pred(gen):
     return ginf._conforms_to_pred(gen)
 
 
-def _comptime_conformance_map(gen) -> dict:
-    """The declared conformance map, from emit_infra's single builder. The
-    `-> dict` matches emit_infra's own annotation: without it this wrapper's
-    return type was inferred as int64_t from the cross-module call, so the
-    importers' externs and the body disagreed with the MojoDict * definition."""
+def _comptime_conformance_map(gen):
+    """The declared conformance map, from emit_infra's single builder."""
     return ginf._comptime_conformance_map(gen)
 
 
