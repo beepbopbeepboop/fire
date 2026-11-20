@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 
+from exec_budget import COMPILE_TIMEOUT_S
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 BINDING = '''struct CondCopyable[T: Movable & Deinitable](
@@ -63,7 +65,7 @@ def build(src):
         fh.write(src)
     r = subprocess.run([sys.executable, os.path.join(HERE, 'fire.py'), 'build', p,
                         '-o', os.path.join(d, 'out')],
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     return r.returncode, r.stdout + r.stderr
 
 
