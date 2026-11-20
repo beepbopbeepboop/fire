@@ -194,8 +194,8 @@ that is meant to be behaviour-preserving:
   `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
   `label`. Each returns a typed value and appends an `Instr`.
   `_rt_call`/`_emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
-  Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the count of
-  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them) are the next
+  Ratchet: the count of `gen._emit(f"` (about 900 after stage 2a) may only
+  shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them) are the next
   mechanical batch: `gen._cast(T, x)`.
 - **Stage 3a (landed 2026-11-13). Exits are told, not recognised.**
   `_emit_cf` (`emit_infra.py`) replaces `_emit_through`. `gen._goto`,
@@ -217,10 +217,7 @@ that is meant to be behaviour-preserving:
   a list of `Instr`; the four function-assembly sites print it.
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
-  methods. Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the
-  counts of `.endswith(' *')` (344), `== 'int64_t'` (404), `in (.., 'int64_t')`
-  (312), `== 'char *'` (398), `== '_Bool'` (68), `== 'double'` (187) and
-  `== 'MojoList *'` (203) may only shrink.
+  methods. Ratchet: counts of `.endswith(' *')` and `== 'int64_t'`.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for
@@ -238,39 +235,6 @@ that is meant to be behaviour-preserving:
 - **Stage 5b. One value-info record.** The name-keyed tables become fields
   of one `ValueInfo` object per temp. `int64_t` splits into
   Int / Erased(T) / DynWord / Box in the value's info.
-- **Stage 5c. Optional values (measured 2026-11-20; first slice landed).**
-  Why the split in 5b matters, measured on `tools/pydiff_corpus`: of 240
-  programs only 60 matched CPython, and the largest single cause (about a
-  quarter of the wrong ones) is that `None` and the integer 0 are the same
-  word. `def find(...): ... return i ... return None` is emitted as an
-  `int64_t` function and `return None` is `0LL`; `print(find(..))` shows `0`,
-  `find(xs, 0) is None` is True. The runtime already has the answer: a TAGGED
-  WORD, where `None` is the shared box `mojo_box_none()` (a pointer to a
-  kind-`n` box), an int is the plain word, and `mojo_word_is_none` /
-  `mojo_repr_boxed` / `mojo_box_word` read it. Generators and "mixed return"
-  functions (pointer beside a scalar) already use it; the plain-function path
-  only used it when one arm was a pointer. What is missing is the DECISION
-  "this value may be None, carry it tagged", and it cannot be taken from the
-  C type, because `int64_t` is an int, a None, a String and a struct pointer
-  at once (`infra_infer._return_arms_need_boxed_word`'s note: "`None` is never
-  evidence", since for an erased pointer None must stay NULL). So the rule
-  needs the 5b split: a value is `Int` (provably a number), `Erased(T)` (a
-  pointer whose None is NULL), `DynWord` (tagged) or `Box`.
-  Landed: a function with a `None` arm and a provably scalar arm (a literal or
-  a comparison, `scalar_shape_arm_kind`) returns the tagged word
-  (`_return_arms_are_int_or_none`). NOT done: an arm that is a name or a call
-  (`return i`, the common case) counts only when the local is provably an
-  int (`_local_is_provably_int`: an unconditional `i = <int literal>` first,
-  every rebinding `i = <int literal>` or `i op= <int literal>`), so `find`
-  above now returns the tagged word. A copy `y = x` of a name bound to such a
-  call keeps the box (`tagged_next_bind_name`). Still lost: a tagged value
-  stored in a list/tuple/dict slot, and one passed as an argument (the
-  parameter is a plain word). Next, in order: (1) widen the local-int proof
-  to arithmetic on proven ints, `len(..)` and comparisons; (2) a parameter default `= None` makes the
-  parameter `DynWord`, and a call passing `None` passes `mojo_box_none()`
-  (see `bugs/CODEGEN_none_prints_as_zero_and_equals_zero.md`); (3) `dict.get`
-  and list slots read back as `DynWord`. Do NOT define `x == None` as
-  `x == 0`: that was tried and reverted (it makes `0 == None` true).
 - **Stage 6, counted loops (started 2026-11-14).** `gen._loop_head(idx, n,
   bb_cond, bb_body, bb_post, bb_after, stmt)` and `gen._loop_tail(idx,
   bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of

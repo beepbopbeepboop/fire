@@ -15412,8 +15412,6 @@ def main():
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
-                  test_none_beside_a_scalar_arm_returns_the_tagged_word,
-                  test_copy_of_a_tagged_none_keeps_it,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -16000,13 +15998,6 @@ c(0)
 c(5)
 print(d(None), d(""), d("0"))
 print(0 == None, 0 != None)
-
-
-def r(x: str):
-    return x
-
-
-print(repr(r(None)), r(None), repr(r("")), repr(r("0")))
 """)
 
 
@@ -16121,71 +16112,6 @@ def main():
     u = {None: 0}
     print(None in u, 0 in u, len(u))
 
-main()
-""")
-
-
-def test_copy_of_a_tagged_none_keeps_it():
-    """`x = h(0)` kept the None box, but the copy `y = x` unwrapped it to the
-    plain word: `y is None` was True for the integer 0, and a copy of None
-    printed `0`. A copy of a name bound to a mixed-return call stays tagged."""
-    test_gimple_matches_cpython("gimple_copy_of_a_tagged_none", """\
-def h(n):
-    if n == 0:
-        return 0
-    return None
-
-def main():
-    x = h(0)
-    y = x
-    print(y)
-    print(y is None)
-    z = h(1)
-    w = z
-    print(w)
-    print(w is None)
-main()
-""")
-
-
-def test_none_beside_a_scalar_arm_returns_the_tagged_word():
-    """A function that returns `None` on one path and a literal or a
-    comparison on another used to return the NULL word for `None`, which is
-    also the integer 0: `print(f(0))` showed `0`, `h(0) is None` was True and
-    `h(1) is None` agreed with it. `None` is now the shared None box in such a
-    function (`infra_infer._return_arms_are_int_or_none`), and `h(0) == 0`
-    stays True while `h(0) is None` is False."""
-    test_gimple_matches_cpython("gimple_none_beside_a_scalar_arm", """\
-def f(n):
-    if n > 0:
-        return 5
-    return None
-
-def g(n):
-    if n > 5:
-        return n > 7
-    return None
-
-def h(n):
-    if n == 0:
-        return 0
-    return None
-
-def main():
-    print(f(1))
-    print(f(0))
-    print(f(1) is None)
-    print(f(0) is None)
-    x = f(0)
-    if x is None:
-        print("none")
-    else:
-        print("val", x)
-    print(g(9), g(6), g(1))
-    print(h(0), h(1))
-    print(h(0) is None, h(1) is None)
-    print(h(0) == 0)
-    print(f(1) + 1)
 main()
 """)
 

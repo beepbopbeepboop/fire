@@ -3762,7 +3762,6 @@ class GimpleGen:
         'mojo_repr_list_elem_double': ('char *', ['int64_t']),
         'mojo_repr_list_elem_bool':   ('char *', ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
-        'mojo_repr_str_or_none': ('char *',    ['char *']),
         'mojo_ascii_escape':     ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
         'mojo_repr_float':       ('char *',    ['double']),
@@ -6140,9 +6139,8 @@ class GimpleGen:
         return grsl._ensure_generic_struct(self, base_name, type_args)
     def _elaborate_generic_struct_call(self, node: CallExpr):
         return grsl._elaborate_generic_struct_call(self, node)
-    def _emit_generic_instantiation(self, info, arg_pairs, span_proofs=None):
-        return grsl._emit_generic_instantiation(self, info, arg_pairs,
-                                               span_proofs=span_proofs)
+    def _emit_generic_instantiation(self, info, arg_pairs):
+        return grsl._emit_generic_instantiation(self, info, arg_pairs)
     def _as_ptr(self, ctype: str, val: str) -> tuple[str, str]:
         return grsl._as_ptr(self, ctype, val)
     def _is_none_literal(self, el) -> bool:

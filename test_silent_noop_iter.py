@@ -44,6 +44,14 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOJO = os.path.join(HERE, 'fire.py')
 TIMEOUT = 300
+#: Budget for the ONE shared build that is not this file's subject. `fire.py
+#: build` links against `build/libmojostdlib.<arch>.dylib`, and in a tree whose
+#: `build/` is empty (a fresh clone, the integrator's `masterred_` snapshot)
+#: the first build also builds that library. Charging it to the first case's
+#: 300 s is what made this job red on master: the first case's `fire.py build`
+#: timed out and the uncaught TimeoutExpired aborted the whole file. So it is
+#: paid once, up front, with a budget that covers a cold stdlib build.
+SHARED_BUILD_TIMEOUT = 1200
 
 _PASS = 0
 _FAIL = 0
@@ -60,9 +68,40 @@ def check(name, cond, detail=''):
         _FAIL += 1
 
 
-def _run(cmd, cwd=None):
+def _run(cmd, cwd=None, timeout=TIMEOUT):
     return subprocess.run(cmd, capture_output=True, text=True,
-                          errors='replace', timeout=TIMEOUT, cwd=cwd or HERE)
+                          errors='replace', timeout=timeout, cwd=cwd or HERE)
+
+
+def _warm_shared_build():
+    """Build one trivial program before the cases, so the shared stdlib dylib
+    is built (and its currency stamp written) OUTSIDE any case's budget.
+
+    Returns `(ok, why)`. The program is deliberately not one of `CASES`: it
+    must not be able to make a case pass by having warmed its own cache entry.
+    """
+    src = 'def main():\n    print("warm")\n'
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p = os.path.join(tmpdir, 'shared_warm.py')
+        with open(p, 'w') as fh:
+            fh.write(src)
+        exe = os.path.join(tmpdir, 'shared_warm')
+        try:
+            b = _run([sys.executable, MOJO, 'build', '-o', exe, p],
+                     timeout=SHARED_BUILD_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return False, f'timed out after {SHARED_BUILD_TIMEOUT}s'
+        if b.returncode != 0 or not os.path.exists(exe):
+            return False, (b.stderr.strip() or b.stdout.strip() or
+                           f'exit {b.returncode}')[-400:]
+        try:
+            r = _run([exe])
+        except subprocess.TimeoutExpired:
+            return False, f'built program timed out after {TIMEOUT}s'
+        if r.returncode != 0 or r.stdout.strip() != 'warm':
+            return False, (f'built program printed {r.stdout!r} '
+                           f'(exit {r.returncode})')
+    return True, ''
 
 
 def _reference_stdout(src, tmpdir):
@@ -81,10 +120,16 @@ def _reference_stdout(src, tmpdir):
     p = os.path.join(tmpdir, 'ref_case.py')
     with open(p, 'w') as fh:
         fh.write(src)
-    r = _run([sys.executable, p])
+    try:
+        r = _run([sys.executable, p])
+    except subprocess.TimeoutExpired:
+        return None
     if r.returncode == 0:
         return r.stdout
-    r = _run([sys.executable, MOJO, 'run', p])
+    try:
+        r = _run([sys.executable, MOJO, 'run', p])
+    except subprocess.TimeoutExpired:
+        return None
     return r.stdout if r.returncode == 0 else None
 
 
@@ -93,7 +138,13 @@ def _compiled_stdout(src, tmpdir, tag):
     with open(p, 'w') as fh:
         fh.write(src)
     exe = os.path.join(tmpdir, tag)
-    b = _run([sys.executable, MOJO, 'build', '-o', exe, p])
+    try:
+        b = _run([sys.executable, MOJO, 'build', '-o', exe, p])
+    except subprocess.TimeoutExpired:
+        # A TIMEOUT is a FAILURE of this case, not of the file: letting the
+        # exception escape loses every case after it (the gate's red for this
+        # job was exactly that -- an uncaught 300 s build timeout).
+        return None, f'BUILD TIMED OUT after {TIMEOUT}s'
     if b.returncode != 0 or not os.path.exists(exe):
         return None, f'BUILD FAILED: {b.stderr.strip().splitlines()[-1:] or b.stdout[-300:]}'
     r = _run([exe])
@@ -1052,6 +1103,13 @@ def main(argv):
     if '-v' in args:
         _VERBOSE = True
         args.remove('-v')
+    # One shared build first: `fire.py build` links against the stdlib dylib,
+    # and building it is not any case's subject (see SHARED_BUILD_TIMEOUT).
+    ok, why = _warm_shared_build()
+    check('shared_build_is_ready', ok, '' if ok else why)
+    if not ok:
+        print('\nCannot run the cases: the shared build they all use failed.')
+        return 1
     names = args or (list(CASES) + list(CODEGEN_CASES))
     for name in names:
         if name in CASES:

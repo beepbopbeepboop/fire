@@ -3525,13 +3525,6 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
     # run time: c_common/tables.py runs it at import, in `ColumnSpec.REGEX`).
     if module_name == 'textwrap' and method_name == 'dedent' and len(node.args) == 1:
         arg_type, arg_val = gen.lower_expr(node.args[0])
-        # The argument's lowered type is not always `char *`: a name bound by
-        # iterating a tuple of strings is an int64_t box holding the pointer
-        # (elaborate.py's `for _src in (module_src, template_src)`). Passing the
-        # box as `char *` is a gcc "makes pointer from integer" error, so convert
-        # the representation explicitly.
-        if arg_type != 'char *':
-            arg_val = gen._cast('char *', arg_val)
         t = gen._call_expr('char *', 'mojo_textwrap_dedent', [('char *', arg_val)])
         return 'char *', t
 
@@ -7513,29 +7506,6 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     }
     if method in _CSTR_CASE_METHODS:
         return 'char *', gen._rt_call('char *', _CSTR_CASE_METHODS[method], [f"{cstr_ov}"])
-    # ljust / rjust / center / zfill: the runtime had the first three and none
-    # was wired for a `char *` receiver, so each answered a raw int 0.
-    if method in ('ljust', 'rjust', 'center', 'zfill'):
-        _w = None
-        _fill = None
-        for _kn, _kv in (kwargs or []):
-            if _as_str(_kn) == 'width':
-                _wt, _wv = gen.lower_expr(_kv)
-                _w = gen._to_int64(_wt, _wv)
-            elif _as_str(_kn) == 'fillchar':
-                _fill = gen.lower_expr(_kv)[1]
-        if _w is None and arg_pairs:
-            _w = gen._to_int64(arg_pairs[0][0], arg_vals[0])
-        if _fill is None and len(arg_vals) > 1:
-            _fill = arg_vals[1]
-        if _w is None:
-            _w = '0'
-        if method == 'zfill':
-            return 'char *', gen._rt_call('char *', 'mojo_str_zfill', [f"{cstr_ov}", f"{_w}"])
-        if _fill is None:
-            _fill = gen._new_val('char *', gen._intern_string(' '))
-        return 'char *', gen._rt_call('char *', f'mojo_str_{method}',
-                                      [f"{cstr_ov}", f"{_w}", f"{_fill}"])
     if method in _CSTR_METHODS:
         # `str.rstrip(chars)` / `str.lstrip(chars)` with a chars argument:
         # the plain mojo_str_rstrip/lstrip only strip whitespace and IGNORE
@@ -7543,9 +7513,8 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # ("MojoFunction *") — breaking gimple_codegen.py's own struct-
         # typedef dependency check (`base_type = field_type.rstrip(' *')`)
         # in the self-hosted binary and emitting structs out of order.
-        if method in ('strip', 'rstrip', 'lstrip') and arg_vals:
-            fn = {'strip': 'mojo_str_strip_chars', 'rstrip': 'mojo_str_rstrip_chars',
-                  'lstrip': 'mojo_str_lstrip_chars'}[method]
+        if method in ('rstrip', 'lstrip') and arg_vals:
+            fn = 'mojo_str_rstrip_chars' if method == 'rstrip' else 'mojo_str_lstrip_chars'
             _a0t, _a0v = arg_pairs[0]
             if _a0t != 'char *' and _a0t != 'void *':
                 _a0v = gen._coerce_to_type(_a0t, 'char *', _a0v)
@@ -7670,21 +7639,6 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # subprocess argv (see mojo_str_split's doc comment).
         sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
         sep_val = arg_vals[0] if arg_vals else '0'
-        # `split(sep, maxsplit)` / `split(maxsplit=n)`: the limit was dropped,
-        # so `"a,b,,c".split(",", 1)` split at every comma.
-        _ms = arg_vals[1] if len(arg_vals) > 1 else None
-        _ms_t = arg_pairs[1][0] if len(arg_pairs) > 1 else 'int64_t'
-        for _kn, _kv in (kwargs or []):
-            if _as_str(_kn) == 'maxsplit':
-                _ms_t, _ms = gen.lower_expr(_kv)
-            elif _as_str(_kn) == 'sep':
-                sep_type, sep_val = gen.lower_expr(_kv)
-        if _ms is not None:
-            t = gen._call_expr('MojoList *', 'mojo_str_split_n',
-                               [('char *', cstr_ov), (sep_type, sep_val),
-                                ('int64_t', gen._to_int64(_ms_t, _ms))])
-            gen._elem_types[t] = 'char *'
-            return 'MojoList *', t
         t = gen._call_expr('MojoList *', 'mojo_str_split', [('char *', cstr_ov), (sep_type, sep_val)])
         gen._elem_types[t] = 'char *'
         return 'MojoList *', t
@@ -7706,23 +7660,6 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         t = gen._call_expr('MojoList *', fn, [('char *', cstr_ov), (sep_type, arg_vals[0])])
         gen._elem_types[t] = 'char *'
         return 'MojoList *', t
-    if method == 'replace' and len(arg_vals) >= 2 and (
-            len(arg_vals) >= 3 or any(_as_str(_kn) == 'count' for _kn, _kv in (kwargs or []))):
-        # `replace(old, new, count)`: the count was dropped (every occurrence
-        # was replaced).
-        _cnt_t, _cnt = ('int64_t', '-1')
-        if len(arg_vals) >= 3:
-            _cnt_t, _cnt = arg_pairs[2]
-        for _kn, _kv in (kwargs or []):
-            if _as_str(_kn) == 'count':
-                _cnt_t, _cnt = gen.lower_expr(_kv)
-        _o0t, _o0v = arg_pairs[0]
-        _o1t, _o1v = arg_pairs[1]
-        t = gen._call_expr('char *', 'mojo_str_replace_n',
-                           [('char *', cstr_ov), (_o0t, arg_vals[0]), (_o1t, arg_vals[1]),
-                            ('int64_t', gen._to_int64(_cnt_t, _cnt))])
-        gen._fresh_vals.add(t)
-        return 'char *', t
     if method == 'replace' and len(arg_vals) >= 2:
         arg0_type = arg_pairs[0][0] if len(arg_pairs) > 0 else 'char *'
         arg1_type = arg_pairs[1][0] if len(arg_pairs) > 1 else 'char *'

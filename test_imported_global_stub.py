@@ -16,17 +16,8 @@ aliased `_SIGNED`/`_UNSIGNED`/`_FLOAT`/`_BIN_OPS`/`_CMP_OPS`).
 The fixture is the compiler's own shape: `generated_dispatch.py` defines the
 tables, `types.py` re-exports one under an alias (`as _GD_SIGNED`) and one
 bare, and the consumer imports the bare one and reads both through calls.
-The test requires zero `unavailable in compiled mode` in the emitted C except
-the one documented weak stub the util preamble now carries in every TU (the
-predeclared prelude `sort`, 00ba62d61), then builds that C and requires the
-binary's stdout to equal CPython's.
-
-A second test covers the SEPARATE-compile shape (`do_imports=False`, the
-`fire dylib` per-module form): a function-scoped `from module_loader import
-STDLIB_PATH` of an unannotated scalar `.py` global must read the defining
-module's `char *` accessor, not an `extern int64_t STDLIB_PATH (...)` +
-`_funcptr_` read. A third pins the `.py` scalar-global export rule in
-`module_loader.py` directly.
+The test requires zero `unavailable in compiled mode` in the emitted C, then
+builds that C and requires the binary's stdout to equal CPython's.
 
 The fixture MUST live inside a checkout (under `build/`, git-ignored): the
 sibling-module resolution path this exercises is keyed on the importing file
@@ -48,19 +39,6 @@ from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
 RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
-
-
-def _residue_lines(c: str, needle: str) -> list:
-    """The `needle` lines of an emitted `.ci` that are NOT the documented
-    predeclared prelude `sort` weak stub. Since 00ba62d61 the util preamble
-    carries that one honest weak definition in EVERY TU (step 1 of
-    bugs/CODEGEN_prelude_sort_is_not_resolved.md: `sort: unavailable in
-    compiled mode`), so a blanket string scan sees it whether or not the
-    fixture calls `sort`. Anything else carrying the stub marker is
-    imported-symbol residue this test exists to keep out."""
-    return [ln for ln in c.splitlines()
-            if needle in ln
-            and 'sort: unavailable in compiled mode' not in ln]
 
 DISPATCH_SRC = """\
 _SIGNED: dict = {
@@ -181,12 +159,11 @@ def test_imported_global_has_no_function_stub():
             ci = gimple_codegen.compile_to_gimple(
                 f.read(), do_imports=True, filename=root_file)
         # An imported global's reads go through its accessor; nothing may
-        # have emitted a callable weak stub for it. (The preamble's one
-        # documented prelude-`sort` weak stub is not residue: see
-        # `_residue_lines`.)
-        assert not _residue_lines(ci, 'unavailable in compiled mode'), \
-            '\n'.join(_residue_lines(ci, 'unavailable in compiled mode'))
-        assert not _residue_lines(ci, 'unavailable')
+        # have emitted a callable weak stub for it.
+        assert 'unavailable in compiled mode' not in ci, '\n'.join(
+            ln for ln in ci.splitlines()
+            if 'unavailable in compiled mode' in ln)
+        assert 'unavailable' not in ci
         # The accessor path itself is still what the reads use — the stub
         # must be gone because the real lowering exists, not because reads
         # stopped resolving.
@@ -214,78 +191,6 @@ def test_imported_global_has_no_function_stub():
         shutil.rmtree(td, ignore_errors=True)
 
 
-STDLIB_SRC = """\
-def locate():
-    # Function-scoped import of a module-level STRING global from a compiler
-    # sibling: `module_loader.py` has `STDLIB_PATH = _find_stdlib_path()`, an
-    # unannotated RHS whose callee is annotated `-> str`. This is the measured
-    # shape from cas._stdlib_fingerprint (cas.py).
-    from module_loader import STDLIB_PATH
-    return STDLIB_PATH
-"""
-
-
-def test_function_scoped_str_global_reads_accessor_not_stub():
-    # Red before the fix: the importer had no export for `STDLIB_PATH`, so the
-    # separate compile declared `extern int64_t STDLIB_PATH (...)` and read it
-    # through `_funcptr_STDLIB_PATH` -- the weak "unavailable in compiled mode"
-    # stub in the closure dump. The defining module's `char *` accessor exists
-    # (`module_loader__mojo_global_get_STDLIB_PATH`), so reads must use it.
-    import gimple_codegen
-    root = os.path.join(HERE, 'build', 'test_imported_global_stub')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='probe_', dir=root)
-    try:
-        path = os.path.join(td, 'types.py')
-        with open(path, 'w') as f:
-            f.write(STDLIB_SRC)
-        sep = gimple_codegen.compile_to_gimple(
-            STDLIB_SRC, do_imports=False, filename=path)
-        assert '_funcptr_STDLIB_PATH' not in sep, sep
-        assert 'extern int64_t STDLIB_PATH' not in sep, sep
-        assert not _residue_lines(sep, 'unavailable in compiled mode'), \
-            '\n'.join(_residue_lines(sep, 'unavailable in compiled mode'))
-        assert 'module_loader__mojo_global_get_STDLIB_PATH' in sep, sep
-    finally:
-        import shutil
-        shutil.rmtree(td, ignore_errors=True)
-
-
-def test_py_scalar_global_scanner_types_only_what_the_definer_types():
-    # The `.py` export scan (module_loader.py) types a `NAME[: ANN] = RHS`
-    # global exactly as the DEFINING module's accessor is typed, or leaves it
-    # unexported. Its own compile is not run here (the scan is gated to the
-    # compiler's directory); the rule is pinned directly.
-    import module_loader as ml
-    assert ml._ml_scalar_global("STDLIB_PATH = _find_stdlib_path()") == \
-        ['STDLIB_PATH', '', '_find_stdlib_path()']
-    assert ml._ml_scalar_global("NAME: str = 'x'") == ['NAME', 'str', "'x'"]
-    # Not a plain scalar assignment: a union annotation, `==`, a `def`, a
-    # tuple target. None of these may be exported.
-    assert ml._ml_scalar_global("NAME: str | None = None") == []
-    assert ml._ml_scalar_global("NAME == 1") == []
-    assert ml._ml_scalar_global("def f():") == []
-    assert ml._ml_scalar_global("A, B = 1, 2") == []
-    exports = {
-        '_find_stdlib_path': {'c_return_type': 'char *'},
-        '_n': {'c_return_type': 'int64_t'},
-    }
-    # Unannotated: only a whole-RHS call to a same-file def with a pointer,
-    # `char *` or `double` return qualifies.
-    assert ml._ml_py_global_ctype('', '_find_stdlib_path()', exports) == 'char *'
-    assert ml._ml_py_global_ctype('', '_n()', exports) == ''
-    assert ml._ml_py_global_ctype('', 'undefined()', exports) == ''
-    assert ml._ml_py_global_ctype('', "'x'", exports) == ''
-    # Annotated: the defining module's own accessor types.
-    assert ml._ml_py_global_ctype('str', "'x'", {}) == 'char *'
-    assert ml._ml_py_global_ctype('int', '1', {}) == 'int'
-    assert ml._ml_py_global_ctype('bool', 'True', {}) == 'int'
-    assert ml._ml_py_global_ctype('float', '1.0', {}) == 'double'
-    assert ml._ml_py_global_ctype('list[int]', '[]', {}) == ''
-
-
 if __name__ == '__main__':
     test_imported_global_has_no_function_stub()
-    test_function_scoped_str_global_reads_accessor_not_stub()
-    test_py_scalar_global_scanner_types_only_what_the_definer_types()
     print('PASS')

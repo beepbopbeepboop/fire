@@ -2121,11 +2121,8 @@ def _comptime_conforms_to_pred(gen):
     return ginf._conforms_to_pred(gen)
 
 
-def _comptime_conformance_map(gen) -> dict:
-    """The declared conformance map, from emit_infra's single builder. The
-    `-> dict` matches emit_infra's own annotation: without it this wrapper's
-    return type was inferred as int64_t from the cross-module call, so the
-    importers' externs and the body disagreed with the MojoDict * definition."""
+def _comptime_conformance_map(gen):
+    """The declared conformance map, from emit_infra's single builder."""
     return ginf._comptime_conformance_map(gen)
 
 
@@ -2650,28 +2647,9 @@ def _lc_getattr(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lc_sum(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`sum(x)` and `sum(x, start)`: the second argument is added to the total
-    (it was a gcc "too many arguments" error). A float start, or a float
-    total, makes the result a double.
-
-    The single-argument form follows.
+    """`sum(x)` with one argument.
 
     One arm of `_lower_call`, which tests the condition and calls this."""
-    rt, rv = _lc_sum_one(gen, node)
-    if len(node.args) < 2:
-        return rt, rv
-    st, sv = gen.lower_expr(node.args[1])
-    if rt in gimple_ctypes._FLOAT_TYPES or st in gimple_ctypes._FLOAT_TYPES:
-        a = gen._cast('double', rv if rt in gimple_ctypes._FLOAT_TYPES
-                      else gen._to_int64(rt, rv))
-        b = gen._cast('double', sv if st in gimple_ctypes._FLOAT_TYPES
-                      else gen._to_int64(st, sv))
-        return 'double', gen._binop('double', f"{a}", '+', f"{b}")
-    return 'int64_t', gen._binop('int64_t', gen._to_int64(rt, rv), '+', gen._to_int64(st, sv))
-
-
-def _lc_sum_one(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """The total of `sum(x)`'s first argument."""
     at, av = gen.lower_expr(node.args[0])
     _refuse_namedtuple_tuple_use(gen, at, 'calling sum on')
     # `sum(a_dict)`/`sum(a_set)` of numbers is real Python, and even a
@@ -4904,29 +4882,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _gen = (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
             and node.func.obj.name in gen._imported_generics) or \
            (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generics)
-    # A call to a SIBLING generic of the instantiation this unit is compiling
-    # (monomorphize.instantiate's `generic_paths`), bracketed or bare: the
-    # sibling map is only ever non-empty inside an isolated instantiation TU,
-    # and a call that cannot elaborate declines and takes the ordinary path
-    # (see emit_resolve._elaborate_generic_call). A BARE call that names the
-    # instantiation's own function (`sin(...)` inside `sin_5_...`'s body) is a
-    # self-call, not a sibling call: it keeps the ordinary stub the same way
-    # every other bare self-call in this gate does (a live one is
-    # unmaterializable — the bracketed form carries the self-recursion
-    # diagnostic, `self_recursive_uninstantiable`; a comptime-dead one must
-    # not fail the build — measured on std.math's `sin`, whose narrowing arm
-    # `comptime if size_of[dtype]() < size_of[.float32](): return sin(...)`
-    # is dead for every dtype >= .float32 and elaborating it raised the
-    # self-recursion refusal on an ordinary `from std.math import sin` module).
-    _sib = getattr(gen, '_sibling_generic_paths', None) or {}
-    _cfn = getattr(gen, 'current_func_name', None)
-    _bare = node.func.name if isinstance(node.func, gimple_ctypes.IdentExpr) else None
-    _bare_self = _bare is not None and bool(_cfn) and (
-        _bare == _cfn or _cfn.startswith(_bare + '_'))
+    # A bracketed call to a SIBLING generic of the instantiation this unit is
+    # compiling (monomorphize.instantiate's `generic_paths`): explicit only, see
+    # emit_resolve._elaborate_generic_call.
     _gen = _gen or (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                     and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                    and node.func.obj.name in _sib) \
-        or (_bare is not None and _bare in _sib and not _bare_self)
+                    and node.func.obj.name in (getattr(gen, '_sibling_generic_paths', None) or {}))
     if _gen:
         res = gen._elaborate_generic_call(node)
         if res is not None:
@@ -5883,7 +5844,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # _elem_types" pattern for repr(). Found via Tools/lockbench/
     # lockbench.py's `sum(values)`/`sum(x**2 for x in values)` on a
     # list of floats.
-    if (fname_raw == 'sum' and len(node.args) in (1, 2)
+    if (fname_raw == 'sum' and len(node.args) == 1
             and not gen._locally_binds_name('sum')):
         return _lc_sum(gen, node)
 
@@ -14369,19 +14330,6 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'Span *', t
 
     if ot == 'char *':
-        # A spelled step (`s[::2]`, `s[::-1]`) keeps its step: the step-less
-        # helper below answered the whole string for both.
-        if getattr(node, 'step', None) is not None:
-            _kt, kv = gen.lower_expr(node.step)
-            _stepv = _emit_slice_step_zero_check(gen, gen._to_int64(_kt, kv))
-            _hs = '0' if node.start is None else '1'
-            _he = '0' if node.stop is None else '1'
-            _sv = gen._new_val('int64_t', start_v)
-            _ev = (gen._new_val('int64_t', stop_v)
-                   if node.stop is not None else '0')
-            t = gen._rt_call('char *', 'mojo_cstr_slice_step',
-                             [f"{ov}", f"{_hs}", _sv, f"{_he}", f"{_ev}", f"{_stepv}"])
-            return 'char *', t
         # Codepoint-aware slicing for char* strings
         t = gen._rt_call('char *', 'mojo_cstr_slice_cp', [f"{ov}", f"{start_v}", f"{stop_v}"])
         return 'char *', t

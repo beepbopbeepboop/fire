@@ -1030,50 +1030,6 @@ def test_every_job_over_the_debt_line_says_why():
           f'nothing, and the next step for each job is written down nowhere')
 
 
-# Jobs whose real COLD pass does not fit the default timeout, with the
-# measurement that says so. Every other job is bounded by the default and must
-# stay there: the default is the hang detector, so a job that opts out of it
-# owes the number that makes its pass legitimate rather than a wedge.
-#
-# `linkmode` runs 56 end-to-end `driver.compile_program` builds. Each one is a
-# cold compile whenever the compiler fingerprint changes (the CAS key covers
-# the codegen sources), so a gate landing a codegen change pays the whole sweep
-# cold. Measured from `build/suite-timings.jsonl`: 1,349-3,352 s over the
-# 2026-11-02..11-19 gates, 3,298.6 s on head 8e1d4ee43 (the last pass), and
-# four 2026-11-19 gate runs reported [TIMEOUT] at the old 3600 s default.
-MEASURED_COLD_PASS_S = {
-    'linkmode': 3298.6,
-}
-
-
-def test_a_job_whose_cold_pass_outruns_the_default_names_its_own_timeout():
-    """A pass measured longer than the default must not run under the default.
-
-    The default is not a budget to raise for everything — it is what catches a
-    genuine wedge in an hour, and 3600 s is still ~6x every ordinary job. But a
-    job killed at that default while doing complete, correct work reports
-    [TIMEOUT], which says nothing about whether its output was right. So a job
-    with a measured cold pass over the line names its own `timeout=`, with 2x
-    headroom over the measurement, and this is the check that keeps the name
-    and the measurement from drifting apart.
-    """
-    for name, measured_s in sorted(MEASURED_COLD_PASS_S.items()):
-        spec = suite.REGISTRY.get(name)
-        check(f'timeout: {name} is a registered job', spec is not None,
-              'a measurement of a job that no longer exists checks nothing')
-        if spec is None:
-            continue
-        check(f'timeout: {name} does not run on the {suite.DEFAULT_JOB_TIMEOUT_S:g} s default',
-              spec.timeout is not None,
-              f'{name} measured {measured_s:g} s cold, which is at or over the '
-              f'default: it must name its own timeout')
-        effective = spec.timeout or suite.DEFAULT_JOB_TIMEOUT_S
-        check(f'timeout: {name} has 2x headroom over its measured cold pass',
-              effective >= 2 * measured_s,
-              f'{effective:g} s for a {measured_s:g} s pass — a loaded gate '
-              f'would kill it again, which is the [TIMEOUT] this pins')
-
-
 def test_an_expect_marker_points_at_a_doc_that_exists():
     """A registered reason that cites `bugs/` must cite a doc that is there.
 
@@ -2250,15 +2206,6 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # that is not a call keyword at all, and it walks `build/` and the other derived
 # trees this one skips.
 STALE_PER_CHILD_BUDGETS = {
-    # Four pins that arrived with the 2026-11-19 closure-stub /
-    # imported-container merge. Each literal is a real child budget (a
-    # compile/link/run of one fixture); the counts are the ast walk's.
-    'test_dump_full_reports_closure_stubs.py': 1,
-    'test_gimple_class_method_import_inlined.py': 2,
-    'test_gimple_imported_container_global.py': 3,
-    'test_gimple_set_op_boxed_container_local.py': 3,
-    # tools/ pin, 2026-11-20: four subprocess timeouts on a compile/run.
-    'tools/test_orchestrator_wedge.py': 4,
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
@@ -2309,6 +2256,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_regress_scriptutil_generator_closure.py': 3,
     'test_regress_yield_from_module_generator.py': 2,
     'test_regress_yield_from_word_iterator.py': 3,
+    'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
@@ -2343,14 +2291,8 @@ STALE_PER_CHILD_BUDGETS = {
     'test_candidate_selection_diagnostic.py': 1,
     'test_diagnostic_format_modular.py': 1,
     'test_diagnostics_in_missing_locs.py': 1,
-    'test_dump_full_reports_closure_stubs.py': 1,
     'test_elaboration_recursion_diagnostic.py': 1,
     'test_fieldwise_init_and_deprecated_conversion.py': 1,
-    'test_gimple_class_method_import_inlined.py': 2,
-    'test_gimple_imported_container_global.py': 3,
-    'test_gimple_set_op_boxed_container_local.py': 3,
-    # tools/ pin, 2026-11-20: four subprocess timeouts on a compile/run.
-    'tools/test_orchestrator_wedge.py': 4,
     'test_invalid_downcast_build.py': 1,
     'test_overload_diagnostic.py': 1,
     'test_predicate_where_diagnostic.py': 1,
@@ -4348,14 +4290,7 @@ UNREGISTERED = {
     'test_gimple_imported_container_global.py': _STANDALONE_TEST_REASON,
     'test_gimple_module_global_pending_owner.py': _STANDALONE_TEST_REASON,
     'test_gimple_set_op_boxed_container_local.py': _STANDALONE_TEST_REASON,
-    # Pins that `--dump-full` reports a weak/unavailable stub present in the
-    # .ci it just wrote (so a reject= job can see it on stdout); runs directly.
-    'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
-    # tools/ pins, 2026-11-20; each runs directly (`python3 <file>`) and
-    # names its cause in its own docstring.
-    'tools/test_integrate_probe_loop.py': _STANDALONE_TEST_REASON,
-    'tools/test_orchestrator_wedge.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
     'test_match_class_pattern.py': _STANDALONE_TEST_REASON,
@@ -5387,35 +5322,6 @@ def test_every_test_file_is_registered():
           'not run by any registered spec, not in UNREGISTERED, and in no '
           'declared family: '
           + ', '.join(undeclared))
-
-    # A REGISTERED test file whose job command is `python3 <file>` must have a
-    # `__main__`, or the job is a silent no-op: the interpreter runs only the
-    # top level (imports + defs) and exits 0, so none of its tests ever run.
-    # Measured 2026-11-20: three such files (test_module_loader_stdlib.py,
-    # test_docstring_mojo_blocks.py, test_tuple_enumerate_var_refinement.py)
-    # were registered jobs that had never executed a single test -- see
-    # the no-op registered-job class. suite.py has no pytest
-    # driver, so `__main__` is the only way these jobs get teeth.
-    noop = []
-    for _f in sorted(on_disk):
-        if os.path.basename(_f) not in named:
-            continue
-        try:
-            _tree = ast.parse(open(_f, errors='replace').read(), filename=_f)
-        except SyntaxError:
-            continue
-        _has_main = any(isinstance(_n, ast.If)
-                        and '__main__' in ast.dump(_n.test) for _n in _tree.body)
-        _has_test = any(isinstance(_n, ast.FunctionDef)
-                        and _n.name.startswith('test')
-                        for _n in ast.walk(_tree))
-        if _has_test and not _has_main:
-            noop.append(_f)
-    check('the estate: a registered test file with tests has a __main__',
-          not noop,
-          'these are registered jobs whose command is `python3 <file>` and '
-          'which define tests but no `__main__`, so the job runs none of them: '
-          + ', '.join(noop))
 
     # The other two directions, which is what stops the list becoming a
     # permanent excuse. Both are the anti-rot discipline tools/suite.py already
@@ -7194,7 +7100,6 @@ def main():
                test_every_compiler_job_is_capped,
                test_every_job_is_reserved_before_it_starts,
                test_the_timeout_clock_starts_after_admission,
-               test_a_job_whose_cold_pass_outruns_the_default_names_its_own_timeout,
                test_a_reservation_the_budget_cannot_fit_is_reported,
                test_a_fanout_item_is_capped_and_reserved_like_any_other_job,
                test_a_registered_fanout_item_is_wrapped_in_the_built_argv,
