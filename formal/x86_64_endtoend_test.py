@@ -3642,14 +3642,17 @@ def _header(code, insns, base, steps):
     #
     # `maxRecDepth` is the other half of the same step, and it is a LIMIT rather
     # than an allocation, so raising it costs nothing when it is not needed.  The
-    # default is 1000, and it is the closing `simp` that runs out rather than any
-    # single step: its term nests one successor equation per instruction, so the
-    # depth it needs grows with the length of the function and a constant would
-    # be a constant that is wrong again at the next example.  Measured on
-    # `bitops`, 44 steps, the first two words that go through are 1200 and 2000
-    # and 1000 fails -- about 27 per step, so 40 is the factor used here, with
-    # the default as the floor for the short ones that never needed it.
-    depth = max(1000, 40 * max(steps, 1))
+    # default is 1000.  Two things in the file run out of it, and they scale with
+    # DIFFERENT sizes: the closing `simp` nests one successor equation per step
+    # (measured on `bitops`, 44 steps, 1200 and 2000 go through and 1000 fails --
+    # about 27 per step, so 40 is the factor here), and `all_bytes` is a flat
+    # `And` chain over every byte of the image proved by a matching flat term,
+    # each conjunct reducing a `List.get` into that image (its depth is the image,
+    # not the function).  A small function with a large image -- the
+    # `call_both_arms`/`elif_call` shape, few steps so the step budget sits at the
+    # 1000 floor but a long compiler-trap image -- busts the floor on `all_bytes`,
+    # so the image's size buys depth too, with the same floor for the short ones.
+    depth = max(1000, 40 * max(steps, 1), 2 * (len(code) + 1))
     out = ["import X86\n",
            "set_option maxHeartbeats 4000000\n",
            "set_option maxRecDepth %d\n" % depth,
