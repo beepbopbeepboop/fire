@@ -2017,6 +2017,50 @@ def test_type_param_markers_and_simd_unification(wd):
     check("unify#10: a provable default is not reported as unbound",
           el.unbound_type_parameter(_dflt, ['2']) is None
           and el.bind_type_args(_dflt, ['2']) == {'x': '2', 'y': '4'})
+    # The generic-struct binder, measured on std/collections/span.mojo's head
+    # (bugs/CODEGEN_prelude_sort_is_not_resolved.md, binder defects 1-4). The
+    # synthetic head has the same shape: a `//`-deduced `mut`, an origin whose
+    # annotation names `mut` inside brackets, a `*`, and a leading-dot enum
+    # default.
+    _span = ('struct S[mut: Bool, //, T: AnyType, origin: Origin[mut=mut], *,\n'
+             '         address_space: AddressSpace = .GENERIC]:\n    pass\n')
+    _sd = el.type_param_defaults(_span)
+    check("binder#1: a default is split at a top-level `=`, not inside `Origin[mut=mut]`",
+          'origin' not in _sd and _sd.get('address_space') == '.GENERIC'
+          and el.type_param_kinds(_span)[1:3] == ['type', 'type'])
+    # A leading-dot default (`.GENERIC`) stays UNPROVABLE on purpose: qualifying
+    # it to `AddressSpace.GENERIC` made std's Pointer instance elaborate and
+    # gcc reject its body (test_module_cache/stdlib: std/memory/pointer.mojo).
+    check("binder#2: a leading-dot enum default is not provable as an argument",
+          el._default_type_arg(_sd['address_space']) is None)
+    _lit = ('struct S[mut: Bool, //, T: AnyType, origin: Origin[mut=mut], *,\n'
+            '         address_space: Int = 0]:\n    pass\n')
+    check("binder#3: a short bracket deduces the `//` prefix from its origin",
+          el.bind_type_args(_lit, ['Int64', 'MutOrigin'])
+          == {'mut': 'True', 'T': 'Int64', 'origin': 'MutOrigin', 'address_space': '0'}
+          and el.bind_type_args(_lit, ['Int64', 'ImmOrigin'])['mut'] == 'False'
+          and el.bind_type_args(_lit, ['Int64']) is None
+          and el.bind_type_args(_lit, ['Int64', 'Foo']) is None
+          and el.bind_type_args(_lit, ['True', 'Int64', 'MutOrigin', '7'])
+          == {'mut': 'True', 'T': 'Int64', 'origin': 'MutOrigin', 'address_space': '7'})
+    import monomorphize as _mm
+    _shadow_src = ('def f():\n'
+                   '    var x = Pointer[Int, MutOrigin](\n'
+                   '        address_space=Self.address_space,\n'
+                   '    )\n')
+    _real_bind = ('def f():\n    T = 3\n')
+    _ok = True
+    try:
+        _mm._check_no_value_shadow(_shadow_src, ['address_space'])
+    except ValueError:
+        _ok = False
+    _raised = False
+    try:
+        _mm._check_no_value_shadow(_real_bind, ['T'])
+    except ValueError:
+        _raised = True
+    check("binder#4: a keyword label inside a bracket is not a binding; a real assignment still is",
+          _ok and _raised)
 
 
 def test_generic_instantiation_symbol_agreement(wd):

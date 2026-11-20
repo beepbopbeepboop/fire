@@ -394,6 +394,24 @@ def type_param_names(template_src: str) -> list:
             if p.strip() and not _is_param_marker(p.strip())]
 
 
+def _partition_top_level_eq(param: str):
+    """`(head, '=', default)` split at the first `=` OUTSIDE any bracket, or
+    `(param, '', '')` when there is none. A bracket parameter's annotation can
+    itself carry a keyword: `origin: Origin[mut=mut] = MutOrigin` (std's
+    `Span`) splits at the `=` inside `Origin[...]` under a plain `partition`,
+    and the default then reads `mut]`. Every reader of a bracket-parameter head
+    splits through here so they cannot disagree about where the default starts."""
+    depth = 0
+    for i, ch in enumerate(param):
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif ch == '=' and depth == 0:
+            return param[:i], '=', param[i + 1:]
+    return param, '', ''
+
+
 def type_param_defaults(template_src: str):
     """Map each bracket-parameter name that has a DEFAULT to that default's
     source text: `def size_of[type: AnyType, target: CompilationTarget =
@@ -420,9 +438,9 @@ def type_param_defaults(template_src: str):
     out = {}
     for p in split_top_level_commas(m.params):
         p = p.strip()
-        if not p or _is_param_marker(p) or '=' not in p:
+        head, eq, dflt = _partition_top_level_eq(p)
+        if not p or _is_param_marker(p) or not eq:
             continue
-        head, _, dflt = p.partition('=')
         out[head.split(':')[0].strip()] = dflt.strip()
     return out
 
@@ -475,7 +493,7 @@ def type_param_kinds(template_src: str):
         p = p.strip()
         if not p or _is_param_marker(p):
             continue
-        head = p.split('=', 1)[0].strip()
+        head = _partition_top_level_eq(p)[0].strip()
         _name, sep, annot = head.partition(':')
         # The annotation's own head: `List[T]` -> `List`, `Origin[mut=x]` ->
         # `Origin`, `Movable where …` -> `Movable`.
@@ -610,11 +628,70 @@ def unbound_param_is_inferable(template_src: str, name: str) -> bool:
                      _argument_list_text(template_src)) is not None
 
 
+#: The origin aliases whose `mut` is fixed, and that value. `Origin[mut=mut]`
+#: is the only annotation a deduced `mut` is read from in the stdlib; a
+#: `MutOrigin`/`ImmOrigin` argument pins it, anything else leaves it unknown.
+_ORIGIN_ALIAS_MUT = {'MutOrigin': 'True', 'ImmOrigin': 'False'}
+_ORIGIN_MUT_ANNOT = re.compile(r'^\s*Origin\s*\[\s*mut\s*=\s*(\w+)\s*\]')
+
+
+def _deduce_prefix_from_rest(template_src: str, params, supplied, k: int):
+    """The full ordered args for a struct bracket that names ONLY the
+    parameters after its `//` separator, or None when a deduced one cannot be
+    read.
+
+    Mojo's `//` makes the leading `k` parameters deduced: a caller writes
+    `Span[Int, MutOrigin]`, never the `mut` that the origin implies. Each
+    deduced parameter is bound from an explicit argument whose parameter is
+    annotated `Origin[mut=<that deduced name>]`, through the origin alias's
+    fixed `mut` (`_ORIGIN_ALIAS_MUT`). A deduced parameter no argument pins
+    is refused, exactly as `complete_explicit_type_args` refuses it for
+    functions. Explicit arguments are never overridden by a deduction, and
+    the explicit list must fit the parameters after the `//`."""
+    rest = params[k:]
+    if len(supplied) > len(rest):
+        return None
+    annots = {}
+    for p in split_top_level_commas(mm.head_match(template_src).params):
+        p = p.strip()
+        if not p or _is_param_marker(p):
+            continue
+        head = _partition_top_level_eq(p)[0]
+        name, _colon, annot = head.partition(':')
+        annots[name.strip()] = annot
+    deduced = {}
+    for i, arg in enumerate(supplied):
+        m = _ORIGIN_MUT_ANNOT.match(annots.get(rest[i], ''))
+        mut_name = m.group(1) if m else None
+        if mut_name in params[:k] and arg.strip() in _ORIGIN_ALIAS_MUT:
+            value = _ORIGIN_ALIAS_MUT[arg.strip()]
+            if deduced.get(mut_name, value) != value:
+                return None  # two origins that disagree about one `mut`
+            deduced[mut_name] = value
+    defaults = type_param_defaults(template_src)
+    for p in params[:k]:
+        if p not in deduced:
+            # Nothing pins it: a provable default (`mut: Bool = True`) is the
+            # only other source, and absent that the bracket cannot bind.
+            d = _default_type_arg(defaults.get(p, ''))
+            if d is None:
+                return None
+            deduced[p] = d
+    return [deduced[p] for p in params[:k]] + list(supplied)
+
+
 def bind_type_args(template_src: str, type_args):
     """{param: concrete} for a template's bracket parameters, filling any the
     caller did not supply from their DEFAULT (`type_param_defaults`). None when
     a parameter is missing and has no provable default, or when the template has
     no bracket parameters at all.
+
+    A `//` separator (`struct Span[mut: Bool, //, T, origin: Origin[mut=mut],
+    *, address_space: ...]`) makes the leading parameters DEDUCED, so a bracket
+    that is shorter than the full parameter list names only the parameters after
+    the `//`, and the deduced prefix is read from them (`_deduce_prefix_from_rest`).
+    A full-length list is taken as written, which is what the instance's own
+    mangled mentions spell.
 
     Supplied arguments are taken POSITIONALLY — the same `zip` the caller
     already used — and only the trailing ones can come from a default, because
@@ -634,6 +711,11 @@ def bind_type_args(template_src: str, type_args):
     if not any(p.startswith('*') for p in params):
         if len(supplied) > len(params):
             supplied = supplied[:len(params)]
+    k = deduced_param_count(template_src)
+    if k and len(supplied) < len(params) and not any(p.startswith('*') for p in params):
+        supplied = _deduce_prefix_from_rest(template_src, params, supplied, k)
+        if supplied is None:
+            return None
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
     if _first_unbound_type_param(params, supplied, defaults) is not None:
         return None
@@ -690,10 +772,10 @@ def parse_bounds(template_src: str):
             # without this the bound read as the whole
             # 'CompilationTarget = CompilationTarget.current()' and every
             # conformance check silently degraded to "unknown trait, accept".
-            bound = bound.partition('=')[0]
+            bound = _partition_top_level_eq(bound)[0]
             bounds[name.strip()] = bound.strip() or None
         else:
-            bounds[p.partition('=')[0].strip()] = None
+            bounds[_partition_top_level_eq(p)[0].strip()] = None
     return bounds
 
 

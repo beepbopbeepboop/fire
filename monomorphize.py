@@ -236,12 +236,17 @@ def _check_no_value_shadow(src: str, type_params) -> None:
         # by `=`, `in`, or end-of-line, never `.`.
         var_for_binding = re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src)
         assignment_binding = re.search(rf'(?m)^\s*{e}\s*=(?!=)', src)
-        # An `identifier = ...` line inside a braced constructor/call literal
-        # (e.g. `length = end - start,` in `return { ... }`) is a keyword-
-        # argument label, not a binding; the substitution pass skips labels.
+        # An `identifier = ...` line inside ANY open bracket — a braced
+        # constructor/call literal (`length = end - start,` in `return {...}`)
+        # or a `[...]`/`(...)` argument list (std's `Span` passes
+        # `address_space=Self.address_space` inside `Pointer[...]`) — is a
+        # keyword-argument label, not a binding; the substitution pass skips
+        # labels. Depth must count all three bracket kinds, or a label inside
+        # a bracket reads as an assignment to the type parameter.
         if assignment_binding is not None:
-            pos = assignment_binding.start()
-            depth = src[:pos].count('{') - src[:pos].count('}')
+            prefix = src[:assignment_binding.start()]
+            depth = sum(prefix.count(o) - prefix.count(c)
+                        for o, c in (('{', '}'), ('[', ']'), ('(', ')')))
             if depth > 0:
                 assignment_binding = None
         if var_for_binding or assignment_binding:
