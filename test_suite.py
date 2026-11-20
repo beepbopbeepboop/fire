@@ -1314,15 +1314,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # the fixed mojo_repr_bool spelling) all 39 cases pass and the marker is
     # gone, so a census still stating it would fail on the registry's own
     # state.
-                     # The 2026-11-19 `imul` walk correction took five of the
-                     # nine off the failure list (annot_params, call_helper,
-                     # chain, localmul, mixed_width now fork and prove), so
-                     # the checked count moves 13 -> 8; the remaining eight
-                     # are the four examples that overlay a sibling bug
-                     # (multi_export, pair / call_both_arms, elif_call), the
-                     # `group3:not` hmem lie (unary_ops) and the three memory
-                     # ceilings.
-                     'formal-x86-endtoend': 4,
+                     'formal-x86-endtoend': 13,
 # NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
                      # is in this census any more, and that is the union of the two
                      # sides of the 2026-10-17 merge, each of which dropped one of
@@ -2224,6 +2216,11 @@ STALE_PER_CHILD_BUDGETS = {
     # moves to `BUDGET_IS_THE_SUBJECT`.
     'test_bootstrap_hotspots.py': 1,
     'test_dict_slot_read_regression.py': 2,
+    # +1 with c69448afe ("DType/string bracket args in generic instances"):
+    # `_build_and_run(src, timeout=1500)` -- a COMPILE-and-RUN of one source
+    # through the real backend, so the 1500 s is a genuine child budget and
+    # not a leftover.
+    'test_elaboration_recursion_diagnostic.py': 1,
     'test_formal_admitted_two_args.py': 1,
     'test_formal_dylib.py': 2,
     'test_formal_fstring_printf_regress.py': 1,

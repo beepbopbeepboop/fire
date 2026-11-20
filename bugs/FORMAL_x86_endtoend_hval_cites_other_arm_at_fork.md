@@ -59,11 +59,10 @@ A one-word patch in each generated file — cite the fork state's fact:
     multi_export:  simp [hs42, hval41, …]  →  simp [hs42, hval36, …]
     pair:          simp [hs27, hval26, …]  →  simp [hs27, hval21, …]
 
-removes BOTH errors in both files.  The `imul` pair that was the only other
-error in each — the walk read the ModRM from the second opcode byte and wrote
-the wrong register — is fixed by the 2026-11-19 walk correction
-(`_abs_step` now decodes `raw[3]`, matching `_resolve`); with both, the
-examples have no remaining error.
+removes BOTH errors in both files; the only remaining errors in each are the
+`imul` pair documented in
+`FORMAL_x86_endtoend_abs_step_imul_modrm_second_opcode.md` (measured:
+`multi_export` and `pair` then fail only on their `x86_imul_ovf` goals).
 
 ## What the emitter has to change
 

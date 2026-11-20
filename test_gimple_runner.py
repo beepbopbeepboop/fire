@@ -15406,7 +15406,6 @@ def main():
                   test_namedtuple_shaped_class_runs_regression,
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
-                  test_none_argument_is_none_in_the_callee,
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
@@ -15956,46 +15955,6 @@ def main():
     print(f(), g())
 
 main()
-""")
-
-
-def test_none_argument_is_none_in_the_callee():
-    """A literal `None` argument is the NULL word in the callee, and the callee's
-    `is None` and `== None` agree on it, for an unannotated parameter and for a `str`
-    one (which used to receive the one-character string "0" from
-    `mojo_word_cstr_value(0)`). The guards are the two things the reverted 2026-11-16
-    attempt broke: the integer 0 and the empty string are NOT None, and `== None` on
-    an annotated int is still False."""
-    test_gimple_matches_cpython("gimple_none_argument_is_none_in_the_callee", """\
-def a(x):
-    print("unann is None:", x is None)
-    print("unann == None:", x == None)
-    print("unann != None:", x != None)
-
-
-def b(x: str):
-    print("str is None:", x is None)
-    print("str == None:", x == None)
-    print("str != None:", x != None)
-
-
-def c(n: int):
-    print("int == None:", n == None)
-    print("int != None:", n != None)
-
-
-def d(x: str):
-    return x is None
-
-
-a(None)
-b(None)
-b("")
-b("abc")
-c(0)
-c(5)
-print(d(None), d(""), d("0"))
-print(0 == None, 0 != None)
 """)
 
 

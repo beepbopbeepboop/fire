@@ -944,50 +944,6 @@ _SUCCS = {
         "{ $s with rip := $rip, rsp := $s.rsp + 8 }",
 }
 
-#: The forms whose SUCCESSOR writes memory, read off `_SUCCS` itself.
-#:
-#: This is the store detector, and it exists because the one this file used was
-#: not one: `done()` used to mark a node as a store when the abstract walk's
-#: write list GREW, and `_Abs.store` CLEARS that list for a store at an unknown
-#: address.  A store through an unknown base therefore looked exactly like a
-#: step that wrote only registers -- so `emit_terminates` emitted
-#: `have hmem{k+1} : s{k+1}.mem = s{k}.mem` over a successor whose `mem` is a
-#: `mem_write_bytes`, a FALSE fact with no admission path, and the generated file
-#: died on an unsolved goal instead of proving or counting a hole.  Measured on
-#: `formal/examples/unary_ops.mojo`, whose `group3:not` wiped RSP and made every
-#: later store address-less (see `_abs_step`'s group-3 branch).
-#:
-#: Deriving it from `_SUCCS` rather than listing the forms is deliberate: the
-#: successor table IS the statement of what each form writes, so a new store row
-#: cannot be added without appearing here, and a row that stops writing memory
-#: leaves automatically.  `test_formal_successor_coverage.py` pins that this set
-#: is exactly the rows of `_SUCCS` whose text mentions `mem_write_bytes`.
-_STORE_FORMS = frozenset(form for form, succ in _SUCCS.items()
-                         if "mem_write_bytes" in succ)
-
-
-def _store_of(form, abs_, after):
-    """(did this FORM write memory?, the (address, value) it wrote or None).
-
-    The first answer is the FORM's, from `_STORE_FORMS`: it is what the emitter
-    must branch on, because a store at an UNKNOWN address leaves no address to
-    record and the walk responds by clearing its whole write list.  Reading
-    "did this step store?" off that list therefore answers `no` for the one kind
-    of store the memory model cannot follow, and the `hmem` fact that follows is
-    a claim that memory is unchanged about a `mem_write_bytes` successor.
-
-    The second answer exists only for `_abs_peel`, which needs a literal
-    address to peel a store off a cell; `None` means "stored, address unknown",
-    and the peel is skipped for it (no cell fact can be stated after such a
-    step anyway -- `_Abs.load` refuses every address once `mem_ok` is false).
-    """
-    if form not in _STORE_FORMS:
-        return False, None
-    if after is None or abs_ is None \
-            or len(after.writes) != len(abs_.writes) + 1:
-        return True, None
-    return True, after.writes[-1]
-
 
 def _body(code, info):
     """The entry function's own instruction stream, or None if it won't decode.
@@ -2046,48 +2002,6 @@ def _abs_step(prev, form, raw, addr, length):
             st.put(dst, _u64(b | 0xFFFFFFFFFFFFFF00) if b & 0x80 else b)
         return st
 
-    if form == "imul_r64_r64":
-        # `REX 0F AF /r`: FOUR bytes with the two-byte escape in the middle, so
-        # the ModRM is `raw[3]` and not `raw[2]` — the same off-by-one
-        # `_resolve`'s own branch for this form records, and reading `raw[2]`
-        # here would take the `0xAF` second opcode for a ModRM.  Measured on
-        # `49 0f af c3` (`imul rax, r11`) that read reg/rm = 5/7, extended both
-        # by the REX to 13/15, and wrote `rbp <- rbp * r15` while leaving `rax`
-        # alone; the flags it computed from those operands then DECIDED the
-        # overflow guard, which a multiply by the theorem's quantified input
-        # must leave undecided.  The walk and the model have to read the same
-        # byte or the emitted `hval` fact states a register write the machine
-        # does not make.
-        #
-        # Four flags, not none: `e54d2f4e` corrected the model's `imul` arm,
-        # which had been setting no flags at all, and this walk had followed it
-        # here.  A walk that does not track them cannot DECIDE a `jcc` after an
-        # `imul`, and the flags are cheap arithmetic on a product it already
-        # computes.
-        #
-        # CF and OF are `x86_imul_ovf`: the 128-bit SIGNED product against the
-        # 64-bit signed range, which is NOT `res != sext64(res)`.  This arm
-        # carried the model's own wrong version for one commit, so the rule is
-        # spelled out rather than abbreviated: `_imul_ovf` is transcribed from
-        # `lib/X86.lean`'s definition and is the only place in this file that
-        # answers the question.
-        rex = raw[0] if raw[0] & 0xF0 == 0x40 else 0
-        modrm = raw[3]
-        reg, rm = (modrm >> 3) & 7, modrm & 7
-        dst = reg + (8 if rex & 4 else 0)
-        src = rm + (8 if rex & 1 else 0)
-        a, b = st.get(dst), st.get(src)
-        if a is None or b is None:
-            st.put(dst, None)
-            st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
-            return st
-        res = _u64(a * b)
-        ovf = _imul_ovf(a, b)
-        st.put(dst, res)
-        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
-                        cf=ovf, of_=ovf)
-        return st
-
     if len(raw) < 3:
         # A form with no ModRM byte that is not handled above. Wiping rather than
         # raising is the point: `_abs_step` runs inside the TREE walk, so an
@@ -2233,37 +2147,6 @@ def _abs_step(prev, form, raw, addr, length):
         st.set_flags(res == 0, _msb(res), a < imm,
                      _msb(a) != _msb(imm) and _msb(res) != _msb(a))
         return st
-    if form in ("group3:not", "group3:neg"):
-        # `REX.W F7 /2` and `/3`, the unary pair.  The walk had no branch for
-        # either, so the FIRST `not` in a program fell through to `st.wipe()` and
-        # every register -- RSP included -- became unknown from that point on.
-        # A store after it then addressed through an unknown base, and
-        # `_Abs.store` drops the whole write list for a store at an unknown
-        # address, which is exactly the state the `hmem` emission used to read as
-        # "this step wrote only registers" (see `_STORE_FORMS`).  `~n` in
-        # `formal/examples/unary_ops.mojo` is the corpus' first use of the form.
-        #
-        # The operand is the ModRM `rm` field extended by REX.B, the SAME
-        # register `_resolve` names `$dst` for these two rows (`group3` puts its
-        # DIGIT in `reg`, so `reg` is not an operand -- `src` is `rm + rex_b`,
-        # which is the model's `r`).  The arithmetic is `lib/X86.lean`'s arm
-        # transcribed: `not` is `a ^^^ 0xffff...` with NO flag write, and `neg`
-        # is `0 - a` with all four flags from `x86_flags_sub s 0 a res`.
-        a = st.get(src)
-        if form == "group3:not":
-            st.put(src, None if a is None else _u64(a ^ 0xFFFFFFFFFFFFFFFF))
-            return st
-        st.flag_regs = {src}
-        if a is None:
-            st.put(src, None)
-            st.set_flags(None, None, None, None)
-            return st
-        res = _u64(0 - a)
-        st.put(src, res)
-        # `x86_flags_sub s 0 a res`: cf is `0 < a`, and its overflow is
-        # `msb 0 != msb a && msb res != msb 0`, i.e. both ends set.
-        st.set_flags(res == 0, _msb(res), a != 0, _msb(a) and _msb(res))
-        return st
     if form.startswith("shift_imm8:"):
         st.flag_regs = {src}
         a = st.get(src)
@@ -2315,6 +2198,30 @@ def _abs_step(prev, form, raw, addr, length):
         of_ = (n == 1 and ((_msb(a) != _msb(res)) if op == "shl"
                            else (_msb(a) if op == "shr" else False)))
         st.set_flags(res == 0, _msb(res), cf, of_)
+        return st
+    if form == "imul_r64_r64":
+        # Four flags, not none: `e54d2f4e` corrected the model's `imul` arm,
+        # which had been setting no flags at all, and this walk had followed it
+        # here.  A walk that does not track them cannot DECIDE a `jcc` after an
+        # `imul`, and the flags are cheap arithmetic on a product it already
+        # computes.
+        #
+        # CF and OF are `x86_imul_ovf`: the 128-bit SIGNED product against the
+        # 64-bit signed range, which is NOT `res != sext64(res)`.  This arm
+        # carried the model's own wrong version for one commit, so the rule is
+        # spelled out rather than abbreviated: `_imul_ovf` is transcribed from
+        # `lib/X86.lean`'s definition and is the only place in this file that
+        # answers the question.
+        a, b = st.get(dst), st.get(src)
+        if a is None or b is None:
+            st.put(dst, None)
+            st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
+            return st
+        res = _u64(a * b)
+        ovf = _imul_ovf(a, b)
+        st.put(dst, res)
+        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
+                        cf=ovf, of_=ovf)
         return st
     if form == "setcc":
         # The NARROW write, matching `x86_set_reg_narrow` rather than the whole
@@ -2410,14 +2317,6 @@ _SIMP_FORMS = {
     "alu_ri32:sub_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_sub"),
     "alu_ri32:and": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_logic"),
     "alu_ri8:cmp": ("x86_get_reg", "x86_flags_sub"),
-    # The two unary group-3 rows, named for the definitions their successors
-    # mention: `not` writes through `x86_set_reg` only (no flag), `neg` also
-    # reads the four flags out of `x86_flags_sub`.  Without these the decision
-    # `simp` after a `neg` cannot unfold the flag function, which is the
-    # `hdec` failure `test_formal_sweep_truth.py`'s shift row records for the
-    # neighbouring family.
-    "group3:not": ("x86_get_reg", "x86_set_reg"),
-    "group3:neg": ("x86_get_reg", "x86_set_reg", "x86_flags_sub"),
     "mov_r64_rm64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
     "mov_rm64_r64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
     "lea_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_eff_addr"),
@@ -2680,7 +2579,7 @@ class _Node:
     counters incremented in step are two answers to one question.
     """
     __slots__ = ("insn", "form", "raw", "addr", "kind", "state", "succ", "kids",
-                 "halt", "cond", "k", "abs", "after", "write", "stores")
+                 "halt", "cond", "k", "abs", "after", "write")
 
     def __init__(self, insn, form, raw, addr, kind, state, succ):
         self.insn, self.form, self.raw, self.addr = insn, form, raw, addr
@@ -2694,17 +2593,10 @@ class _Node:
         #: emitted `hval{k+1}` is about — `abs` is the one BEFORE it, and the
         #: two are one step apart, which is the step the fact closes.
         self.after = None
-        #: `(address, value)` if THIS instruction stored and the walk knows the
-        #: address, else None.  On its own this is NOT the store detector — a
-        #: store at an unknown address has no `(address, value)` to record and
-        #: also leaves this None — so `stores` is the fact the emitter must read;
-        #: `write` is only the peel's address.
+        #: `(address, value)` if THIS instruction stored, else None. Read off
+        #: the abstract machine's own write list rather than off a table of
+        #: which forms are stores, so the two cannot disagree about it.
         self.write = None
-        #: Does this form write memory?  Read off `_STORE_FORMS`, i.e. off the
-        #: successor table, NOT off the abstract walk's write list.  A store at
-        #: an unknown address CLEARS that list, so a list-length test calls a
-        #: store a register-only step and the `hmem` fact it then emits is false.
-        self.stores = False
 
 
 class _NoTree(ValueError):
@@ -2793,14 +2685,8 @@ def _tree(code, info, shapes):
         """
         node.abs = abs_
         node.after = after
-        # **The store detector is the FORM, not the write list's length.** A
-        # store at an unknown address CLEARS `writes`, so measuring "did this
-        # step store?" by a GAIN marks exactly that step as register-only and
-        # emits a memory-invariance fact about a `mem_write_bytes` successor.
-        # `_store_of` reads the first half off the successor table, which is the
-        # one place that says what the instruction does; `write` is then the
-        # address the peel can use, when the walk knows it.
-        node.stores, node.write = _store_of(node.form, abs_, after)
+        if after is not None and len(after.writes) > len(abs_.writes):
+            node.write = after.writes[-1]
         return node
 
     def build(addr, state, abs_, depth, seen, rets, jumped=False):
@@ -4152,10 +4038,10 @@ def emit_terminates(path):
             emit("have hpop%d : (mem_read_bytes %s.mem (%s.rsp.toNat) 8).toNat"
                  " = %d := by" % (k, state, state, ret_to))
             hmem_for_read = hmem_path
-            if not node.stores and node.kind not in ("leaves",):
+            if node.write is None and node.kind not in ("leaves",):
                 hmem_for_read = hmem_path + ("hmem%d" % (k + 1),)
             mem_for_read = mem_path
-            if node.stores:
+            if node.write is not None:
                 mem_for_read = mem_path + ("hs%d" % (k + 1),)
             for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex, hmem_path=hmem_for_read, mem_path=mem_for_read):
                 emit(line)
@@ -4187,10 +4073,9 @@ def emit_terminates(path):
         emit("have hs%d : %s = %s := by" % (k + 1, nxt, succ))
         emit("  rw [h%d] at hstep%d" % (k, k))
         emit("  exact Option.some.inj hstep%d" % k)
-        # If this FORM writes only registers -- read off `_STORE_FORMS`, not off
-        # the walk's write list, which a store at an unknown address CLEARS --
-        # record that memory is unchanged so we can skip reconstructing it.
-        if not node.stores and node.kind not in ("leaves",):
+        # If this step wrote only registers (no memory writes), record that
+        # memory is unchanged so we can skip reconstructing it later
+        if node.write is None and node.kind not in ("leaves",):
             emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
             hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
             emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
@@ -4253,10 +4138,10 @@ def emit_terminates(path):
                 emit("by_cases hc%d : x86_cond %d %s = true" % (k, cc, state))
                 emit("\u00b7")
                 hmem_this_local = hmem_path
-                if not node.stores and node.kind not in ("leaves",):
+                if node.write is None and node.kind not in ("leaves",):
                     hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
                 mem_this_local = mem_path
-                if node.stores:
+                if node.write is not None:
                     mem_this_local = mem_path + ("hs%d" % (k + 1),)
                 walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
@@ -4297,10 +4182,10 @@ def emit_terminates(path):
             # this very condition, and without it every later step on this path
             # would be proving an `if`.
             hmem_this_local = hmem_path
-            if not node.stores and node.kind not in ("leaves",):
+            if node.write is None and node.kind not in ("leaves",):
                 hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
             mem_this_local = mem_path
-            if node.stores:
+            if node.write is not None:
                 mem_this_local = mem_path + ("hs%d" % (k + 1),)
             walk(node.kids[0], nxt, ind, cases + ["hdec%d" % k], both,
                  "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
@@ -4354,10 +4239,10 @@ def emit_terminates(path):
             # `s{k+1}` and not `s{k}` -- the same off-by-one the peel below
             # needed, and the reason `hs` is built above.
             hmem_for_hrip = hmem_path
-            if not node.stores and node.kind not in ("leaves",):
+            if node.write is None and node.kind not in ("leaves",):
                 hmem_for_hrip = hmem_path + ("hmem%d" % (k + 1),)
             mem_for_hrip = mem_path
-            if node.stores:
+            if node.write is not None:
                 mem_for_hrip = mem_path + ("hs%d" % (k + 1),)
             for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex, hmem_path=hmem_for_hrip, mem_path=mem_for_hrip):
                 emit(line)
@@ -4407,10 +4292,10 @@ def emit_terminates(path):
             return
 
         hmem_this_local = hmem_path
-        if not node.stores and node.kind not in ("leaves",):
+        if node.write is None and node.kind not in ("leaves",):
             hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
         mem_this_local = mem_path
-        if node.stores:
+        if node.write is not None:
             mem_this_local = mem_path + ("hs%d" % (k + 1),)
         walk(node.kids[0], nxt, ind, cases, rules + [step_rule],
              "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
