@@ -1090,11 +1090,16 @@ def globals_base(fmt: str = "macho") -> int:
     backends' `_global_slot_address` (which compute where slot `i` lives), and
     the linker (which declares the segment there). One function, so a format
     whose base moved cannot leave three copies behind."""
+    # Two aliases, not one name imported from two modules: a function scope
+    # may not bind the same name from two different modules (Modular's
+    # `import of 'X' is ambiguous`, enforced by the compiler), and the
+    # closure now reaches this module, so the old double import is a hard
+    # error here.
     if fmt == "elf":
-        from formal.elf import GLOBALS_VM
-        return GLOBALS_VM
-    from formal.macho_linker import GLOBALS_VM
-    return GLOBALS_VM
+        from formal import elf as _elf
+        return _elf.GLOBALS_VM
+    from formal import macho_linker as _macho_linker
+    return _macho_linker.GLOBALS_VM
 
 
 def _container_family(path: str) -> str:
