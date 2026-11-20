@@ -52,6 +52,10 @@ _EXPR_DISPATCH: dict = {
 }
 """
 
+OWNER_SRC = """\
+STRING_GLOBAL = 'hello-owner'
+"""
+
 TYPES_SRC = """\
 from generated_dispatch import _SIGNED as _GD_SIGNED, _EXPR_DISPATCH
 
@@ -76,12 +80,18 @@ CONSUMER_SRC = """\
 from types import _EXPR_DISPATCH, banner, pick, rank
 
 
+def label():
+    from owner import STRING_GLOBAL
+    return STRING_GLOBAL
+
+
 def main():
     print(pick('add'))
     print(pick('zzz'))
     print(rank('int16'))
     print(sorted(_EXPR_DISPATCH))
     print(banner())
+    print(label())
 
 
 main()
@@ -91,6 +101,7 @@ main()
 def _write_tree(td: str) -> str:
     for rel, src in (
             ('generated_dispatch.py', DISPATCH_SRC),
+            ('owner.py', OWNER_SRC),
             ('types.py', TYPES_SRC),
             ('consumer.py', CONSUMER_SRC),
     ):
@@ -142,7 +153,8 @@ def test_imported_global_has_no_function_stub():
     try:
         root_file = _write_tree(td)
         expected = _cpython_stdout(td, root_file)
-        assert expected == 'plus\nnope\n2\n[\'add\', \'sub\']\nplus\n', expected
+        assert expected == ('plus\nnope\n2\n[\'add\', \'sub\']\n'
+                              'plus\n' 'hello-owner\n'), expected
         with open(root_file) as f:
             ci = gimple_codegen.compile_to_gimple(
                 f.read(), do_imports=True, filename=root_file)
@@ -169,6 +181,10 @@ def test_imported_global_has_no_function_stub():
         assert '_funcptr__EXPR_DISPATCH' not in sep, sep
         assert 'extern int64_t _EXPR_DISPATCH' not in sep, sep
         assert 'generated_dispatch__mojo_global_get__EXPR_DISPATCH' in sep, sep
+        # The FUNCTION-SCOPED sibling import is the case this pin adds: the
+        # read must resolve the defining module's accessor too, not a stub.
+        assert '__mojo_global_get_STRING_GLOBAL' in ci, ci
+        assert 'STRING_GLOBAL (...)' not in ci, ci
         assert _build_and_run(ci, td) == expected
     finally:
         import shutil
