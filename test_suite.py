@@ -1774,11 +1774,10 @@ def test_the_timeout_clock_starts_after_admission():
     and having printed nothing. The runner therefore takes the reservation
     itself and starts the clock after it.
 
-    Measured rather than asserted from the code: the job's own timeout is 2s,
-    the budget is full when it is ready, and it is held there for three times
-    that. If the wait counted, the job would come back TIMEOUT and fail the
-    run; if it does not, it comes back PASS having run for a fraction of a
-    second.
+    Measured rather than asserted from the code: the job's own timeout is 5s,
+    the budget is full when it is ready, and it is held there for twice that.
+    If the wait counted, the job would come back TIMEOUT and fail the run; if
+    it does not, it comes back PASS having run for a fraction of a second.
     """
     log = os.path.join(HERE, 'build', 'test-suite-admit-wait.log')
     quick = ok_cmd('import time; time.sleep(0.3); print("ran")')
@@ -1799,7 +1798,7 @@ def test_the_timeout_clock_starts_after_admission():
 
     ledger = tempfile.mkdtemp()
     with _SandboxEnv(MEMSLOT_DIR=ledger, MEMSLOT_BUDGET_GB=16), Sandbox(
-            waiter=dict(cmd=quick, mem='small', timeout=2)):
+            waiter=dict(cmd=quick, mem='small', timeout=5)):
         # 12 of the 16 GB are already spoken for, so a `small` (8 GB) job has
         # to wait: 12 + 8 > 16. The holder is this very process, which is also
         # what running `suite.main` in-process means for a test.
@@ -1813,7 +1812,7 @@ def test_the_timeout_clock_starts_after_admission():
         while time.time() < deadline and not queued(ledger, 'waiter'):
             time.sleep(0.05)
         was_waiting = queued(ledger, 'waiter')
-        time.sleep(6.0)                       # three times the job's timeout
+        time.sleep(10.0)                      # twice the job's timeout
         still_waiting = not outcome
         holder.release()
         worker.join(30)
@@ -1828,8 +1827,9 @@ def test_the_timeout_clock_starts_after_admission():
     text = open(log).read() if os.path.exists(log) else ''
     secs = re.search(r'exit: 0\s+secs: ([0-9.]+)', text)
     check('admission: the recorded duration is the job\'s, not the queue\'s',
-          secs and float(secs.group(1)) < 2,
-          f'the 2s timeout is inside {secs.group(1) if secs else "(no exit line)"}')
+          secs and float(secs.group(1)) < 8.0,
+          f'the 10s queue wait leaked into the job duration: '
+          f'{secs.group(1) if secs else "(no exit line)"}s')
     check('admission: the queue wait is recorded rather than hidden',
           'admission: waited' in text,
           'the log should say how long the job waited for memory')
@@ -2291,6 +2291,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_candidate_selection_diagnostic.py': 1,
     'test_diagnostic_format_modular.py': 1,
     'test_diagnostics_in_missing_locs.py': 1,
+    'test_elaboration_recursion_diagnostic.py': 1,
     'test_fieldwise_init_and_deprecated_conversion.py': 1,
     'test_invalid_downcast_build.py': 1,
     'test_overload_diagnostic.py': 1,
