@@ -38,6 +38,7 @@ funcs/20_gen_list_and_next.py
 funcs/33_mutual_recursion_even_odd.py
 funcs/39_pipeline_compose.py
 min/big_int.py
+min/bool_call_values.py
 min/fs_align.py
 min/fs_float.py
 min/fs_intspec.py
