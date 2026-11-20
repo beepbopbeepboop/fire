@@ -1787,6 +1787,35 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
     return field_type, t
 
 
+_STATIC_TYPE_NAMES = {
+    'IntLiteral': 'int', 'FloatLiteral': 'float', 'BoolLiteral': 'bool',
+    'ListExpr': 'list', 'TupleExpr': 'tuple', 'DictExpr': 'dict',
+    'SetExpr': 'set', 'NoneLiteral': 'NoneType',
+}
+_STATIC_CTYPE_NAMES = {'double': 'float', '_Bool': 'bool',
+                       'MojoDict *': 'dict', 'MojoSet *': 'set'}
+
+
+def _static_type_name(gen, arg) -> str:
+    """The Python type name of `arg` when its SOURCE SHAPE or its C type fixes
+    it, else ''. `int64_t` and `MojoList *` are deliberately not named: the
+    first is also every erased pointer and the second is a list AND a tuple."""
+    _n = _STATIC_TYPE_NAMES.get(type(arg).__name__, '')
+    if _n:
+        return _n
+    if isinstance(arg, gimple_ctypes.IdentExpr) and _as_str(arg.name) == 'None':
+        return 'NoneType'
+    if isinstance(arg, gimple_ctypes.StringLiteral):
+        return 'bytes' if getattr(arg, 'is_bytes', False) else 'str'
+    try:
+        _t = _as_str(gen._quick_type(arg))
+    except Exception:
+        return ''
+    if gimple_ctypes.TypeLattice.is_cstr(_t):
+        return 'str'
+    return _STATIC_CTYPE_NAMES.get(_t, '')
+
+
 def _lme_name_member(gen, node, ot: str, ov) -> tuple[str, str] | None:
     """`x.__name__`: for the `type(node)` receiver the real struct name is recovered from the runtime type tag, and every other object gets its dynamic attribute through the runtime dispatch.
 
@@ -1804,6 +1833,12 @@ def _lme_name_member(gen, node, ot: str, ov) -> tuple[str, str] | None:
     # using the same _struct_type_id hash as the alloc sites).
     if isinstance(node.obj, gimple_ctypes.CallExpr) and isinstance(node.obj.func, gimple_ctypes.IdentExpr) \
             and node.obj.func.name == 'type' and node.obj.args:
+        # A value whose kind is certain without the runtime tag (a literal,
+        # or a C type only that kind has) is named directly: the tag table
+        # knows struct names only, so `type(1).__name__` answered `<type>`.
+        _tn = _static_type_name(gen, node.obj.args[0])
+        if _tn:
+            return 'char *', gen._new_val('char *', gen._intern_string(_tn))
         # node.obj (`type(x)`) was already lowered above to ov = the
         # runtime type tag; map it to the struct name.
         ov64 = gen._cast('int64_t', f"{ov}")

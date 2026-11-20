@@ -62,6 +62,8 @@ min/str_split_max.py
 min/str_strip_chars.py
 min/str_sumstart.py
 min/str_zfill.py
+min/type_name_static.py
+min/type_name.py
 params/01_default_int.py
 params/02_default_str.py
 params/04_default_bool_flags.py

@@ -1,33 +1,9 @@
-# CODEGEN: type(x).__name__ is "<type>"; `x /= 2` and `x += 0.5` on an int variable truncate
+# CODEGEN: `x /= 2` and `x += 0.5` on an int variable truncate (`type(x).__name__` fixed 2026-11-20)
 
 Found 2026-11-20 by `tools/pydiff.py` (runs a program through CPython and through this compiler and compares).
 The differences below are CPython versus the compiled binary.
 
-`type(1).__name__` must be `int`; `float`, `str`, `tuple`, `list`, `NoneType` likewise. Separately, an int variable that gets a float in an augmented assignment keeps the int type and truncates (`x = 9; x /= 2` prints 4, Python prints 4.5), and `if 0.0001:` is treated as false. Use CPython as the oracle.
-
-## Repro `type_name.py`
-
-```python
-def main():
-    print(type(1).__name__)
-    print(type(1.5).__name__)
-    print(type("s").__name__)
-    print(type((1, 2)).__name__)
-    print(type([1]).__name__)
-    print(type(None).__name__)
-main()
-```
-
-Differences:
-
-```
-line 1: CPython 'int'   compiled '<type>'
-line 2: CPython 'float'   compiled '<type>'
-line 3: CPython 'str'   compiled '<type>'
-line 4: CPython 'tuple'   compiled '<type>'
-line 5: CPython 'list'   compiled '<type>'
-line 6: CPython 'NoneType'   compiled '<type>'
-```
+An int variable that gets a float in an augmented assignment keeps the int type and truncates (`x = 9; x /= 2` prints 4, Python prints 4.5), and `if 0.0001:` is treated as false. Use CPython as the oracle.
 
 ## Repro `float_arith.py`
 
