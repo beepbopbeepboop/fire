@@ -45,6 +45,26 @@ class DirtyReason(unittest.TestCase):
         self.assertIsNone(C.tree_dirty_reason(d))
 
 
+class ProbeCallsWork(unittest.TestCase):
+    """probe() itself, not only classify_probe(): a unpacking mismatch between them made every landing probe raise
+    ValueError (2026-11-20), and no test had called probe(). This one does."""
+
+    def fake_run(self, stdout):
+        return mock.patch.object(S.subprocess, "run",
+                                 return_value=subprocess.CompletedProcess(["x"], 0, stdout, ""))
+
+    def test_probe_returns_a_four_tuple_on_green(self):
+        with self.fake_run("PROBE GREEN: a b\n"):
+            verdict, merged, failing, out = S.probe(["a", "b"])
+        self.assertEqual((verdict, merged, failing), ("GREEN", ["a", "b"], []))
+        self.assertIn("PROBE GREEN", out)
+
+    def test_probe_reports_an_error_verdict(self):
+        with self.fake_run("PROBE ERROR: KeyError: 'x'\n"):
+            verdict, _, _, _ = S.probe(["a"])
+        self.assertEqual(verdict, "ERROR")
+
+
 class StepsAreBounded(unittest.TestCase):
     def test_hung_control_step_times_out_and_the_pass_goes_on(self):
         boom = subprocess.TimeoutExpired(cmd="control.py cleanup", timeout=900)

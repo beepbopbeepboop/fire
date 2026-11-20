@@ -945,7 +945,7 @@ def probe(batch, stdlib=True):
     r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if stdlib else []) +
                        ["--probe", "--only"] + batch,
                        capture_output=True, text=True, cwd=C.MAIN)
-    verdict, merged, failing, _ = classify_probe(r.stdout + r.stderr)
+    verdict, merged, failing = classify_probe(r.stdout + r.stderr)
     return verdict, merged, failing, r.stdout + r.stderr
 
 
