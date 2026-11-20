@@ -3959,7 +3959,7 @@ def emit_terminates(path):
     crossed = [False]
 
     def walk(node, state, ind, cases, rules, hs_in=None, hs_path=(),
-             fs_path=(), hmem_path=(), mem_path=()):
+             fs_path=(), hmem_path=(), mem_path=(), hval_base=None):
         """Emit one node and, for a branch, both of its children.
 
         `cases` are the `by_cases`/decided hypotheses in scope at this point;
@@ -4009,7 +4009,7 @@ def emit_terminates(path):
         def emit(line):
             out.append(pad + line if line else "")
 
-        def emit_value_facts(node, name, index, forms):
+        def emit_value_facts(node, name, new_hval_idx, forms, hval_base):
             """The step's own `hval`, if a decided branch on this path will need it.
 
             **Why there is a fact per STEP and not one `simp` over the chain.** A
@@ -4037,7 +4037,7 @@ def emit_terminates(path):
             `upto` bounds it: nothing after the last decided branch on the path is
             emitted, and a path with no decided branch emits none at all.
             """
-            if index > upto:
+            if new_hval_idx > upto:
                 return
             st = node.after
             conj = []
@@ -4052,11 +4052,11 @@ def emit_terminates(path):
             if not conj:
                 return
             emit("have hval%d : %s := by"
-                 % (index, " ∧\n      ".join(conj)))
+                 % (new_hval_idx, " ∧\n      ".join(conj)))
             # The four accessors are always in: a register read in a successor
             # is `x86_get_reg s{k} (rm + x86_rex_b rex)` until BOTH are reduced,
             # and which of them a given step needs is that step's own row.
-            simp = ["hs%d" % index, "hval%d" % (index - 1), "x86_get_reg",
+            simp = ["hs%d" % new_hval_idx, "hval%d" % hval_base, "x86_get_reg",
                     "x86_set_reg", "x86_rex_b", "x86_rex_r"]
             simp += [n for n in _SIMP_FORMS.get(forms[-1], ())
                      if n not in ("mem_read_bytes", "mem_write_bytes")]
@@ -4077,7 +4077,7 @@ def emit_terminates(path):
                 # set on a goal the first one already closed is a "simp made no
                 # progress" error, which is the same shape as a fact that says
                 # nothing.
-                emit("  <;> simp [hval%d]" % (index - 1))
+                emit("  <;> simp [hval%d]" % hval_base)
             emit("  <;> decide")
 
 
@@ -4198,7 +4198,7 @@ def emit_terminates(path):
             emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
             hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
             emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
-        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,))
+        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,), hval_base)
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
         # exit`, and `s_k` is the state this step STARTS in -- which the
         # PREVIOUS step's successor equation describes.  So this uses `hs_k`,
@@ -4264,11 +4264,13 @@ def emit_terminates(path):
                     mem_this_local = mem_path + ("hs%d" % (k + 1),)
                 walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,), hmem_this_local, mem_this_local)
+                     fs_path + (node.form,), hmem_this_local, mem_this_local,
+                     hval_base=k + 1)
                 emit("\u00b7")
                 walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,), hmem_this_local, mem_this_local)
+                     fs_path + (node.form,), hmem_this_local, mem_this_local,
+                     hval_base=k + 1)
                 return
             # **THE DECIDED ARM, and it is emitted as a PROOF.**  `_tree` settled
             # this condition from the abstract machine, so only one arm was built
@@ -4293,8 +4295,9 @@ def emit_terminates(path):
             # fields are `(x86_flags_sub s{k-1} …).zf`, so without the setter's
             # own definitions the goal stops at exactly that — measured, and the
             # fix is one entry of the form table away.
+            prev_facts = ["hs%d" % k, "hval%d" % (k - 1)] if k else ["i0"]
             emit("  simp [%s]" % _decision_simp(
-                fs_path[-1:], ["hs%d" % k, "hval%d" % (k - 1)] if k else ["i0"]))
+                fs_path[-1:], prev_facts))
             emit("  <;> decide")
             # …and the hypothesis joins the `simp` sets below, exactly as a
             # `by_cases` hypothesis would: the successor's `rip` is an `if` on
@@ -4308,7 +4311,8 @@ def emit_terminates(path):
                 mem_this_local = mem_path + ("hs%d" % (k + 1),)
             walk(node.kids[0], nxt, ind, cases + ["hdec%d" % k], both,
                  "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                 fs_path + (node.form,), hmem_this_local, mem_this_local)
+                 fs_path + (node.form,), hmem_this_local, mem_this_local,
+                 hval_base=k + 1)
             return
 
         if node.kind == "ret" and node.succ is None:
@@ -4418,7 +4422,8 @@ def emit_terminates(path):
             mem_this_local = mem_path + ("hs%d" % (k + 1),)
         walk(node.kids[0], nxt, ind, cases, rules + [step_rule],
              "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-             fs_path + (node.form,), hmem_this_local, mem_this_local)
+             fs_path + (node.form,), hmem_this_local, mem_this_local,
+             hval_base=k + 1)
 
     if upto >= 0:
         # `hval0`: the initial state's own field values, which is where the whole
@@ -4433,7 +4438,7 @@ def emit_terminates(path):
         out.append("    simp [i0, X86State.init, x86_get_reg, mem_read_bytes]")
         out.append("    <;> decide")
 
-    walk(root, "i0", 1, [], [], None, (), (), (), ())
+    walk(root, "i0", 1, [], [], None, (), (), (), (), 0)
     return "\n".join(out) + "\n"
 
 
