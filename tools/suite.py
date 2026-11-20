@@ -425,7 +425,8 @@ def needs_memwhy(spec) -> bool:
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
 MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
-                'the run log (--apply-peaks)')
+                'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
+                '632a573a5 by a single-job --no-cache run')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -739,7 +740,7 @@ MEASURED_PEAK_GB = {
     'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
-    'linkmode':                               (0.1, 'measured'),
+    'linkmode':                               (0.6, 'measured'),
     'nonlocal':                               (0.4, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
@@ -1682,9 +1683,13 @@ REGISTRY: dict[str, object] = {}
 #
 # 3600 s is ~6x the slowest healthy test measured across the last two full gates
 # (gimplerunner, 607 s; then mojoc 417 s, selfhost 408 s, gimplegenerators
-# 371 s), so it cannot fire on a healthy or merely loaded run, while a genuine
-# wedge is caught in an hour instead of never. Per-test `timeout=` still wins,
-# and `--timeout` still overrides everything.
+# 371 s), so a healthy ordinary job cannot reach it, while a genuine wedge is
+# caught in an hour instead of never. The one job over that band is `linkmode`,
+# whose real cold pass is a 56-program end-to-end compile sweep measured at
+# 1,349-3,352 s and 3,298.6 s on the head where it last passed; it names its own
+# 7200 s below, from that measurement, instead of being killed at a default
+# sized for other jobs. Per-test `timeout=` still wins, and `--timeout` still
+# overrides everything.
 DEFAULT_JOB_TIMEOUT_S = 3600.0
 
 
@@ -1893,7 +1898,17 @@ test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
      desc='the docs\' HTML generator keeps every word of its Markdown, and '
           'the committed HTML is not stale')
+# `timeout=7200`: this job builds 56 real programs through
+# `driver.compile_program`, and every compiler-fingerprint change invalidates
+# the CAS artifacts (the key folds in the codegen sources), so a gate on a tree
+# with a codegen change pays a full COLD pass here. Measured: 1,349-3,352 s over
+# the 2026-11-02..11-19 gates; 3,298.6 s on head 8e1d4ee43 where it last passed;
+# and four consecutive gate runs on 2026-11-19 (12:33, 13:35, 15:54, 16:54) hit
+# the 3600 s default exactly and were reported [TIMEOUT] — a job killed for
+# doing 56 builds, not a wedge. 7200 s is 2x the measured slowest pass, the same
+# headroom standard as `stdlib-syntax` below.
 test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
+     timeout=7200,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
      desc='the real driver.compile_program link-mode pipeline')
