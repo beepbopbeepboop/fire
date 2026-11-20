@@ -566,3 +566,23 @@ keyword). Checked: `compile_stdlib.py` 610 / 0 unexpected, `build_stdlib_dylib.p
 
 Remaining: `enum_exhaustive_errors` (builtin `EnumLike` synthesis), `moco_4400` (see the entry above: the
 type of a same-module generic struct local is never recorded), and the `tuple_*` type-checker cases.
+
+## Status (2026-11-20): the `tuple_*` tests are STALE against the stdlib this tree compiles — do not implement them
+
+`tuple_first_of_error.mojo` and `tuple_contains_type_mismatch_error.mojo` live in the older
+`/Users/mrs/net/chatgpt/claude/modular/mojo/test/` tree (`tools/modular_filecheck.py`'s `ROOT`), whose
+`std/builtin/tuple.mojo` declares `__contains__[T: Equatable](...) where Self.Ts.contains[T]()` and a
+compile-checked `first_of[T]`. The stdlib this repo compiles against, `new-modular/Mojo/stdlib`, has NEITHER:
+its `std/builtin/tuple.mojo` defines no `first_of` and no `__contains__` with that `where`, and its own
+`test/builtin/test_tuple.mojo` (line 64) treats `StaticString("Mojo is awesome") in d` and `b.__contains__(1)` as
+VALID and `False`. The two trees disagree about the language, and the target one makes the diagnostic wrong.
+
+Tried and reverted: a narrow static check (a local bound to a tuple display of proven scalar types; `x in t` and
+`t.first_of[T]()` against it) passed both FileCheck files and a 9-case test, and then failed
+`compile_stdlib.py` with one unexpected file, `test/builtin/test_tuple.mojo`, which the check refused at line 64.
+A diagnostic that rejects valid stdlib code is worse than the miss, so nothing landed.
+
+Disposition: not a bug in this tree. These two rows belong with the other cases the target stdlib no longer
+has; the `tools/modular_filecheck.py` `ROOT` should point at the tree matching the stdlib (or the rows be
+dropped from the umbrella). Remaining real items: `enum_exhaustive_errors` (a builtin `EnumLike` trait) and
+`moco_4400` (the unrecorded type of a same-module generic struct local).

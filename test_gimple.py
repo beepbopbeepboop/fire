@@ -14629,6 +14629,25 @@ if True:
 
 print(step(7))
 """, "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
+    # `lldb_formatter_wrapping_type` (std/simd.mojo's `SIMD`; it was refused as
+    # "inside a module-level block, which the compiled path cannot rebind", fixed
+    # by 803cb29d2 adding it to `_ANNOTATION_DECORATORS`) is an annotation
+    # decorator: so even with a same-module def of that name in scope it is
+    # never rebound, and the decorated def keeps its own name. If the set entry were lost, the def would be renamed
+    # to `show__undecorated` and rebound through the decorator.
+    _run_isolated(lambda: test_c_shape("annotation_decorator_lldb_formatter_is_not_rebound", """\
+def lldb_formatter_wrapping_type(f):
+    return f
+
+@lldb_formatter_wrapping_type
+def show(x):
+    return x + 1
+
+def main():
+    print(show(6))
+
+main()
+""", must_have=["int64_t show_"], must_not_have=["show__undecorated"]), 'annotation_decorator_lldb_formatter_is_not_rebound')
 
     # Same-module wraps using a class-based partial (functools.wraps style)
     # must compile and apply correctly; the decorator rebinding/refusal must
