@@ -1,6 +1,43 @@
 SPLIT: COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union-part2, COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union-part3 (part1 fixed: variadic async `__aexit__` start-call packing, pinned by `test_asyncio_run_module_scope_regress.py::variadic_aexit_awaited_in_main`)
 # COMPILE_FAIL: Lib/contextlib.py — blocked on the async/coroutine codegen (title STALE)
 
+## Status 2026-11-19 -- order-dependence in async-method eligibility fixed; the remaining three are the dynamic-await wall
+
+Landed: `mojo/middle/coro.py::lower` built `_ASYNC_METHOD_NAMES` in ONE
+source-order pass, but whether an async method is eligible depends on that
+set (`await self.thing.aclose()` is only accepted once `aclose` is a known
+compiled async method). A method was therefore judged against only the async
+methods defined before it, so `AsyncClosing.__aexit__` (line 389, awaits
+`.aclose()`) was refused because `AsyncExitStack.aclose` sits later in the
+file. It is now a fixpoint (names only grow, so it terminates). Pinned by
+`async_method_awaits_later_defined_async_method` in
+`test_gimple_generator_runner.py`. Measured on `Lib/contextlib.py` through
+`compile_to_gimple_with_cpp`: the refusal list went from
+`__aexit__, __aexit__, _exit_wrapper, inner` to `__aexit__, _exit_wrapper, inner`.
+
+Measured reasons for the three that remain (A3 `_eligible_async*` and
+`_async_awaits_ok`/`_await_stmt_ok` in `mojo/middle/coro.py`); all are the same
+wall, an `await` of an object whose type is dynamic:
+
+- `_GeneratorContextManager`-async `__aexit__` (line 218):
+  `await anext(self.gen)`, `await self.gen.athrow(value)`,
+  `await self.gen.aclose()` -- `self.gen` is whatever `func(*args, **kwds)`
+  returned (an async generator object of unknown type), plus try/except/else/
+  finally with awaits in the handlers.
+- `inner` (line 99) / `_exit_wrapper` (line 650): `await func(*args, **kwds)`
+  / `await callback(*args, **kwds)` where the callee is a PARAMETER. Even the
+  minimal `def mk(cb, x): async def w(): await cb(x)` is refused
+  (`_await_stmt_ok` only accepts a known async name, a handle, or a method
+  whose name is a compiled async method), and `*args, **kwds` forwarding needs a
+  variable-arity call through a function value, which the C ABI of
+  `__mgco_<f>_start` (fixed scalar parameters) cannot express.
+
+Next step (needs a design decision, not more probing): a first-class
+async-callable value -- a boxed callable whose call takes `(MojoList *args,
+MojoDict *kwds)` and returns a coroutine handle, with a matching dynamic
+await on a handle of statically unknown kind. Until that exists, contextlib's
+async half cannot compile; that is the whole remaining blocker.
+
 ## Status 2026-10-29 (third session) — the call-arity defect landed; the doc stays open
 
 Landed (partial, real behaviour change): a call to a coroutine or generator
