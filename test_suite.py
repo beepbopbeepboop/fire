@@ -2206,6 +2206,13 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # that is not a call keyword at all, and it walks `build/` and the other derived
 # trees this one skips.
 STALE_PER_CHILD_BUDGETS = {
+    # Four pins that arrived with the 2026-11-19 closure-stub /
+    # imported-container merge. Each literal is a real child budget (a
+    # compile/link/run of one fixture); the counts are the ast walk's.
+    'test_dump_full_reports_closure_stubs.py': 1,
+    'test_gimple_class_method_import_inlined.py': 2,
+    'test_gimple_imported_container_global.py': 3,
+    'test_gimple_set_op_boxed_container_local.py': 3,
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
@@ -4259,6 +4266,8 @@ UNREGISTERED = {
     'test_casesgen_dataclass_ctor_literal_union_build.py': _STANDALONE_TEST_REASON,
     'test_casesgen_decorated_method_gate.py': _STANDALONE_TEST_REASON,
     'test_casesgen_preseed_takeover_union_elems.py': _STANDALONE_TEST_REASON,
+    # Runs directly (`python3 <file>`); names its cause in its docstring.
+    'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_export_table_suffix_mismatch.py': _STANDALONE_TEST_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
