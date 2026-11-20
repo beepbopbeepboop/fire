@@ -667,7 +667,22 @@ def test_every_declaration_is_seen():
     #       `mojo_list_get_int_checked` (`MojoList *` in) and
     #       `mojo_list_get_str_checked` (`MojoList *` in, `char *` out) are
     #       box-shaped.
-    for header, want in (('fire_runtime.h', 857),   # --fix writes the live figure
+    # 856 -> 857 (2026-11-19, `05016b34d`, "codegen: read an escaped
+    # generator's value by its registered yield kind"): ONE name landed with
+    # that commit's own rung.
+    # 857 -> 859 (2026-11-20, the gate fix for `rthdrscan`): TWO names, read
+    # off the call on the live header, from two commits that landed after the
+    # 857 rung without one:
+    #   +1  17686c02f ("codegen: repr() of a char * None prints None, not ''"):
+    #       `mojo_repr_str_or_none` (`char *` in, `char *` out) — the repr
+    #       resolver's None-preserving arm. Word-shaped (both sides one word),
+    #       word 449 -> 450, total 967 -> 968.
+    #   +1  ae81bbf68 ("codegen: textwrap.dedent runtime helper; c_common/tables.py
+    #       builds and runs again"): `mojo_textwrap_dedent` (`char *` in,
+    #       `char *` out) — CPython 3.14's dedent. Word-shaped, word
+    #       450 -> 451, total 968 -> 969; box stays 518.
+    # `--fix` wrote this rung and every quoted figure above from one scan.
+    for header, want in (('fire_runtime.h', 859),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
