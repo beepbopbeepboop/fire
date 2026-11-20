@@ -397,7 +397,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
 # `os.linesep` to `0` (an empty string) while the ordinary path in the same
 # program read `'\n'`, and the only thing that kept the coroutine body off
 # the compiled path was the mixed-yield refusal that difference caused
-# (the c_common/scriptutil.py compile bug (fixed; its doc is deleted)).
+# (bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
 #
 # The POSIX-only half of `signal` is deliberate: only the numbers identical
 # across every POSIX platform this runtime targets are listed, so a

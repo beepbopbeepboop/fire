@@ -2181,10 +2181,6 @@ int64_t mojo_box_from_bool(int64_t v)
  * pointer back. */
 int64_t mojo_box_from_str(char *s)
 {
-    /* A NULL string in a tagged word is `None`: this is the box a `str`-typed value
-     * takes when it is returned beside other kinds (`return selected` where `selected`
-     * is None), and a 'p' box around NULL is read as a string by every consumer. */
-    if (s == NULL) return mojo_box_none();
     MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
     if (!bx) return (int64_t)(intptr_t)s;
     bx->magic = MOJO_BOX_MAGIC;
@@ -2570,27 +2566,6 @@ char *mojo_repr_boxed(int64_t v)
      * how a tuple of strings renders each slot as a string. */
     if (mojo_is_registered_list(v))
         return mojo_repr_list_kinds((MojoList *)(intptr_t)v, NULL);
-    /* A registered SET travels as its raw pointer in a tagged word (it has no box
-     * kind: see emit_stmts._box_mixed_return_arm), so it must be recognised here or
-     * it spells as its address. It is rendered from its element list, the way a
-     * statically typed set prints; there is no frozen marker on MojoSet, so a
-     * frozenset renders as a plain set exactly as it does there. */
-    if (mojo_is_registered_set(v)) {
-        MojoSet *st = (MojoSet *)(intptr_t)v;
-        if (st->used == 0) return strdup("set()");
-        int64_t *order = mojo_set_order_indices(st);
-        char *acc = strdup("{");
-        for (int64_t oi = 0; oi < st->used; oi++) {
-            int64_t i = order[oi];
-            if (oi > 0) acc = mojo_str_cat_free(acc, ", ");
-            /* each element by ITS tag: 0 an int, otherwise a string (quoted) */
-            char *el = st->slots[i].tag == 0 ? mojo_repr_int(st->slots[i].val_i)
-                                             : mojo_repr_str(st->slots[i].val_s);
-            acc = mojo_str_cat_free(acc, el);
-        }
-        free(order);
-        return mojo_str_cat_free(acc, "}");
-    }
     if (mojo_is_boxed(v)) {
         MojoBox *bx = (MojoBox *)(intptr_t)v;
         switch (bx->kind) {
