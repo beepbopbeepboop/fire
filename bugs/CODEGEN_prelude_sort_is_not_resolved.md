@@ -18,6 +18,34 @@ called it inside a generic and only failed `gcc -c` once that generic was really
 
 ## Status
 
+**2026-11-19 (round 3) — step 2a/2b designed and drafted, NOT landed; end-to-end unmeasured.**
+Drafted and checked (unit level only) the two pieces the planning guide below asks for, then
+reverted them because the end-to-end measurement did not finish in this round:
+
+- *2a, element type of a local.* `emit_resolve.py`: a per-body cache `_proven_list_locals(gen)` maps
+  a local bound exactly once (`gex._names_bound_by` count == 1) by `var p: List[X]` or
+  `var p = List(length=n, fill=<literal>)` to `'List[X]'` (`_literal_mojo_type`, so `0` is `Int`);
+  `_proven_arg_mojo_type`'s IdentExpr branch falls back to it after the parameter check.
+- *2b, Span conversion.* `emit_resolve.py::_coerce_span_args(gen, info['params'], arg_pairs)`, called
+  in `_emit_generic_instantiation` after the arity truncation: a `MojoList *` argument whose instance
+  parameter is `Span *` becomes a fresh `_alloc_Span` with `_data = (char*) list->data`,
+  `_len = list->len`. One helper for every Span parameter.
+- *Inferred path.* `_elaborate_generic_call` passes `_inferred_arg_mojo_type` (proven type for a
+  `MojoList *` argument only; literal inference unchanged).
+- *Guard.* `elaborate.py::_unify_param_ann`: a proven `List[X]` declines the bare `x: T` shape, so
+  only the Span shape sees the new proof (pinned by an added assertion in
+  `test_span_param_binds_only_from_a_proven_list`, which passes).
+
+Measured: the Done-when program still prints the honest stub (no registration yet; expected). The
+`from std.builtin.sort import sort` variant was run once under the 8 GB cap and did not finish in
+~12 minutes (RSS climbed to ~1 GB, then the background run was stopped by the harness), so whether
+the real sort now elaborates, and what it fails on, is NOT known. The drafted diff was saved only in
+the worktree's git-ignored `.tmp/`, not committed; re-derive from the description above.
+
+**Next step for the next round:** re-apply 2a/2b, then measure the imported program as a
+single-unit `elaborate_generic_call` of `std.builtin.sort.sort` (not a whole-closure program run),
+to find the first failing helper before touching `_PRELUDE_GENERICS`.
+
 **2026-11-20 — planning step 1 landed (`Span[T, o]` <- `List[X]` unify rule); step 2 blocked on a
 proof this lane does not yet have.** `elaborate.py::_unify_param_ann` now binds a `Span[T, o]`
 annotation from a `MojoList *` argument, but ONLY when the caller proves the list's Mojo type
