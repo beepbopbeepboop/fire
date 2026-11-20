@@ -4277,6 +4277,19 @@ UNREGISTERED = {
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
+    # The bootstrap-stage2-cc pins (2026-11-19): one shape of the red
+    # whole-closure job each — the unaliased class import in every scope, the
+    # class-method import's closure pull-in, the mid-compile module-global
+    # read, and the two container spellings (one boxed, one a dispatch-table
+    # raw pointer). Each runs directly (`python3 <file>`) and names its cause
+    # in its own docstring; the registered regression file for the class-import
+    # area is `test_gimple.py` (its `known_function_not_shadowed_by_global_
+    # fnptr` case asserts the same lowering from the other side).
+    'test_gimple_class_import_cross_module.py': _STANDALONE_TEST_REASON,
+    'test_gimple_class_method_import_inlined.py': _STANDALONE_TEST_REASON,
+    'test_gimple_imported_container_global.py': _STANDALONE_TEST_REASON,
+    'test_gimple_module_global_pending_owner.py': _STANDALONE_TEST_REASON,
+    'test_gimple_set_op_boxed_container_local.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
