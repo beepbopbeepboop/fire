@@ -18,6 +18,70 @@ called it inside a generic and only failed `gcc -c` once that generic was really
 
 ## Status
 
+**2026-11-20 (round 4) — steps 2a/2b landed and measured; stop condition invoked; `sort` NOT registered.**
+
+- *2a landed (with a round-3 draft defect fixed).* `emit_resolve.py::_proven_list_locals(gen)` maps a
+  local bound exactly once by `var p: List[X]` / `var p = List(length=n, fill=<literal>)` to `'List[X]'`,
+  and — the round-3 draft's defect — an in-place store (`p[0] = 3`) must NOT end the proof: the draft
+  counted subscript targets as bindings (`gex._names_bound_by` over-counts), so `p` in the Done-when
+  program was never proven. `_bare_name_target_names` counts only bare/tuple targets as rebinds.
+  Pinned by `test_proven_list_local_keeps_element_type_across_inplace_store` (fails at HEAD:
+  `AttributeError: no attribute '_proven_list_locals'`; passes now).
+- *2b landed.* `_coerce_span_args` in `_emit_generic_instantiation`: a `MojoList *` argument whose
+  instance parameter is `Span *` becomes a fresh `_alloc_Span` over the list's own storage
+  (`_data = (char*) list->data; _len = list->len`). One helper for every `Span` parameter.
+- *Chain fixes 3-5 landed.* (3) the inferred arm passes
+  `generic_paths=_generic_paths_with_module(gen, source, module_src)` (the callee module's own generic
+  functions, so the instance's sibling calls elaborate); (4) `elaborate.py::_unify_param_ann` binds
+  `Span[T, o]` <- a PROVEN `Span[X, o]` argument (the nested chain passes the same proven Span down),
+  guarded by `_is_concrete_type_arg` + concrete-origin agreement — a still-generic proof binds nothing;
+  (5) bare-sibling routing: the `_gen` gate in `emit_calls._lower_call`, the ExprStmt fast path in
+  `emit_stmts._gen_stmt_ExprStmt`, and the source lookup in `emit_resolve._elaborate_generic_call`
+  accept BARE sibling-map names (statement-position `_insertion_sort(interval, cmp_fn)` in the `_sort`
+  instance fell to the weak stub before). Pinned by `test_span_param_binds_from_a_proven_span`
+  (fails at HEAD: proven Span declined) and `test_arity_overloads_mangle_to_distinct_symbols`.
+- *Mangle injectivity defect found and fixed (shared, arity-keyed).* The two `sort` overloads
+  (`sort(span)` / `sort(span, cmp_fn)`, same type-param names) mangled to ONE symbol for the same type
+  args; the moment the 1-arg instance's own body call elaborated the 2-arg overload, the 1-arg TU
+  declared the 2-arg extern beside its own definition and gcc failed "too many arguments".
+  `elaborate.py::_arity_overload_clash` + `targs['ArgC'] = arg_count` (same mechanism as the variadic
+  fold): `sort_4_ArgC_1_1_...` vs `sort_4_ArgC_1_2_...`. Disambiguation is by ARITY, never by name.
+- *Bare-sibling gate regression found and fixed this round.* The bare-sibling additions above let the
+  `sin_5_...` instance's OWN body (built in its isolated TU) elaborate its comptime-dead narrowing arm
+  `comptime if size_of[dtype]() < size_of[.float32](): return sin(...)` — a BARE SELF-call that now
+  resolved through the sibling map and raised the self-recursion refusal, breaking the pre-existing
+  `gate_stdlib_syntax_imported_generic_bracket_args` gate (passed at HEAD, where the bare gate checked
+  `_imported_generics` only and the self-call stubbed in its dead branch). Fix: the bare-sibling branch
+  of the `_gen` gate excludes a call whose name self-references `current_func_name`
+  (`name == cfn or cfn.startswith(name + '_')`, the existing `self_recursive_uninstantiable`
+  convention). Bare self-calls keep exactly the HEAD stub; bracketed self-calls and true siblings
+  (different names) are untouched. Measured: the gate's probe compiles again; the sort chain still
+  elaborates all 4 nested helper objects.
+- *New regression tests verified fail-before/pass-after.* All three new tests FAIL at HEAD
+  (`3 of 3 failed at HEAD`) and PASS on the fixed tree; full `test_gimple.py`: **469 passed, 0 failed**.
+- *Measured failing helper (the recorded one).* In the `_quicksort` instance TU the bare calls
+  `_insertion_sort(interval, cmp_fn)`, `_sort3(interval, len >> 1, 0, len - 1, cmp_fn)`,
+  `_quicksort_partition_left/right(interval, cmp_fn)` are DECLINED because `interval` is the `Span *`
+  local from `stack.pop()` on a `List[Span[Int, MutOrigin]]`: proving the element type needs the
+  container's element type, and the current proof covers only (a) the enclosing function's own
+  parameter annotation, (b) a `List(length=, fill=)` constructor at the call site, (c) a proven List
+  local — not a one-step projection from a proven List's `.pop()`.
+- *Deeper measured gaps (why the instance still cannot run).* (1) The Span runtime API
+  (`as_ref`, `unsafe_offset`, `unsafe_take_pointee`, `unsafe_write(_move_from)`, `unsafe_get`,
+  `unsafe_swap_elements`, `unsafe_subspan`, `unsafe_ptr`) is weak no-op stubs inside the helper
+  instances: the `_insertion_sort[Int, MutOrigin]` object builds with a real loop, but `as_ref` prints
+  a message and returns 0. (2) The module comptime constant `insertion_sort_threshold` erases to
+  `(int64_t)0 /* ct param or undeclared */` in the isolated TU, so the `len < 32` small-sort branch is
+  dead. Both are features larger than Span/List per the stop condition.
+- **Stop condition invoked (per the plan): `sort` is NOT added to `_PRELUDE_GENERICS`; the Done-when
+  program prints the honest stub, which is correct while the instance cannot run.**
+
+**Exact next step (in order):** (1) container-projection proof — a proven `List[X]` local's
+`stack.pop()`/index yields a proven `X` argument (one step; the recorded failing helper);
+(2) the Span runtime methods in helper instance bodies (their shared gap, per the plan's step 3:
+fix each by its own doc'd gap, no sort special-casing); (3) module comptime constants in isolated TUs
+(`insertion_sort_threshold`); (4) re-measure the Done-when program, and only then register `sort`.
+
 **2026-11-19 (round 3) — step 2a/2b designed and drafted, NOT landed; end-to-end unmeasured.**
 Drafted and checked (unit level only) the two pieces the planning guide below asks for, then
 reverted them because the end-to-end measurement did not finish in this round:
