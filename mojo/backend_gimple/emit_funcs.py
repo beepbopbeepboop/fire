@@ -5647,6 +5647,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
 
     params_str = ', '.join(param_strs) if param_strs else 'void'
     mangled    = gen._struct_method_csym(struct_name, node.name, overload_id)
+    gen._current_method_csym = mangled
 
     gen._seed_mut_captured_local_types(gen.current_func_name)
     gen._seed_addressed_locals(node.body)

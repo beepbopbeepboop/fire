@@ -168,20 +168,17 @@ def test_concrete_unrenderable_type_arg_is_not_refused():
     # `i * 2`): a bracketed generic call inside an elaborated instantiation
     # whose bracket argument PROGRESSES is an unbounded instantiation. A string
     # literal and a `.uint32` dot-value are fixed comptime data, so the call must
-    # NOT be refused: std/math/math.mojo's `llvm_intrinsic["llvm.*", ...]` and
-    # std/builtin/_format_float.mojo's `_truncate[.uint32](...)` previously made
-    # the stdlib skip those modules. The same goes for a type expression the
-    # renderer cannot spell (a local `comptime T = ...` alias): only the
-    # arithmetic SHAPE is refused, not "the renderer came back blank".
-    # Only the build is asserted here. The nested call's VALUE is not yet correct
-    # (it takes the pre-existing stub path, which answers 0): see
-    # bugs/CODEGEN_nested_bracket_generic_call_stubs_to_zero.md.
+    # NOT be refused, and it must be MATERIALIZED, not stubbed to 0:
+    # std/math/math.mojo's `llvm_intrinsic["llvm.*", ...]` and
+    # std/builtin/_format_float.mojo's `_truncate[.uint32](...)`. The callees add
+    # distinct constants, so a stub (0) or a swapped call cannot give the answer:
+    # tag["abc"](5) = 105, ident[.uint32](5) = 15, plus i = 1 -> 121.
     src = (
         'def tag[s: StaticString](x: Int) -> Int:\n'
-        '    return x\n'
+        '    return x + 100\n'
         '\n'
         'def ident[dt: DType](x: Int) -> Int:\n'
-        '    return x\n'
+        '    return x + 10\n'
         '\n'
         'def wrap[i: Int](x: Int) -> Int:\n'
         '    return tag["abc"](x) + ident[.uint32](x) + i\n'
@@ -189,13 +186,15 @@ def test_concrete_unrenderable_type_arg_is_not_refused():
         'def main():\n'
         '    print(wrap[1](5))\n'
     )
-    rc, out, _ = _build_and_run(src)
+    rc, out, r = _build_and_run(src)
     assert rc == 0, 'concrete unrenderable type argument was refused:\n' + out
     assert 'will cause an infinite loop' not in out and 'cannot materialize' not in out, out
+    assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
+    assert r.stdout.strip() == '121', r.stdout
 
 
 def test_nested_bracketed_call_in_instantiation_is_materialized():
-    # bugs/CODEGEN_nested_bracket_generic_call_stubs_to_zero.md: `ident[7](x)`
+    # The nested-bracket stub bug (fixed; its doc is deleted): `ident[7](x)`
     # inside the elaborated body of `wrap[1]` used to stub to `(int64_t)0`, so
     # the program printed 1 (ident[7](5) = 12, plus i = 1 -> 13 expected). The
     # nested call is a generic VALUE-parameter instantiation, which the in-TU
@@ -242,6 +241,32 @@ def test_nested_bracketed_calls_two_levels_and_shared_callee():
     assert r.stdout.strip() == '37', r.stdout
 
 
+def test_generic_instance_sees_its_home_modules_imports():
+    # An elaborated generic FUNCTION is its own compilation unit. It used to see none of
+    # the imports of the module that wrote it, so `rand(p)` in the body below bound to
+    # the C library's `rand()` ("too many arguments to function 'rand'"), the link-mode
+    # build threw, `fire.py build` swallowed it and fell back to the inline whole-closure
+    # compile of std.random (60 levels deep; 15+ minutes and 7 GB). The instance now
+    # gets the imports it calls plainly, so the build stays in link mode and finishes.
+    src = (
+        'from std.random import rand\n'
+        '\n'
+        'def fill_it[dtype: DType, name: StaticString](size: Int) raises:\n'
+        '    var p = List(length=size, fill=Scalar[dtype](0))\n'
+        '    rand(p)\n'
+        '    print(name, size)\n'
+        '\n'
+        'def main() raises:\n'
+        '    fill_it[.int8, "int8"](300)\n'
+    )
+    rc, out, r = _build_and_run(src, timeout=1500)
+    assert rc == 0, 'generic instance calling an imported function failed to build:\n' + out
+    assert 'cannot compile in-process' not in out, 'fell back to the inline path:\n' + out
+    assert 'too many arguments to function' not in out, out
+    assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
+    assert 'int8 300' in r.stdout, r.stdout
+
+
 if __name__ == '__main__':
     tests = [
         test_direct_self_recursion_still_refused,
@@ -253,6 +278,7 @@ if __name__ == '__main__':
         test_concrete_unrenderable_type_arg_is_not_refused,
         test_nested_bracketed_call_in_instantiation_is_materialized,
         test_nested_bracketed_calls_two_levels_and_shared_callee,
+        test_generic_instance_sees_its_home_modules_imports,
     ]
     for t in tests:
         t()

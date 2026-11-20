@@ -3819,12 +3819,18 @@ class Elaborator:
         check_bounds(module_src, tmpl, targs)
 
         nested_objects: list = []
+        _, concrete = mm.monomorphize_source(tmpl, targs)
+        # The instance is its own compilation unit (see elaborate_generic_struct): it
+        # sees the names its home module imports, or a plain call to one of them
+        # (`rand(p)` from std.random in a generic's body) would bind to the C
+        # library's `rand` or to a weak stub.
+        _imports = _instance_import_text(module_src, concrete)
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      conformance_bases=_where_conformance_bases(module_src),
                                                      origin_module=origin_module,
                                                      generic_paths=generic_paths,
-                                                     links_out=nested_objects)
-        _, concrete = mm.monomorphize_source(tmpl, targs)
+                                                     links_out=nested_objects,
+                                                     import_text=_imports)
         ret, ptypes = _elab_signature(concrete, mangled)
         if ret is None:
             ret = mm.defined_return_ctype(mangled) or 'void'
@@ -3901,7 +3907,8 @@ class Elaborator:
         symbols = sorted(_defined_symbols(obj)) if obj else []
         return {'name': mangled, 'fields': fields, 'methods': methods,
                 'anns': anns, 'object': obj, 'cpp_object': cpp_obj,
-                'symbols': symbols}
+                'symbols': symbols,
+                'deferred_asserts': mm.deferred_asserts(mangled)}
 
     def elaborate_generic_struct_inferred(self, module_src: str, struct_name: str,
                                           arg_ctypes) -> dict:

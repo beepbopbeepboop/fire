@@ -1141,6 +1141,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     _cpp_bytes: dict = {}
     _ret_bytes: dict = {}
     _links_data: dict = {}
+    _asserts_bytes: dict = {}
 
     def build():
         # The instantiated function is already uniquely named (mangled); don't
@@ -1222,6 +1223,11 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         # template has none). Recorded so the caller declares the call site
         # with the same type the definition has — see `defined_return_ctype`.
         _ret_bytes['data'] = (gen.func_return_types.get(mangled) or '').encode()
+        # A method whose `comptime assert` is false for THIS instance was built as a trap
+        # instead of failing the instance (see emit_stmts._comptime_assert_fail); the
+        # diagnostics travel with the object so a caller that calls the method can raise.
+        _asserts_bytes['data'] = json.dumps(
+            dict(getattr(gen, '_deferred_method_asserts', None) or {}), sort_keys=True).encode()
         if _sib:
             # Every object this body's nested instantiations produced: the caller
             # links them, because this `.o` only declares the callees.
@@ -1308,6 +1314,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
             if 'data' in _cpp_bytes:
                 cas.publish(key, '.cpp.o', _cpp_bytes['data'])
             cas.publish(key, '.ret', _ret_bytes['data'])
+            cas.publish(key, '.asserts', _asserts_bytes['data'])
         elif cas.lookup(key, '.ret') is None:
             # An entry built before the `.ret` sidecar existed: its object is
             # still the right one, but nothing records the return type. Build
@@ -1317,6 +1324,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
             if 'data' in _cpp_bytes and cas.lookup(key, '.cpp.o') is None:
                 cas.publish(key, '.cpp.o', _cpp_bytes['data'])
             cas.publish(key, '.ret', _ret_bytes['data'])
+            cas.publish(key, '.asserts', _asserts_bytes['data'])
         # A PATH (cas.lookup's own return convention), not bytes — matches
         # `obj` above exactly, so callers can treat both uniformly (e.g.
         # gimple_codegen.py's `_link_objects`, ultimately passed straight
@@ -1325,6 +1333,12 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         cpp_obj = cas.lookup(key, '.cpp.o')
         with open(cas.lookup(key, '.ret')) as _f:
             _DEFINED_RET[mangled] = _f.read() or None
+        _ap = cas.lookup(key, '.asserts')
+        if _ap is not None:
+            with open(_ap) as _f:
+                _DEFERRED_ASSERTS[mangled] = json.loads(_f.read() or '{}')
+        else:
+            _DEFERRED_ASSERTS[mangled] = {}
     finally:
         ELAB_DEPTH[0] -= 1
         _IN_PROGRESS.discard(key)
@@ -1334,6 +1348,18 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
 # mangled name -> the C return type its defining unit gave it, recorded by
 # `instantiate` in this process (the CAS keeps it as the `.ret` sidecar).
 _DEFINED_RET: dict = {}
+
+# mangled instantiation name -> {method C symbol: diagnostic} for each method whose
+# `comptime assert` is false for that instance and was built as a trap, recorded by
+# `instantiate` (the CAS keeps it as the `.asserts` sidecar).
+_DEFERRED_ASSERTS: dict = {}
+
+
+def deferred_asserts(mangled: str) -> dict:
+    """{method C symbol: diagnostic} of the instance `mangled`'s methods that were
+    built as traps because their `comptime assert` is false for it (see
+    `_DEFERRED_ASSERTS`); empty when there are none."""
+    return dict(_DEFERRED_ASSERTS.get(mangled) or {})
 
 
 def defined_return_ctype(mangled: str):

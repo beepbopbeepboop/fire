@@ -2453,6 +2453,10 @@ def _type_expr_to_ann(gen, node) -> str:
         return _float_type_arg_text(node.value)
     if isinstance(node, gimple_ctypes.BoolLiteral):
         return 'True' if node.value else 'False'
+    if isinstance(node, gimple_ctypes.StringLiteral) and not node.is_bytes:
+        return repr(node.value)
+    if isinstance(node, gimple_ctypes.DottedLiteral):
+        return '.' + node.path
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.IntLiteral):
         return str(-node.operand.value)
     # A sign chain over an integer spelling (`-shift` with shift = -8 substituted

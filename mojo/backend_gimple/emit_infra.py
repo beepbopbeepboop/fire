@@ -2852,6 +2852,9 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
     only fires for a callee that declares `*args`, whose string parameter is
     never the interesting case); a `f(*xs)` spread expands AFTER this point,
     so a spread argument simply arrives with no node."""
+    _deferred = getattr(gen, '_callee_deferred_asserts', None)
+    if _deferred and fname in _deferred:
+        raise RuntimeError(_deferred[fname])
     fname, arg_pairs = _apply_kw_keys(gen, fname, arg_pairs)
     # Rename certain C library functions to mojo_* wrappers with void* params
     fname = gen._CALL_RENAMES.get(fname, fname)

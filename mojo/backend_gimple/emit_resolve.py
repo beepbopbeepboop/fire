@@ -4341,6 +4341,11 @@ def _register_generic_struct(gen, base_name, info):
         # no object, or `nm` was unavailable), fall back to composing the
         # bare name — the pre-existing behavior, kept so a cycle does not
         # regress into declining the struct entirely.
+        # Methods the instance built as traps (their `comptime assert` is false for it):
+        # calling one is the compile error, so `_emit_call` raises it.
+        _callee_asserts = getattr(gen, '_callee_deferred_asserts', None) or {}
+        _callee_asserts.update(info.get('deferred_asserts') or {})
+        gen._callee_deferred_asserts = _callee_asserts
         _syms = set(info.get('symbols') or ())
         # `nm` on Mach-O prints C symbols with the object format's own leading
         # underscore (`_Empty_Int___next__` for the C name

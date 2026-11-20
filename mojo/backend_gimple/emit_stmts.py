@@ -6400,7 +6400,31 @@ def _comptime_assert_fail(gen, node, msg):
         loc = f'{fn}:{line}:{col}: '
     elif line:
         loc = f'{line}:{col}: '
-    raise RuntimeError(f'{loc}comptime assertion failed: {msg}')
+    _text = f'{loc}comptime assertion failed: {msg}'
+    # A struct method of an ELABORATED INSTANCE is compiled with every other method
+    # of that instance, called or not, but Mojo checks a method's `comptime assert`
+    # only when that method is instantiated. `SIMD[.bfloat16, 2]` carries
+    # `__init__(value: Bool)` with `comptime assert Self.length == 1`: false for the
+    # instance, and the constructor is never called. So the failure is DEFERRED: the
+    # method body traps if it is ever reached, and the diagnostic is recorded against
+    # the method's C symbol (`gen._deferred_method_asserts`, published with the
+    # instance); a caller that actually calls that method raises it (`_emit_call`).
+    _csym = getattr(gen, '_current_method_csym', '')
+    if _in_method and _csym and getattr(gen, '_is_elaborated_instantiation', False):
+        gimple_ctypes._debug_note(
+            f'comptime assert false in an elaborated instance method, deferred to its callers: {msg}')
+        _deferred = getattr(gen, '_deferred_method_asserts', None) or {}
+        _deferred[_csym] = _text
+        gen._deferred_method_asserts = _deferred
+        gen._emit_call('void', '', 'mojo_print_stderr',
+                       [('char *', gen._new_val('char *', gen._intern_string(
+                           gimple_ctypes._c_escape(_text + '\n'))))])
+        gen._rt_void('__builtin_trap', [])
+        _bb_after = gen._new_bb()
+        gen._goto(_bb_after)
+        gen._emit_label(_bb_after)
+        return False
+    raise RuntimeError(_text)
 
 
 def _eval_comptime_assert_msg(gen, node):

@@ -238,6 +238,35 @@ def probe64(x: Float64) -> Bool:
     assert 'dtype_arm_probe_5_dtype_7_Float64_5_width_1_1 (double)' in c, c
 
 
+def test_uncalled_method_with_false_comptime_assert_does_not_fail_the_instance():
+    # Mojo checks a method's `comptime assert` when THAT METHOD is instantiated, not
+    # when the struct is. The elaborated instance compiles every method, so a guard
+    # that is false for this instance (SIMD's `__init__(value: Bool)` asserts
+    # `length == 1`) must not fail it; it is deferred to the callers of the method.
+    src = '''
+struct DTypeDiagDefer[dtype: DType]:
+    fn ok(self) -> Int:
+        return 1
+
+    fn only_fp(self):
+        comptime assert dtype.is_floating_point(), "fp"
+        constrained[True]()
+
+fn main():
+    var f = DTypeDiagDefer[DType.uint32]()
+    print(f.ok())
+'''
+    _compile_full(src)
+    called = src.replace('print(f.ok())', 'f.only_fp()')
+    try:
+        _compile_full(called)
+    except RuntimeError as e:
+        assert 'comptime assertion failed' in str(e), e
+        assert 'fp' in str(e), e
+        return
+    raise AssertionError('a CALLED method with a false comptime assert compiled')
+
+
 if __name__ == '__main__':
     test_comptime_assert_dtype_is_integral_false()
     test_comptime_assert_dtype_is_integral_true()
@@ -252,4 +281,5 @@ if __name__ == '__main__':
     test_generic_struct_comptime_assert_dtype_param_only_stmt()
     test_comptime_scalar_type_name_is_a_dtype_value()
     test_generic_dtype_comptime_if_prunes_other_dtypes_arm()
+    test_uncalled_method_with_false_comptime_assert_does_not_fail_the_instance()
     print('ok')
