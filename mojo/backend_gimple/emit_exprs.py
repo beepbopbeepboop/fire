@@ -4478,6 +4478,14 @@ def _lbt_none_eq(gen, op: str, left_node, lt: str, lv: str, right_node, rt: str,
         _t = gen._new_temp('_Bool')
         gen._binop_into(_t, _p, op, '0')
         return '_Bool', _t
+    if _ptr_ty == 'int64_t' and _ptr_val in getattr(gen, '_cur_untyped_params', ()):
+        # An UNANNOTATED parameter is a word of unknown kind: `f(None)` hands it the
+        # null word, so it CAN be None, and `x is None` already answers by testing that
+        # word. `x == None` must agree with it, not fold to a constant False.
+        _p = gen._cast('int64_t', f"{_ptr_val}")
+        _t = gen._new_temp('_Bool')
+        gen._binop_into(_t, _p, op, '0')
+        return '_Bool', _t
     if _ptr_ty in ('int', 'int64_t', '_Bool', 'double', 'float'):
         # ...and the same comparison when the other side is NOT a
         # pointer at all. `None == 0` is False in Python because
