@@ -425,7 +425,8 @@ def needs_memwhy(spec) -> bool:
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
 MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
-                'the run log (--apply-peaks)')
+                'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
+                '632a573a5 by a single-job --no-cache run')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -739,7 +740,7 @@ MEASURED_PEAK_GB = {
     'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
-    'linkmode':                               (0.1, 'measured'),
+    'linkmode':                               (0.6, 'measured'),
     'nonlocal':                               (0.4, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
