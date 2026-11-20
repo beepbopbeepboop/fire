@@ -1322,7 +1322,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      # (multi_export, pair / call_both_arms, elif_call), the
                      # `group3:not` hmem lie (unary_ops) and the three memory
                      # ceilings.
-                     'formal-x86-endtoend': 8,
+                     'formal-x86-endtoend': 4,
 # NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
                      # is in this census any more, and that is the union of the two
                      # sides of the 2026-10-17 merge, each of which dropped one of

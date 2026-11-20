@@ -3141,25 +3141,20 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             '`mem_read_bytes`\'s `ite` chain, which is the subject of '
             '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)` '
             'and not something a class change would fix.',
-     expect='8 of 68, each a filed bug and none a regression: two are the '
+     expect='4 of 68, each a filed bug and none a regression: one is the '
             'fork-hval cross-arm cite in '
             '`FORMAL_x86_endtoend_hval_cites_other_arm_at_fork` '
-            '(multi_export, pair); two are the `maxRecDepth` floor that prices '
-            'the step count but not the image in '
-            '`FORMAL_x86_endtoend_maxrecdepth_ignores_image_size` '
-            '(call_both_arms, elif_call); three are the per-process `-M 6144` '
-            'ceiling in `FORMAL_x86_endtoend_memory_ceiling` (wide_expr, '
-            'wide_recv — the case this marker named since 2026-10-05 — and '
-            'list_literal_index, reached when the general '
-            '`x86_step_mov_rm64_imm32` made its success path the one that is '
-            'proved). The other 60: 53 proved with no sorry, the five whose '
-            '`imul` overflow guard the 2026-11-19 walk correction moved off '
-            'this list (annot_params, call_helper, chain, localmul, '
-            'mixed_width — they now fork and prove), and 2 proved with a '
-            'counted hole (main_calls_helper hpop44, struct_method hpop58 — '
-            'the mov hole this branch closed surfaced the hpop admission). '
-            'The 26 that build no path tree (19 loop, 7 uncovered form) '
-            'are reported by the harness itself and are not cases.',
+            '(multi_export: `Unknown identifier` for `hval`); three are the '
+            'per-process `-M 6144` ceiling in `FORMAL_x86_endtoend_memory_ceiling` '
+            '(wide_expr and wide_recv, the case this marker named since '
+            '2026-10-05, and list_literal_index, which hits kernel memory '
+            'consumption). Measured 2026-11-19 with the imul ModRM and group3 '
+            'walk corrections: the nine imul examples (annot_params, call_helper, '
+            'chain, localmul, mixed_width, multi_export, pair, call_both_arms, '
+            'elif_call) all fork and prove except multi_export; unary_ops now '
+            'proves with no sorry. The other 64 are proved, with no sorry or a '
+            'counted hole, and the 26 that build no path tree are reported by the '
+            'harness itself and are not cases.',
      desc='x86-64 whole run, every input, no sorry')
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
