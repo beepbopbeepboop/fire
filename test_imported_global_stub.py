@@ -62,10 +62,18 @@ def pick(op):
 
 def rank(x):
     return _GD_SIGNED.get(x, 0)
+
+
+def banner():
+    # Function-scoped sibling import of a module-level DICT global: the
+    # import binds inside the body, not at module scope, and the name must
+    # still read the defining module's accessor, not a stub.
+    from generated_dispatch import _EXPR_DISPATCH
+    return _EXPR_DISPATCH.get('add', 'none')
 """
 
 CONSUMER_SRC = """\
-from types import _EXPR_DISPATCH, pick, rank
+from types import _EXPR_DISPATCH, banner, pick, rank
 
 
 def main():
@@ -73,6 +81,7 @@ def main():
     print(pick('zzz'))
     print(rank('int16'))
     print(sorted(_EXPR_DISPATCH))
+    print(banner())
 
 
 main()
@@ -133,7 +142,7 @@ def test_imported_global_has_no_function_stub():
     try:
         root_file = _write_tree(td)
         expected = _cpython_stdout(td, root_file)
-        assert expected == 'plus\nnope\n2\n[\'add\', \'sub\']\n', expected
+        assert expected == 'plus\nnope\n2\n[\'add\', \'sub\']\nplus\n', expected
         with open(root_file) as f:
             ci = gimple_codegen.compile_to_gimple(
                 f.read(), do_imports=True, filename=root_file)
@@ -148,6 +157,18 @@ def test_imported_global_has_no_function_stub():
         # stopped resolving.
         assert '__mojo_global_get__EXPR_DISPATCH' in ci, ci
         assert '__mojo_global_get__SIGNED' in ci, ci
+        # The function-scoped import of the same global, compiled as its own
+        # module (do_imports=False: the `fire dylib` / closure-dump shape, where
+        # the defining module is NOT inlined), must read the accessor too: the
+        # bug there was an `extern int64_t _EXPR_DISPATCH (...)` declaration
+        # plus a `_funcptr__EXPR_DISPATCH` pointer, not a call to the accessor.
+        with open(os.path.join(td, 'types.py')) as f:
+            sep = gimple_codegen.compile_to_gimple(
+                f.read(), do_imports=False,
+                filename=os.path.join(td, 'types.py'))
+        assert '_funcptr__EXPR_DISPATCH' not in sep, sep
+        assert 'extern int64_t _EXPR_DISPATCH' not in sep, sep
+        assert 'generated_dispatch__mojo_global_get__EXPR_DISPATCH' in sep, sep
         assert _build_and_run(ci, td) == expected
     finally:
         import shutil
