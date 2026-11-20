@@ -2650,9 +2650,28 @@ def _lc_getattr(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lc_sum(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """`sum(x)` with one argument.
+    """`sum(x)` and `sum(x, start)`: the second argument is added to the total
+    (it was a gcc "too many arguments" error). A float start, or a float
+    total, makes the result a double.
+
+    The single-argument form follows.
 
     One arm of `_lower_call`, which tests the condition and calls this."""
+    rt, rv = _lc_sum_one(gen, node)
+    if len(node.args) < 2:
+        return rt, rv
+    st, sv = gen.lower_expr(node.args[1])
+    if rt in gimple_ctypes._FLOAT_TYPES or st in gimple_ctypes._FLOAT_TYPES:
+        a = gen._cast('double', rv if rt in gimple_ctypes._FLOAT_TYPES
+                      else gen._to_int64(rt, rv))
+        b = gen._cast('double', sv if st in gimple_ctypes._FLOAT_TYPES
+                      else gen._to_int64(st, sv))
+        return 'double', gen._binop('double', f"{a}", '+', f"{b}")
+    return 'int64_t', gen._binop('int64_t', gen._to_int64(rt, rv), '+', gen._to_int64(st, sv))
+
+
+def _lc_sum_one(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """The total of `sum(x)`'s first argument."""
     at, av = gen.lower_expr(node.args[0])
     _refuse_namedtuple_tuple_use(gen, at, 'calling sum on')
     # `sum(a_dict)`/`sum(a_set)` of numbers is real Python, and even a
@@ -5864,7 +5883,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # _elem_types" pattern for repr(). Found via Tools/lockbench/
     # lockbench.py's `sum(values)`/`sum(x**2 for x in values)` on a
     # list of floats.
-    if (fname_raw == 'sum' and len(node.args) == 1
+    if (fname_raw == 'sum' and len(node.args) in (1, 2)
             and not gen._locally_binds_name('sum')):
         return _lc_sum(gen, node)
 
@@ -14350,6 +14369,19 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'Span *', t
 
     if ot == 'char *':
+        # A spelled step (`s[::2]`, `s[::-1]`) keeps its step: the step-less
+        # helper below answered the whole string for both.
+        if getattr(node, 'step', None) is not None:
+            _kt, kv = gen.lower_expr(node.step)
+            _stepv = _emit_slice_step_zero_check(gen, gen._to_int64(_kt, kv))
+            _hs = '0' if node.start is None else '1'
+            _he = '0' if node.stop is None else '1'
+            _sv = gen._new_val('int64_t', start_v)
+            _ev = (gen._new_val('int64_t', stop_v)
+                   if node.stop is not None else '0')
+            t = gen._rt_call('char *', 'mojo_cstr_slice_step',
+                             [f"{ov}", f"{_hs}", _sv, f"{_he}", f"{_ev}", f"{_stepv}"])
+            return 'char *', t
         # Codepoint-aware slicing for char* strings
         t = gen._rt_call('char *', 'mojo_cstr_slice_cp', [f"{ov}", f"{start_v}", f"{stop_v}"])
         return 'char *', t

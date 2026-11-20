@@ -41,11 +41,13 @@ BASELINE = {
     "endswith(' *')": 344,
     "== 'int64_t'": 404,
     "in (.., 'int64_t', ..)": 312,
-    "== 'char *'": 398,
+    # +1 on 2026-11-20: TypeLattice.is_cstr, the one definition call sites
+    # should use instead of spelling the test.
+    "== 'char *'": 399,
     "== '_Bool'": 68,
     "== 'double'": 187,
     "== 'MojoList *'": 203,
-    "gen._emit( text": 300,
+    "gen._emit( text": 298,
 }
 
 

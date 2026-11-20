@@ -1,0 +1,5 @@
+print("xxhixx".strip("x"))
+print("xxhixx".lstrip("x"))
+print("xxhixx".rstrip("x"))
+print("  hi  ".strip())
+print("abcba".strip("ab"))

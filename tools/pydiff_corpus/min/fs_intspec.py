@@ -1,0 +1,12 @@
+n = -3
+print(f"{n:04d}")
+print(f"{42:5d}|")
+print(f"{42:<5d}|")
+print(f"{42:+d}")
+print(f"{-42:+d}")
+print(f"{42:05d}")
+print(f"{1234567:,}")
+print(f"{255:x} {255:X} {255:o} {5:b}")
+print(f"{255:#x} {5:#b} {255:#o}")
+print(f"{5:08b}")
+print(f"{255:04x}")

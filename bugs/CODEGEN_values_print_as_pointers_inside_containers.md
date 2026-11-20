@@ -3,7 +3,7 @@
 Found 2026-11-20 by `tools/pydiff.py` (runs a program through CPython and through this compiler and compares).
 The differences below are CPython versus the compiled binary.
 
-Elements that are strings or nested containers print as a raw number like `4312620976`, and bools inside a list print as `1`/`0` instead of `True`/`False`. The element kind is known to the compiler where the list or tuple is built, but the printer is given an untyped word. Find where `print` of a list/tuple chooses the element printer and carry the element kind from the construction site (see `gen._elem_types`, `mojo_list_set_kinds`).
+Elements that are strings or nested containers print as a raw number like `4312620976`, and a bool put into a list one `append` at a time prints as `1`/`0` instead of `True`/`False` (`e = []; e.append(True)`). Bools in a list/tuple/dict LITERAL, including the result of a call to a `_Bool`-returning function, are fixed (2026-11-20, `exprtypes.is_python_bool_expr`); the append case needs a whole-function proof that every append to that list is a bool. The element kind is known to the compiler where the list or tuple is built, but the printer is given an untyped word. Find where `print` of a list/tuple chooses the element printer and carry the element kind from the construction site (see `gen._elem_types`, `mojo_list_set_kinds`).
 
 ## Repro `ptr_print.py`
 
