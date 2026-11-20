@@ -29,3 +29,17 @@ which then fails with `invalid conversion in gimple call` at `std/collections/co
    weak stub) until `std.builtin.sort` compiles. Make the unresolved bare name register that stub.
 2. Then make `std.builtin.sort.sort` compile (the `counter.mojo:948` conversion and the `void`-used-as-value).
 3. Test: the program above prints `5`, and `print(p[0])` after a sort of `[3, 1, 2]` prints `1`.
+
+## Status 2026-11-20: step 1 landed; step 2 is still open
+
+- The unresolved prelude `sort` no longer fails at link time. Its predeclared
+  util stub (`_util_pairs` in `mojo/backend_gimple/module_gen.py`) is now the
+  same honest weak definition the unknown-name path emits:
+  `sort: unavailable in compiled mode`. The doc's program builds with
+  `fire.py build` and runs, printing `sort: unavailable in compiled mode5` (the
+  stub prints without a newline, as the unknown-name stub does) and then `5`.
+- Gates: stdlib compile `FAILED: 0 (0 expected, 0 unexpected)` and the dylib
+  `1203 of 1203` with no skips, both identical to master's.
+- Not done: step 2 (make `std.builtin.sort.sort` compile, which is the
+  `counter.mojo:948` conversion and the void-as-value). Step 3's `prints 5` /
+  sorted-value test therefore does not hold yet, and this doc stays open.
