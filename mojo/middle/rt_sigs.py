@@ -499,6 +499,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_int_literal_decimal': ['char *', 'char *'],
     'mojo_int_of_word': ['int64_t', 'int64_t'],
     'mojo_int_str_transient': ['char *', 'int64_t'],
+    'mojo_ipow': ['int64_t', 'int64_t', 'int64_t'],
     'mojo_is_bound_method': ['int', 'void *'],
     'mojo_is_boxed': ['int', 'int64_t'],
     'mojo_is_callable_word': ['int', 'int64_t'],

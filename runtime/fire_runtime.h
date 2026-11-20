@@ -2237,6 +2237,7 @@ char *mojo_sprintf_ptr(const char *fmt, void *p);
  * fire_runtime.c for why the key has to be materialized as text at all. */
 char *mojo_str_from_double(double v);
 MojoList *mojo_divmod(int64_t a, int64_t b);
+int64_t mojo_ipow(int64_t base, int64_t exp);
 int64_t mojo_pow_mod(int64_t base, int64_t exp, int64_t mod);
 char *mojo_hex(int64_t v);
 char *mojo_oct(int64_t v);

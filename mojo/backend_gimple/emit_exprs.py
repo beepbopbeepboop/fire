@@ -5772,6 +5772,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op in ('|', '-', '&', '^'):
         lt, lv = gen._resolve_container_kind(lt, lv)
         rt, rv = gen._resolve_container_kind(rt, rv)
+    # `1 << 40` of two `int` literals is a 32-bit shift in C (zero, or
+    # undefined); Python integers are not that narrow. Shift in 64 bits.
+    # Only the LEFT operand's width decides a shift's result, and only a plain
+    # `int` (an integer literal) is the narrow one; an explicit Int8/Int16/
+    # Int32 left operand keeps its own width and wrap-around.
+    if op == '<<' and lt == 'int' and rt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES:
+        lv = gen._cast('int64_t', f"{lv}")
+        lt = 'int64_t'
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
     if int_true_div:
@@ -6492,22 +6500,18 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     if rt.endswith(' *'):
         ti = gen._new_val('int64_t', f"(int64_t) {rv}")
         rv_for_double = ti
-    t1 = gen._new_temp('double')
-    t2 = gen._new_temp('double')
-    gen._emit(f"  {t1} = (double) {lv_for_double};")
-    gen._emit(f"  {t2} = (double) {rv_for_double};")
-    t3 = gen._rt_call('double', 'pow', [t1, t2])
-    t4 = gen._new_val('int', f"(int) {t3}")
-    # Integer `**` produces an integer: the `(int)` cast above makes that
-    # true for every input, so this needs no inference about the operands
-    # at all — the strongest form of the argument the other producers on
-    # `gen._int_word_vals` make. It is worth having because `**` is how a
-    # large key is usually COMPUTED rather than written: `3 ** 20` is
-    # 3486784401, inside the runtime discriminator's pointer window, and
-    # `d[3 ** 20] = 8` was a `strcmp` of address 3486784401 before this
-    # (RUNTIME_int64_key_above_2gb_dereferenced_as_pointer).
+    # Integer `**` is exact 64-bit integer power. It used to be a `double`
+    # `pow` cast to `(int)`: 2 ** 62 printed 2147483647 and 3 ** 39 lost its
+    # low digits. The result is an integer word by construction (the
+    # argument `gen._int_word_vals` producers make), which matters because
+    # `**` is how a large key is usually COMPUTED (`3 ** 20` is inside the
+    # runtime discriminator's pointer window; RUNTIME_int64_key_above_2gb_
+    # dereferenced_as_pointer).
+    lv64 = gen._to_int64(lt, lv_for_double)
+    rv64 = gen._to_int64(rt, rv_for_double)
+    t4 = gen._rt_call('int64_t', 'mojo_ipow', [lv64, rv64])
     gen._int_word_vals.add(t4)
-    return 'int', t4
+    return 'int64_t', t4
 
 
 def _lower_matmul(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:

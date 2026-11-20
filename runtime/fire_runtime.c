@@ -16926,6 +16926,27 @@ MojoList *mojo_divmod(int64_t a, int64_t b) {
  * Python raises for a negative exponent here too; this codegen has no
  * exception path out of a runtime helper, so a negative exponent just
  * yields 0 rather than looping incorrectly). */
+/* Python's integer `base ** exp` in 64 bits, exactly (a `double` `pow` is
+ * inexact above 2**53 and `(int)` of it clamps at 2**31). Wraps on overflow
+ * like every other int64_t operation here. A negative exponent is a float in
+ * Python; truncating it to an integer, as the old `(int) pow()` did, gives 0
+ * except for the bases whose power is still +-1 or 1. */
+int64_t mojo_ipow(int64_t base, int64_t exp) {
+    if (exp < 0) {
+        if (base == 1) return 1;
+        if (base == -1) return (exp & 1) ? -1 : 1;
+        return 0;
+    }
+    uint64_t r = 1, b = (uint64_t)base;
+    uint64_t e = (uint64_t)exp;
+    while (e) {
+        if (e & 1) r *= b;
+        b *= b;
+        e >>= 1;
+    }
+    return (int64_t)r;
+}
+
 int64_t mojo_pow_mod(int64_t base, int64_t exp, int64_t mod) {
     if (mod == 0) return 0;
     int64_t neg = mod < 0;
