@@ -301,8 +301,11 @@ def compile_program(input_file, src, output=None, run=True,
 
     # Stdlib dylib: monolithic, CAS-built on first use; runtime folded in, so
     # programs need only one dylib on the link line.  Resolved *before* the
-    # cache key so its content participates in invalidation.
-    stdlib = bsd.build_stdlib()
+    # cache key so its content participates in invalidation.  `stdlib_dylib`
+    # and not `build_stdlib`: the latter re-derives every module key and nms
+    # every object on EVERY build, which is the stdlib build's cost paid once
+    # per program; the currency stamp makes a warm checkout a two-file read.
+    stdlib = bsd.stdlib_dylib()
 
     # Warm path: the whole program is content-addressed — a cache hit is a copy.
     link_files = list(dict.fromkeys(list(dylibs) + [stdlib])) + list(objects)

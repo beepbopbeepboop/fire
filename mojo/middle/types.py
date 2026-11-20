@@ -171,13 +171,6 @@ class TypeLattice:
         return '*' in t
 
     @classmethod
-    def is_cstr(cls, t: str) -> bool:
-        """`t` is the C spelling of a string value (`char *`). The one place
-        that spells the test, so stage 4 (doc/GIR.md) can change what a string
-        type IS without touching its callers."""
-        return t == 'char *'
-
-    @classmethod
     def is_bool(cls, t: str) -> bool:
         if not t:
             return False

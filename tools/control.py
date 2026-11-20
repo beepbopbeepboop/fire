@@ -1108,19 +1108,6 @@ def tree_extras(wt):
     return [l[3:] for l in st.splitlines() if l[3:] not in CONTROLLER_FILES and not l[3:].startswith(".tmp/")]
 
 
-def tree_dirty_reason(p):
-    """Why worker tree P must be KEPT by cleanup, or None when it is clean and may go. A tree that vanished between the
-    listing and this check, or a `git status` that cannot run, is kept with its reason and never raised: one such tree
-    used to end the whole cleanup (2026-11-20: a tree removed mid-pass raised FileNotFoundError out of the thread pool,
-    and the swarm's cleanup, run twice per pass, ended every time)."""
-    if not os.path.isdir(p):
-        return "tree vanished during the pass"
-    try:
-        return "dirty" if tree_extras(p) else None
-    except OSError as e:
-        return "status failed: %s" % str(e)[:80]
-
-
 def retire_landed(name):
     """The last step of a landing: its tree and branch go with it, in the same operation, so nothing waits for a later
     cleanup pass. Runs only for a task whose every commit is on master (`ahead == 0`), whose worker is not alive, and
@@ -1729,11 +1716,6 @@ def cmd_cleanup(a):
     except (RuntimeError, OSError, ValueError) as e:
         print("cleanup: %s; removing nothing" % e)     # cannot tell which trees a process is in: remove none
         return
-    # Every commit master has, read ONCE. A `git merge-base` per tree, run one after another over ~400 worker trees, was
-    # most of the 6-minute cleanup (2026-11-20), and the swarm runs cleanup twice a pass. None (unreadable) keeps every
-    # tree as unmerged: the conservative answer.
-    _rl = subprocess.run(["git", "rev-list", "master"], capture_output=True, text=True, cwd=MAIN)
-    merged_heads = set(_rl.stdout.split()) if _rl.returncode == 0 else None
     cands, kept = [], []
     for w in wt:
         p = os.path.realpath(w["path"])
@@ -1748,21 +1730,21 @@ def cmd_cleanup(a):
             kept.append((p, "live process in tree")); continue
         if _claimed_by_outside(p):
             kept.append((p, "claimed by an outside session")); continue
-        if w.get("branch") not in retire and (merged_heads is None or w.get("head") not in merged_heads):
+        if (w.get("branch") not in retire
+                and subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0):
             kept.append((p, "unmerged")); continue
         cands.append(p)
 
     # `git status` over a worker tree with a build/ in it is the slow step (~0.1-1 s each, 1900+ trees on
     # 2026-10-23 made the sequential loop outlast a 2-minute command timeout), and it is I/O bound, so fan it out.
+    def is_dirty(p):
+        return bool(tree_extras(p))             # the controller's own files (TASK.md, work.log, ...) are not dirt
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        reasons = list(ex.map(tree_dirty_reason, cands))
+        dirty = list(ex.map(is_dirty, cands))
     safe = []
-    for p, r in zip(cands, reasons):
-        if r:
-            kept.append((p, r))
-        else:
-            safe.append(p)
+    for p, d in zip(cands, dirty):
+        (kept if d else safe).append((p, "dirty") if d else p)
     if safe and not a.dry_run:
         # The snapshot above predates the (parallel) git-status fan-out; rescan at the moment of the
         # irreversible step, so a run that started in the gap is still seen.
@@ -2027,21 +2009,25 @@ def live_cwds(jobs=16):
     reads as "nothing is running anywhere"."""
     if not shutil.which("lsof"):
         raise RuntimeError("lsof is not available; cannot read process cwds")
-    # ONE lsof for every process's cwd. The old form ran `lsof -p PID` for each of the ~5,900 processes on the machine
-    # (~50 ms each, fanned out), which was the 6-minute cleanup (2026-11-20). `-d cwd -Fn` lists every cwd in one pass:
-    # `n<path>` lines, one per process. lsof exits non-zero when it cannot read some processes but still lists the rest,
-    # so only an empty output with a failure is an error. `jobs` is kept for callers; one call needs no fan-out.
-    try:
-        r = subprocess.run(["lsof", "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=300)
-    except (OSError, subprocess.SubprocessError) as e:
-        raise RuntimeError("lsof could not run: %s" % e)
-    if r.returncode != 0 and not r.stdout.strip():
-        raise RuntimeError("lsof failed: " + (r.stderr or "").strip()[:200])
-    cwds = set()
-    for line in r.stdout.splitlines():
-        if line.startswith("n") and len(line) > 1:
-            cwds.add(os.path.realpath(line[1:]))
-    return cwds
+    r = subprocess.run(["ps", "-axo", "pid="], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("ps failed: " + (r.stderr or r.stdout).strip()[:200])
+    pids = [int(x) for x in r.stdout.split()]
+
+    def one(pid):
+        try:
+            o = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                               capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        for line in o.splitlines():
+            if line.startswith("n"):
+                return os.path.realpath(line[1:])
+        return ""
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        return {c for c in ex.map(one, pids) if c}
 
 
 def busy_task_names(dirs, tasks):

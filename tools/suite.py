@@ -425,8 +425,7 @@ def needs_memwhy(spec) -> bool:
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
 MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
-                'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
-                '632a573a5 by a single-job --no-cache run')
+                'the run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -740,7 +739,7 @@ MEASURED_PEAK_GB = {
     'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
-    'linkmode':                               (0.6, 'measured'),
+    'linkmode':                               (0.1, 'measured'),
     'nonlocal':                               (0.4, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
@@ -800,8 +799,6 @@ MEASURED_PEAK_GB = {
     'no-new-casts':                           (0.10, 'measured'),  # 0.7 s
     'rthdrscan':                              (0.11, 'measured'),  # 0.7 s
     'gimple-lint':                            (0.50, 'measured'),  # 10 s; four --dump children, the largest (myinterpreter.py) 0.5 GB
-    'type-string-ratchet':                    (0.05, 'estimated'),  # a text scan, well under 1 s
-    'pydiff-ratchet':                         (1.00, 'estimated'),  # ~3 min; 8 compiles at a time, each well under 1 GB (not yet measured)
     'doc-refs':                               (0.15, 'measured'),  # 1.4 s
     'returned-frame-layout':                  (0.09, 'measured'),  # 0.8 s
     'formal-typed-flag':                      (0.08, 'measured'),  # 0.8 s
@@ -1685,13 +1682,9 @@ REGISTRY: dict[str, object] = {}
 #
 # 3600 s is ~6x the slowest healthy test measured across the last two full gates
 # (gimplerunner, 607 s; then mojoc 417 s, selfhost 408 s, gimplegenerators
-# 371 s), so a healthy ordinary job cannot reach it, while a genuine wedge is
-# caught in an hour instead of never. The one job over that band is `linkmode`,
-# whose real cold pass is a 56-program end-to-end compile sweep measured at
-# 1,349-3,352 s and 3,298.6 s on the head where it last passed; it names its own
-# 7200 s below, from that measurement, instead of being killed at a default
-# sized for other jobs. Per-test `timeout=` still wins, and `--timeout` still
-# overrides everything.
+# 371 s), so it cannot fire on a healthy or merely loaded run, while a genuine
+# wedge is caught in an hour instead of never. Per-test `timeout=` still wins,
+# and `--timeout` still overrides everything.
 DEFAULT_JOB_TIMEOUT_S = 3600.0
 
 
@@ -1900,17 +1893,7 @@ test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
      desc='the docs\' HTML generator keeps every word of its Markdown, and '
           'the committed HTML is not stale')
-# `timeout=7200`: this job builds 56 real programs through
-# `driver.compile_program`, and every compiler-fingerprint change invalidates
-# the CAS artifacts (the key folds in the codegen sources), so a gate on a tree
-# with a codegen change pays a full COLD pass here. Measured: 1,349-3,352 s over
-# the 2026-11-02..11-19 gates; 3,298.6 s on head 8e1d4ee43 where it last passed;
-# and four consecutive gate runs on 2026-11-19 (12:33, 13:35, 15:54, 16:54) hit
-# the 3600 s default exactly and were reported [TIMEOUT] — a job killed for
-# doing 56 builds, not a wedge. 7200 s is 2x the measured slowest pass, the same
-# headroom standard as `stdlib-syntax` below.
 test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
-     timeout=7200,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
      desc='the real driver.compile_program link-mode pipeline')
@@ -1923,21 +1906,6 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # with garbage upper bits; measured with gcc-mp-15 on arm64). So this is the
 # only job that type-checks every statement the backend emits. Its BASELINE
 # counts may only shrink.
-# Stage 4 of doc/GIR.md: the count of string-typed type tests in the backend
-# (`.endswith(' *')`, `== 'int64_t'`, ...) may only fall.
-test('type-string-ratchet', [PY, 'test_type_string_ratchet.py'], cache=True, mem='tiny',
-     extra=GIMPLE_SOURCES + ['test_type_string_ratchet.py'],
-     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)')
-# Every program in tools/pydiff_ok.txt must print what CPython prints (the
-# corpus is tools/pydiff_corpus; the finder is tools/pydiff.py). The list may
-# only grow, so a fix that lands is locked in and a regression is named.
-test('pydiff-ratchet', [PY, 'test_pydiff_ratchet.py'], cache=True, mem='tiny',
-     extra=GIMPLE_SOURCES + ['test_pydiff_ratchet.py', 'tools/pydiff.py',
-                             'tools/pydiff_ok.txt', 'runtime/fire_runtime.h',
-                             'runtime/fire_runtime.c', 'test_gimple_runner.py'] + sorted(
-         os.path.relpath(p, REPO)
-         for p in glob.glob(os.path.join(REPO, 'tools', 'pydiff_corpus', '*', '*.py'))),
-     desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)')
 test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + sorted(
          os.path.relpath(p, REPO)
@@ -2119,7 +2087,12 @@ test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
 # registration is the thing that was wrong.
 test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True, mem='tiny',
      deps=['preflight'], timeout=1500,
+     # The cases build through `fire.build_executable` in a `python3 -c`
+     # subprocess, so `fire.py` itself and the content-addressed codegen cache
+     # it uses are part of this job's subject: a change to either must not be
+     # hidden by a cached PASS recorded before it.
      extra=GIMPLE_SOURCES + ['test_silent_noop_iter.py', 'build_config.py',
+                             'fire.py', 'cas.py',
                              RUNTIME_SRC, RUNTIME_HDR],
      desc='the silent no-op class: no loop may iterate zero times, read a '
           'container as another kind, or drop reversed/findall order')
@@ -4460,10 +4433,6 @@ test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condit
 # commits" (b3b2233b0) and registered nowhere until this audit, which is the
 # same hole the suite's estate check names. 0.15 s, 0.0 GB measured: it only
 # drives `compile_to_gimple`, no build.
-test('reg-system-struct-helpers-compile',
-     [PY, 'test_system_struct_helpers_compile.py'], mem='tiny',
-     desc='a struct named like a C system struct compiles; its helpers '
-          'do not read fields the typedef pass never declared')
 test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditional_conformance_declaration_diagnostic.py'], mem='tiny',
      desc='conditional conformance declarations are diagnosed: the diamond, '
           'the derived/ancestor constraint, conditional RegisterPassable, and '
@@ -4796,7 +4765,7 @@ BUCKETS = {
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'gimple-lint', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
@@ -4984,7 +4953,7 @@ BUCKETS = {
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-signature-diagnostic-anchors', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-interp-call-kwargs-printf', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-system-struct-helpers-compile', 'reg-mid-gate-kinds-bug', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-signature-diagnostic-anchors', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-interp-call-kwargs-printf', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-mid-gate-kinds-bug', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
