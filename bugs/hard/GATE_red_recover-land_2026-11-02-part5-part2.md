@@ -1,4 +1,4 @@
-SPLIT: GATE_red_recover-land_2026-11-02-part5-part2-part1, GATE_red_recover-land_2026-11-02-part5-part2-part2
+SPLIT: GATE_red_recover-land_2026-11-02-part5-part2-part2 (part1 — the function-scoped sibling `STDLIB_PATH` weak stub — is fixed and its doc deleted; the imported-global accessor pass now covers function-scoped `from` imports and `module_loader.py` exports annotated scalar globals; the stage1 closure dump re-measure is the integrator's gate)
 
 # Restore bootstrap stage2/stage3 dump jobs (replan part 2 of 5)
 
