@@ -38,6 +38,14 @@ funcs/20_gen_list_and_next.py
 funcs/33_mutual_recursion_even_odd.py
 funcs/39_pipeline_compose.py
 min/big_int.py
+min/fs_align.py
+min/fs_float.py
+min/fs_intspec.py
+min/fs_misc.py
+min/fs_nested.py
+min/fs_pct.py
+min/fs_selfdoc.py
+min/fstring_spec.py
 min/func_value.py
 min/pow_shift.py
 min/print_end.py

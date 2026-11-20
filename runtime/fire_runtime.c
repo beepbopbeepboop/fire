@@ -12147,6 +12147,210 @@ char *mojo_str_center(char *s, int64_t width, char *fill) {
     return _str_pad(s, width, fill, 2);
 }
 
+/* ---- Python's format-spec mini-language, for f"{x:spec}" -----------------
+ *   [[fill]align][sign][#][0][width][grouping][.precision][type]
+ * One parser and one padder, three value kinds. Widths count code points. */
+typedef struct {
+    char fill[5];       /* the fill character, UTF-8 */
+    int fill_len;
+    char align;         /* 0 (unset), '<' '>' '^' '=' */
+    char sign;          /* '-' (default), '+', ' ' */
+    int alt;
+    int group;          /* 0, ',' or '_' */
+    int64_t width;
+    int64_t prec;       /* -1: none */
+    char type;          /* 0: none */
+} MojoFmtSpec;
+
+static size_t _fmt_cp_len(unsigned char c) {
+    return (c < 0x80) ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4;
+}
+
+static MojoFmtSpec _fmt_parse(const char *spec) {
+    MojoFmtSpec f;
+    memset(&f, 0, sizeof f);
+    f.fill[0] = ' '; f.fill_len = 1; f.sign = '-'; f.prec = -1;
+    if (!spec) return f;
+    const char *p = spec;
+    int zero = 0;
+    if (*p) {
+        size_t cl = _fmt_cp_len((unsigned char)*p);
+        const char *n = p + cl;
+        if (*n == '<' || *n == '>' || *n == '^' || *n == '=') {
+            memcpy(f.fill, p, cl); f.fill[cl] = '\0'; f.fill_len = (int)cl;
+            f.align = *n; p = n + 1;
+        } else if (*p == '<' || *p == '>' || *p == '^' || *p == '=') {
+            f.align = *p; p++;
+        }
+    }
+    if (*p == '+' || *p == '-' || *p == ' ') { f.sign = *p; p++; }
+    if (*p == '#') { f.alt = 1; p++; }
+    if (*p == '0') { zero = 1; p++; }
+    while (*p >= '0' && *p <= '9') { f.width = f.width * 10 + (*p - '0'); p++; }
+    if (*p == ',' || *p == '_') { f.group = *p; p++; }
+    if (*p == '.') {
+        p++; f.prec = 0;
+        while (*p >= '0' && *p <= '9') { f.prec = f.prec * 10 + (*p - '0'); p++; }
+    }
+    if (*p) f.type = *p;
+    if (zero && !f.align) { f.fill[0] = '0'; f.fill[1] = '\0'; f.fill_len = 1; f.align = '='; }
+    return f;
+}
+
+/* `pre` (sign and radix prefix) + `body`, padded to the width. */
+static char *_fmt_finish(const char *pre, const char *body, const MojoFmtSpec *f,
+                         char default_align) {
+    size_t pl = strlen(pre), bl = strlen(body);
+    int64_t cps = (int64_t)pl + mojo_str_codepoint_len((char *)body);
+    int64_t pad = f->width > cps ? f->width - cps : 0;
+    char align = f->align ? f->align : default_align;
+    int64_t left = 0, right = 0;
+    if (align == '<') right = pad;
+    else if (align == '^') { left = pad / 2; right = pad - left; }
+    else left = pad;                      /* '>' and '=' */
+    char *out = (char *)malloc(pl + bl + (size_t)pad * (size_t)f->fill_len + 1);
+    if (!out) return (char *)"";
+    size_t o = 0;
+    if (align == '=') {
+        memcpy(out + o, pre, pl); o += pl;
+        for (int64_t i = 0; i < left; i++) { memcpy(out + o, f->fill, (size_t)f->fill_len); o += (size_t)f->fill_len; }
+    } else {
+        for (int64_t i = 0; i < left; i++) { memcpy(out + o, f->fill, (size_t)f->fill_len); o += (size_t)f->fill_len; }
+        memcpy(out + o, pre, pl); o += pl;
+    }
+    memcpy(out + o, body, bl); o += bl;
+    for (int64_t i = 0; i < right; i++) { memcpy(out + o, f->fill, (size_t)f->fill_len); o += (size_t)f->fill_len; }
+    out[o] = '\0';
+    return out;
+}
+
+/* Insert `sepc` every `n` digits of the digit run `d` (no sign), from the right. */
+static char *_fmt_group(const char *d, char sepc, int n) {
+    size_t len = strlen(d);
+    char *out = (char *)malloc(len * 2 + 2);
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (i && ((len - i) % (size_t)n) == 0) out[o++] = sepc;
+        out[o++] = d[i];
+    }
+    out[o] = '\0';
+    return out;
+}
+
+char *mojo_fmt_str(char *s, char *spec) {
+    MojoFmtSpec f = _fmt_parse(spec);
+    if (!s) s = (char *)"None";
+    char *body = s;
+    char *owned = NULL;
+    if (f.prec >= 0 && mojo_str_codepoint_len(s) > f.prec) {
+        owned = mojo_cstr_slice_cp(s, 0, f.prec);
+        body = owned;
+    }
+    char *r = _fmt_finish("", body, &f, '<');
+    if (owned) free(owned);
+    return r;
+}
+
+char *mojo_fmt_float(double v, char *spec) {
+    MojoFmtSpec f = _fmt_parse(spec);
+    char type = f.type;
+    int neg = signbit(v) != 0;
+    double a = fabs(v);
+    char buf[512];
+    char *body;
+    int pct = 0;
+    if (isnan(v) || isinf(v)) {
+        const char *w = isnan(v) ? "nan" : "inf";
+        char up[8]; size_t k = 0;
+        for (; w[k]; k++) up[k] = (type == 'E' || type == 'F' || type == 'G') ? (char)toupper((unsigned char)w[k]) : w[k];
+        up[k] = '\0';
+        body = strdup(up);
+        neg = isnan(v) ? 0 : neg;
+    } else if (type == 0 && f.prec < 0) {
+        char *r = mojo_repr_float(a);
+        body = strdup(r[0] == '-' ? r + 1 : r);
+    } else {
+        if (type == '%') { a *= 100.0; pct = 1; type = 'f'; }
+        int prec = f.prec < 0 ? 6 : (int)f.prec;
+        char fmt[8];
+        char t = type ? type : 'g';
+        if (!type && f.prec >= 0 && prec == 0) prec = 1;
+        snprintf(fmt, sizeof fmt, "%%.%d%c", 0, t);
+        /* the precision is a run-time value: build the format around it */
+        char full[16];
+        snprintf(full, sizeof full, "%%.*%c", t);
+        (void)fmt;
+        snprintf(buf, sizeof buf, full, prec, a);
+        body = strdup(buf);
+    }
+    if (f.group && (type == 'f' || type == 'F' || type == 0 || pct)) {
+        char *dot = strchr(body, '.');
+        size_t ilen = dot ? (size_t)(dot - body) : strlen(body);
+        int all_digits = 1;
+        for (size_t i = 0; i < ilen; i++) if (body[i] < '0' || body[i] > '9') all_digits = 0;
+        if (all_digits) {
+            char *ipart = (char *)malloc(ilen + 1);
+            memcpy(ipart, body, ilen); ipart[ilen] = '\0';
+            char *g = _fmt_group(ipart, (char)f.group, 3);
+            char *nb = (char *)malloc(strlen(g) + strlen(body + ilen) + 1);
+            strcpy(nb, g); strcat(nb, body + ilen);
+            free(ipart); free(g); free(body);
+            body = nb;
+        }
+    }
+    if (pct) { body = (char *)realloc(body, strlen(body) + 2); strcat(body, "%"); }
+    const char *pre = neg ? "-" : (f.sign == '+' ? "+" : f.sign == ' ' ? " " : "");
+    char *r = _fmt_finish(pre, body, &f, '>');
+    free(body);
+    return r;
+}
+
+char *mojo_fmt_int(int64_t v, char *spec) {
+    MojoFmtSpec f = _fmt_parse(spec);
+    char t = f.type;
+    if (t == 'e' || t == 'E' || t == 'f' || t == 'F' || t == 'g' || t == 'G' || t == '%')
+        return mojo_fmt_float((double)v, spec);
+    if (t == 'c') {
+        char cbuf[5] = {0};
+        uint32_t cp = (uint32_t)v;
+        if (cp < 0x80) cbuf[0] = (char)cp;
+        else if (cp < 0x800) { cbuf[0] = (char)(0xC0 | (cp >> 6)); cbuf[1] = (char)(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) { cbuf[0] = (char)(0xE0 | (cp >> 12)); cbuf[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); cbuf[2] = (char)(0x80 | (cp & 0x3F)); }
+        else { cbuf[0] = (char)(0xF0 | (cp >> 18)); cbuf[1] = (char)(0x80 | ((cp >> 12) & 0x3F)); cbuf[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); cbuf[3] = (char)(0x80 | (cp & 0x3F)); }
+        return _fmt_finish("", cbuf, &f, '<');
+    }
+    int neg = v < 0;
+    uint64_t m = neg ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    unsigned base = (t == 'b') ? 2 : (t == 'o') ? 8 : (t == 'x' || t == 'X') ? 16 : 10;
+    char digs[80];
+    size_t n = 0;
+    if (m == 0) digs[n++] = '0';
+    while (m) {
+        unsigned d = (unsigned)(m % base);
+        digs[n++] = (char)(d < 10 ? '0' + d : (t == 'X' ? 'A' : 'a') + (d - 10));
+        m /= base;
+    }
+    char body[96];
+    for (size_t i = 0; i < n; i++) body[i] = digs[n - 1 - i];
+    body[n] = '\0';
+    char *grouped = NULL;
+    const char *b = body;
+    if (f.group) {
+        grouped = _fmt_group(body, (char)f.group, base == 10 ? 3 : 4);
+        b = grouped;
+    }
+    char pre[8] = {0};
+    size_t k = 0;
+    if (neg) pre[k++] = '-';
+    else if (f.sign == '+') pre[k++] = '+';
+    else if (f.sign == ' ') pre[k++] = ' ';
+    if (f.alt && base != 10) { pre[k++] = '0'; pre[k++] = (t == 'X') ? 'X' : t; }
+    pre[k] = '\0';
+    char *r = _fmt_finish(pre, b, &f, '>');
+    if (grouped) free(grouped);
+    return r;
+}
+
 /* `s.zfill(width)`: pad on the left with '0' to `width`, after a leading sign. */
 char *mojo_str_zfill(char *s, int64_t width) {
     if (!s) s = (char *)"";

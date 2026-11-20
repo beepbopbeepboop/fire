@@ -1,0 +1,11 @@
+x = 3.14159
+print(f"{x:.2f}")
+print(f"{x:.0f}")
+print(f"{x:8.3f}|")
+print(f"{x:<8.1f}|")
+print(f"{-x:.2f}")
+print(f"{2.5:.0f} {3.5:.0f}")
+print(f"{1e10:.3e}")
+print(f"{0.000123:.2e}")
+print(f"{x:g}")
+print(f"{12.0:g}")

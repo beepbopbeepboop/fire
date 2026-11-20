@@ -2506,6 +2506,10 @@ char *mojo_str_lstrip_chars(char *str, char *chars);
 char *mojo_str_rjust(char *s, int64_t width, char *fill);
 char *mojo_str_ljust(char *s, int64_t width, char *fill);
 char *mojo_str_zfill(char *s, int64_t width);
+/* f"{x:spec}" for an int / float / str value: Python's format-spec mini-language. */
+char *mojo_fmt_int(int64_t v, char *spec);
+char *mojo_fmt_float(double v, char *spec);
+char *mojo_fmt_str(char *s, char *spec);
 char *mojo_str_strip_chars(char *str, char *chars);
 MojoList *mojo_str_split_n(char *s, char *sep, int64_t maxsplit);
 char *mojo_str_replace_n(char *s, char *old, char *neu, int64_t count);

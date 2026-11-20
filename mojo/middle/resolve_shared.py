@@ -2198,7 +2198,22 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
                     # `!=` is the operator, not a `!r` conversion.
                     _conv = expr_src[_k + 1:]
                     expr_src = expr_src[:_k]
+                    # `{x!r:>8}`: the spec follows the conversion.
+                    _cc = _conv.find(':')
+                    if _cc >= 0:
+                        _spec = _conv[_cc + 1:]
+                        _conv = _conv[:_cc]
                     break
+            # `{x=}` is the self-documenting form: the source text of the
+            # expression, the `=` and any whitespace around it, then the
+            # value's repr (or its formatted value when a spec follows).
+            _selfdoc = expr_src.rstrip()
+            if (_selfdoc.endswith('=') and _selfdoc[-2:] not in ('==', '!=', '<=', '>=')
+                    and len(_selfdoc) > 1):
+                parts.append(('lit', expr_src, '', ''))
+                expr_src = _selfdoc[:-1]
+                if _conv == '' and _spec == '':
+                    _conv = 'r'
             parts.append(('expr', expr_src.strip(), _spec, _conv))
         elif c == '}' and i + 1 < len(inner) and inner[i+1] == '}':
             buf.append('}'); i += 2

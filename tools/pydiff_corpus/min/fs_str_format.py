@@ -1,0 +1,8 @@
+print("{} {}".format(1, "a"))
+print("{0} {1} {0}".format("x", "y"))
+print("{name} {age}".format(name="bob", age=3))
+print("{:>5} {:<5}|".format("a", "b"))
+print("{:.2f}".format(3.14159))
+print("{:04d}".format(7))
+print("{:,}".format(1234567))
+print("{!r}".format("s"))

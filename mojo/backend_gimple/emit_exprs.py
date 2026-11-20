@@ -414,7 +414,15 @@ def _lower_StringLiteral(gen, node):
                 # mojo_obj_getattr's stub instead of the real rewrite.
                 expr_node = gimple_ctypes.ast_rewriter.rewrite_node(expr_node)
                 et, ev = gen.lower_expr(expr_node)
-                if _conv == 'r':
+                _typed = False
+                if ((isinstance(expr_node, gimple_ctypes.NoneLiteral)
+                        or (isinstance(expr_node, gimple_ctypes.IdentExpr)
+                            and _as_str(expr_node.name) == 'None'))
+                        and not _spec):
+                    # `f"{None}"` and `f"{None!r}"` are both the text None;
+                    # the NULL word it lowers to would print as 0.
+                    part_val = gen._new_val('char *', gen._intern_string('None'))
+                elif _conv == 'r':
                     # repr() the ORIGINAL typed value, not the stringified
                     # one — _repr_value(et, ev) expects the raw value.
                     part_val = gen._repr_value(et, ev, expr_node)
@@ -443,9 +451,14 @@ def _lower_StringLiteral(gen, node):
                                        [('char *', _repr_val)])
                         gen._fresh_vals.discard(_repr_val)
                 else:
-                    part_val = gen._stringify_value(et, ev, expr_node)
-                if _spec:
-                    part_val = gen._apply_fstring_spec(part_val, _spec)
+                    part_val = ''
+                    if _spec and not _conv:
+                        part_val = _fstring_typed_spec(gen, expr_node, et, ev, _spec)
+                        _typed = part_val != ''
+                    if not part_val:
+                        part_val = gen._stringify_value(et, ev, expr_node)
+                if _spec and not _typed:
+                    part_val = _fstring_str_spec(gen, part_val, _spec)
             except Exception as e:
                 # The interpolation can't be lowered.  Dropping it would
                 # silently corrupt the program's output, so warn and keep
@@ -487,6 +500,52 @@ def _lower_StringLiteral(gen, node):
         acc_val_t = gen._new_val('char *', f'{gen._intern_string("")}')
         return 'char *', acc_val_t
     return 'char *', acc_val
+
+
+def _fstring_spec_value(gen, spec: str) -> str:
+    """The format spec of one f-string field as a `char *` value. A spec that
+    contains a nested field (`{x:>{w}}`) is itself an f-string, built at run
+    time; a plain one is a pooled literal."""
+    if '{' in spec:
+        _st, _sv = gen._lower_StringLiteral(
+            gimple_ctypes.StringLiteral(value='f"' + spec + '"', is_interpolated=True))
+        return _sv
+    return gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(spec)))
+
+
+def _fstring_typed_spec(gen, node, et: str, ev: str, spec: str) -> str:
+    """`{x:spec}` for a value whose C type says what it is: an integer, a
+    float or a string goes to the runtime's format-spec engine
+    (`mojo_fmt_int` / `_float` / `_str`: fill, align, sign, `#`, `0`, width,
+    grouping, precision, type). Returns '' for anything else (a word of
+    unknown kind, a container, a struct), which keeps the older
+    stringify-then-pad route."""
+    if ev in gen._boxed_vals or ev in gen._dyn_word_vals or gen._is_dyn_word(node, ev):
+        return ''
+    if et in gimple_ctypes._FLOAT_TYPES:
+        dv = gen._cast('double', ev)
+        res = gen._call_expr('char *', 'mojo_fmt_float',
+                             [('double', dv), ('char *', _fstring_spec_value(gen, spec))])
+    elif et in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES:
+        res = gen._call_expr('char *', 'mojo_fmt_int',
+                             [('int64_t', gen._to_int64(et, ev)),
+                              ('char *', _fstring_spec_value(gen, spec))])
+    elif gimple_ctypes.TypeLattice.is_cstr(et):
+        res = gen._call_expr('char *', 'mojo_fmt_str',
+                             [('char *', ev), ('char *', _fstring_spec_value(gen, spec))])
+    else:
+        return ''
+    gen._fresh_vals.add(res)
+    return res
+
+
+def _fstring_str_spec(gen, text: str, spec: str) -> str:
+    """A spec applied to a field that is already a string (`{x!r:>8}`, or a
+    value the typed route declined): format it as a str."""
+    res = gen._call_expr('char *', 'mojo_fmt_str',
+                         [('char *', text), ('char *', _fstring_spec_value(gen, spec))])
+    gen._fresh_vals.add(res)
+    return res
 
 
 def _lower_TstringLiteral(gen, node) -> tuple[str, str]:
