@@ -123,6 +123,82 @@ def test_local_generic_alias_folds():
     _check(c, 'always_true', 'always_1_T_3_Int')
 
 
+FOREIGN_STRUCT = '''\
+from std.collections.string import String
+from std.traits import IsTriviallyDeinitable
+
+def maybe[T: AnyType](n: Int) -> Int:
+    comptime if IsTriviallyDeinitable[T]:
+        return 1
+    else:
+        return 2
+
+def use(n: Int) -> Int:
+    return maybe[String](n)
+'''
+
+MODULE_TRAIT_ON_SCALAR = '''\
+trait Widget:
+    pass
+
+comptime is_widget[T: AnyType]: Bool = conforms_to(T, Widget)
+
+def pick[T: AnyType](n: Int) -> Int:
+    comptime if is_widget[T]:
+        return 1
+    else:
+        return 2
+
+def use(n: Int) -> Int:
+    return pick[Int](n)
+'''
+
+
+def _check_false_arm(c: str, alias: str, mangled: str) -> None:
+    """The alias folds to FALSE for this instance: no undeclared-name
+    placeholder, no boxed-list read, no runtime branch, and the FALSE arm
+    (`return 2`) is the one emitted."""
+    assert 'ct param or undeclared: ' + alias not in c, (
+        f'{alias} still lowered as an undeclared name:\n{c}')
+    body = _body(c, mangled)
+    assert 'mojo_list_get_int' not in body, (
+        f'{mangled} still reads the condition as a boxed list:\n{body}')
+    assert 'if (' not in body, (
+        f'{mangled} still branches at RUNTIME on the comptime condition:\n'
+        f'{body}')
+    assert '= 2LL' in body, (
+        f'{mangled} does not contain the FALSE arm (the condition must fold to '
+        f'False for this argument):\n{body}')
+    assert '= 1LL' not in body, (
+        f'{mangled} contains the TRUE arm although the condition is False:\n'
+        f'{body}')
+
+
+def test_foreign_struct_conformance_folds():
+    """`conforms_to(String, TrivialRegisterPassable)` must decide False.
+
+    String is imported, so its declared bases exist only in its home module.
+    The fold's bases map never held them (the single-TU path does not register
+    imported structs' bases), and a trait no declared base names read as
+    None, so `IsTriviallyDeinitable[String]` stayed CONST_UNKNOWN and became a
+    runtime branch on a zero word. String declares no TrivialRegisterPassable
+    and its complete base walk reaches none, so the answer is False.
+    """
+    c = _compile(FOREIGN_STRUCT)
+    assert 'maybe_1_T_6_String' in c, 'the in-TU instance was not emitted:\n' + c
+    _check_false_arm(c, 'IsTriviallyDeinitable', 'maybe_1_T_6_String')
+
+
+def test_module_trait_on_builtin_scalar_folds_false():
+    """`conforms_to(Int, Widget)` for a trait THIS module declares must be
+    False: no builtin scalar conforms to a trait declared outside std. The
+    answer was None, so the alias read CONST_UNKNOWN and was emitted as a
+    runtime branch on a zero word, with the TRUE arm live."""
+    c = _compile(MODULE_TRAIT_ON_SCALAR)
+    assert 'pick_1_T_3_Int' in c, 'the in-TU instance was not emitted:\n' + c
+    _check_false_arm(c, 'is_widget', 'pick_1_T_3_Int')
+
+
 DOT_PREDICATE = '''def unsigned_f64() -> Int:
     comptime if .float64.is_unsigned():
         return 1
@@ -180,3 +256,7 @@ if __name__ == '__main__':
     print('PASS test_local_generic_alias_folds')
     test_chained_dot_value_dtype_predicate_folds()
     print('PASS test_chained_dot_value_dtype_predicate_folds')
+    test_foreign_struct_conformance_folds()
+    print('PASS test_foreign_struct_conformance_folds')
+    test_module_trait_on_builtin_scalar_folds_false()
+    print('PASS test_module_trait_on_builtin_scalar_folds_false')

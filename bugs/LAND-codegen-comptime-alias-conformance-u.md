@@ -2,7 +2,7 @@
 
 **Branch:** `work/bug-codegen-comptime-alias-conformance-u` (task `bug-codegen-comptime-alias-conformance-u`; its tip is also saved as `refs/archive/work/bug-codegen-comptime-alias-conformance-u`, so dropping it loses nothing).
 **Age:** last commit 2026-11-18, first unlanded commit 2026-11-18; 1 commit(s) ahead of master, 149 behind it; task started 2026-11-18 11:56:20
-**Original work:** Fix the bug in bugs/CODEGEN_comptime_alias_conformance_unknown.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, 
+**Original work:** Fix the comptime-alias conformance bug (a `comptime if` over an undecidable `conforms_to` alias lowered to a runtime branch on a zero word) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, 
 **Original claims:** bug:CODEGEN_comptime_alias_conformance_unknown
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
