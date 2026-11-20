@@ -202,83 +202,6 @@ def _ml_container_global(line: str) -> list[str]:
     return out
 
 
-def _ml_scalar_global(line: str) -> list[str]:
-    """`[name, annotation, rhs]` for a column-0 `NAME[: ANN] = RHS` line (a
-    plain `=`, not `==`), else `[]`. ANN is returned stripped, '' when absent;
-    RHS is the rest of the line, stripped. An annotation that is not a plain
-    `_ml_ann_char` run (`str | None`) does not match at all."""
-    k = _ml_ident_end(line, 0)
-    if k == 0:
-        return []
-    n = len(line)
-    j = k
-    while j < n and _ml_is_space(line[j]):
-        j += 1
-    ann: str = ''
-    if j < n and line[j] == ':':
-        j += 1
-        while j < n and _ml_is_space(line[j]):
-            j += 1
-        a0 = j
-        if not (j < n and (line[j].isalpha() or line[j] == '_')):
-            return []
-        while j < n and _ml_ann_char(line[j]):
-            j += 1
-        ann = line[a0:j].strip()
-        while j < n and _ml_is_space(line[j]):
-            j += 1
-    if j >= n or line[j] != '=':
-        return []
-    j += 1
-    if j < n and line[j] == '=':
-        return []
-    rhs = line[j:].strip()
-    if rhs == '':
-        return []
-    out: list[str] = []
-    out.append(line[:k])
-    out.append(ann)
-    out.append(rhs)
-    return out
-
-
-def _ml_py_ann_ctype(ann: str) -> str:
-    """The C type of a `.py` module global annotated `ann` (the head before any
-    `[`), or '' when it has no scalar C type here. These are the types the
-    DEFINING module's own accessor is emitted with: `int` and `bool` are both
-    `int`, `float` is `double`, `str` is `char *` (the mojo branch's table is
-    different -- there `Int` is int64_t -- and must not be shared)."""
-    annb = ann.split('[', 1)[0].strip()
-    if annb == 'str':
-        return 'char *'
-    if annb == 'float':
-        return 'double'
-    if annb == 'int' or annb == 'bool':
-        return 'int'
-    return ''
-
-
-def _ml_py_global_ctype(ann: str, rhs: str, exports: dict) -> str:
-    """The C type a `.py` sibling's `NAME[: ANN] = RHS` global is exported
-    with, or '' to leave it unexported (its reads then keep the stub, as they
-    always did). An annotation decides it alone. Unannotated, only a whole-RHS
-    `callee(...)` to a same-file `def` whose C return is a pointer, `char *` or
-    `double` qualifies: that is the rule the defining module applies to the
-    same RHS, so the importer's extern matches its accessor."""
-    if ann != '':
-        return _ml_py_ann_ctype(ann)
-    callee = _ml_plain_call_callee(rhs)
-    if callee == '' or callee not in exports:
-        return ''
-    ent = exports[callee]
-    if ent.get('kind') is not None or 'c_return_type' not in ent:
-        return ''
-    ct = ent['c_return_type']
-    if ct == 'char *' or ct == 'double' or ct.endswith(' *'):
-        return ct
-    return ''
-
-
 def _ml_from_imports(content: str) -> list[str]:
     """`[module, names_blob, module, names_blob, ...]` for every column-0
     `from MOD import (a, b)` (the blob is what the parentheses hold, which may
@@ -539,7 +462,7 @@ def _is_stdlib_root(path):
     return os.path.isdir(os.path.join(path, 'std'))
 
 
-def _find_stdlib_path() -> str:
+def _find_stdlib_path():
     """Find stdlib path using multiple strategies.
 
     1. Check MOJO_STDLIB environment variable
@@ -1296,25 +1219,6 @@ class ModuleLoader:
                     _local_set_globals.add(_nm)
                     exports[_nm] = {
                         'kind': 'global_var', 'c_return_type': _crt,
-                        'home_module_path': path}
-                # Scalar globals: `NAME: str = ...`, `NAME: int = ...`,
-                # `NAME = callee(...)` (see `_ml_py_global_ctype`). Without an
-                # export, a function-scoped `from M import NAME` declared the
-                # name as a no-signature `extern int64_t NAME (...)` and read
-                # it through a `_funcptr_` stub, not the defining module's
-                # `M__mojo_global_get_NAME` accessor. Anything whose type is
-                # not decided here stays unexported, as before.
-                for _line in content.split('\n'):
-                    if not _line or _line[0] in ' \t#':
-                        continue
-                    _sg = _ml_scalar_global(_line)
-                    if len(_sg) == 0 or _sg[0] in exports:
-                        continue
-                    _sgt = _ml_py_global_ctype(_sg[1], _sg[2], exports)
-                    if _sgt == '':
-                        continue
-                    exports[_sg[0]] = {
-                        'kind': 'global_var', 'c_return_type': _sgt,
                         'home_module_path': path}
                 # Re-exports: `from SIBLING import (a, b)` — a set global not
                 # defined locally but surfaced through this module carries the

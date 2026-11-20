@@ -6530,31 +6530,19 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
         # frame storage plus that. One definition of "a new S", two homes.
         # Plain C, not `__GIMPLE`: `sizeof(S)` is not accepted inside a GIMPLE
         # body for a helper that only takes `S *`.
-        # A system-struct collision has no body of ours (only the typedef), so
-        # the tag word and the class/field initialisers do not exist in it:
-        # writing them produced `'timespec' has no member named
-        # '__mojo_type_id'` from `_init_timespec` (a user struct named like a C
-        # system struct; bugs/stdlib/STDLIB_system_struct_name_helpers_need_the_
-        # struct_body.md). Zeroing is all the system header's layout needs.
-        _is_system_struct = sn in _SYSTEM_STRUCT_NAMES
-        _tag_lines = (
-            '' if _is_system_struct else
+        parts.append(
+            f"static void _init_{sn} ({sn} * _p)\n"
+            f"{{\n"
+            f"{_dsub_decls}"
             f"  static int _tag_noted = 0;\n"
+            f"  memset (_p, 0, sizeof({sn}));\n"
             f"  _p->__mojo_type_id = (int64_t){_struct_type_id(sn)};\n"
             # The runtime learns this struct's tag on its first instance, so
             # `mojo_boxed_is_str` can tell a struct handle from a string (see
             # `_reg_struct_tag` in fire_runtime.c).
             f"  if (!_tag_noted) {{ _tag_noted = 1; mojo_struct_tag_register ((int64_t){_struct_type_id(sn)}); }}\n"
-        )
-        _sys_attr_inits = '' if _is_system_struct else attr_inits
-        parts.append(
-            f"static void _init_{sn} ({sn} * _p)\n"
-            f"{{\n"
-            f"{_dsub_decls}"
-            f"{_tag_lines}"
-            f"  memset (_p, 0, sizeof({sn}));\n"
             f"{_dsub_init}"
-            f"{_sys_attr_inits}"
+            f"{attr_inits}"
             f"}}"
         )
         parts.append('')
@@ -6581,18 +6569,6 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
             f"}}"
         )
         parts.append('')
-
-
-# Struct NAMES that collide with a C system header's struct. The typedef pass
-# emits only `typedef struct NAME NAME;` for these (no body), so every
-# per-struct helper the codegen emits must NOT read Mojo-level fields or the
-# `__mojo_type_id` tag word -- they do not exist in the system header's layout.
-_SYSTEM_STRUCT_NAMES = frozenset({
-    'timeval', 'linger', 'timespec', 'timezone',
-    'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
-    'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
-    'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
-})
 
 
 def _gmp_emit_struct_typedefs(self, stmts: list, imported_stmts: list, parts: list[str]) -> None:
@@ -11859,7 +11835,12 @@ def _gmp_emit_struct_definitions(self, parts: list[str]) -> None:
     if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
         parts.append('')
         emitted = set()
-        _system_structs = set(_SYSTEM_STRUCT_NAMES)
+        _system_structs = {
+            'timeval', 'linger', 'timespec', 'timezone',
+            'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
+            'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
+            'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
+        }
         max_iterations = len(self.struct_field_types) + 1
         iteration = 0
         while emitted != set(self.struct_field_types.keys()) and iteration < max_iterations:
@@ -20833,13 +20814,13 @@ def gen_module_impl(self, stmts: list):
         ('MojoDict__reserved',     'int64_t MojoDict__reserved(...);'),
         ('ord',                    'int64_t ord(...);'),         # FIXME: should be int64_t ord(char *c) [takes char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('chr',                    'int64_t chr(...);'),        # FIXME: should be char *chr(int64_t i) [returns char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
-        # No `sort` entry here: an unimported prelude `sort` gets the honest
-        # weak stub from the unknown-name path (`_is_unknown_stmt` in
-        # emit_stmts.py) only in a TU that calls it. A table entry is emitted
-        # into EVERY module's artifact, so every closure carried a stub
-        # definition whether or not a call reached it, and the closure check
-        # (`fire.py --dump-full`, bootstrap-stage1-transitive) reads that as an
-        # incomplete closure (bugs/CODEGEN_prelude_sort_is_not_resolved.md).
+        # The prelude `sort` (std/prelude: `from std.builtin.sort import sort`)
+        # has no definition in the runtime or in this codegen, so a call that
+        # reaches this stub was an undefined symbol at LINK time. It is the same
+        # honest weak stub `_lnc_unknown` emits for an unresolved name: the
+        # program links and says what it did not do. The real `sort` lands with
+        # std.builtin.sort compiling (bugs/CODEGEN_prelude_sort_is_not_resolved.md).
+        ('sort',                   '__attribute__((weak)) void sort(...) { mojo_print((char *)"sort: unavailable in compiled mode"); }'),
         # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('Span_byte_length',       'int64_t Span_byte_length(...);'),
         ('_stat_macos',            'int64_t _stat_macos(...);'),
