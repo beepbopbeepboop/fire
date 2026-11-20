@@ -15998,13 +15998,6 @@ c(0)
 c(5)
 print(d(None), d(""), d("0"))
 print(0 == None, 0 != None)
-
-
-def r(x: str):
-    return x
-
-
-print(repr(r(None)), r(None), repr(r("")), repr(r("0")))
 """)
 
 

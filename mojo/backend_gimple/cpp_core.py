@@ -1086,7 +1086,7 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                 ectype = 'int64_t'
             if conv == 'r' or conv == 'a':
                 if ectype == 'char *':
-                    piece = f"mojo_repr_str_or_none((char *)({v}))"
+                    piece = f"mojo_repr_str((char *)({v}))"
                 elif ectype == 'double':
                     piece = f"mojo_repr_float(({v}))"
                 elif ectype == '_Bool':
@@ -1241,7 +1241,7 @@ def _cpp_percent_format(gen, node) -> str | None:
         ct = _operand_ctype(operand)
         if conv == 'r':
             if ct == 'char *':
-                return f"mojo_repr_str_or_none((char *)({v}))"
+                return f"mojo_repr_str((char *)({v}))"
             if ct == 'double':
                 return f"mojo_repr_float(({v}))"
             return f"mojo_str((void *)({v}))"
@@ -5064,7 +5064,7 @@ def _cpp_expr(gen, e) -> str:
                 return f"((double)({args[0]}))"
             if (fname == 'repr' and len(e.args) == 1
                     and not gen._locally_binds_name('repr')):
-                return f"mojo_repr_str_or_none((char *)({args[0]}))"
+                return f"mojo_repr_str((char *)({args[0]}))"
             if (fname == 'hasattr' and len(e.args) == 2
                     and not gen._locally_binds_name('hasattr')):
                 return f"mojo_hasattr((int)({args[0]}), {args[1]})"
@@ -12334,7 +12334,7 @@ def _cpp_raise_tuple_msg_expr(gen, lit) -> str:
                 el.value, gimple_ctypes._str_literal_interp_flag(el))
             if is_fstr:
                 ev = gen._cpp_expr(el)
-                piece = f"mojo_repr_str_or_none((char *)({ev}))"
+                piece = f"mojo_repr_str((char *)({ev}))"
             else:
                 piece = f'strdup("{gimple_ctypes._c_escape(repr(text))}")'
         else:
@@ -12344,7 +12344,7 @@ def _cpp_raise_tuple_msg_expr(gen, lit) -> str:
                 getattr(gen, '_cpp_gen_self_fields', None),
                 gen._async_api)
             if ct == 'char *':
-                piece = f"mojo_repr_str_or_none((char *)({ev}))"
+                piece = f"mojo_repr_str((char *)({ev}))"
             elif ct == 'double':
                 piece = f"mojo_repr_float((double)({ev}))"
             elif ct == '_Bool':

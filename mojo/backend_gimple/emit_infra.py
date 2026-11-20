@@ -2051,7 +2051,7 @@ _OWNS_STR_ELEMS = frozenset([
 # mojo_char_to_str's table entry, so both must stay off this list.
 _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
-    'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str', 'mojo_repr_str_or_none',
+    'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
     # `!a`'s ascii-escape pass: copies its input into a fresh allocation on
     # every path, so a cat may free its result like any other conversion temp.
     'mojo_ascii_escape',
@@ -8578,7 +8578,7 @@ _OWNED_REPR_FNS = frozenset({
     '_mojo_repr_pair', '_mojo_repr_intlists', '_mojo_repr_pairlist',
     '_mojo_generic_elem_repr',
     # the scalar formatters that malloc unconditionally
-    'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str', 'mojo_repr_str_or_none', 'mojo_repr_boxed',
+    'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str', 'mojo_repr_boxed',
     'mojo_bytes_repr', 'mojo_memoryview_repr', 'mojo_sprintf_ptr', 'mojo_repr_float',
 })
 

@@ -90,35 +90,14 @@ Landed (no representation change: the integer 0 and None stay different values):
   broke included), `test_gimple.py` passes, `compile_stdlib.py` 610/0 unexpected,
   `build_stdlib_dylib.py` 0 skips.
 
-## Status 2026-11-20: repr of a None str value is `None`; the unannotated-word residual remains
+Still open: `repr(c(None))` for `def c(x: str): return x` prints `''`, CPython `None`. The cause is
+`runtime/fire_runtime.c::mojo_repr_str`'s deliberate `if (!s) s = "";`. Changing a NULL string to
+repr as `None` is the right answer for this program, but the self-hosted AST dumps are compared byte
+for byte against the interpreted ones in `make bootstrap` (stage1 == stage2 == stage3), and a NULL
+string field in those dumps is spelled `''` today. So that edit needs the owner's bootstrap run; the
+`'0'` it used to print is gone.
 
-Landed: `repr` of a statically `char *` value renders a NULL as `None`, as CPython does.
-
-- `runtime/fire_runtime.c` / `fire_runtime.h`: new `mojo_repr_str_or_none(char *)`, NULL -> `strdup("None")`,
-  otherwise `mojo_repr_str`. Plain `mojo_repr_str` is unchanged, so every other caller keeps NULL-as-`''`.
-- Registered beside `mojo_repr_str` in `mojo/middle/rt_sigs.py`, `gimple_codegen.py`'s table and
-  `emit_infra.py`'s `_FRESH_STRING_RETURNS` and malloc-unconditional lists.
-- Codegen sites switched: `emit_resolve.py` (the `rat == 'char *'` arm of the repr resolver) and the five
-  `mojo_repr_str((char *)(...))` sites in `cpp_core.py` (the C++-coroutine path's f-string, `repr()` and
-  list/tuple element reprs). `module_gen.py`'s generated dataclass/struct walkers already tested NULL -> None
-  for `char *` fields and are unchanged.
-- Measured against CPython (`repr(c(None))`, `repr(g(None))` with `def g(x: str = "")`, `repr(r(None))` in a
-  `str`-annotated function): compiled now prints `None`, `None`, and `repr("")`, `repr(0)`, `0 == None`,
-  `"" == None` are unchanged.
-- Regression: `test_gimple_runner.py::test_none_argument_is_none_in_the_callee` gained
-  `def r(x: str): return x` and `print(repr(r(None)), r(None), repr(r("")), repr(r("0")))`.
-- Generated-C effect, measured: with `#line` directives stripped, `myinterpreter.py`, `fire.py` and
-  `gimple_codegen.py` emit identical C before and after. In `fire_compiler.py` exactly 15 call sites change, all
-  `{x!r}` inside `SyntaxError` messages of token values. The `.ast`/`.tok` dumps are not affected: they go through
-  `repr(ast)`, whose dataclass fields are already NULL-tested in `module_gen.py`.
-- The `make bootstrap` byte-compare has NOT been run here (agent policy). The owner should run it once to confirm
-  stage1 == stage2 == stage3 with this change.
-
-Still open: an UNANNOTATED parameter (or a copy of one) holding None answers `repr` / `str` with `0`:
-`def u(x): return x` then `repr(u(None))` prints `0` (CPython `None`), and `y = x` inside a `str`-annotated
-function does the same. The word is the null word, and an unknown-kind word cannot say `repr` is `None`
-rather than `0`. Closing this needs the distinct None word the reverted attempt got wrong (decision in item 1
-above); `== None` and `in` on the integer 0 must stay False. Unrelated to this entry's repr fix.
-
-Also still open: an unannotated parameter holding the integer 0 answers `x is None` True (the word is 0),
-where CPython says False. Same cause as the entry above.
+Also still open, found on the way: an unannotated parameter holding the integer 0 answers
+`x is None` True (the word is 0), where CPython says False. That is the cost of the single null
+word for an unknown-kind parameter; closing it needs a distinct None word, which is the
+representation decision the reverted attempt got wrong.
