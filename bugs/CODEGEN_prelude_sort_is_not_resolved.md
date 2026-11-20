@@ -18,6 +18,25 @@ called it inside a generic and only failed `gcc -c` once that generic was really
 
 ## Status
 
+**2026-11-20 — planning step 1 landed (`Span[T, o]` <- `List[X]` unify rule); step 2 blocked on a
+proof this lane does not yet have.** `elaborate.py::_unify_param_ann` now binds a `Span[T, o]`
+annotation from a `MojoList *` argument, but ONLY when the caller proves the list's Mojo type
+(`arg_mojo == 'List[X]'`): `T := X`, and `o := ERASED_TYPE_ARG` (`MutOrigin`). Without that proof,
+or for a `Pointer` argument, it still declines. Pinned by `test_gimple.py::test_span_param_binds_only_from_a_proven_list`
+(fails before the change: `infer_type_args` returns None for the proven List; passes after).
+The honest-stub test and `test_inferred_generic_statement_call.py` still pass.
+
+**Why step 2 did NOT land.** The Done-when program's `p` is `List(length=3, fill=0)` with no
+annotation. `_proven_arg_mojo_type` (`emit_resolve.py:3574`) proves a type only for a literal, a
+direct constructor call, or a parameter of the enclosing function. A local `var p = List(...)` has
+no recorded element type, so the call still declines and the elaborator never sees the Span
+binding. Step 2's `MojoList * -> Span *` conversion in `_elaborate_generic_call` would therefore be
+dead code today, and untestable against the Done-when program, so it was not landed.
+**Next step for step 2 (ordered):** (a) record the Mojo element type of a local bound to a
+`List(...)` constructor (from `fill=`'s proven type, or an explicit `List[X]` annotation) in the
+same place parameters are recorded for `_proven_arg_mojo_type`; (b) only then add the
+`MojoList * -> Span *` helper and its call in `_elaborate_generic_call`; (c) steps 3-4 of the plan.
+
 **2026-11-19 — step 1 landed (honest stub), step 2 open.** An unimported prelude `sort`
 now builds and runs, lowering to the same honest weak definition an imported-but-not-yet-
 compilable `sort` gets.
@@ -140,7 +159,8 @@ which then fails with `invalid conversion in gimple call` at `std/collections/co
 1. ~~Decide the contract: an unimported prelude `sort` should resolve exactly as the imported one (honest
    weak stub) until `std.builtin.sort` compiles. Make the unresolved bare name register that stub.~~
    Done 2026-11-19 (see Status).
-2. Then make `std.builtin.sort.sort` compile. The call site must first turn its `List` argument into
+2. Then make `std.builtin.sort.sort` compile. (Step 1 of the planning guide, the unify rule, is landed;
+   the element-type proof for a local `List` is the open piece, see Status.) The call site must first turn its `List` argument into
    the `Span` the generic takes (`counter.mojo:948` is the same shape), which is the missing piece
    measured above; the generic body's own `counter.mojo` conversion then has to compile as well.
 3. Test: the program above prints `5`, and `print(p[0])` after a sort of `[3, 1, 2]` prints `1`.

@@ -3056,6 +3056,8 @@ def inferred_ctype_is_specific(ctype) -> bool:
 
 _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
+_SPAN_ANN_RE = re.compile(r'^Span\[\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*\]$')
+_LIST_MOJO_RE = re.compile(r'List\[(.+)\]')
 
 
 #: The dtype a literal of a proven Mojo scalar type binds. `Int` is the 64-bit
@@ -3120,6 +3122,22 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
         # `Foo *` cannot say: a `Foo *` is equally a `Pointer[Foo]`.
         bound = arg_mojo if arg_mojo else c_to_mojo(arg_ctype)
         return {} if bound is None else {ann: bound}
+    # `Span[T, o]` <- a List. A `List[X]` is a `MojoList *` at runtime and its
+    # C type erases the element type `X`, so the element binds `T` ONLY from a
+    # Mojo type the caller proves (`arg_mojo == 'List[Int8]'`). Without that
+    # proof the parameter is declined, exactly as every other unprovable shape
+    # is. The origin binds to the erased origin (`ERASED_TYPE_ARG`), which is
+    # what the call's Span argument is. The stdlib's `sort[T, origin]`
+    # (`std/builtin/sort.mojo`) is the first template written this way.
+    m = _SPAN_ANN_RE.match(ann)
+    if m and m.group(1) in pnames:
+        lst = _LIST_MOJO_RE.fullmatch((arg_mojo or '').strip())
+        if lst is None or arg_ctype != 'MojoList *':
+            return {}
+        out = {m.group(1): lst.group(1).strip()}
+        if m.group(2) in pnames:
+            out[m.group(2)] = ERASED_TYPE_ARG
+        return out
     # `Scalar[dtype]` and `SIMD[dtype, width]`. SIMD is erased to `int64_t`, so
     # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
     # nothing. Any other scalar C type (`double`, `float`, `int32_t`) cannot be

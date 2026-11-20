@@ -321,6 +321,40 @@ def main() raises:
         _PASS += 1
 
 
+def test_span_param_binds_only_from_a_proven_list():
+    """`Span[T, origin]` infers `T` from a List argument ONLY when the caller
+    proves the list's element type.
+
+    This is the first step of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`:
+    `std.builtin.sort.sort[T, origin](span: Span[T, origin])` is called with a
+    `List`, and before this rule `_unify_param_ann` declined the `Span`
+    annotation outright, so the call never reached the elaborator. A
+    `MojoList *` erases its element type, so the binding is taken from the
+    Mojo type the call site proves (`List[Int8]`) and `origin` binds to the
+    erased origin. Without that proof, or for a non-list argument, the
+    template stays unbound (declined), exactly as before.
+    """
+    import elaborate
+    src = ('def sort[T: Copyable, origin: MutOrigin, //, *, stable: Bool = False]'
+           '(span: Span[T, origin]):\n    pass\n')
+    problems = []
+    got = elaborate.infer_type_args(src, ['MojoList *'], ['List[Int8]'])
+    # `stable` is a keyword-only bracket parameter with a default; the
+    # template default fills it, so the full ordered binding has three entries.
+    want = ['Int8', elaborate.ERASED_TYPE_ARG, 'False']
+    if got != want:
+        problems.append(f"List[Int8] proven: got {got!r}, want {want!r}")
+    got = elaborate.infer_type_args(src, ['MojoList *'], None)
+    if got is not None:
+        problems.append(f'unproven List bound {got!r}; want None (declined)')
+    got = elaborate.infer_type_args(src, ['int64_t *'], ['Pointer[Int8, MutOrigin]'])
+    if got is not None:
+        problems.append(f'a Pointer argument bound {got!r}; want None (declined)')
+    if problems:
+        raise AssertionError('; '.join(problems))
+    print("PASS  span_param_binds_only_from_a_proven_list")
+
+
 def defined_param_ctype(c_src: str, func_name: str, param_name: str) -> str:
     """The C type `param_name` is declared with in `func_name`'s DEFINITION.
 
@@ -15514,6 +15548,8 @@ main()
 
     _run_isolated(test_prelude_sort_without_import_is_an_honest_stub,
                   'prelude_sort_without_import_is_an_honest_stub')
+    _run_isolated(test_span_param_binds_only_from_a_proven_list,
+                  'span_param_binds_only_from_a_proven_list')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
