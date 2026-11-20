@@ -8727,7 +8727,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             _emit_literal_print('\\n', print_fn)
             return
         _et, _ev = gen.lower_expr(end_node)
-        if _et != 'char *':
+        if not gimple_ctypes.TypeLattice.is_cstr(_et):
             _ev = gen._call_expr('char *', 'mojo_str_word_fresh',
                                  [('int64_t', gen._to_int64(_et, _ev))])
         gen._rt_void(print_fn, [_ev])
