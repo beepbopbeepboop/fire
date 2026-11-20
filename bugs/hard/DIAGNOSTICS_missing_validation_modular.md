@@ -521,3 +521,28 @@ Remaining: the rest of the "Still open (large)" list above, notably the
 `EnumLike` synthesis (`enum_exhaustive_errors`), the same-module generic
 discriminator (`moco_4400`), `identifier_source_range`, and `tuple_*`. The
 combined autoparam errors are ordered by check, not by source line.
+
+## Status (2026-11-20): `moco_4400` — the 2026-11-16 chain is WRONG at step 2; the real blocker is the type of the local
+
+Measured on the doc's 30-line repro (in-process `compile_to_gimple(do_imports=True)` from a real file; the
+build is the same, exit 0):
+
+* `needs_iterator(s)` IS reached: `elaborate_generic_call_inferred('needs_iterator', ['S *'])` runs.
+* It returns `None` **before** any conformance check, not by swallowing a `ConformanceError`: `infer_type_args`
+  cannot bind `I` from the bare C type `S *` (`c_to_mojo('S *')` is None by design), and `elaborate_generic_call`
+  is never entered. The 11-16 note that "it infers `S[NotMovable]` and raises" held only for the direct unit
+  test, which hands the elaborator the type text `S[NotMovable]`.
+* So loosening the swallow's discriminator (`inferred_ctype_is_specific`, treating a pointer to a program
+  struct as specific) changes nothing for this program: tried, no effect, reverted.
+* Why `S *`: `var s = S(NotMovable(1))` is **not elaborated as a generic struct instance at all**.
+  `_elaborate_generic_struct_call` (`emit_resolve.py`) takes the inferred-constructor path only for
+  `gen._imported_generic_structs`, and `S` is defined in the SAME module, so the call lowers as the erased base
+  struct and `_register_generic_struct` is never called (probed). The local's type is `S` with `T` erased;
+  `NotMovable` is recorded nowhere.
+
+Next step (a feature, not a patch): infer the type arguments of a same-module generic struct constructor
+(`S(NotMovable(1))` -> `S[NotMovable]`) and record the local's Mojo type (`gen` has no per-local Mojo-type
+table; `_proven_arg_mojo_type` knows only a parameter's annotation and a direct constructor call). Then
+`_proven_arg_mojo_type` returns `S[NotMovable]` for the IdentExpr `s`, `infer_type_args` binds `I`, and the
+existing `Iterator` conformance check fires (it is proven: `test_trait_requirement_evidence_diagnostic.py`).
+The positive control to pin it with: the same program with a `Movable` payload must still compile.
