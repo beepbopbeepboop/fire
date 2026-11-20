@@ -22,4 +22,9 @@ It is red on `master`: reproduce it there (`python3 tools/suite.py bootstrap-sta
   depends on this exact behaviour, so the two must be checked together.
 - `python3 tools/suite.py bootstrap-stage1-transitive` has not been re-run on master since the merge. This doc stays
   until it is green. Delete it in the same commit that shows it green, then run `python3 tools/dangling_doc_refs.py --ratchet`.
-- The stdlib compile (`compile_stdlib.py`) has not been run on the removed `sort` entry. Its skip and FAILED counts must not increase.
+- Measured after the fix (`2a5b22587`, on the fix's own branch): `compile_stdlib.py` reports `FAILED: 0 (0 expected,
+  0 unexpected)` with no skips; `test_dump_full_reports_closure_stubs.py` passes; a program calling unimported `sort(p)`
+  carries exactly one weak `sort` stub, in its own TU, and a program with no `sort` call carries none.
+- Still NOT done: the link step of the unimported `sort(p)` program (`fire.py build`) did not finish (two builds ran
+  13 and 24 minutes without completing; pids 36526 and 72861 were left running). And the named job has not been rerun
+  green on master. The doc stays until it is.
