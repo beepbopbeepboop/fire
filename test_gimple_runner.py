@@ -336,7 +336,7 @@ def test_gimple_build_refusal(name: str, mojo_src: str, expected_substr: str):
     _FAIL += 1
 
 
-def test_gimple_matches_cpython(name: str, mojo_src: str):
+def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
     """Compile, run, and require the COMPILED program's stdout and exit code
     to be byte-identical to CPython's on the same source.
 
@@ -346,6 +346,15 @@ def test_gimple_matches_cpython(name: str, mojo_src: str):
     through a module global printed `0`, and no fixed expectation written
     after the bug would have said `0` was wrong — only CPython does. It also
     cannot rot: if the compiler starts diverging, this fails.
+
+    `filename` ending in `.py` compiles the text as Python source (see
+    compile_mojo_to_gimple_exe). A loop over a list of 3+ DISTINCT struct
+    classes has an int64_t (dynamic word) variable, and a method call on a
+    dynamic word dispatches per instance tag only in Python mode — the
+    scalar-method arms of `_lower_method_call` gate the dynamic dispatch on
+    a `.py` filename so a Mojo `Int`'s real scalar methods are never
+    redirected — so a repro of that shape passes `filename='x.py'`, the same
+    mode `tools/pydiff.py` runs it in.
 
     CPython is run first and a non-zero exit or empty output from it is
     reported as the test program's own problem, not a compiler failure —
@@ -373,7 +382,7 @@ def test_gimple_matches_cpython(name: str, mojo_src: str):
             want_rc = py.returncode
         finally:
             os.unlink(entry)
-        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        exe_path = compile_mojo_to_gimple_exe(mojo_src, filename=filename)
         got = subprocess.run([exe_path], capture_output=True,
                              timeout=RUN_TIMEOUT_S, env=_SCRIBBLE_ENV)
         if got.stdout == want_out and got.returncode == want_rc:
@@ -16653,6 +16662,81 @@ def main():
 
 main()
 """)
+
+    # User __eq__/__len__/__contains__/__getitem__/__str__ were not dispatched
+    # on a struct receiver, and the type tag was zeroed by _init's own memset
+    # (the tag was written BEFORE it), so even isinstance(a, SameClass) was
+    # False. `2 in a` must call P.__contains__ statically instead of asking
+    # the list/dict/set registry about a struct address.
+    test_gimple_matches_cpython("gimple_class_dunder_methods_dispatch", """\
+class P:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def __eq__(self, other):
+        return self.x == other.x and self.y == other.y
+    def __len__(self):
+        return self.x
+    def __contains__(self, v):
+        return v == self.x or v == self.y
+    def __getitem__(self, i):
+        return self.x if i == 0 else self.y
+    def __str__(self):
+        return "P(" + str(self.x) + ", " + str(self.y) + ")"
+
+def main():
+    a = P(1, 2)
+    b = P(1, 2)
+    print(a == b)
+    print(a is b)
+    print(len(a))
+    print(2 in a)
+    print(5 in a)
+    print(a[0], a[1])
+    print(a)
+    print(str(a))
+    print(isinstance(a, P))
+main()
+""")
+
+    # The same doc's second repro: a hierarchy where the derived __init__
+    # calls super().__init__ AND the instances live in a mixed-class list.
+    # Needs the base-prefix field layout (super() writes at base offsets),
+    # the presence set after the super() call (the base writes name through
+    # its own emission), the MRO-aware isinstance (zoo[1] is a Dog, an
+    # Animal but not a Cat), and the int64_t element type for a list of
+    # 3+ distinct classes so a.speak() dispatches per instance tag. That
+    # dispatch is a method call on a DYNAMIC WORD (the mixed-class loop
+    # variable), which _lower_method_call answers only in Python mode —
+    # the .py filename selects it, the same mode tools/pydiff.py runs this
+    # repro in.
+    test_gimple_matches_cpython("gimple_class_inheritance_super_init", """\
+class Animal:
+    def __init__(self, name):
+        self.name = name
+    def speak(self):
+        return self.name + " says ..."
+
+class Dog(Animal):
+    def speak(self):
+        return self.name + " says woof"
+
+class Cat(Animal):
+    def __init__(self, name, lives):
+        super().__init__(name)
+        self.lives = lives
+    def speak(self):
+        return self.name + " says meow"
+
+def main():
+    zoo = [Animal("thing"), Dog("rex"), Cat("tom", 9)]
+    for a in zoo:
+        print(a.speak())
+    print(isinstance(zoo[1], Animal))
+    print(isinstance(zoo[1], Cat))
+    print(zoo[2].lives)
+main()
+""", filename='inherit.py')
 
 
 # Keep the existing main if present; append our test call via module globals not needed
