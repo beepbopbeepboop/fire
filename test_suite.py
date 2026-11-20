@@ -2341,8 +2341,12 @@ STALE_PER_CHILD_BUDGETS = {
     'test_candidate_selection_diagnostic.py': 1,
     'test_diagnostic_format_modular.py': 1,
     'test_diagnostics_in_missing_locs.py': 1,
+    'test_dump_full_reports_closure_stubs.py': 1,
     'test_elaboration_recursion_diagnostic.py': 1,
     'test_fieldwise_init_and_deprecated_conversion.py': 1,
+    'test_gimple_class_method_import_inlined.py': 2,
+    'test_gimple_imported_container_global.py': 3,
+    'test_gimple_set_op_boxed_container_local.py': 3,
     'test_invalid_downcast_build.py': 1,
     'test_overload_diagnostic.py': 1,
     'test_predicate_where_diagnostic.py': 1,
@@ -4342,6 +4346,9 @@ UNREGISTERED = {
     'test_gimple_imported_container_global.py': _STANDALONE_TEST_REASON,
     'test_gimple_module_global_pending_owner.py': _STANDALONE_TEST_REASON,
     'test_gimple_set_op_boxed_container_local.py': _STANDALONE_TEST_REASON,
+    # Pins that `--dump-full` reports a weak/unavailable stub present in the
+    # .ci it just wrote (so a reject= job can see it on stdout); runs directly.
+    'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
