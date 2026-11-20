@@ -15413,6 +15413,7 @@ def main():
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_none_beside_a_scalar_arm_returns_the_tagged_word,
+                  test_copy_of_a_tagged_none_keeps_it,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -16120,6 +16121,29 @@ def main():
     u = {None: 0}
     print(None in u, 0 in u, len(u))
 
+main()
+""")
+
+
+def test_copy_of_a_tagged_none_keeps_it():
+    """`x = h(0)` kept the None box, but the copy `y = x` unwrapped it to the
+    plain word: `y is None` was True for the integer 0, and a copy of None
+    printed `0`. A copy of a name bound to a mixed-return call stays tagged."""
+    test_gimple_matches_cpython("gimple_copy_of_a_tagged_none", """\
+def h(n):
+    if n == 0:
+        return 0
+    return None
+
+def main():
+    x = h(0)
+    y = x
+    print(y)
+    print(y is None)
+    z = h(1)
+    w = z
+    print(w)
+    print(w is None)
 main()
 """)
 

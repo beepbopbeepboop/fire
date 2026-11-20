@@ -4086,6 +4086,16 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
                 return False
             copies += 1
             continue
+        # A call to a mixed-return function (`x = h(0)` where `h` returns
+        # `None` on one path and an int on another) is a tagged word by its
+        # own shape; the bind keeps the box (`_call_tagged` in emit_stmts), and
+        # a copy of such a name must keep it too, or `y = x` turns the None box
+        # into 0 and `y is None` / `print(y)` answer for the integer.
+        if (isinstance(v, gimple_ctypes.CallExpr)
+                and isinstance(v.func, gimple_ctypes.IdentExpr)
+                and _as_str(v.func.name) in getattr(gen, '_ret_may_hold_mixed', ())):
+            copies += 1
+            continue
         if not (isinstance(v, gimple_ctypes.CallExpr)
                 and isinstance(v.func, gimple_ctypes.IdentExpr)
                 and v.func.name == 'next'
