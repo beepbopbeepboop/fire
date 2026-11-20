@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pin: `emit_stmts._iter_structdefs` has no nested generator.
 
-`the stage1-transitive closure stub residue (the bootstrap-stage1-transitive job)`'s `_yield_from` row:
+`bugs/mid/GATE_red_recover-land_2026-11-02-part5-part1.md`'s `_yield_from` row:
 the helper used to be a generator `def _yield_from(coll)` nested inside
 `_iter_structdefs` (itself a generator) and reading the enclosing `seen` set.
 A nested generator that captures an enclosing-scope variable is a shape the

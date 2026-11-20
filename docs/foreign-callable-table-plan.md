@@ -1,6 +1,6 @@
 # Plan: Foreign-Callable Signature Table (tables.py / c_analyzer group)
 
-Source bug: the c_common/tables.py compile bug (fixed; its doc is deleted)
+Source bug: bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md
 Goal: make `c_common/tables.py`, `c_analyzer/__init__.py`, `c_common/fsutil.py` compile.
 
 ## Decomposition

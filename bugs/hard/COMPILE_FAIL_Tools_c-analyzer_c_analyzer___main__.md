@@ -1,4 +1,4 @@
-SPLIT (parts 4 and 5 are both fixed and their docs were deleted: `yield from` a captured nested generator, and the consuming `for` loop over one, inside a coroutine-path generator; what remains is the imported-module floor owned by the sibling docs)
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4 (part 5 fixed: consuming-loop over a captured nested generator inside a coroutine-path generator; its doc was deleted)
 
 ## Status 2026-11-12 — replan after parts 1-3 landed
 
@@ -24,10 +24,9 @@ A probe shows these are one defect, not two: `section` IS claimed with its
 `cpp_core._cpp_yield_from` resolves callees from `_generator_api` only, not
 `_nested_generator_api`. The remaining work is split into:
 
-* part 4 (fixed 2026-11-19; its doc was deleted):
+* part 4 (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`):
   `yield from` a claimed nested generator from a coroutine-path generator —
-  the `fmt_summary`/`section` blocker. The real `c_analyzer/__main__.py` now compiles
-  through `compile_to_gimple_with_cpp` with no `Unsupported shape(s)` naming either.
+  the live `fmt_summary`/`section` blocker.
 * part 5 (fixed): the sibling consuming-loop path, `for x in <nested generator>():` inside a
   coroutine-path generator. The part-5 bug doc was deleted when its named quick test passed.
 

@@ -3204,15 +3204,6 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
                      * kind — the old vkind-5 arm lost that, reading a box's is_str
                      * false and storing the box pointer as an int). */
             int64_t w = ((int64_t (*)(void *))sg->value)(h);
-            /* The drain collects EVERY element before the consumer reads any, so a
-             * string the generator yielded out of a shared scratch buffer (`mojo_str`
-             * formats a small int into one static block: `f'{item}'` for two items was
-             * the same pointer twice) must be owned by the list. A str-typed slot (3)
-             * is a string by its type; a dynamic word (5) only when it classifies as
-             * one. Bytes keep their own object. */
-            if (w && !mojo_is_registered_bytes(w) && !mojo_is_boxed(w)
-                && (sg->vkind == 3 || mojo_boxed_is_str(w)))
-                w = (int64_t)(intptr_t)strdup((const char *)(intptr_t)w);
             mojo_list_append_word(out, w);
             break; }
         default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;
@@ -12174,66 +12165,6 @@ char *mojo_shlex_join(MojoList *parts) {
     }
     *p = '\0';
     free(quoted);
-    return out;
-}
-
-/* textwrap.dedent(text), CPython 3.14's algorithm: the margin is the common leading
- * run of spaces and tabs shared by the lexicographically smallest and largest
- * non-blank lines (so a tab and a space share nothing), it is cut from every
- * non-blank line, and a blank line (empty or all whitespace) becomes "". ASCII
- * whitespace only: a line made solely of a non-ASCII space counts as non-blank. */
-static int _dedent_blank(const char *l, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)l[i];
-        if (!(c == ' ' || (c >= 9 && c <= 13) || (c >= 28 && c <= 31))) return 0;
-    }
-    return 1;
-}
-
-char *mojo_textwrap_dedent(char *text) {
-    if (!text) return text;
-    size_t n = strlen(text);
-    const char *min_l = NULL, *max_l = NULL;
-    size_t min_n = 0, max_n = 0;
-    for (size_t i = 0; i <= n; ) {
-        const char *l = text + i;
-        size_t e = i;
-        while (e < n && text[e] != '\n') e++;
-        size_t ln = e - i;
-        if (ln && !_dedent_blank(l, ln)) {
-            size_t m = ln < min_n ? ln : min_n;
-            if (!min_l || memcmp(l, min_l, ln < min_n ? ln : min_n) < 0
-                || (memcmp(l, min_l, m) == 0 && ln < min_n)) { min_l = l; min_n = ln; }
-            m = ln < max_n ? ln : max_n;
-            if (!max_l || memcmp(l, max_l, m) > 0
-                || (memcmp(l, max_l, m) == 0 && ln > max_n)) { max_l = l; max_n = ln; }
-        }
-        i = e + 1;
-    }
-    size_t margin = 0;
-    if (min_l) {
-        for (size_t i = 0; i < min_n; i++) {
-            margin = i;
-            if (i >= max_n || min_l[i] != max_l[i] || (min_l[i] != ' ' && min_l[i] != '\t')) break;
-        }
-    }
-    char *out = (char *)malloc(n + 1);
-    if (!out) return text;
-    char *p = out;
-    for (size_t i = 0; i <= n; ) {
-        const char *l = text + i;
-        size_t e = i;
-        while (e < n && text[e] != '\n') e++;
-        size_t ln = e - i;
-        if (!_dedent_blank(l, ln)) {
-            size_t skip = margin < ln ? margin : ln;
-            memcpy(p, l + skip, ln - skip);
-            p += ln - skip;
-        }
-        if (e < n) *p++ = '\n';
-        i = e + 1;
-    }
-    *p = '\0';
     return out;
 }
 

@@ -1074,16 +1074,16 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     Both the straight-line and the path-tree emitters go through here, so a form
     cannot be wired up in one and forgotten in the other.
 
-    `fs_path` sizes the `rip` side condition's `simp`, for the reason the
-    `x86_exec_go_exit_step` one carries the same list: that condition is
-    `s_k.rip = <literal>`, and `s_k` is described by `hs_k`, which is the
-    PREVIOUS step's SUCCESSOR -- so proving it means projecting through whatever
-    wrapper that successor is built on.  A successor that is not a bare
-    `{s with …}` is exactly the two rows that were stale until this pass
-    (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for `imul`), and without
-    the names the condition does not close and is ADMITTED, which is the quiet
-    failure: the proof still elaborates and the report reads "proved with a
-    `sorry`" about a fact that is a `simp` set away.
+    `prev_defs` are the definitions of the PREVIOUS step's form, and they are in
+    the `rip` side condition for the reason the `x86_exec_go_exit_step` one
+    carries the same list: that condition is `s_k.rip = <literal>`, and `s_k` is
+    described by `hs_k`, which is the PREVIOUS step's SUCCESSOR -- so proving it
+    means projecting through whatever wrapper that successor is built on.  A
+    successor that is not a bare `{s with …}` is exactly the two rows that were
+    stale until this pass (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for
+    `imul`), and without the names the condition does not close and is ADMITTED,
+    which is the quiet failure: the proof still elaborates and the report reads
+    "proved with a `sorry`" about a fact that is a `simp` set away.
 
     `rip` overrides a successor's program counter with a LITERAL, which is only
     ever right where the tree knows the address the machine goes to next and the
@@ -1092,9 +1092,9 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     the step is still the model's; see `emit_terminates`.
 
     `fs_path` is the FORM of every step walked before this one on this path, and
-    it is what sizes that `simp`: the state this step starts in is written by all
-    of them, so folding it needs every definition they used and not only the
-    last one's.  See `_path_simp`.
+    it sizes the `rip` side condition's `simp`: the state this step starts in is
+    written by all of them, so folding it needs every definition they used and
+    not only the last one's.  See `_path_simp`.
 
     `code_name` is the NAME of the code function in the generated file, because a
     successor may quote the model's own reader (`UInt64.ofInt (read_i32_le rc
@@ -3642,17 +3642,14 @@ def _header(code, insns, base, steps):
     #
     # `maxRecDepth` is the other half of the same step, and it is a LIMIT rather
     # than an allocation, so raising it costs nothing when it is not needed.  The
-    # default is 1000.  Two things in the file run out of it, and they scale with
-    # DIFFERENT sizes: the closing `simp` nests one successor equation per step
-    # (measured on `bitops`, 44 steps, 1200 and 2000 go through and 1000 fails --
-    # about 27 per step, so 40 is the factor here), and `all_bytes` is a flat
-    # `And` chain over every byte of the image proved by a matching flat term,
-    # each conjunct reducing a `List.get` into that image (its depth is the image,
-    # not the function).  A small function with a large image -- the
-    # `call_both_arms`/`elif_call` shape, few steps so the step budget sits at the
-    # 1000 floor but a long compiler-trap image -- busts the floor on `all_bytes`,
-    # so the image's size buys depth too, with the same floor for the short ones.
-    depth = max(1000, 40 * max(steps, 1), 2 * (len(code) + 1))
+    # default is 1000, and it is the closing `simp` that runs out rather than any
+    # single step: its term nests one successor equation per instruction, so the
+    # depth it needs grows with the length of the function and a constant would
+    # be a constant that is wrong again at the next example.  Measured on
+    # `bitops`, 44 steps, the first two words that go through are 1200 and 2000
+    # and 1000 fails -- about 27 per step, so 40 is the factor used here, with
+    # the default as the floor for the short ones that never needed it.
+    depth = max(1000, 40 * max(steps, 1))
     out = ["import X86\n",
            "set_option maxHeartbeats 4000000\n",
            "set_option maxRecDepth %d\n" % depth,
@@ -3771,17 +3768,16 @@ def emit(path, expected):
 
     prev, k = "i0", 0
     chain = []
-    # The FORMS walked so far, for the reason `_resolve` documents: this step's
-    # `rip` fact is about `s_k`, which every earlier step's successor wrote, so
-    # the fold has to name every one of their definitions and not only the last
-    # one's.  The path-tree emitter threads the same list (`fs_path`) through
-    # its walk; this loop is linear, so it is accumulated here.
-    fs_path = ()
+    prev_form = None
     for insn, form, raw in shapes:
         addr = base + insn.offset
+        # `prev_form`'s definitions, for the reason `_resolve` documents: this
+        # step's `rip` fact is about the state the PREVIOUS step's successor
+        # describes.
         call, succ = _resolve(form, raw, addr, prev, k, (), None, insn.length,
-                              fs_path=fs_path)
-        fs_path += (form,)
+                              prev_defs=_SIMP_FORMS.get(prev_form, ())
+                              if prev_form else ())
+        prev_form = form
         nxt = "s%d" % (k + 1)
         a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
         a("    %s" % call)
@@ -3959,7 +3955,7 @@ def emit_terminates(path):
     crossed = [False]
 
     def walk(node, state, ind, cases, rules, hs_in=None, hs_path=(),
-             fs_path=(), hmem_path=(), mem_path=(), hval_base=None):
+             fs_path=(), hmem_path=(), mem_path=()):
         """Emit one node and, for a branch, both of its children.
 
         `cases` are the `by_cases`/decided hypotheses in scope at this point;
@@ -4009,7 +4005,7 @@ def emit_terminates(path):
         def emit(line):
             out.append(pad + line if line else "")
 
-        def emit_value_facts(node, name, new_hval_idx, forms, hval_base):
+        def emit_value_facts(node, name, index, forms):
             """The step's own `hval`, if a decided branch on this path will need it.
 
             **Why there is a fact per STEP and not one `simp` over the chain.** A
@@ -4037,7 +4033,7 @@ def emit_terminates(path):
             `upto` bounds it: nothing after the last decided branch on the path is
             emitted, and a path with no decided branch emits none at all.
             """
-            if new_hval_idx > upto:
+            if index > upto:
                 return
             st = node.after
             conj = []
@@ -4052,11 +4048,11 @@ def emit_terminates(path):
             if not conj:
                 return
             emit("have hval%d : %s := by"
-                 % (new_hval_idx, " ∧\n      ".join(conj)))
+                 % (index, " ∧\n      ".join(conj)))
             # The four accessors are always in: a register read in a successor
             # is `x86_get_reg s{k} (rm + x86_rex_b rex)` until BOTH are reduced,
             # and which of them a given step needs is that step's own row.
-            simp = ["hs%d" % new_hval_idx, "hval%d" % hval_base, "x86_get_reg",
+            simp = ["hs%d" % index, "hval%d" % (index - 1), "x86_get_reg",
                     "x86_set_reg", "x86_rex_b", "x86_rex_r"]
             simp += [n for n in _SIMP_FORMS.get(forms[-1], ())
                      if n not in ("mem_read_bytes", "mem_write_bytes")]
@@ -4077,7 +4073,7 @@ def emit_terminates(path):
                 # set on a goal the first one already closed is a "simp made no
                 # progress" error, which is the same shape as a fact that says
                 # nothing.
-                emit("  <;> simp [hval%d]" % hval_base)
+                emit("  <;> simp [hval%d]" % (index - 1))
             emit("  <;> decide")
 
 
@@ -4198,7 +4194,7 @@ def emit_terminates(path):
             emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
             hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
             emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
-        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,), hval_base)
+        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,))
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
         # exit`, and `s_k` is the state this step STARTS in -- which the
         # PREVIOUS step's successor equation describes.  So this uses `hs_k`,
@@ -4264,13 +4260,11 @@ def emit_terminates(path):
                     mem_this_local = mem_path + ("hs%d" % (k + 1),)
                 walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,), hmem_this_local, mem_this_local,
-                     hval_base=k + 1)
+                     fs_path + (node.form,), hmem_this_local, mem_this_local)
                 emit("\u00b7")
                 walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,), hmem_this_local, mem_this_local,
-                     hval_base=k + 1)
+                     fs_path + (node.form,), hmem_this_local, mem_this_local)
                 return
             # **THE DECIDED ARM, and it is emitted as a PROOF.**  `_tree` settled
             # this condition from the abstract machine, so only one arm was built
@@ -4295,9 +4289,8 @@ def emit_terminates(path):
             # fields are `(x86_flags_sub s{k-1} …).zf`, so without the setter's
             # own definitions the goal stops at exactly that — measured, and the
             # fix is one entry of the form table away.
-            prev_facts = ["hs%d" % k, "hval%d" % (k - 1)] if k else ["i0"]
             emit("  simp [%s]" % _decision_simp(
-                fs_path[-1:], prev_facts))
+                fs_path[-1:], ["hs%d" % k, "hval%d" % (k - 1)] if k else ["i0"]))
             emit("  <;> decide")
             # …and the hypothesis joins the `simp` sets below, exactly as a
             # `by_cases` hypothesis would: the successor's `rip` is an `if` on
@@ -4311,8 +4304,7 @@ def emit_terminates(path):
                 mem_this_local = mem_path + ("hs%d" % (k + 1),)
             walk(node.kids[0], nxt, ind, cases + ["hdec%d" % k], both,
                  "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                 fs_path + (node.form,), hmem_this_local, mem_this_local,
-                 hval_base=k + 1)
+                 fs_path + (node.form,), hmem_this_local, mem_this_local)
             return
 
         if node.kind == "ret" and node.succ is None:
@@ -4422,8 +4414,7 @@ def emit_terminates(path):
             mem_this_local = mem_path + ("hs%d" % (k + 1),)
         walk(node.kids[0], nxt, ind, cases, rules + [step_rule],
              "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-             fs_path + (node.form,), hmem_this_local, mem_this_local,
-             hval_base=k + 1)
+             fs_path + (node.form,), hmem_this_local, mem_this_local)
 
     if upto >= 0:
         # `hval0`: the initial state's own field values, which is where the whole
@@ -4438,7 +4429,7 @@ def emit_terminates(path):
         out.append("    simp [i0, X86State.init, x86_get_reg, mem_read_bytes]")
         out.append("    <;> decide")
 
-    walk(root, "i0", 1, [], [], None, (), (), (), (), 0)
+    walk(root, "i0", 1, [], [], None, (), (), (), ())
     return "\n".join(out) + "\n"
 
 

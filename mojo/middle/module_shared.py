@@ -548,23 +548,6 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _dept
                         modules_to_compile[_as_str(_ex[0])] = _loc
         elif isinstance(stmt, FunctionDef):
             _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
-        elif isinstance(stmt, StructDef):
-            # A `from M import name` inside a CLASS/STRUCT METHOD body is a
-            # real import of the module this translation unit must inline:
-            # the function-scoped import preamble declares the callee as an
-            # extern expecting the definer's body somewhere in the unit, and
-            # a method-scoped import of a sibling module is never inlined
-            # without this arm. Measured on the bootstrap-stage2 closure
-            # (`elaborate.py`'s `Elaborator.elaborate_generic_struct` does
-            # `from mojo.middle.comptime_fn import resolve_struct_aliases`):
-            # gcc compiled the call site against the extern and the LINK
-            # failed with `_mojo_middle_comptime_fn_resolve_struct_aliases_
-            # 37bd8e` undefined. Method bodies are the only statement lists a
-            # StructDef owns (fields carry no statements).
-            for _sd_m in (getattr(stmt, 'methods', None) or []):
-                _collect_import_modules_rec(
-                    modules_to_compile, getattr(_sd_m, 'body', None) or [],
-                    _depth + 1)
         elif isinstance(stmt, IfStmt):
             _collect_import_modules_rec(modules_to_compile, stmt.then_body, _depth + 1)
             for _elif_pair in stmt.elifs:
@@ -590,16 +573,6 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
     _sk = _as_str(sym_name)
     _reg_isym = _as_dict(self.imported_symbols)
     if _sk in self.struct_field_types:
-        # The name is already a class HERE, so there is nothing to register
-        # as an imported function — but this gen may still lack the class's
-        # METHOD signatures: `func_return_types` is re-seeded per
-        # `gen_module`, and the struct passes only see the modules THIS gen
-        # inlined, so a class whose defining module a sibling subtree
-        # compiled has a layout but no methods. `_note_struct_import_alias`
-        # publishes them (and is a no-op for a name that is not a class of
-        # the named module).
-        if not s.wildcard:
-            self._note_struct_import_alias(s.module, _sk, orig_name)
         return
     if not s.wildcard and self._from_import_name_is_submodule(s.module, orig_name):
         _reg_isym[_sk] = {
