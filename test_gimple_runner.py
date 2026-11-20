@@ -15408,6 +15408,7 @@ def main():
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_none_argument_is_none_in_the_callee,
                   test_textwrap_dedent_matches_cpython,
+                  test_mixed_return_none_string_and_set_arms,
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
@@ -16033,6 +16034,30 @@ cases = [
 ]
 for c in cases:
     print(repr(textwrap.dedent(c)))
+""")
+
+
+def test_mixed_return_none_string_and_set_arms():
+    """A function whose return arms mix a `str` (which may be None, the NULL word), a bool and
+    a set returns the TAGGED word, and each arm renders by its kind at the call site:
+    `None` for a NULL string (it used to be a 'p' box around NULL, which crashed the
+    consumer), the string itself, `True`, and a set as `{...}` (a raw set pointer used to
+    print as its address). The shape is `c_common/scriptutil.normalize_selection`'s."""
+    test_gimple_matches_cpython("gimple_mixed_return_none_string_and_set_arms", """\
+def pick(sel: str, which: int):
+    if which == 0:
+        return sel
+    if which == 1:
+        return True
+    if which == 2:
+        return {'only'}
+    return sel
+
+print(pick(None, 0))
+print(pick('a', 0))
+print(pick('x', 1))
+print(pick('x', 2))
+print(pick(None, 3))
 """)
 
 

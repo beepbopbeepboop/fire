@@ -45,10 +45,10 @@ selected`. Called as `normalize_selection(None)`, the membership test is False i
 the compiled binary, so execution falls into `elif isinstance(selected, str)`
 (a type test that is true for every value of the str type) and returns a
 `frozenset([<word>])`; printing the API's result produced `4383444896` (the set
-pointer) where CPython prints `None`. The same function is currently refused
-outright by a different, unrelated check (a `_Bool` return arm in a `char *`
-function — see `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil-part4.md`),
-so the wrong answer was measured with that refusal lifted in memory.
+pointer) where CPython prints `None`. (That refusal, a `_Bool` return arm in a `char *`
+function, no longer applies: the module builds, and the function's arms are boxed as a tagged
+word. What still differs from CPython for this function is tracked in
+`bugs/CODEGEN_param_annotation_contradicted_by_the_body.md`.)
 
 ## What is already there
 

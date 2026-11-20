@@ -9,7 +9,6 @@ deleted in the same commit, as for any bug.
 | `CODEGEN_stdlib_dylib_lazy_undefined_refs.md` | see doc | workers |
 | `COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md` | see doc | workers |
-| `COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` | see doc | workers |
 | `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
 | `GATE_recover_land_remainder.md` | see doc | workers |
