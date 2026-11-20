@@ -4495,6 +4495,55 @@ char *mojo_cstr_slice_cp(char *s, int64_t start, int64_t stop)
     return out;
 }
 
+/* `s[start:stop:step]` over CODE POINTS (not bytes), Python's slice rules:
+ * an omitted bound defaults by the step's sign, a negative bound counts from
+ * the end, and bounds clamp. `step` must be nonzero (the call site checks).
+ * The result is always a fresh string. */
+char *mojo_cstr_slice_step(char *s, int has_start, int64_t start,
+                           int has_stop, int64_t stop, int64_t step)
+{
+    if (!s || step == 0) { char *e = malloc(1); e[0] = '\0'; return e; }
+    int64_t slen = (int64_t)strlen(s);
+    int64_t ncp = mojo_str_codepoint_len(s);
+    int64_t lo, hi;                      /* clamp limits, as CPython's */
+    if (step > 0) { lo = 0; hi = ncp; } else { lo = -1; hi = ncp - 1; }
+    if (!has_start) start = (step > 0) ? lo : hi;
+    else {
+        if (start < 0) { start += ncp; if (start < lo) start = lo; }
+        else if (start > hi) start = hi;
+    }
+    if (!has_stop) stop = (step > 0) ? hi : lo;
+    else {
+        if (stop < 0) { stop += ncp; if (stop < lo) stop = lo; }
+        else if (stop > hi) stop = hi;
+    }
+    /* byte offset of every code point start, plus the end */
+    int64_t *off = malloc(sizeof(int64_t) * (size_t)(ncp + 1));
+    int64_t b = 0, k = 0;
+    while (k < ncp && b < slen) {
+        off[k++] = b;
+        unsigned char c = (unsigned char)s[b];
+        b += (c < 0x80) ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4;
+    }
+    off[ncp] = slen;
+    char *out = malloc((size_t)slen + 1);
+    int64_t n = 0;
+    if (step > 0) {
+        for (int64_t i = start; i < stop; i += step) {
+            int64_t w = off[i + 1] - off[i];
+            memcpy(out + n, s + off[i], (size_t)w); n += w;
+        }
+    } else {
+        for (int64_t i = start; i > stop; i += step) {
+            int64_t w = off[i + 1] - off[i];
+            memcpy(out + n, s + off[i], (size_t)w); n += w;
+        }
+    }
+    out[n] = '\0';
+    free(off);
+    return out;
+}
+
 /* reversed(<str>) modeled as an eagerly reversed copy (see
  * _lower_builtin_reversed). */
 char *mojo_cstr_reverse(char *s)

@@ -14350,6 +14350,19 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'Span *', t
 
     if ot == 'char *':
+        # A spelled step (`s[::2]`, `s[::-1]`) keeps its step: the step-less
+        # helper below answered the whole string for both.
+        if getattr(node, 'step', None) is not None:
+            _kt, kv = gen.lower_expr(node.step)
+            _stepv = _emit_slice_step_zero_check(gen, gen._to_int64(_kt, kv))
+            _hs = '0' if node.start is None else '1'
+            _he = '0' if node.stop is None else '1'
+            _sv = gen._new_val('int64_t', start_v)
+            _ev = (gen._new_val('int64_t', stop_v)
+                   if node.stop is not None else '0')
+            t = gen._rt_call('char *', 'mojo_cstr_slice_step',
+                             [f"{ov}", f"{_hs}", _sv, f"{_he}", f"{_ev}", f"{_stepv}"])
+            return 'char *', t
         # Codepoint-aware slicing for char* strings
         t = gen._rt_call('char *', 'mojo_cstr_slice_cp', [f"{ov}", f"{start_v}", f"{stop_v}"])
         return 'char *', t

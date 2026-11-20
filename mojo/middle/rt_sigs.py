@@ -251,6 +251,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_cstr_slice': ['char *', 'char *', 'int64_t', 'int64_t'],
     'mojo_cstr_slice_cp': ['char *', 'char *', 'int64_t', 'int64_t'],
     'mojo_cstr_slice_n': ['char *', 'char *', 'int64_t', 'int64_t', 'int64_t'],
+    'mojo_cstr_slice_step': ['char *', 'char *', 'int', 'int64_t', 'int', 'int64_t', 'int64_t'],
     'mojo_csv_reader_vf': ['int64_t', 'int64_t', 'MojoList *', 'MojoDict *'],
     'mojo_ctlz': ['int64_t', 'int64_t', 'int64_t'],
     'mojo_ctpop': ['int64_t', 'int64_t', 'int64_t'],
