@@ -37,6 +37,12 @@ BASELINE = {
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md': 1,
     'bugs/mid/LAND-codegen-simd-and-array-values-erase-3.md': 1,
+    # Historical LANDING RECORD: names the mid part-1 doc whose claim it
+    # merged. That doc was retired 2026-11-19 once the whole-closure
+    # measurement it was waiting on came back clean (0 weak stubs, not the
+    # 15 recorded here), so the citation is deliberate history rather than
+    # a dangling pointer.
+    'bugs/LAND-gate-red-recover-land-2026-11-02-par-2.md': 1,
     'build_stdlib_dylib.py': 1,
     'consolidate_string_pool.py': 1,
     'doc/ABI.md': 7,

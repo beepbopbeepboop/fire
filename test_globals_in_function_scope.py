@@ -4,7 +4,7 @@ snapshot of the module's globals struct, not to the unavailable
 "globals: unavailable in compiled mode" stub.
 
 This is the `globals`-in-function-scope stub class of
-`bugs/mid/GATE_red_recover-land_2026-11-02-part5-part1.md`: the compiler's
+`the stage1-transitive closure stub residue (the bootstrap-stage1-transitive job)`: the compiler's
 own `mojo/middle/types.py` reads module state with `globals()` inside a
 function, and the closure emitted a weak stub for that builtin call
 because `is_module_globals_call` only accepted module-scope reads.
