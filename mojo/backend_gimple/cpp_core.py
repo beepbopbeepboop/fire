@@ -2096,7 +2096,8 @@ def _cpp_dyn_call_expr(gen, e):
             and gen._cpp_declared is not None
             and gen._cpp_declared.get(e.func.name) in ('int64_t', 'char *')
             and (e.func.name in getattr(gen, '_cpp_param_names', ())
-                 or e.func.name in getattr(gen, '_cpp_word_locals', ()))):
+                 or e.func.name in getattr(gen, '_cpp_word_locals', ())
+                 or e.func.name in getattr(gen, '_cpp_unpacked_call_words', ()))):
         return None
     _fname = e.func.name
     parts = []
@@ -7917,6 +7918,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         lines.append(f"{indent}int64_t {el.name};")
                     if _tup_is_split_call:
                         _cpp_mark_tagged_word(gen, el.name)
+                    if _tup_is_list_call and declared.get(el.name) == 'int64_t':
+                        # A word read out of a module function's returned tuple has no
+                        # static kind: it may be a callable (`_, render = build(...)`
+                        # then `render()`), so a call through it is a dynamic call.
+                        # A set of its own, read only by `_cpp_dyn_call_expr`, so
+                        # nothing else that keys on `_cpp_word_locals` changes.
+                        if not hasattr(gen, '_cpp_unpacked_call_words'):
+                            gen._cpp_unpacked_call_words = set()
+                        gen._cpp_unpacked_call_words.add(el.name)
                     if _tup_is_list_val:
                         # Read each slot with the accessor the TARGET's
                         # declared type needs, not always the boxed-int
@@ -12607,7 +12617,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             gen._cpp_word_iter_locals.add(_yfl)
             return [f"{indent}MojoList *{_yfl} = mojo_iter_word((int64_t)(intptr_t)({_yf_dyn}));",
                     f"{indent}for (int64_t _i = 0; _i < mojo_list_len({_yfl}); _i++) {{",
-                    f"{indent}    co_yield mojo_box_word(mojo_list_get_boxed({_yfl}, _i));",
+                    f"{indent}    co_yield /*YFWORD*/ mojo_box_word(mojo_list_get_boxed({_yfl}, _i));",
                     f"{indent}}}"]
 
     call = yf.value

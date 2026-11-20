@@ -346,7 +346,7 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 _Y_SITE = re.compile(r'^(.*?)co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
 
 
-def _cpp_tag_yield_sites(body_lines: list):
+def _cpp_tag_yield_sites(body_lines: list, tagged_bases=()):
     """The body lines with every `co_yield /*Y:<ctype>*/ (<expr>);` site boxed
     into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
     a bool as `mojo_box_from_bool`, a string as `mojo_box_from_str`, an int as itself),
@@ -363,6 +363,13 @@ def _cpp_tag_yield_sites(body_lines: list):
             continue
         m = _Y_SITE.search(ln.strip())
         if m is None:
+            # A `yield from` of a TAGGED generator forwards that generator's words as
+            # they are: they are already boxes by kind, so the site needs no boxing, and
+            # it is a word kind of its own beside the marked sites.
+            if any(f"co_yield {_tb}_value(" in ln for _tb in tagged_bases):
+                kinds.add('word')
+                out.append(ln)
+                continue
             return None
         # group 1 is any `x = ` prefix a received yield put in front of the
         # co_yield; it is kept, so the sent word still lands in `x`.
@@ -381,6 +388,30 @@ def _cpp_tag_yield_sites(body_lines: list):
     if len(kinds) < 2 or kinds == {'int64_t', '_Bool'}:
         return None
     return out
+
+
+def _delegates_only_to_tagged(gen, fn) -> bool:
+    """True when every yield site of generator `fn` is a `yield from <name>(...)` of a
+    generator this compile has already registered with a TAGGED value slot (a nested
+    generator keyed `(fn.name, name)`, or a module-level one). Such a generator
+    forwards that delegate's words unchanged, so its own slot is tagged too and its
+    consumers render each word by kind. Any plain `yield`, or a delegate that is not
+    tagged, makes it False."""
+    sites = [n for n in gimple_exprtypes._walk_own_body(fn.body)
+             if isinstance(n, (gimple_ctypes.YieldExpr, gimple_ctypes.YieldFromExpr))]
+    if not sites:
+        return False
+    nested = getattr(gen, '_nested_generator_api', None) or {}
+    for n in sites:
+        if not isinstance(n, gimple_ctypes.YieldFromExpr):
+            return False
+        c = n.value
+        if not (isinstance(c, gimple_ctypes.CallExpr) and isinstance(c.func, gimple_ctypes.IdentExpr)):
+            return False
+        api = nested.get((fn.name, c.func.name)) or (gen._generator_api or {}).get(c.func.name)
+        if not (api and api.get('tagged')):
+            return False
+    return True
 
 
 def _cpp_adapt_word_iter_yields(body_lines: list, value_ctype: str | None) -> list:
@@ -1121,6 +1152,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_last_has_return_value = _has_return_value
     gen._cpp_list_local_elem_types = {}
     gen._cpp_word_locals = set()
+    gen._cpp_unpacked_call_words = set()
     gen._cpp_word_iter_locals = set()
     # Locals that must be represented as a plain function-pointer WORD
     # because they are yielded as a tuple element (see
@@ -1299,13 +1331,29 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # word before the promise type was known; now that it is (it can be
         # `MojoList *` from a tuple-yield site), cast them to the promise's
         # own representation. See _cpp_adapt_word_iter_yields.
+        # A generator whose ONLY yield sites are `yield from <word iterator>` carries
+        # words of whatever kind the delegate yields (a string pointer, an integer):
+        # the slot is TAGGED, so a consumer renders each word by what it is at run
+        # time (`mojo_repr_boxed`) rather than as the integer it is stored as.
+        _yield_lines = [_bl for _bl in body_lines if 'co_yield' in _bl]
+        _word_iter_only = (bool(_yield_lines)
+                           and all('/*YFWORD*/' in _bl for _bl in _yield_lines))
+        if _word_iter_only and value_ctype == 'int64_t' and not has_tuple_yield:
+            # Tagged, so each word is yielded as the BOX the runtime's drain built for
+            # it (its kind says string / int / double), not unwrapped to the bare word
+            # (`mojo_box_word`), which is what lost the kind.
+            body_lines = [re.sub(r'co_yield /\*YFWORD\*/ mojo_box_word\((.*)\);',
+                                 r'co_yield \1;', _bl) for _bl in body_lines]
         body_lines = _cpp_adapt_word_iter_yields(body_lines, value_ctype)
         gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None) or getattr(gen, '_cpp_word_iter_locals', None))
         # TAGGED-word value slot: the yields' kinds are all KNOWN but not one
         # type (the solver cannot keep it tight), and the module only ever
         # consumes this generator through `for` loops, which bind the value as a
         # boxed word. Box each site by its marked ctype.
-        _tagged_yield = False
+        _tagged_yield = bool((_word_iter_only or _delegates_only_to_tagged(gen, fn))
+                             and value_ctype == 'int64_t' and not has_tuple_yield)
+        if _tagged_yield:
+            gen._cpp_last_mixed_slots = True
         _has_dirent_word_yield_tags = any(
             (('/*Y:str*/' in _bl or '/*Y:bytes*/' in _bl)
              and ('mojo_dirent_name(' in _bl or 'mojo_dirent_path(' in _bl
@@ -1317,17 +1365,27 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 fn, coro_mod._static_env(fn, struct_def))[0]
         except Exception:
             _gvk = None
+        _tagged_bases = [_a.get('base') for _a in
+                         list((getattr(gen, '_nested_generator_api', None) or {}).values())
+                         + list((gen._generator_api or {}).values())
+                         if _a.get('tagged') and _a.get('base')]
+        # The stack-switch kind analysis cannot see through a `yield from` of a
+        # generator (it reports an unresolved kind), so a body that delegates to a
+        # TAGGED generator is judged by `_cpp_tag_yield_sites` alone, which accepts
+        # only sites that are each a marked yield or such a delegate.
+        _has_tagged_delegate = any(f"co_yield {_tb}_value(" in _bl
+                                   for _bl in body_lines for _tb in _tagged_bases)
         if ((value_ctype is None
                 or (value_ctype == 'char *'
                     and any('/*Y:bytes*/' in _bl for _bl in body_lines))
                 or any('/*Y:none*/' in _bl for _bl in body_lines)
                 or (value_ctype == 'int64_t' and _has_dirent_word_yield_tags))
                 and not has_tuple_yield
-                and _gvk == 'w'):
+                and (_gvk == 'w' or (_gvk is None and _has_tagged_delegate))):
             # the stack-switch kind analysis (which also checks the consumers)
             # must agree: every yield has a KNOWN kind -- the cpp typer alone
             # reads an unresolved name as int64_t, which would tag a hole.
-            _tag_body = _cpp_tag_yield_sites(body_lines)
+            _tag_body = _cpp_tag_yield_sites(body_lines, _tagged_bases)
             if _tag_body is not None:
                 body_lines = _tag_body
                 value_ctype = 'int64_t'

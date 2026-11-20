@@ -3204,6 +3204,15 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
                      * kind — the old vkind-5 arm lost that, reading a box's is_str
                      * false and storing the box pointer as an int). */
             int64_t w = ((int64_t (*)(void *))sg->value)(h);
+            /* The drain collects EVERY element before the consumer reads any, so a
+             * string the generator yielded out of a shared scratch buffer (`mojo_str`
+             * formats a small int into one static block: `f'{item}'` for two items was
+             * the same pointer twice) must be owned by the list. A str-typed slot (3)
+             * is a string by its type; a dynamic word (5) only when it classifies as
+             * one. Bytes keep their own object. */
+            if (w && !mojo_is_registered_bytes(w) && !mojo_is_boxed(w)
+                && (sg->vkind == 3 || mojo_boxed_is_str(w)))
+                w = (int64_t)(intptr_t)strdup((const char *)(intptr_t)w);
             mojo_list_append_word(out, w);
             break; }
         default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;

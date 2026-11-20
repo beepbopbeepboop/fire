@@ -76,6 +76,32 @@ for v in fmt_summary([1, 2]):
     print(v)
 '''
 
+# The parent file's shape with its own trailer: plain string `yield`s AFTER the
+# delegations (`fmt_summary`'s `yield ''` and `yield f'grand total: {total}'`). The
+# delegated slot is a tagged word, so these sites join it as boxed strings.
+MAIN_TRAILER_SRC = '''def build_section(name: str, groupitems: list):
+    def render():
+        yield ''
+        yield f'{name}:'
+        for item in groupitems:
+            yield f'{item}'
+    return groupitems, render
+
+def fmt_summary(analysis: list):
+    items = list(analysis)
+    total = len(items)
+    def section(name: str):
+        _, render = build_section(name, items)
+        yield from render()
+    yield from section('types')
+    yield from section('functions')
+    yield ''
+    yield f'grand total: {total}'
+
+for v in fmt_summary([1, 2]):
+    print(v)
+'''
+
 
 def _cpython_run(src: str) -> tuple[int, str]:
     tmp = tempfile.mkdtemp(dir=SCRATCH)
@@ -131,6 +157,10 @@ def test_yield_from_captured_nested_generator_in_coroutine_generator():
 
 def test_yield_from_captured_nested_generator_main_shape():
     _check('main-shape', MAIN_SHAPE_SRC)
+
+
+def test_yield_from_captured_nested_generator_main_shape_with_trailer():
+    _check('main-trailer', MAIN_TRAILER_SRC)
 
 
 # --- part 3 (tagged): the delegated value slot keeps the nested generator's
@@ -218,30 +248,22 @@ def test_negative_unclaimed_nested_generator_shapes_stay_refused():
                     [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
     _expect_refused('negative-kwarg', NEGATIVE_KWARG_SRC,
                     [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
-    # The parent file's own shape (c_analyzer/__main__.py's fmt_summary/section)
-    # is NOT among the shapes part 4 fixed: measured 2026-11-16, the exact
-    # MAIN_SHAPE_SRC below is refused with both reasons. Pinned here so the
-    # default run covers it; flip this to the positive `_check` when the
-    # coroutine capture model lands.
-    _expect_refused('main-shape', MAIN_SHAPE_SRC,
-                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
 
 
 _CASES = {
     'minimal': [test_yield_from_captured_nested_generator_in_coroutine_generator],
     'main': [test_yield_from_captured_nested_generator_main_shape],
     'main-shape': [test_yield_from_captured_nested_generator_main_shape],
+    'main-trailer': [test_yield_from_captured_nested_generator_main_shape_with_trailer],
     'negative': [test_negative_unclaimed_nested_generator_shapes_stay_refused],
     'tagged': [test_yield_from_tagged_nested_generator_delegation_matches_cpython],
 }
 
-# `main`/`main-shape` stay OUT of the default: that positive pin does not hold
-# (see the negative assertion below -- the parent file's own fmt_summary/section
-# shape is still refused), so running it by default would report a red that is
-# already filed. It is selectable as `main` for whoever fixes the capture model.
-# `negative` IS in the default, so the run asserts the refusal that is the
-# current truth instead of skipping the shape entirely.
-_DEFAULT_CASES = ['minimal', 'negative', 'tagged']
+# `main-shape` is in the default now: the parent file's own fmt_summary/section shape
+# (a captured nested generator that `yield from`s a generator it got by unpacking
+# another function's returned tuple) builds and prints what CPython prints.
+# `negative` stays in the default so the unclaimed shapes keep their refusals.
+_DEFAULT_CASES = ['minimal', 'main-shape', 'main-trailer', 'negative', 'tagged']
 
 
 if __name__ == '__main__':
