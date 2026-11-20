@@ -5632,6 +5632,70 @@ def _find_struct_template_source(gen, module_src, name):
     return None, None
 
 
+def _signature_item_positions(module_src, fn):
+    """Source positions of a function signature's runtime parameters and return
+    type: `({param_name: (line, col)}, (line, col) | None)`, 1-based, read off
+    the declaration text because `FunctionDef.params` carries no positions.
+    Modular anchors a signature diagnostic at the offending parameter (or the
+    `->` return type), not at the `def`; this is how we do the same. Empty when
+    the text cannot be read (the caller then keeps the function's position)."""
+    lines = (module_src or '').split('\n')
+    start = (getattr(fn, 'line', 0) or 0) - 1
+    if start < 0 or start >= len(lines):
+        return {}, None
+    params = {}
+    ret = None
+    depth_sq = 0       # [...] generic parameter list
+    depth_par = 0      # (...) runtime parameter list
+    seen_name = False
+    done = False
+    for ln in range(start, len(lines)):
+        text = lines[ln]
+        i = 0
+        n = len(text)
+        while i < n and not done:
+            ch = text[i]
+            if ch == '#':
+                break
+            if ch in '"\'':
+                q = ch
+                i += 1
+                while i < n and text[i] != q:
+                    i += 2 if text[i] == '\\' else 1
+            elif ch == '[':
+                depth_sq += 1
+            elif ch == ']':
+                depth_sq -= 1
+            elif ch == '(' and depth_sq == 0:
+                depth_par += 1
+            elif ch == ')' and depth_sq == 0:
+                depth_par -= 1
+            elif depth_par == 0 and depth_sq == 0 and seen_name:
+                if text.startswith('->', i):
+                    ret = (ln + 1, i + 1)
+                elif ch == ':':
+                    done = True
+            elif depth_par == 1 and depth_sq == 0 and (ch.isalpha() or ch == '_'):
+                j = i
+                while j < n and (text[j].isalnum() or text[j] == '_'):
+                    j += 1
+                prev = text[i - 1] if i else ' '
+                k = j
+                while k < n and text[k] == ' ':
+                    k += 1
+                if (prev in ' (,*' and k < n and text[k] == ':'
+                        and text[j:k] == text[j:k].strip(' ') and text[i:j] not in params):
+                    params[text[i:j]] = (ln + 1, i + 1)
+                i = j
+                continue
+            if ch == '(' and depth_sq == 0 and depth_par == 1:
+                seen_name = True
+            i += 1
+        if done:
+            break
+    return params, ret
+
+
 def _check_fn_signature_binding_violations(gen, fn, module_src):
     params = getattr(fn, 'params', None) or []
     if not params and getattr(fn, 'return_type', None) is None:
@@ -5643,11 +5707,15 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
     _anns = []
     for item in params:
         try:
-            _anns.append(item[1] if len(item) > 1 else None)
+            _anns.append((item[0], item[1] if len(item) > 1 else None))
         except Exception:
-            _anns.append(None)
-    _anns.append(getattr(fn, 'return_type', None))
-    for ptype in _anns:
+            _anns.append((None, None))
+    _anns.append((None, getattr(fn, 'return_type', None)))
+    _pos_params, _pos_ret = _signature_item_positions(module_src, fn)
+    for _pname, ptype in _anns:
+        # Anchor a diagnostic at the offending parameter / return type, as
+        # modular does, falling back to the function's own position.
+        _anchor = _pos_params.get(_pname) if _pname is not None else _pos_ret
         # params are typically (name, annotation[, ...]) tuples/lists.
         ann = _ann_to_str(gen, ptype)
         base, args = _parse_generic_inst_annotation(ann)
@@ -5671,8 +5739,8 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _elaborate_mod.check_where_clauses(struct_module_src or module_src or '', tmpl, targs)
             except _elaborate_mod.WhereConformanceError as e:
                 _cfn = getattr(gen, '_current_filename', '') or ''
-                _cln = getattr(fn, 'line', 0) or 0
-                _clc = getattr(fn, 'col', 0) or 0
+                _cln, _clc = _anchor or (getattr(fn, 'line', 0) or 0,
+                                         getattr(fn, 'col', 0) or 0)
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}error: violated constraint")
             # Part 2: a bracket parameter's TRAIT BOUND whose argument is
@@ -5686,8 +5754,8 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _elaborate_mod._fn_type_param_bounds(fn))
             if _diag:
                 _cfn = getattr(gen, '_current_filename', '') or ''
-                _cln = getattr(fn, 'line', 0) or 0
-                _clc = getattr(fn, 'col', 0) or 0
+                _cln, _clc = _anchor or (getattr(fn, 'line', 0) or 0,
+                                         getattr(fn, 'col', 0) or 0)
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}{_diag}")
         except RuntimeError:
@@ -5706,13 +5774,23 @@ def _check_signature_binding_violations(gen, stmts):
                     module_src = f.read()
             except Exception:
                 module_src = None
+        # Every offending signature is reported, not just the first: a module
+        # with two bad declarations shows both diagnostics (modular does).
+        _found = []
+
+        def _collect(fn):
+            try:
+                _check_fn_signature_binding_violations(gen, fn, module_src)
+            except RuntimeError as _e:
+                _found.append(str(_e))
+
         for s in (stmts or []):
             if isinstance(s, FunctionDef):
-                _check_fn_signature_binding_violations(gen, s, module_src)
+                _collect(s)
             elif isinstance(s, StructDef):
                 for m in (getattr(s, 'methods', None) or []):
                     if isinstance(m, FunctionDef):
-                        _check_fn_signature_binding_violations(gen, m, module_src)
+                        _collect(m)
         # Generic function declarations may have been stripped from `stmts`
         # earlier (kept in `_stripped_generic_fns`) but still need the same
         # declaration-time signature binding check.
@@ -5721,7 +5799,9 @@ def _check_signature_binding_violations(gen, stmts):
             _scgf = getattr(gen, '_stripped_generic_fns', None) or []
         for s in _scgf:
             if isinstance(s, FunctionDef):
-                _check_fn_signature_binding_violations(gen, s, module_src)
+                _collect(s)
+        if _found:
+            raise RuntimeError("\n".join(_found))
     except RuntimeError:
         raise
     except Exception:
@@ -5804,6 +5884,13 @@ def _gmp_emit_generator_cpp_units(self) -> None:
             'template <class T> static inline _MjWord _mj_w(T v) {',
             '    if constexpr (std::is_pointer_v<T>) return _MjWord{(int64_t)(intptr_t)v};',
             '    else return _MjWord{(int64_t)v}; }',
+            '/* One side of a `word == global` comparison whose C type is only final',
+            '   once the whole module is lowered: a pointer is compared by its bits,',
+            '   any other value is left exactly as it is (see',
+            '   `_cpp_word_vs_object_pointer` in cpp_core). */',
+            'template <class T> static inline auto _mj_word_bits(T v) {',
+            '    if constexpr (std::is_pointer_v<T>) return (int64_t)(intptr_t)v;',
+            '    else return v; }',
             '',
             '/* Milestone D: RAII `finally:` translation (see',
             '   GimpleGen._cpp_try_stmt) -- runs an arbitrary capturing',
@@ -11730,8 +11817,18 @@ def _gmp_discover_closures(self, stmts: list) -> None:
             # keeps the factory as an ordinary function: its `{mut}` local is
             # heap-boxed and shared by every call of the returned closure.
             _fns = [fn for fn in _walk_ast(stmts) if isinstance(fn, FunctionDef)]
+            # A MODULE-LEVEL factory is never lifted by the coroutine path (that
+            # lift is of a def nested in a generator/async body); it is compiled
+            # as the ordinary function it is, whose `{mut}` local is heap-boxed
+            # and shared by every call of the closure it returns, and a
+            # generator may call it like any other module function
+            # (c_parser/parser/__init__.py's `anonymous_names()` from `parse`).
+            # Only a factory nested inside another function is refused.
+            _top_level_ids = set(id(_st) for _st in stmts)
             if any(getattr(fn, 'is_generator', False) or getattr(fn, 'is_async', False) for fn in _fns):
                 for fn in _fns:
+                    if id(fn) in _top_level_ids:
+                        continue
                     if _closures._is_closure_factory_with_nonlocal(fn):
                         raise RuntimeError(f"unresolved callee '{fn.name}(...)'")
         except RuntimeError:

@@ -784,6 +784,15 @@ def _cpp_receiver_ctype(gen, e):
             _cls_gname = gen._class_attrs.get(_self_struct, {}).get(e.member)
             if _cls_gname is not None:
                 return gen._global_var_types.get(_cls_gname)
+        # `ClassName.<attr>` (an enum member / class constant read off the class
+        # NAME): the class-level attribute global's own type, the same answer the
+        # `cls.<attr>` case above gives (see `_cpp_expr`'s ClassName.attr branch).
+        if (isinstance(e.obj, gimple_ctypes.IdentExpr)
+                and (gen._cpp_declared is None or e.obj.name not in gen._cpp_declared)
+                and e.obj.name in gen.struct_field_types):
+            _cn_gname = gen._class_attrs.get(e.obj.name, {}).get(e.member)
+            if _cn_gname is not None:
+                return gen._global_var_types.get(_cn_gname)
         # `<struct-pointer local>.<field>` — the non-self sibling of the
         # `self.<field>` case (e.g. a generator taking a struct-typed
         # parameter: `for k, v in b.data.copy().items():`), resolved
@@ -1551,8 +1560,26 @@ def _cpp_expr_static_ctype(gen, e):
     emptyness, not pointer-nullness); deliberately conservative so a
     wrong 'char *' guess can never corrupt non-string lowering."""
     if isinstance(e, gimple_ctypes.IdentExpr):
-        return (gen._cpp_declared.get(e.name)
-                if gen._cpp_declared is not None else None)
+        if gen._cpp_declared is None:
+            return None
+        _dt = gen._cpp_declared.get(e.name)
+        if _dt is None and e.name in gen._cpp_early_global_names:
+            # A module-level global holding a user-struct instance (an enum member
+            # `KIND.FUNCTION` reaches the body as the global `KIND__FUNCTION`, a
+            # `KIND *`): the field the module's OWN globals struct declares for it
+            # (the same registry the read itself is emitted from) answers its
+            # struct-pointer type with certainty, so a comparison against an
+            # untyped word can be cast (`_cpp_word_vs_object_pointer`). Only
+            # user-struct pointers are answered; every other global keeps the
+            # conservative "unknown" this function documents.
+            _mk = str(gen.module_name if len(gen.module_name) > 0
+                      else (gen._current_module_ctx or "root"))
+            _gf = gen._module_global_field_type(_mk, e.name)
+            _gt = _gf[0] if _gf else None
+            if (isinstance(_gt, str) and _gt.endswith(' *')
+                    and _gt[:-2] in gen.struct_field_types):
+                return _gt
+        return _dt
     if isinstance(e, gimple_ctypes.StringLiteral):
         return 'char *'
     if isinstance(e, gimple_ctypes.BinaryOp) and e.op in ('and', 'or'):
@@ -1830,6 +1857,96 @@ _CPP_RT_RETURN_CTYPE = {
     'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
     'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
 }
+
+
+def _cpp_word_vs_object_pointer(l_ct, r_ct, l, r):
+    """`(l, r)` with a struct/container-pointer operand cast to its word when
+    the other operand is not a pointer at all.
+
+    `parent.kind is KIND.FUNCTION`: the left side is a member read off an
+    untyped word (an `int64_t`), the right a class-level attribute global typed
+    `KIND *`. C++ rejects the raw comparison ("ISO C++ forbids comparison
+    between pointer and integer"); every container and object in this model is
+    one pointer-sized word, so comparing the word against the pointer's bits is
+    the identity comparison Python's `is`/`==` asks for. `char *` is excluded:
+    string comparison has its own content-equality path above."""
+    def _objptr(ct):
+        return (isinstance(ct, str) and ct.endswith(' *') and ct != 'char *')
+    # A module-global field read whose C type is not final at this point (the
+    # module's globals struct is completed after the generator bodies are lowered:
+    # an enum member `KIND.FUNCTION` is the global `KIND__FUNCTION`, a `KIND *`),
+    # compared against an untyped word: let the C++ side decide by the field's
+    # real type (`_mj_word_bits` is the identity for a non-pointer).
+    _glob = re.compile(r'^(?:_[A-Za-z0-9_]*_globals\.[A-Za-z0-9_]+|_classattr_[A-Za-z0-9_]+)$')
+    def _wordish(ct):
+        return ct is None or ct == 'int64_t'
+    if l_ct is None and _glob.match(l) and _wordish(r_ct):
+        return f"_mj_word_bits({l})", r
+    if r_ct is None and _glob.match(r) and _wordish(l_ct):
+        return l, f"_mj_word_bits({r})"
+    if _objptr(l_ct) and not (isinstance(r_ct, str) and r_ct.endswith('*')):
+        l = f"(int64_t)(intptr_t)({l})"
+    elif _objptr(r_ct) and not (isinstance(l_ct, str) and l_ct.endswith('*')):
+        r = f"(int64_t)(intptr_t)({r})"
+    return l, r
+
+
+def _cpp_untyped_word_truth(gen, node, text):
+    """The Python truthiness of `node` when it reads an UNTYPED word, else `text`.
+
+    An untyped parameter, a local assigned a member read off one, and the member
+    read itself (`mojo_getattr_any`) are each a word whose kind is only known at
+    run time: `''`, `[]`, `{}` and `0` are all falsy, but the bare C++ test
+    `if (word)` only asks "non-zero bits", so a non-NULL pointer to an EMPTY
+    string was true (`f'<{data}>' if data else '-'` printed `<>`).
+    `mojo_truthy_word` is the runtime's own answer for a word of unknown kind; for
+    a real integer it is exactly `!= 0`."""
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        if (gen._cpp_declared is not None
+                and gen._cpp_declared.get(node.name) == 'int64_t'
+                and (node.name in getattr(gen, '_cpp_param_names', ())
+                     or node.name in getattr(gen, '_cpp_str_word_locals', ()))):
+            return f"mojo_truthy_word((int64_t)(intptr_t)({text}))"
+    elif (isinstance(node, gimple_ctypes.MemberExpr) and isinstance(text, str)
+            and text.startswith('mojo_getattr_any(')):
+        return f"mojo_truthy_word((int64_t)(intptr_t)({text}))"
+    return text
+
+
+def _cpp_fn_returns_closure(gen, name) -> bool:
+    """Is `name` a module-level function every `return` of which hands back a
+    closure: a nested `def` of its own body (by name) or a `lambda`?
+
+    A call of such a function yields a callable WORD (the compiled function hands
+    the closure back as an int64 bound-method word), so a local bound to the call
+    is dispatched like a callable parameter. Deliberately independent of the
+    ownership analysis' `_fresh_closure_returning` (which also demands that
+    nothing else touch the captured boxes, so it refuses a factory like
+    `anonymous_names()` whose closure mutates its cell through `nonlocal`):
+    this only asks WHAT is returned, which is all a call site needs."""
+    fn = (getattr(gen, '_analysis_funcs', None) or {}).get(name)
+    if fn is None or getattr(fn, 'is_generator', False) or getattr(fn, 'is_async', False):
+        return False
+    if getattr(fn, 'decorators', None):
+        return False
+    nested = set()
+    rets = []
+    for n in gimple_exprtypes._walk_ast(fn.body):
+        if isinstance(n, gimple_ctypes.FunctionDef) and n is not fn:
+            nested.add(n.name)
+    for n in gimple_exprtypes._walk_own_body(fn.body):
+        if isinstance(n, gimple_ctypes.ReturnStmt):
+            rets.append(n)
+    if not rets:
+        return False
+    for r in rets:
+        v = r.value
+        if isinstance(v, gimple_ctypes.LambdaExpr):
+            continue
+        if isinstance(v, gimple_ctypes.IdentExpr) and v.name in nested:
+            continue
+        return False
+    return True
 
 
 def _cpp_assign_cast_type(gen, val):
@@ -3297,6 +3414,24 @@ def _cpp_expr(gen, e) -> str:
                         f'generator-body module-member value read '
                         f'{e.obj.name}.{e.member}')
             return '0'
+        # `ClassName.<attr>` read of a module-level class off its own NAME (an enum
+        # member `KIND.FUNCTION`, a class constant): the non-`cls` twin of the
+        # `cls.<attr>` case above. A name that is not a declared local, and names a
+        # class this module knows, reads the class-level attribute global when the
+        # class body assigned one, else the run-time class table (a word), exactly
+        # as `cls.<attr>` does. Without it the bare class name was emitted as C++
+        # text and g++ reported `'KIND' was not declared in this scope`.
+        if (isinstance(e.obj, gimple_ctypes.IdentExpr)
+                and (gen._cpp_declared is None or e.obj.name not in gen._cpp_declared)
+                and e.obj.name in gen.struct_field_types
+                and e.member not in gen._struct_method_names.get(e.obj.name, ())
+                and e.member not in gen.struct_field_types.get(e.obj.name, {})):
+            _cn_gname = gen._class_attrs.get(e.obj.name, {}).get(e.member)
+            if _cn_gname is not None:
+                gen._cpp_class_attr_refs.add(_cn_gname)
+                return _cn_gname
+            _cn_tag = gimple_exprtypes._struct_type_id(e.obj.name)
+            return f'mojo_class_getattr({_cn_tag}LL, "{e.member}")'
         obj_expr = gen._cpp_expr(e.obj) if not isinstance(e.obj, gimple_ctypes.IdentExpr) else e.obj.name
         if isinstance(e.obj, gimple_ctypes.IdentExpr):
             _ptr_struct = gen._cpp_struct_ptr_local(e.obj.name)
@@ -3526,7 +3661,8 @@ def _cpp_expr(gen, e) -> str:
                     return "(int64_t)(intptr_t)mojo_list_new()"
                 return f"(int64_t)({gen._cpp_expr(b)})"
             return f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})"
-        return f"({gen._cpp_expr(e.condition)} ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"
+        return (f"({_cpp_untyped_word_truth(gen, e.condition, gen._cpp_expr(e.condition))}"
+                f" ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})")
     if isinstance(e, gimple_ctypes.BinaryOp):
         if e.op == '//':
             # Python floor division — uses the same __mojo_floordiv
@@ -3769,6 +3905,8 @@ def _cpp_expr(gen, e) -> str:
                     _br = f"((char *)({_br}))"
                 else:
                     _bl = f"((char *)({_bl}))"
+            else:
+                _bl, _br = _cpp_word_vs_object_pointer(_lct, _rct, _bl, _br)
         return f"({_bl} {op} {_br})"
     if isinstance(e, gimple_ctypes.CompareChain):
         links = []
@@ -3808,6 +3946,8 @@ def _cpp_expr(gen, e) -> str:
                         b = f"((char *)({b}))"
                     else:
                         a = f"((char *)({a}))"
+                else:
+                    a, b = _cpp_word_vs_object_pointer(_a_ct, _b_ct, a, b)
                 links.append(f"({a} {gimple_ctypes._GD_BIN_OPS.get(op, op)} {b})")
         return '(' + ' && '.join(links) + ')'
     if isinstance(e, gimple_ctypes.DictExpr):
@@ -4162,6 +4302,28 @@ def _cpp_expr(gen, e) -> str:
                     if e.args:
                         return f"mojo_list_pop_at({_cont_ref}, (int64_t)({gen._cpp_expr(e.args[0])}))"
                     return f"mojo_list_pop({_cont_ref})"
+                if (_cont_ct == 'MojoList *' and e.func.member == 'extend'
+                        and len(e.args) == 1 and not e.kwargs):
+                    # `<list-local>.extend(<iterable>)`. A list/tuple LITERAL
+                    # argument is the sequence of its own `append`s, lowered
+                    # through the append branches below so each element
+                    # updates the local's unified element-type registry
+                    # exactly as a spelled-out `.append` would (c_parser/
+                    # info.py's `parts.extend([name, f'<{data}>', ...])`).
+                    # Any other iterable falls through unchanged.
+                    _ext = e.args[0]
+                    if isinstance(_ext, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+                        _ext_elts = list(getattr(_ext, 'elements', None) or [])
+                        if not any(isinstance(_x, gimple_ctypes.UnaryOp) and _x.op == '*'
+                                   for _x in _ext_elts):
+                            _ext_calls = [
+                                gen._cpp_expr(gimple_ctypes.CallExpr(
+                                    func=gimple_ctypes.MemberExpr(
+                                        obj=e.func.obj, member='append',
+                                        line=e.line, col=e.col),
+                                    args=[_x], line=e.line, col=e.col))
+                                for _x in _ext_elts]
+                            return '(' + ', '.join(_ext_calls + ['0']) + ')'
                 if (_cont_ct == 'MojoList *' and e.func.member == 'append'
                         and len(e.args) == 1
                         and isinstance(e.args[0], (gimple_ctypes.ListExpr,
@@ -6974,6 +7136,55 @@ def _cpp_word_lambda_names(gen, fn) -> set:
     return out
 
 
+def _cpp_str_word_polymorphic_locals(gen, fn, param_ctypes) -> set:
+    """Names of locals the body binds to BOTH a string and an opaque object word.
+
+    Python lets one name hold a `str` on one path and an object on another
+    (c_parser/info.py's `_fmt_line`: `parent = ''`, then `parent = parsed.parent`,
+    then `if not isinstance(parent, str): parent.kind ...`).  A local is declared
+    from its FIRST assignment, so the string-first order declared it `char *` and
+    the object-word assignment, plus every `parent.kind` read off it, then failed
+    to compile.  Such a local has to be the boxed word every other path already
+    understands: a string stored in it is its pointer bits (the reassignment path
+    casts them), and `isinstance(x, str)` on a word is decided at run time by
+    `mojo_boxed_is_str`.
+
+    "An object word" is a member read whose chain root is an `int64_t` parameter
+    (a value of a class the body cannot name), or a member read off another local
+    already known to be such a word, so the answer is a fixpoint over the body."""
+    assignments = {}
+    for n in gimple_exprtypes._walk_own_body(fn.body):
+        if isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
+            assignments.setdefault(n.target.name, []).append(n.value)
+    word_roots = set(gimple_ctypes._as_str(_n) for _n, _t in param_ctypes if _t == 'int64_t')
+    if not word_roots:
+        return set()
+
+    def _root_name(v):
+        while isinstance(v, gimple_ctypes.MemberExpr):
+            v = v.obj
+        return v.name if isinstance(v, gimple_ctypes.IdentExpr) else None
+
+    out = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, vals in assignments.items():
+            if name in out or name in word_roots:
+                continue
+            has_str = False
+            has_word = False
+            for v in vals:
+                if isinstance(v, gimple_ctypes.MemberExpr) and _root_name(v) in (word_roots | out):
+                    has_word = True
+                elif gimple_exprtypes._infer_simple_expr_ctype(v, {}) == 'char *':
+                    has_str = True
+            if has_str and has_word:
+                out.add(name)
+                changed = True
+    return out
+
+
 def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
     """`yield a, b, ...` — boxes the tuple's elements into a real
     runtime `MojoList *` (mojo_mark_as_tuple'd, exactly the same
@@ -7666,6 +7877,34 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         f"{indent}{el.name} = mojo_list_get_int("
                         f"{_cpp_as('MojoList *', _ubox)}, {i});")
                 return lines
+            if (not _tup_is_list_val and not _tup_is_unresolved_call
+                    and _cpp_expr_static_ctype(gen, s.value) == 'int64_t'):
+                # Unpacking an untyped WORD (`data, = data` on a parameter that
+                # may be a list, a list iterator, a generator handle...): the
+                # C++ `(word)[i]` is not valid on an integer, and the kind is
+                # only known at run time. `mojo_iter_word` is the runtime's own
+                # "iterate a word of unknown kind" (the same entry `for x in w`
+                # / `list(w)` use), evaluated ONCE into a cached list, and each
+                # slot is read back through the word-boxing getter so a string
+                # or nested container survives as a word.
+                _uw = gen._cpp_fresh_name("_mg_unpack")
+                lines.append(f"{indent}MojoList *{_uw} = mojo_iter_word("
+                             f"(int64_t)(intptr_t)({_tup_val}));")
+                for i, el in enumerate(s.target.elements):
+                    if not isinstance(el, gimple_ctypes.IdentExpr):
+                        continue
+                    if el.name not in declared:
+                        declared[el.name] = 'int64_t'
+                        lines.append(f"{indent}int64_t {el.name};")
+                    _el_decl = declared.get(el.name)
+                    if _el_decl == 'char *':
+                        _el_get = f"mojo_list_get_str({_uw}, {i})"
+                    elif _el_decl == 'double':
+                        _el_get = f"mojo_list_get_double({_uw}, {i})"
+                    else:
+                        _el_get = f"mojo_list_get_boxed({_uw}, {i})"
+                    lines.append(f"{indent}{el.name} = {_el_get};")
+                return lines
             if _tup_is_unresolved_call:
                 # Still emit the call itself (discarding its bogus
                 # scalar result) so any real side effect the actual
@@ -8097,6 +8336,19 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                              or gimple_ctypes._CPP_CALLABLE_CTYPE)
                 else:
                     ctype = gimple_ctypes._CPP_CALLABLE_CTYPE
+            elif (isinstance(s.value, gimple_ctypes.CallExpr)
+                    and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                    and s.value.func.name not in declared
+                    and _cpp_fn_returns_closure(gen, s.value.func.name)):
+                # `anon = anonymous_names()`: a module function whose every call
+                # returns a fresh capturing closure. The local holds that closure
+                # as a callable WORD, so a later `anon(x)` dispatches through
+                # `mojo_dyn_call` (see `_cpp_dyn_call_expr`) like a call through a
+                # callable parameter, not an "unresolved callee".
+                ctype = 'int64_t'
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
+                gen._cpp_word_locals.add(name)
             elif (name == 'fix_row'
                     or (isinstance(s.value, gimple_ctypes.CallExpr)
                         and isinstance(s.value.func, gimple_ctypes.IdentExpr)
@@ -8151,6 +8403,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     ctype = _cpp_expr_static_ctype(gen, s.value)
             if ctype is None:
                 ctype = 'int64_t'  # default for unknown-type locals
+            if ctype == 'char *' and name in getattr(gen, '_cpp_str_word_locals', ()):
+                ctype = 'int64_t'  # str on one path, an object word on another
             declared[name] = ctype
             # A call to a module-level function whose every value-return is
             # provably a dict/list (`_cpp_fn_container_shape`) — record the
@@ -8466,6 +8720,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # A received yield word (or a local bound to one) is a box: its
             # truth is the runtime's Python truthiness, not "non-zero bits".
             cond = f"mojo_truthy_word((int64_t)(intptr_t)({cond}))"
+        else:
+            cond = _cpp_untyped_word_truth(gen, cond_node, cond)
         lines.append(f"{indent}if ({cond}) {{")
         for inner in s.then_body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))

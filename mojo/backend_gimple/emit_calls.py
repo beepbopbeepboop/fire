@@ -5627,9 +5627,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == '_MojoFloat8Value' and len(node.args) == 2:
         return _lower_float8_value_box(gen, node)
     if fname_raw == '_float8_spelling_of' and len(node.args) == 1:
+        # The runtime returns `const char *` (fire_runtime.h). The temp must
+        # carry that qualifier too: typed `char *`, the assignment from the
+        # call is a "discards 'const' qualifier" warning in every build.
         vt, vv = gen.lower_expr(node.args[0])
-        return 'char *', gen._call_expr('char *', 'mojo_f8_spelling',
-                                        [('int64_t', gen._to_int64(vt, vv))])
+        return 'const char *', gen._call_expr('const char *', 'mojo_f8_spelling',
+                                              [('int64_t', gen._to_int64(vt, vv))])
     if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
     # `callable(x)` — does the word denote a function at run time? The runtime's
     # `mojo_is_callable_word` answers from the function/bound-method/variadic-
