@@ -23,6 +23,11 @@ Verdicts, one per program:
 outputs and the compiler's message. `--show` prints them. The exit code is 0
 when no program is WRONG, CRASH, GCC, ERROR or TIMEOUT.
 
+`tools/pydiff_corpus/` holds 260 programs (written 2026-11-20, 7 themes; on that
+day 60 of the 240 theme programs matched). Run `python3 tools/pydiff.py
+tools/pydiff_corpus` to see how many match now; the count of OK is the
+progress meter for the CODEGEN_* docs that cite this tool.
+
 This is a finder, not a gate: it is not registered in tools/suite.py. A
 program it finds becomes a bug doc in bugs/ and, once fixed, a case in
 test_gimple_runner.py.

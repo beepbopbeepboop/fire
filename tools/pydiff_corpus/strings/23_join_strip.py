@@ -1,0 +1,20 @@
+def main():
+    print(",".join(["a", "b", "c"]))
+    print("".join(["x", "y"]))
+    print(" ".join([]))
+    print("-".join(["solo"]))
+    print("|".join(["", "", ""]))
+    print("   pad   ".strip() + "|")
+    print("   pad   ".lstrip() + "|")
+    print("   pad   ".rstrip() + "|")
+    print("xxhixx".strip("x"))
+    print("xxhixx".lstrip("x"))
+    print("xxhixx".rstrip("x"))
+    print("\t\n spaced \n".strip())
+    print("abcabc".strip("abc") == "")
+    print("".strip() == "")
+    print("hello".strip("lo"))
+    print("  ".join(["1", "2"]))
+
+
+main()
