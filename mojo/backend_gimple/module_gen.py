@@ -6530,19 +6530,31 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
         # frame storage plus that. One definition of "a new S", two homes.
         # Plain C, not `__GIMPLE`: `sizeof(S)` is not accepted inside a GIMPLE
         # body for a helper that only takes `S *`.
-        parts.append(
-            f"static void _init_{sn} ({sn} * _p)\n"
-            f"{{\n"
-            f"{_dsub_decls}"
+        # A system-struct collision has no body of ours (only the typedef), so
+        # the tag word and the class/field initialisers do not exist in it:
+        # writing them produced `'timespec' has no member named
+        # '__mojo_type_id'` from `_init_timespec` (a user struct named like a C
+        # system struct; bugs/stdlib/STDLIB_system_struct_name_helpers_need_the_
+        # struct_body.md). Zeroing is all the system header's layout needs.
+        _is_system_struct = sn in _SYSTEM_STRUCT_NAMES
+        _tag_lines = (
+            '' if _is_system_struct else
             f"  static int _tag_noted = 0;\n"
-            f"  memset (_p, 0, sizeof({sn}));\n"
             f"  _p->__mojo_type_id = (int64_t){_struct_type_id(sn)};\n"
             # The runtime learns this struct's tag on its first instance, so
             # `mojo_boxed_is_str` can tell a struct handle from a string (see
             # `_reg_struct_tag` in fire_runtime.c).
             f"  if (!_tag_noted) {{ _tag_noted = 1; mojo_struct_tag_register ((int64_t){_struct_type_id(sn)}); }}\n"
+        )
+        _sys_attr_inits = '' if _is_system_struct else attr_inits
+        parts.append(
+            f"static void _init_{sn} ({sn} * _p)\n"
+            f"{{\n"
+            f"{_dsub_decls}"
+            f"{_tag_lines}"
+            f"  memset (_p, 0, sizeof({sn}));\n"
             f"{_dsub_init}"
-            f"{attr_inits}"
+            f"{_sys_attr_inits}"
             f"}}"
         )
         parts.append('')
@@ -6569,6 +6581,18 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
             f"}}"
         )
         parts.append('')
+
+
+# Struct NAMES that collide with a C system header's struct. The typedef pass
+# emits only `typedef struct NAME NAME;` for these (no body), so every
+# per-struct helper the codegen emits must NOT read Mojo-level fields or the
+# `__mojo_type_id` tag word -- they do not exist in the system header's layout.
+_SYSTEM_STRUCT_NAMES = frozenset({
+    'timeval', 'linger', 'timespec', 'timezone',
+    'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
+    'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
+    'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
+})
 
 
 def _gmp_emit_struct_typedefs(self, stmts: list, imported_stmts: list, parts: list[str]) -> None:
@@ -11835,12 +11859,7 @@ def _gmp_emit_struct_definitions(self, parts: list[str]) -> None:
     if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
         parts.append('')
         emitted = set()
-        _system_structs = {
-            'timeval', 'linger', 'timespec', 'timezone',
-            'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
-            'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
-            'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
-        }
+        _system_structs = set(_SYSTEM_STRUCT_NAMES)
         max_iterations = len(self.struct_field_types) + 1
         iteration = 0
         while emitted != set(self.struct_field_types.keys()) and iteration < max_iterations:
