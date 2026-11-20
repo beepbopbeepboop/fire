@@ -75,3 +75,25 @@ call site, measured on `sort(sp)` with an explicit `Span`; (2) fix the nested-`d
 argument conversion that `counter.mojo:948` hits; (3) the void-as-value of the
 elaborated instance; (4) the `List` -> `Span` implicit conversion; (5) step 3's
 test. Each step has its own program above; the bug stays open until (5) passes.
+
+## Status 2026-11-20: the unconditional stub now reaches the closure gate (measured)
+
+- Every `--dump-full` artifact now carries the prelude `sort` stub, whether or not
+  the program mentions `sort`. A one-line program (`def f(n): return n + 1` +
+  `print(f(1))`) dumps `prog.ci` with `_util_pairs`'s `sort(...)` weak stub at
+  line 308 (`sort: unavailable in compiled mode`).
+- That matters because master's `--dump-full` (commit 5468c8f80, "reports the
+  weak stubs its .ci carries") prints `closure: <name>.ci carries an unavailable
+  in compiled mode stub` on that artifact. The line contains the phrase that
+  `tools/suite.py`'s `CLOSURE_INCOMPLETE` rejects, so `bootstrap-stage1-transitive`,
+  `bootstrap-stage2-transitive` and `bootstrap-stage3-transitive` reject their
+  output on master. Not gated yet: this was measured with the quick fixture only,
+  not a bootstrap run.
+- `test_dump_full_reports_closure_stubs.py` on master: `test_stub_in_artifact_is_reported`
+  passes; `test_clean_artifact_is_quiet` fails on the `assert PHASE not in ci`
+  line, for the reason above. The test's premise (a program with no stub) is no
+  longer true until this bug's stub goes away.
+- Consequence for this doc's plan: step 2 (a real `std.builtin.sort.sort`) is what
+  clears it. An interim choice is open for the controller: emit the predeclared
+  stub only when `sort` is referenced, which clears the closure gate sooner and
+  is a separate decision from step 2.
