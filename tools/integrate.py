@@ -404,6 +404,9 @@ def _cap_merge_fix(name, why, kind=None):
     because abandoned/superseded branches are still landing candidates (their work is finished), so without the flag
     a capped branch conflicted and was "capped" again on every pass, forever."""
     with C.registry() as reg:
+        if name not in reg:               # retired since the batch was built: nothing to cap, and no KeyError to end the pass
+            print("cap: %s is no longer registered; nothing to cap (%s)" % (name, why), flush=True)
+            return
         reg[name]["state"] = "abandoned"
         reg[name]["merge_capped"] = why
     print(why, flush=True)
@@ -520,6 +523,9 @@ def commit_doc(path, message):
         if r.returncode == 0:
             return
         last = (r.stderr or r.stdout).strip()
+        if "nothing to commit" in (r.stdout + r.stderr):
+            return                        # the doc's content is already on master: the record exists, nothing to add
+
         if "lock" not in last:
             break
         time.sleep(2 + 2 * attempt)
@@ -822,5 +828,23 @@ def main():
         sys.exit(1)
 
 
+def run_guarded(entry):
+    """Run ENTRY (main). A --probe must end with exactly one verdict line. Any exception, or a SystemExit with a message,
+    that escapes before the PROBE line used to leave swarm.probe() with nothing to classify: EMPTY, and re-probed
+    unchanged forever. Now it prints `PROBE ERROR: ...` and exits 2, which swarm.classify_probe reads as ERROR."""
+    if "--probe" not in sys.argv:
+        return entry()
+    try:
+        return entry()
+    except SystemExit as e:
+        if isinstance(e.code, str):          # sys.exit("message"): the message is the failure, say so
+            print("PROBE ERROR: %s" % e.code, flush=True)
+            sys.exit(2)
+        raise                                # an int exit (0/1) already printed its own verdict (PROBE RED/REFUSED)
+    except BaseException as e:
+        print("PROBE ERROR: %s: %s" % (type(e).__name__, str(e)[:300]), flush=True)
+        sys.exit(2)
+
+
 if __name__ == "__main__":
-    main()
+    run_guarded(main)

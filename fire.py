@@ -1763,10 +1763,14 @@ def main():
         # bootstrap jobs' `reject=CLOSURE_INCOMPLETE` matches this line, which
         # turns "the closure is stub-free" from a manual grep of a 120 MB
         # `.ci` into the dump's own verdict. Deliberately quiet when there is
-        # nothing to report, so a clean dump is unchanged; one `in` is a
-        # single pass over the artifact and does not split it into a second
-        # 120 MB line list (the cost class cause 1 of the same bug doc removed).
-        if "unavailable in compiled mode" in c_code:
+        # nothing to report, so a clean dump is unchanged. The match is on a
+        # stub DEFINITION, a `{ mojo_print ((char *)"<name>: unavailable in
+        # compiled mode` body as every emitter writes it, and not the bare
+        # phrase: this file carries the phrase as a string literal, so every
+        # closure's string pool contains it, and a stub the emitter defines in
+        # every module is not one a call reaches. One regex search is a single
+        # pass over the artifact and does not split it into a 120 MB line list.
+        if re.search(r'\{ ?mojo_print ?\(\(char \*\)"[^"\n]*: unavailable in compiled mode', c_code):
             print("closure: " + basename + ".ci carries an unavailable in "
                   "compiled mode stub", file=sys.stderr)
         return
