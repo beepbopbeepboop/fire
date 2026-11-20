@@ -5843,8 +5843,17 @@ def _gen_stmt_ExprStmt(gen, node):
         # built clean instead of reporting the missing witness table).
         # Locally-bound names are excluded: a parameter or local shadowing
         # the template is an ordinary call.
+        #
+        # SIBLING generics (monomorphize.instantiate's `generic_paths`) need
+        # the same routing: inside an isolated instantiation TU a bare call
+        # to a sibling of the instantiated module (`_sort`'s body calling
+        # `_insertion_sort(span, cmp_fn)` in std.builtin.sort) is not in
+        # `_imported_generics` — it is in `_sibling_generic_paths`, which
+        # is only ever non-empty inside such a TU — and without this it
+        # falls to the weak stub below, silently skipping the real helper.
         if (node.value.func.name in gen._imported_generics
-                and not gen._locally_binds_name(node.value.func.name)):
+                or node.value.func.name in (getattr(gen, '_sibling_generic_paths', None) or {})) \
+                and not gen._locally_binds_name(node.value.func.name):
             gen._lower_call(node.value)
             return
         # A bare, value-discarding call to an offloaded DEVICE function.

@@ -948,22 +948,25 @@ ELAB_DEPTH: list = [0]
 
 def _sibling_fingerprints(template_src: str, generic_paths) -> list:
     """(name, source digest) for each generic FUNCTION in `generic_paths` that
-    `template_src` calls with explicit type arguments (`ident[7](x)`), sorted
-    by name.
+    `template_src` calls — bracketed (`ident[7](x)`) or bare (`ident(x)`) —
+    sorted by name.
 
     Such a call compiles to an extern call to that callee's own instantiation,
-    so the template's object depends on the callee's source. Only a bracketed
-    call counts, because only that one is resolved from `generic_paths` (see
+    so the template's object depends on the callee's source. Both spellings
+    count, because both are resolved from `generic_paths` (see
     emit_resolve._elaborate_generic_call): a bare `ident(x)` may name a
-    non-generic overload. A name that is merely mentioned (an attribute
-    `obj.ident[`, a string) is not a call; the template's OWN definition
-    (`def ident[...]`) is not either, which the `(?<!def )` lookbehind excludes
-    — without it every template would depend on itself."""
+    non-generic overload, in which case the digest folded here buys nothing
+    but a rebuild — key hygiene, not a behaviour change. A name that is merely
+    mentioned (an attribute `obj.ident(`, a string) is not a call; the
+    template's OWN definition (`def ident[...]`) is not either, which the
+    `(?<!def )` lookbehind excludes — without it every template would depend
+    on itself."""
     if not generic_paths:
         return []
     out = []
     for name in sorted(generic_paths):
-        pat = r'(?<![\w.])(?<!def )(?<!fn )' + re.escape(name) + r'\['
+        pat = (r'(?<![\w.])(?<!def )(?<!fn )' + re.escape(name)
+               + r'(?=\[|\s*\()')
         if re.search(pat, template_src):
             out.append((name, cas.file_digest(generic_paths[name])))
     return out

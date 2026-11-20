@@ -355,6 +355,150 @@ def test_span_param_binds_only_from_a_proven_list():
     print("PASS  span_param_binds_only_from_a_proven_list")
 
 
+def test_span_param_binds_from_a_proven_span():
+    """`Span[T, o]` infers T/o from a SPAN argument ONLY when the caller
+    proves its concrete Mojo type — the nested chain of Span-taking
+    generics (std.builtin.sort's `sort` -> `_sort` -> `_insertion_sort`,
+    each `span: Span[T, origin]`) passes the SAME proven Span down; the
+    argument's C type is the erased `Span *`, so the proof is the caller's
+    own monomorphized parameter annotation (`Span[Int, MutOrigin]`).
+
+    Second step of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`, beside
+    the List case of `test_span_param_binds_only_from_a_proven_list`. A
+    still-generic proof (`Span[T, origin]` inside a body that is itself
+    not yet an instance) is symbol-for-symbol and never converges, so it
+    binds nothing — and a proven origin that disagrees with a CONCRETE
+    origin the annotation already names is a different type, not a
+    binding.
+    """
+    import elaborate
+    src = ('def sink[T, o](span: Span[T, o]):\n    pass\n')
+    problems = []
+    got = elaborate.infer_type_args(src, ['Span *'], ['Span[Int, MutOrigin]'])
+    if got != ['Int', 'MutOrigin']:
+        problems.append(f'proven Span bound {got!r}, want [Int, MutOrigin]')
+    got = elaborate.infer_type_args(src, ['Span *'], ['Span[T, MutOrigin]'])
+    if got is not None:
+        problems.append(f'a still-generic proof bound {got!r}; want None')
+    got = elaborate.infer_type_args(src, ['Span *'], None)
+    if got is not None:
+        problems.append(f'an unproven Span bound {got!r}; want None')
+    # A concrete origin the annotation already names must AGREE with the
+    # proven argument; a different origin is a different type.
+    src2 = 'def sink[T](span: Span[T, MutOrigin]):\n    pass\n'
+    got = elaborate.infer_type_args(src2, ['Span *'], ['Span[Int, MutOrigin]'])
+    if got != ['Int']:
+        problems.append(f'matching concrete origin bound {got!r}, want [Int]')
+    got = elaborate.infer_type_args(src2, ['Span *'], ['Span[Int, ImmOrigin]'])
+    if got is not None:
+        problems.append(f'a disagreeing origin bound {got!r}; want None')
+    if problems:
+        raise AssertionError('; '.join(problems))
+    print("PASS  span_param_binds_from_a_proven_span")
+
+
+def test_arity_overloads_mangle_to_distinct_symbols():
+    """Two same-named generic overloads with the SAME type-parameter names
+    and DIFFERENT value arities must mangle to DIFFERENT symbols for the
+    same type args — `mangle` is a function of (name, {type-param: value})
+    only, so without the arity in the identity they are ONE symbol.
+
+    Measured on std.builtin.sort's `sort(span)` / `sort(span, cmp_fn)`
+    (both `sort[T, origin, stable]`): the moment the 1-arg instance's own
+    body call elaborated the 2-arg overload, its translation unit declared
+    the 2-arg extern beside its own 1-arg definition and gcc failed with
+    "too many arguments to function". `elaborate_generic_call` folds the
+    call arity into the identity (`ArgC`) for any such overload pair —
+    keyed on arity, not on the name (the doc's plan: disambiguate
+    overloads by arity, never special-case `sort`).
+    """
+    import elaborate
+    el = elaborate.Elaborator()
+    src = ('def dup[T](a: T) -> T:\n    return a\n'
+           'def dup[T](a: T, b: T) -> T:\n    return a\n')
+    problems = []
+    one = el.elaborate_generic_call(src, 'dup', ['Int'], arg_count=1)
+    two = el.elaborate_generic_call(src, 'dup', ['Int'], arg_count=2)
+    if one is None or two is None:
+        problems.append(f'an arity overload declined: {one!r} / {two!r}')
+    elif one['symbol'] == two['symbol']:
+        problems.append(f'both arities mangle to {one["symbol"]!r}')
+    if problems:
+        raise AssertionError('; '.join(problems))
+    print(f"PASS  arity_overloads_mangle_to_distinct_symbols  "
+          f"(one={one['symbol']}, two={two['symbol']})")
+
+
+def test_proven_list_local_keeps_element_type_across_inplace_store():
+    """Step 2a of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`: a local
+    bound exactly once by a `List(...)` constructor (from `fill`'s literal)
+    or a `List[X]` annotation keeps its proven element type — in particular
+    ACROSS in-place stores like `p[0] = 3`, whose subscript target mutates
+    the object instead of rebinding the name — so the Done-when `sort(p)`
+    can prove `List[Int]` to a `Span[T, o]` parameter. A plain
+    re-assignment ends the proof, a read alias inherits nothing, and a
+    parameter is not a local (its annotation is read by the parameter
+    check, not the local proof).
+    """
+    from fire_compiler import py_tokenize, Parser, FunctionDef
+    import mojo.backend_gimple.emit_resolve as er
+
+    def _proven(src, params=()):
+        mod = Parser(py_tokenize(src)).parse_module()
+        fn = next(s for s in mod if isinstance(s, FunctionDef))
+        fake = type('G', (), {})()
+        fake._cur_func_body = fn.body
+        fake._cur_func_params = set(params)
+        return er._proven_list_locals(fake)
+
+    problems = []
+    got = _proven("""\
+def f():
+    var p = List(length=3, fill=0)
+    p[0] = 3
+    p[1] = 1
+    p[2] = 2
+    return p
+""")
+    if got.get('p') != 'List[Int]':
+        problems.append(f'in-place store: p proven as {got.get("p")!r}, '
+                        f'want List[Int]')
+    got = _proven("""\
+def f():
+    var q: List[Float64] = List(length=2, fill=0)
+    q[0] = 1.0
+    return q
+""")
+    if got.get('q') != 'List[Float64]':
+        problems.append(f'annotation: q proven as {got.get("q")!r}, '
+                        f'want List[Float64]')
+    got = _proven("""\
+def f():
+    var r = List(length=1, fill=1)
+    r = 5
+    return r
+""")
+    if 'r' in got:
+        problems.append(f'rebound r still proven {got["r"]!r}')
+    got = _proven("""\
+def f():
+    var r = List(length=1, fill=1)
+    var s = r
+    return s
+""")
+    if got.get('s') is not None:
+        problems.append(f'read alias s proven {got["s"]!r}; want unproven')
+    if got.get('r') != 'List[Int]':
+        problems.append(f'r should stay proven List[Int], '
+                        f'got {got.get("r")!r}')
+    got = _proven("def f(x: List[Int]):\n    return x\n", params=('x',))
+    if 'x' in got:
+        problems.append(f'parameter x proven {got["x"]!r}; want not a local')
+    if problems:
+        raise AssertionError('; '.join(problems))
+    print("PASS  proven_list_local_keeps_element_type_across_inplace_store")
+
+
 def defined_param_ctype(c_src: str, func_name: str, param_name: str) -> str:
     """The C type `param_name` is declared with in `func_name`'s DEFINITION.
 
@@ -15550,6 +15694,12 @@ main()
                   'prelude_sort_without_import_is_an_honest_stub')
     _run_isolated(test_span_param_binds_only_from_a_proven_list,
                   'span_param_binds_only_from_a_proven_list')
+    _run_isolated(test_span_param_binds_from_a_proven_span,
+                  'span_param_binds_from_a_proven_span')
+    _run_isolated(test_arity_overloads_mangle_to_distinct_symbols,
+                  'arity_overloads_mangle_to_distinct_symbols')
+    _run_isolated(test_proven_list_local_keeps_element_type_across_inplace_store,
+                  'proven_list_local_keeps_element_type_across_inplace_store')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

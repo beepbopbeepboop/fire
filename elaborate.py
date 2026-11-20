@@ -30,6 +30,7 @@ from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to, eval_const_int)
 from mojo.middle.comptime_fn import resolve_struct_aliases
 from gimple_codegen import _mojo_type
+from mojo.middle.exprtypes import _is_concrete_type_arg
 from mojo.middle.types import _body_builds_struct_tuple
 
 
@@ -278,6 +279,57 @@ def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = Non
     if first_arity_match is not None:
         return first_arity_match
     return candidates[0]
+
+
+def _arity_overload_clash(module_src: str, fn_name: str, tmpl: str) -> bool:
+    """Whether a DIFFERENT same-named generic in the same module can mangle to
+    the SAME symbol as `tmpl`'s instantiations.
+
+    `mangle` is a function of (name, {type-param: value}) only — the VALUE
+    ARITY of the call is not in the name. Two same-named overloads with the
+    SAME type-parameter names and DIFFERENT value-parameter arities therefore
+    produce the identical symbol for every shared type-arg set: `std/builtin/
+    sort`'s `sort(span)` and `sort(span, cmp_fn)` are both `sort[T, origin,
+    stable]`, so for `T=Int, origin=MutOrigin, stable=False` they are ONE
+    symbol — the moment the 1-arg instance's own body call elaborated (its
+    `sort[stable=False](span, _cmp_fn)` selects the 2-arg overload), the
+    translation unit declared the 2-arg instance's extern beside its own
+    1-arg definition and gcc failed with "too many arguments to function"
+    (measured 2026-11-20 on the sort single-unit chain). When such a sibling
+    exists, the caller folds `ArgC` into the type args so each arity mangles
+    to its own symbol — the same fold the variadic pack case already makes,
+    keyed on arity (never on the name: the plan is to disambiguate overloads
+    by arity, not to special-case `sort`)."""
+    try:
+        candidates = extract_fn_sources(module_src, fn_name)
+    except Exception:
+        return False
+    if len(candidates) < 2:
+        return False
+
+    def _shape(c):
+        try:
+            for s in Parser(py_tokenize(textwrap.dedent(c))).parse_module():
+                if isinstance(s, FunctionDef) and s.name == fn_name:
+                    n = len([1 for pn, _ in s.params
+                             if pn != 'self' and not pn.startswith('*')])
+                    return n, set(type_param_names(c))
+        except Exception:
+            return None
+    own = _shape(tmpl)
+    if own is None:
+        return False
+    own_arity, own_pnames = own
+    for c in candidates:
+        if c.strip() == tmpl.strip():
+            continue
+        other = _shape(c)
+        if other is None:
+            continue
+        other_arity, other_pnames = other
+        if other_arity != own_arity and other_pnames == own_pnames:
+            return True
+    return False
 
 
 def extract_overloads(module_src: str, fn_name: str):
@@ -3129,8 +3181,35 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     # is. The origin binds to the erased origin (`ERASED_TYPE_ARG`), which is
     # what the call's Span argument is. The stdlib's `sort[T, origin]`
     # (`std/builtin/sort.mojo`) is the first template written this way.
+    # `Span[T, o]` <- a Span. A nested chain of Span-taking generics passes
+    # the SAME proven Span down the chain (`sort` calls `_sort` calls
+    # `_insertion_sort`, each with `span: Span[T, origin]`): the argument's
+    # C type is still the erased `Span *`, so the element/origin bind ONLY
+    # from a Mojo type the caller proves (`arg_mojo == 'Span[Int,
+    # MutOrigin]'` — read from the caller's own monomorphized parameter
+    # annotation). Both slots of the proven argument must be CONCRETE type
+    # arguments: a still-generic `Span[T, origin]` passing into another
+    # `Span[T, o]` is symbol-for-symbol and never converges, so it binds
+    # nothing, exactly as every other unprovable shape does. If the
+    # annotation's own origin slot is concrete, the proven argument must
+    # agree with it — a `Span[Int, MutOrigin]` is not a `Span[Int,
+    # ImmOrigin]`.
     m = _SPAN_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
+        if arg_ctype == 'Span *':
+            sp = _SPAN_ANN_RE.fullmatch((arg_mojo or '').strip())
+            if sp is None:
+                return {}
+            _x, _y = sp.group(1).strip(), sp.group(2).strip()
+            if not (_is_concrete_type_arg(_x) and _is_concrete_type_arg(_y)):
+                return {}
+            _ao = m.group(2).strip()
+            if _ao not in pnames and _ao != _y:
+                return {}
+            out = {m.group(1): _x}
+            if _ao in pnames:
+                out[_ao] = _y
+            return out
         lst = _LIST_MOJO_RE.fullmatch((arg_mojo or '').strip())
         if lst is None or arg_ctype != 'MojoList *':
             return {}
@@ -3831,7 +3910,15 @@ class Elaborator:
         # producing a real argument-count mismatch at the other call site.
         # Fold the call arity into the instantiation identity so each arity
         # gets its own mangled symbol/cache entry.
-        if arg_count is not None and any(p.startswith('*') for p in params):
+        #
+        # Same fold for arity OVERLOADS that share a name and the same
+        # type-parameter names (`_arity_overload_clash`): without it the two
+        # `sort` overloads above collide on one symbol for the same type
+        # args, and the caller's own translation unit fails to compile the
+        # moment the sibling call elaborates.
+        if arg_count is not None and (
+                any(p.startswith('*') for p in params)
+                or _arity_overload_clash(module_src, fn_name, tmpl)):
             targs['ArgC'] = arg_count
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
