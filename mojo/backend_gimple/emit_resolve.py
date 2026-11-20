@@ -3305,7 +3305,8 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
         return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
-        return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
+        # A NULL str is None here (see mojo_repr_str_or_none in fire_runtime.c).
+        return gen._call_expr('char *', 'mojo_repr_str_or_none', [('char *', rav)])
     if rat == 'MojoList *':
         # Unpacked into named locals, not splatted into the call: a `*call()`
         # of a returned tuple becomes ONE positional argument once
