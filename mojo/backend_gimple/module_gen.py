@@ -8635,6 +8635,143 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                             _walk_ast_invalidate(s)
 
 
+def _gmp_order_struct_fields_base_first(self, all_struct_defs: list) -> None:
+    """Give every struct that HAS bases a base-prefix (MRO) field layout,
+    and complete its field set with the bases' fields.
+
+    One pass of `gen_module_impl`, called immediately after
+    `_gmp_register_struct_fields`, whose per-struct field tables (declared,
+    constructor-assigned, read-minted) are final by then.
+
+    The instance layout must be the base layout with the derived's own
+    fields appended: `super().__init__` writes the base's fields at the
+    base's offsets, so a derived field placed BEFORE a base field overlaps
+    the base's slot (Cat's layout {tag, lives, name} put `lives` where
+    Animal's layout {tag, name} writes `name` — the base constructor
+    silently clobbered the derived field, and `speak` read the presence
+    word instead of `name`). Field order is the insertion order of the
+    `struct_field_types[S]` dict, and the typedef reads the `s.fields`
+    VarDecl list first, so both are rebuilt together, in the same order.
+    `s.fields` keeps the non-VarDecl class-body entries in their original
+    RELATIVE order (the merge convention that base declarations precede the
+    class's own, which `_own_class_field_index` relies on). A base field the
+    derived never mentions (so the read-mint pass never created it) is
+    minted here from the base's table — without the slot the base's
+    `__init__` would write past the derived layout. In-place dict reorder
+    (delete + reinsert, same object) because other passes may hold the
+    table reference. Idempotent: safe to run on the shared StructDef.fields
+    from more than one generator instance compiling the same structure."""
+    node_by_name = {}
+    for _s0 in all_struct_defs:
+        if isinstance(_s0, StructDef):
+            _sd0 = _as_structdef_node(_s0)
+            node_by_name.setdefault(_as_str(_sd0.name), _sd0)
+    _layout_done = set()
+
+    def _order_of(sn):
+        """Ensure `sn` has its final base-first field order; return it."""
+        if sn in _layout_done:
+            return list(self.struct_field_types.get(sn, {}).keys())
+        _layout_done.add(sn)  # mark first: inheritance-cycle guard
+        sdef = node_by_name.get(sn)
+        table = self.struct_field_types.get(sn, {})
+        if sdef is None:
+            return list(table.keys())
+        desired = []
+        source = {}
+        seen = set()
+        for b in (getattr(sdef, 'bases', None) or []):
+            b = _as_str(b)
+            if not b:
+                continue
+            if self.struct_field_types.get(b) is None:
+                continue  # unresolved / external base: no layout to prefix
+            for f in _order_of(b):
+                if f in seen:
+                    continue
+                seen.add(f)
+                desired.append(f)
+                source[f] = b
+        for f in list(table.keys()):
+            if f not in seen:
+                seen.add(f)
+                desired.append(f)
+        # A base field the derived never mentions has no slot of its own:
+        # mint it from the base that supplies it, same shape the read-mint
+        # pass uses (registry entry + VarDecl + presence tracking).
+        #
+        # "No slot" means no DECLARATION of the field in `sdef.fields` in
+        # EITHER class-body spelling (`_class_field_decl`: a `NAME = v`
+        # AssignStmt as well as a `var NAME = v` VarDecl), plus a bare
+        # no-value non-container VarDecl, which `_class_field_decl` does
+        # not name: an annotated class-body field (`a: int = 3`) is an
+        # AssignStmt declaration that the field-typing pass registered in
+        # the table WITHOUT a VarDecl, so testing VarDecls alone minted a
+        # phantom second declaration AND presence-tracked the field (its
+        # bit is set only by the direct-store path, which never runs for a
+        # default-initialized field) — `@dataclass` instances then raised
+        # AttributeError on every field (gimple_dataclass_default_factory).
+        _declared = set()
+        for _fe in sdef.fields:
+            _cfd = _class_field_decl(_fe)
+            if _cfd is not None:
+                _declared.add(_as_str(_cfd[0]))
+            if isinstance(_fe, VarDecl) and _fe.name:
+                _declared.add(_as_str(_fe.name))
+        for f in desired:
+            if f not in table:
+                b = source.get(f)
+                if b is None:
+                    continue
+                table[f] = _as_str(self.struct_field_types[b][f])
+            if f not in _declared:
+                sdef.fields.append(VarDecl(name=f, type_ann=None, value=None))
+                _mark_presence_field(sdef, f)
+                _declared.add(f)
+                _walk_ast_invalidate(sdef)
+        if desired != list(table.keys()):
+            _snap = {f: table[f] for f in table}
+            for _old in list(_snap.keys()):
+                del table[_old]
+            for f in desired:
+                if f in _snap:
+                    table[f] = _snap[f]
+        _vd_by_name = {}
+        _other_entries = []
+        for _fe in sdef.fields:
+            if isinstance(_fe, VarDecl):
+                _fn = _as_str(_fe.name)
+                if _fn not in _vd_by_name:
+                    _vd_by_name[_fn] = _fe
+            else:
+                _other_entries.append(_fe)
+        # Layout order for the table's fields, then EVERY remaining VarDecl
+        # in its original relative order — NOT just the table's: a class-body
+        # `var` attribute of a function-scoped class is a per-execution CELL
+        # with no entry in the field table (see _cattr_value_is_cell), yet its
+        # VarDecl in `.fields` is what `_own_class_field_index` must find for
+        # the `_classattr_` global's declaration (dropping it left the global
+        # undeclared: `'_classattr_C__name' undeclared` in `_init_C`).
+        _vd_in_layout = []
+        _used_vd = set()
+        for f in desired:
+            if f in _vd_by_name:
+                _vd_in_layout.append(_vd_by_name[f])
+                _used_vd.add(id(_vd_by_name[f]))
+        _extra_vds = [_fe for _fe in sdef.fields
+                      if isinstance(_fe, VarDecl) and id(_fe) not in _used_vd]
+        _new_fields = _vd_in_layout + _extra_vds + _other_entries
+        if _new_fields != list(sdef.fields):
+            sdef.fields = _new_fields
+            _walk_ast_invalidate(sdef)
+        return desired
+
+    for _s1 in all_struct_defs:
+        if isinstance(_s1, StructDef):
+            _sd1 = _as_structdef_node(_s1)
+            _order_of(_as_str(_sd1.name))
+
+
 def _gmp_assign_struct_cnames(self, all_struct_defs: list) -> None:
     """Give every struct definition its C name (qualified when two modules define the same name).
 
@@ -14928,6 +15065,7 @@ def gen_module_impl(self, stmts: list):
     # neither can quietly diverge from the other.
     self._xf_own_ctor_params = _xf_own_ctor_params
     _gmp_register_struct_fields(self, stmts, _xf_own_ctor_params, all_struct_defs, imported_stmts)
+    _gmp_order_struct_fields_base_first(self, all_struct_defs)
 
     _struct_by_name = {st.name: st for st in all_struct_defs
                         if isinstance(st, StructDef)

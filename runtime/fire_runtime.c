@@ -18552,6 +18552,23 @@ static int _class_derives(int64_t tag, int64_t want, int depth)
     for (int i = 0; i < c->nbases; i++) if (_class_derives(c->bases[i], want, depth + 1)) return 1;
     return 0;
 }
+/* `isinstance(obj, StaticStructCls)`: 1 when obj is a tagged struct whose
+ * type tag is want's or derives from it through the registered class table
+ * (mojo_class_register's base edges — that is what makes
+ * `isinstance(dog, Animal)` true for `class Dog(Animal)`). A struct with no
+ * bases is never registered (module_gen emits the class registrations only
+ * for classes that HAVE bases), so fall back to plain tag equality when the
+ * table has no entry for obj's tag: same-class isinstance must work for
+ * every struct, not only ones with bases. `mojo_read_type_tag_safe`, not
+ * the bare deref: obj may be a boxed word (small int / None), same caller
+ * profile as the generic dispatch. */
+int mojo_struct_isinst(int64_t obj, int64_t want)
+{
+    int64_t tag = mojo_read_type_tag_safe(obj);
+    if (tag == want) return 1;
+    if (!_class_find(tag)) return 0;
+    return _class_derives(tag, want, 0);
+}
 /* `isinstance(obj, Cls)` where `Cls` is a class made at run time: `obj` is an instance whose
  * class is `Cls` or derives from it. */
 int mojo_isinstance_rtclass(int64_t obj, int64_t cls)
