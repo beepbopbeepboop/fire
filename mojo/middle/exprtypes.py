@@ -10,7 +10,7 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import TypeLattice, _LIBM_FN_RETVALS,_C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
+from mojo.middle.types import _LIBM_FN_RETVALS, _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
 from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CompareChain, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
@@ -822,17 +822,6 @@ def is_python_bool_expr(gen, node) -> bool:
                 and len(node.args) == 1 and isinstance(node.args[0], IdentExpr)
                 and node.args[0].name in getattr(gen, '_bool_valued', ())):
             return True
-        # A call to a plain function whose return type is `_Bool`
-        # (`def is_pos(n): return n > 0`): its result is a bool VALUE, so
-        # `[is_pos(1)]`, `{'k': is_pos(3)}` and `(True, is_pos(0))` print
-        # True/False, not 1/0. A name with several same-named definitions has
-        # no single return type to read, so it is left alone.
-        if isinstance(node.func, IdentExpr):
-            _fname = _as_str(node.func.name)
-            _ov = (getattr(gen, '_local_def_overloads', None) or {}).get(_fname)
-            if (not (_ov and len(_ov) >= 2)
-                    and TypeLattice.is_bool(_as_str(gen.func_return_types.get(_fname, '')))):
-                return True
         return _is_python_bool_method(gen, node)
     try:
         return gen._quick_type(node) == '_Bool'
