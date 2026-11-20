@@ -1334,6 +1334,54 @@ def _run_isolated(thunk, label):
         print(f"FAIL {label}: {type(e).__name__}: {e}")
 
 
+def test_prelude_sort_without_import_is_an_honest_stub():
+    """A prelude `sort` call with no import must BUILD, not fail at link time.
+
+    `sort` is a prelude name (`std/prelude/__init__.mojo` re-exports it from
+    std.builtin.sort), so Mojo code calls it without an import. module_gen's
+    declaration-only `_util_pairs` row for `sort` once won the shared
+    `_MOJO_STUB_sort` guard and suppressed the weak "unavailable in compiled
+    mode" definition the unknown-name path emits, leaving a bare call to a
+    symbol nothing defines — the build died with
+    `Undefined symbols ... "_sort"`. The row was dropped (commit
+    00ba62d61), so the existing weak definition stands: the program links
+    and prints the honest stub, then the program's own answer.
+
+    Asserts the contract from the bug doc's step 1: no import, an honest weak
+    stub (the message, not a link failure), and the program's own `5`.
+    """
+    global _PASS, _FAIL
+    name = 'prelude_sort_without_import_is_an_honest_stub'
+    got, c_src, err = program_stdout("""\
+def main() raises:
+    var p = List(length=5, fill=Scalar[DType.int8](3))
+    sort(p)
+    print(len(p))
+""")
+    problems = []
+    if got is None:
+        problems.append(err or 'the program did not build and run')
+    else:
+        if 'sort: unavailable in compiled mode' not in got:
+            problems.append(f'the honest stub message is missing from '
+                            f'stdout {got!r}')
+        if not got.rstrip().endswith('5'):
+            problems.append(f'compiled stdout {got!r} does not end with the '
+                            f"program's own `5`")
+    if 'void sort(...);' in c_src:
+        problems.append('the declaration-only `void sort(...)` stub is back '
+                        '(it wins the _MOJO_STUB_sort guard and suppresses '
+                        'the weak definition)')
+    if problems:
+        print(f"FAIL  {name}: " + '; '.join(problems))
+        for line in (c_src or '').splitlines():
+            if 'sort' in line and '#line' not in line:
+                print(f"      C: {line}")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}  (stdout={got!r})")
+
+
 def run_tests():
     global _PASS, _FAIL
     # A comprehension's `for` target that SHADOWS a live local of the same name
@@ -15488,6 +15536,9 @@ main()
                   'local_generic_struct_in_own_module_keeps_methods_and_plain_overloads')
     _run_isolated(test_scalar_integer_dtype_resolution,
                   'scalar_integer_dtype_resolution')
+
+    _run_isolated(test_prelude_sort_without_import_is_an_honest_stub,
+                  'prelude_sort_without_import_is_an_honest_stub')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
