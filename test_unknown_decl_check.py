@@ -178,23 +178,6 @@ def test_awaitable_protocol_constructors_are_not_reported():
     assert _reads(src) == [], _reads(src)
 
 
-def test_python_source_names_resolve_lazily():
-    # A `.py` file reading an unbound name in code that never runs is valid
-    # Python (NameError only if executed); the Mojo diagnostic must not fire.
-    src = (
-        "def f():\n"
-        "    raise NotImplementedError\n"
-        "    return ghost_name\n"
-    )
-    stmts = Parser(py_tokenize(src)).with_filename("t.py").parse_module()
-    unknown_decl_check.check_module(stmts, src, "t.py")
-    try:
-        unknown_decl_check.check_module(stmts, src, "t.mojo")
-    except SyntaxError:
-        return
-    raise AssertionError("the .mojo spelling must still be rejected")
-
-
 if __name__ == "__main__":
     test_unknown_name_reports_modular_layout()
     test_every_name_is_reported_in_source_order()
@@ -204,5 +187,4 @@ if __name__ == "__main__":
     test_compiler_builtins_are_not_reported()
     test_compile_time_type_builtins_are_not_reported()
     test_awaitable_protocol_constructors_are_not_reported()
-    test_python_source_names_resolve_lazily()
     print("ok")

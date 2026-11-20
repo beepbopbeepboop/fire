@@ -181,6 +181,5 @@ job's `expect=3` could not be verified in either direction. Re-classed to
 
 This is a debt under the standard above, not a fact about the workload: the
 4.58 GB is the Lean dylib contract proof over the whole export closure, and
-nothing here says it should need that. The three failures it then reported were
-`DylibExport.Total` obligations over a false statement, since fixed (the emitter
-now declines the claim); the job passes.
+nothing here says it should need that. The three failures it reports are
+tracked by `bugs/hard/FORMAL_svc_exit_handling_incomplete.md`.

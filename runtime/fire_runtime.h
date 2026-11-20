@@ -2138,7 +2138,6 @@ int64_t mojo_read_type_tag_safe(int64_t addr);
 char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr_int(int64_t obj);
 char *mojo_repr_str(char *s);
-char *mojo_repr_str_or_none(char *s);
 /* CPython `ascii()` of an already-repr()-rendered string: non-ASCII code
    points escaped, ASCII bytes copied through. See fire_runtime.c. */
 char *mojo_ascii_escape(char *s);
@@ -2510,9 +2509,6 @@ char *mojo_str_join(char *sep, MojoList *parts);
  * shlex.quote() (a distinct helper from mojo_str_join since shlex.join takes
  * no separator argument at all — see gimple_codegen.py's shlex.join dispatch). */
 char *mojo_shlex_join(MojoList *parts);
-
-/* textwrap.dedent(text): see the definition for the exact (CPython 3.14) rule. */
-char *mojo_textwrap_dedent(char *text);
 
 /* ── SIMD select helper ──────────────────────────────────────────────────
  * Lowers SIMD[_Bool,N].select(a, b) → cond ? a : b for scalar path.   */

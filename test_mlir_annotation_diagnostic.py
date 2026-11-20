@@ -331,44 +331,6 @@ class MlirAnnotationCallDiagnostic(unittest.TestCase):
                        '    var t = (1, 2.5)\n'
                        '    foo(*t)\n')
 
-    # --- an MLIR attribute written with its type ----------------------------------
-
-    def test_mlir_attr_of_another_type_is_refused_at_argument(self):
-        # modular's identifier_source_range.mojo: `__mlir_attr.`1 : si32`` is an
-        # MLIR value of type si32, not of `__mlir_type.index`. The variable name is a
-        # backtick-escaped identifier, whose own spelling must not leak into the
-        # message ("unexpected character") or move the range.
-        msg = self._refused(
-            f'def foo(x: {ANN}):\n'
-            '    pass\n'
-            '\n'
-            'def bar():\n'
-            '    var `!` = __mlir_attr.`1 : si32`\n'
-            '    foo(`!`)\n')
-        self.assertIn("error: invalid call to 'foo'", msg)
-        self.assertNotIn('unexpected character', msg)
-        self.assertEqual(_location(msg), (6, 9))
-
-    def test_mlir_attr_of_the_matching_type_is_accepted(self):
-        # The control: the same shape with the parameter's own type. A check that
-        # refused every `__mlir_attr` value would pass the test above and fail here.
-        self._compiles(f'def foo(x: {ANN}):\n'
-                       '    pass\n'
-                       '\n'
-                       'def bar():\n'
-                       '    var `!` = __mlir_attr.`1 : index`\n'
-                       '    foo(`!`)\n')
-
-    def test_mlir_attr_of_another_type_is_refused_by_keyword_too(self):
-        msg = self._refused(
-            f'def foo(x: {ANN}):\n'
-            '    pass\n'
-            '\n'
-            'def bar():\n'
-            '    var a = __mlir_attr.`1 : si32`\n'
-            '    foo(x=a)\n')
-        self.assertIn("error: invalid call to 'foo'", msg)
-
 
 if __name__ == '__main__':
     unittest.main()

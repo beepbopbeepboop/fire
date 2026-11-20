@@ -118,7 +118,6 @@ from mojo.middle.module_shared import *  # noqa: F401,F403
 # `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
 # name would be unavailable at the moment the import ran.
 from mojo.middle.types import _COMPILE_TIME_CALL_MODULES, dispatch_table_global_ctype, _body_builds_struct_tuple
-from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # _LIST_RETURNING_METHODS / _STR_RETURNING_METHODS are defined in both
 # gimple_codegen and mojo.middle.types (re-exported by module_shared); keep the
 # gimple_codegen bindings from the import above to avoid a module-scope ambiguity.
@@ -5633,70 +5632,6 @@ def _find_struct_template_source(gen, module_src, name):
     return None, None
 
 
-def _signature_item_positions(module_src, fn):
-    """Source positions of a function signature's runtime parameters and return
-    type: `({param_name: (line, col)}, (line, col) | None)`, 1-based, read off
-    the declaration text because `FunctionDef.params` carries no positions.
-    Modular anchors a signature diagnostic at the offending parameter (or the
-    `->` return type), not at the `def`; this is how we do the same. Empty when
-    the text cannot be read (the caller then keeps the function's position)."""
-    lines = (module_src or '').split('\n')
-    start = (getattr(fn, 'line', 0) or 0) - 1
-    if start < 0 or start >= len(lines):
-        return {}, None
-    params = {}
-    ret = None
-    depth_sq = 0       # [...] generic parameter list
-    depth_par = 0      # (...) runtime parameter list
-    seen_name = False
-    done = False
-    for ln in range(start, len(lines)):
-        text = lines[ln]
-        i = 0
-        n = len(text)
-        while i < n and not done:
-            ch = text[i]
-            if ch == '#':
-                break
-            if ch in '"\'':
-                q = ch
-                i += 1
-                while i < n and text[i] != q:
-                    i += 2 if text[i] == '\\' else 1
-            elif ch == '[':
-                depth_sq += 1
-            elif ch == ']':
-                depth_sq -= 1
-            elif ch == '(' and depth_sq == 0:
-                depth_par += 1
-            elif ch == ')' and depth_sq == 0:
-                depth_par -= 1
-            elif depth_par == 0 and depth_sq == 0 and seen_name:
-                if text.startswith('->', i):
-                    ret = (ln + 1, i + 1)
-                elif ch == ':':
-                    done = True
-            elif depth_par == 1 and depth_sq == 0 and (ch.isalpha() or ch == '_'):
-                j = i
-                while j < n and (text[j].isalnum() or text[j] == '_'):
-                    j += 1
-                prev = text[i - 1] if i else ' '
-                k = j
-                while k < n and text[k] == ' ':
-                    k += 1
-                if (prev in ' (,*' and k < n and text[k] == ':'
-                        and text[j:k] == text[j:k].strip(' ') and text[i:j] not in params):
-                    params[text[i:j]] = (ln + 1, i + 1)
-                i = j
-                continue
-            if ch == '(' and depth_sq == 0 and depth_par == 1:
-                seen_name = True
-            i += 1
-        if done:
-            break
-    return params, ret
-
-
 def _check_fn_signature_binding_violations(gen, fn, module_src):
     params = getattr(fn, 'params', None) or []
     if not params and getattr(fn, 'return_type', None) is None:
@@ -5708,15 +5643,11 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
     _anns = []
     for item in params:
         try:
-            _anns.append((item[0], item[1] if len(item) > 1 else None))
+            _anns.append(item[1] if len(item) > 1 else None)
         except Exception:
-            _anns.append((None, None))
-    _anns.append((None, getattr(fn, 'return_type', None)))
-    _pos_params, _pos_ret = _signature_item_positions(module_src, fn)
-    for _pname, ptype in _anns:
-        # Anchor a diagnostic at the offending parameter / return type, as
-        # modular does, falling back to the function's own position.
-        _anchor = _pos_params.get(_pname) if _pname is not None else _pos_ret
+            _anns.append(None)
+    _anns.append(getattr(fn, 'return_type', None))
+    for ptype in _anns:
         # params are typically (name, annotation[, ...]) tuples/lists.
         ann = _ann_to_str(gen, ptype)
         base, args = _parse_generic_inst_annotation(ann)
@@ -5740,8 +5671,8 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _elaborate_mod.check_where_clauses(struct_module_src or module_src or '', tmpl, targs)
             except _elaborate_mod.WhereConformanceError as e:
                 _cfn = getattr(gen, '_current_filename', '') or ''
-                _cln, _clc = _anchor or (getattr(fn, 'line', 0) or 0,
-                                         getattr(fn, 'col', 0) or 0)
+                _cln = getattr(fn, 'line', 0) or 0
+                _clc = getattr(fn, 'col', 0) or 0
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}error: violated constraint")
             # Part 2: a bracket parameter's TRAIT BOUND whose argument is
@@ -5755,8 +5686,8 @@ def _check_fn_signature_binding_violations(gen, fn, module_src):
                 _elaborate_mod._fn_type_param_bounds(fn))
             if _diag:
                 _cfn = getattr(gen, '_current_filename', '') or ''
-                _cln, _clc = _anchor or (getattr(fn, 'line', 0) or 0,
-                                         getattr(fn, 'col', 0) or 0)
+                _cln = getattr(fn, 'line', 0) or 0
+                _clc = getattr(fn, 'col', 0) or 0
                 _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
                 raise RuntimeError(f"{_cat}{_diag}")
         except RuntimeError:
@@ -5775,23 +5706,13 @@ def _check_signature_binding_violations(gen, stmts):
                     module_src = f.read()
             except Exception:
                 module_src = None
-        # Every offending signature is reported, not just the first: a module
-        # with two bad declarations shows both diagnostics (modular does).
-        _found = []
-
-        def _collect(fn):
-            try:
-                _check_fn_signature_binding_violations(gen, fn, module_src)
-            except RuntimeError as _e:
-                _found.append(str(_e))
-
         for s in (stmts or []):
             if isinstance(s, FunctionDef):
-                _collect(s)
+                _check_fn_signature_binding_violations(gen, s, module_src)
             elif isinstance(s, StructDef):
                 for m in (getattr(s, 'methods', None) or []):
                     if isinstance(m, FunctionDef):
-                        _collect(m)
+                        _check_fn_signature_binding_violations(gen, m, module_src)
         # Generic function declarations may have been stripped from `stmts`
         # earlier (kept in `_stripped_generic_fns`) but still need the same
         # declaration-time signature binding check.
@@ -5800,9 +5721,7 @@ def _check_signature_binding_violations(gen, stmts):
             _scgf = getattr(gen, '_stripped_generic_fns', None) or []
         for s in _scgf:
             if isinstance(s, FunctionDef):
-                _collect(s)
-        if _found:
-            raise RuntimeError("\n".join(_found))
+                _check_fn_signature_binding_violations(gen, s, module_src)
     except RuntimeError:
         raise
     except Exception:
@@ -5885,13 +5804,6 @@ def _gmp_emit_generator_cpp_units(self) -> None:
             'template <class T> static inline _MjWord _mj_w(T v) {',
             '    if constexpr (std::is_pointer_v<T>) return _MjWord{(int64_t)(intptr_t)v};',
             '    else return _MjWord{(int64_t)v}; }',
-            '/* One side of a `word == global` comparison whose C type is only final',
-            '   once the whole module is lowered: a pointer is compared by its bits,',
-            '   any other value is left exactly as it is (see',
-            '   `_cpp_word_vs_object_pointer` in cpp_core). */',
-            'template <class T> static inline auto _mj_word_bits(T v) {',
-            '    if constexpr (std::is_pointer_v<T>) return (int64_t)(intptr_t)v;',
-            '    else return v; }',
             '',
             '/* Milestone D: RAII `finally:` translation (see',
             '   GimpleGen._cpp_try_stmt) -- runs an arbitrary capturing',
@@ -6530,31 +6442,19 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
         # frame storage plus that. One definition of "a new S", two homes.
         # Plain C, not `__GIMPLE`: `sizeof(S)` is not accepted inside a GIMPLE
         # body for a helper that only takes `S *`.
-        # A system-struct collision has no body of ours (only the typedef), so
-        # the tag word and the class/field initialisers do not exist in it:
-        # writing them produced `'timespec' has no member named
-        # '__mojo_type_id'` from `_init_timespec` (a user struct named like a C
-        # system struct; bugs/stdlib/STDLIB_system_struct_name_helpers_need_the_
-        # struct_body.md). Zeroing is all the system header's layout needs.
-        _is_system_struct = sn in _SYSTEM_STRUCT_NAMES
-        _tag_lines = (
-            '' if _is_system_struct else
+        parts.append(
+            f"static void _init_{sn} ({sn} * _p)\n"
+            f"{{\n"
+            f"{_dsub_decls}"
             f"  static int _tag_noted = 0;\n"
+            f"  memset (_p, 0, sizeof({sn}));\n"
             f"  _p->__mojo_type_id = (int64_t){_struct_type_id(sn)};\n"
             # The runtime learns this struct's tag on its first instance, so
             # `mojo_boxed_is_str` can tell a struct handle from a string (see
             # `_reg_struct_tag` in fire_runtime.c).
             f"  if (!_tag_noted) {{ _tag_noted = 1; mojo_struct_tag_register ((int64_t){_struct_type_id(sn)}); }}\n"
-        )
-        _sys_attr_inits = '' if _is_system_struct else attr_inits
-        parts.append(
-            f"static void _init_{sn} ({sn} * _p)\n"
-            f"{{\n"
-            f"{_dsub_decls}"
-            f"{_tag_lines}"
-            f"  memset (_p, 0, sizeof({sn}));\n"
             f"{_dsub_init}"
-            f"{_sys_attr_inits}"
+            f"{attr_inits}"
             f"}}"
         )
         parts.append('')
@@ -6581,18 +6481,6 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
             f"}}"
         )
         parts.append('')
-
-
-# Struct NAMES that collide with a C system header's struct. The typedef pass
-# emits only `typedef struct NAME NAME;` for these (no body), so every
-# per-struct helper the codegen emits must NOT read Mojo-level fields or the
-# `__mojo_type_id` tag word -- they do not exist in the system header's layout.
-_SYSTEM_STRUCT_NAMES = frozenset({
-    'timeval', 'linger', 'timespec', 'timezone',
-    'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
-    'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
-    'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
-})
 
 
 def _gmp_emit_struct_typedefs(self, stmts: list, imported_stmts: list, parts: list[str]) -> None:
@@ -7494,51 +7382,6 @@ def _gmp_register_method_sigs(self, all_structs_for_methods: list) -> None:
                             ctypes.append(self._param_ctype(pn, pt, m))
                     if mangled not in self.func_param_types:
                         self.func_param_types[mangled] = ctypes
-
-
-def _gmp_publish_body_class_imports(self, stmts: list, imported_stmts: list) -> None:
-    """Publish every CLASS named by a `from M import C` inside a function or
-    method body, before the struct passes and type inference run.
-
-    The module-scope spelling is registered by `_gmp_register_from_imports`
-    (which runs later, before inference); the body-scoped spelling only
-    reached `_gen_stmt_FromImportStmt` at BODY EMISSION, i.e. after the
-    inference pre-pass had already typed the call's result from the stale
-    tables. `_note_struct_import_alias` is the one gate that decides whether
-    an import names a class (cheap dict test for every ordinary name, parser
-    confirmation + publication only for a genuine class whose defining
-    module is in this unit), so this pass is a walk, not a second
-    implementation.
-
-    A name whose StructDef is in THIS gen's `imported_stmts` is skipped: the
-    normal struct passes below register it (with inheritance merged, ctor
-    hints applied) and its method signatures, so publishing the indepen-
-    dently parsed twin first would claim the bare name and make those passes
-    skip the real node."""
-    _imported_struct_names = set()
-    for _is in (imported_stmts or []):
-        if isinstance(_is, StructDef):
-            _imported_struct_names.add(_as_str(_is.name))
-    for _top in stmts:
-        if isinstance(_top, FunctionDef):
-            _bodies = [_top.body]
-        elif isinstance(_top, (StructDef, TraitDef)):
-            _bodies = [getattr(_mm, 'body', None) for _mm in
-                       (getattr(_top, 'methods', None) or [])]
-        else:
-            continue
-        for _body in _bodies:
-            for _n in _walk_ast(_body or []):
-                if (not isinstance(_n, FromImportStmt)
-                        or getattr(_n, 'wildcard', False)):
-                    continue
-                for _fip in (getattr(_n, 'name_alias_strs', None) or []):
-                    _pn = _as_str(gimple_ctypes._fi_name(_fip))
-                    _pa = _as_str(gimple_ctypes._fi_alias(_fip))
-                    if _pn in _imported_struct_names:
-                        continue
-                    self._note_struct_import_alias(
-                        _n.module, _pa if _pa else _pn, _pn)
 
 
 def _gmp_register_from_imports(self, stmts: list) -> None:
@@ -10881,209 +10724,6 @@ def _gmh_walk_gen_prov(self, body, target_name, known_params):
     return _genprov_found[0]
 
 
-def _module_is_in_unit(gen, module: str) -> bool:
-    """True when `module` is (or was) one of the modules this translation
-    unit inlines, as opposed to an un-inlined stdlib/test module marker
-    (`os`, `sys` — where a class or global with the same name does exist in
-    the real CPython source but has no `_<mod>_globals` struct, no typedef
-    and no method symbols in this unit).
-
-    Three positive answers, all evidence rather than a guess:
-    `_module_source_paths` is written when `_compile_imported_module` STARTS
-    a module (before its statements run), `_compiled_modules` records a
-    module this unit already inlined, and a source path currently on
-    `_compiling_file_paths` is a module whose compile is on the stack above
-    this gen (compiles are strictly nested, so set membership there means
-    "an ancestor is compiling it right now")."""
-    if not module:
-        return False
-    _m = _as_str(module)
-    if _m in getattr(gen, '_module_source_paths', {}):
-        return True
-    if _m in getattr(gen, '_compiled_modules', ()):
-        return True
-    _path = _module_source_path(gen, _m)
-    return bool(_path) and os.path.abspath(_path) in getattr(
-        gen, '_compiling_file_paths', ())
-
-
-def _module_source_path(gen, module: str) -> str | None:
-    """`module`'s own source file, for the in-unit tests above and the
-    pending-global answer below. `_parsed_import` first (it is the cached
-    parse every consumer already uses and it absolutizes the ref), then the
-    same candidate-path probe `_compile_imported_module` runs (that one
-    resolves a bare repo-local `.py` sibling `_parsed_import` can miss)."""
-    try:
-        _p, _src, _stmts = gen._parsed_import(module)
-        if _p:
-            return _as_str(_p)
-    except Exception:
-        pass
-    try:
-        return gen._submodule_source_path(module)
-    except Exception:
-        return None
-
-
-def _pending_global_decl(self, stmts: list, name: str):
-    """`(annotation, right_hand_side)` of the LAST module-level binding of
-    `name` in `stmts`, or `(None, None)` when the source binds no such
-    name. Top-level `if`/`try` bodies are descended into (their assignments
-    are module-level globals too, and Phase 1.7's own scan flattens the
-    same conditionals); method/function bodies are not (their assignments
-    are locals). Python semantics: a later binding rebinds the name, so the
-    last one wins."""
-    _ann = None
-    _val = None
-    _found = False
-    _nodes = list(stmts)
-    _i = 0
-    while _i < len(_nodes):
-        _s = _nodes[_i]
-        _i += 1
-        if isinstance(_s, IfStmt):
-            _nodes.extend(getattr(_s, 'then_body', None) or [])
-            for _el in (getattr(_s, 'elifs', None) or []):
-                _nodes.extend(_el[1] or [])
-            _nodes.extend(getattr(_s, 'else_body', None) or [])
-            continue
-        if isinstance(_s, TryStmt):
-            _nodes.extend(getattr(_s, 'body', None) or [])
-            for _h in (getattr(_s, 'handlers', None) or []):
-                _nodes.extend(getattr(_h, 'body', None) or [])
-            _nodes.extend(getattr(_s, 'else_body', None) or [])
-            _nodes.extend(getattr(_s, 'finally_body', None) or [])
-            continue
-        if isinstance(_s, VarDecl) and _as_str(_s.name) == name:
-            _found = True
-            _ann = _s.type_ann
-            _val = _s.value
-            continue
-        if (isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr)
-                and _as_str(_s.target.name) == name):
-            _found = True
-            _ann = None
-            _val = _s.value
-            continue
-        if isinstance(_s, MultiAssignStmt):
-            for _t in (getattr(_s, 'targets', None) or []):
-                if isinstance(_t, IdentExpr) and _as_str(_t.name) == name:
-                    _found = True
-                    _ann = None
-                    _val = _s.value
-    if not _found:
-        return (None, None)
-    return (_ann, _val)
-
-
-def _pending_global_container_ctype(self, stmts: list, value, depth: int = 0):
-    """The CONTAINER ctype `value` produces as a module global's value, or
-    None when it is not provably a container.
-
-    `_gmh_phase17_value_type` is the one table that decides what a global's
-    RHS means, so this reuses it rather than growing a second one. Two
-    shapes it cannot type on its own are answered here, both from the
-    defining module's own source:
-    * a call to a sibling function the owner declares with a container
-      return annotation (`_COMPTIME_TYPE_FUNCS = _mk()` with
-      `def _mk() -> Set[String]`) — the callee's return type is not in this
-      gen's `func_return_types` while the owner is still mid-compile;
-    * a container operator whose OTHER operand is the unresolved one
-      (`{'constrained'} | N._COMPTIME_TYPE_FUNCS` joins a known `MojoSet *`
-      with the unknown member read; real Python's `|`/`&`/`^` on
-      containers is the container operator, so a container operand names
-      the result kind)."""
-    if value is None or depth > 4:
-        return None
-    _t = _gmh_phase17_value_type(self, value)
-    if _t in _BOXED_CONTAINER_CTYPES:
-        return _t
-    if isinstance(value, CallExpr) and isinstance(value.func, IdentExpr):
-        _fn = _as_str(value.func.name)
-        for _f in stmts:
-            if isinstance(_f, FunctionDef) and _as_str(_f.name) == _fn:
-                if isinstance(_f.return_type, str) and _f.return_type.strip():
-                    _rt = self._resolve_type(_f.return_type)
-                    return _rt if _rt in _BOXED_CONTAINER_CTYPES else None
-                return None
-        return None
-    if isinstance(value, BinaryOp) and _as_str(value.op) in ('|', '&', '^'):
-        _lt = _pending_global_container_ctype(self, stmts, value.left, depth + 1)
-        _rt = _pending_global_container_ctype(self, stmts, value.right, depth + 1)
-        if _lt is None:
-            return _rt
-        if _rt is None:
-            return _lt
-        return _lt if _lt == _rt else None
-    return None
-
-
-def _gmh_pending_module_global_field_type(self, module: str, name: str):
-    """`(c_type, mojo_type)` for `module.name` while `module` is an ANCESTOR
-    still mid-compile, or None.
-
-    The `submod.GLOBAL` counterpart of `_lower_IdentExpr`'s `_imp_pending`:
-    `_module_global_field_type` answers from `_module_globals[mod]`, and a
-    module's own globals are registered at the END of its `gen_module_impl`.
-    A closure with an import CYCLE compiles a reader while its owner is
-    still an ancestor on the compile stack, so that lookup misses and the
-    read fell through every arm to `(int64_t)0` — silently. Measured on the
-    self-host closure: `b.py`'s `{'constrained'} | a._COMPTIME_TYPE_FUNCS`
-    (a module-level union in `unknown_decl_check.py`) dropped the imported
-    set, so the compiled compiler's `_COMPILE_TIME_INTRINSICS` lacked
-    `type_of`/`__type_of` and refused real Mojo source the interpreter
-    accepted.
-
-    Three gates keep this a proof rather than a guess:
-    * the owner is on `_compiling_file_paths`, i.e. an ancestor of this gen
-      is compiling it — never an un-inlined stdlib marker (see
-      `_module_is_in_unit`);
-    * the owner's own source binds `name` at module level (last binding),
-      so "the field is coming" is read off the declaration that will
-      produce it;
-    * that declaration is provably a CONTAINER, whose field convention is
-      the boxed `int64_t` word (the owner's scan boxes every container
-      global). A scalar's field C type (`char *`, `int`, `_Bool`, a struct
-      pointer) is not derivable from the Mojo type alone, so those keep the
-      old placeholder rather than guess. A dispatch table is answered at its
-      declared RAW C type (`_gmi_declare_table_global`), not boxed."""
-    if not module or not name:
-        return None
-    _m = _as_str(module)
-    _n = _as_str(name)
-    _msrc = getattr(self, '_module_source_paths', {})
-    if _m in _msrc:
-        _path = _as_str(_msrc[_m])
-    else:
-        _path = _module_source_path(self, _m)
-    if not _path or os.path.abspath(_path) not in getattr(
-            self, '_compiling_file_paths', ()):
-        return None
-    _stmts = None
-    try:
-        _stmts = self._parsed_import(_m)[2]
-    except Exception:
-        _stmts = None
-    if not _stmts:
-        return None
-    _ann, _val = _pending_global_decl(self, _stmts, _n)
-    _sem = None
-    if isinstance(_ann, str) and _ann.strip():
-        _sem = self._resolve_type(_ann)
-    if _sem not in _BOXED_CONTAINER_CTYPES:
-        _sem = _pending_global_container_ctype(self, _stmts, _val)
-    if _sem not in _BOXED_CONTAINER_CTYPES:
-        return None
-    _tbl = dispatch_table_global_ctype(_n)
-    if _tbl is not None:
-        # A compiler-internal table is declared RAW by its owner
-        # (`_gmi_declare_table_global`), at the table's own C type, not boxed:
-        # the field's C type is `_tbl`, exactly as `_module_global_field_type`
-        # answers for a module whose globals are already registered.
-        return (_tbl, _tbl)
-    return ('int64_t', _sem)
-
-
 def _gmh_phase17_value_type(self, _value):
     """Pure mapping from an RHS AST value to the C type
     _phase17_infer_global_type would assign it — no dict writes,
@@ -11859,7 +11499,12 @@ def _gmp_emit_struct_definitions(self, parts: list[str]) -> None:
     if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
         parts.append('')
         emitted = set()
-        _system_structs = set(_SYSTEM_STRUCT_NAMES)
+        _system_structs = {
+            'timeval', 'linger', 'timespec', 'timezone',
+            'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
+            'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
+            'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
+        }
         max_iterations = len(self.struct_field_types) + 1
         iteration = 0
         while emitted != set(self.struct_field_types.keys()) and iteration < max_iterations:
@@ -12085,18 +11730,8 @@ def _gmp_discover_closures(self, stmts: list) -> None:
             # keeps the factory as an ordinary function: its `{mut}` local is
             # heap-boxed and shared by every call of the returned closure.
             _fns = [fn for fn in _walk_ast(stmts) if isinstance(fn, FunctionDef)]
-            # A MODULE-LEVEL factory is never lifted by the coroutine path (that
-            # lift is of a def nested in a generator/async body); it is compiled
-            # as the ordinary function it is, whose `{mut}` local is heap-boxed
-            # and shared by every call of the closure it returns, and a
-            # generator may call it like any other module function
-            # (c_parser/parser/__init__.py's `anonymous_names()` from `parse`).
-            # Only a factory nested inside another function is refused.
-            _top_level_ids = set(id(_st) for _st in stmts)
             if any(getattr(fn, 'is_generator', False) or getattr(fn, 'is_async', False) for fn in _fns):
                 for fn in _fns:
-                    if id(fn) in _top_level_ids:
-                        continue
                     if _closures._is_closure_factory_with_nonlocal(fn):
                         raise RuntimeError(f"unresolved callee '{fn.name}(...)'")
         except RuntimeError:
@@ -14539,10 +14174,6 @@ def gen_module_impl(self, stmts: list):
                            for s in all_struct_defs if isinstance(s, StructDef)}
     self._trait_bases = {s.name: list(getattr(s, 'bases', None) or [])
                          for s in all_struct_defs if isinstance(s, TraitDef)}
-    # The StructDef nodes this module can read, for the comptime fold's
-    # destructor-triviality question (`emit_infra._struct_deinit_trivial`).
-    self._struct_def_nodes = {_as_str(_as_structdef_node(s).name): _as_structdef_node(s)
-                              for s in all_struct_defs if isinstance(s, StructDef)}
     _all_struct_names = {_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
     _struct_bases_map = {}
     for _sbm in all_struct_defs:
@@ -14876,7 +14507,6 @@ def gen_module_impl(self, stmts: list):
     # `class StringLiteral` definitions take (see this doc's §5). Keying the
     # qualification on the genuine cross-module case, NOT on the name loss,
     # is what keeps the self-hosting closure's struct set unchanged.
-    _gmp_publish_body_class_imports(self, stmts, imported_stmts)
     _gmp_assign_struct_cnames(self, all_struct_defs)
     for s in all_struct_defs:
         s = _as_structdef_node(s)
@@ -15163,16 +14793,6 @@ def gen_module_impl(self, stmts: list):
                     (_as_str(_al_mem.obj.name), _as_str(_al_n.target.name),
                      _as_str(_al_mem.member)))
 
-    # Top-level `from M import N [as L]` edges, for the comptime conformance
-    # fold (`ginf._imported_struct_bases`): a struct imported by name has its
-    # declared bases in its home module, which the single-TU path never loads.
-    self._top_from_import_homes = {}
-    for _tfi in stmts:
-        if isinstance(_tfi, FromImportStmt) and not getattr(_tfi, 'wildcard', False):
-            for _tfip in (getattr(_tfi, 'name_alias_strs', None) or []):
-                _tfi_orig = _as_str(gimple_ctypes._fi_name(_tfip))
-                _tfi_local = _as_str(gimple_ctypes._fi_alias(_tfip) or _tfi_orig)
-                self._top_from_import_homes.setdefault(_tfi_local, (_tfi.module, _tfi_orig))
     _phase0_func_types = dict(self.func_return_types)   # save Phase 0 registrations
     _phase0_imported   = dict(getattr(self, 'imported_symbols', {}))  # save Phase 0 imported_symbols
     self.func_return_types = dict(_RUNTIME_FUNCS)
@@ -15312,22 +14932,6 @@ def gen_module_impl(self, stmts: list):
     self._method_param_names: dict = {}
     all_structs_for_methods = (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
                                 + self._imported_typedef_structs)
-    # A class published from a FUNCTION-body import (see
-    # `_gmp_publish_body_class_imports`) is not in `stmts` or
-    # `imported_stmts`, but it must take part in exactly the passes those
-    # lists feed — method signature registration, the unannotated
-    # return-type fixpoint and the parameter inference — or this gen's
-    # prototypes would be inferred independently of (and disagree with) the
-    # definition module's own, e.g. `int64_t C___init__ (C *, int64_t)`
-    # against the real `void C___init__ (...)`.
-    if getattr(self, '_published_class_defs', None):
-        _pub_known = set()
-        for _pub_s in all_structs_for_methods:
-            _pub_known.add(id(_pub_s))
-        for _pub_s in self._published_class_defs:
-            if id(_pub_s) not in _pub_known:
-                all_structs_for_methods.append(_pub_s)
-                _pub_known.add(id(_pub_s))
     _gmp_register_method_sigs(self, all_structs_for_methods)
 
     _gmp_infer_return_types(self, stmts, all_functions)
@@ -20833,14 +20437,17 @@ def gen_module_impl(self, stmts: list):
         ('MojoDict__reserved',     'int64_t MojoDict__reserved(...);'),
         ('ord',                    'int64_t ord(...);'),         # FIXME: should be int64_t ord(char *c) [takes char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('chr',                    'int64_t chr(...);'),        # FIXME: should be char *chr(int64_t i) [returns char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
-        # The prelude `sort` (std/prelude: `from std.builtin.sort import sort`)
-        # has no definition in the runtime or in this codegen, so a call that
-        # reaches this stub was an undefined symbol at LINK time. It is the same
-        # honest weak stub `_lnc_unknown` emits for an unresolved name: the
-        # program links and says what it did not do. The real `sort` lands with
-        # std.builtin.sort compiling (bugs/CODEGEN_prelude_sort_is_not_resolved.md).
-        ('sort',                   '__attribute__((weak)) void sort(...) { mojo_print((char *)"sort: unavailable in compiled mode"); }'),
-        # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]; variadic so both int and pointer call sites typecheck
+        # `sort` deliberately has NO row here. It is a prelude name
+        # (`std/prelude/__init__.mojo` re-exports it from std.builtin.sort),
+        # so a program may call it with no import at all; a declaration-only
+        # stub in this table then left the call bound to a symbol nothing
+        # defines, and `fire.py build` died at link time with
+        # `Undefined symbols ... "_sort"`. The unknown-name path
+        # (`emit_calls._lnc_unknown`) already emits an honest WEAK
+        # "unavailable in compiled mode" definition for exactly this state —
+        # the same contract an imported-but-not-yet-compilable sort has — and
+        # this guarded stub would win the shared `_MOJO_STUB_sort` macro and
+        # suppress it. See bugs/CODEGEN_prelude_sort_is_not_resolved.md.
         ('Span_byte_length',       'int64_t Span_byte_length(...);'),
         ('_stat_macos',            'int64_t _stat_macos(...);'),
         ('_getpw_macos',           'int64_t _getpw_macos(...);'),
@@ -22046,20 +21653,6 @@ def gen_module_impl(self, stmts: list):
             and not any(isinstance(s, StructDef) and s.name == 'GimpleGen'
                         for s in _cai_structs)):
         _cai_structs.append(_gg_syn)
-    # A class published from an import (see `_publish_body_class_imports`)
-    # is not in `all_struct_defs`. When THIS gen owns its layout it may emit
-    # `_alloc_X` (the constructor call site chose it), and that seed reads
-    # `_classattr_X__*` — so the class-body attribute globals must be in the
-    # same section. A same-class parsed TWIN (a sibling subtree owns the
-    # layout) has an empty per-gen `_class_attrs` and contributes nothing.
-    if getattr(self, '_published_class_defs', None):
-        _pub_cai = set()
-        for _c0 in _cai_structs:
-            _pub_cai.add(id(_c0))
-        for _c0 in self._published_class_defs:
-            if id(_c0) not in _pub_cai:
-                _cai_structs.append(_c0)
-                _pub_cai.add(id(_c0))
     # (struct, attr, global, C type) of every class-body attribute: the run-time class table
     # reads them back through `_mojo_classattr_read` (a class made by `type(..)` that lists
     # this class as a base inherits them).
@@ -22110,21 +21703,6 @@ def gen_module_impl(self, stmts: list):
     struct_defs = [s for s in stmts if isinstance(s, StructDef) and not _is_enum_class_def(s)]
     if not self.do_imports:
         struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef) and not _is_enum_class_def(s)]
-    # A class this gen had to PUBLISH (its defining module a sibling subtree
-    # compiled, or an ancestor still mid-compile — see
-    # `_publish_body_class_imports`) is not in `stmts` or `imported_stmts`,
-    # so its method prototypes would otherwise first appear in the DEFINING
-    # module's section, which can come after the bodies that call them: an
-    # implicit declaration, a hard error in C99+. The typedef itself is in
-    # the root preamble, ahead of every section.
-    if getattr(self, '_published_class_defs', None):
-        _seen_sd = set()
-        for _s0 in struct_defs:
-            _seen_sd.add(id(_s0))
-        for _s0 in self._published_class_defs:
-            if id(_s0) not in _seen_sd:
-                struct_defs.append(_s0)
-                _seen_sd.add(id(_s0))
     # The method prototypes below can carry a `MojoGenerator *` return
     # (a generator method — row-25 entry C's `Mailbox___iter__`), but the
     # generator block that DEFINES the type emits later in this section.

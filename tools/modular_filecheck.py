@@ -10,25 +10,9 @@ Only RUN lines of the shape `[not] <tool> [flags] %s [2>&1] | FileCheck
 -verify-diagnostics tests are reported UNSUPPORTED. A test whose expected output
 is an MLIR dump rather than a diagnostic cannot pass by construction."""
 import os, re, subprocess, sys, shutil, tempfile, glob
-# The tree the tests are read from must be the one whose stdlib this repo compiles
-# against (`new-modular/Mojo`): the older `modular/mojo/test` tree carries tests for
-# language rules the current stdlib no longer has (Tuple.__contains__'s `where`,
-# EnumLike's `_enum_is_exhaustive`), which passed their FileCheck lines and then
-# rejected valid stdlib code. Override with MODULAR_TEST_ROOT.
-ROOT=os.environ.get('MODULAR_TEST_ROOT', '/Users/mrs/net/chatgpt/claude/new-modular/Mojo/test')
-FIRE=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'fire.py')
+ROOT='/Users/mrs/net/chatgpt/claude/modular/mojo/test'
+FIRE='/Users/mrs/net/chatgpt/claude/mojo-reference/fire.py'
 FC='/opt/homebrew/opt/llvm/bin/FileCheck'
-PARSE_ONLY = '''
-import sys
-sys.path.insert(0, sys.argv[1])
-from gimple_codegen import compile_to_gimple
-f = sys.argv[2]
-try:
-    compile_to_gimple(open(f).read(), do_imports=True, filename=f)
-except Exception as e:
-    print('Error building: %s' % e, file=sys.stderr)
-    sys.exit(1)
-'''
 TOOL=r'(?:%mojo-build|%mojo|%parse-mojo-isolated|mojo build|mojo run|kgen -elaborate|kgen)'
 for n in sys.argv[1:]:
     hits=glob.glob(ROOT+'/**/'+n, recursive=True)
@@ -44,24 +28,14 @@ for n in sys.argv[1:]:
     flags=[a for a in (m.group(1)+m.group(2)).split() if a=='--Werror']
     if 'Werror' in cmd or 'warnings-as-errors' in cmd: flags=['--Werror']
     fcargs=[a for a in m.group(3).split() if a.startswith('--check-prefix')]
-    d=tempfile.mkdtemp(); t=os.path.join(d,os.path.basename(n)); shutil.copy(f,t)
+    d=tempfile.mkdtemp(); t=os.path.join(d,n); shutil.copy(f,t)
     inp=os.path.join(os.path.dirname(f),'inputs')
-    # Only a test that names `inputs` gets them: copying a directory with dozens of
-    # packages next to a test that needs none made every build crawl past its 60 s
-    # budget (a TIMEOUT that read as "the compiler accepted the file").
-    if os.path.isdir(inp) and 'inputs' in txt:
+    if os.path.isdir(inp):
         for e in os.listdir(inp):
             s=os.path.join(inp,e)
             (shutil.copytree if os.path.isdir(s) else shutil.copy)(s,os.path.join(d,e))
     try:
-        if '%parse-mojo-isolated' in cmd:
-            # A parse test has no `main` and expects only diagnostics: `fire.py build` would
-            # run on into the link stage and time out, which reads as "accepted". Compile
-            # in-process and print what a failed build prints.
-            argv=[sys.executable,'-c',PARSE_ONLY,os.path.dirname(FIRE),t]
-        else:
-            argv=[sys.executable,FIRE]+flags+['build',t,'-o',os.path.join(d,'out')]
-        p=subprocess.run(argv,capture_output=True,text=True,timeout=60,cwd=d)
+        p=subprocess.run([sys.executable,FIRE]+flags+['build',t,'-o',os.path.join(d,'out')],capture_output=True,text=True,timeout=60,cwd=d)
         out=p.stdout+p.stderr
     except subprocess.TimeoutExpired:
         print(f"{n}: TIMEOUT"); continue

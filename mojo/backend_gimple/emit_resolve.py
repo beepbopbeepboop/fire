@@ -483,7 +483,7 @@ def publish_a3_generators(gen, meta) -> None:
     (kwonly params → "kwonly params (v0)"), so `read_table` compiles
     through the cpp path and could not resolve the foreign handle,
     refusing the whole module with `a call to unresolved callee
-    'next(...)'`. See the c_common/tables.py compile bug (fixed; its doc is deleted).
+    'next(...)'`. See bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
     Must be called at the A3 registration site, not from gen_module: by the
     time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
@@ -3305,8 +3305,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
         return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
-        # A NULL str is None here (see mojo_repr_str_or_none in fire_runtime.c).
-        return gen._call_expr('char *', 'mojo_repr_str_or_none', [('char *', rav)])
+        return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
         # Unpacked into named locals, not splatted into the call: a `*call()`
         # of a returned tuple becomes ONE positional argument once

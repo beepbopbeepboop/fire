@@ -1,4 +1,4 @@
-SPLIT (parts 4 and 5 are both fixed and their docs were deleted: `yield from` a captured nested generator, and the consuming `for` loop over one, inside a coroutine-path generator; what remains is the imported-module floor owned by the sibling docs)
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4 (part 5 fixed: consuming-loop over a captured nested generator inside a coroutine-path generator; its doc was deleted)
 
 ## Status 2026-11-12 — replan after parts 1-3 landed
 
@@ -24,10 +24,9 @@ A probe shows these are one defect, not two: `section` IS claimed with its
 `cpp_core._cpp_yield_from` resolves callees from `_generator_api` only, not
 `_nested_generator_api`. The remaining work is split into:
 
-* part 4 (fixed 2026-11-19; its doc was deleted):
+* part 4 (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`):
   `yield from` a claimed nested generator from a coroutine-path generator —
-  the `fmt_summary`/`section` blocker. The real `c_analyzer/__main__.py` now compiles
-  through `compile_to_gimple_with_cpp` with no `Unsupported shape(s)` naming either.
+  the live `fmt_summary`/`section` blocker.
 * part 5 (fixed): the sibling consuming-loop path, `for x in <nested generator>():` inside a
   coroutine-path generator. The part-5 bug doc was deleted when its named quick test passed.
 
@@ -98,7 +97,7 @@ I did not re-run that file this round (no code touched); the 265/0 figure is the
 2. `for line in _render_table(...)` target not typed in `_cpp_for_stmt`
    (`cpp_core.py:6279`) → claimed nested-generator lane.
 3. Module-attribute value read stubbed to `0` in a generator body (shared with
-   `the c_common/scriptutil.py compile bug (fixed; its doc is deleted)`, `iter_marks`).
+   `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md`, `iter_marks`).
 4. `_fix_write_default`, `_parse_next_local_static`, `_parse_struct_next`: yield
    sites agree INTERNALLY but call sites disagree on the yielded type. Unexamined
    third yield-typing shape. Measure with `MOJO_DEBUG=1` before designing.
@@ -212,7 +211,7 @@ at all:
     _parse_next_local_static:  the same shape, `yields ['srcinfo']`
     _parse_struct_next:        the same shape, `yields ['parent', 'srcinfo']`
     _iter_filenames:           a call to unresolved callee 'process(...)'  (shared with
-                               the c_common/scriptutil.py compile bug (fixed; its doc is deleted))
+                               bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md)
 
 `yields [...], whose call sites do not all pass the same statically-known type` is a THIRD
 yield-typing answer, distinct from both this entry's `render` case ("the yields disagree")
@@ -299,7 +298,7 @@ body model to read a module constant's real value (the per-module globals
 structs already exist and are already emitted) and give
 `_infer_simple_expr_ctype` the matching row — clears both, and is the
 difference between an honest refusal and a program that computes `''` where
-CPython computes `'\n'`. See `the c_common/scriptutil.py compile bug (fixed; its doc is deleted)`
+CPython computes `'\n'`. See `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md`
 for the detail and the "silent-wrong upstream" argument. **Start there**, not
 here: this doc's refusal is downstream of the same stub.
 

@@ -944,50 +944,6 @@ _SUCCS = {
         "{ $s with rip := $rip, rsp := $s.rsp + 8 }",
 }
 
-#: The forms whose SUCCESSOR writes memory, read off `_SUCCS` itself.
-#:
-#: This is the store detector, and it exists because the one this file used was
-#: not one: `done()` used to mark a node as a store when the abstract walk's
-#: write list GREW, and `_Abs.store` CLEARS that list for a store at an unknown
-#: address.  A store through an unknown base therefore looked exactly like a
-#: step that wrote only registers -- so `emit_terminates` emitted
-#: `have hmem{k+1} : s{k+1}.mem = s{k}.mem` over a successor whose `mem` is a
-#: `mem_write_bytes`, a FALSE fact with no admission path, and the generated file
-#: died on an unsolved goal instead of proving or counting a hole.  Measured on
-#: `formal/examples/unary_ops.mojo`, whose `group3:not` wiped RSP and made every
-#: later store address-less (see `_abs_step`'s group-3 branch).
-#:
-#: Deriving it from `_SUCCS` rather than listing the forms is deliberate: the
-#: successor table IS the statement of what each form writes, so a new store row
-#: cannot be added without appearing here, and a row that stops writing memory
-#: leaves automatically.  `test_formal_successor_coverage.py` pins that this set
-#: is exactly the rows of `_SUCCS` whose text mentions `mem_write_bytes`.
-_STORE_FORMS = frozenset(form for form, succ in _SUCCS.items()
-                         if "mem_write_bytes" in succ)
-
-
-def _store_of(form, abs_, after):
-    """(did this FORM write memory?, the (address, value) it wrote or None).
-
-    The first answer is the FORM's, from `_STORE_FORMS`: it is what the emitter
-    must branch on, because a store at an UNKNOWN address leaves no address to
-    record and the walk responds by clearing its whole write list.  Reading
-    "did this step store?" off that list therefore answers `no` for the one kind
-    of store the memory model cannot follow, and the `hmem` fact that follows is
-    a claim that memory is unchanged about a `mem_write_bytes` successor.
-
-    The second answer exists only for `_abs_peel`, which needs a literal
-    address to peel a store off a cell; `None` means "stored, address unknown",
-    and the peel is skipped for it (no cell fact can be stated after such a
-    step anyway -- `_Abs.load` refuses every address once `mem_ok` is false).
-    """
-    if form not in _STORE_FORMS:
-        return False, None
-    if after is None or abs_ is None \
-            or len(after.writes) != len(abs_.writes) + 1:
-        return True, None
-    return True, after.writes[-1]
-
 
 def _body(code, info):
     """The entry function's own instruction stream, or None if it won't decode.
@@ -1074,16 +1030,16 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     Both the straight-line and the path-tree emitters go through here, so a form
     cannot be wired up in one and forgotten in the other.
 
-    `fs_path` sizes the `rip` side condition's `simp`, for the reason the
-    `x86_exec_go_exit_step` one carries the same list: that condition is
-    `s_k.rip = <literal>`, and `s_k` is described by `hs_k`, which is the
-    PREVIOUS step's SUCCESSOR -- so proving it means projecting through whatever
-    wrapper that successor is built on.  A successor that is not a bare
-    `{s with …}` is exactly the two rows that were stale until this pass
-    (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for `imul`), and without
-    the names the condition does not close and is ADMITTED, which is the quiet
-    failure: the proof still elaborates and the report reads "proved with a
-    `sorry`" about a fact that is a `simp` set away.
+    `prev_defs` are the definitions of the PREVIOUS step's form, and they are in
+    the `rip` side condition for the reason the `x86_exec_go_exit_step` one
+    carries the same list: that condition is `s_k.rip = <literal>`, and `s_k` is
+    described by `hs_k`, which is the PREVIOUS step's SUCCESSOR -- so proving it
+    means projecting through whatever wrapper that successor is built on.  A
+    successor that is not a bare `{s with …}` is exactly the two rows that were
+    stale until this pass (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for
+    `imul`), and without the names the condition does not close and is ADMITTED,
+    which is the quiet failure: the proof still elaborates and the report reads
+    "proved with a `sorry`" about a fact that is a `simp` set away.
 
     `rip` overrides a successor's program counter with a LITERAL, which is only
     ever right where the tree knows the address the machine goes to next and the
@@ -1092,9 +1048,9 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     the step is still the model's; see `emit_terminates`.
 
     `fs_path` is the FORM of every step walked before this one on this path, and
-    it is what sizes that `simp`: the state this step starts in is written by all
-    of them, so folding it needs every definition they used and not only the
-    last one's.  See `_path_simp`.
+    it sizes the `rip` side condition's `simp`: the state this step starts in is
+    written by all of them, so folding it needs every definition they used and
+    not only the last one's.  See `_path_simp`.
 
     `code_name` is the NAME of the code function in the generated file, because a
     successor may quote the model's own reader (`UInt64.ofInt (read_i32_le rc
@@ -2046,48 +2002,6 @@ def _abs_step(prev, form, raw, addr, length):
             st.put(dst, _u64(b | 0xFFFFFFFFFFFFFF00) if b & 0x80 else b)
         return st
 
-    if form == "imul_r64_r64":
-        # `REX 0F AF /r`: FOUR bytes with the two-byte escape in the middle, so
-        # the ModRM is `raw[3]` and not `raw[2]` — the same off-by-one
-        # `_resolve`'s own branch for this form records, and reading `raw[2]`
-        # here would take the `0xAF` second opcode for a ModRM.  Measured on
-        # `49 0f af c3` (`imul rax, r11`) that read reg/rm = 5/7, extended both
-        # by the REX to 13/15, and wrote `rbp <- rbp * r15` while leaving `rax`
-        # alone; the flags it computed from those operands then DECIDED the
-        # overflow guard, which a multiply by the theorem's quantified input
-        # must leave undecided.  The walk and the model have to read the same
-        # byte or the emitted `hval` fact states a register write the machine
-        # does not make.
-        #
-        # Four flags, not none: `e54d2f4e` corrected the model's `imul` arm,
-        # which had been setting no flags at all, and this walk had followed it
-        # here.  A walk that does not track them cannot DECIDE a `jcc` after an
-        # `imul`, and the flags are cheap arithmetic on a product it already
-        # computes.
-        #
-        # CF and OF are `x86_imul_ovf`: the 128-bit SIGNED product against the
-        # 64-bit signed range, which is NOT `res != sext64(res)`.  This arm
-        # carried the model's own wrong version for one commit, so the rule is
-        # spelled out rather than abbreviated: `_imul_ovf` is transcribed from
-        # `lib/X86.lean`'s definition and is the only place in this file that
-        # answers the question.
-        rex = raw[0] if raw[0] & 0xF0 == 0x40 else 0
-        modrm = raw[3]
-        reg, rm = (modrm >> 3) & 7, modrm & 7
-        dst = reg + (8 if rex & 4 else 0)
-        src = rm + (8 if rex & 1 else 0)
-        a, b = st.get(dst), st.get(src)
-        if a is None or b is None:
-            st.put(dst, None)
-            st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
-            return st
-        res = _u64(a * b)
-        ovf = _imul_ovf(a, b)
-        st.put(dst, res)
-        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
-                        cf=ovf, of_=ovf)
-        return st
-
     if len(raw) < 3:
         # A form with no ModRM byte that is not handled above. Wiping rather than
         # raising is the point: `_abs_step` runs inside the TREE walk, so an
@@ -2233,37 +2147,6 @@ def _abs_step(prev, form, raw, addr, length):
         st.set_flags(res == 0, _msb(res), a < imm,
                      _msb(a) != _msb(imm) and _msb(res) != _msb(a))
         return st
-    if form in ("group3:not", "group3:neg"):
-        # `REX.W F7 /2` and `/3`, the unary pair.  The walk had no branch for
-        # either, so the FIRST `not` in a program fell through to `st.wipe()` and
-        # every register -- RSP included -- became unknown from that point on.
-        # A store after it then addressed through an unknown base, and
-        # `_Abs.store` drops the whole write list for a store at an unknown
-        # address, which is exactly the state the `hmem` emission used to read as
-        # "this step wrote only registers" (see `_STORE_FORMS`).  `~n` in
-        # `formal/examples/unary_ops.mojo` is the corpus' first use of the form.
-        #
-        # The operand is the ModRM `rm` field extended by REX.B, the SAME
-        # register `_resolve` names `$dst` for these two rows (`group3` puts its
-        # DIGIT in `reg`, so `reg` is not an operand -- `src` is `rm + rex_b`,
-        # which is the model's `r`).  The arithmetic is `lib/X86.lean`'s arm
-        # transcribed: `not` is `a ^^^ 0xffff...` with NO flag write, and `neg`
-        # is `0 - a` with all four flags from `x86_flags_sub s 0 a res`.
-        a = st.get(src)
-        if form == "group3:not":
-            st.put(src, None if a is None else _u64(a ^ 0xFFFFFFFFFFFFFFFF))
-            return st
-        st.flag_regs = {src}
-        if a is None:
-            st.put(src, None)
-            st.set_flags(None, None, None, None)
-            return st
-        res = _u64(0 - a)
-        st.put(src, res)
-        # `x86_flags_sub s 0 a res`: cf is `0 < a`, and its overflow is
-        # `msb 0 != msb a && msb res != msb 0`, i.e. both ends set.
-        st.set_flags(res == 0, _msb(res), a != 0, _msb(a) and _msb(res))
-        return st
     if form.startswith("shift_imm8:"):
         st.flag_regs = {src}
         a = st.get(src)
@@ -2315,6 +2198,30 @@ def _abs_step(prev, form, raw, addr, length):
         of_ = (n == 1 and ((_msb(a) != _msb(res)) if op == "shl"
                            else (_msb(a) if op == "shr" else False)))
         st.set_flags(res == 0, _msb(res), cf, of_)
+        return st
+    if form == "imul_r64_r64":
+        # Four flags, not none: `e54d2f4e` corrected the model's `imul` arm,
+        # which had been setting no flags at all, and this walk had followed it
+        # here.  A walk that does not track them cannot DECIDE a `jcc` after an
+        # `imul`, and the flags are cheap arithmetic on a product it already
+        # computes.
+        #
+        # CF and OF are `x86_imul_ovf`: the 128-bit SIGNED product against the
+        # 64-bit signed range, which is NOT `res != sext64(res)`.  This arm
+        # carried the model's own wrong version for one commit, so the rule is
+        # spelled out rather than abbreviated: `_imul_ovf` is transcribed from
+        # `lib/X86.lean`'s definition and is the only place in this file that
+        # answers the question.
+        a, b = st.get(dst), st.get(src)
+        if a is None or b is None:
+            st.put(dst, None)
+            st.flags = dict(st.flags, zf=None, sf=None, cf=None, of_=None)
+            return st
+        res = _u64(a * b)
+        ovf = _imul_ovf(a, b)
+        st.put(dst, res)
+        st.flags = dict(st.flags, zf=res == 0, sf=_msb(res),
+                        cf=ovf, of_=ovf)
         return st
     if form == "setcc":
         # The NARROW write, matching `x86_set_reg_narrow` rather than the whole
@@ -2410,14 +2317,6 @@ _SIMP_FORMS = {
     "alu_ri32:sub_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_sub"),
     "alu_ri32:and": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_flags_logic"),
     "alu_ri8:cmp": ("x86_get_reg", "x86_flags_sub"),
-    # The two unary group-3 rows, named for the definitions their successors
-    # mention: `not` writes through `x86_set_reg` only (no flag), `neg` also
-    # reads the four flags out of `x86_flags_sub`.  Without these the decision
-    # `simp` after a `neg` cannot unfold the flag function, which is the
-    # `hdec` failure `test_formal_sweep_truth.py`'s shift row records for the
-    # neighbouring family.
-    "group3:not": ("x86_get_reg", "x86_set_reg"),
-    "group3:neg": ("x86_get_reg", "x86_set_reg", "x86_flags_sub"),
     "mov_r64_rm64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
     "mov_rm64_r64_reg": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_rex_r"),
     "lea_r64_rm64_disp32": ("x86_get_reg", "x86_set_reg", "x86_rex_b", "x86_eff_addr"),
@@ -2680,7 +2579,7 @@ class _Node:
     counters incremented in step are two answers to one question.
     """
     __slots__ = ("insn", "form", "raw", "addr", "kind", "state", "succ", "kids",
-                 "halt", "cond", "k", "abs", "after", "write", "stores")
+                 "halt", "cond", "k", "abs", "after", "write")
 
     def __init__(self, insn, form, raw, addr, kind, state, succ):
         self.insn, self.form, self.raw, self.addr = insn, form, raw, addr
@@ -2694,17 +2593,10 @@ class _Node:
         #: emitted `hval{k+1}` is about — `abs` is the one BEFORE it, and the
         #: two are one step apart, which is the step the fact closes.
         self.after = None
-        #: `(address, value)` if THIS instruction stored and the walk knows the
-        #: address, else None.  On its own this is NOT the store detector — a
-        #: store at an unknown address has no `(address, value)` to record and
-        #: also leaves this None — so `stores` is the fact the emitter must read;
-        #: `write` is only the peel's address.
+        #: `(address, value)` if THIS instruction stored, else None. Read off
+        #: the abstract machine's own write list rather than off a table of
+        #: which forms are stores, so the two cannot disagree about it.
         self.write = None
-        #: Does this form write memory?  Read off `_STORE_FORMS`, i.e. off the
-        #: successor table, NOT off the abstract walk's write list.  A store at
-        #: an unknown address CLEARS that list, so a list-length test calls a
-        #: store a register-only step and the `hmem` fact it then emits is false.
-        self.stores = False
 
 
 class _NoTree(ValueError):
@@ -2793,14 +2685,8 @@ def _tree(code, info, shapes):
         """
         node.abs = abs_
         node.after = after
-        # **The store detector is the FORM, not the write list's length.** A
-        # store at an unknown address CLEARS `writes`, so measuring "did this
-        # step store?" by a GAIN marks exactly that step as register-only and
-        # emits a memory-invariance fact about a `mem_write_bytes` successor.
-        # `_store_of` reads the first half off the successor table, which is the
-        # one place that says what the instruction does; `write` is then the
-        # address the peel can use, when the walk knows it.
-        node.stores, node.write = _store_of(node.form, abs_, after)
+        if after is not None and len(after.writes) > len(abs_.writes):
+            node.write = after.writes[-1]
         return node
 
     def build(addr, state, abs_, depth, seen, rets, jumped=False):
@@ -3642,17 +3528,14 @@ def _header(code, insns, base, steps):
     #
     # `maxRecDepth` is the other half of the same step, and it is a LIMIT rather
     # than an allocation, so raising it costs nothing when it is not needed.  The
-    # default is 1000.  Two things in the file run out of it, and they scale with
-    # DIFFERENT sizes: the closing `simp` nests one successor equation per step
-    # (measured on `bitops`, 44 steps, 1200 and 2000 go through and 1000 fails --
-    # about 27 per step, so 40 is the factor here), and `all_bytes` is a flat
-    # `And` chain over every byte of the image proved by a matching flat term,
-    # each conjunct reducing a `List.get` into that image (its depth is the image,
-    # not the function).  A small function with a large image -- the
-    # `call_both_arms`/`elif_call` shape, few steps so the step budget sits at the
-    # 1000 floor but a long compiler-trap image -- busts the floor on `all_bytes`,
-    # so the image's size buys depth too, with the same floor for the short ones.
-    depth = max(1000, 40 * max(steps, 1), 2 * (len(code) + 1))
+    # default is 1000, and it is the closing `simp` that runs out rather than any
+    # single step: its term nests one successor equation per instruction, so the
+    # depth it needs grows with the length of the function and a constant would
+    # be a constant that is wrong again at the next example.  Measured on
+    # `bitops`, 44 steps, the first two words that go through are 1200 and 2000
+    # and 1000 fails -- about 27 per step, so 40 is the factor used here, with
+    # the default as the floor for the short ones that never needed it.
+    depth = max(1000, 40 * max(steps, 1))
     out = ["import X86\n",
            "set_option maxHeartbeats 4000000\n",
            "set_option maxRecDepth %d\n" % depth,
@@ -3771,17 +3654,16 @@ def emit(path, expected):
 
     prev, k = "i0", 0
     chain = []
-    # The FORMS walked so far, for the reason `_resolve` documents: this step's
-    # `rip` fact is about `s_k`, which every earlier step's successor wrote, so
-    # the fold has to name every one of their definitions and not only the last
-    # one's.  The path-tree emitter threads the same list (`fs_path`) through
-    # its walk; this loop is linear, so it is accumulated here.
-    fs_path = ()
+    prev_form = None
     for insn, form, raw in shapes:
         addr = base + insn.offset
+        # `prev_form`'s definitions, for the reason `_resolve` documents: this
+        # step's `rip` fact is about the state the PREVIOUS step's successor
+        # describes.
         call, succ = _resolve(form, raw, addr, prev, k, (), None, insn.length,
-                              fs_path=fs_path)
-        fs_path += (form,)
+                              prev_defs=_SIMP_FORMS.get(prev_form, ())
+                              if prev_form else ())
+        prev_form = form
         nxt = "s%d" % (k + 1)
         a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
         a("    %s" % call)
@@ -3959,7 +3841,7 @@ def emit_terminates(path):
     crossed = [False]
 
     def walk(node, state, ind, cases, rules, hs_in=None, hs_path=(),
-             fs_path=(), hmem_path=(), mem_path=(), hval_base=None):
+             fs_path=(), hmem_path=(), mem_path=()):
         """Emit one node and, for a branch, both of its children.
 
         `cases` are the `by_cases`/decided hypotheses in scope at this point;
@@ -4009,8 +3891,7 @@ def emit_terminates(path):
         def emit(line):
             out.append(pad + line if line else "")
 
-        def emit_value_facts(node, name, new_hval_idx, forms, hval_base,
-                             hmem_fact=None):
+        def emit_value_facts(node, name, index, forms):
             """The step's own `hval`, if a decided branch on this path will need it.
 
             **Why there is a fact per STEP and not one `simp` over the chain.** A
@@ -4038,7 +3919,7 @@ def emit_terminates(path):
             `upto` bounds it: nothing after the last decided branch on the path is
             emitted, and a path with no decided branch emits none at all.
             """
-            if new_hval_idx > upto:
+            if index > upto:
                 return
             st = node.after
             conj = []
@@ -4053,16 +3934,14 @@ def emit_terminates(path):
             if not conj:
                 return
             emit("have hval%d : %s := by"
-                 % (new_hval_idx, " ∧\n      ".join(conj)))
+                 % (index, " ∧\n      ".join(conj)))
             # The four accessors are always in: a register read in a successor
             # is `x86_get_reg s{k} (rm + x86_rex_b rex)` until BOTH are reduced,
             # and which of them a given step needs is that step's own row.
-            simp = ["hs%d" % new_hval_idx, "hval%d" % hval_base, "x86_get_reg",
+            simp = ["hs%d" % index, "hval%d" % (index - 1), "x86_get_reg",
                     "x86_set_reg", "x86_rex_b", "x86_rex_r"]
             simp += [n for n in _SIMP_FORMS.get(forms[-1], ())
                      if n not in ("mem_read_bytes", "mem_write_bytes")]
-            if hmem_fact:
-                simp.append(hmem_fact)
             emit("  simp [%s]" % ", ".join(dict.fromkeys(simp)))
             # A store at this step is PEELLED off the cells the facts track, with
             # the library's own disjointness lemma and a side condition Lean can
@@ -4080,7 +3959,7 @@ def emit_terminates(path):
                 # set on a goal the first one already closed is a "simp made no
                 # progress" error, which is the same shape as a fact that says
                 # nothing.
-                emit("  <;> simp [hval%d]" % hval_base)
+                emit("  <;> simp [hval%d]" % (index - 1))
             emit("  <;> decide")
 
 
@@ -4159,10 +4038,10 @@ def emit_terminates(path):
             emit("have hpop%d : (mem_read_bytes %s.mem (%s.rsp.toNat) 8).toNat"
                  " = %d := by" % (k, state, state, ret_to))
             hmem_for_read = hmem_path
-            if not node.stores and node.kind not in ("leaves",):
+            if node.write is None and node.kind not in ("leaves",):
                 hmem_for_read = hmem_path + ("hmem%d" % (k + 1),)
             mem_for_read = mem_path
-            if node.stores:
+            if node.write is not None:
                 mem_for_read = mem_path + ("hs%d" % (k + 1),)
             for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex, hmem_path=hmem_for_read, mem_path=mem_for_read):
                 emit(line)
@@ -4194,17 +4073,13 @@ def emit_terminates(path):
         emit("have hs%d : %s = %s := by" % (k + 1, nxt, succ))
         emit("  rw [h%d] at hstep%d" % (k, k))
         emit("  exact Option.some.inj hstep%d" % k)
-        # If this FORM writes only registers -- read off `_STORE_FORMS`, not off
-        # the walk's write list, which a store at an unknown address CLEARS --
-        # record that memory is unchanged so we can skip reconstructing it.
-        hmem_fact = None
-        if not node.stores and node.kind not in ("leaves",):
+        # If this step wrote only registers (no memory writes), record that
+        # memory is unchanged so we can skip reconstructing it later
+        if node.write is None and node.kind not in ("leaves",):
             emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
-            hmem_fact = "hmem%d" % (k + 1)
             hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
             emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
-        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,), hval_base,
-                         hmem_fact)
+        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,))
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
         # exit`, and `s_k` is the state this step STARTS in -- which the
         # PREVIOUS step's successor equation describes.  So this uses `hs_k`,
@@ -4263,20 +4138,18 @@ def emit_terminates(path):
                 emit("by_cases hc%d : x86_cond %d %s = true" % (k, cc, state))
                 emit("\u00b7")
                 hmem_this_local = hmem_path
-                if not node.stores and node.kind not in ("leaves",):
+                if node.write is None and node.kind not in ("leaves",):
                     hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
                 mem_this_local = mem_path
-                if node.stores:
+                if node.write is not None:
                     mem_this_local = mem_path + ("hs%d" % (k + 1),)
                 walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,), hmem_this_local, mem_this_local,
-                     hval_base=k + 1)
+                     fs_path + (node.form,), hmem_this_local, mem_this_local)
                 emit("\u00b7")
                 walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,), hmem_this_local, mem_this_local,
-                     hval_base=k + 1)
+                     fs_path + (node.form,), hmem_this_local, mem_this_local)
                 return
             # **THE DECIDED ARM, and it is emitted as a PROOF.**  `_tree` settled
             # this condition from the abstract machine, so only one arm was built
@@ -4301,24 +4174,22 @@ def emit_terminates(path):
             # fields are `(x86_flags_sub s{k-1} …).zf`, so without the setter's
             # own definitions the goal stops at exactly that — measured, and the
             # fix is one entry of the form table away.
-            prev_facts = ["hs%d" % k, "hval%d" % (k - 1)] if k else ["i0"]
             emit("  simp [%s]" % _decision_simp(
-                fs_path[-1:], prev_facts))
+                fs_path[-1:], ["hs%d" % k, "hval%d" % (k - 1)] if k else ["i0"]))
             emit("  <;> decide")
             # …and the hypothesis joins the `simp` sets below, exactly as a
             # `by_cases` hypothesis would: the successor's `rip` is an `if` on
             # this very condition, and without it every later step on this path
             # would be proving an `if`.
             hmem_this_local = hmem_path
-            if not node.stores and node.kind not in ("leaves",):
+            if node.write is None and node.kind not in ("leaves",):
                 hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
             mem_this_local = mem_path
-            if node.stores:
+            if node.write is not None:
                 mem_this_local = mem_path + ("hs%d" % (k + 1),)
             walk(node.kids[0], nxt, ind, cases + ["hdec%d" % k], both,
                  "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                 fs_path + (node.form,), hmem_this_local, mem_this_local,
-                 hval_base=k + 1)
+                 fs_path + (node.form,), hmem_this_local, mem_this_local)
             return
 
         if node.kind == "ret" and node.succ is None:
@@ -4368,10 +4239,10 @@ def emit_terminates(path):
             # `s{k+1}` and not `s{k}` -- the same off-by-one the peel below
             # needed, and the reason `hs` is built above.
             hmem_for_hrip = hmem_path
-            if not node.stores and node.kind not in ("leaves",):
+            if node.write is None and node.kind not in ("leaves",):
                 hmem_for_hrip = hmem_path + ("hmem%d" % (k + 1),)
             mem_for_hrip = mem_path
-            if node.stores:
+            if node.write is not None:
                 mem_for_hrip = mem_path + ("hs%d" % (k + 1),)
             for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex, hmem_path=hmem_for_hrip, mem_path=mem_for_hrip):
                 emit(line)
@@ -4421,15 +4292,14 @@ def emit_terminates(path):
             return
 
         hmem_this_local = hmem_path
-        if not node.stores and node.kind not in ("leaves",):
+        if node.write is None and node.kind not in ("leaves",):
             hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
         mem_this_local = mem_path
-        if node.stores:
+        if node.write is not None:
             mem_this_local = mem_path + ("hs%d" % (k + 1),)
         walk(node.kids[0], nxt, ind, cases, rules + [step_rule],
              "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-             fs_path + (node.form,), hmem_this_local, mem_this_local,
-             hval_base=k + 1)
+             fs_path + (node.form,), hmem_this_local, mem_this_local)
 
     if upto >= 0:
         # `hval0`: the initial state's own field values, which is where the whole
@@ -4444,7 +4314,7 @@ def emit_terminates(path):
         out.append("    simp [i0, X86State.init, x86_get_reg, mem_read_bytes]")
         out.append("    <;> decide")
 
-    walk(root, "i0", 1, [], [], None, (), (), (), (), 0)
+    walk(root, "i0", 1, [], [], None, (), (), (), ())
     return "\n".join(out) + "\n"
 
 

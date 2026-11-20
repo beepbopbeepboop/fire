@@ -2181,10 +2181,6 @@ int64_t mojo_box_from_bool(int64_t v)
  * pointer back. */
 int64_t mojo_box_from_str(char *s)
 {
-    /* A NULL string in a tagged word is `None`: this is the box a `str`-typed value
-     * takes when it is returned beside other kinds (`return selected` where `selected`
-     * is None), and a 'p' box around NULL is read as a string by every consumer. */
-    if (s == NULL) return mojo_box_none();
     MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
     if (!bx) return (int64_t)(intptr_t)s;
     bx->magic = MOJO_BOX_MAGIC;
@@ -2570,27 +2566,6 @@ char *mojo_repr_boxed(int64_t v)
      * how a tuple of strings renders each slot as a string. */
     if (mojo_is_registered_list(v))
         return mojo_repr_list_kinds((MojoList *)(intptr_t)v, NULL);
-    /* A registered SET travels as its raw pointer in a tagged word (it has no box
-     * kind: see emit_stmts._box_mixed_return_arm), so it must be recognised here or
-     * it spells as its address. It is rendered from its element list, the way a
-     * statically typed set prints; there is no frozen marker on MojoSet, so a
-     * frozenset renders as a plain set exactly as it does there. */
-    if (mojo_is_registered_set(v)) {
-        MojoSet *st = (MojoSet *)(intptr_t)v;
-        if (st->used == 0) return strdup("set()");
-        int64_t *order = mojo_set_order_indices(st);
-        char *acc = strdup("{");
-        for (int64_t oi = 0; oi < st->used; oi++) {
-            int64_t i = order[oi];
-            if (oi > 0) acc = mojo_str_cat_free(acc, ", ");
-            /* each element by ITS tag: 0 an int, otherwise a string (quoted) */
-            char *el = st->slots[i].tag == 0 ? mojo_repr_int(st->slots[i].val_i)
-                                             : mojo_repr_str(st->slots[i].val_s);
-            acc = mojo_str_cat_free(acc, el);
-        }
-        free(order);
-        return mojo_str_cat_free(acc, "}");
-    }
     if (mojo_is_boxed(v)) {
         MojoBox *bx = (MojoBox *)(intptr_t)v;
         switch (bx->kind) {
@@ -3229,15 +3204,6 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
                      * kind — the old vkind-5 arm lost that, reading a box's is_str
                      * false and storing the box pointer as an int). */
             int64_t w = ((int64_t (*)(void *))sg->value)(h);
-            /* The drain collects EVERY element before the consumer reads any, so a
-             * string the generator yielded out of a shared scratch buffer (`mojo_str`
-             * formats a small int into one static block: `f'{item}'` for two items was
-             * the same pointer twice) must be owned by the list. A str-typed slot (3)
-             * is a string by its type; a dynamic word (5) only when it classifies as
-             * one. Bytes keep their own object. */
-            if (w && !mojo_is_registered_bytes(w) && !mojo_is_boxed(w)
-                && (sg->vkind == 3 || mojo_boxed_is_str(w)))
-                w = (int64_t)(intptr_t)strdup((const char *)(intptr_t)w);
             mojo_list_append_word(out, w);
             break; }
         default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;
@@ -10992,19 +10958,6 @@ char *mojo_repr_str(char *s) {
     return buf;
 }
 
-/* repr() of a `str`-typed value that may be None. A NULL char * is how this
- * runtime spells None for a str-typed slot (an Optional[str] field, a
- * `str`-annotated parameter given None, a str-returning function's None
- * return), so repr renders it as `None`, as CPython does. The bare
- * mojo_repr_str keeps its NULL-is-'' behaviour for callers that use a NULL
- * as an empty string. Only the codegen sites that repr a statically char *
- * value route here, so str()/print() of the same value, which already print
- * None, and the integer 0 (a word, not a char *) are unaffected. */
-char *mojo_repr_str_or_none(char *s) {
-    if (!s) return strdup("None");
-    return mojo_repr_str(s);
-}
-
 /* Python str(True)/str(False) → "True"/"False", not "1"/"0". str()/f-string
  * lowering routes a statically-_Bool value here instead of the int path. */
 char *mojo_bool_to_str(int b) {
@@ -12212,66 +12165,6 @@ char *mojo_shlex_join(MojoList *parts) {
     }
     *p = '\0';
     free(quoted);
-    return out;
-}
-
-/* textwrap.dedent(text), CPython 3.14's algorithm: the margin is the common leading
- * run of spaces and tabs shared by the lexicographically smallest and largest
- * non-blank lines (so a tab and a space share nothing), it is cut from every
- * non-blank line, and a blank line (empty or all whitespace) becomes "". ASCII
- * whitespace only: a line made solely of a non-ASCII space counts as non-blank. */
-static int _dedent_blank(const char *l, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)l[i];
-        if (!(c == ' ' || (c >= 9 && c <= 13) || (c >= 28 && c <= 31))) return 0;
-    }
-    return 1;
-}
-
-char *mojo_textwrap_dedent(char *text) {
-    if (!text) return text;
-    size_t n = strlen(text);
-    const char *min_l = NULL, *max_l = NULL;
-    size_t min_n = 0, max_n = 0;
-    for (size_t i = 0; i <= n; ) {
-        const char *l = text + i;
-        size_t e = i;
-        while (e < n && text[e] != '\n') e++;
-        size_t ln = e - i;
-        if (ln && !_dedent_blank(l, ln)) {
-            size_t m = ln < min_n ? ln : min_n;
-            if (!min_l || memcmp(l, min_l, ln < min_n ? ln : min_n) < 0
-                || (memcmp(l, min_l, m) == 0 && ln < min_n)) { min_l = l; min_n = ln; }
-            m = ln < max_n ? ln : max_n;
-            if (!max_l || memcmp(l, max_l, m) > 0
-                || (memcmp(l, max_l, m) == 0 && ln > max_n)) { max_l = l; max_n = ln; }
-        }
-        i = e + 1;
-    }
-    size_t margin = 0;
-    if (min_l) {
-        for (size_t i = 0; i < min_n; i++) {
-            margin = i;
-            if (i >= max_n || min_l[i] != max_l[i] || (min_l[i] != ' ' && min_l[i] != '\t')) break;
-        }
-    }
-    char *out = (char *)malloc(n + 1);
-    if (!out) return text;
-    char *p = out;
-    for (size_t i = 0; i <= n; ) {
-        const char *l = text + i;
-        size_t e = i;
-        while (e < n && text[e] != '\n') e++;
-        size_t ln = e - i;
-        if (!_dedent_blank(l, ln)) {
-            size_t skip = margin < ln ? margin : ln;
-            memcpy(p, l + skip, ln - skip);
-            p += ln - skip;
-        }
-        if (e < n) *p++ = '\n';
-        i = e + 1;
-    }
-    *p = '\0';
     return out;
 }
 

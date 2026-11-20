@@ -2240,19 +2240,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # qualified half.
         _field_types = gen._module_global_field_type(_bound_mod, node.member) \
             if _bound_mod else None
-        if _field_types is None and _bound_mod:
-            # The owner is still MID-COMPILE further up this same call stack
-            # (an import cycle), so its globals struct is not registered yet
-            # and `_module_global_field_type` cannot answer. Read the field
-            # off the owner's own declaration instead of falling through to
-            # the silent 0 stub — the `submod.GLOBAL` counterpart of
-            # `_lower_IdentExpr`'s `_imp_pending`. See
-            # `_gmh_pending_module_global_field_type` for the gates and the
-            # measured self-host closure failure this closes.
-            from mojo.backend_gimple.module_gen import (
-                _gmh_pending_module_global_field_type)
-            _field_types = _gmh_pending_module_global_field_type(
-                gen, _as_str(_bound_mod), _as_str(node.member))
         if _field_types is not None:
             c_decl_type, gtype = _field_types
             ctype = 'int64_t' if gtype in _BOXED_CONTAINER_CTYPES else gtype
@@ -4487,14 +4474,6 @@ def _lbt_none_eq(gen, op: str, left_node, lt: str, lv: str, right_node, rt: str,
         # becomes `!= 0`; a pointer comparison here already is the
         # answer). Getting that backwards inverts every missing-key
         # guard, which is the shape this branch exists to fix.
-        _p = gen._cast('int64_t', f"{_ptr_val}")
-        _t = gen._new_temp('_Bool')
-        gen._binop_into(_t, _p, op, '0')
-        return '_Bool', _t
-    if _ptr_ty == 'int64_t' and _ptr_val in getattr(gen, '_cur_untyped_params', ()):
-        # An UNANNOTATED parameter is a word of unknown kind: `f(None)` hands it the
-        # null word, so it CAN be None, and `x is None` already answers by testing that
-        # word. `x == None` must agree with it, not fold to a constant False.
         _p = gen._cast('int64_t', f"{_ptr_val}")
         _t = gen._new_temp('_Bool')
         gen._binop_into(_t, _p, op, '0')
