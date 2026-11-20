@@ -6130,8 +6130,9 @@ class GimpleGen:
         return grsl._ensure_generic_struct(self, base_name, type_args)
     def _elaborate_generic_struct_call(self, node: CallExpr):
         return grsl._elaborate_generic_struct_call(self, node)
-    def _emit_generic_instantiation(self, info, arg_pairs):
-        return grsl._emit_generic_instantiation(self, info, arg_pairs)
+    def _emit_generic_instantiation(self, info, arg_pairs, span_proofs=None):
+        return grsl._emit_generic_instantiation(self, info, arg_pairs,
+                                               span_proofs=span_proofs)
     def _as_ptr(self, ctype: str, val: str) -> tuple[str, str]:
         return grsl._as_ptr(self, ctype, val)
     def _is_none_literal(self, el) -> bool:

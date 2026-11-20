@@ -3602,15 +3602,16 @@ def _proven_arg_mojo_type(gen, arg, ctype):
         ann = _param_ann_mojo_type(gen, arg)
         if ann is not None:
             return ann
+        if ctype == 'Span *':
+            return _proven_span_arg_mojo_type(gen, arg)
         return _list_arg_mojo_type(gen, arg, ctype)
     if ctype == 'MojoList *':
         lst = _list_arg_mojo_type(gen, arg, ctype)
         if lst is not None:
             return lst
+    if ctype == 'Span *':
+        return _proven_span_arg_mojo_type(gen, arg)
     return _constructed_struct_type(gen, arg, ctype)
-
-
-_LIST_MOJO_ANN_RE = re.compile(r'^List\[\s*([^\[\]]+)\s*\]$')
 
 
 def _list_ctor_fill_type(call):
@@ -3637,6 +3638,33 @@ def _list_ctor_fill_type(call):
     return _literal_mojo_type(_fill)
 
 
+def _list_ctor_mojo_type(gen, call):
+    """`'List[X]'` for a `List` constructor call whose element type its own
+    syntax NAMES, else None. Two spellings:
+    * `List(length=n, fill=<literal>)` — the fill literal (`_list_ctor_
+      fill_type`);
+    * `List[X](...)` — the explicit bracket, rendered by the one type-
+      expression renderer (`_type_expr_to_ann`, so `List[Span[T, o]]` keeps
+      its balanced nested argument instead of a `[^]]` truncation)."""
+    if not isinstance(call, gimple_ctypes.CallExpr):
+        return None
+    f = call.func
+    if isinstance(f, gimple_ctypes.IdentExpr) and f.name == 'List':
+        elem = _list_ctor_fill_type(call)
+        return 'List[%s]' % elem if elem else None
+    if (isinstance(f, gimple_ctypes.SubscriptExpr)
+            and isinstance(f.obj, gimple_ctypes.IdentExpr)
+            and f.obj.name == 'List'):
+        idx = f.index
+        elems = (idx.elements if isinstance(idx, gimple_ctypes.TupleExpr)
+                 else [idx])
+        if not elems:
+            return None
+        elem = _type_expr_to_ann(gen, elems[0])
+        return 'List[%s]' % elem if elem else None
+    return None
+
+
 def _bare_name_target_names(target) -> set:
     """The names a store target REBINDS (as opposed to mutates in place): a
     bare name, or the bare names of a tuple/list target (`a, b = ...`). A
@@ -3655,19 +3683,56 @@ def _bare_name_target_names(target) -> set:
     return set()
 
 
-def _proven_list_locals(gen) -> dict:
-    """{local name: 'List[X]'} for every local of the function being lowered
-    whose element type its own binding statement names.
+def _container_ann_type(ann):
+    """The Mojo type an annotation NAMES when it is a container this proof
+    can project through (`List[X]`, `Span[X, origin]`), else None. Read with
+    a balanced trailing-bracket test rather than a `[^][]` regex: the element
+    of the list this exists for is itself a bracketed type
+    (`List[Span[T, origin]]`, std.builtin.sort's `_quicksort` stack)."""
+    text = ann.strip()
+    for base in ('List', 'Span'):
+        if text.startswith(base + '[') and text.endswith(']'):
+            inner = text[len(base) + 1:-1].strip()
+            return '%s[%s]' % (base, inner) if inner else None
+    return None
 
-    The `MojoList *` C type erases the element type, so a `Span[T, o]`
-    parameter (`elaborate._unify_param_ann`) binds from a List argument only
-    when the call site PROVES the element. Two spellings prove it, and they
-    are the two that NAME it:
 
-    * `var p: List[X]` — the annotation says the element, whatever the
-      initializer is;
-    * `var p = List(length=n, fill=<literal>)` — the fill literal says it
-      (`_list_ctor_fill_type`; `0` is an `Int`, so `List[Int]`).
+def _container_elem_type(mojo_type):
+    """The element type of a proven `List[X]` / `Span[X, origin]`, else None.
+    For a Span the first bracket argument is the element; the origin is the
+    second (`Span[Int, MutOrigin]`)."""
+    if not isinstance(mojo_type, str):
+        return None
+    for base in ('List', 'Span'):
+        if mojo_type.startswith(base + '[') and mojo_type.endswith(']'):
+            inner = mojo_type[len(base) + 1:-1].strip()
+            if not inner:
+                return None
+            parts = gimple_ctypes._split_top_level_commas(inner)
+            return parts[0].strip() if parts else None
+    return None
+
+
+def _proven_local_types(gen) -> dict:
+    """{local name: Mojo type} for every local of the function being lowered
+    whose type its own binding statement PROVES.
+
+    The erased C types cannot say which element a container holds
+    (`MojoList *`) or which element/origin a `Span *` is, so a generic
+    parameter that names one (`Span[T, o]`) binds only from a PROVEN
+    argument (`elaborate._unify_param_ann`). The spellings that prove a
+    local's type are the ones that NAME it:
+
+    * `var p: List[X]` / `var p: Span[X, o]` — the annotation;
+    * `var p = List[X](...)` — the explicit bracket (`_list_ctor_mojo_type`);
+    * `var p = List(length=n, fill=<literal>)` — the fill literal;
+    * `var p = q.pop()` / `var p = q[i]` — a ONE-STEP projection from a
+      proven `q: List[X]`/`Span[X, o]` (`_container_elem_type`). This is the
+      shape std.builtin.sort's `_quicksort` takes: `var interval =
+      stack.pop()` where `stack` is a `List[Span[T, origin]]`, whose own type
+      is written by its `List[Span[T, origin]](capacity=...)` constructor —
+      without it every bare helper call (`_insertion_sort(interval, ...)`)
+      declined and stubbed.
 
     The local must be bound exactly once in the function: a REBIND of the
     name (a plain re-assignment, a loop or except target, a nested def's own
@@ -3683,15 +3748,14 @@ def _proven_list_locals(gen) -> dict:
     body = getattr(gen, '_cur_func_body', None)
     if body is None:
         return {}
-    cache = getattr(gen, '_proven_list_locals_cache', None)
+    cache = getattr(gen, '_proven_local_types_cache', None)
     if cache is None:
         cache = {}
-        gen._proven_list_locals_cache = cache
+        gen._proven_local_types_cache = cache
     key = id(body)
     hit = cache.get(key)
     if hit is not None:
         return hit
-    out = {}
     try:
         nodes = gimple_exprtypes._walk_ast(body)
     except Exception:
@@ -3720,23 +3784,73 @@ def _proven_list_locals(gen) -> dict:
             for _nm in gex._names_bound_by(n):
                 _bump(_nm)
     params = set(getattr(gen, '_cur_func_params', None) or ())
+    decls = {}
     for n in nodes:
         if not isinstance(n, gimple_ctypes.VarDecl):
             continue
         name = _as_str(n.name)
         if name in params or bound.get(name) != 1:
             continue
-        elem = None
-        if isinstance(n.type_ann, str):
-            m = _LIST_MOJO_ANN_RE.match(n.type_ann.strip())
-            if m:
-                elem = m.group(1).strip()
-        if elem is None:
-            elem = _list_ctor_fill_type(n.value)
-        if elem:
-            out[name] = 'List[%s]' % elem
+        decls.setdefault(name, n)
+    out = {}
+
+    def _resolve(name, seen):
+        if name in out:
+            return out[name]
+        d = decls.get(name)
+        if d is None or name in seen:
+            return None
+        seen = seen | {name}
+        typ = None
+        if isinstance(d.type_ann, str):
+            typ = _container_ann_type(d.type_ann)
+        if typ is None:
+            typ = _projection_type(gen, d.value, _resolve, seen)
+        if typ:
+            out[name] = typ
+        return typ
+
+    for name in decls:
+        _resolve(name, set())
     cache[key] = out
     return out
+
+
+def _projection_type(gen, value, resolve, seen):
+    """The proven Mojo type of a local's initializer expression: a `List`
+    constructor (`_list_ctor_mojo_type`), or a ONE-STEP projection out of a
+    proven local container — `.pop()` and a non-slice subscript. Anything
+    else is not a proof, and returns None rather than a guess."""
+    if isinstance(value, gimple_ctypes.CallExpr):
+        ct = _list_ctor_mojo_type(gen, value)
+        if ct:
+            return ct
+        f = value.func
+        if (isinstance(f, gimple_ctypes.MemberExpr)
+                and f.member == 'pop'
+                and isinstance(f.obj, gimple_ctypes.IdentExpr)):
+            return _container_elem_type(resolve(_as_str(f.obj.name), seen))
+        return None
+    if (isinstance(value, gimple_ctypes.SubscriptExpr)
+            and isinstance(value.obj, gimple_ctypes.IdentExpr)
+            and not isinstance(value.index, gimple_ctypes.SliceExpr)):
+        return _container_elem_type(resolve(_as_str(value.obj.name), seen))
+    return None
+
+
+def _proven_list_locals(gen) -> dict:
+    """{local name: 'List[X]'} for every local whose binding proves it is a
+    `List[X]` — the List-only view of `_proven_local_types`, kept because the
+    `MojoList *` argument proof (`_list_arg_mojo_type`) reads exactly that."""
+    return {name: typ for name, typ in _proven_local_types(gen).items()
+            if typ.startswith('List[')}
+
+
+def _proven_local_mojo_type(gen, name):
+    """The proven Mojo type of local `name` (`_proven_local_types`), else
+    None. The proof is per function body, so a same-named local in another
+    function cannot answer."""
+    return _proven_local_types(gen).get(name)
 
 
 def _list_arg_mojo_type(gen, arg, ctype):
@@ -3745,20 +3859,44 @@ def _list_arg_mojo_type(gen, arg, ctype):
 
     A `MojoList *` erases the element (its getters cannot say which), so the
     only proofs are the spellings that NAME it: the argument is the
-    `List(length=n, fill=<literal>)` constructor call itself, or a local
-    whose one binding is `var p: List[X]` / `var p = List(length=n,
-    fill=<literal>)` (`_proven_list_locals`). Anything else is unprovable,
-    and the caller declines the shape exactly as every other unprovable
-    argument does (bugs/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's
-    `sort[T, origin](span: Span[T, origin])` is the template this proof
-    exists for)."""
+    `List(length=n, fill=<literal>)` / `List[X](...)` constructor call
+    itself, or a local whose one binding proves its type
+    (`_proven_local_types`). Anything else is unprovable, and the caller
+    declines the shape exactly as every other unprovable argument does
+    (bugs/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
+    origin](span: Span[T, origin])` is the template this proof exists for)."""
     if ctype != 'MojoList *':
         return None
     if isinstance(arg, gimple_ctypes.CallExpr):
-        return _list_ctor_fill_type(arg)
+        return _list_ctor_mojo_type(gen, arg)
     if isinstance(arg, gimple_ctypes.IdentExpr):
-        return _proven_list_locals(gen).get(_as_str(arg.name))
+        typ = _proven_local_mojo_type(gen, _as_str(arg.name))
+        return typ if typ and typ.startswith('List[') else None
     return None
+
+
+def _proven_span_arg_mojo_type(gen, arg):
+    """`'Span[X, o]'` for a `Span *` call argument whose type the call site
+    proves, else None: a local whose binding proves it (`_proven_local_types`
+    — a `Span` annotation, or a one-step `.pop()`/subscript projection from a
+    proven `List[Span[X, o]]`), the enclosing function's own parameter
+    annotation (`_param_ann_mojo_type`), or the argument expression itself
+    when it is that projection (`f(stack.pop(), ...)`). The erased `Span *`
+    C type cannot say either the element or the origin, and the nested
+    Span-taking helper chain (`_quicksort` -> `_insertion_sort`/`_sort3`/
+    `_quicksort_partition_*`) passes exactly this proven Span down."""
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        ann = _param_ann_mojo_type(gen, arg)
+        if ann:
+            return ann
+        typ = _proven_local_mojo_type(gen, _as_str(arg.name))
+        if typ and typ.startswith('Span['):
+            return typ
+        return None
+    typ = _projection_type(gen, arg,
+                           lambda n, _seen: _proven_local_mojo_type(gen, n),
+                           set())
+    return typ if typ and typ.startswith('Span[') else None
 
 
 def _inferred_arg_mojo_type(gen, arg, ctype):
@@ -3767,9 +3905,11 @@ def _inferred_arg_mojo_type(gen, arg, ctype):
     type` always answered (`Foo()` is a `Foo`), — for a `MojoList *`
     argument — the element type `_list_arg_mojo_type` proves (`List[Int]`),
     and — for a `Span *` argument — the enclosing function's own parameter
-    annotation after monomorphization (`span: Span[Int, MutOrigin]`; the C
-    type `Span *` cannot say which element/origin it is, and the proof is
-    only CONCRETE in an elaborated instance — in a still-generic body the
+    annotation after monomorphization, a proven local (`_proven_local_types`,
+    including a one-step `List[Span[X, o]].pop()` projection), or the
+    projection expression itself (`span: Span[Int, MutOrigin]`; the C type
+    `Span *` cannot say which element/origin it is, and the proof is only
+    CONCRETE in an elaborated instance — in a still-generic body the
     annotation is `Span[T, origin]` and `elaborate._unify_param_ann`'s
     concreteness guard keeps it binding nothing, exactly as before).
     Literal inference is deliberately UNCHANGED on this path (a literal's
@@ -3777,8 +3917,8 @@ def _inferred_arg_mojo_type(gen, arg, ctype):
     call has can move — the List/Span proofs are purely additive."""
     if ctype == 'MojoList *':
         return _list_arg_mojo_type(gen, arg, ctype)
-    if ctype == 'Span *':
-        return _param_ann_mojo_type(gen, arg)
+    if ctype in ('Span *', 'int64_t'):
+        return _proven_span_arg_mojo_type(gen, arg)
     return _constructed_struct_type(gen, arg, ctype)
 
 
@@ -4166,7 +4306,16 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                     f"{_cat}error: failed to infer parameter "
                     f"'{_unbound}' of '{g}'")
         return None
-    return gen._emit_generic_instantiation(info, arg_pairs)
+    # Which boxed (`int64_t`-erased) arguments this call PROVED are Spans:
+    # `_coerce_span_args` may only cast those back to `Span *` (see its own
+    # note). Computed from the call's own syntax, so an explicit-type-args
+    # call to a Span-taking generic keeps the old ABI and its old diagnostic.
+    _span_proofs = [
+        ct == 'int64_t' and _proven_span_arg_mojo_type(gen, a) is not None
+        for a, (ct, _v) in zip(node.args, arg_pairs)
+    ]
+    return gen._emit_generic_instantiation(info, arg_pairs,
+                                           span_proofs=_span_proofs)
 
 
 
@@ -4624,32 +4773,65 @@ def _register_generic_struct(gen, base_name, info):
     return name
 
 
-def _coerce_span_args(gen, params, arg_pairs):
-    """Wrap every `MojoList *` argument whose instance parameter is a
-    `Span *` in a fresh `Span` header over the list's own storage — the
-    implicit List→Span conversion the stdlib's Span-taking generics rely on
-    (`sort`'s `span: Span[T, origin]` is called with a `List`; a `List[X]`
-    is a `Span[X, mut]` over the same data and length). The span does not
-    own the storage — it is a view, and the list keeps it alive.
+def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
+    """Convert every argument whose instance parameter is a `Span *` into
+    the span ABI, in the two spellings a call site produces:
+
+    * `MojoList *` -> a fresh `Span` header over the list's own storage (the
+      implicit List→Span conversion the stdlib's Span-taking generics rely
+      on: `sort`'s `span: Span[T, origin]` is called with a `List`; a
+      `List[X]` is a `Span[X, mut]` over the same data and length). The span
+      does not own the storage — it is a view, and the list keeps it alive.
+    * `int64_t` -> a `(Span *)` cast, but ONLY at an index `span_proofs`
+      marks (a Span popped/subscripted out of a word-storing
+      `List[Span[X, o]]`, proved by `_proven_span_arg_mojo_type`). An
+      unproved `int64_t` keeps the old ABI: the cast is a consequence of the
+      proof, not a guess from the C type.
 
     ONE helper for every `Span *` parameter, not a `sort`-only branch: any
-    future generic that takes a `Span` from a `List` argument converts here
-    (bugs/CODEGEN_prelude_sort_is_not_resolved.md, planning decision 1a).
-    `params` is the instance's C param types (elaborate's erased view), so
-    the check is on the parameter, not the annotation text."""
+    future generic that takes a `Span` from a `List` (or a boxed Span)
+    argument converts here (bugs/CODEGEN_prelude_sort_is_not_resolved.md,
+    planning decision 1a). `params` is the instance's C param types
+    (elaborate's erased view), so the check is on the parameter, not the
+    annotation text."""
     for i, (ctype, val) in enumerate(arg_pairs):
-        if ctype != 'MojoList *' or i >= len(params) or params[i] != 'Span *':
+        if i >= len(params) or params[i] != 'Span *':
             continue
-        gen._struct_allocs_needed.add('Span')
-        sp = gen._new_temp('Span *')
-        gen._rt_into(sp, '_alloc_Span', [])
-        gen._emit(f"  {sp}->_data = (char *) {val}->data;")
-        gen._emit(f"  {sp}->_len = {val}->len;")
-        arg_pairs[i] = ('Span *', sp)
+        if ctype == 'MojoList *':
+            gen._struct_allocs_needed.add('Span')
+            sp = gen._new_temp('Span *')
+            gen._rt_into(sp, '_alloc_Span', [])
+            # The field reads are materialized into temps BEFORE the span
+            # store, because `gcc -fgimple` rejects a component_ref in a
+            # memory store (`_span->_len = items->len;` is "invalid RHS for
+            # gimple memory store: 'component_ref'") and rejects a CAST over
+            # one in any position ("invalid operand in unary operation").
+            # `MojoList._data` is already `char *`, so no cast is needed; the
+            # scalar load into a temp is the one operand form GIMPLE accepts.
+            _data = gen._new_temp('char *')
+            gen._emit(f"  {_data} = {val}->data;")
+            _len = gen._new_temp('int64_t')
+            gen._emit(f"  {_len} = {val}->len;")
+            gen._emit(f"  {sp}->_data = {_data};")
+            gen._emit(f"  {sp}->_len = {_len};")
+            arg_pairs[i] = ('Span *', sp)
+        elif ctype == 'int64_t' and span_proofs is not None and span_proofs[i]:
+            # A Span carried in a boxed word — `List[Span[X, o]].pop()` and
+            # `[i]` lower to the element's `int64_t` slot (the list stores
+            # words, not typed values). The element-type proof in
+            # `_proven_span_arg_mojo_type` is what established that the word
+            # IS a `Span *` (and `span_proofs[i]` records that this call had
+            # that proof), so cast it back; the pointer is the span header
+            # the list stored (`emit_calls`' List element lowering boxes the
+            # same address). An unproved `int64_t` deliberately keeps the
+            # old ABI/diagnostic rather than casting a guess.
+            sp = gen._new_temp('Span *')
+            gen._emit(f"  {sp} = (Span *) {val};")
+            arg_pairs[i] = ('Span *', sp)
     return arg_pairs
 
 
-def _emit_generic_instantiation(gen, info, arg_pairs):
+def _emit_generic_instantiation(gen, info, arg_pairs, span_proofs=None):
     """Record an elaborated instantiation (object on the link line, extern in
     the preamble, signature for calls) and emit the concrete call."""
     sym = info['symbol']
@@ -4689,7 +4871,8 @@ def _emit_generic_instantiation(gen, info, arg_pairs):
     # so the call stays argument-count-safe against the extern decl.
     if len(arg_pairs) > len(info['params']):
         arg_pairs = arg_pairs[:len(info['params'])]
-    arg_pairs = _coerce_span_args(gen, info['params'], arg_pairs)
+    arg_pairs = _coerce_span_args(gen, info['params'], arg_pairs,
+                                  span_proofs=span_proofs)
     _decl = f"extern {info['ret']} {sym} ({', '.join(info['params']) or 'void'});"
     if _decl not in gen._elaborated_externs:
         gen._elaborated_externs.append(_decl)

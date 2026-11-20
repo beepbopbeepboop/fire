@@ -383,6 +383,17 @@ def test_span_param_binds_from_a_proven_span():
     got = elaborate.infer_type_args(src, ['Span *'], None)
     if got is not None:
         problems.append(f'an unproven Span bound {got!r}; want None')
+    # A Span carried in a BOXED slot (`List[Span[X, o]].pop()` lowers to an
+    # `int64_t` word) is still a proven Span; the call site casts it back to
+    # `Span *` (`emit_resolve._coerce_span_args`). Without this the same
+    # proof was ignored whenever the C type was the boxed word.
+    got = elaborate.infer_type_args(src, ['int64_t'], ['Span[Int, MutOrigin]'])
+    if got != ['Int', 'MutOrigin']:
+        problems.append(f'boxed proven Span bound {got!r}, '
+                        f'want [Int, MutOrigin]')
+    got = elaborate.infer_type_args(src, ['int64_t'], None)
+    if got is not None:
+        problems.append(f'an unproven boxed Span bound {got!r}; want None')
     # A concrete origin the annotation already names must AGREE with the
     # proven argument; a different origin is a different type.
     src2 = 'def sink[T](span: Span[T, MutOrigin]):\n    pass\n'
@@ -395,6 +406,73 @@ def test_span_param_binds_from_a_proven_span():
     if problems:
         raise AssertionError('; '.join(problems))
     print("PASS  span_param_binds_from_a_proven_span")
+
+
+def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
+    """A `Span *` parameter given a BOXED `int64_t` argument gets a
+    `(Span *)` cast at the call site, but ONLY when the caller proved that
+    word is a Span. This is the call-site half of the proof
+    `test_span_param_binds_from_a_proven_span` pins: std.builtin.sort's
+    `_quicksort` pops `interval` from a `List[Span[T, origin]]`, so the value
+    arrives as an `int64_t` slot of a word-storing list, and the sibling
+    helper's parameter is `Span *`. An unproved `int64_t` is left alone: the
+    cast is a consequence of the proof, not a guess from the ABI.
+    """
+    import mojo.backend_gimple.emit_resolve as er
+
+    class G:
+        _struct_allocs_needed = set()
+
+        def __init__(self):
+            self.n = 0
+            self.lines = []
+
+        def _new_temp(self, ctype):
+            self.n += 1
+            self.lines.append(f'/* temp {ctype} */')
+            return f'_t{self.n}'
+
+        def _emit(self, text):
+            self.lines.append(text)
+
+        def _rt_into(self, dest, name, args):
+            self.lines.append(f'  {dest} = {name}();')
+
+    problems = []
+    g = G()
+    out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')],
+                               span_proofs=[True])
+    if out != [('Span *', '_t1')]:
+        problems.append(f'proved boxed Span became {out!r}, '
+                        f'want [(Span *, _t1)]')
+    if not any('(Span *) interval' in ln for ln in g.lines):
+        problems.append(f'the cast is missing from {g.lines!r}')
+    g = G()
+    out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')],
+                               span_proofs=[False])
+    if out != [('int64_t', 'interval')]:
+        problems.append(f'unproved int64_t was rewritten to {out!r}')
+    out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')])
+    if out != [('int64_t', 'interval')]:
+        problems.append(f'a call with no proof information rewrote {out!r}')
+    # A `MojoList *` argument builds the Span header from fields, and the
+    # field reads MUST go through temps: `gcc -fgimple` rejects a
+    # component_ref as a memory-store RHS ("invalid RHS for gimple memory
+    # store") and a cast over one ("invalid operand in unary operation") —
+    # both measured on std.collections.counter's `sort(items, comparator)`.
+    g = G()
+    out = er._coerce_span_args(g, ['Span *'], [('MojoList *', 'items')])
+    if out[0][0] != 'Span *':
+        problems.append(f'a List argument was not converted: {out!r}')
+    text = '\n'.join(g.lines)
+    if '->_len = items->len' in text or '->_data = (char *) items->data' in text:
+        problems.append(f'the span store uses a raw component_ref: {text!r}')
+    if ('= items->len;' not in text or '= items->data;' not in text
+            or '->_len = _t' not in text or '->_data = _t' not in text):
+        problems.append(f'the field reads are not materialized: {text!r}')
+    if problems:
+        raise AssertionError('; '.join(problems))
+    print("PASS  boxed_span_arg_is_cast_to_a_span_only_when_proven")
 
 
 def test_arity_overloads_mangle_to_distinct_symbols():
@@ -429,6 +507,23 @@ def test_arity_overloads_mangle_to_distinct_symbols():
           f"(one={one['symbol']}, two={two['symbol']})")
 
 
+def _proven_local_types(src, params=()):
+    """`emit_resolve._proven_local_types` on the first function of `src`, via
+    a minimal generator stand-in (the proof reads only the body, the
+    parameter names and the type-expression renderer)."""
+    from fire_compiler import py_tokenize, Parser, FunctionDef
+    import mojo.backend_gimple.emit_resolve as er
+    mod = Parser(py_tokenize(src)).parse_module()
+    fn = next(s for s in mod if isinstance(s, FunctionDef))
+    fake = type('G', (), {})()
+    fake._cur_func_body = fn.body
+    fake._cur_func_params = set(params)
+    # The proof renders a `List[...]` bracket argument through the generator's
+    # own type-expression renderer, which recurses through this attribute.
+    fake._type_expr_to_ann = lambda n: er._type_expr_to_ann(fake, n)
+    return er._proven_local_types(fake)
+
+
 def test_proven_list_local_keeps_element_type_across_inplace_store():
     """Step 2a of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`: a local
     bound exactly once by a `List(...)` constructor (from `fill`'s literal)
@@ -440,16 +535,8 @@ def test_proven_list_local_keeps_element_type_across_inplace_store():
     parameter is not a local (its annotation is read by the parameter
     check, not the local proof).
     """
-    from fire_compiler import py_tokenize, Parser, FunctionDef
-    import mojo.backend_gimple.emit_resolve as er
-
     def _proven(src, params=()):
-        mod = Parser(py_tokenize(src)).parse_module()
-        fn = next(s for s in mod if isinstance(s, FunctionDef))
-        fake = type('G', (), {})()
-        fake._cur_func_body = fn.body
-        fake._cur_func_params = set(params)
-        return er._proven_list_locals(fake)
+        return _proven_local_types(src, params)
 
     problems = []
     got = _proven("""\
@@ -497,6 +584,64 @@ def f():
     if problems:
         raise AssertionError('; '.join(problems))
     print("PASS  proven_list_local_keeps_element_type_across_inplace_store")
+
+
+def test_proven_span_local_from_a_list_projection():
+    """Step 2b of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`: a local
+    bound to a ONE-STEP projection out of a proven container inherits its
+    element type — specifically std.builtin.sort's `_quicksort` shape
+
+        var stack = List[Span[T, origin]](capacity=...)
+        var interval = stack.pop()
+
+    where `interval: Span[T, origin]` is passed to the bare sibling helpers
+    (`_insertion_sort(interval, cmp_fn)`, `_sort3(...)`,
+    `_quicksort_partition_*`). Before this proof, the `Span *` argument's
+    element/origin could not be named, so every one of those calls declined
+    and fell to the `unavailable in compiled mode` weak stub.
+
+    The element is read from a non-slice subscript as well as `.pop()`, and
+    a rebind of the projected local ends the proof exactly as it does for
+    the list itself.
+    """
+    problems = []
+    got = _proven_local_types("""\
+def f():
+    var stack = List[Span[Int, MutOrigin]](capacity=4)
+    var interval = stack.pop()
+    var first = stack[0]
+    return interval
+""")
+    if got.get('stack') != 'List[Span[Int, MutOrigin]]':
+        problems.append(f'stack proven as {got.get("stack")!r}, '
+                        f'want List[Span[Int, MutOrigin]]')
+    if got.get('interval') != 'Span[Int, MutOrigin]':
+        problems.append(f'pop projection proven as {got.get("interval")!r}, '
+                        f'want Span[Int, MutOrigin]')
+    if got.get('first') != 'Span[Int, MutOrigin]':
+        problems.append(f'index projection proven as {got.get("first")!r}, '
+                        f'want Span[Int, MutOrigin]')
+    got = _proven_local_types("""\
+def f():
+    var stack: List[Span[Int, MutOrigin]] = List(length=2, fill=0)
+    var interval = stack.pop()
+    interval = 0
+    return interval
+""")
+    if 'interval' in got:
+        problems.append(f'rebound interval still proven {got["interval"]!r}')
+    got = _proven_local_types("""\
+def f():
+    var stack = List[Int](capacity=4)
+    var value = stack[0]
+    return value
+""")
+    if got.get('value') != 'Int':
+        problems.append(f'List[Int] element proven as {got.get("value")!r}, '
+                        f'want Int')
+    if problems:
+        raise AssertionError('; '.join(problems))
+    print("PASS  proven_span_local_from_a_list_projection")
 
 
 def defined_param_ctype(c_src: str, func_name: str, param_name: str) -> str:
@@ -15696,10 +15841,14 @@ main()
                   'span_param_binds_only_from_a_proven_list')
     _run_isolated(test_span_param_binds_from_a_proven_span,
                   'span_param_binds_from_a_proven_span')
+    _run_isolated(test_boxed_span_arg_is_cast_to_a_span_only_when_proven,
+                  'boxed_span_arg_is_cast_to_a_span_only_when_proven')
     _run_isolated(test_arity_overloads_mangle_to_distinct_symbols,
                   'arity_overloads_mangle_to_distinct_symbols')
     _run_isolated(test_proven_list_local_keeps_element_type_across_inplace_store,
                   'proven_list_local_keeps_element_type_across_inplace_store')
+    _run_isolated(test_proven_span_local_from_a_list_projection,
+                  'proven_span_local_from_a_list_projection')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

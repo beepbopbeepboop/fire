@@ -3196,7 +3196,14 @@ def _unify_param_ann(ann, pnames, arg_ctype, arg_mojo=None) -> dict:
     # ImmOrigin]`.
     m = _SPAN_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
-        if arg_ctype == 'Span *':
+        # A Span the caller carries in a BOXED slot (`List[Span[X, o]].pop()`
+        # lowers to an `int64_t` word) is still a Span: the proof is the
+        # caller's Mojo type, and the call site casts the word back to
+        # `Span *` (`emit_resolve._coerce_span_args`). Accepting only the
+        # `Span *` C type here declined exactly std.builtin.sort's
+        # `_quicksort`, whose `interval` is popped from a
+        # `List[Span[T, origin]]`.
+        if arg_ctype in ('Span *', 'int64_t'):
             sp = _SPAN_ANN_RE.fullmatch((arg_mojo or '').strip())
             if sp is None:
                 return {}

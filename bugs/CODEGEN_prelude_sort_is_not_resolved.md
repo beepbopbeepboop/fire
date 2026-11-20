@@ -18,6 +18,81 @@ called it inside a generic and only failed `gcc -c` once that generic was really
 
 ## Status
 
+**2026-11-20 (round 5) — container projection landed: `_quicksort`'s helper chain now elaborates; Span runtime methods are the open gap.**
+
+- *Step 1 of the recorded next step landed.* `emit_resolve._proven_local_types`
+  generalizes the round-4 `_proven_list_locals` and proves a local's Mojo type
+  from: a `List[X]`/`Span[X, o]` annotation, a `List[X](...)` constructor's own
+  bracket (`_list_ctor_mojo_type`, balanced nested args), a
+  `List(length=, fill=)` literal, and a ONE-STEP projection — `.pop()` or a
+  non-slice subscript — out of a proven `List[X]`/`Span[X, o]`
+  (`_projection_type`/`_container_elem_type`). Exactly-once-binding and
+  in-place-store rules are unchanged. `_proven_span_arg_mojo_type` is the
+  `Span *` argument proof (local, enclosing parameter, or the projection
+  expression itself), and `_unify_param_ann` accepts it from a BOXED
+  `int64_t` slot as well as from `Span *`: `List[Span[T, origin]].pop()`
+  lowers to an `int64_t` word, but the word IS a Span header.
+- *Call-site half.* `_coerce_span_args` casts a proven boxed `int64_t` to
+  `Span *` (`span_proofs` from the call's own arguments; an unproved
+  `int64_t` keeps the old ABI/diagnostic). Its `MojoList *` conversion now
+  reads `data`/`len` into temps before the span store: `gcc -fgimple`
+  rejects a `component_ref` there ("invalid RHS for gimple memory store")
+  and a cast over one ("invalid operand in unary operation"), measured on
+  `std.collections.counter`'s `sort(items, comparator)` once the prelude
+  elaboration reaches it.
+- *Measured.* std.builtin.sort's `_quicksort[Int64, MutOrigin,
+  do_smallsort=False]` instance now builds **8** nested helper objects (was
+  4) and emits real calls `_insertion_sort_...`, `_sort3_...`,
+  `_quicksort_partition_left_...`, `_quicksort_partition_right_...`; the bare
+  stubs for those four are gone from its C. Weak stubs left per helper:
+  `_insertion_sort` -> `Span_as_ref`; `_sort2`/partition_left/right ->
+  `Span_unsafe_get` + `Span_unsafe_swap_elements`; `_quicksort` ->
+  `Span_unsafe_ptr`. With the prelude `sort` temporarily registered,
+  `std.collections.counter`'s single-unit C (668885 bytes) now passes
+  `gcc -fgimple -fsyntax-only`; `sort` is still NOT registered, so the
+  Done-when program still prints the honest stub.
+- *Tests.* New `test_proven_span_local_from_a_list_projection` (fails at HEAD:
+  no `_proven_local_types`; passes now), new
+  `test_boxed_span_arg_is_cast_to_a_span_only_when_proven` (proof-gated cast,
+  and the component-ref-free span conversion), and
+  `test_span_param_binds_from_a_proven_span` extended with boxed
+  `int64_t` cases (first case fails at HEAD). Full `test_gimple.py`:
+  **469 passed, 0 failed**.
+
+**Next step (step 2, measured blockers in order).** A `Span[X, o]` PARAMETER
+annotation is never materialized as a generic struct: `_materialize_generic_
+struct_mentions` is called for FIELD and RETURN annotations only
+(`emit_resolve.py` ~4211/4227), so the helper instances keep the builtin
+`Span` stub and their method calls stay weak stubs. Making
+`_ensure_generic_struct('Span', ['Int64', 'MutOrigin'])` work first needs
+four generic-STRUCT binder defects fixed (all measured on
+`std/collections/span.mojo`):
+
+1. `elaborate.type_param_defaults` splits `origin: Origin[mut=mut]` at the
+   `=` INSIDE the brackets, so `origin`'s default reads `mut]` and
+   `_default_type_arg` rejects it — split at a top-level `=` only.
+2. `address_space: AddressSpace = .GENERIC` has no value default:
+   `_default_type_arg('.GENERIC')` returns None — render the enum-value
+   default (`.GENERIC` -> `GENERIC`) or accept it as a comptime value.
+3. `bind_type_args` treats the deduced prefix before `//` positionally:
+   `Span` is `Span[mut: Bool, //, T, AnyType, origin, *, address_space]`, and
+   the stdlib spells it `Span[T, origin]`, so `mut` must be deduced
+   (`MutOrigin` -> `True`) and `address_space` defaulted, as
+   `complete_explicit_type_args` already does for function calls.
+4. `monomorphize._check_no_value_shadow` reads the keyword label
+   `address_space=Self.address_space` (span.mojo:859, inside a `Pointer[...]`
+   bracket) as an assignment binding, because only `{}` depth is excused —
+   excise labels inside any bracket/paren, not only braces.
+
+With (4) monkeypatched and all four args supplied
+(`['True','Int64','MutOrigin','GENERIC']`), `Elaborator.elaborate_generic_struct
+('span.mojo','Span',...)` succeeds in ~0.7 s and lists `as_ref`,
+`unsafe_ptr`, `unsafe_get`, `unsafe_swap_elements` (and the rest), so the
+struct itself is ready; the binder + parameter-annotation hook is what is
+missing. Then (3) module comptime constants in isolated TUs
+(`insertion_sort_threshold` still erases to `(int64_t)0`), and only then
+register `sort`.
+
 **2026-11-20 (round 4) — steps 2a/2b landed and measured; stop condition invoked; `sort` NOT registered.**
 
 - *2a landed (with a round-3 draft defect fixed).* `emit_resolve.py::_proven_list_locals(gen)` maps a
@@ -252,9 +327,13 @@ which then fails with `invalid conversion in gimple call` at `std/collections/co
    weak stub) until `std.builtin.sort` compiles. Make the unresolved bare name register that stub.~~
    Done 2026-11-19 (see Status).
 2. Then make `std.builtin.sort.sort` compile. (Step 1 of the planning guide, the unify rule, is landed;
-   the element-type proof for a local `List` is the open piece, see Status.) The call site must first turn its `List` argument into
-   the `Span` the generic takes (`counter.mojo:948` is the same shape), which is the missing piece
-   measured above; the generic body's own `counter.mojo` conversion then has to compile as well.
+   the element-type proof for a local `List` AND the `List`/boxed-`Span` call-site
+   conversion (step 1 of the round-4 next-step list) landed in round 5 — see
+   Status. `counter.mojo:948`'s conversion now emits GIMPLE-clean C.) The
+   remaining open piece is step 2 of that list: the Span runtime methods inside
+   the helper instances, blocked on materializing a `Span[X, o]` parameter
+   annotation as a generic struct (the four binder defects are measured in
+   Status).
 3. Test: the program above prints `5`, and `print(p[0])` after a sort of `[3, 1, 2]` prints `1`.
 
 ## Done when
