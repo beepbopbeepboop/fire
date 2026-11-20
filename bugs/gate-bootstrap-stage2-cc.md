@@ -58,3 +58,33 @@ State 2026-11-19, master 633131370 after the r2 integration (210191e85):
   reports the same 15 pre-existing diagnostics as before this change, with
   the `ModuleLoader` site now a real `_alloc_ModuleLoader()` constructor and
   a direct `module_loader_ModuleLoader_resolve_module_path` call).
+
+## Status (2026-11-19, work/bug-gate-bootstrap-stage2-cc)
+
+The job WAS run over this source by the controller's landing probe: the
+`integ` reflog at 14:51:20 merged branch `bug-gate-bootstrap-stage2-cc` into
+master `04a291c6c` (merge `48c9115da`, branch head `46638d6c2`) and the full
+gate ran to 17:58:39. `bootstrap-stage2-cc` PASSED; the probe's red was the
+unrelated `doc-refs`, `formal-sweep-truth`, `linkmode` and `suite-self-test`
+master reds. This round ports that verified source onto the current master and
+adds the two pins the distilled landing branch had dropped.
+
+Quick proof on this branch (all PASS, each under
+`python3 tools/memslot.py --gb 8 --label x --`):
+
+    python3 test_gimple_class_import_cross_module.py
+    python3 test_gimple_module_global_pending_owner.py
+    python3 test_gimple_class_method_import_inlined.py
+    python3 test_gimple_imported_container_global.py
+    python3 test_gimple_set_op_boxed_container_local.py
+
+`test_gimple.py` (the existing file over this lowering) is the second half of
+the quick proof.
+
+Later master commits change the container classification this branch was
+verified against: 44ba4f915 makes `_COMPTIME_TYPE_FUNCS`, `_PURE_ITER_CALLS`
+and `_COMPILE_TIME_INTRINSICS` dispatch-table globals, whose owner field is
+the RAW `MojoSet *`. `_gmh_pending_module_global_field_type` now answers that
+raw spelling from `dispatch_table_global_ctype` (instead of stubbing it to 0),
+and `test_gimple_imported_container_global.py` asserts ONE consistent
+spelling between owner and importer instead of "always boxed".

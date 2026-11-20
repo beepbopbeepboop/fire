@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Regression: a module-level global initialized from an IMPORTED module's
 container global (`import owner as N; K = N.K`) must be declared the SAME C
-way the owning module declares it -- a boxed `int64_t` word -- not as the raw
-`MojoSet *` pointer.
+way the owning module declares it -- one spelling in both globals structs --
+and the boxed/raw choice must be the one the owner's own declaration made.
 
 Symptom this pins (bootstrap-stage2-cc, 2026-11-18): in the whole-closure
 self-host translation unit `ownership_check.py`'s
@@ -16,10 +16,15 @@ read ("assignment to 'int64_t' from 'MojoSet *'").
 
 The declaration scan's module-attribute arm (`_gscan_declare_global` in
 mojo/backend_gimple/module_gen.py) copied the owner's SEMANTIC pointer type
-into the field and into `_global_c_decl_types`; every other container
-declaration path in the same scan boxes to `int64_t` and keeps the semantic
-type in `_global_var_types`. This test compiles the two-module shape and
-requires gcc to accept it and the program to actually test membership.
+into the field and into `_global_c_decl_types` instead of the owner's
+DECLARED field spelling. The invariant is ONE spelling, not "always boxed":
+a plain container global is boxed `int64_t`, while a dispatch table named in
+`dispatch_table_global_ctype` (since 44ba4f915 the three set-valued dispatch
+globals `_COMPTIME_TYPE_FUNCS`, `_PURE_ITER_CALLS` and
+`_COMPILE_TIME_INTRINSICS` are in that map) is declared RAW `MojoSet *` by
+the owner, and the importer must follow. This test compiles the two-module
+shape and requires gcc to accept it and the program to actually test
+membership.
 
 Run:  python3 test_gimple_imported_container_global.py
 """
@@ -74,13 +79,15 @@ def main():
         c_src = gimple_codegen._run_pipeline(
             FILES['reader.py'], filename=entry, do_imports=True)[0]
 
-        # One C spelling: the boxed word in BOTH modules' globals structs.
-        n_boxed = len(re.findall(r'^\s*int64_t _COMPTIME_TYPE_FUNCS;', c_src, re.M))
-        if n_boxed != 2:
+        # One C spelling: the importer's mirror field must carry the owner's
+        # declared spelling, whichever convention that is (boxed `int64_t`
+        # for a plain container, raw `MojoSet *` for a dispatch table).
+        decls = re.findall(
+            r'^\s*(int64_t|MojoSet \*) _COMPTIME_TYPE_FUNCS;', c_src, re.M)
+        if len(decls) != 2 or len(set(decls)) != 1:
             failures.append(
-                'expected both module fields boxed as `int64_t`; found '
-                f'{n_boxed} (raw pointer fields: '
-                f'{len(re.findall(r"MojoSet [*] _COMPTIME_TYPE_FUNCS;", c_src))})')
+                'expected BOTH module fields declared with ONE C spelling; '
+                f'found {decls!r}')
 
         c_file = os.path.join(td, 'imported_container_global.c')
         with open(c_file, 'w') as fh:
