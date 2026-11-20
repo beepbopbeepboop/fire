@@ -1274,12 +1274,17 @@ def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | 
 
 def _note_struct_import_alias(gen, module: str, alias: str, orig_name: str) -> str | None:
     """Record `alias -> orig_name` in `gen._struct_import_aliases` when
-    `from <module> import <orig_name> as <alias>` names a CLASS, and return
+    `from <module> import <orig_name> [as <alias>]` names a CLASS, and return
     the real bare name it was recorded under (or None).
 
     One implementation for both spellings that need it — the module-scope
     `_register_sym` and the function-scoped `_gen_stmt_FromImportStmt` — so
-    the two can never disagree about what an aliased class import means.
+    the two can never disagree about what a class import means. The
+    UNALIASED spelling is a class binding too (`from module_loader import
+    ModuleLoader`, the `bootstrap-stage2-cc` shape); treating it as an
+    imported FUNCTION made the constructor call site emit `C (...)` against
+    the class's own typedef and every read of the class value a weak
+    "unavailable in compiled mode" stub.
 
     Two gates keep this off the hot path, because the alternative (a probe
     per `from X import Y`) would re-parse an import for every imported
@@ -1291,24 +1296,58 @@ def _note_struct_import_alias(gen, module: str, alias: str, orig_name: str) -> s
       BEFORE any import registration runs, so membership here is a free
       dict test and says "some module in this closure defines a struct
       with exactly this name".
-    * that membership is then CONFIRMED against `module`'s own source, by
-      the same re-export-hop walk `_find_struct_home_module` already does.
-      Without the confirmation a `from mod_b import f` for a FUNCTION `f`
-      would be captured whenever some other module happens to declare a
-      struct also named `f`, and `f(...)` would then construct that struct
-      instead of calling the function. With it, the answer is "the class
-      really is reachable from the module the import statement names", so
-      a same-named struct in an unrelated module is not enough.
+    * when it is NOT there, the name is confirmed against the named
+      module's own source (`_find_imported_struct` — the parser, not the
+      closure table), and the class's REAL parsed StructDef + method
+      signatures are published into this gen (`_publish_imported_class`).
+      That is the case the closure table cannot see: a class whose defining
+      module a sibling subtree compiled, or an ancestor is still compiling
+      (the function-scoped-import-in-a-cycle shape on
+      `bootstrap-stage2-cc`). An import that is not a class in that module
+      still costs one scan of its cached statements and nothing else.
+    * that membership (or the published layout) is then CONFIRMED against
+      `module`'s own source, by the same re-export-hop walk
+      `_find_struct_home_module` already does. Without the confirmation a
+      `from mod_b import f` for a FUNCTION `f` would be captured whenever
+      some other module happens to declare a struct also named `f`, and
+      `f(...)` would then construct that struct instead of calling the
+      function. With it, the answer is "the class really is reachable from
+      the module the import statement names", so a same-named struct in an
+      unrelated module is not enough.
 
     The C-keyword rename (`auto` -> `_kw_auto`, `module_gen.py`'s
     `_c_kw_struct_renames`) is applied to the RECORDED name, because the
     consumer (the constructor dispatch) applies it to the name it is
     handed before looking it up, and both must agree.
     """
-    if not alias or alias == orig_name:
+    if not alias:
+        return None
+    # The compiler's OWN self-host type is never class-bound here:
+    # `GimpleGen`'s tables come from the self-host registries (a frozen
+    # signature table, a synthetic layout whose real node only takes the
+    # bare name over), and the pre-fix behaviour for an import of it is what
+    # every file in the compiler's own closure already relies on. Measured
+    # on the emit_resolve closure: recording `GimpleGen` as a class here
+    # turned a call site the closure lowers as an opaque 0 into a real
+    # `_alloc_GimpleGen` in a module section whose `_classattr_GimpleGen__*`
+    # definitions land much later — 200 hard C errors. Same exemption
+    # `_struct_method_qualifier` already makes for it.
+    if orig_name == 'GimpleGen':
         return None
     if orig_name not in gen.struct_field_types:
-        return None
+        if _find_imported_struct(gen, module, orig_name) is None:
+            return None
+        if not gen._publish_imported_class(module, orig_name):
+            return None
+    else:
+        # The layout is already in the shared table, but it may have been
+        # registered by a SIBLING subtree's compile — in which case this
+        # gen's own per-module tables (`func_return_types` is re-seeded per
+        # `gen_module`) have no method signatures and `C(...).m()` lowers
+        # through the dynamic dispatch. Publishing them is best-effort: a
+        # class from an un-inlined module (a dylib's) has a layout but no
+        # in-unit methods, and that must keep working exactly as before.
+        gen._publish_imported_class(module, orig_name)
     if not gen._find_struct_home_module(module, orig_name):
         return None
     _real = gen._c_kw_struct_renames.get(orig_name, orig_name)

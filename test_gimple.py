@@ -7497,9 +7497,16 @@ def root_cas_hash_call(parts) -> str:
             print(f"FAIL  {name}: {e}")
             _FAIL += 1
             return
-        start = c_src.find("root_cas_hash_call_")
-        start = c_src.find("root_cas_hash_call_", start + 1)
-        end = c_src.find("\n}", start)
+        # Extract the DEFINITION's body, not the second textual occurrence of
+        # the mangled name: the preamble also emits a guarded extern for it
+        # (`#ifndef _MOJO_STUB_<sym>`), whose guard name CONTAINS the mangled
+        # name, so "find the second occurrence" landed on that guard and the
+        # slice then ran until the next unrelated `\n}` (2.3 MB, measured
+        # 2026-11-18, as soon as a closure change made the extern appear).
+        # A definition is spelled `... (params)\n{`; the extern ends in `;`.
+        _m = re.search(r'\nchar \* root_cas_hash_call_\w+ \([^)]*\)\n\{', c_src)
+        start = _m.start() if _m else -1
+        end = c_src.find("\n}", start) if start >= 0 else -1
         body = c_src[start:end] if start >= 0 and end >= 0 else ""
         if "cas__hash (" not in body or "mojo_fnptr_call" in body:
             print(f"FAIL  {name}: qualified function call used function-pointer lowering")
