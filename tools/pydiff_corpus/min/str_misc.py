@@ -1,0 +1,6 @@
+print("a-b-c".partition("-"))
+print("a-b-c".rpartition("-"))
+print("Hello World".swapcase())
+print("hello world".title())
+print("a\nb\nc".splitlines())
+print("abc".isalpha(), "123".isdigit(), "a1".isalnum())

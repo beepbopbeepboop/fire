@@ -12147,6 +12147,113 @@ char *mojo_str_center(char *s, int64_t width, char *fill) {
     return _str_pad(s, width, fill, 2);
 }
 
+/* `s.zfill(width)`: pad on the left with '0' to `width`, after a leading sign. */
+char *mojo_str_zfill(char *s, int64_t width) {
+    if (!s) s = (char *)"";
+    size_t slen = strlen(s);
+    int64_t n = mojo_str_codepoint_len(s);
+    if (width <= n) return _str_fresh_copy(s);
+    size_t pad = (size_t)(width - n);
+    char *out = (char *)malloc(slen + pad + 1);
+    if (!out) return s;
+    size_t o = 0, i = 0;
+    if (s[0] == '+' || s[0] == '-') { out[o++] = s[0]; i = 1; }
+    memset(out + o, '0', pad);
+    o += pad;
+    memcpy(out + o, s + i, slen - i);
+    out[o + slen - i] = '\0';
+    return out;
+}
+
+/* `s.strip(chars)`: both ends, every character in the SET `chars`. */
+char *mojo_str_strip_chars(char *str, char *chars) {
+    if (!str) return str;
+    char *r = mojo_str_rstrip_chars(str, chars);
+    char *l = mojo_str_lstrip_chars(r, chars);
+    if (l != r) free(r);
+    return l;
+}
+
+/* `s.split(sep, maxsplit)`: at most `maxsplit` splits (negative: no limit).
+ * Whitespace mode (`sep` NULL or empty) skips leading whitespace and leaves
+ * the remainder, trailing whitespace included, as the last field. */
+MojoList *mojo_str_split_n(char *s, char *sep, int64_t maxsplit) {
+    if (maxsplit < 0) return mojo_str_split(s, sep);
+    MojoList *l = mojo_list_new();
+    if (!s) return l;
+    int64_t n = 0;
+    if (!sep || !*sep) {
+        const char *p = s;
+        for (;;) {
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            if (n >= maxsplit) { mojo_list_append_str(l, strdup(p)); return l; }
+            const char *q = p;
+            while (*q && !isspace((unsigned char)*q)) q++;
+            size_t w = (size_t)(q - p);
+            char *seg = (char *)malloc(w + 1);
+            memcpy(seg, p, w);
+            seg[w] = '\0';
+            mojo_list_append_str(l, seg);
+            n++;
+            p = q;
+        }
+        return l;
+    }
+    size_t sep_len = strlen(sep);
+    const char *p = s;
+    const char *hit;
+    while (n < maxsplit && (hit = strstr(p, sep)) != NULL) {
+        size_t w = (size_t)(hit - p);
+        char *seg = (char *)malloc(w + 1);
+        memcpy(seg, p, w);
+        seg[w] = '\0';
+        mojo_list_append_str(l, seg);
+        p = hit + sep_len;
+        n++;
+    }
+    mojo_list_append_str(l, strdup(p));
+    return l;
+}
+
+/* `s.replace(old, new, count)`: the first `count` occurrences (negative: all).
+ * An empty `old` matches before every code point and at the end. */
+char *mojo_str_replace_n(char *s, char *old, char *neu, int64_t count) {
+    if (!s) s = (char *)"";
+    if (!old) old = (char *)"";
+    if (!neu) neu = (char *)"";
+    size_t sl = strlen(s), ol = strlen(old), nl = strlen(neu);
+    if (count == 0) return _str_fresh_copy(s);
+    size_t occ = ol ? sl / ol : sl + 1;
+    char *out = (char *)malloc(sl + occ * nl + 1);
+    if (!out) return s;
+    size_t o = 0;
+    int64_t done = 0;
+    const char *p = s;
+    if (ol == 0) {
+        for (;;) {
+            if (count < 0 || done < count) { memcpy(out + o, neu, nl); o += nl; done++; }
+            if (!*p) break;
+            unsigned char c = (unsigned char)*p;
+            size_t cl = (c < 0x80) ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4;
+            memcpy(out + o, p, cl); o += cl; p += cl;
+        }
+    } else {
+        const char *hit;
+        while ((count < 0 || done < count) && (hit = strstr(p, old)) != NULL) {
+            size_t w = (size_t)(hit - p);
+            memcpy(out + o, p, w); o += w;
+            memcpy(out + o, neu, nl); o += nl;
+            p = hit + ol;
+            done++;
+        }
+        size_t rest = strlen(p);
+        memcpy(out + o, p, rest); o += rest;
+    }
+    out[o] = '\0';
+    return out;
+}
+
 char *mojo_str_expandtabs(char *str, int tabsize) {
     if (!str) return str;
     if (tabsize <= 0) tabsize = 8;
@@ -15176,7 +15283,7 @@ int64_t _char_replace_impl(int64_t s_i, int64_t old_i, int64_t new_i) {
     if (!s) return s_i;
     if (!old_s || !new_s) return (int64_t)_str_fresh_copy(s);
     size_t old_len = strlen(old_s), new_len = strlen(new_s);
-    if (old_len == 0) return (int64_t)_str_fresh_copy(s);
+    if (old_len == 0) return (int64_t)mojo_str_replace_n(s, old_s, new_s, -1);
     int count = 0;
     const char *p = s;
     while ((p = strstr(p, old_s)) != NULL) { count++; p += old_len; }

@@ -45,6 +45,15 @@ min/print_sep_end.py
 min/slice_step.py
 min/slice_str_step.py
 min/sort_strings.py
+min/str_find_args.py
+min/str_justify.py
+min/str_methods.py
+min/str_misc.py
+min/str_replace_count.py
+min/str_split_max.py
+min/str_strip_chars.py
+min/str_sumstart.py
+min/str_zfill.py
 params/01_default_int.py
 params/02_default_str.py
 params/04_default_bool_flags.py
