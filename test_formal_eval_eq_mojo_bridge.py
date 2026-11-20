@@ -301,30 +301,41 @@ class TestBridgeSimpset(unittest.TestCase):
 
         `_exec_code_limit` is where the function bodies end and the interned
         strings begin.  A decode lemma for a data word is an `rfl` over the
-        WHOLE code list, so on an image with 1 220 bytes of trap messages those
-        lemmas are ~40 full kernel walks that no proof reads.  The step lemmas
-        already stop there; the decode lemmas did not.
+        WHOLE code image, so on an image with 1 220 bytes of trap messages
+        those lemmas are ~40 full kernel walks that no proof reads.  The step
+        lemmas already stop there; the decode lemmas did not.
+
+        The image is read back from `bigbody_code_blocks` (64-byte chunks,
+        flattened here), not from a flat list: the flat spelling no longer
+        exists in the arm64 lane, and the bytes between the two markers are
+        the image and nothing else.
         """
         import formal.arm64_proof_gen as AP
 
         text = _read(self.proofs["bigbody"])
-        m = re.search(r"def bigbody_code_list : List UInt8 :=\n  \[(.*?)\]",
-                      text, re.DOTALL)
-        self.assertIsNotNone(m, "the proof declares no `bigbody_code_list`")
-        listed = bytes(int(x, 16) for x in
-                       re.findall(r"0x([0-9a-fA-F]{2})", m.group(1)))
-        # The emitted list is `code + [0xc0, 0x03, 0x5f, 0xd6]` (the RET
+        self.assertIn(
+            "def bigbody_code_blocks : List (List UInt8) :=\n", text,
+            "the proof declares no `bigbody_code_blocks`")
+        start = text.index("def bigbody_code_blocks")
+        end = text.index("def bigbody_code (addr")
+        listed = bytes(int(x, 16) for x in re.findall(
+            r"0x([0-9a-fA-F]{2})", text[start:end]))
+        # The emitted image is `code + [0xc0, 0x03, 0x5f, 0xd6]` (the RET
         # sentinel `_gen_code_defs` appends); `_exec_code_limit` is asked about
         # the code WITHOUT it, as every emitter does.
         self.assertEqual(listed[-4:], b"\xc0\x03\x5f\xd6",
-                         "no appended RET sentinel in `bigbody_code_list`")
+                         "no appended RET sentinel in `bigbody_code_blocks`")
+        self.assertEqual(
+            len(listed), 2377,
+            "the `bigbody` image moved (2 373 bytes of code + the 4-byte RET "
+            "sentinel); re-derive this pin and the block reader's shape")
         code = listed[:-4]
-        end = AP._exec_code_limit(code)
-        self.assertLess(end, len(code),
+        endlim = AP._exec_code_limit(code)
+        self.assertLess(endlim, len(code),
                         "the fixture interns no string, so this asserts "
                         "nothing -- it needs a program whose image carries "
                         "the runtime's diagnostic messages")
-        last = end // 4 - 1
+        last = endlim // 4 - 1
         self.assertIn(f"theorem bigbody_insn_{last} ", text,
                       f"the decode lemmas stopped before the executable "
                       f"region's last word ({last})")
@@ -333,6 +344,71 @@ class TestBridgeSimpset(unittest.TestCase):
             "a decode lemma is declared for a word PAST `_exec_code_limit`, "
             "i.e. for an interned string's bytes; each is a full `getD` walk "
             "the proof never reads")
+
+    def test_the_code_image_is_read_per_block_not_walked_flat(self):
+        """The byte reader is the two-level block read, not a flat-list walk.
+
+        `arm64_step` reads the instruction word at every step of every CFG
+        path, and the kernel pays for the read at every occurrence in the
+        universal proof's terms.  The flat-list reader is one `List.getD`
+        walk of the WHOLE 2 377-byte image per byte — measured on `bigbody`
+        as the difference between its generated proof fitting the
+        `-M 6144` budget and breaching it.  The block reader takes one `getD`
+        per level (38 blocks of 64 bytes, last one short), so this pins the
+        read shape itself rather than the image, which the previous row pins.
+        The dylib lane keeps the flat list on purpose
+        (`test_formal_call_proof_gen.py` pins `dylib_code_list`'s shape), so
+        the assertion is on the arm64 `bigbody` reader.
+        """
+        text = _read(self.proofs["bigbody"])
+        self.assertIn(
+            "def bigbody_code (addr : Nat) : UInt8 :=\n"
+            "  if addr < 4294968256 then 0\n"
+            "  else match bigbody_code_blocks.getD ((addr - 4294968256) / 64) [] with\n"
+            "    | c => c.getD ((addr - 4294968256) % 64) 0",
+            text,
+            "the byte reader is not the two-level block read: a flat-list "
+            "`getD` is O(image) per read, and the universal proof reads one "
+            "byte per step on every CFG path")
+        self.assertNotIn(
+            "bigbody_code_list.getD (addr - 4294968256) 0", text,
+            "the flat-list walk is back in the byte reader")
+
+    def test_the_block_advance_applies_its_runs_certificate_once(self):
+        """The per-block advance inhabits its `∃ s, runs … = some s` by the
+        already-emitted `hcert`, not by a second application of the
+        certificate.
+
+        The old order proved the existential with `refine ⟨(state), ?_⟩;
+        exact cert` and then re-emitted `hcert := cert`: the block's runs
+        theorem instantiated at a nested run-exit state — whose kernel check
+        is the advance's whole cost — applied twice per block (894
+        applications on `bigbody`'s 64 paths).  The top-level site emits
+        `hcert` first and inhabits the existential by it; this pins that the
+        per-block site does too, and that each advance cites exactly the
+        `hcert` it emitted.
+        """
+        text = _read(self.proofs["bigbody"])
+        self.assertRegex(
+            text,
+            r"have hrun_ex_\d+ : ∃ s : Arm64State, [^\n]*= some s := ⟨\(",
+            "the per-block advance no longer inhabits its run-exit "
+            "existential by a term")
+        self.assertNotRegex(
+            text,
+            r"have hrun_ex_\d+ : ∃ s : Arm64State, [^\n]*= some s := by",
+            "the per-block advance re-derives its existential tactic-style "
+            "(`refine ⟨…, ?_⟩; exact cert`), i.e. applies the block's runs "
+            "certificate a second time")
+        n_hcert = len(re.findall(
+            r"have hcert_\d+ : arm64_runs bigbody_code \d+ ", text))
+        n_adv = len(re.findall(
+            r"have hrun_ex_\d+ : ∃ s : Arm64State, ", text))
+        self.assertEqual(
+            n_hcert, n_adv,
+            f"{n_hcert} run-certificate `hcert`s for {n_adv} advances: a "
+            f"certificate is emitted that no advance cites, or an advance "
+            f"has no certificate to cite")
 
 
 class TestBridgeTypechecks(unittest.TestCase):
