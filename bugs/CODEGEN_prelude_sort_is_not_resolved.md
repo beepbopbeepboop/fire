@@ -52,6 +52,81 @@ can be emitted at all. The earlier "invalid use of void expression" in this doc 
 symptom of the `_util_pairs` row (the `void` declaration was the one the call bound to), not a
 separate return-type bug: with the row removed the call no longer reaches a `void` declaration.
 
+**2026-11-19 — planning round for step 2 (the real `sort`).** Step 2 is a feature, not a one-line
+registration. Everything below was established by reading the code; nothing in it has been
+changed or run beyond the measurement above. The next round can start at item 1 without
+re-investigating.
+
+*Where the real sort lives.* The stdlib is the external checkout
+`/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib` (not in this worktree; `module_loader.py`
+~line 450 searches it). The file is `std/builtin/sort.mojo`, with two public overloads:
+
+- line 485: `def sort[T: Copyable, origin: MutOrigin, //, *, stable: Bool = False](span: Span[T, origin], cmp_fn: Some[def(T, T) -> Bool])`
+- line 530: `def sort[T: Copyable & Comparable, origin: MutOrigin, //, *, stable: Bool = False](span: Span[T, origin])`
+
+Both delegate to the private helpers `_insertion_sort` (34), `_quicksort_partition_right/left`
+(61/89), `_heap_sort_fix_down`/`_heap_sort` (114/136), `_delegate_small_sort` (164), `_quicksort`
+(194). `partition` (434) has the same `Span`/`Some[def]` shape.
+
+*Where the current path stops, by code.*
+
+- `elaborate.py::_unify_param_ann` (3066) binds a parameter only when the annotation IS the type
+  parameter, or is `Scalar[..]`/`SIMD[..]`. `Span[T, origin]` is neither, so it returns `{}`
+  and `infer_type_args` (3492) declines the call. That is the "declined" half of the failure.
+- `mojo/backend_gimple/emit_resolve.py::_elaborate_generic_call` (3630) lowers the arguments and
+  hands their C types to the elaborator. A `List` argument arrives as `MojoList *`; the callee
+  expects a runtime `Span *` (the ctype is already known: emit_resolve.py:3561 lists `Span *`).
+  Nothing converts one into the other, so even a bound instance would be passed the wrong ABI.
+- `Some[def(T, T) -> Bool]` (the `cmp_fn` parameter) is not an annotation shape that
+  `_unify_param_ann` handles either. The one-argument overload (530) avoids it, so the
+  simple `sort(p)` call needs the `Span` work only.
+- `gimple_codegen.py:4574` `_PRELUDE_GENERICS = {'alloc': 'std.memory.unsafe_pointer'}` is the
+  registration step 2 adds `'sort': 'std.builtin.sort'` to. Done alone it reproduces the
+  measured "invalid conversion in gimple call" / "invalid use of void expression" failure.
+- `elaborate.extract_fn_source(module_src, g, arg_count=...)` already selects by arity, so the
+  two overloads are distinguishable once the `Span` binding exists.
+
+*Decisions needed, with a recommendation for each.*
+
+1. **Where the List->Span conversion lives.** (a) In the elaborator, teaching `_unify_param_ann`
+   the shape `Span[T, o]` <- `List[X]` (binding `T := X` from the list element type and `o` to
+   the erased origin) plus a call-site conversion in `_elaborate_generic_call`; or (b) rewrite the
+   call site before elaboration into `sort(Span(p))`-style source. **Recommend (a).** (b) would
+   special-case one spelling and leave `Counter.most_common` (`std/collections/counter.mojo:948`,
+   `sort(items, comparator)`) on the old path. The conversion must be one function that every
+   `Span`-taking generic call uses, not a `sort`-only branch.
+2. **Which overload a bare `sort(p)` selects.** Recommend arity selection through
+   `extract_fn_source(..., arg_count=1)`, which is already there. Do NOT special-case the name.
+3. **The comparator.** The one-argument overload needs only `T: Comparable`, so step 2's test
+   does not need `Some[def]`. `Some[def(T, T) -> Bool]` for `Counter.most_common` is a separate,
+   later decision (its own unify rule for a function-value argument); record it, do not fold it in.
+
+*Implementation plan, in order.*
+
+1. `elaborate.py::_unify_param_ann`: add the `Span[T, o]` <- `List[X]` case beside the
+   `Scalar`/`SIMD` cases, returning `{T: X, o: <erased origin>}`. Reject the shape (return `{}`)
+   for any other argument, so a `Span` parameter given a `Pointer` still declines. Unit test:
+   `infer_type_args` on `Span[T, origin]` with a `List[Int8]` argument binds `T = Int8` and does
+   not bind a `Pointer` argument.
+2. `emit_resolve.py::_elaborate_generic_call`: when a parameter's annotation is `Span[...]` and the
+   argument's C type is `MojoList *`, emit a `Span` from the list's data pointer and length
+   (the same runtime struct `Span *` already uses) and pass that. One helper, reused by any
+   future `Span` parameter.
+3. Make the instance compile: `_quicksort`, `_insertion_sort`, `_delegate_small_sort` use
+   `comptime` constants and `Span` subscripts/`swap`. Measure which of them fail after steps
+   1-2 (a single-unit compile of the instance, not a stdlib sweep) and fix each by its own
+   doc'd gap, not by special-casing `sort`.
+4. `gimple_codegen.py:4574`: add `'sort': 'std.builtin.sort'` to `_PRELUDE_GENERICS`. Only now
+   does the bare name elaborate the real sort instead of the stub.
+5. Quick tests (the only gate this lane runs): the `infer_type_args` unit test from step 1, and
+   the Done-when program below. `test_gimple.py` next to `test_prelude_sort_without_import_is_an_honest_stub`.
+
+*Stop condition for step 2.* If step 3 shows the helper chain needs a feature larger than
+`Span`/`List` (for example the `Some[def]` comparator on the 1-arg path, or `origin` parameters
+that the elaborator cannot erase), land steps 1-2 with their unit test and record the exact
+failing helper here. Do not register `sort` in `_PRELUDE_GENERICS` until the instance compiles,
+or the stub becomes a silent miscompile instead of an honest one.
+
 ## What was tried
 
 Adding `'sort': 'std.builtin.sort'` to `GimpleGen._PRELUDE_GENERICS` (the `alloc` mechanism,
