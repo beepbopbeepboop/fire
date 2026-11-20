@@ -969,7 +969,6 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_tb_frame': ['int64_t', 'int64_t'],
     'mojo_tb_lineno': ['int64_t', 'int64_t'],
     'mojo_tb_next': ['int64_t', 'int64_t'],
-    'mojo_textwrap_dedent': ['char *', 'char *'],
     'mojo_traceback': ['int64_t', 'int64_t'],
     'mojo_truthy_cstr': ['int', 'char *'],
     'mojo_truthy_word': ['int', 'int64_t'],

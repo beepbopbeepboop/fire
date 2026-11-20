@@ -20833,13 +20833,13 @@ def gen_module_impl(self, stmts: list):
         ('MojoDict__reserved',     'int64_t MojoDict__reserved(...);'),
         ('ord',                    'int64_t ord(...);'),         # FIXME: should be int64_t ord(char *c) [takes char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('chr',                    'int64_t chr(...);'),        # FIXME: should be char *chr(int64_t i) [returns char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
-        # The prelude `sort` (std/prelude: `from std.builtin.sort import sort`)
-        # has no definition in the runtime or in this codegen, so a call that
-        # reaches this stub was an undefined symbol at LINK time. It is the same
-        # honest weak stub `_lnc_unknown` emits for an unresolved name: the
-        # program links and says what it did not do. The real `sort` lands with
-        # std.builtin.sort compiling (bugs/CODEGEN_prelude_sort_is_not_resolved.md).
-        ('sort',                   '__attribute__((weak)) void sort(...) { mojo_print((char *)"sort: unavailable in compiled mode"); }'),
+        # No `sort` entry here: an unimported prelude `sort` gets the honest
+        # weak stub from the unknown-name path (`_is_unknown_stmt` in
+        # emit_stmts.py) only in a TU that calls it. A table entry is emitted
+        # into EVERY module's artifact, so every closure carried a stub
+        # definition whether or not a call reached it, and the closure check
+        # (`fire.py --dump-full`, bootstrap-stage1-transitive) reads that as an
+        # incomplete closure (bugs/CODEGEN_prelude_sort_is_not_resolved.md).
         # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('Span_byte_length',       'int64_t Span_byte_length(...);'),
         ('_stat_macos',            'int64_t _stat_macos(...);'),
