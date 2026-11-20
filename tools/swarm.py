@@ -25,7 +25,6 @@ import integrate as I
 import task_text as T
 
 PREFIXES = ("bug-", "fix-")
-CTL_TIMEOUT_S = 900          # a control.py step that is not done in 15 minutes is wedged, not slow
 def marker(word):
     """A doc's control line `WORD: <value>` as a regex. The line is written by workers inside Markdown, and the
     commonest way to write it is as a heading (`# SPLIT: ...`, 2026-11-12: a replan's perfectly good decomposition
@@ -485,31 +484,10 @@ def feed_view():
     return 0
 
 
-def ctl_script(script, args, timeout=CTL_TIMEOUT_S):
-    """ctl for another tools/ script (cpu_cap.py)."""
-    try:
-        return subprocess.run([sys.executable, os.path.join(HERE, script)] + list(args),
-                              capture_output=True, text=True, cwd=C.MAIN, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        log("%s %s: timed out after %d s; the pass goes on without it" % (script, " ".join(args), timeout))
-        return subprocess.CompletedProcess(args, 1, "", "")
-
-
-def ctl(args, timeout=CTL_TIMEOUT_S):
-    """Run one control.py subcommand under a timeout. A pass runs these in sequence, and an untimed child that wedges
-    holds the whole pass: no feed, no refill, every slot idle (2026-11-20: cleanup ran 6+ minutes a pass and the feed
-    never came). A timeout is logged, and the pass goes on without that step."""
-    try:
-        return subprocess.run([sys.executable, os.path.join(HERE, "control.py")] + list(args),
-                              capture_output=True, text=True, cwd=C.MAIN, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        log("control %s: timed out after %d s; the pass goes on without it" % (" ".join(args), timeout))
-        return subprocess.CompletedProcess(args, 1, "", "")
-
-
 def probe_free():
     """Ask every banned daily free tier one word (control.py probe-free), so its ban ends when it answers."""
-    r = ctl(["probe-free"])
+    r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "probe-free"],
+                       capture_output=True, text=True, cwd=C.MAIN)
     for l in r.stdout.splitlines():
         if l.strip():
             log(l)
@@ -945,7 +923,7 @@ def probe(batch, stdlib=True):
     r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if stdlib else []) +
                        ["--probe", "--only"] + batch,
                        capture_output=True, text=True, cwd=C.MAIN)
-    verdict, merged, failing = classify_probe(r.stdout + r.stderr)
+    verdict, merged, failing, _ = classify_probe(r.stdout + r.stderr)
     return verdict, merged, failing, r.stdout + r.stderr
 
 
@@ -1255,15 +1233,15 @@ def main():
             guard_ok = live_guard()
             if guard_ok:
                 apply_moves(load_state())        # a class change is a file move, so it lands before the feed reads the tree
-            ctl(["reap"])  # jobs of finished workers
+            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "reap"], capture_output=True, cwd=C.MAIN)  # jobs of finished workers
             # keep the control plane honest: reconcile queue/registry with the filesystem and recover dead workers
-            sr = ctl(["sync", "--restart-dead"])
+            sr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "sync", "--restart-dead"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (sr.stdout or "").splitlines():
                 if line.strip():
                     text = line.strip()
                     log(text if text.startswith("sync:") else "sync: " + text)   # control.py labels its own lines
             # safe, conservative cleanup every pass: only removes merged/clean/idle trees with no outside claim
-            cr = ctl(["cleanup"])
+            cr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (cr.stdout or "").splitlines():
                 if line.strip() and ("removed" in line.lower() or "deleted" in line.lower() or "worktree" in line.lower()):
                     log("cleanup: " + line.strip())
@@ -1283,10 +1261,10 @@ def main():
             probe_free()
             drop_queued_busy()
             log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retired, refill(a.target if a.target is not None else C.pool_total())))
-            ctl_script("cpu_cap.py", ["ratchet"])
+            subprocess.run([sys.executable, os.path.join(HERE, "cpu_cap.py"), "ratchet"], capture_output=True, cwd=C.MAIN)
             if guard_ok and land():
                 verify_async()
-                ctl(["cleanup"])  # landed trees go
+                subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")
         except (Exception, SystemExit) as e:      # an unattended loop must survive one bad pass. SystemExit too: control.git()
             #   and friends call sys.exit on a failed git command, which is not an Exception and used to end this
