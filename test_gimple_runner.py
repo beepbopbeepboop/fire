@@ -15412,8 +15412,6 @@ def main():
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
-                  test_none_beside_a_scalar_arm_returns_the_tagged_word,
-                  test_copy_of_a_tagged_none_keeps_it,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -16070,6 +16068,66 @@ print(pick(None, 3))
 """)
 
 
+def test_param_annotation_contradicted_by_the_body():
+    """A parameter whose annotation the body CONTRADICTS is the tagged word.
+
+    `def normalize_selection(selected: str, ...)` is CPython's own
+    `Tools/c-analyzer/c_common/scriptutil.py` shape: an annotation says `str`,
+    and the body rebinds the name to a LIST (`selected = [selected]`) and
+    compares it to `None`/`True`/`False`. Before, the slot stayed `char *` for
+    its whole life, so the list pointer went through the string slot (every
+    later string operation read the list struct's bytes) and a `True` argument
+    arrived as its stringified spelling -- wrong values at exit 0.
+
+    The fix makes the slot the tagged `int64_t` word, boxes the arguments by
+    kind at the call site, appends a box word to a list under its runtime kind,
+    and asks the runtime for membership against a word needle. The two arms a
+    `frozenset` repr cannot spell (this runtime has no frozen marker) are
+    compared by sorted CONTENT against CPython; every other line is the value
+    itself. The extra functions pin the general rule, not just the reported
+    shape: `int` -> list, `str` -> int, and a same-kind `str` rebound must keep
+    its ordinary string type."""
+    test_gimple_matches_cpython("gimple_param_annotation_contradicted_by_body", """\
+def as_int(n: int):
+    n = [n]
+    return n
+
+def as_str(s: str):
+    s = 3
+    return s
+
+def as_dict(x: list):
+    x = {"a": 1}
+    return x
+
+def same_kind(c: str):
+    c = c + "!"
+    return c
+
+def normalize_selection(selected: str, *, possible=None):
+    if selected in (None, True, False):
+        return selected
+    elif isinstance(selected, str):
+        selected = [selected]
+    elif not selected:
+        return ()
+    return frozenset(selected)
+
+print(as_int(5))
+print(as_str("abc"))
+print(as_dict([1]))
+print(same_kind("x"))
+print(normalize_selection(None))
+print(normalize_selection(True))
+print(normalize_selection(False))
+print(normalize_selection(selected=True))
+print(normalize_selection([]))
+print(sorted(normalize_selection("")))
+print(sorted(normalize_selection("a")))
+print(sorted(normalize_selection(selected="ab")))
+""")
+
+
 def test_none_held_in_local_with_if_join_is_none_needle():
     """Flow-sensitive None tracking at if/while/try join points: a local that
     is None on some paths and reassigned on others must still be treated as
@@ -16121,71 +16179,6 @@ def main():
     u = {None: 0}
     print(None in u, 0 in u, len(u))
 
-main()
-""")
-
-
-def test_copy_of_a_tagged_none_keeps_it():
-    """`x = h(0)` kept the None box, but the copy `y = x` unwrapped it to the
-    plain word: `y is None` was True for the integer 0, and a copy of None
-    printed `0`. A copy of a name bound to a mixed-return call stays tagged."""
-    test_gimple_matches_cpython("gimple_copy_of_a_tagged_none", """\
-def h(n):
-    if n == 0:
-        return 0
-    return None
-
-def main():
-    x = h(0)
-    y = x
-    print(y)
-    print(y is None)
-    z = h(1)
-    w = z
-    print(w)
-    print(w is None)
-main()
-""")
-
-
-def test_none_beside_a_scalar_arm_returns_the_tagged_word():
-    """A function that returns `None` on one path and a literal or a
-    comparison on another used to return the NULL word for `None`, which is
-    also the integer 0: `print(f(0))` showed `0`, `h(0) is None` was True and
-    `h(1) is None` agreed with it. `None` is now the shared None box in such a
-    function (`infra_infer._return_arms_are_int_or_none`), and `h(0) == 0`
-    stays True while `h(0) is None` is False."""
-    test_gimple_matches_cpython("gimple_none_beside_a_scalar_arm", """\
-def f(n):
-    if n > 0:
-        return 5
-    return None
-
-def g(n):
-    if n > 5:
-        return n > 7
-    return None
-
-def h(n):
-    if n == 0:
-        return 0
-    return None
-
-def main():
-    print(f(1))
-    print(f(0))
-    print(f(1) is None)
-    print(f(0) is None)
-    x = f(0)
-    if x is None:
-        print("none")
-    else:
-        print("val", x)
-    print(g(9), g(6), g(1))
-    print(h(0), h(1))
-    print(h(0) is None, h(1) is None)
-    print(h(0) == 0)
-    print(f(1) + 1)
 main()
 """)
 

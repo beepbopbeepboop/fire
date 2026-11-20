@@ -56,4 +56,11 @@ bool, or a string that takes the list path, gets a silently wrong value.
 ## Tests that will prove it
 
 A compiled-vs-CPython case in `test_gimple_runner.py` over the five calls above (the set arm sorted so its
-order is deterministic), plus a refusal case for decision 1 if the diagnostic route is taken.
+order is deterministic), plus the general shape in both directions (`int` parameter rebound to a list,
+`str` parameter rebound to an int, and a same-kind `str` rebound that must keep its string type).
+
+## Done when
+
+`test_gimple_runner.py::test_param_annotation_contradicted_by_the_body` passes: the annotated parameter
+rebound to a list (and the int/str neighbours) matches CPython, with the set arms compared by sorted content
+because this runtime's `frozenset` has no frozen marker to spell.
