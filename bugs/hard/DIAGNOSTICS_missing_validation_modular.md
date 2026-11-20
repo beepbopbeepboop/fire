@@ -546,3 +546,23 @@ table; `_proven_arg_mojo_type` knows only a parameter's annotation and a direct 
 `_proven_arg_mojo_type` returns `S[NotMovable]` for the IdentExpr `s`, `infer_type_args` binds `I`, and the
 existing `Iterator` conformance check fires (it is proven: `test_trait_requirement_evidence_diagnostic.py`).
 The positive control to pin it with: the same program with a `Movable` payload must still compile.
+
+## Status (2026-11-20): `identifier_source_range` FIXED
+
+`identifier_source_range.mojo` now PASSES its real FileCheck line (`tools/modular_filecheck.py`, rc=1):
+`var `!` = __mlir_attr.`1 : si32``; `foo(`!`)` against `def foo(x: __mlir_type.index)` is refused at the
+argument with `error: invalid call to 'foo': value passed to 'x' cannot be converted to '__mlir_type.index'`,
+and the backtick-escaped name does not leak an `unexpected character`.
+
+The existing `_check_mlir_type_argument_calls` (`fire_compiler.py`) only refused literals and primitive-typed
+variables. A `var` initialised from an MLIR attribute written with its type is now typed `__mlir_type.<T>`
+(`_mlir_attr_value_type`, read from the text after the last ` : `), and `_mlir_argument_refused` refuses it only
+when that type differs from the parameter's own MLIR type. So the matching case (`1 : index` into an
+`__mlir_type.index` parameter) is accepted. Positional and keyword arguments both go through it.
+
+Tests: `test_mlir_annotation_diagnostic.py` +3 (refused with the location pinned, the matching-type control,
+keyword). Checked: `compile_stdlib.py` 610 / 0 unexpected, `build_stdlib_dylib.py` 0 skips (the stdlib uses
+`__mlir_attr` values heavily, so no false positive).
+
+Remaining: `enum_exhaustive_errors` (builtin `EnumLike` synthesis), `moco_4400` (see the entry above: the
+type of a same-module generic struct local is never recorded), and the `tuple_*` type-checker cases.

@@ -2793,7 +2793,27 @@ def _mlir_decl_type(decl):
     if isinstance(decl.type_ann, str):
         return decl.type_ann if decl.type_ann in _MLIR_REFUSED_PRIMITIVES else None
     if decl.value is not None:
+        _attr_type = _mlir_attr_value_type(decl.value)
+        if _attr_type is not None:
+            return _attr_type
         return _MLIR_LITERAL_INIT_TYPES.get(type(decl.value).__name__)
+    return None
+
+
+def _mlir_attr_value_type(value):
+    """`__mlir_type.<T>` for an MLIR attribute value written with its type
+    (`__mlir_attr.`1 : si32``), or None. The member text is the attribute's own
+    spelling, so its type is what follows the last ` : `. Such a value is an MLIR
+    value of type T, not a primitive: it is accepted where a `__mlir_type.<T>`
+    is expected and refused where a different MLIR type is (see
+    `_mlir_argument_refused`)."""
+    if (type(value).__name__ == "MemberExpr" and type(value.obj).__name__ == "IdentExpr"
+            and value.obj.name == "__mlir_attr"
+            and isinstance(value.member, str) and value.member.startswith("`")
+            and value.member.endswith("`") and " : " in value.member):
+        t = value.member[1:-1].rsplit(" : ", 1)[1].strip()
+        if t:
+            return "__mlir_type." + t
     return None
 
 
@@ -2952,26 +2972,33 @@ def _check_mlir_type_argument_calls(stmts, filename) -> None:
             for i, a in enumerate(node.args):
                 if type(a).__name__ == "UnaryOp":
                     break  # `*x` at the call site shifts every later position
-                if i in mlir and _mlir_argument_refused(a, table):
+                if i in mlir and _mlir_argument_refused(a, table, fn.params[i][1]):
                     _raise_mlir_refusal(fn_node.name, mlir[i], fn.params[i][1], a, filename)
             for kw_name, kw_value in (node.kwargs or []):
                 hit = [i for i, pname in mlir.items() if pname == kw_name]
-                if hit and _mlir_argument_refused(kw_value, table):
+                if hit and _mlir_argument_refused(kw_value, table, fn.params[hit[0]][1]):
                     _raise_mlir_refusal(fn_node.name, kw_name, fn.params[hit[0]][1], kw_value, filename)
         children = list(_mlir_child_scopes(content))
         for child_content, child_bindings in reversed(children):
             work.append((child_content, {**table, **child_bindings}))
 
 
-def _mlir_argument_refused(value, table):
+def _mlir_argument_refused(value, table, param_type=None):
     """Whether a call argument must be refused at an MLIR parameter: a
-    literal of one of _MLIR_REFUSED_LITERALS, or an identifier the scope table
-    resolves to a primitive value type."""
+    literal of one of _MLIR_REFUSED_LITERALS, an identifier the scope table
+    resolves to a primitive value type, or an identifier holding an MLIR
+    attribute of a type other than the parameter's (`__mlir_attr.`1 : si32``
+    passed to `__mlir_type.index`)."""
     kind = type(value).__name__
     if kind in _MLIR_REFUSED_LITERALS:
         return True
     if kind == "IdentExpr":
-        return table.get(value.name) is not None
+        t = table.get(value.name)
+        if t is None:
+            return False
+        if t.startswith("__mlir_type."):
+            return t != param_type
+        return True
     return False
 
 
