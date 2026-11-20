@@ -4807,25 +4807,13 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
             # memory store (`_span->_len = items->len;` is "invalid RHS for
             # gimple memory store: 'component_ref'") and rejects a CAST over
             # one in any position ("invalid operand in unary operation").
-            #
-            # The data word needs a CAST too, and it goes on the TEMP (a cast
-            # over a plain SSA name is the operand form GIMPLE accepts):
-            # `MojoList.data` is `int64_t *` (fire_runtime.h: the list stores
-            # WORDS), while `Span._data` is `char *` (the span is a raw view).
-            # Assigning one to the other without the cast is an incompatible
-            # pointer assignment, which is how stdlib-syntax went red on
-            # test/builtin/test_sort.mojo:73 and test/math/test_tanh.mojo:200
-            # (`_small_sort[length](list, _less_than)`):
-            #   error: assignment to 'char *' from incompatible pointer type
-            #   'int64_t *' {aka 'long long int *'}
-            # The cast was there before this helper was generalized; the
-            # generalization dropped it on the strength of the (wrong) note
-            # that `MojoList._data` is already `char *`.
-            _data = gen._new_temp('int64_t *')
+            # `MojoList._data` is already `char *`, so no cast is needed; the
+            # scalar load into a temp is the one operand form GIMPLE accepts.
+            _data = gen._new_temp('char *')
             gen._emit(f"  {_data} = {val}->data;")
             _len = gen._new_temp('int64_t')
             gen._emit(f"  {_len} = {val}->len;")
-            gen._emit(f"  {sp}->_data = (char *) {_data};")
+            gen._emit(f"  {sp}->_data = {_data};")
             gen._emit(f"  {sp}->_len = {_len};")
             arg_pairs[i] = ('Span *', sp)
         elif ctype == 'int64_t' and span_proofs is not None and span_proofs[i]:

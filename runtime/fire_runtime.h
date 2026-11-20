@@ -1078,7 +1078,6 @@ char       *mojo_chr(int64_t code);
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice_cp(char *s, int64_t start, int64_t stop);
-char       *mojo_cstr_slice_step(char *s, int has_start, int64_t start, int has_stop, int64_t stop, int64_t step);
 char       *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop);
 int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop, char *needle);
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
@@ -2238,7 +2237,6 @@ char *mojo_sprintf_ptr(const char *fmt, void *p);
  * fire_runtime.c for why the key has to be materialized as text at all. */
 char *mojo_str_from_double(double v);
 MojoList *mojo_divmod(int64_t a, int64_t b);
-int64_t mojo_ipow(int64_t base, int64_t exp);
 int64_t mojo_pow_mod(int64_t base, int64_t exp, int64_t mod);
 char *mojo_hex(int64_t v);
 char *mojo_oct(int64_t v);
@@ -2505,14 +2503,6 @@ char *mojo_str_rstrip_chars(char *str, char *chars);
 char *mojo_str_lstrip_chars(char *str, char *chars);
 char *mojo_str_rjust(char *s, int64_t width, char *fill);
 char *mojo_str_ljust(char *s, int64_t width, char *fill);
-char *mojo_str_zfill(char *s, int64_t width);
-/* f"{x:spec}" for an int / float / str value: Python's format-spec mini-language. */
-char *mojo_fmt_int(int64_t v, char *spec);
-char *mojo_fmt_float(double v, char *spec);
-char *mojo_fmt_str(char *s, char *spec);
-char *mojo_str_strip_chars(char *str, char *chars);
-MojoList *mojo_str_split_n(char *s, char *sep, int64_t maxsplit);
-char *mojo_str_replace_n(char *s, char *old, char *neu, int64_t count);
 char *mojo_str_center(char *s, int64_t width, char *fill);
 char *mojo_str_expandtabs(char *str, int tabsize);
 char *mojo_str_join(char *sep, MojoList *parts);
