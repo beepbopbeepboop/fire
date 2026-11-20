@@ -414,15 +414,7 @@ def _lower_StringLiteral(gen, node):
                 # mojo_obj_getattr's stub instead of the real rewrite.
                 expr_node = gimple_ctypes.ast_rewriter.rewrite_node(expr_node)
                 et, ev = gen.lower_expr(expr_node)
-                _typed = False
-                if ((isinstance(expr_node, gimple_ctypes.NoneLiteral)
-                        or (isinstance(expr_node, gimple_ctypes.IdentExpr)
-                            and _as_str(expr_node.name) == 'None'))
-                        and not _spec):
-                    # `f"{None}"` and `f"{None!r}"` are both the text None;
-                    # the NULL word it lowers to would print as 0.
-                    part_val = gen._new_val('char *', gen._intern_string('None'))
-                elif _conv == 'r':
+                if _conv == 'r':
                     # repr() the ORIGINAL typed value, not the stringified
                     # one — _repr_value(et, ev) expects the raw value.
                     part_val = gen._repr_value(et, ev, expr_node)
@@ -451,14 +443,9 @@ def _lower_StringLiteral(gen, node):
                                        [('char *', _repr_val)])
                         gen._fresh_vals.discard(_repr_val)
                 else:
-                    part_val = ''
-                    if _spec and not _conv:
-                        part_val = _fstring_typed_spec(gen, expr_node, et, ev, _spec)
-                        _typed = part_val != ''
-                    if not part_val:
-                        part_val = gen._stringify_value(et, ev, expr_node)
-                if _spec and not _typed:
-                    part_val = _fstring_str_spec(gen, part_val, _spec)
+                    part_val = gen._stringify_value(et, ev, expr_node)
+                if _spec:
+                    part_val = gen._apply_fstring_spec(part_val, _spec)
             except Exception as e:
                 # The interpolation can't be lowered.  Dropping it would
                 # silently corrupt the program's output, so warn and keep
@@ -500,52 +487,6 @@ def _lower_StringLiteral(gen, node):
         acc_val_t = gen._new_val('char *', f'{gen._intern_string("")}')
         return 'char *', acc_val_t
     return 'char *', acc_val
-
-
-def _fstring_spec_value(gen, spec: str) -> str:
-    """The format spec of one f-string field as a `char *` value. A spec that
-    contains a nested field (`{x:>{w}}`) is itself an f-string, built at run
-    time; a plain one is a pooled literal."""
-    if '{' in spec:
-        _st, _sv = gen._lower_StringLiteral(
-            gimple_ctypes.StringLiteral(value='f"' + spec + '"', is_interpolated=True))
-        return _sv
-    return gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(spec)))
-
-
-def _fstring_typed_spec(gen, node, et: str, ev: str, spec: str) -> str:
-    """`{x:spec}` for a value whose C type says what it is: an integer, a
-    float or a string goes to the runtime's format-spec engine
-    (`mojo_fmt_int` / `_float` / `_str`: fill, align, sign, `#`, `0`, width,
-    grouping, precision, type). Returns '' for anything else (a word of
-    unknown kind, a container, a struct), which keeps the older
-    stringify-then-pad route."""
-    if ev in gen._boxed_vals or ev in gen._dyn_word_vals or gen._is_dyn_word(node, ev):
-        return ''
-    if et in gimple_ctypes._FLOAT_TYPES:
-        dv = gen._cast('double', ev)
-        res = gen._call_expr('char *', 'mojo_fmt_float',
-                             [('double', dv), ('char *', _fstring_spec_value(gen, spec))])
-    elif et in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES:
-        res = gen._call_expr('char *', 'mojo_fmt_int',
-                             [('int64_t', gen._to_int64(et, ev)),
-                              ('char *', _fstring_spec_value(gen, spec))])
-    elif gimple_ctypes.TypeLattice.is_cstr(et):
-        res = gen._call_expr('char *', 'mojo_fmt_str',
-                             [('char *', ev), ('char *', _fstring_spec_value(gen, spec))])
-    else:
-        return ''
-    gen._fresh_vals.add(res)
-    return res
-
-
-def _fstring_str_spec(gen, text: str, spec: str) -> str:
-    """A spec applied to a field that is already a string (`{x!r:>8}`, or a
-    value the typed route declined): format it as a str."""
-    res = gen._call_expr('char *', 'mojo_fmt_str',
-                         [('char *', text), ('char *', _fstring_spec_value(gen, spec))])
-    gen._fresh_vals.add(res)
-    return res
 
 
 def _lower_TstringLiteral(gen, node) -> tuple[str, str]:
@@ -1787,35 +1728,6 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
     return field_type, t
 
 
-_STATIC_TYPE_NAMES = {
-    'IntLiteral': 'int', 'FloatLiteral': 'float', 'BoolLiteral': 'bool',
-    'ListExpr': 'list', 'TupleExpr': 'tuple', 'DictExpr': 'dict',
-    'SetExpr': 'set', 'NoneLiteral': 'NoneType',
-}
-_STATIC_CTYPE_NAMES = {'double': 'float', '_Bool': 'bool',
-                       'MojoDict *': 'dict', 'MojoSet *': 'set'}
-
-
-def _static_type_name(gen, arg) -> str:
-    """The Python type name of `arg` when its SOURCE SHAPE or its C type fixes
-    it, else ''. `int64_t` and `MojoList *` are deliberately not named: the
-    first is also every erased pointer and the second is a list AND a tuple."""
-    _n = _STATIC_TYPE_NAMES.get(type(arg).__name__, '')
-    if _n:
-        return _n
-    if isinstance(arg, gimple_ctypes.IdentExpr) and _as_str(arg.name) == 'None':
-        return 'NoneType'
-    if isinstance(arg, gimple_ctypes.StringLiteral):
-        return 'bytes' if getattr(arg, 'is_bytes', False) else 'str'
-    try:
-        _t = _as_str(gen._quick_type(arg))
-    except Exception:
-        return ''
-    if gimple_ctypes.TypeLattice.is_cstr(_t):
-        return 'str'
-    return _STATIC_CTYPE_NAMES.get(_t, '')
-
-
 def _lme_name_member(gen, node, ot: str, ov) -> tuple[str, str] | None:
     """`x.__name__`: for the `type(node)` receiver the real struct name is recovered from the runtime type tag, and every other object gets its dynamic attribute through the runtime dispatch.
 
@@ -1833,12 +1745,6 @@ def _lme_name_member(gen, node, ot: str, ov) -> tuple[str, str] | None:
     # using the same _struct_type_id hash as the alloc sites).
     if isinstance(node.obj, gimple_ctypes.CallExpr) and isinstance(node.obj.func, gimple_ctypes.IdentExpr) \
             and node.obj.func.name == 'type' and node.obj.args:
-        # A value whose kind is certain without the runtime tag (a literal,
-        # or a C type only that kind has) is named directly: the tag table
-        # knows struct names only, so `type(1).__name__` answered `<type>`.
-        _tn = _static_type_name(gen, node.obj.args[0])
-        if _tn:
-            return 'char *', gen._new_val('char *', gen._intern_string(_tn))
         # node.obj (`type(x)`) was already lowered above to ov = the
         # runtime type tag; map it to the struct name.
         ov64 = gen._cast('int64_t', f"{ov}")
@@ -5866,14 +5772,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op in ('|', '-', '&', '^'):
         lt, lv = gen._resolve_container_kind(lt, lv)
         rt, rv = gen._resolve_container_kind(rt, rv)
-    # `1 << 40` of two `int` literals is a 32-bit shift in C (zero, or
-    # undefined); Python integers are not that narrow. Shift in 64 bits.
-    # Only the LEFT operand's width decides a shift's result, and only a plain
-    # `int` (an integer literal) is the narrow one; an explicit Int8/Int16/
-    # Int32 left operand keeps its own width and wrap-around.
-    if op == '<<' and lt == 'int' and rt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES:
-        lv = gen._cast('int64_t', f"{lv}")
-        lt = 'int64_t'
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
     if int_true_div:
@@ -6594,18 +6492,22 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     if rt.endswith(' *'):
         ti = gen._new_val('int64_t', f"(int64_t) {rv}")
         rv_for_double = ti
-    # Integer `**` is exact 64-bit integer power. It used to be a `double`
-    # `pow` cast to `(int)`: 2 ** 62 printed 2147483647 and 3 ** 39 lost its
-    # low digits. The result is an integer word by construction (the
-    # argument `gen._int_word_vals` producers make), which matters because
-    # `**` is how a large key is usually COMPUTED (`3 ** 20` is inside the
-    # runtime discriminator's pointer window; RUNTIME_int64_key_above_2gb_
-    # dereferenced_as_pointer).
-    lv64 = gen._to_int64(lt, lv_for_double)
-    rv64 = gen._to_int64(rt, rv_for_double)
-    t4 = gen._rt_call('int64_t', 'mojo_ipow', [lv64, rv64])
+    t1 = gen._new_temp('double')
+    t2 = gen._new_temp('double')
+    gen._emit(f"  {t1} = (double) {lv_for_double};")
+    gen._emit(f"  {t2} = (double) {rv_for_double};")
+    t3 = gen._rt_call('double', 'pow', [t1, t2])
+    t4 = gen._new_val('int', f"(int) {t3}")
+    # Integer `**` produces an integer: the `(int)` cast above makes that
+    # true for every input, so this needs no inference about the operands
+    # at all — the strongest form of the argument the other producers on
+    # `gen._int_word_vals` make. It is worth having because `**` is how a
+    # large key is usually COMPUTED rather than written: `3 ** 20` is
+    # 3486784401, inside the runtime discriminator's pointer window, and
+    # `d[3 ** 20] = 8` was a `strcmp` of address 3486784401 before this
+    # (RUNTIME_int64_key_above_2gb_dereferenced_as_pointer).
     gen._int_word_vals.add(t4)
-    return 'int64_t', t4
+    return 'int', t4
 
 
 def _lower_matmul(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
@@ -6986,6 +6888,27 @@ def _in_question_result(gen, ti: str, negate: bool) -> tuple[str, str]:
     return '_Bool', t
 
 
+def _in_defines_contains(gen, sn: str):
+    """The first class in `sn`'s chain (self first) that defines its own
+    `__contains__`, or None. `x in obj` for a user struct must call that
+    method (CPython defines `in` as `obj.__contains__(x)` — the same rule
+    `len(obj)` follows through _lower_builtin_len's struct branch). The
+    receiver is cast to the defining class when the method is inherited,
+    whose layout is a base-prefix of the derived one."""
+    seen = set()
+    stack = [sn]
+    while stack:
+        cur = stack.pop()
+        if not cur or cur in seen:
+            continue
+        seen.add(cur)
+        if gen._struct_defines_method(cur, '__contains__'):
+            return cur
+        for b in (getattr(gen, '_struct_bases', {}).get(cur) or []):
+            stack.append(b)
+    return None
+
+
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
                        x_is_none: bool = False) -> tuple[str, str]:
     """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
@@ -7208,6 +7131,27 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             cv = gen._cast('char', f"{xv}")
             needle = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
         gen._emit_call('int', ti, 'mojo_str_contains', [('char *', rv), ('char *', needle)])
+    elif (rt.endswith(' *') and rt[:-2] in gen.struct_field_types
+          and _in_defines_contains(gen, rt[:-2]) is not None):
+        # `x in obj` with a user struct pointer: call the struct's
+        # `__contains__` statically, the same rule `len(obj)` follows
+        # (CPython defines `in` as `obj.__contains__(x)`). Before this arm
+        # a struct receiver reached the boxed tail below, which cast the
+        # struct address to a word and asked `mojo_in_dispatch_int` — that
+        # runtime only knows the list/dict/set allocation registries, so
+        # every user-class membership test silently answered False
+        # (`1 in P(1, 2)`). The item goes in as int64_t, the unannotated-
+        # param convention of the method bodies this calls (`_Bool
+        # P___contains__ (P * self, int64_t v)`); the return is the method's
+        # truth value, which the shared negate tail below turns into the
+        # `in`/`not in` bool.
+        _dc_in = _in_defines_contains(gen, rt[:-2])
+        import mojo.backend_gimple.emit_funcs as _gef_in
+        _cs_in = _gef_in._struct_method_csym(gen, _dc_in, '__contains__', '')
+        _recv_in = rv if _dc_in == rt[:-2] else gen._cast(f'{_dc_in} *', rv)
+        _item_in = gen._to_int64(xt, xv)
+        gen._emit_call('int', ti, _cs_in,
+                       [(f'{_dc_in} *', _recv_in), ('int64_t', _item_in)])
     elif rt in ('int64_t', 'int', 'void *') or rt.endswith(' *'):
         # A container that reached here BOXED — no static type, most often
         # a cross-module module-global read (those accessors are declared

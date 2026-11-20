@@ -6536,6 +6536,14 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
         # '__mojo_type_id'` from `_init_timespec` (a user struct named like a C
         # system struct; bugs/stdlib/STDLIB_system_struct_name_helpers_need_the_
         # struct_body.md). Zeroing is all the system header's layout needs.
+        # The tag word must be written AFTER the memset: `_p->__mojo_type_id =`
+        # before `memset(_p, 0, sizeof)` zeroes the tag back to 0, so the
+        # instance's `mojo_read_type_tag` is 0 and every tag comparison
+        # (isinstance, `in`/`==`/`repr` dispatch, `_mojo_dispatch_getattr`)
+        # misses the struct (regression in 3530da89e, which moved the tag
+        # lines above the memset to skip system structs; the original order
+        # was memset -> tag). The `_is_system_struct` guard is what still
+        # skips system structs, so the order is safe to restore.
         _is_system_struct = sn in _SYSTEM_STRUCT_NAMES
         _tag_lines = (
             '' if _is_system_struct else
@@ -6551,10 +6559,10 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
             f"static void _init_{sn} ({sn} * _p)\n"
             f"{{\n"
             f"{_dsub_decls}"
-            f"{_tag_lines}"
             f"  memset (_p, 0, sizeof({sn}));\n"
             f"{_dsub_init}"
             f"{_sys_attr_inits}"
+            f"{_tag_lines}"
             f"}}"
         )
         parts.append('')
