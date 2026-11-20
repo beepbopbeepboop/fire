@@ -11021,9 +11021,8 @@ def _gmh_pending_module_global_field_type(self, module: str, name: str):
       the boxed `int64_t` word (the owner's scan boxes every container
       global). A scalar's field C type (`char *`, `int`, `_Bool`, a struct
       pointer) is not derivable from the Mojo type alone, so those keep the
-      old placeholder rather than guess. Dispatch tables are excluded:
-      their fields are declared RAW by `_gmi_declare_table_global`, not
-      boxed."""
+      old placeholder rather than guess. A dispatch table is answered at its
+      declared RAW C type (`_gmi_declare_table_global`), not boxed."""
     if not module or not name:
         return None
     _m = _as_str(module)
@@ -11051,8 +11050,13 @@ def _gmh_pending_module_global_field_type(self, module: str, name: str):
         _sem = _pending_global_container_ctype(self, _stmts, _val)
     if _sem not in _BOXED_CONTAINER_CTYPES:
         return None
-    if dispatch_table_global_ctype(_n) is not None:
-        return None
+    _tbl = dispatch_table_global_ctype(_n)
+    if _tbl is not None:
+        # A compiler-internal table is declared RAW by its owner
+        # (`_gmi_declare_table_global`), at the table's own C type, not boxed:
+        # the field's C type is `_tbl`, exactly as `_module_global_field_type`
+        # answers for a module whose globals are already registered.
+        return (_tbl, _tbl)
     return ('int64_t', _sem)
 
 
