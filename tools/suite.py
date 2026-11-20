@@ -3141,20 +3141,13 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             '`mem_read_bytes`\'s `ite` chain, which is the subject of '
             '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)` '
             'and not something a class change would fix.',
-     expect='4 of 68, each a filed bug and none a regression: one is the '
-            'fork-hval cross-arm cite in '
-            '`FORMAL_x86_endtoend_hval_cites_other_arm_at_fork` '
-            '(multi_export: `Unknown identifier` for `hval`); three are the '
+     expect='3 of 68, each a filed bug and none a regression: three are the '
             'per-process `-M 6144` ceiling in `FORMAL_x86_endtoend_memory_ceiling` '
             '(wide_expr and wide_recv, the case this marker named since '
             '2026-10-05, and list_literal_index, which hits kernel memory '
-            'consumption). Measured 2026-11-19 with the imul ModRM and group3 '
-            'walk corrections: the nine imul examples (annot_params, call_helper, '
-            'chain, localmul, mixed_width, multi_export, pair, call_both_arms, '
-            'elif_call) all fork and prove except multi_export; unary_ops now '
-            'proves with no sorry. The other 64 are proved, with no sorry or a '
-            'counted hole, and the 26 that build no path tree are reported by the '
-            'harness itself and are not cases.',
+            'consumption). Measured 2026-11-19 with the imul ModRM, group3 walk, '
+            'fork-state hval cite, prev_defs and maxRecDepth corrections landed: the '
+            'other 65 prove or are reported by the harness itself and are not cases.',
      desc='x86-64 whole run, every input, no sorry')
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',

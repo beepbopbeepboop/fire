@@ -14271,6 +14271,10 @@ def gen_module_impl(self, stmts: list):
                            for s in all_struct_defs if isinstance(s, StructDef)}
     self._trait_bases = {s.name: list(getattr(s, 'bases', None) or [])
                          for s in all_struct_defs if isinstance(s, TraitDef)}
+    # The StructDef nodes this module can read, for the comptime fold's
+    # destructor-triviality question (`emit_infra._struct_deinit_trivial`).
+    self._struct_def_nodes = {_as_str(_as_structdef_node(s).name): _as_structdef_node(s)
+                              for s in all_struct_defs if isinstance(s, StructDef)}
     _all_struct_names = {_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
     _struct_bases_map = {}
     for _sbm in all_struct_defs:
@@ -14890,6 +14894,16 @@ def gen_module_impl(self, stmts: list):
                     (_as_str(_al_mem.obj.name), _as_str(_al_n.target.name),
                      _as_str(_al_mem.member)))
 
+    # Top-level `from M import N [as L]` edges, for the comptime conformance
+    # fold (`ginf._imported_struct_bases`): a struct imported by name has its
+    # declared bases in its home module, which the single-TU path never loads.
+    self._top_from_import_homes = {}
+    for _tfi in stmts:
+        if isinstance(_tfi, FromImportStmt) and not getattr(_tfi, 'wildcard', False):
+            for _tfip in (getattr(_tfi, 'name_alias_strs', None) or []):
+                _tfi_orig = _as_str(gimple_ctypes._fi_name(_tfip))
+                _tfi_local = _as_str(gimple_ctypes._fi_alias(_tfip) or _tfi_orig)
+                self._top_from_import_homes.setdefault(_tfi_local, (_tfi.module, _tfi_orig))
     _phase0_func_types = dict(self.func_return_types)   # save Phase 0 registrations
     _phase0_imported   = dict(getattr(self, 'imported_symbols', {}))  # save Phase 0 imported_symbols
     self.func_return_types = dict(_RUNTIME_FUNCS)
