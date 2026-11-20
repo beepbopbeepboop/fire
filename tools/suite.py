@@ -4428,6 +4428,10 @@ test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condit
 # commits" (b3b2233b0) and registered nowhere until this audit, which is the
 # same hole the suite's estate check names. 0.15 s, 0.0 GB measured: it only
 # drives `compile_to_gimple`, no build.
+test('reg-system-struct-helpers-compile',
+     [PY, 'test_system_struct_helpers_compile.py'], mem='tiny',
+     desc='a struct named like a C system struct compiles; its helpers '
+          'do not read fields the typedef pass never declared')
 test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditional_conformance_declaration_diagnostic.py'], mem='tiny',
      desc='conditional conformance declarations are diagnosed: the diamond, '
           'the derived/ancestor constraint, conditional RegisterPassable, and '
