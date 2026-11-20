@@ -6460,6 +6460,18 @@ def _ascii_repr(value) -> str:
     return out
 
 
+def _dot_some_constructor(*args):
+    """The `.Some` constructor a dot-relative pattern resolves to: a marker
+    object carrying the first argument. Module level, not nested in
+    `Interpreter.eval_DottedLiteral`: a nested def returned as the method's
+    first value made the codegen type that method's result as a raw pointer,
+    while its dispatch prototype says int64_t (a conflicting-types error)."""
+    obj = object.__new__(type('Some', (), {}))
+    obj._is_some = True
+    obj._value = args[0] if args else None
+    return obj
+
+
 class Interpreter:
     """Executes Mojo AST nodes."""
 
@@ -9430,7 +9442,10 @@ class Interpreter:
         # Try to resolve as a variant/enum case
         try:
             # Look up in scope for common enum/variant constructors
-            name = expr.path
+            # getattr, not `expr.path`: `path` is also a field of
+            # imports.Resolver, and a field read is the evidence the codegen
+            # uses to type an untyped parameter as that struct.
+            name = getattr(expr, 'path')
             # Try to find as attribute of known types or just return a marker
             # For Optional/Some/None patterns, try to construct
             if name in ('Some', 'None'):
@@ -9444,12 +9459,7 @@ class Interpreter:
                 # But we need to know if it's Some with args - this is tricky
                 # For pattern matching, return a callable or special marker
                 if name == 'Some':
-                    def Some(*args):
-                        obj = object.__new__(type('Some', (), {}))
-                        obj._is_some = True
-                        obj._value = args[0] if args else None
-                        return obj
-                    return Some
+                    return _dot_some_constructor
                 elif name == 'None':
                     obj = object.__new__(type('None', (), {}))
                     obj._is_none = True
