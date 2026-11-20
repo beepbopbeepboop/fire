@@ -2263,7 +2263,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_regress_scriptutil_generator_closure.py': 3,
     'test_regress_yield_from_module_generator.py': 2,
     'test_regress_yield_from_word_iterator.py': 3,
-    'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
