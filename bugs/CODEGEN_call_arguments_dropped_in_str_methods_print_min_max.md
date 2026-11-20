@@ -1,32 +1,9 @@
-# CODEGEN: keyword/extra arguments of str methods, print() and min/max/sum are ignored or rejected
+# CODEGEN: extra arguments of str methods and sum() are ignored or rejected (print sep/end fixed 2026-11-20)
 
 Found 2026-11-20 by `tools/pydiff.py` (runs a program through CPython and through this compiler and compares).
 The differences below are CPython versus the compiled binary.
 
-Arguments are dropped: `print(sep=, end=)`, `str.split(sep, maxsplit)`, `strip(chars)`, `replace(old, new, count)`, `zfill`, `ljust/rjust/center`; `sum(x, start)` fails in gcc ("too many arguments to function mojo_sum"). Each method must accept exactly the arguments Python accepts. Fix one method at a time; each fix gets a line in the repro.
-
-## Repro `print_sep_end.py`
-
-```python
-def main():
-    print("a", "b", sep="")
-    print("a", "b", sep="-")
-    print("x", end="")
-    print("y")
-    print("p", "q", sep=", ", end="!\n")
-main()
-```
-
-Differences:
-
-```
-line 1: CPython 'ab'   compiled 'a b'
-line 2: CPython 'a-b'   compiled 'a b'
-line 3: CPython 'xy'   compiled 'x'
-line 4: CPython 'p, q!'   compiled 'y'
-line 5: CPython ''   compiled 'p q'
-line 6: CPython '<no line>'   compiled ''
-```
+Arguments are dropped: `str.split(sep, maxsplit)`, `strip(chars)`, `replace(old, new, count)`, `zfill`, `ljust/rjust/center`; `sum(x, start)` fails in gcc ("too many arguments to function mojo_sum"). Each method must accept exactly the arguments Python accepts. Fix one method at a time; each fix gets a line in the repro.
 
 ## Repro `str_methods.py`
 

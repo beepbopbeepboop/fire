@@ -40,6 +40,8 @@ funcs/39_pipeline_compose.py
 min/big_int.py
 min/func_value.py
 min/pow_shift.py
+min/print_end.py
+min/print_sep_end.py
 min/slice_step.py
 min/slice_str_step.py
 min/sort_strings.py
