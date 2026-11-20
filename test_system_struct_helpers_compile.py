@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Pin: a struct whose NAME collides with a C system struct compiles.
 
-`bugs/stdlib/STDLIB_system_struct_name_helpers_need_the_struct_body.md`. The
-typedef pass emits only `typedef struct timespec timespec;` for a name in
+A struct whose NAME collides with a C system struct (`timespec`, `stat`, `tm`,
+...). The typedef pass emits only `typedef struct timespec timespec;` for a name in
 `_SYSTEM_STRUCT_NAMES` (the system header owns the layout), so the per-struct
 helpers must not read Mojo-level fields or the `__mojo_type_id` tag word --
 they do not exist in that layout. Before the fix `_init_timespec` wrote
