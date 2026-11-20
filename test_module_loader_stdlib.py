@@ -64,38 +64,3 @@ def test_call_initialized_global_export_takes_callee_return_type(tmp_path):
         "S": "char *",    # s() -> String: char *
         "U": "void *",    # callee not defined in this file: unchanged default
     }, got
-
-
-if __name__ == '__main__':
-    # This file is pytest-style (two `test_*` functions, one taking the
-    # `tmp_path` fixture) and was registered as the `module-loader-stdlib` job
-    # with the command `python3 test_module_loader_stdlib.py`. With no
-    # `__main__`, that command ran neither test -- exit 0, zero output, a job
-    # that could never fail (the no-op registered-job class).
-    # suite.py has no pytest driver, so run them here, substituting a real
-    # tempdir path object for `tmp_path` -- the pattern the other pytest-style
-    # file in the tree uses.
-    import pathlib
-    import tempfile
-    import traceback
-
-    def _run(name, fn):
-        try:
-            fn()
-        except Exception:
-            traceback.print_exc()
-            print('FAIL ' + name)
-            return 1
-        print('PASS ' + name)
-        return 0
-
-    _cases = [
-        ('test_stdlib_checkout_prefers_new_modular_when_both_exist',
-         lambda: test_stdlib_checkout_prefers_new_modular_when_both_exist()),
-        ('test_call_initialized_global_export_takes_callee_return_type',
-         lambda: test_call_initialized_global_export_takes_callee_return_type(
-             pathlib.Path(tempfile.mkdtemp(prefix='xmodexp_')))),
-    ]
-    _failed = sum(_run(_n, _f) for _n, _f in _cases)
-    if _failed:
-        raise SystemExit('%d failure(s)' % _failed)

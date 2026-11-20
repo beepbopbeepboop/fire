@@ -4086,16 +4086,6 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
                 return False
             copies += 1
             continue
-        # A call to a mixed-return function (`x = h(0)` where `h` returns
-        # `None` on one path and an int on another) is a tagged word by its
-        # own shape; the bind keeps the box (`_call_tagged` in emit_stmts), and
-        # a copy of such a name must keep it too, or `y = x` turns the None box
-        # into 0 and `y is None` / `print(y)` answer for the integer.
-        if (isinstance(v, gimple_ctypes.CallExpr)
-                and isinstance(v.func, gimple_ctypes.IdentExpr)
-                and _as_str(v.func.name) in getattr(gen, '_ret_may_hold_mixed', ())):
-            copies += 1
-            continue
         if not (isinstance(v, gimple_ctypes.CallExpr)
                 and isinstance(v.func, gimple_ctypes.IdentExpr)
                 and v.func.name == 'next'
@@ -8686,17 +8676,10 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # time; see _is_sys_stderr.
     print_fn = 'mojo_print'
     sep_node = None
-    end_node = None
     if kwargs:
         for kw_name, kw_val in kwargs:
             if kw_name == 'file' and gen._is_sys_stderr(kw_val):
                 print_fn = 'mojo_print_stderr'
-            elif kw_name == 'end' and not isinstance(kw_val, gimple_ctypes.NoneLiteral):
-                # print(..., end=X): the string printed AFTER the arguments
-                # instead of the newline. It was never read, so
-                # `print("x", end="")` always ended the line. `end=None` means
-                # the default newline in CPython, so it is left as no end_node.
-                end_node = kw_val
             elif kw_name == 'sep':
                 # print(..., sep=X): the string placed BETWEEN arguments.
                 # It was silently dropped before, so every `print(indent,
@@ -8721,22 +8704,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
         t = gen._new_val('char *', slit)
         gen._rt_void(print_fn, [t])
 
-    # The text that ends the call: the `end=` string, else the newline.
-    def _emit_end(print_fn: str):
-        if end_node is None:
-            _emit_literal_print('\\n', print_fn)
-            return
-        _et, _ev = gen.lower_expr(end_node)
-        if not gimple_ctypes.TypeLattice.is_cstr(_et):
-            _ev = gen._call_expr('char *', 'mojo_str_word_fresh',
-                                 [('int64_t', gen._to_int64(_et, _ev))])
-        gen._rt_void(print_fn, [_ev])
-
     if not args:
-        if end_node is not None:
-            _emit_end(print_fn)
-        else:
-            _emit_literal_print('', print_fn)
+        _emit_literal_print('', print_fn)
         return
     # Through the module object `ggc` (imported at the top of this file), not a
     # function-local `from ... import`: the self-hosted C compiler saw the local
@@ -9253,7 +9222,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # separator prints in between read the previous argument's buffer too.
     for _or_i in range(len(_owned_reprs)):
         gen._rt_void('free', [f"{_owned_reprs[_or_i]}"])
-    _emit_end(print_fn)
+    _emit_literal_print('\\n', print_fn)
     if _sep_owned:
         gen._rt_void('free', [f"{sep_var}"])
 

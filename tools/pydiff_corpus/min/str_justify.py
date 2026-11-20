@@ -1,6 +1,0 @@
-print("ab".ljust(5) + "|")
-print("ab".rjust(5) + "|")
-print("ab".center(6) + "|")
-print("ab".ljust(5, "*"))
-print("ab".rjust(5, "0"))
-print("abc".center(8, "-"))
