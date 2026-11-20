@@ -6125,6 +6125,99 @@ class _AutoStubNamespace:
         return _AutoStubValue(_AUTO_STUB_VALUE)
 
 
+def _c_printf_text(fmt, args):
+    """The text a C `printf(fmt, *args)` writes, for the conversions the stdlib's comptime
+    formats use: `%%`, `%d %i %u` (an integer), `%s` (a string) and `%c` (a character
+    code), each with the `-` / `0` flags and a width, and the `l`/`h`/`z` length
+    modifiers skipped. Written with loops and string concatenation rather than Python's `%`
+    on purpose: a format that is not a literal makes the self-hosted compile of this file
+    lower `%` as a C modulo on pointers. Any other conversion is written through as it
+    stands."""
+    out = ''
+    n = len(fmt)
+    i = 0
+    ai = 0
+    while i < n:
+        ch = fmt[i]
+        if ch != '%':
+            out = out + ch
+            i = i + 1
+            continue
+        i = i + 1
+        left = False
+        zero = False
+        while i < n and (fmt[i] == '-' or fmt[i] == '0'):
+            if fmt[i] == '-':
+                left = True
+            else:
+                zero = True
+            i = i + 1
+        width = 0
+        while i < n and fmt[i] >= '0' and fmt[i] <= '9':
+            width = width * 10 + (ord(fmt[i]) - ord('0'))
+            i = i + 1
+        while i < n and (fmt[i] == 'l' or fmt[i] == 'h' or fmt[i] == 'z'):
+            i = i + 1
+        if i >= n:
+            out = out + '%'
+            break
+        conv = fmt[i]
+        i = i + 1
+        if conv == '%':
+            out = out + '%'
+            continue
+        if ai >= len(args):
+            out = out + '%' + conv
+            continue
+        value = args[ai]
+        ai = ai + 1
+        if conv == 'd' or conv == 'i' or conv == 'u':
+            text = str(int(value))
+        elif conv == 'c':
+            text = chr(int(value))
+        else:
+            text = str(value)
+        pad = width - len(text)
+        if pad > 0:
+            if left:
+                text = text + ' ' * pad
+            elif zero and conv != 's':
+                if len(text) > 0 and text[0] == '-':
+                    text = '-' + '0' * pad + text[1:]
+                else:
+                    text = '0' * pad + text
+            else:
+                text = ' ' * pad + text
+        out = out + text
+    return out
+
+
+class _MojoPrintfBound:
+    """`_printf[fmt]`, ready to be called with the values."""
+    def __init__(self, fmt):
+        self.fmt = fmt
+
+    def __call__(self, *args, **kwargs):
+        # `file=` (a FileDescriptor) is accepted and ignored: stdout only.
+        print(_c_printf_text(self.fmt, args), end='')
+
+
+class _MojoPrintf:
+    """`std.io.io._printf[fmt](*args)`: a C `printf` with a comptime format string, writing to
+    stdout WITHOUT a newline (the stdlib's `_printf_cpu` calls `KGEN_CompilerRT_fprintf`). The
+    bracket is the format, the call's arguments are the values (`_c_printf_text` lists the
+    conversions). Output goes through `print` so it interleaves with the program's own
+    `print` in order."""
+
+    def __getitem__(self, fmt):
+        return _MojoPrintfBound(fmt)
+
+
+class _IoIoNamespace(_AutoStubNamespace):
+    """`std.io.io`: the real `_printf`; every other name is auto-stubbed as before."""
+    _printf = _MojoPrintf()
+
+
 class _SysProxy:
     """Presents the executed program's own argv (`[filename] + program_args`)
     while forwarding everything else to the real `sys` module. Without this,
@@ -6367,6 +6460,18 @@ def _ascii_repr(value) -> str:
     return out
 
 
+def _dot_some_constructor(*args):
+    """The `.Some` constructor a dot-relative pattern resolves to: a marker
+    object carrying the first argument. Module level, not nested in
+    `Interpreter.eval_DottedLiteral`: a nested def returned as the method's
+    first value made the codegen type that method's result as a raw pointer,
+    while its dispatch prototype says int64_t (a conflicting-types error)."""
+    obj = object.__new__(type('Some', (), {}))
+    obj._is_some = True
+    obj._value = args[0] if args else None
+    return obj
+
+
 class Interpreter:
     """Executes Mojo AST nodes."""
 
@@ -6550,6 +6655,9 @@ class Interpreter:
             namespace = types.SimpleNamespace(List=self.scope.get('List'))
             cache[module_name] = namespace
             return namespace
+
+        if module_name == 'std.io.io':
+            return _IoIoNamespace()
 
         if module_name == 'std' or module_name.startswith('std.'):
             # Real `std.*` submodules beyond the hardcoded shims above are
@@ -9334,7 +9442,10 @@ class Interpreter:
         # Try to resolve as a variant/enum case
         try:
             # Look up in scope for common enum/variant constructors
-            name = expr.path
+            # getattr, not `expr.path`: `path` is also a field of
+            # imports.Resolver, and a field read is the evidence the codegen
+            # uses to type an untyped parameter as that struct.
+            name = getattr(expr, 'path')
             # Try to find as attribute of known types or just return a marker
             # For Optional/Some/None patterns, try to construct
             if name in ('Some', 'None'):
@@ -9348,12 +9459,7 @@ class Interpreter:
                 # But we need to know if it's Some with args - this is tricky
                 # For pattern matching, return a callable or special marker
                 if name == 'Some':
-                    def Some(*args):
-                        obj = object.__new__(type('Some', (), {}))
-                        obj._is_some = True
-                        obj._value = args[0] if args else None
-                        return obj
-                    return Some
+                    return _dot_some_constructor
                 elif name == 'None':
                     obj = object.__new__(type('None', (), {}))
                     obj._is_none = True
@@ -10009,8 +10115,10 @@ class Interpreter:
         # mismatch meant `hasattr(expr, 'keywords')` was always False, so
         # every keyword argument to every call was silently dropped in
         # favor of the callee's default value.
+        # They JOIN what a `**mapping` spread already put in `kwargs`; assigning
+        # replaced it, so `f(named=6, **rest)` lost every key of `rest`.
         if getattr(expr, 'kwargs', None):
-            kwargs = {k: self.eval_expr(v) for k, v in expr.kwargs}
+            kwargs.update({k: self.eval_expr(v) for k, v in expr.kwargs})
 
         _CALL_SITE[0] = expr
         if isinstance(func, MojoOverloadSet):

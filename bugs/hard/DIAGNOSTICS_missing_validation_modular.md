@@ -497,3 +497,121 @@ builtin `EnumLike` trait definition plus synthesizing the conformance on every
 `__enum` -- a feature, not a patch. Filed as such rather than approximated by a
 special case that would emit a "trait 'EnumLike' declared here" note with no
 declaration behind it.
+
+## Status (2026-11-19): signature diagnostics anchored at the parameter, all reported
+
+Landed (measured with the real FileCheck lines, `fire.py build` + `FileCheck`):
+
+* `failed_binding_deferrals.mojo` now PASSES. The `violated constraint` /
+  `lacking evidence` diagnostics from `_check_fn_signature_binding_violations`
+  are anchored at the OFFENDING PARAMETER (or the `->` return type), not at the
+  `def`: `module_gen._signature_item_positions` reads the declaration text
+  (`FunctionDef.params` carries no positions), skipping the `[...]` list and
+  comments/strings. Falls back to the function position when unreadable.
+* `_check_signature_binding_violations` collects every offending signature and
+  raises them together (it used to stop at the first, which hid the
+  `successful_binding` "lacking evidence" the second CHECK wants).
+* `autoparam_dependency_errors.mojo` now PASSES. `fire_compiler`'s
+  `_check_inferred_param_dependencies` and `_check_variadic_element_types` were
+  run in sequence, so the first raise hid the second's diagnostic; they now
+  report together.
+* Regression: `test_signature_diagnostic_anchors.py`.
+
+Remaining: the rest of the "Still open (large)" list above, notably the
+`EnumLike` synthesis (`enum_exhaustive_errors`), the same-module generic
+discriminator (`moco_4400`), `identifier_source_range`, and `tuple_*`. The
+combined autoparam errors are ordered by check, not by source line.
+
+## Status (2026-11-20): `moco_4400` — the 2026-11-16 chain is WRONG at step 2; the real blocker is the type of the local
+
+Measured on the doc's 30-line repro (in-process `compile_to_gimple(do_imports=True)` from a real file; the
+build is the same, exit 0):
+
+* `needs_iterator(s)` IS reached: `elaborate_generic_call_inferred('needs_iterator', ['S *'])` runs.
+* It returns `None` **before** any conformance check, not by swallowing a `ConformanceError`: `infer_type_args`
+  cannot bind `I` from the bare C type `S *` (`c_to_mojo('S *')` is None by design), and `elaborate_generic_call`
+  is never entered. The 11-16 note that "it infers `S[NotMovable]` and raises" held only for the direct unit
+  test, which hands the elaborator the type text `S[NotMovable]`.
+* So loosening the swallow's discriminator (`inferred_ctype_is_specific`, treating a pointer to a program
+  struct as specific) changes nothing for this program: tried, no effect, reverted.
+* Why `S *`: `var s = S(NotMovable(1))` is **not elaborated as a generic struct instance at all**.
+  `_elaborate_generic_struct_call` (`emit_resolve.py`) takes the inferred-constructor path only for
+  `gen._imported_generic_structs`, and `S` is defined in the SAME module, so the call lowers as the erased base
+  struct and `_register_generic_struct` is never called (probed). The local's type is `S` with `T` erased;
+  `NotMovable` is recorded nowhere.
+
+Next step (a feature, not a patch): infer the type arguments of a same-module generic struct constructor
+(`S(NotMovable(1))` -> `S[NotMovable]`) and record the local's Mojo type (`gen` has no per-local Mojo-type
+table; `_proven_arg_mojo_type` knows only a parameter's annotation and a direct constructor call). Then
+`_proven_arg_mojo_type` returns `S[NotMovable]` for the IdentExpr `s`, `infer_type_args` binds `I`, and the
+existing `Iterator` conformance check fires (it is proven: `test_trait_requirement_evidence_diagnostic.py`).
+The positive control to pin it with: the same program with a `Movable` payload must still compile.
+
+## Status (2026-11-20): `identifier_source_range` FIXED
+
+`identifier_source_range.mojo` now PASSES its real FileCheck line (`tools/modular_filecheck.py`, rc=1):
+`var `!` = __mlir_attr.`1 : si32``; `foo(`!`)` against `def foo(x: __mlir_type.index)` is refused at the
+argument with `error: invalid call to 'foo': value passed to 'x' cannot be converted to '__mlir_type.index'`,
+and the backtick-escaped name does not leak an `unexpected character`.
+
+The existing `_check_mlir_type_argument_calls` (`fire_compiler.py`) only refused literals and primitive-typed
+variables. A `var` initialised from an MLIR attribute written with its type is now typed `__mlir_type.<T>`
+(`_mlir_attr_value_type`, read from the text after the last ` : `), and `_mlir_argument_refused` refuses it only
+when that type differs from the parameter's own MLIR type. So the matching case (`1 : index` into an
+`__mlir_type.index` parameter) is accepted. Positional and keyword arguments both go through it.
+
+Tests: `test_mlir_annotation_diagnostic.py` +3 (refused with the location pinned, the matching-type control,
+keyword). Checked: `compile_stdlib.py` 610 / 0 unexpected, `build_stdlib_dylib.py` 0 skips (the stdlib uses
+`__mlir_attr` values heavily, so no false positive).
+
+Remaining: `enum_exhaustive_errors` (builtin `EnumLike` synthesis), `moco_4400` (see the entry above: the
+type of a same-module generic struct local is never recorded), and the `tuple_*` type-checker cases.
+
+## Status (2026-11-20): the `tuple_*` tests are STALE against the stdlib this tree compiles — do not implement them
+
+`tuple_first_of_error.mojo` and `tuple_contains_type_mismatch_error.mojo` live in the older
+`/Users/mrs/net/chatgpt/claude/modular/mojo/test/` tree (`tools/modular_filecheck.py`'s `ROOT`), whose
+`std/builtin/tuple.mojo` declares `__contains__[T: Equatable](...) where Self.Ts.contains[T]()` and a
+compile-checked `first_of[T]`. The stdlib this repo compiles against, `new-modular/Mojo/stdlib`, has NEITHER:
+its `std/builtin/tuple.mojo` defines no `first_of` and no `__contains__` with that `where`, and its own
+`test/builtin/test_tuple.mojo` (line 64) treats `StaticString("Mojo is awesome") in d` and `b.__contains__(1)` as
+VALID and `False`. The two trees disagree about the language, and the target one makes the diagnostic wrong.
+
+Tried and reverted: a narrow static check (a local bound to a tuple display of proven scalar types; `x in t` and
+`t.first_of[T]()` against it) passed both FileCheck files and a 9-case test, and then failed
+`compile_stdlib.py` with one unexpected file, `test/builtin/test_tuple.mojo`, which the check refused at line 64.
+A diagnostic that rejects valid stdlib code is worse than the miss, so nothing landed.
+
+Disposition: not a bug in this tree. These two rows belong with the other cases the target stdlib no longer
+has; the `tools/modular_filecheck.py` `ROOT` should point at the tree matching the stdlib (or the rows be
+dropped from the umbrella). Remaining real items: `enum_exhaustive_errors` (a builtin `EnumLike` trait) and
+`moco_4400` (the unrecorded type of a same-module generic struct local).
+
+## Status (2026-11-20): the whole list re-swept against the CURRENT tree — what is real, what is stale
+
+`tools/modular_filecheck.py` now reads `new-modular/Mojo/test` (the tree whose stdlib this repo compiles;
+override with `MODULAR_TEST_ROOT`), finds `fire.py` relative to itself, takes a relative path to disambiguate
+duplicate names (`mojo-integration/comptime_assert.mojo` vs `mojo-parser/statements/comptime_assert.mojo`),
+and runs a `%parse-mojo-isolated` test in-process (`compile_to_gimple`) instead of `fire.py build`, which has no
+`main` to link and used to time out and read as "accepted". The old TIMEOUT column of this doc was that artifact.
+
+Measured, every Category A/B row that exists in the current tree:
+
+| row | verdict | note |
+|---|---|---|
+| comptime_assert (integration), comptime_assert_tstring, invalid_downcast_error, defaulted_trait_method_bad_conformance, align_decorator_parametric_error, identifier_source_range, error_tolerance, kgen_lsp_check_parse_error | **PASS** | |
+| assert_failure_message | **PASS** (`fire.py run`) | a RUN test, not a build diagnostic |
+| error_handling, variadic_kwargs (integration) | **FIXED today**, PASS under `fire.py run` | two interpreter faults, see below |
+| comptime_assert (parser/statements), not_conformance, where_message, never_conforming_no_synthesis, moco_4400 | not diagnostics / not tractable | CHECK lines are an MLIR dump (`lit.struct.decl`, `kgen.param.assert`), or (moco_4400) need the unrecorded local type |
+| enum_exhaustive_errors, autoparam_dependency_errors, failed_binding_deferrals, tuple_first_of_error, tuple_contains_type_mismatch_error | **do not exist / are stale** in `new-modular` | the older `modular/` tree's language rules; enforcing them rejected valid stdlib code (tuple_*) |
+| diagnostics_in_missing_locs(+_imports), import_mojoc_*, mojo_import_case_sensitive_error | harness cannot run them | multi-step RUN lines (`mojo precompile`, mojo-tool CLI); the dedicated tests pass their lines |
+
+The two interpreter faults the sweep found (both in `myinterpreter.py`, pinned by
+`test_interp_call_kwargs_and_printf.py`): `f(named=6, **rest)` REPLACED the `**rest` spread with the explicit
+keywords instead of joining them (`variadic_kwargs.mojo`: `KeyError: 'k'`), and `std.io.io._printf[fmt](*args)`
+was an auto-stubbed no-op (`error_handling.mojo` printed `0`, not `third: 0`). `_printf` is a loop-built C-format
+writer, not Python's `%`: a non-literal `%` makes the self-hosted compile of this file lower it as a C modulo on
+pointers. Not done: the same `_printf` on the COMPILED path.
+
+Remaining real work in this umbrella: `moco_4400` (record the type arguments of a same-module generic struct
+local; the expected text names `'S[T]'`) and a `_printf` for the compiled path.

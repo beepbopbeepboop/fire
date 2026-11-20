@@ -15406,6 +15406,9 @@ def main():
                   test_namedtuple_shaped_class_runs_regression,
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
+                  test_none_argument_is_none_in_the_callee,
+                  test_textwrap_dedent_matches_cpython,
+                  test_mixed_return_none_string_and_set_arms,
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
@@ -15955,6 +15958,113 @@ def main():
     print(f(), g())
 
 main()
+""")
+
+
+def test_none_argument_is_none_in_the_callee():
+    """A literal `None` argument is the NULL word in the callee, and the callee's
+    `is None` and `== None` agree on it, for an unannotated parameter and for a `str`
+    one (which used to receive the one-character string "0" from
+    `mojo_word_cstr_value(0)`). The guards are the two things the reverted 2026-11-16
+    attempt broke: the integer 0 and the empty string are NOT None, and `== None` on
+    an annotated int is still False."""
+    test_gimple_matches_cpython("gimple_none_argument_is_none_in_the_callee", """\
+def a(x):
+    print("unann is None:", x is None)
+    print("unann == None:", x == None)
+    print("unann != None:", x != None)
+
+
+def b(x: str):
+    print("str is None:", x is None)
+    print("str == None:", x == None)
+    print("str != None:", x != None)
+
+
+def c(n: int):
+    print("int == None:", n == None)
+    print("int != None:", n != None)
+
+
+def d(x: str):
+    return x is None
+
+
+a(None)
+b(None)
+b("")
+b("abc")
+c(0)
+c(5)
+print(d(None), d(""), d("0"))
+print(0 == None, 0 != None)
+
+
+def r(x: str):
+    return x
+
+
+print(repr(r(None)), r(None), repr(r("")), repr(r("0")))
+""")
+
+
+def test_textwrap_dedent_matches_cpython():
+    """`textwrap.dedent` is a runtime helper (the module itself is not compiled into the
+    binary, so the call used to raise NotImplementedError; c_common/tables.py runs it at
+    import). The corpus is the rule's corners: tabs and spaces share no margin, a blank
+    or whitespace-only line normalises to empty, a ragged margin, no trailing newline,
+    a single line, empty and all-blank input, and a margin set by the SMALLEST line."""
+    test_gimple_matches_cpython("gimple_textwrap_dedent_matches_cpython", r"""
+import textwrap
+
+cases = [
+    "",
+    "   ",
+    "\n",
+    "\n\n   \n",
+    "hello",
+    "  hello",
+    "    a\n    b\n",
+    "    a\n      b\n    c",
+    "  a\n\n  b",
+    "  a\n   \n  b\n",
+    "\ta\n\tb\n",
+    "\ta\n  b\n",
+    "  a\n\tb\n",
+    "    a\n  b\n      c\n",
+    "\n    first\n      second\n    third\n  ",
+    "x\n  y\n",
+    "  \t a\n  \t b",
+    "  \t a\n  \tb",
+    "no margin\n  indented\n",
+    "   trailing space   \n   next   \n",
+]
+for c in cases:
+    print(repr(textwrap.dedent(c)))
+""")
+
+
+def test_mixed_return_none_string_and_set_arms():
+    """A function whose return arms mix a `str` (which may be None, the NULL word), a bool and
+    a set returns the TAGGED word, and each arm renders by its kind at the call site:
+    `None` for a NULL string (it used to be a 'p' box around NULL, which crashed the
+    consumer), the string itself, `True`, and a set as `{...}` (a raw set pointer used to
+    print as its address). The shape is `c_common/scriptutil.normalize_selection`'s."""
+    test_gimple_matches_cpython("gimple_mixed_return_none_string_and_set_arms", """\
+def pick(sel: str, which: int):
+    if which == 0:
+        return sel
+    if which == 1:
+        return True
+    if which == 2:
+        return {'only'}
+    return sel
+
+print(pick(None, 0))
+print(pick('a', 0))
+print(pick('x', 1))
+print(pick('x', 2))
+print(pick(None, 3))
 """)
 
 

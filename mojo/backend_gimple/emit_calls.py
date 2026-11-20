@@ -2116,66 +2116,17 @@ def _dtype_cast_ctype(e):
 
 
 def _comptime_conforms_to_pred(gen):
-    try:
-        import mojo.middle.comptime as _comptime_eval
-        bases = _comptime_conformance_map(gen)
-        if bases is None:
-            return None
-        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
-    except Exception:
-        return None
+    """The conforms_to predicate every comptime fold in this module uses: one
+    definition, in emit_infra (`_conforms_to_pred`)."""
+    return ginf._conforms_to_pred(gen)
 
 
-def _comptime_conformance_map(gen):
-    """The declared `{decl: [base, ...]}` map this generator knows, merged from
-    the struct bases, trait bases, the instantiation's extra bases and the
-    trait declarations read from the source text. None when it knows none."""
-    try:
-        sb = getattr(gen, '_struct_bases', None) or {}
-        tb = getattr(gen, '_trait_bases', None) or {}
-        ex = getattr(gen, '_conformance_bases_extra', None) or {}
-        tbt = getattr(gen, '_conformance_trait_bases_text', None)
-        if tbt is None:
-            tbt = {}
-            try:
-                src = getattr(gen, '_source_text', '') or ''
-                if not src:
-                    fn = getattr(gen, '_current_filename', '') or ''
-                    if fn:
-                        with open(fn) as f:
-                            src = f.read()
-                if src:
-                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
-                        name = m.group(1)
-                        bstr = m.group(3) or ''
-                        blist = []
-                        for part in bstr.split(','):
-                            part = part.strip()
-                            if not part:
-                                continue
-                            b = part.split('[')[0].split('.')[-1].strip()
-                            if b and re.match(r'^[A-Za-z_]\w*$', b):
-                                blist.append(b)
-                        tbt[name] = blist
-                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
-                        tbt.setdefault(m.group(1), [])
-            except Exception:
-                tbt = {}
-            try:
-                gen._conformance_trait_bases_text = tbt
-            except Exception:
-                pass
-        if not sb and not tb and not ex and not tbt:
-            return None
-        bases = dict(ex)
-        bases.update(sb)
-        bases.update(tb)
-        for k, v in (tbt or {}).items():
-            if v or k not in bases:
-                bases[k] = v
-        return bases
-    except Exception:
-        return None
+def _comptime_conformance_map(gen) -> dict:
+    """The declared conformance map, from emit_infra's single builder. The
+    `-> dict` matches emit_infra's own annotation: without it this wrapper's
+    return type was inferred as int64_t from the cross-module call, so the
+    importers' externs and the body disagreed with the MojoDict * definition."""
+    return ginf._comptime_conformance_map(gen)
 
 
 def _eval_constrained_msg(gen, msg_node, node):
@@ -5644,9 +5595,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == '_MojoFloat8Value' and len(node.args) == 2:
         return _lower_float8_value_box(gen, node)
     if fname_raw == '_float8_spelling_of' and len(node.args) == 1:
+        # The runtime returns `const char *` (fire_runtime.h). The temp must
+        # carry that qualifier too: typed `char *`, the assignment from the
+        # call is a "discards 'const' qualifier" warning in every build.
         vt, vv = gen.lower_expr(node.args[0])
-        return 'char *', gen._call_expr('char *', 'mojo_f8_spelling',
-                                        [('int64_t', gen._to_int64(vt, vv))])
+        return 'const char *', gen._call_expr('const char *', 'mojo_f8_spelling',
+                                              [('int64_t', gen._to_int64(vt, vv))])
     if fname_raw == 'issubclass'      and len(node.args) == 2:  return gen._lower_builtin_issubclass(node)
     # `callable(x)` — does the word denote a function at run time? The runtime's
     # `mojo_is_callable_word` answers from the function/bound-method/variadic-

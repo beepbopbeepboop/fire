@@ -646,6 +646,14 @@ def conforms_to(struct_name, trait_name, bases_map):
     if struct_name in TRIVIAL_REGISTER_PASSABLE_TYPES:
         if trait_name in TRIVIAL_REGISTER_PASSABLE_TRAITS:
             return True
+        # A trait THIS module declares and the stdlib does not is one no
+        # builtin scalar conforms to: a conformance is written in the
+        # conforming type's own base list, and the scalars' lists live in
+        # std, which cannot name a trait declared here. A stdlib trait (or a
+        # name the stdlib declares twice) may be one a scalar DOES conform to
+        # (`Writable`), so that stays an honest None.
+        if trait_name in bases_map and trait_name not in _stdlib_trait_index():
+            return False
         return None
     if not bases_map:
         return None
@@ -664,7 +672,12 @@ def conforms_to(struct_name, trait_name, bases_map):
             if known:
                 break
         if not known:
-            return None
+            # The trait is named by no declared base: the declaration map can
+            # still decide it by the closed-world walk (every base reached is
+            # resolved through the map or the stdlib's trait declarations).
+            # `String` conforms to nothing but its declared bases, so
+            # `conforms_to(String, TrivialRegisterPassable)` is False.
+            return _closed_world_verdict(struct_name, trait_name, bases_map)
     return trait_name in _conforms_to_bases(struct_name, bases_map)
 
 
@@ -673,7 +686,11 @@ _STDLIB_TRAIT_INDEX = None
 
 def _stdlib_trait_index():
     """`{trait name: (qualified name, [base, ...])}` for every trait the stdlib
-    declares, read from the stdlib sources once per process.
+    declares, read from the stdlib sources once per process. A stdlib
+    `comptime NAME = A & B & C` (an intersection of traits, e.g. `KeyElement`)
+    is indexed as a pseudo-trait whose bases are its conjuncts: a type that
+    conforms to `NAME` conforms to each of them, so a base list naming it can
+    be walked.
 
     A name declared by more than one stdlib file maps to None: the bare name
     does not then identify one trait, so nothing may be concluded from it.
@@ -690,6 +707,15 @@ def _stdlib_trait_index():
     index = {}
     header = re.compile(r'^trait\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:\(([^)]*)\))?\s*:',
                         re.MULTILINE)
+    intersection = re.compile(r'^comptime\s+([A-Za-z_]\w*)\s*=\s*([^\n]*&[^\n]*)$',
+                              re.MULTILINE)
+    pending = []
+
+    def _declare(name, qual, bases):
+        if name in index:
+            index[name] = None
+        else:
+            index[name] = (qual + '::' + name, bases)
     root = os.path.join(STDLIB_PATH, 'std')
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
@@ -704,16 +730,31 @@ def _stdlib_trait_index():
             rel = os.path.relpath(path, STDLIB_PATH)[:-len('.mojo')]
             qual = rel.replace(os.sep, '::')
             for m in header.finditer(text):
-                name = m.group(1)
                 bases = []
                 for part in (m.group(2) or '').split(','):
                     part = part.split('[')[0].split('.')[-1].strip()
                     if part and re.match(r'^[A-Za-z_]\w*$', part):
                         bases.append(part)
-                if name in index:
-                    index[name] = None
-                else:
-                    index[name] = (qual + '::' + name, bases)
+                _declare(m.group(1), qual, bases)
+            for m in intersection.finditer(text):
+                parts = [p.split('[')[0].split('.')[-1].strip()
+                         for p in m.group(2).split('&')]
+                if all(re.match(r'^[A-Za-z_]\w*$', p) for p in parts):
+                    pending.append((m.group(1), qual, parts))
+    # An intersection is a trait alias only when every conjunct is a trait
+    # this index already holds (or another accepted alias). A plain integer
+    # constant `comptime MASK = FLAG_A & FLAG_B` names no trait and is left out.
+    progress = True
+    while progress:
+        progress = False
+        rest = []
+        for name, qual, parts in pending:
+            if all(index.get(p) is not None for p in parts):
+                _declare(name, qual, parts)
+                progress = True
+            else:
+                rest.append((name, qual, parts))
+        pending = rest
     _STDLIB_TRAIT_INDEX = index
     return index
 
@@ -745,8 +786,18 @@ def conforms_to_closed(struct_name, trait_name, bases_map, module_name):
         index = _stdlib_trait_index()
         entry = index.get(trait_name)
         trait_q = entry[0] if entry else trait_name
+    return _closed_world_verdict(struct_name, trait_name, bases_map), trait_q
+
+
+def _closed_world_verdict(struct_name, trait_name, bases_map):
+    """True / False / None for STRUCT_NAME conforming to TRAIT_NAME by walking
+    its transitive bases: through BASES_MAP where the module declares a name,
+    then the stdlib's trait declarations. False only when every base reached
+    is itself resolved (the walk is complete); any unresolved base is None.
+    The one walk both `conforms_to` (for a name no declared base mentions) and
+    `conforms_to_closed` (diagnostics) answer from."""
     if trait_name in _AUTO_DERIVED_TRAITS:
-        return True, trait_q
+        return True
     index = _stdlib_trait_index()
     seen = set()
     todo = [struct_name]
@@ -768,11 +819,11 @@ def conforms_to_closed(struct_name, trait_name, bases_map, module_name):
             if not b:
                 continue
             if b == trait_name:
-                return True, trait_q
+                return True
             todo.append(b)
     if not complete:
-        return None, trait_q
-    return False, trait_q
+        return None
+    return False
 
 
 def _conforms_to_operand_name(node, bindings):
@@ -811,6 +862,76 @@ def _fold_conforms_to_call(node, conforms_to_pred, bindings=None):
         return None
     try:
         return conforms_to_pred(tname, trname)
+    except Exception:
+        return None
+
+
+class ConformancePredicate:
+    """The declared facts a comptime fold may ask about a named type, as one
+    object: calling it is `conforms_to(struct, trait)` over `bases_map`, and
+    `trivially_deinitable(struct)` answers the destructor question
+    `downcast[T, Deinitable].__del__is_trivial` reads.
+
+    `declare_missing(name)` supplies the declared bases of a name the map does
+    not hold yet (an imported struct, whose home module is parsed only when a
+    fold names it); `deinit_trivial(name)` supplies True/False/None. Either is
+    optional: without it the answer for that name is undecided, never guessed.
+    """
+
+    def __init__(self, bases_map, declare_missing=None, deinit_trivial=None):
+        self.bases_map = bases_map
+        self._declare_missing = declare_missing
+        self._deinit_trivial = deinit_trivial
+
+    def _declare(self, name):
+        if (isinstance(name, str) and name not in self.bases_map
+                and self._declare_missing is not None):
+            declared = self._declare_missing(name)
+            if declared is not None:
+                self.bases_map[name] = declared
+
+    def __call__(self, struct_name, trait_name):
+        self._declare(struct_name)
+        return conforms_to(struct_name, trait_name, self.bases_map)
+
+    def trivially_deinitable(self, struct_name):
+        if self._deinit_trivial is None or not isinstance(struct_name, str):
+            return None
+        return self._deinit_trivial(struct_name)
+
+
+def _downcast_deinitable_operand(node, bindings):
+    """The bound type name `T` of `downcast[T, Deinitable]`, or None when
+    NODE is not that shape. The shape is what `std/traits/deinitable.mojo`'s
+    `IsTriviallyDeinitable` names for its `__del__is_trivial` disjunct."""
+    if not (isinstance(node, MemberExpr) and node.member == '__del__is_trivial'):
+        return None
+    sub = node.obj
+    if SubscriptExpr is None or not isinstance(sub, SubscriptExpr):
+        return None
+    if not (isinstance(sub.obj, IdentExpr) and sub.obj.name == 'downcast'):
+        return None
+    idx = sub.index
+    elems = getattr(idx, 'elements', None) if TupleExpr is not None and isinstance(idx, TupleExpr) else None
+    if not elems or len(elems) != 2:
+        return None
+    trait = _conforms_to_operand_name(elems[1], bindings)
+    if trait != 'Deinitable':
+        return None
+    return _conforms_to_operand_name(elems[0], bindings)
+
+
+def _fold_del_is_trivial(node, conforms_to_pred, bindings=None):
+    """`downcast[T, Deinitable].__del__is_trivial` as True / False, or None when
+    the declared facts do not decide it (or the shape is not that read)."""
+    tname = _downcast_deinitable_operand(node, bindings)
+    if tname is None:
+        return None
+    triv = getattr(conforms_to_pred, 'trivially_deinitable', None)
+    if triv is None:
+        return None
+    try:
+        return triv(tname)
     except Exception:
         return None
 
@@ -1071,6 +1192,9 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
     _ct = _fold_conforms_to_call(node, conforms_to_pred, bindings)
     if _ct is not None:
         return bool(_ct)
+    _dt = _fold_del_is_trivial(node, conforms_to_pred, bindings)
+    if _dt is not None:
+        return bool(_dt)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
         # A dot-relative value (`.float32`, `.Some`) folds to a marker for
         # enum/DType values. The node's field is `path`
@@ -1585,6 +1709,8 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
         return True
     _ct = _fold_conforms_to_call(node, conforms_to_pred, bindings)
     if _ct is not None:
+        return True
+    if _fold_del_is_trivial(node, conforms_to_pred, bindings) is not None:
         return True
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and node.func.name == 'conforms_to'):

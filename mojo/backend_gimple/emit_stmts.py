@@ -6377,7 +6377,12 @@ def _gen_stmt_ExprStmt(gen, node):
                     and _as_str(arg_pairs[1][1]) in getattr(gen, '_boxed_vals', ())):
                 _uw = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', arg_pairs[1][1])])
                 arg_pairs = [arg_pairs[0], ('int64_t', _uw)]
-            gen._emit_call(ret_type, '', fname, arg_pairs)
+            # The call's own argument nodes, as `_call_expr` is given them, so a literal
+            # `None` argument reaches a `str` parameter as NULL (see `_emit_call`). Only
+            # when the nodes line up with the pairs one for one.
+            _stmt_arg_nodes = (node.value.args
+                               if len(node.value.args) == len(arg_pairs) else None)
+            gen._emit_call(ret_type, '', fname, arg_pairs, _stmt_arg_nodes)
     else:
         gen.lower_expr(node.value)
 

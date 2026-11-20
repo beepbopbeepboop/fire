@@ -1837,10 +1837,22 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
     stdlib/test set). Safe to call unconditionally (like
     `_emit_stdlib_import_externs`, right next to which this runs): a
     module with no `global_var`-kind import is an untouched no-op.
+
+    Every `from X import` in the module is consumed, a function-scoped one
+    included (`_walk_func_stmts(into_defs=True)`): a function that binds a
+    sibling's global itself, with no module-scope twin, reads it through the
+    same accessor, and an unregistered name falls to the no-signature
+    `extern int64_t NAME (...)` weak stub instead (cas.py's
+    `from module_loader import STDLIB_PATH` in `_stdlib_fingerprint`).
     """
-    for stmt in stmts:
-        if not isinstance(stmt, gimple_ctypes.FromImportStmt):
-            continue
+    _from_imports: list = []
+
+    def _collect(s):
+        if isinstance(s, gimple_ctypes.FromImportStmt):
+            _from_imports.append(s)
+
+    _walk_func_stmts(stmts, _collect, into_defs=True)
+    for stmt in _from_imports:
         # `_as_str`: a bare `.module` FIELD read used unguarded below in
         # string concatenation (`mod + '.py'`) and as a resolver
         # argument — the established self-hosted trap (working `==` but
@@ -2051,7 +2063,7 @@ _OWNS_STR_ELEMS = frozenset([
 # mojo_char_to_str's table entry, so both must stay off this list.
 _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
-    'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
+    'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str', 'mojo_repr_str_or_none',
     # `!a`'s ascii-escape pass: copies its input into a fresh allocation on
     # every path, so a cat may free its result like any other conversion temp.
     'mojo_ascii_escape',
@@ -3200,6 +3212,14 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 _anode = None
                 if arg_nodes is not None and i < len(arg_nodes):
                     _anode = arg_nodes[i]
+                if _anode is not None and gen._is_none_literal(_anode):
+                    # A literal `None` argument is the NULL pointer, not an integer to be
+                    # spelled: `mojo_word_cstr_value(0)` is the one-character string "0",
+                    # which made the callee's `x is None` / `x == None` False and
+                    # `return x` print `'0'` where CPython prints `None`.
+                    _nl = gen._ensure_local('int64_t', aval) if atype == 'int64_t' else gen._cast('int64_t', f"{aval}")
+                    coerced_args.append(gen._cast('char *', f"{_nl}"))
+                    continue
                 _provable = (
                     actual_atype in ('double', 'float', '_Bool')
                     or aval in getattr(gen, '_int_word_vals', ())
@@ -4246,21 +4266,24 @@ def tagged_recv_name(gen, name) -> bool:
                for v in values)
 
 
-def _walk_func_stmts(stmts, visit):
+def _walk_func_stmts(stmts, visit, into_defs=False):
     """Call `visit` on every statement of a function body, nested bodies
-    included, never descending into a nested `def` (its locals are its own)."""
+    included. By default a nested `def` is skipped whole (its locals are its
+    own); `into_defs=True` also visits the `def` and walks its body, for a
+    whole-module scan (the accessor pass wants every `from X import` an
+    importer binds, in a `def` body or not)."""
     if not stmts:
         return
     for s in stmts:
-        if isinstance(s, gimple_ctypes.FunctionDef):
+        if isinstance(s, gimple_ctypes.FunctionDef) and not into_defs:
             continue
         visit(s)
         for attr in ('then_body', 'else_body', 'body', 'finalbody'):
-            _walk_func_stmts(getattr(s, attr, None), visit)
+            _walk_func_stmts(getattr(s, attr, None), visit, into_defs)
         for _c, eb in (getattr(s, 'elifs', None) or ()):
-            _walk_func_stmts(eb, visit)
+            _walk_func_stmts(eb, visit, into_defs)
         for h in (getattr(s, 'handlers', None) or ()):
-            _walk_func_stmts(getattr(h, 'body', None), visit)
+            _walk_func_stmts(getattr(h, 'body', None), visit, into_defs)
 
 
 def _scalar_mixed_prescan(gen, body) -> tuple:
@@ -8570,7 +8593,7 @@ _OWNED_REPR_FNS = frozenset({
     '_mojo_repr_pair', '_mojo_repr_intlists', '_mojo_repr_pairlist',
     '_mojo_generic_elem_repr',
     # the scalar formatters that malloc unconditionally
-    'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str', 'mojo_repr_boxed',
+    'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str', 'mojo_repr_str_or_none', 'mojo_repr_boxed',
     'mojo_bytes_repr', 'mojo_memoryview_repr', 'mojo_sprintf_ptr', 'mojo_repr_float',
 })
 
@@ -9323,6 +9346,81 @@ def _conformance_trait_bases_from_source(gen):
     return extra
 
 
+def _comptime_conformance_map(gen) -> dict:
+    """The declared `{decl: [base, ...]}` map this generator knows, merged from
+    the struct bases, trait bases, the instantiation's extra bases and the
+    trait declarations read from the source text. The ONE builder every
+    comptime conformance question reads (`_conforms_to_pred`, and
+    `conforms_to_closed` for diagnostics)."""
+    sb = getattr(gen, '_struct_bases', None) or {}
+    tb = getattr(gen, '_trait_bases', None) or {}
+    ex = getattr(gen, '_conformance_bases_extra', None) or {}
+    tbt = _conformance_trait_bases_from_source(gen) or {}
+    bases = dict(ex)
+    bases.update(sb)
+    bases.update(tb)
+    for k, v in tbt.items():
+        if v or k not in bases:
+            bases[k] = v
+    return bases
+
+
+def _imported_struct_def(gen, name):
+    """The StructDef of a struct this module IMPORTS by name (`from M import N
+    [as name]`) from the defining module's own parsed source, or None when
+    `name` is not such an import. Imported structs are absent from
+    `_struct_bases` in the single-translation-unit path (`do_imports` off), so
+    a condition about `String` could never see its declared conformances.
+    The home is found through re-exports (`_find_symbol_home_module`), the
+    same walk every other struct resolution uses."""
+    edge = (getattr(gen, '_top_from_import_homes', None) or {}).get(name)
+    if not edge:
+        return None
+    module, orig = edge
+    try:
+        # want_abs: the spelling `_find_imported_struct` can PARSE from here.
+        # The relative spelling (`.string`) is only meaningful inside the
+        # re-exporting module.
+        home = gen._find_symbol_home_module(module, orig, 'struct', want_abs=True)
+        return gen._find_imported_struct(home, orig) if home else None
+    except Exception:
+        return None
+
+
+def _struct_def_node(gen, name):
+    """The StructDef a comptime fold can read for NAME: this module's own
+    struct, else an imported one, else None."""
+    sd = (getattr(gen, '_struct_def_nodes', None) or {}).get(name)
+    return sd if sd is not None else _imported_struct_def(gen, name)
+
+
+def _imported_struct_bases(gen, name):
+    sd = _imported_struct_def(gen, name)
+    if sd is None:
+        return None
+    return list(getattr(sd, 'bases', None) or [])
+
+
+def _struct_deinit_trivial(gen, name):
+    """Whether NAME's destructor is trivial, as True / False, or None when this
+    module cannot see the struct or the rule does not decide it.
+
+    The rule is `ownership_check._struct_def_is_trivial`, the one the
+    move-lifetime pass already applies: a user `__deinit__` (or a user copy or
+    move constructor) makes the destructor non-trivial, and a struct whose
+    fields are all trivially register-passable is trivial. Only the decided
+    answers are returned; an undecided field stays None."""
+    sd = _struct_def_node(gen, name)
+    if sd is None:
+        return None
+    from ownership_check import _struct_def_is_trivial
+    try:
+        verdict = _struct_def_is_trivial(sd, {name: sd})
+    except Exception:
+        return None
+    return verdict if isinstance(verdict, bool) else None
+
+
 def _conforms_to_pred(gen):
     """Predicate for comptime `conforms_to(T, Trait)` folding, or None.
 
@@ -9331,21 +9429,19 @@ def _conforms_to_pred(gen):
     compiler-synthesized `TrivialRegisterPassable` and the traits it derives),
     and a module whose only structs are the builtins — the doc's synthetic
     `maybe[Int]` module is one — must still be able to fold
-    `conforms_to(Int, TrivialRegisterPassable)`."""
+    `conforms_to(Int, TrivialRegisterPassable)`.
+
+    An imported struct's declared bases and destructor triviality are read
+    from its home module the first time a fold names it (lazily: the home is
+    parsed only when a question asks)."""
     try:
-        sb = getattr(gen, '_struct_bases', None) or {}
-        tb = getattr(gen, '_trait_bases', None) or {}
-        ex = getattr(gen, '_conformance_bases_extra', None) or {}
-        tbt = _conformance_trait_bases_from_source(gen) or {}
-        bases = dict(ex)
-        bases.update(sb)
-        bases.update(tb)
-        for k, v in tbt.items():
-            if v or k not in bases:
-                bases[k] = v
-        return lambda t, tr, _b=bases: comptime_eval.conforms_to(t, tr, _b)
+        bases = _comptime_conformance_map(gen)
     except Exception:
         return None
+    return comptime_eval.ConformancePredicate(
+        bases,
+        declare_missing=lambda n: _imported_struct_bases(gen, n),
+        deinit_trivial=lambda n: _struct_deinit_trivial(gen, n))
 
 
 def _eval_const_int(gen, node) -> int | None:

@@ -1,9 +1,9 @@
-# Land: should finished branch bug-gate-red-recover-land-2026-11-02-par-2 land?
+# Land: should finished branch bug-mid-formal-eval-eq-mojo-bridge-red-o land?
 
-**Branch:** `work/bug-gate-red-recover-land-2026-11-02-par-2` (task `bug-gate-red-recover-land-2026-11-02-par-2`; its tip is also saved as `refs/archive/work/bug-gate-red-recover-land-2026-11-02-par-2`, so dropping it loses nothing).
-**Age:** last commit 2026-11-19, first unlanded commit 2026-11-19; 1 commit(s) ahead of master, 196 behind it; task started 2026-11-19 03:18:51
-**Original work:** An earlier attempt left 5 commit(s) on branch work/bug-gate-red-recover-land-2026-11-02-par, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/G
-**Original claims:** bug:GATE_red_recover-land_2026-11-02-part5-part1
+**Branch:** `work/bug-mid-formal-eval-eq-mojo-bridge-red-o` (task `bug-mid-formal-eval-eq-mojo-bridge-red-o`; its tip is also saved as `refs/archive/work/bug-mid-formal-eval-eq-mojo-bridge-red-o`, so dropping it loses nothing).
+**Age:** last commit 2026-11-19, first unlanded commit 2026-11-19; 2 commit(s) ahead of master, 205 behind it; task started 2026-11-20 05:42:03
+**Original work:** An earlier attempt left 2 commit(s) on branch work/bug-formal-eval-eq-mojo-bridge-red-on-he-2, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs
+**Original claims:** bug:FORMAL_eval_eq_mojo_bridge_red_on_head
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-19 14:47:41: conflicts with master (last commit 2026-11-19, first unlanded commit 2026-11-19; 1 commit(s) ahead of master, 196 behind it; task started 2026-11-19 03:18:51)
-  Branch: work/bug-gate-red-recover-land-2026-11-02-par-2
-  Conflicting files: bugs/mid/GATE_red_recover-land_2026-11-02-part5-part1.md
+- 2026-11-20 09:40:13: conflicts with master (last commit 2026-11-19, first unlanded commit 2026-11-19; 2 commit(s) ahead of master, 205 behind it; task started 2026-11-20 05:42:03)
+  Branch: work/bug-mid-formal-eval-eq-mojo-bridge-red-o
+  Conflicting files: formal/arm64_proof_gen.py, test_formal_eval_eq_mojo_bridge.py

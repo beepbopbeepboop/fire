@@ -4,7 +4,7 @@ edges, so a name surfaced through a star import resolves to its defining
 module.
 
 This is the `multi_kind_locals` stub class of
-`bugs/mid/GATE_red_recover-land_2026-11-02-part5-part1.md`: `emit_infra`
+`the stage1-transitive closure stub residue (the bootstrap-stage1-transitive job)`: `emit_infra`
 star-imports `multi_kind_locals` from `mojo.middle.infra_infer`, and the
 re-export walk only followed explicit `from X import name` edges, so the
 symbol's home could not be found.

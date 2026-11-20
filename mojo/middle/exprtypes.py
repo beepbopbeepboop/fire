@@ -1340,6 +1340,20 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
             return 'int64_t'
     return 'char *'
 
+def _is_tuple_unpacked_call_word(fn: FunctionDef, name: str) -> bool:
+    """True when `name` is a target of a tuple/list unpacking in `fn`'s own body whose
+    value is a call to a plain name (`_, render = build_section(name, items)`): a word
+    read out of a returned tuple, with no static kind of its own. Mirrors the places
+    `cpp_core` records such a name for `_cpp_dyn_call_expr`
+    (`_cpp_unpacked_call_words`), so inference and emission agree on what it yields."""
+    for st in _walk_own_body(fn.body):
+        if (isinstance(st, AssignStmt) and isinstance(st.target, (TupleExpr, ListExpr))
+                and isinstance(st.value, CallExpr) and isinstance(st.value.func, IdentExpr)
+                and any(isinstance(el, IdentExpr) and el.name == name
+                        for el in st.target.elements)):
+            return True
+    return False
+
 def _is_itertools_repeat2_call(call: 'CallExpr') -> bool:
     """True for the FINITE 2-argument form of `itertools.repeat(value,
     times)` — either bare `repeat(value, times)` (the common shape after
@@ -1885,6 +1899,15 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                     and known is not None
                     and known.get(n.value.func.name) in ('int64_t', 'char *')
                     and n.value.func.name in {_p[0] for _p in (fn.params or [])}):
+                t = 'int64_t'
+            # The same for a word bound by unpacking a module function's returned
+            # tuple (`_, render = build_section(...)`, then `yield from render()`):
+            # `cpp_core._cpp_dyn_call_expr` drives it as a dynamic call whose
+            # elements are words.
+            elif (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
+                    and known is not None
+                    and known.get(n.value.func.name) == 'int64_t'
+                    and _is_tuple_unpacked_call_word(fn, n.value.func.name)):
                 t = 'int64_t'
             else:
                 t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,

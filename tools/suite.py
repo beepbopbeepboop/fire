@@ -425,7 +425,8 @@ def needs_memwhy(spec) -> bool:
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
 MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
-                'the run log (--apply-peaks)')
+                'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
+                '632a573a5 by a single-job --no-cache run')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -739,7 +740,7 @@ MEASURED_PEAK_GB = {
     'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
-    'linkmode':                               (0.1, 'measured'),
+    'linkmode':                               (0.6, 'measured'),
     'nonlocal':                               (0.4, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
@@ -1682,9 +1683,13 @@ REGISTRY: dict[str, object] = {}
 #
 # 3600 s is ~6x the slowest healthy test measured across the last two full gates
 # (gimplerunner, 607 s; then mojoc 417 s, selfhost 408 s, gimplegenerators
-# 371 s), so it cannot fire on a healthy or merely loaded run, while a genuine
-# wedge is caught in an hour instead of never. Per-test `timeout=` still wins,
-# and `--timeout` still overrides everything.
+# 371 s), so a healthy ordinary job cannot reach it, while a genuine wedge is
+# caught in an hour instead of never. The one job over that band is `linkmode`,
+# whose real cold pass is a 56-program end-to-end compile sweep measured at
+# 1,349-3,352 s and 3,298.6 s on the head where it last passed; it names its own
+# 7200 s below, from that measurement, instead of being killed at a default
+# sized for other jobs. Per-test `timeout=` still wins, and `--timeout` still
+# overrides everything.
 DEFAULT_JOB_TIMEOUT_S = 3600.0
 
 
@@ -1893,7 +1898,17 @@ test('md2html', [PY, 'test_md2html.py'], cache=True, mem='tiny',
             'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
      desc='the docs\' HTML generator keeps every word of its Markdown, and '
           'the committed HTML is not stale')
+# `timeout=7200`: this job builds 56 real programs through
+# `driver.compile_program`, and every compiler-fingerprint change invalidates
+# the CAS artifacts (the key folds in the codegen sources), so a gate on a tree
+# with a codegen change pays a full COLD pass here. Measured: 1,349-3,352 s over
+# the 2026-11-02..11-19 gates; 3,298.6 s on head 8e1d4ee43 where it last passed;
+# and four consecutive gate runs on 2026-11-19 (12:33, 13:35, 15:54, 16:54) hit
+# the 3600 s default exactly and were reported [TIMEOUT] — a job killed for
+# doing 56 builds, not a wedge. 7200 s is 2x the measured slowest pass, the same
+# headroom standard as `stdlib-syntax` below.
 test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
+     timeout=7200,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
      desc='the real driver.compile_program link-mode pipeline')
@@ -3141,30 +3156,13 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             '`mem_read_bytes`\'s `ite` chain, which is the subject of '
             '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)` '
             'and not something a class change would fix.',
-     expect='13 of 68, each a filed bug and none a regression: nine are the '
-            'walk-side `imul` ModRM off-by-one that writes the product to the '
-            'wrong register and decides its overflow guard (annot_params, '
-            'call_helper, chain, localmul, mixed_width, multi_export, pair, '
-            'call_both_arms, elif_call) in '
-            '`FORMAL_x86_endtoend_abs_step_imul_modrm_second_opcode`; two of '
-            'those nine overlay one bug each, the fork-hval cross-arm cite in '
-            '`FORMAL_x86_endtoend_hval_cites_other_arm_at_fork` '
-            '(multi_export, pair) and the `maxRecDepth` floor that prices the '
-            'step count but not the image in '
-            '`FORMAL_x86_endtoend_maxrecdepth_ignores_image_size` '
-            '(call_both_arms, elif_call); one is the walk wiping on '
-            '`group3:not` and emitting a false `hmem` in '
-            '`FORMAL_x86_endtoend_abs_step_no_group3_hmem_false_fact` '
-            '(unary_ops); three are the per-process `-M 6144` ceiling in '
-            '`FORMAL_x86_endtoend_memory_ceiling` (wide_expr, wide_recv — '
-            'the case this marker named since 2026-10-05 — and '
-            'list_literal_index, reached when the general '
-            '`x86_step_mov_rm64_imm32` made its success path the one that is '
-            'proved). The other 55: 53 proved with no sorry, 2 proved with a '
-            'counted hole (main_calls_helper hpop44, struct_method hpop58 — '
-            'the mov hole this branch closed surfaced the hpop admission), '
-            'and the 26 that build no path tree (19 loop, 7 uncovered form) '
-            'are reported by the harness itself and are not cases.',
+     expect='3 of 68, each a filed bug and none a regression: three are the '
+            'per-process `-M 6144` ceiling in `FORMAL_x86_endtoend_memory_ceiling` '
+            '(wide_expr and wide_recv, the case this marker named since '
+            '2026-10-05, and list_literal_index, which hits kernel memory '
+            'consumption). Measured 2026-11-19 with the imul ModRM, group3 walk, '
+            'fork-state hval cite, prev_defs and maxRecDepth corrections landed: the '
+            'other 65 prove or are reported by the harness itself and are not cases.',
      desc='x86-64 whole run, every input, no sorry')
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -4445,6 +4443,10 @@ test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condit
 # commits" (b3b2233b0) and registered nowhere until this audit, which is the
 # same hole the suite's estate check names. 0.15 s, 0.0 GB measured: it only
 # drives `compile_to_gimple`, no build.
+test('reg-system-struct-helpers-compile',
+     [PY, 'test_system_struct_helpers_compile.py'], mem='tiny',
+     desc='a struct named like a C system struct compiles; its helpers '
+          'do not read fields the typedef pass never declared')
 test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditional_conformance_declaration_diagnostic.py'], mem='tiny',
      desc='conditional conformance declarations are diagnosed: the diamond, '
           'the derived/ancestor constraint, conditional RegisterPassable, and '
@@ -4563,6 +4565,8 @@ test('reg-float-return-beside-tuple-return', [PY, 'test_float_return_beside_tupl
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-gate-rthdrscan', [PY, 'test_gate_rthdrscan.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-signature-diagnostic-anchors', [PY, 'test_signature_diagnostic_anchors.py'], mem='tiny',
+     desc='signature diagnostics anchored at the parameter; every bad signature reported (2026-11-19)')
 test('reg-stdlib-import-extern-variadic', [PY, 'test_stdlib_import_extern_variadic.py'], mem='tiny',
      desc='overloaded stdlib import: declared concretely, never (void); stdlib-dylib pin (2026-11-19)')
 test('reg-gimple-function-scoped-alias-extern', [PY, 'test_gimple_function_scoped_alias_extern.py'], mem='tiny',
@@ -4646,6 +4650,8 @@ test('reg-tagged-container-corpus', [PY, 'test_tagged_container_corpus.py'], mem
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-tagged-mixed-readsites', [PY, 'test_tagged_mixed_readsites.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-interp-call-kwargs-printf', [PY, 'test_interp_call_kwargs_and_printf.py'], mem='tiny',
+     desc='interpreter: explicit keywords join a ** spread; std.io.io._printf (modular variadic_kwargs, error_handling)')
 test('reg-bare-object-ctor-no-stub', [PY, 'test_bare_object_ctor_no_stub.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-19)')
 test('reg-globals-in-function-scope', [PY, 'test_globals_in_function_scope.py'], mem='tiny',
@@ -4961,7 +4967,7 @@ BUCKETS = {
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-mid-gate-kinds-bug', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-signature-diagnostic-anchors', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-interp-call-kwargs-printf', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-system-struct-helpers-compile', 'reg-mid-gate-kinds-bug', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus

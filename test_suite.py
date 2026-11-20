@@ -1030,6 +1030,50 @@ def test_every_job_over_the_debt_line_says_why():
           f'nothing, and the next step for each job is written down nowhere')
 
 
+# Jobs whose real COLD pass does not fit the default timeout, with the
+# measurement that says so. Every other job is bounded by the default and must
+# stay there: the default is the hang detector, so a job that opts out of it
+# owes the number that makes its pass legitimate rather than a wedge.
+#
+# `linkmode` runs 56 end-to-end `driver.compile_program` builds. Each one is a
+# cold compile whenever the compiler fingerprint changes (the CAS key covers
+# the codegen sources), so a gate landing a codegen change pays the whole sweep
+# cold. Measured from `build/suite-timings.jsonl`: 1,349-3,352 s over the
+# 2026-11-02..11-19 gates, 3,298.6 s on head 8e1d4ee43 (the last pass), and
+# four 2026-11-19 gate runs reported [TIMEOUT] at the old 3600 s default.
+MEASURED_COLD_PASS_S = {
+    'linkmode': 3298.6,
+}
+
+
+def test_a_job_whose_cold_pass_outruns_the_default_names_its_own_timeout():
+    """A pass measured longer than the default must not run under the default.
+
+    The default is not a budget to raise for everything — it is what catches a
+    genuine wedge in an hour, and 3600 s is still ~6x every ordinary job. But a
+    job killed at that default while doing complete, correct work reports
+    [TIMEOUT], which says nothing about whether its output was right. So a job
+    with a measured cold pass over the line names its own `timeout=`, with 2x
+    headroom over the measurement, and this is the check that keeps the name
+    and the measurement from drifting apart.
+    """
+    for name, measured_s in sorted(MEASURED_COLD_PASS_S.items()):
+        spec = suite.REGISTRY.get(name)
+        check(f'timeout: {name} is a registered job', spec is not None,
+              'a measurement of a job that no longer exists checks nothing')
+        if spec is None:
+            continue
+        check(f'timeout: {name} does not run on the {suite.DEFAULT_JOB_TIMEOUT_S:g} s default',
+              spec.timeout is not None,
+              f'{name} measured {measured_s:g} s cold, which is at or over the '
+              f'default: it must name its own timeout')
+        effective = spec.timeout or suite.DEFAULT_JOB_TIMEOUT_S
+        check(f'timeout: {name} has 2x headroom over its measured cold pass',
+              effective >= 2 * measured_s,
+              f'{effective:g} s for a {measured_s:g} s pass — a loaded gate '
+              f'would kill it again, which is the [TIMEOUT] this pins')
+
+
 def test_an_expect_marker_points_at_a_doc_that_exists():
     """A registered reason that cites `bugs/` must cite a doc that is there.
 
@@ -1314,7 +1358,15 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # the fixed mojo_repr_bool spelling) all 39 cases pass and the marker is
     # gone, so a census still stating it would fail on the registry's own
     # state.
-                     'formal-x86-endtoend': 13,
+                     # The 2026-11-19 `imul` walk correction took five of the
+                     # nine off the failure list (annot_params, call_helper,
+                     # chain, localmul, mixed_width now fork and prove), so
+                     # the checked count moves 13 -> 8; the remaining eight
+                     # are the four examples that overlay a sibling bug
+                     # (multi_export, pair / call_both_arms, elif_call), the
+                     # `group3:not` hmem lie (unary_ops) and the three memory
+                     # ceilings.
+                     'formal-x86-endtoend': 3,
 # NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
                      # is in this census any more, and that is the union of the two
                      # sides of the 2026-10-17 merge, each of which dropped one of
@@ -1766,11 +1818,10 @@ def test_the_timeout_clock_starts_after_admission():
     and having printed nothing. The runner therefore takes the reservation
     itself and starts the clock after it.
 
-    Measured rather than asserted from the code: the job's own timeout is 2s,
-    the budget is full when it is ready, and it is held there for three times
-    that. If the wait counted, the job would come back TIMEOUT and fail the
-    run; if it does not, it comes back PASS having run for a fraction of a
-    second.
+    Measured rather than asserted from the code: the job's own timeout is 5s,
+    the budget is full when it is ready, and it is held there for twice that.
+    If the wait counted, the job would come back TIMEOUT and fail the run; if
+    it does not, it comes back PASS having run for a fraction of a second.
     """
     log = os.path.join(HERE, 'build', 'test-suite-admit-wait.log')
     quick = ok_cmd('import time; time.sleep(0.3); print("ran")')
@@ -1791,7 +1842,7 @@ def test_the_timeout_clock_starts_after_admission():
 
     ledger = tempfile.mkdtemp()
     with _SandboxEnv(MEMSLOT_DIR=ledger, MEMSLOT_BUDGET_GB=16), Sandbox(
-            waiter=dict(cmd=quick, mem='small', timeout=2)):
+            waiter=dict(cmd=quick, mem='small', timeout=5)):
         # 12 of the 16 GB are already spoken for, so a `small` (8 GB) job has
         # to wait: 12 + 8 > 16. The holder is this very process, which is also
         # what running `suite.main` in-process means for a test.
@@ -1805,7 +1856,7 @@ def test_the_timeout_clock_starts_after_admission():
         while time.time() < deadline and not queued(ledger, 'waiter'):
             time.sleep(0.05)
         was_waiting = queued(ledger, 'waiter')
-        time.sleep(6.0)                       # three times the job's timeout
+        time.sleep(10.0)                      # twice the job's timeout
         still_waiting = not outcome
         holder.release()
         worker.join(30)
@@ -1820,8 +1871,9 @@ def test_the_timeout_clock_starts_after_admission():
     text = open(log).read() if os.path.exists(log) else ''
     secs = re.search(r'exit: 0\s+secs: ([0-9.]+)', text)
     check('admission: the recorded duration is the job\'s, not the queue\'s',
-          secs and float(secs.group(1)) < 2,
-          f'the 2s timeout is inside {secs.group(1) if secs else "(no exit line)"}')
+          secs and float(secs.group(1)) < 8.0,
+          f'the 10s queue wait leaked into the job duration: '
+          f'{secs.group(1) if secs else "(no exit line)"}s')
     check('admission: the queue wait is recorded rather than hidden',
           'admission: waited' in text,
           'the log should say how long the job waited for memory')
@@ -2198,6 +2250,13 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # that is not a call keyword at all, and it walks `build/` and the other derived
 # trees this one skips.
 STALE_PER_CHILD_BUDGETS = {
+    # Four pins that arrived with the 2026-11-19 closure-stub /
+    # imported-container merge. Each literal is a real child budget (a
+    # compile/link/run of one fixture); the counts are the ast walk's.
+    'test_dump_full_reports_closure_stubs.py': 1,
+    'test_gimple_class_method_import_inlined.py': 2,
+    'test_gimple_imported_container_global.py': 3,
+    'test_gimple_set_op_boxed_container_local.py': 3,
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
@@ -2216,6 +2275,11 @@ STALE_PER_CHILD_BUDGETS = {
     # moves to `BUDGET_IS_THE_SUBJECT`.
     'test_bootstrap_hotspots.py': 1,
     'test_dict_slot_read_regression.py': 2,
+    # +1 with c69448afe ("DType/string bracket args in generic instances"):
+    # `_build_and_run(src, timeout=1500)` -- a COMPILE-and-RUN of one source
+    # through the real backend, so the 1500 s is a genuine child budget and
+    # not a leftover.
+    'test_elaboration_recursion_diagnostic.py': 1,
     'test_formal_admitted_two_args.py': 1,
     'test_formal_dylib.py': 2,
     'test_formal_fstring_printf_regress.py': 1,
@@ -2243,7 +2307,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_regress_scriptutil_generator_closure.py': 3,
     'test_regress_yield_from_module_generator.py': 2,
     'test_regress_yield_from_word_iterator.py': 3,
-    'test_regress_timespec_type.py': 1,
     'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
@@ -2278,7 +2341,12 @@ STALE_PER_CHILD_BUDGETS = {
     'test_candidate_selection_diagnostic.py': 1,
     'test_diagnostic_format_modular.py': 1,
     'test_diagnostics_in_missing_locs.py': 1,
+    'test_dump_full_reports_closure_stubs.py': 1,
+    'test_elaboration_recursion_diagnostic.py': 1,
     'test_fieldwise_init_and_deprecated_conversion.py': 1,
+    'test_gimple_class_method_import_inlined.py': 2,
+    'test_gimple_imported_container_global.py': 3,
+    'test_gimple_set_op_boxed_container_local.py': 3,
     'test_invalid_downcast_build.py': 1,
     'test_overload_diagnostic.py': 1,
     'test_predicate_where_diagnostic.py': 1,
@@ -4245,6 +4313,8 @@ UNREGISTERED = {
     'test_casesgen_dataclass_ctor_literal_union_build.py': _STANDALONE_TEST_REASON,
     'test_casesgen_decorated_method_gate.py': _STANDALONE_TEST_REASON,
     'test_casesgen_preseed_takeover_union_elems.py': _STANDALONE_TEST_REASON,
+    # Runs directly (`python3 <file>`); names its cause in its docstring.
+    'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_export_table_suffix_mismatch.py': _STANDALONE_TEST_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
@@ -4263,6 +4333,22 @@ UNREGISTERED = {
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
+    # The bootstrap-stage2-cc pins (2026-11-19): one shape of the red
+    # whole-closure job each — the unaliased class import in every scope, the
+    # class-method import's closure pull-in, the mid-compile module-global
+    # read, and the two container spellings (one boxed, one a dispatch-table
+    # raw pointer). Each runs directly (`python3 <file>`) and names its cause
+    # in its own docstring; the registered regression file for the class-import
+    # area is `test_gimple.py` (its `known_function_not_shadowed_by_global_
+    # fnptr` case asserts the same lowering from the other side).
+    'test_gimple_class_import_cross_module.py': _STANDALONE_TEST_REASON,
+    'test_gimple_class_method_import_inlined.py': _STANDALONE_TEST_REASON,
+    'test_gimple_imported_container_global.py': _STANDALONE_TEST_REASON,
+    'test_gimple_module_global_pending_owner.py': _STANDALONE_TEST_REASON,
+    'test_gimple_set_op_boxed_container_local.py': _STANDALONE_TEST_REASON,
+    # Pins that `--dump-full` reports a weak/unavailable stub present in the
+    # .ci it just wrote (so a reject= job can see it on stdout); runs directly.
+    'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
@@ -7073,6 +7159,7 @@ def main():
                test_every_compiler_job_is_capped,
                test_every_job_is_reserved_before_it_starts,
                test_the_timeout_clock_starts_after_admission,
+               test_a_job_whose_cold_pass_outruns_the_default_names_its_own_timeout,
                test_a_reservation_the_budget_cannot_fit_is_reported,
                test_a_fanout_item_is_capped_and_reserved_like_any_other_job,
                test_a_registered_fanout_item_is_wrapped_in_the_built_argv,

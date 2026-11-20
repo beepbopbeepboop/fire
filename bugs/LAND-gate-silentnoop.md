@@ -1,9 +1,9 @@
-# Land: should finished branch bug-codegen-simd-and-array-values-erase-3 land?
+# Land: should finished branch bug-gate-silentnoop land?
 
-**Branch:** `work/bug-codegen-simd-and-array-values-erase-3` (task `bug-codegen-simd-and-array-values-erase-3`; its tip is also saved as `refs/archive/work/bug-codegen-simd-and-array-values-erase-3`, so dropping it loses nothing).
-**Age:** last commit 2026-11-15, first unlanded commit 2026-11-13; 6 commit(s) ahead of master, 626 behind it; task started 2026-11-15 16:22:52
-**Original work:** An earlier attempt left 5 commit(s) on branch work/bug-codegen-simd-and-array-values-erase-4, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted 
-**Original claims:** bug:CODEGEN_simd_and_array_values_erase_to_int64-part3
+**Branch:** `work/bug-gate-silentnoop` (task `bug-gate-silentnoop`; its tip is also saved as `refs/archive/work/bug-gate-silentnoop`, so dropping it loses nothing).
+**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 3 commit(s) ahead of master, 18 behind it; task started 2026-11-20 01:41:06
+**Original work:** Fix the bug in bugs/gate-silentnoop.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report). QUICK tests onl
+**Original claims:** bug:gate-silentnoop
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-15 16:59:36: conflicts with master (last commit 2026-11-15, first unlanded commit 2026-11-13; 6 commit(s) ahead of master, 626 behind it; task started 2026-11-15 16:22:52)
-  Branch: work/bug-codegen-simd-and-array-values-erase-3
-  Conflicting files: bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md, mojo/backend_gimple/emit_calls.py, mojo/middle/infra_infer.py, mojo/middle/types.py
+- 2026-11-20 06:35:56: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 3 commit(s) ahead of master, 18 behind it; task started 2026-11-20 01:41:06)
+  Branch: work/bug-gate-silentnoop
+  Conflicting files: see `git merge master`

@@ -1706,6 +1706,8 @@ def _run_isolated(thunk, label):
         print(f"FAIL {label}: {type(e).__name__}: {e}")
 
 
+
+
 def run_tests():
     global _PASS, _FAIL
     # A comprehension's `for` target that SHADOWS a live local of the same name
@@ -7869,9 +7871,16 @@ def root_cas_hash_call(parts) -> str:
             print(f"FAIL  {name}: {e}")
             _FAIL += 1
             return
-        start = c_src.find("root_cas_hash_call_")
-        start = c_src.find("root_cas_hash_call_", start + 1)
-        end = c_src.find("\n}", start)
+        # Extract the DEFINITION's body, not the second textual occurrence of
+        # the mangled name: the preamble also emits a guarded extern for it
+        # (`#ifndef _MOJO_STUB_<sym>`), whose guard name CONTAINS the mangled
+        # name, so "find the second occurrence" landed on that guard and the
+        # slice then ran until the next unrelated `\n}` (2.3 MB, measured
+        # 2026-11-18, as soon as a closure change made the extern appear).
+        # A definition is spelled `... (params)\n{`; the extern ends in `;`.
+        _m = re.search(r'\nchar \* root_cas_hash_call_\w+ \([^)]*\)\n\{', c_src)
+        start = _m.start() if _m else -1
+        end = c_src.find("\n}", start) if start >= 0 else -1
         body = c_src[start:end] if start >= 0 and end >= 0 else ""
         if "cas__hash (" not in body or "mojo_fnptr_call" in body:
             print(f"FAIL  {name}: qualified function call used function-pointer lowering")
@@ -14994,6 +15003,25 @@ if True:
 
 print(step(7))
 """, "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
+    # `lldb_formatter_wrapping_type` (std/simd.mojo's `SIMD`; it was refused as
+    # "inside a module-level block, which the compiled path cannot rebind", fixed
+    # by 803cb29d2 adding it to `_ANNOTATION_DECORATORS`) is an annotation
+    # decorator: so even with a same-module def of that name in scope it is
+    # never rebound, and the decorated def keeps its own name. If the set entry were lost, the def would be renamed
+    # to `show__undecorated` and rebound through the decorator.
+    _run_isolated(lambda: test_c_shape("annotation_decorator_lldb_formatter_is_not_rebound", """\
+def lldb_formatter_wrapping_type(f):
+    return f
+
+@lldb_formatter_wrapping_type
+def show(x):
+    return x + 1
+
+def main():
+    print(show(6))
+
+main()
+""", must_have=["int64_t show_"], must_not_have=["show__undecorated"]), 'annotation_decorator_lldb_formatter_is_not_rebound')
 
     # Same-module wraps using a class-based partial (functools.wraps style)
     # must compile and apply correctly; the decorator rebinding/refusal must

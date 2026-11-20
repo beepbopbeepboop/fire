@@ -2041,6 +2041,62 @@ class TestX86EndToEndTree(unittest.TestCase):
         self.assertTrue(issubclass(_NoTree, ValueError))
         self.assertEqual(_NoTree("call", "x").kind, "call")
 
+    def test_the_walk_reads_imuls_modrm_from_the_second_opcode_slot(self):
+        """`REX 0F AF /r` puts the ModRM at `raw[3]`, not `raw[2]`.
+
+        The walk decoded every form's ModRM out of `raw[2]`, which for `imul`
+        is the `0xAF` second OPCODE: `49 0f af c3` (`imul rax, r11`) read
+        reg/rm = 5/7, extended both by the REX to 13/15, and wrote
+        `rbp <- rbp * r15` — a register write the machine never makes, which
+        the emitter then stated as a `hval` fact and Lean rejected as False.
+        `_resolve` had already been corrected to `raw[3]` for the same reason;
+        this walk had not.
+        """
+        from formal.x86_64 import Reg, encode_imul_r64_r64
+        import formal.x86_64_endtoend_test as E
+        enc = encode_imul_r64_r64(Reg.RAX, Reg.R11)
+        self.assertEqual(enc, b"\x49\x0f\xaf\xc3",
+                         "the encoding this case is about")
+        st = E._Abs()
+        st.put(Reg.RAX.value, 3)
+        st.put(Reg.R11.value, 5)
+        # The frame pointer is live and non-zero at the imul, which is what
+        # made the misdecode visible: writing `rbp` with `rbp * r15` turned the
+        # next step's fact into a false statement about it.
+        frame = 0xFFFFFFFFFFFFFFE8
+        st.put(Reg.RBP.value, frame)
+        st.put(Reg.R15.value, 7)
+        after = E._abs_step(st, "imul_r64_r64", enc, self.BASE, len(enc))
+        self.assertEqual(after.get(Reg.RAX.value), 15,
+                         "the product must land in the ModRM `reg` field's "
+                         "register, extended by REX.R")
+        self.assertEqual(after.get(Reg.RBP.value), frame,
+                         "the walk wrote rbp, which this encoding does not name")
+
+    def test_the_walk_leaves_an_imul_of_the_input_undecided(self):
+        """A multiply by the theorem's quantified input cannot decide its guard.
+
+        `rax` is `n` in the examples that carry this instruction, so
+        `x86_imul_ovf n k` is not a constant.  The misdecode handed the walk
+        `rbp * r15` instead — concrete, and zero at the initial register file —
+        so `JNO` was DECIDED and the generated file emitted a decided-arm fact
+        about `n` that `decide` could not close.  The guard has to fork.
+        """
+        from formal.x86_64 import Reg
+        import formal.x86_64_endtoend_test as E
+        st = E._Abs()
+        st.put(Reg.RAX.value, None)
+        self.assertIsNone(st.get(Reg.RAX.value),
+                          "the fixture must start with rax as the input")
+        st.put(Reg.R11.value, 3)
+        after = E._abs_step(st, "imul_r64_r64", b"\x49\x0f\xaf\xc3",
+                            self.BASE, 4)
+        self.assertIsNone(after.flag("of_"),
+                          "the overflow of an unknown product is unknown")
+        self.assertIsNone(E._abs_cond(0, after),
+                          "JNO must be undecided there, so the tree forks "
+                          "instead of emitting a decided-arm proof")
+
 
 # ── 6. the estate: nothing launches Lean outside the launcher ───────────────
 #
@@ -4774,16 +4830,19 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: per-example table cannot see a program that gained a branch, so the total
     #: is the row that does, and it is the number the doc quotes.
     #:
-    #: **Re-pinned 2026-11-08** to the current corpus (68 trees / 165 leaves /
-    #: 6505 steps / 26 declined), measured on this tree. The growth/shift is
-    #: driven by undecided overflow-trap branches and corpus evolution; the
-    #: guard-settling invariant (per-example guard jccs decided) is unchanged.
-    TOTAL = (165, 6505)
-    #: Re-pinned 2026-11-08 for the pre-merge 52-example subset on this tree
-    #: (40 trees / 94 leaves / 3330 steps). Moves with undecided overflow traps
-    #: the same way the corpus does; compared against the dynamic re-measurement
-    #: below to distinguish corpus growth from guard regression.
-    TOTAL_PRE_MERGE52 = (94, 3330)
+    #: **Re-pinned 2026-11-19** to the current corpus (68 trees / 175 leaves /
+    #: 6892 steps / 26 declined), measured on this tree.  The +10 leaves /
+    #: +387 steps since 2026-11-08 are the `imul` guards that the walk used to
+    #: DECIDE from a misdecoded ModRM (it read the second opcode byte as the
+    #: ModRM and multiplied `rbp` by `r15`): with the walk corrected, a
+    #: multiply by the quantified input leaves the overflow bit unknown and the
+    #: guard FORKS, which is the tree this test is supposed to see.
+    TOTAL = (175, 6892)
+    #: Re-pinned 2026-11-19 for the pre-merge 52-example subset on this tree
+    #: (40 trees / 97 leaves / 3425 steps).  +3 leaves / +95 steps from the
+    #: same `imul` fork correction as `TOTAL`; compared against the dynamic
+    #: re-measurement below to distinguish corpus growth from guard regression.
+    TOTAL_PRE_MERGE52 = (97, 3425)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
@@ -4947,6 +5006,83 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
                                 f"branch test; `formal/examples/` has emptied "
                                 f"out or moved and this class is measuring "
                                 f"nothing")
+
+    @staticmethod
+    def _straight_line_plan(entry=0x1000):
+        """`(code, info, insns, shapes)` for a hand-built branch-free body.
+
+        The refusal above is what makes this necessary: every program image
+        carries `_emit_stack_floor_guard`'s `jcc`/`call exit` pair in every
+        prologue, so `emit`'s branching check refuses every example and its step
+        loop — the code below that check — is never reached by the corpus. The
+        bytes here come from the backend's OWN encoder and are decoded by its
+        own decoder, so the plan is exactly the shape `_plan` returns without
+        anything to build, run, or prove: the subject is the loop, not the
+        program.
+
+        A `push`/`mov` prologue, `mov rax, 7`, and a `ret` — four steps, every
+        one of them a form with a step lemma and no branch, which is the case
+        `emit` exists for.
+        """
+        import formal.x86_64 as X
+        import formal.x86_64_decode as D
+        import formal.x86_64_endtoend_test as E
+        code = (X.encode_push_r64(X.Reg.RBP)
+                + X.encode_mov_r64_r64(X.Reg.RBP, X.Reg.RSP)
+                + X.encode_mov_r64_imm32(X.Reg.RAX, 7)
+                + X.encode_ret())
+        insns = D.decode_all(code, 0, len(code))
+        info = {"base_addr": entry, "func_offset": entry}
+        return code, info, insns, E._shapes(code, insns)
+
+    def test_the_value_theorems_step_loop_runs_on_a_straight_line_body(self):
+        """`emit`'s step loop, which no corpus example can reach.
+
+        The loop calls `_resolve` once per instruction, and the call passed a
+        `prev_defs=` keyword that `_resolve` stopped accepting when the
+        parameter became `fs_path` — so the moment a branch-free body reached
+        the loop the whole run died with a `TypeError` that `main()` does not
+        catch (it catches `ValueError`, the branch refusal). Every example's
+        stack-floor guard is why nobody saw it: the loop had never run.
+
+        The second half is what `fs_path` is FOR. The `rip` side condition at
+        step `k` is `s_k.rip = <literal>`, and `s_k` is the state every earlier
+        step wrote, so the `simp` that folds it must name the definitions of
+        EVERY form walked so far — not only the previous form's. The assertion
+        is the exact set the four synthetic steps produce: the `push`'s
+        `x86_get_reg` is in the `ret` step's set, and it could not be if the set
+        were read off one form.
+
+        Lean-free, because the emission is milliseconds and the CENSUS above
+        costs minutes. That the facts head a proof was measured once instead: on
+        this exact plan the generated file elaborates with `fired False` — every
+        one of the 24 guarded side conditions, the three `rip` facts among them,
+        closes — and the only admissions are the two closing facts (`hrax`,
+        `hrip`) a function that spills its argument cannot discharge. A check on
+        the proof itself belongs in `formal-x86-endtoend`'s Lean run, and this
+        is the text where a regression in the loop shows up first.
+        """
+        import unittest.mock
+        import formal.x86_64_endtoend_test as E
+        code, info, insns, shapes = self._straight_line_plan()
+        with unittest.mock.patch.object(E, "_plan",
+                                        return_value=(code, info, insns, shapes)):
+            text = E.emit("straight-line.mojo", 7)
+        self.assertIn("theorem all_inputs (n : UInt64) :", text)
+        self.assertIn("= some 7 := by", text,
+                      "the theorem states the constant the program returns")
+        for k in range(len(shapes)):
+            self.assertIn("have hstep%d :" % k, text,
+                          "every instruction on the path gets its own step, so "
+                          "the loop ran to the end")
+        i = text.index("have hstep3 :")
+        block = text[i:text.index("obtain", i)]
+        self.assertIn(
+            "try (simp [hs3, x86_get_reg, x86_rex_b, x86_rex_r, x86_set_reg])",
+            block,
+            "the `ret` step's `rip` condition must fold through the `push` and "
+            "both `mov`s before it: the definitions are read off the FORMS "
+            "walked so far (`fs_path`), not off the previous form's defs")
 
 
 class TestScratchDirEstate(unittest.TestCase):

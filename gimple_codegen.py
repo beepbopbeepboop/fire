@@ -2117,6 +2117,13 @@ class GimpleGen:
         # never reaches it, e.g. a temp_gen used only for signature probing)
         # sees "no bases" instead of raising AttributeError.
         self._struct_bases: dict[str, list] = {}
+        # local name -> (module, struct name) for each TOP-LEVEL
+        # `from M import N [as L]` of the module being compiled, recorded by
+        # gen_module. The comptime conformance fold reads an imported
+        # struct's declared bases from its home module through this edge.
+        self._top_from_import_homes: dict[str, tuple] = {}
+        # name -> StructDef for this module's own structs (see module_gen).
+        self._struct_def_nodes: dict[str, object] = {}
         # struct name → {alias_name: value AST}; expanded at member access.
         self._struct_comptime_aliases: dict[str, dict] = {}
         # Bare names of user free functions whose C symbol is overload-mangled by
@@ -3755,6 +3762,7 @@ class GimpleGen:
         'mojo_repr_list_elem_double': ('char *', ['int64_t']),
         'mojo_repr_list_elem_bool':   ('char *', ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
+        'mojo_repr_str_or_none': ('char *',    ['char *']),
         'mojo_ascii_escape':     ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
         'mojo_repr_float':       ('char *',    ['double']),
@@ -5238,6 +5246,8 @@ class GimpleGen:
         return gfn._home_signature_ctypes(self, module, fs)
     def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
         return gfn._note_struct_import_alias(self, module, alias, orig_name)
+    def _publish_imported_class(self, module: str, name: str) -> bool:
+        return gfn._publish_imported_class(self, module, name)
     def _note_struct_attr_alias(self, module: str, alias: str, member: str):
         return gfn._note_struct_attr_alias(self, module, alias, member)
     def _local_sibling_module_exports(self, module: str):
