@@ -3200,6 +3200,14 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 _anode = None
                 if arg_nodes is not None and i < len(arg_nodes):
                     _anode = arg_nodes[i]
+                if _anode is not None and gen._is_none_literal(_anode):
+                    # A literal `None` argument is the NULL pointer, not an integer to be
+                    # spelled: `mojo_word_cstr_value(0)` is the one-character string "0",
+                    # which made the callee's `x is None` / `x == None` False and
+                    # `return x` print `'0'` where CPython prints `None`.
+                    _nl = gen._ensure_local('int64_t', aval) if atype == 'int64_t' else gen._cast('int64_t', f"{aval}")
+                    coerced_args.append(gen._cast('char *', f"{_nl}"))
+                    continue
                 _provable = (
                     actual_atype in ('double', 'float', '_Bool')
                     or aval in getattr(gen, '_int_word_vals', ())
