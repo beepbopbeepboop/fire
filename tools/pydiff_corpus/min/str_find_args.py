@@ -1,7 +1,0 @@
-print("hello".find("l"))
-print("hello".find("l", 3))
-print("hello".find("z"))
-print("hello".rfind("l"))
-print("hello".count("l"))
-print("hello".startswith("he"))
-print("hello".index("e"))

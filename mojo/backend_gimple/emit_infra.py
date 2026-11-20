@@ -1837,22 +1837,10 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
     stdlib/test set). Safe to call unconditionally (like
     `_emit_stdlib_import_externs`, right next to which this runs): a
     module with no `global_var`-kind import is an untouched no-op.
-
-    Every `from X import` in the module is consumed, a function-scoped one
-    included (`_walk_func_stmts(into_defs=True)`): a function that binds a
-    sibling's global itself, with no module-scope twin, reads it through the
-    same accessor, and an unregistered name falls to the no-signature
-    `extern int64_t NAME (...)` weak stub instead (cas.py's
-    `from module_loader import STDLIB_PATH` in `_stdlib_fingerprint`).
     """
-    _from_imports: list = []
-
-    def _collect(s):
-        if isinstance(s, gimple_ctypes.FromImportStmt):
-            _from_imports.append(s)
-
-    _walk_func_stmts(stmts, _collect, into_defs=True)
-    for stmt in _from_imports:
+    for stmt in stmts:
+        if not isinstance(stmt, gimple_ctypes.FromImportStmt):
+            continue
         # `_as_str`: a bare `.module` FIELD read used unguarded below in
         # string concatenation (`mod + '.py'`) and as a resolver
         # argument — the established self-hosted trap (working `==` but
@@ -4086,16 +4074,6 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
                 return False
             copies += 1
             continue
-        # A call to a mixed-return function (`x = h(0)` where `h` returns
-        # `None` on one path and an int on another) is a tagged word by its
-        # own shape; the bind keeps the box (`_call_tagged` in emit_stmts), and
-        # a copy of such a name must keep it too, or `y = x` turns the None box
-        # into 0 and `y is None` / `print(y)` answer for the integer.
-        if (isinstance(v, gimple_ctypes.CallExpr)
-                and isinstance(v.func, gimple_ctypes.IdentExpr)
-                and _as_str(v.func.name) in getattr(gen, '_ret_may_hold_mixed', ())):
-            copies += 1
-            continue
         if not (isinstance(v, gimple_ctypes.CallExpr)
                 and isinstance(v.func, gimple_ctypes.IdentExpr)
                 and v.func.name == 'next'
@@ -4276,24 +4254,21 @@ def tagged_recv_name(gen, name) -> bool:
                for v in values)
 
 
-def _walk_func_stmts(stmts, visit, into_defs=False):
+def _walk_func_stmts(stmts, visit):
     """Call `visit` on every statement of a function body, nested bodies
-    included. By default a nested `def` is skipped whole (its locals are its
-    own); `into_defs=True` also visits the `def` and walks its body, for a
-    whole-module scan (the accessor pass wants every `from X import` an
-    importer binds, in a `def` body or not)."""
+    included, never descending into a nested `def` (its locals are its own)."""
     if not stmts:
         return
     for s in stmts:
-        if isinstance(s, gimple_ctypes.FunctionDef) and not into_defs:
+        if isinstance(s, gimple_ctypes.FunctionDef):
             continue
         visit(s)
         for attr in ('then_body', 'else_body', 'body', 'finalbody'):
-            _walk_func_stmts(getattr(s, attr, None), visit, into_defs)
+            _walk_func_stmts(getattr(s, attr, None), visit)
         for _c, eb in (getattr(s, 'elifs', None) or ()):
-            _walk_func_stmts(eb, visit, into_defs)
+            _walk_func_stmts(eb, visit)
         for h in (getattr(s, 'handlers', None) or ()):
-            _walk_func_stmts(getattr(h, 'body', None), visit, into_defs)
+            _walk_func_stmts(getattr(h, 'body', None), visit)
 
 
 def _scalar_mixed_prescan(gen, body) -> tuple:
@@ -8686,17 +8661,10 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # time; see _is_sys_stderr.
     print_fn = 'mojo_print'
     sep_node = None
-    end_node = None
     if kwargs:
         for kw_name, kw_val in kwargs:
             if kw_name == 'file' and gen._is_sys_stderr(kw_val):
                 print_fn = 'mojo_print_stderr'
-            elif kw_name == 'end' and not isinstance(kw_val, gimple_ctypes.NoneLiteral):
-                # print(..., end=X): the string printed AFTER the arguments
-                # instead of the newline. It was never read, so
-                # `print("x", end="")` always ended the line. `end=None` means
-                # the default newline in CPython, so it is left as no end_node.
-                end_node = kw_val
             elif kw_name == 'sep':
                 # print(..., sep=X): the string placed BETWEEN arguments.
                 # It was silently dropped before, so every `print(indent,
@@ -8721,22 +8689,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
         t = gen._new_val('char *', slit)
         gen._rt_void(print_fn, [t])
 
-    # The text that ends the call: the `end=` string, else the newline.
-    def _emit_end(print_fn: str):
-        if end_node is None:
-            _emit_literal_print('\\n', print_fn)
-            return
-        _et, _ev = gen.lower_expr(end_node)
-        if not gimple_ctypes.TypeLattice.is_cstr(_et):
-            _ev = gen._call_expr('char *', 'mojo_str_word_fresh',
-                                 [('int64_t', gen._to_int64(_et, _ev))])
-        gen._rt_void(print_fn, [_ev])
-
     if not args:
-        if end_node is not None:
-            _emit_end(print_fn)
-        else:
-            _emit_literal_print('', print_fn)
+        _emit_literal_print('', print_fn)
         return
     # Through the module object `ggc` (imported at the top of this file), not a
     # function-local `from ... import`: the self-hosted C compiler saw the local
@@ -9253,7 +9207,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # separator prints in between read the previous argument's buffer too.
     for _or_i in range(len(_owned_reprs)):
         gen._rt_void('free', [f"{_owned_reprs[_or_i]}"])
-    _emit_end(print_fn)
+    _emit_literal_print('\\n', print_fn)
     if _sep_owned:
         gen._rt_void('free', [f"{sep_var}"])
 

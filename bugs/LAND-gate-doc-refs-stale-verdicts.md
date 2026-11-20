@@ -34,3 +34,31 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 - 2026-11-20 06:35:55: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-19; 2 commit(s) ahead of master, 67 behind it; task started 2026-11-20 01:40:41)
   Branch: work/fix-proof-bug-gate-doc-refs-stale-verdicts
   Conflicting files: bugs/hard/README.md
+- 2026-11-20 (land worker): assessed; decision ADAPT, recorded in the landing commit.
+  Branch now 2 ahead / 70 behind (merge-base 7400c7b85).
+  - The branch's own test is the job `doc-refs-stale-verdicts` (`test_dangling_doc_refs.py`).
+    It is GREEN on today's master (2026-11-20: 7/7 under memslot 8 GB), so it does not
+    fail there: the bug the branch fixed is already fixed on master.
+  - Master already carries the branch's fix, byte-identical: 8f7e64375 (2026-11-19
+    21:21) deletes gate-doc-refs-stale-verdicts.md and makes the same README sync as
+    the branch's 158cbe334 (same from/to blobs, 86a7095a2 -> 6d59fe17c) — parallel
+    copies of one fix, and master kept its own. The branch's second commit 8d97fcf0e
+    changes no file.
+  - After 8f7e64375 the job went red again: at ef7029347^ the index held 11 rows to
+    12 docs, the unindexed one being GATE_red_recover-land_2026-11-02-part5-part1.md
+    (measured), and the integrator re-filed the doc (ef7029347). The part1 doc was
+    closed and deleted in merge 76bfc1b8d (no row ever existed), and the c_common
+    rows went with their docs (ae81bbf68, d960ce50f). The job has been green since
+    (re-verified 2026-11-20: 9 docs = 9 rows; 7/7). The re-filed doc is now stale:
+    job green, doc says red; its own rule is to delete it when the job is green.
+  - The branch's README version is stale: it keeps the two rows for the closed
+    c_common docs (COMPILE_FAIL_Tools_c-analyzer_c_common_{scriptutil,tables}.md,
+    gone from bugs/hard on master); landing them would break the green
+    HardIndexIsTrue check (a row naming a doc that is no longer in the tree).
+    Master's README is strictly ahead of the branch's.
+  - ADAPT: land the still-right part only — delete gate-doc-refs-stale-verdicts.md
+    (the branch's 158cbe334 does exactly this) and pin it with a regression test in
+    test_dangling_doc_refs.py; leave the README sync out (already on master since
+    8f7e64375, and the branch's copy is behind it). Nothing more is owed to the
+    branch; its tip is archived at
+    refs/archive/work/fix-proof-bug-gate-doc-refs-stale-verdicts.

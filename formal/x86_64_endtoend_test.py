@@ -4009,8 +4009,7 @@ def emit_terminates(path):
         def emit(line):
             out.append(pad + line if line else "")
 
-        def emit_value_facts(node, name, new_hval_idx, forms, hval_base,
-                             hmem_fact=None):
+        def emit_value_facts(node, name, new_hval_idx, forms, hval_base):
             """The step's own `hval`, if a decided branch on this path will need it.
 
             **Why there is a fact per STEP and not one `simp` over the chain.** A
@@ -4061,8 +4060,6 @@ def emit_terminates(path):
                     "x86_set_reg", "x86_rex_b", "x86_rex_r"]
             simp += [n for n in _SIMP_FORMS.get(forms[-1], ())
                      if n not in ("mem_read_bytes", "mem_write_bytes")]
-            if hmem_fact:
-                simp.append(hmem_fact)
             emit("  simp [%s]" % ", ".join(dict.fromkeys(simp)))
             # A store at this step is PEELLED off the cells the facts track, with
             # the library's own disjointness lemma and a side condition Lean can
@@ -4197,14 +4194,11 @@ def emit_terminates(path):
         # If this FORM writes only registers -- read off `_STORE_FORMS`, not off
         # the walk's write list, which a store at an unknown address CLEARS --
         # record that memory is unchanged so we can skip reconstructing it.
-        hmem_fact = None
         if not node.stores and node.kind not in ("leaves",):
             emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
-            hmem_fact = "hmem%d" % (k + 1)
             hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
             emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
-        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,), hval_base,
-                         hmem_fact)
+        emit_value_facts(node, nxt, k + 1, fs_path + (node.form,), hval_base)
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
         # exit`, and `s_k` is the state this step STARTS in -- which the
         # PREVIOUS step's successor equation describes.  So this uses `hs_k`,
