@@ -325,7 +325,7 @@ def test_span_param_binds_only_from_a_proven_list():
     """`Span[T, origin]` infers `T` from a List argument ONLY when the caller
     proves the list's element type.
 
-    This is the first step of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`:
+    This is the first step of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`:
     `std.builtin.sort.sort[T, origin](span: Span[T, origin])` is called with a
     `List`, and before this rule `_unify_param_ann` declined the `Span`
     annotation outright, so the call never reached the elaborator. A
@@ -363,7 +363,7 @@ def test_span_param_binds_from_a_proven_span():
     argument's C type is the erased `Span *`, so the proof is the caller's
     own monomorphized parameter annotation (`Span[Int, MutOrigin]`).
 
-    Second step of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`, beside
+    Second step of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`, beside
     the List case of `test_span_param_binds_only_from_a_proven_list`. A
     still-generic proof (`Span[T, origin]` inside a body that is itself
     not yet an instance) is symbol-for-symbol and never converges, so it
@@ -533,7 +533,7 @@ def _proven_local_types(src, params=()):
 
 
 def test_proven_list_local_keeps_element_type_across_inplace_store():
-    """Step 2a of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`: a local
+    """Step 2a of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`: a local
     bound exactly once by a `List(...)` constructor (from `fill`'s literal)
     or a `List[X]` annotation keeps its proven element type — in particular
     ACROSS in-place stores like `p[0] = 3`, whose subscript target mutates
@@ -595,7 +595,7 @@ def f():
 
 
 def test_proven_span_local_from_a_list_projection():
-    """Step 2b of `bugs/CODEGEN_prelude_sort_is_not_resolved.md`: a local
+    """Step 2b of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`: a local
     bound to a ONE-STEP projection out of a proven container inherits its
     element type — specifically std.builtin.sort's `_quicksort` shape
 

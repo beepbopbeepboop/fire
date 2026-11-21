@@ -18,7 +18,7 @@ It is red on `master`: reproduce it there (`python3 tools/suite.py bootstrap-sta
 
 **Not verified, and still open:**
 
-- The unimported `sort(p)` build: it must still link. The prelude-sort work (`bugs/CODEGEN_prelude_sort_is_not_resolved.md`)
+- The unimported `sort(p)` build: it must still link. The prelude-sort work (`bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`)
   depends on this exact behaviour, so the two must be checked together.
 - `python3 tools/suite.py bootstrap-stage1-transitive` has not been re-run on master since the merge. This doc stays
   until it is green. Delete it in the same commit that shows it green, then run `python3 tools/dangling_doc_refs.py --ratchet`.
