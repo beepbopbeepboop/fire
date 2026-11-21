@@ -5,6 +5,7 @@
 
 Points C.MAIN at a temporary tree and replaces the registry with an in-memory dict, so the live bugs/ and tasks.json
 are never read or written."""
+from contextlib import nullcontext
 import contextlib, os, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -117,22 +118,18 @@ def test_ledger_landing_clears_an_untracked_twin_of_a_tracked_doc():
 
         seen = {}
 
-        class Lock:
-            def close(self):
-                pass
-
         def fake_merge(main, *args):
             seen["twin"] = os.path.exists(twin)
             seen["other"] = os.path.exists(other)
             return "ok", ""
 
-        real_lock, real_merge = VL.integrator_lock, VL.SF.merge
-        VL.integrator_lock = lambda wait_s=0: Lock()
+        real_lock, real_merge = VL.I.master_lock, VL.SF.merge
+        VL.I.master_lock = lambda wait_s=None: nullcontext()
         VL.SF.merge = fake_merge
         try:
             landed = VL.land_ledger(new, sha)
         finally:
-            VL.integrator_lock, VL.SF.merge = real_lock, real_merge
+            VL.I.master_lock, VL.SF.merge = real_lock, real_merge
         check("the ledger lands once the untracked twin is cleared", landed is True)
         check("the untracked twin is gone before the merge runs", seen.get("twin") is False)
         check("an untracked doc the ledger does not track is left alone", seen.get("other") is True)
@@ -152,17 +149,13 @@ def test_ledger_landing_keeps_a_twin_whose_bytes_differ():
         twin = os.path.join(tmp, "bugs", "gate-%s.md" % JOB)
         open(twin, "w").write("a different local edit\n")
 
-        class Lock:
-            def close(self):
-                pass
-
-        real_lock, real_merge = VL.integrator_lock, VL.SF.merge
-        VL.integrator_lock = lambda wait_s=0: Lock()
+        real_lock, real_merge = VL.I.master_lock, VL.SF.merge
+        VL.I.master_lock = lambda wait_s=None: nullcontext()
         VL.SF.merge = lambda main, *args: ("conflict", "untracked file would be overwritten")
         try:
             VL.land_ledger(new, sha)
         finally:
-            VL.integrator_lock, VL.SF.merge = real_lock, real_merge
+            VL.I.master_lock, VL.SF.merge = real_lock, real_merge
         check("a twin whose bytes differ is kept, not deleted",
               open(twin).read() == "a different local edit\n")
     in_repo(body)

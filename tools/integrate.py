@@ -24,12 +24,76 @@ One round:
      nothing to check, and the round is refused. A red landing gate is a stop,
      not an ungate.
 """
-import argparse, fcntl, json, os, re, shutil, signal, subprocess, sys, tempfile, time
+import argparse, atexit, fcntl, json, os, re, shutil, signal, subprocess, sys, tempfile, time
+from contextlib import contextmanager
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 import stash_ff as SF
 
 INTEG = os.path.join(C.PARENT, "work-integ")
+
+
+def take_integrator_lock(probe):
+    """The landing round's exclusion: one landing at a time, because a landing moves master and shares ../work-integ.
+    A probe takes NO lock: it gates in its own detached tree (see main) and changes no state, so probes run side by
+    side (doc/ORCHESTRATION_REDESIGN.md, Phase 2). Returns the open lock file, or None for a probe."""
+    if probe:
+        return None
+    lock = open(os.path.join(C.ctl_dir(), "integrator.lock"), "a+")   # "a+": a losing attempt must not truncate the record
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("another integrator is already running (lock %s/integrator.lock): there is only ever one" % C.ctl_dir())
+    return lock
+
+
+@contextmanager
+def master_lock(wait_s=None):
+    """Only one process moves master at a time: an exclusive flock around the fast-forward (landings, and the ledger
+    commit of verify_landed.py). wait_s None blocks: a holder is bounded (it does one merge), and a landing that loses
+    the race must wait, not be dropped. wait_s N polls for N seconds, then raises TimeoutError, before the body runs."""
+    f = open(os.path.join(C.ctl_dir(), "master.lock"), "a+")
+    try:
+        if wait_s is None:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        else:
+            end = time.time() + wait_s
+            while True:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.time() > end:
+                        raise TimeoutError("master.lock busy for %ds" % wait_s)
+                    time.sleep(2)
+        yield
+    finally:
+        f.close()
+
+
+def regenerate_generated(tree):
+    """Generated files are a pure function of their sources, so the round regenerates them in its own tree before it
+    gates. A branch that changed runtime/*.h but not the table generated from it (mojo/middle/rt_sigs.py) used to fail
+    the freshness gate for whoever was merged with it, and the bisect blamed the wrong branch. The regeneration is
+    committed to the round's branch only when it changed something, so it lands with the merge it belongs to."""
+    r = subprocess.run(["python3", "tools/gen_rt_sigs.py"], cwd=tree, capture_output=True, text=True)
+    if r.returncode:
+        print("regenerate rt_sigs: generator failed (exit %d): %s" % (r.returncode, (r.stdout + r.stderr)[-300:]))
+        return
+    # porcelain, not `git diff --quiet`: diff ignores an untracked file, which would leave a new table uncommitted
+    if subprocess.run(["git", "status", "--porcelain", "--", "mojo/middle/rt_sigs.py"], cwd=tree,
+                      capture_output=True, text=True).stdout.strip():
+        subprocess.run(["git", "add", "mojo/middle/rt_sigs.py"], cwd=tree, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "integrate: regenerate mojo/middle/rt_sigs.py from runtime/*.h"],
+                       cwd=tree, check=True)
+        print("regenerated mojo/middle/rt_sigs.py for this round (committed)")
+
+
+def remove_probe_tree(path):
+    """Remove a probe's detached worktree when the probe ends, by any exit path (registered with atexit)."""
+    subprocess.run(["git", "worktree", "remove", "--force", path], cwd=C.MAIN, capture_output=True)
+    shutil.rmtree(path, ignore_errors=True)
+    subprocess.run(["git", "worktree", "prune"], cwd=C.MAIN, capture_output=True)
 
 # The round in progress. Set once, by main(), after the lock is won. `deadline` is an epoch time (None: no bound),
 # `lock` the open integrator.lock (its contents are the holder record, see holder()), `merged` the tasks this round
@@ -671,6 +735,7 @@ def gate_doc(culprit, t, failing, files=()):
 
 
 def main():
+    global INTEG
     sys.stdout.reconfigure(line_buffering=True)  # progress must be visible in a redirected log
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true", help="merge and report, do nothing else: no gate, no landing, no fixers queued, no registry state changed")
@@ -709,11 +774,7 @@ def main():
     # program-class jobs need 55 GB; a second gate beside it is 110), so being careful with it means
     # there is only one of it. flock, kernel-released when this process dies, so a crash cannot wedge it.
     # Opened WITHOUT truncation: a losing attempt must not wipe the holder's record (it used to, with "w").
-    lock = open(os.path.join(C.ctl_dir(), "integrator.lock"), "a+")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        sys.exit("another integrator is already running (lock %s/integrator.lock): there is only ever one" % C.ctl_dir())
+    lock = take_integrator_lock(a.probe)
     now = time.time()
     ROUND.update(id="%d-%d" % (os.getpid(), int(now)), started=now, lock=lock, probe=a.probe,
                  deadline=(now + a.deadline * 60) if a.deadline else None)
@@ -725,7 +786,13 @@ def main():
     if not cands:
         print("nothing to integrate"); return
 
-    if not os.path.isdir(INTEG):
+    if a.probe:
+        # A probe gates in its own detached tree: it never touches ../work-integ or the `integ` branch, so probes can
+        # run side by side. The tree is removed on every exit path.
+        INTEG = os.path.join(C.PARENT, "work-probe-%s" % ROUND["id"])
+        C.git("worktree", "add", "--detach", INTEG, "master")
+        atexit.register(remove_probe_tree, INTEG)
+    elif not os.path.isdir(INTEG):
         C.git("worktree", "add", "-B", "integ", INTEG, "master")
     else:
         C.git("switch", "-C", "integ", "master", cwd=INTEG)
@@ -781,7 +848,8 @@ def main():
                 with C.registry() as reg:
                     for n in merged: reg[n]["state"] = "integration-failed"
                 print("RED in the fast lane: %s (see %s/fast.log); master untouched" % (" ".join(c[:4]), INTEG)); sys.exit(1)
-        land_on_master()
+        with master_lock():
+            land_on_master()
         mark_landed(merged)
         print("GREEN (fast lane): master is now %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
         return
@@ -822,6 +890,7 @@ def main():
         sys.exit(1)
     else:
         print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
+        regenerate_generated(INTEG)
         holder("gate")
         rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"), step="gate")
     if a.jobs:
@@ -855,7 +924,8 @@ def main():
                 pre.append(j)
         if pre:
             print("PRE-EXISTING on master (not this round's): %s; their docs are written, no branch is held" % " ".join(pre))
-            gate_doc(None, None, pre)
+            if not a.probe:                  # a probe changes no state: it reports the pre-existing jobs, files nothing
+                gate_doc(None, None, pre)
             failed = [j for j in failed if j not in pre]
             if not failed:
                 print("no failing job is new against master: the round is judged on the jobs that master also passes")
@@ -887,7 +957,8 @@ def main():
         sys.exit(rc)
     if rc == 0:
         holder("land")
-        land_on_master(None if a.jobs else lambda: run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"), step="regate"))
+        with master_lock():
+            land_on_master(None if a.jobs else lambda: run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"), step="regate"))
         mark_landed(merged)
         print("GREEN: master fast-forwarded to %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
     else:

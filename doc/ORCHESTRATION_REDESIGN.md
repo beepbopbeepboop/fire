@@ -1,7 +1,13 @@
 # Orchestration redesign: landing without a single blocking lock
 
-Status: PLAN, 2026-11-20. Nothing here is implemented yet. Phase 1 needs the owner's go-ahead
-because it changes what the live integrator does.
+Status (2026-11-20):
+- Phase 0 (cheap landing gate only) and Phase 1 (holder record, round deadline): committed, 719279f8e.
+- Phase 2 (probes in their own detached tree, no integrator lock; master.lock for the fast-forward): committed, 8a854ce8a.
+- Phase 3 (verify_landed.py's ledger commit takes master.lock, not integrator.lock; test_verify_lock and
+  test_gate_doc repointed): committed with this doc's update.
+- Not done: swarm probes still run one after another (swarm.py calls them in sequence); landing rounds still
+  hold integrator.lock for the whole round, so two landings do not run side by side (by design: they share work-integ).
+  The integrator's fast-forward takes master.lock; the verifier's ledger commit takes it too.
 
 ## 1. What is wrong, measured on 2026-11-20
 

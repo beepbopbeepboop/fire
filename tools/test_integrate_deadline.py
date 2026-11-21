@@ -86,5 +86,66 @@ class HolderRecord(unittest.TestCase):
             winner.close()
 
 
+class ProbeLocking(unittest.TestCase):
+    """Phase 2: a probe takes no integrator lock and gates in its own tree; a landing still takes the lock."""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.patch = mock.patch.object(C, "ctl_dir", lambda: self.d)
+        self.patch.start()
+        self.held = open(os.path.join(self.d, "integrator.lock"), "a+")
+        fcntl.flock(self.held, fcntl.LOCK_EX | fcntl.LOCK_NB)   # another integrator holds the lock
+
+    def tearDown(self):
+        self.held.close()
+        self.patch.stop()
+
+    def test_probe_takes_no_lock_while_a_landing_holds_it(self):
+        self.assertIsNone(I.take_integrator_lock(probe=True))
+
+    def test_landing_refuses_while_the_lock_is_held(self):
+        with self.assertRaises(SystemExit):
+            I.take_integrator_lock(probe=False)
+
+    def test_probe_tree_is_removed_from_the_repo(self):
+        repo = os.path.join(self.d, "repo")
+        os.mkdir(repo)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "root"], check=True, env=env)
+        tree = os.path.join(self.d, "work-probe-test")
+        subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "--detach", tree, "HEAD"], check=True)
+        self.assertTrue(os.path.isdir(tree))
+        with mock.patch.object(C, "MAIN", repo):
+            I.remove_probe_tree(tree)
+        self.assertFalse(os.path.exists(tree))
+        wl = subprocess.run(["git", "-C", repo, "worktree", "list"], capture_output=True, text=True).stdout
+        self.assertNotIn("work-probe-test", wl)
+
+
+class RegenerateGenerated(unittest.TestCase):
+    """A round regenerates a generated file in its own tree and commits it only when it changed."""
+    def test_commits_only_a_real_change(self):
+        d = tempfile.mkdtemp()
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        def git(*a):
+            return subprocess.run(["git", "-C", d] + list(a), capture_output=True, text=True, env=env)
+        git("init", "-q"); os.makedirs(os.path.join(d, "tools")); os.makedirs(os.path.join(d, "runtime"))
+        open(os.path.join(d, "runtime", "h.h"), "w").write("int f(int);\n")
+        open(os.path.join(d, "tools", "gen_rt_sigs.py"), "w").write(
+            "import os\nsrc = open('runtime/h.h').read()\n"
+            "os.makedirs('mojo/middle', exist_ok=True)\nopen('mojo/middle/rt_sigs.py', 'w').write(src)\n")
+        git("add", "-A"); git("commit", "-q", "-m", "root")
+        before = git("rev-parse", "HEAD").stdout.strip()
+        I.regenerate_generated(d)                       # the table is stale: regenerated and committed
+        after = git("rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(before, after, "a stale generated file is committed")
+        self.assertEqual(git("log", "-1", "--format=%s").stdout.strip(),
+                         "integrate: regenerate mojo/middle/rt_sigs.py from runtime/*.h")
+        I.regenerate_generated(d)                       # already current: no new commit
+        self.assertEqual(git("rev-parse", "HEAD").stdout.strip(), after)
+
+
 if __name__ == "__main__":
     unittest.main()
