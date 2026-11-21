@@ -2043,6 +2043,23 @@ def test_type_param_markers_and_simd_unification(wd):
           and el.bind_type_args(_lit, ['Int64', 'Foo']) is None
           and el.bind_type_args(_lit, ['True', 'Int64', 'MutOrigin', '7'])
           == {'mut': 'True', 'T': 'Int64', 'origin': 'MutOrigin', 'address_space': '7'})
+    # A list that already carries the `//` prefix but omits the trailing
+    # default is the shape `elab_intu._struct_bind_args` hands this binder (its
+    # callers fill `mut` themselves and leave `forward` to the trailing-default
+    # rule). It must be taken as written, not re-deduced: the re-deduction
+    # duplicated the prefix and declined, which turned LinkedList's
+    # `IteratorType` alias — and so `LinkedList.__iter__` — into an int64_t
+    # stub (gate job linked-list-struct-element-step4b).
+    _iter = ('struct S[mut: Bool, //, ElementType: Copyable, '
+             'origin: Origin[mut=mut], forward: Bool = True]:\n    pass\n')
+    check("binder#5: a prefixed list keeps its positions when the trailing "
+          "default is omitted",
+          el.bind_type_args(_iter, ['True', 'Int', 'MutOrigin'])
+          == {'mut': 'True', 'ElementType': 'Int', 'origin': 'MutOrigin',
+              'forward': 'True'}
+          and el.bind_type_args(_lit, ['True', 'Int64', 'MutOrigin'])
+          == {'mut': 'True', 'T': 'Int64', 'origin': 'MutOrigin',
+              'address_space': '0'})
     import monomorphize as _mm
     _shadow_src = ('def f():\n'
                    '    var x = Pointer[Int, MutOrigin](\n'

@@ -4293,8 +4293,7 @@ test('linked-list-struct-element-step4', [PY, 'test_linked_list_struct_element_s
      desc='registered by the estate audit (every test file runs)',
      disabled='bugs/gate-linked-list-struct-element-step4.md')
 test('linked-list-struct-element-step4b', [PY, 'test_linked_list_struct_element_step4b.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)',
-     disabled='bugs/gate-linked-list-struct-element-step4b.md')
+     desc='registered by the estate audit (every test file runs)')
 test('linked-list-struct-element-step4c', [PY, 'test_linked_list_struct_element_step4c.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)',
      disabled='bugs/gate-linked-list-struct-element-step4c.md')

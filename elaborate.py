@@ -691,7 +691,12 @@ def bind_type_args(template_src: str, type_args):
     that is shorter than the full parameter list names only the parameters after
     the `//`, and the deduced prefix is read from them (`_deduce_prefix_from_rest`).
     A full-length list is taken as written, which is what the instance's own
-    mangled mentions spell.
+    mangled mentions spell. A list that already carries the prefix but omits a
+    trailing default (`[True, T, origin]` of four, which the alias evaluators
+    produce) is taken as written too: the deduction above cannot tell it from
+    a short list by length, and its own answer is refused when no argument
+    pins the prefix, so the written positions stand exactly as they did before
+    the deduction existed.
 
     Supplied arguments are taken POSITIONALLY — the same `zip` the caller
     already used — and only the trailing ones can come from a default, because
@@ -713,9 +718,20 @@ def bind_type_args(template_src: str, type_args):
             supplied = supplied[:len(params)]
     k = deduced_param_count(template_src)
     if k and len(supplied) < len(params) and not any(p.startswith('*') for p in params):
-        supplied = _deduce_prefix_from_rest(template_src, params, supplied, k)
-        if supplied is None:
-            return None
+        # A SHORT bracket names only the parameters after `//`, so read the
+        # deduced prefix from its origin arguments. When that cannot be read,
+        # take the list AS WRITTEN — the positional rule every full-length
+        # caller already relies on. The two spellings are indistinguishable
+        # by length alone: `_struct_bind_args` (an internal alias evaluator)
+        # fills the `//` prefix itself and leaves the trailing default to the
+        # loop below, so `[True, T, origin]` for a 4-parameter struct is a
+        # PREFIXED list, not a short one. Re-deducing it duplicated the
+        # prefix and declined the instantiation, which is what turned
+        # LinkedList's `IteratorType` alias (and so every `__iter__` caller)
+        # back into an `int64_t` stub.
+        deduced = _deduce_prefix_from_rest(template_src, params, supplied, k)
+        if deduced is not None:
+            supplied = deduced
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
     if _first_unbound_type_param(params, supplied, defaults) is not None:
         return None
