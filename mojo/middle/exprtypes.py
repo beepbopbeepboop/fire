@@ -2657,9 +2657,10 @@ def scalar_shape_arm_kind(node) -> str | None:
     `None` is `int 0`, and a `Bool` value is `_Bool`, so on the C side a
     legitimate pointer arm and a mistyped scalar arm are the same word. Only
     shapes whose static Mojo type is a scalar in every context are named here
-    — literals, comparisons, `not`, and a sign applied to a literal. An
-    IdentExpr or a call is deliberately NOT named: `return result^` returning
-    a String is an `int64_t` on the C side and must stay legal.
+    — literals, comparisons, `not`, a sign applied to a literal, and floor
+    division. An IdentExpr or a call is deliberately NOT named: `return
+    result^` returning a String is an `int64_t` on the C side and must stay
+    legal.
 
     Two readers, and they must agree: the return emitter's refusal of a
     scalar arm in an ANNOTATED pointer return (emit_stmts), and
@@ -2678,6 +2679,19 @@ def scalar_shape_arm_kind(node) -> str | None:
         return 'bool'
     if isinstance(node, BinaryOp) and node.op in ('==', '!=', '<', '<=', '>', '>='):
         return 'bool'
+    if isinstance(node, BinaryOp) and node.op == '//':
+        # Floor division is a NUMBER in every context: Python defines it only
+        # for numeric operands, so it can never be the str/bytes their `+`,
+        # `*` and `%` produce. It belongs here for the same reason a
+        # comparison does — `_return_arms_need_boxed_word` must see that
+        # `return a // b` beside `return "div by zero"` is a scalar/pointer
+        # mix, or the join casts the int result to `char *` and the caller
+        # dereferences address 3 (the mixed int/str return join that crashed
+        # `return a // b` beside `return "div by zero"`). A float-side `//`
+        # is already a tag in the int64_t word (`_lower_floordiv`'s
+        # float-param arm boxes it), so the family is the word's, not a C
+        # scalar's.
+        return 'int'
     if isinstance(node, UnaryOp) and node.op == 'not':
         return 'bool'
     return None

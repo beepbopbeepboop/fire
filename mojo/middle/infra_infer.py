@@ -2337,7 +2337,7 @@ def _is_none_return_arm(node) -> bool:
             and _as_str(node.name) == 'None')
 
 
-def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
+def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> bool:
     """Does an unannotated function whose arms joined to a POINTER really mix
     a pointer with a scalar, so its return type must be the boxed word?
 
@@ -2361,7 +2361,16 @@ def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
 
       * `_Bool` and a float — C types no pointer value can have; and
       * an int/int64_t arm whose SOURCE SHAPE is unambiguously scalar
-        (a literal, a comparison, `not`, a sign on a literal)
+        (a literal, a comparison, `not`, a sign on a literal, `//`); and
+      * an int/int64_t arm that is a SUBSCRIPT of a named container, when the
+        join is the STRING pointer — `return d[k]` beside `return "missing"`.
+        The slot is the dict/list's own word (`mojo_dict_slot_boxed`): an
+        integer for an int slot and the string itself for a str slot. Cast
+        to `char *`, the int 1 became address 1 and the caller dereferenced
+        it (the `try: return d[k]` / `except: return "missing"` crash). The
+        gates are load-bearing: a dict-of-sets subscript beside a `MojoSet *`
+        arm really is that pointer, and `s.split('.')[-1]` (a subscript of a
+        CALL) really is a string, so widening either loses a real type.
 
     are evidence. An IdentExpr or a call is not: `return result^` (String)
     and `return len(x)` are both named `int64_t` here, and only the first
@@ -2369,7 +2378,11 @@ def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
     ignored, as the join ignores it.
 
     `acc` and `arms` are index-aligned; `arms` may be shorter when a caller
-    did not ask for nodes, in which case there is no node evidence."""
+    did not ask for nodes, in which case there is no node evidence. `joined`
+    is the arm join the caller already computed (the joined pointer the
+    subscript arm is compared against), or None to compute it here."""
+    _joined = _as_str(joined) if joined is not None else _as_str(
+        gimple_ctypes.TypeLattice.join_all(acc))
     for _i in range(len(acc)):
         _t = _as_str(acc[_i])
         if _t == 'void' or gimple_ctypes.TypeLattice.is_pointer(_t):
@@ -2381,6 +2394,20 @@ def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
             return True
         if _t in ('int', 'int64_t'):
             if gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
+                return True
+            # A bare-name container subscript beside a STRING arm
+            # (`return d[key]` with `return "missing"`) is the slot's own word
+            # of unknown kind: an int slot's integer, a str slot's pointer.
+            # Cast to the joined `char *` the int slot's `1` became address 1
+            # and the caller dereferenced it. Named containers only (not a
+            # call result or a member), and only when the join is the string
+            # pointer: a subscript of a dict of sets beside a `MojoSet *` arm
+            # really is that pointer (`_conforms_to_bases`), and widening it
+            # would lose the container type for every caller, and a
+            # `p.split('.')[-1]` (a subscript of a CALL) really is a string.
+            if (gimple_ctypes.TypeLattice.is_cstr(_joined)
+                    and isinstance(_node, gimple_ctypes.SubscriptExpr)
+                    and isinstance(_node.obj, gimple_ctypes.IdentExpr)):
                 return True
     return False
 
@@ -2511,7 +2538,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # exactly the functions this decision widened, rather than re-deriving
         # the mix from a differently-seeded type table.
         if (gimple_ctypes.TypeLattice.is_pointer(_rt)
-                and _return_arms_need_boxed_word(acc, arms)) \
+                and _return_arms_need_boxed_word(acc, arms, _rt)) \
                 or (_rt in ('int', 'int64_t')
                     and _return_arms_are_int_or_none(acc, arms, body)):
             _mixed = getattr(gen, '_mixed_return_bodies', None)
