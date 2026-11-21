@@ -2,6 +2,7 @@
 
 Status: stages 0, 1, 2a, 3a, 3b and 5a landed (2026-11-14). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
+How the remaining stages are being built with Sonnet/Haiku workers: `doc/GIR_WORKERS.md`.
 
 ## 1. What is wrong today (measured 2026-11-13)
 
@@ -195,7 +196,7 @@ that is meant to be behaviour-preserving:
   `label`. Each returns a typed value and appends an `Instr`.
   `_rt_call`/`_emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
   Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the count of
-  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them) are the next
+  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them on 2026-11-20, 41 on 2026-11-21) are the next
   mechanical batch: `gen._cast(T, x)`.
 - **Stage 3a (landed 2026-11-13). Exits are told, not recognised.**
   `_emit_cf` (`emit_infra.py`) replaces `_emit_through`. `gen._goto`,
