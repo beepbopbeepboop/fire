@@ -31,6 +31,17 @@ stage2/
 # has the measurement; the ignore is the cheap half of the fix and the CWD
 # itself is the other.
 *_gen.cpp
+# A hand-written probe left at the repo root under a `tempfile`-shaped name.
+# `.mojo` scratch belongs in `.tmp/` (ignored below), but `mkstemp`/a probe run
+# from the root puts `tmpXXXXXXXX.mojo` there, and a `git add -A` then tracks
+# it. That is not a cosmetic mess: `tools/suite.py::tracked_mojo_files()` feeds
+# EVERY tracked top-level `*.mojo` to the bootstrap fanouts, so each leftover
+# becomes a bootstrap job that can only fail or, worse, silently widen the
+# corpus (the `fcntl` probes `tmphemc8yln.mojo` and `tmpe7tqx39y.mojo` were
+# committed this way by 3d32c0e66, and the former turned the gate red at
+# c0182fd365). Root-anchored, so a real fixture named `tmp*.mojo` in a
+# subdirectory is unaffected.
+/tmp*.mojo
 mojoc
 bfib
 bnbody
