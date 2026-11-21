@@ -680,7 +680,7 @@ def _deduce_prefix_from_rest(template_src: str, params, supplied, k: int):
     return [deduced[p] for p in params[:k]] + list(supplied)
 
 
-def bind_type_args(template_src: str, type_args):
+def bind_type_args(template_src: str, type_args, *, full_prefix: bool = False):
     """{param: concrete} for a template's bracket parameters, filling any the
     caller did not supply from their DEFAULT (`type_param_defaults`). None when
     a parameter is missing and has no provable default, or when the template has
@@ -693,10 +693,27 @@ def bind_type_args(template_src: str, type_args):
     A full-length list is taken as written, which is what the instance's own
     mangled mentions spell. A list that already carries the prefix but omits a
     trailing default (`[True, T, origin]` of four, which the alias evaluators
-    produce) is taken as written too: the deduction above cannot tell it from
-    a short list by length, and its own answer is refused when no argument
-    pins the prefix, so the written positions stand exactly as they did before
-    the deduction existed.
+    produce) is taken as written too when the deduction cannot read it: the
+    deduction cannot tell the two spellings apart by length, and its own answer
+    is refused when no argument pins the prefix, so the written positions stand
+    exactly as they did before the deduction existed. That fallback is still
+    only a guess about which spelling it got, so a caller that KNOWS its list
+    is a full prefix says so with `full_prefix` instead of relying on it.
+
+    `full_prefix` says the caller ALREADY wrote the deduced prefix: its list
+    starts at the template's first parameter and only trailing defaults are
+    absent. That is what the compiler's own alias expansion builds
+    (`elab_intu._struct_bind_args` fills an infer-only `mut: Bool` with `True`),
+    so re-deducing it reads the caller's first explicit argument as a
+    post-`//` argument and shifts every position one parameter right. Measured
+    on `struct S[mut: Bool, //, T, origin: Origin[mut=mut], forward: Bool =
+    True]`: the prefixed list `[True, MutOrigin, MutOrigin]` re-deduced to
+    `mut=True, T=True, origin=MutOrigin, forward=MutOrigin` — a silently WRONG
+    instantiation, not a refusal. On `_LinkedListIter` the shifted read could
+    not be read at all, and it was the take-as-written fallback above that
+    saved that path (gate job linked-list-struct-element-step4c,
+    `test_linked_list_struct_element_step4*`); the guess remains unsound for a
+    list a caller built itself, which is why that caller says so.
 
     Supplied arguments are taken POSITIONALLY — the same `zip` the caller
     already used — and only the trailing ones can come from a default, because
@@ -717,7 +734,8 @@ def bind_type_args(template_src: str, type_args):
         if len(supplied) > len(params):
             supplied = supplied[:len(params)]
     k = deduced_param_count(template_src)
-    if k and len(supplied) < len(params) and not any(p.startswith('*') for p in params):
+    if (k and not full_prefix and len(supplied) < len(params)
+            and not any(p.startswith('*') for p in params)):
         # A SHORT bracket names only the parameters after `//`, so read the
         # deduced prefix from its origin arguments. When that cannot be read,
         # take the list AS WRITTEN — the positional rule every full-length
@@ -728,7 +746,10 @@ def bind_type_args(template_src: str, type_args):
         # PREFIXED list, not a short one. Re-deducing it duplicated the
         # prefix and declined the instantiation, which is what turned
         # LinkedList's `IteratorType` alias (and so every `__iter__` caller)
-        # back into an `int64_t` stub.
+        # back into an `int64_t` stub. That caller now passes `full_prefix=True`
+        # and never reaches this guess; the fallback below still covers every
+        # other shorter-than-full list, where the deduction is the only source
+        # of a prefix.
         deduced = _deduce_prefix_from_rest(template_src, params, supplied, k)
         if deduced is not None:
             supplied = deduced
