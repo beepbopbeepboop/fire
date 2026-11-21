@@ -88,6 +88,31 @@ class Splice(unittest.TestCase):
         self.assertEqual(G.set_expect(SRC, "nope", "r"), SRC)
 
 
+class ReportText(unittest.TestCase):
+    """The doc a red job gets must not tell a fixer to remove a marker the job cannot carry."""
+
+    def text(self, job, **e):
+        e.setdefault("last_good", "S1")
+        e.setdefault("first_bad", "S2")
+        return G.report_text(job, e, "S3" * 4, "verify-S3.log", lambda s: "subject")
+
+    def test_a_registered_job_names_its_disabled_marker(self):
+        self.assertIn("disabled='%s'" % _doc("gate-gimple"), self.text("gimple", registered=True))
+
+    def test_a_fanout_item_says_there_is_no_marker_and_names_the_parent(self):
+        t = self.text("dumps:x.mojo", registered=False)
+        self.assertNotIn("disabled='", t)
+        self.assertIn("one item of the `dumps` fanout", t)
+        self.assertIn("no registration of its own", t)
+
+    def test_an_unrecorded_registration_state_keeps_the_registered_wording(self):
+        self.assertIn("disabled='", self.text("gimple"))
+
+    def test_registered_tells_a_fanout_item_from_its_parent(self):
+        self.assertTrue(G.registered(SRC, "eps"))
+        self.assertFalse(G.registered(SRC, "eps:x"))
+
+
 class Ledger(unittest.TestCase):
     def test_a_new_red_takes_the_previous_run_as_last_good(self):
         st = {}
