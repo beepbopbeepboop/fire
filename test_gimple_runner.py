@@ -15195,6 +15195,35 @@ def main():
 main()
 """)
 
+    # The reduced form of the full `gimple_id_is_an_integer` program: the same
+    # two equal-content lists, their id() tokens as DICT KEYS (written and read
+    # back) and as the members of one set literal, nothing else. Reducing the
+    # full program one statement at a time over the pre-fix tree, the collapse
+    # survived every reduction down to the bare set literal — the codegen
+    # refactors after the bug was found routed the set elements through the
+    # boxed-word path even in isolation, so the floor the doc's next step
+    # expected never stopped failing — which `gimple_id_token_set_dedupes_by_identity`
+    # pins in its bare form. This case pins the dict-keyed interaction the full
+    # program adds: before the fix, `mojo_set_add_word` unwrapped the kind-'i'
+    # id box to the container pointer in bx->bits, `_set_word_key` saw a
+    # registered container and re-keyed by CONTENT, and the two equal-content
+    # lists collapsed to one element (`set 1` where CPython says `set 2`),
+    # with the dict arm printing its hit throughout.
+    test_gimple_matches_cpython("gimple_set_of_id_tokens_collapses", """\
+def main():
+    a = [1, 2]
+    b = [1, 2]
+    # The dict half of the full program: id tokens as keys, read back.
+    cache = {}
+    cache[id(a)] = 'A'
+    print('hit', cache[id(a)] == 'A')
+    # The set half: id tokens of two equal-content lists.
+    ids = {id(a), id(b), id(a)}
+    print('set', len(ids))
+
+main()
+""")
+
     # `c == in_str` where one side is a `char *` VALUE and the other an
     # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
     # the codegen cannot tell them apart in one pass (the slot is assigned its
