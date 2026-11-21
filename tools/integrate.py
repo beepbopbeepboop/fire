@@ -9,10 +9,12 @@ One round:
   2. ../work-integ is reset to master and each candidate is merged in (--no-ff).
      A candidate that conflicts is aborted, marked `conflict`, and left for the
      controller to hand back to a worker; the rest carry on.
-  3. `make gate` runs in ../work-integ over everything merged, ONE time. Its
-     output goes to ../work-integ/gate.log; the two judgement lines the gate
-     cannot fail on (stdlib-dylib `skip` count, stdlib-syntax `FAILED:` line)
-     are copied to gate-judgement.txt for a human/controller to compare.
+  3. The landing gate runs in ../work-integ over everything merged, ONE time:
+     the cheap jobs in tools/gates.json `landing` (stdlib-syntax, gimple-lint),
+     minus any OFF. Its output goes to ../work-integ/gate.log; the judgement
+     line the gate cannot fail on (stdlib-syntax `FAILED:` line) is copied to
+     gate-judgement.txt for a human/controller to compare. The full `make gate`
+     is never run by the integrator (verify_landed.py runs it after landing).
   4. Green: master is fast-forwarded to integ, merged tasks are marked
      `integrated`. Red: master is untouched, merged tasks are marked
      `integration-failed` (their branches remain, so the next round re-tries
@@ -22,19 +24,81 @@ One round:
      nothing to check, and the round is refused. A red landing gate is a stop,
      not an ungate.
 """
-import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, fcntl, json, os, re, shutil, signal, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 import stash_ff as SF
 
 INTEG = os.path.join(C.PARENT, "work-integ")
 
+# The round in progress. Set once, by main(), after the lock is won. `deadline` is an epoch time (None: no bound),
+# `lock` the open integrator.lock (its contents are the holder record, see holder()), `merged` the tasks this round
+# holds (marked integration-failed if the deadline ends it), `probe` true for a probe, which changes no registry state.
+ROUND = {"id": None, "started": None, "deadline": None, "lock": None, "merged": [], "probe": False}
 
-def run(cmd, cwd, log=None):
-    if log:
-        with open(log, "w") as f:
-            return subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT).returncode
-    return subprocess.run(cmd, cwd=cwd).returncode
+
+def holder(step):
+    """Rewrite integrator.lock with this round's holder record: {pid, round, started, deadline, step, tree, merged}.
+    `control.py status` reads it, so a stuck round is visible as the round, its step and its deadline, not a 0-byte
+    file. Written only while the flock is held (main() takes it first), so the record is always the current holder's."""
+    f = ROUND["lock"]
+    if f is None:
+        return
+    rec = {"pid": os.getpid(), "round": ROUND["id"], "started": ROUND["started"], "deadline": ROUND["deadline"],
+           "step": step, "tree": INTEG, "merged": ROUND["merged"]}
+    f.seek(0); f.truncate(); f.write(json.dumps(rec) + "\n"); f.flush()
+
+
+def remaining():
+    """Seconds left in the round, or None when the round has no deadline."""
+    if ROUND["deadline"] is None:
+        return None
+    return max(0.0, ROUND["deadline"] - time.time())
+
+
+def round_deadline_hit(cmd, step):
+    """The round ran past its deadline while running `cmd`: its process group has been stopped (see run()). The round
+    ends here: a landing that was not made is not made, so the merged tasks are marked integration-failed (their
+    branches remain, and the next round re-tries them). A probe reports and changes no state."""
+    print("ROUND DEADLINE: %s ran past the round's deadline during %s; the round is over, master untouched"
+          % (" ".join(cmd[:4]), step))
+    if ROUND["merged"] and not ROUND["probe"]:
+        with C.registry() as reg:
+            for n in ROUND["merged"]: reg[n]["state"] = "integration-failed"
+        print("tasks marked integration-failed: %s" % ROUND["merged"])
+    holder("deadline")
+    sys.exit(1)
+
+
+def stop_group(proc):
+    """SIGTERM the child's process group (the child was started in its own session, so the group is its own and its
+    descendants). Plain SIGTERM only, and the group is ours alone: no name match, nothing outside this child's tree.
+    Waits for it to exit; a group that will not exit is reported, not force-killed."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        print("WARNING: process group %d did not exit 60 s after SIGTERM; leaving it, see `ps`" % proc.pid)
+
+
+def run(cmd, cwd, log=None, step="run"):
+    """Run `cmd` in `cwd`, output to `log` if given. Bounded by the round's deadline: on overrun the child's process
+    group is stopped and the round ends (round_deadline_hit). With no deadline (a bare call) it simply waits."""
+    out = open(log, "w") if log else None
+    try:
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=subprocess.STDOUT if out else None,
+                                start_new_session=True)
+        try:
+            return proc.wait(timeout=remaining())
+        except subprocess.TimeoutExpired:
+            stop_group(proc)
+            round_deadline_hit(cmd, step)
+    finally:
+        if out:
+            out.close()
 
 
 # The jobs that catch nearly every bad branch in minutes: the self-host build (the compiler compiling
@@ -616,13 +680,8 @@ def main():
                          "an explicit decision by the owner, recorded in the landing log, never automatic")
     ap.add_argument("--jobs", nargs="*", metavar="JOB",
                     help="verify with just these suite jobs (e.g. bootstrap-stage1-transitive bootstrap-stage2-cc) "
-                         "instead of the full `make gate`: the way a branch's heavy verification is done, by the "
-                         "one integrator, never by a worker. Landing still requires the FULL gate; a --jobs run "
-                         "only reports (it never fast-forwards master).")
-    ap.add_argument("--stdlib", action="store_true",
-                    help="LIGHT GATE (owner's swarm policy): the gate is just the stdlib compile (`suite.py stdlib-syntax`); "
-                         "green lands on master. The wider checks (`make check`, stdlib-dylib) run AFTER landing, in "
-                         "tools/verify_landed.py, which files a fixer if they go red")
+                         "instead of the landing gate: the way a branch's heavy verification is done, by the one "
+                         "integrator, never by a worker. A --jobs run only reports (it never fast-forwards master).")
     ap.add_argument("--probe", action="store_true",
                     help="PROBE: merge and gate the named branches exactly as a landing would, then report PROBE GREEN or "
                          "PROBE RED with the failing jobs, or PROBE REFUSED when there is nothing to check (all landing "
@@ -640,16 +699,25 @@ def main():
     ap.add_argument("--allow-dirty", nargs="*", default=[], metavar="NAME",
                     help="integrate these tasks although their worktree has uncommitted files (only COMMITTED "
                          "work is merged; save the stray edits first, e.g. as a patch under ../control-stray/)")
+    ap.add_argument("--deadline", type=float, default=45, metavar="MINUTES",
+                    help="the round's time bound, from the moment it takes the lock (default 45; 0 for none). A round "
+                         "still running at its deadline has its own gate/confirm process group stopped (SIGTERM), "
+                         "marks its tasks integration-failed and ends, so a stuck round cannot hold the lock for hours")
     a = ap.parse_args()
 
     # ONE integrator, ever. It is the single mass consumer of CPU and memory on the machine (a gate's
     # program-class jobs need 55 GB; a second gate beside it is 110), so being careful with it means
     # there is only one of it. flock, kernel-released when this process dies, so a crash cannot wedge it.
-    lock = open(os.path.join(C.ctl_dir(), "integrator.lock"), "w")
+    # Opened WITHOUT truncation: a losing attempt must not wipe the holder's record (it used to, with "w").
+    lock = open(os.path.join(C.ctl_dir(), "integrator.lock"), "a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         sys.exit("another integrator is already running (lock %s/integrator.lock): there is only ever one" % C.ctl_dir())
+    now = time.time()
+    ROUND.update(id="%d-%d" % (os.getpid(), int(now)), started=now, lock=lock, probe=a.probe,
+                 deadline=(now + a.deadline * 60) if a.deadline else None)
+    holder("start")
 
     cands = pick_candidates(a.only, a.allow_dirty, ignore_verdict=a.ignore_verdict)
     if a.only:                                       # the caller's order is the merge order (a bisect depends on it)
@@ -663,6 +731,7 @@ def main():
         C.git("switch", "-C", "integ", "master", cwd=INTEG)
     tasks = C.load()
     merged = []
+    holder("merge")
     for name in cands:
         r = subprocess.run(["git", "merge", "--no-ff", "-m", "integrate %s" % name, tasks[name]["branch"]],
                            cwd=INTEG, capture_output=True, text=True)
@@ -682,6 +751,7 @@ def main():
         else:
             merged.append(name); print("merged %s" % name)
     print("MERGED: %s" % " ".join(merged))
+    ROUND["merged"] = merged
     if not merged or a.dry_run:
         print("merged: %s (dry-run or nothing to gate)" % merged); return
 
@@ -715,7 +785,7 @@ def main():
         mark_landed(merged)
         print("GREEN (fast lane): master is now %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
         return
-    if a.quick and not a.jobs and not a.stdlib:
+    if a.quick and not a.jobs:
         print("quick tier for %s: %s" % (merged, " ".join(QUICK)))
         qrc = run(["python3", "tools/suite.py"] + QUICK, INTEG, os.path.join(INTEG, "quick.log"))
         if qrc != 0:
@@ -726,16 +796,15 @@ def main():
                                  capture_output=True, text=True).stdout)
             sys.exit(1)
     # A landing runs the cheap landing gate (tools/gates.json `landing`) minus every gate that is OFF for a backlog.
-    # The full suite is NOT run here: tools/verify_landed.py runs it once per interval, under this same lock.
-    gate_cmd = (["python3", "tools/suite.py"] + a.jobs if a.jobs
-                else ["python3", "tools/suite.py"] + C.gates_cfg()["landing"] + C.gate_skip_args() if a.stdlib
-                else ["python3", "tools/suite.py", "gate"] + C.gate_skip_args())
+    # The full suite is NOT run here, and not by any landing path: tools/verify_landed.py runs it once per interval,
+    # under this same lock, and files a fixer if it goes red.
+    gate_cmd = ["python3", "tools/suite.py"] + (a.jobs if a.jobs else C.gates_cfg()["landing"] + C.gate_skip_args())
     # The landing gate can be OFF for a backlog (tools/gates.json). If every landing job is OFF there is nothing to
     # run, and the round is refused below rather than landed on zero evidence (2026-11-12: a round landed ungated after
     # the red was turned off, and broke stdlib-syntax on master).
     landing_left = [g for g in C.gates_cfg()["landing"]
                     if not any(re.search(pat, g) for pat in C.gates_cfg().get("off", {}))]
-    if a.stdlib and not a.jobs and not landing_left:
+    if not a.jobs and not landing_left:
         # Nothing would be checked at all: landing anyway would fast-forward master on zero evidence. The OFF entries are
         # an audited decision (control.py gate off names a doc and a worker), but they are not a licence to land blind.
         msg = ("every landing job is OFF (%s): refusing to land %s ungated (master untouched). "
@@ -753,7 +822,8 @@ def main():
         sys.exit(1)
     else:
         print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
-        rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
+        holder("gate")
+        rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"), step="gate")
     if a.jobs:
         print("--jobs run finished with exit %d; master NOT touched (only a full gate lands)" % rc)
         sys.exit(rc)
@@ -765,7 +835,8 @@ def main():
         failed = failed_job_names(os.path.join(INTEG, "gate.log"))
         if failed:
             print("gate red on %s: confirming by re-running them alone" % ", ".join(failed))
-            if run(["python3", "tools/suite.py"] + failed, INTEG, os.path.join(INTEG, "confirm.log")) == 0:
+            holder("confirm")
+            if run(["python3", "tools/suite.py"] + failed, INTEG, os.path.join(INTEG, "confirm.log"), step="confirm") == 0:
                 print("the red did NOT reproduce when the failed jobs ran alone (load): treating the gate as green")
                 rc = 0
             else:
@@ -815,8 +886,8 @@ def main():
         print("FAILED_FILES: %s" % " ".join(files))
         sys.exit(rc)
     if rc == 0:
-        land_on_master(None if a.jobs or (a.stdlib and not landing_left)
-                       else lambda: run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log")))
+        holder("land")
+        land_on_master(None if a.jobs else lambda: run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"), step="regate"))
         mark_landed(merged)
         print("GREEN: master fast-forwarded to %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
     else:

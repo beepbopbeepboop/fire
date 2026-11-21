@@ -134,9 +134,9 @@ def pool_total():
 
 
 def mode():
-    """The campaign the pool is running, from tools/pool.json `mode`: `build` (high volume: the light --stdlib gate,
+    """The campaign the pool is running, from tools/pool.json `mode`: `build` (high volume: the cheap landing gate,
     no batch cap, land everything fast) or `drain` (work the backlog down: finishing and gate-repair work starts first,
-    the full landing gate, batches of 8). One declaration, read by refill and the lander, instead of each guessing
+    batches of 8). One declaration, read by refill and the lander, instead of each guessing
     from who is running or how the owner feels. An unreadable or unknown value is `drain`: the careful campaign."""
     try:
         m = load_pool().get("mode", "drain")
@@ -478,8 +478,51 @@ def done_and_gone(t, unmerged):
             and t.get("branch") not in unmerged)
 
 
+def integrator_holder():
+    """Who holds the integrator lock right now, or None when it is free. The lock is an flock, so "held" is asked of the
+    kernel (a probe lock attempt), not inferred from the file; the file's contents are the holder's record, written by
+    integrate.py's holder(). A held lock with no readable record (an integrator from before the record existed) reads {}."""
+    path = os.path.join(ctl_dir(), "integrator.lock")
+    if not os.path.exists(path):
+        return None
+    f = open(path, "a+")                      # append mode: reading must never truncate the holder's record
+    try:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.seek(0)
+            raw = f.read()
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                rec = {}
+            return rec if isinstance(rec, dict) else {}
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return None
+    finally:
+        f.close()
+
+
+def describe_holder(rec):
+    """One status line for the integrator holding the lock: round, step, pid, and time left to its deadline."""
+    if not rec:
+        return "integrator: lock held, no holder record (an integrator from before the record existed)"
+    line = "integrator: round %s, step %s, pid %s" % (rec.get("round", "?"), rec.get("step", "?"), rec.get("pid", "?"))
+    if rec.get("deadline"):
+        left = (rec["deadline"] - time.time()) / 60.0
+        line += ", deadline " + ("in %.0f min" % left if left >= 0 else "PASSED %.0f min ago (it is overrunning)" % -left)
+    else:
+        line += ", no deadline"
+    if rec.get("merged"):
+        line += ", tasks " + " ".join(rec["merged"][:6]) + (" ..." if len(rec["merged"]) > 6 else "")
+    return line
+
+
 def cmd_status(a):
     reg = load()
+    h = integrator_holder()
+    if h is not None:
+        print(describe_holder(h))
     unmerged = unmerged_branches()
     items = sorted(reg.items(), key=lambda kv: kv[1]["slot"])
     shown = [(n, t) for n, t in items if a.all or not done_and_gone(t, unmerged)]
