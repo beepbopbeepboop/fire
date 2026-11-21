@@ -15451,6 +15451,30 @@ def main():
 main()
 """)
 
+    # `try: return d[key]` beside `except KeyError: return "missing"`: two arms
+    # of different kinds. The join picked `char *` and the present arm cast the
+    # dict's int slot into it -- `_t9 = (char *)(int64_t)_t8;` -- so `print`
+    # dereferenced address 1 and the program SIGSEGV'd before the first print
+    # flushed. Now the body is widened to the tagged word
+    # (`_return_arms_need_boxed_word`: a bare-name container subscript beside a
+    # STRING join) and each arm keeps its kind.
+    test_gimple_matches_cpython("gimple_return_in_try_mixes_int_and_str", """\
+def lookup(d, key):
+    try:
+        return d[key]
+    except KeyError:
+        return "missing"
+
+
+def main():
+    d = {"a": 1}
+    print(lookup(d, "a"))
+    print(lookup(d, "zz"))
+
+
+main()
+""")
+
 
     # `c == in_str` where one side is a `char *` VALUE and the other an
     # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
