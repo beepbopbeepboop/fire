@@ -1661,6 +1661,9 @@ int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt);
 double      mojo_dict_pop_double_kw(MojoDict *d, int64_t kw, double dflt);
+/* The `_kw` twin of `mojo_dict_del_item`, with the same three key kinds every
+ * other twin here dispatches on (see `_kw_kind`). */
+void        mojo_dict_del_item_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
@@ -1762,6 +1765,12 @@ void        mojo_dict_update(MojoDict *dst, MojoDict *src);
 int64_t     mojo_dict_pop_int(MojoDict *d, char *key, int64_t dflt);
 char       *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt);
 double      mojo_dict_pop_double(MojoDict *d, char *key, double dflt);
+/* `del d[k]` is CPython's item deletion, not `pop`: an ABSENT key raises the
+ * same catchable KeyError `mojo_dict_subscript_*` raises, and a frozen dict
+ * raises the item-deletion TypeError. Lowering it to `mojo_dict_pop_int(...,
+ * 0)` made a missing key a silent no-op, so a `except KeyError:` handler
+ * never ran. */
+void        mojo_dict_del_item(MojoDict *d, char *key);
 MojoDict   *mojo_dict_copy(MojoDict *d);
 MojoDict   *mojo_dict_union(MojoDict *a, MojoDict *b);  /* a | b */
 MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */

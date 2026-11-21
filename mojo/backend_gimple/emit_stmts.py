@@ -4794,12 +4794,12 @@ def _gen_stmt_DelStmt(gen, node):
         if ot == 'MojoDict *':
             key_type, key_val = gen.lower_expr(target.index)
             key_type, key_val = gen._char_to_cstr(key_type, key_val, True, True)
-            # `del d[k]` — a removal whose VALUE is discarded, so the
-            # absent-box default (0) is the whole answer it needs from the
-            # new `dflt` parameter `d.pop(k, default)` requires.
-            gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
-                             [('MojoDict *', ov), (key_type, key_val),
-                              ('int64_t', '0')])
+            # `del d[k]` is CPython's item deletion, whose miss RAISES — not
+            # `d.pop(k, 0)`, whose miss returned the default 0 and made the
+            # statement a silent no-op on a missing key. The runtime function
+            # raises the same catchable KeyError a bare `d[k]` does.
+            gen._emit_call('void', '', 'mojo_dict_del_item',
+                             [('MojoDict *', ov), (key_type, key_val)])
         elif gimple_ctypes.TypeLattice.is_list(ot):
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
@@ -4829,9 +4829,8 @@ def _gen_stmt_DelStmt(gen, node):
             dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
             dkey_type, dkey_val = gen.lower_expr(target.index)
             dkey_type, dkey_val = gen._char_to_cstr(dkey_type, dkey_val, True, True)
-            gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
-                             [('MojoDict *', dp), (dkey_type, dkey_val),
-                              ('int64_t', '0')])
+            gen._emit_call('void', '', 'mojo_dict_del_item',
+                             [('MojoDict *', dp), (dkey_type, dkey_val)])
             gen._goto(bb_after)
             gen._emit_label(bb_list)
             lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
