@@ -4416,8 +4416,7 @@ test('stdlib-import-suffix', [PY, 'test_stdlib_import_suffix.py'],
      desc='stdlib import suffix (registered by the estate audit)')
 test('stdlib-syntax-quick-bench-math', [PY, 'test_stdlib_syntax_quick_bench_math.py'],
      mem='tiny',
-     desc='quick_bench math stdlib syntax (registered by the estate audit)',
-     disabled='bugs/gate-stdlib-syntax-quick-bench-math.md')
+     desc='quick_bench math stdlib syntax (registered by the estate audit)')
 test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
      mem='tiny',
      desc='land doc summary (registered by the estate audit)')
