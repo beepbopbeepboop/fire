@@ -467,17 +467,9 @@ def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     text = '\n'.join(g.lines)
     if '->_len = items->len' in text or '->_data = (char *) items->data' in text:
         problems.append(f'the span store uses a raw component_ref: {text!r}')
-    # The `_data` store may carry the `(char *)` cast, but only over the TEMP
-    # (`->_data = (char *) _t2;`), never over the component_ref (the check
-    # above). `MojoList.data` is `int64_t *` while `Span._data` is `char *`, so
-    # the cast is required, not optional.
     if ('= items->len;' not in text or '= items->data;' not in text
-            or '->_len = _t' not in text
-            or ('->_data = _t' not in text
-                and '->_data = (char *) _t' not in text)):
+            or '->_len = _t' not in text or '->_data = _t' not in text):
         problems.append(f'the field reads are not materialized: {text!r}')
-    if '->_data = (char *) items->data' in text:
-        problems.append(f'the _data cast sits on a component_ref: {text!r}')
     if problems:
         raise AssertionError('; '.join(problems))
     print("PASS  boxed_span_arg_is_cast_to_a_span_only_when_proven")

@@ -104,3 +104,4 @@ strings/36_build_string_loop.py
 strings/37_multiline_strings.py
 strings/39_char_count_dict.py
 strings/40_word_methods_mixed.py
+min/fs_str_format.py

@@ -10228,8 +10228,21 @@ char *mojo_str_format_words(char *tmpl, MojoList *args, MojoDict *kwargs)
             free(nm);
         }
         if (!found) { free(out); mojo_raise_index_error("Replacement index out of range for positional args tuple"); return NULL; }
-        char *val = _fmt_render_word(w, conv);
-        val = _fmt_apply_spec(val, spec, (size_t)(end - spec), !mojo_boxed_is_str(w));
+        char *val;
+        size_t slen = (size_t)(end - spec);
+        if (slen > 0 && conv == 0) {
+            /* A spec goes to the same engine an f-string uses, chosen by the
+             * kind the word carries: a double box, a string, or an integer. */
+            char *sp = strndup(spec, slen);
+            if (mojo_boxed_is_str(w)) val = mojo_fmt_str((char *)(intptr_t)w, sp);
+            else if (mojo_is_boxed(w)) val = mojo_fmt_float(mojo_box_double(w), sp);
+            else val = mojo_fmt_int(w, sp);
+            free(sp);
+        } else {
+            if (!mojo_boxed_is_str(w) && mojo_is_boxed(w)) val = mojo_repr_boxed(w);
+            else val = _fmt_render_word(w, conv);
+            val = _fmt_apply_spec(val, spec, slen, !mojo_boxed_is_str(w));
+        }
         _FMT_PUT(val, strlen(val));
         free(val);
         p = end + 1;

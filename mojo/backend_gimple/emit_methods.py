@@ -7409,6 +7409,10 @@ def _format_arg_word(gen, at: str, av: str) -> str:
     if at in ('int', 'int64_t', 'int32_t', 'int16_t', 'int8_t',
               'uint64_t', 'uint32_t', 'uint16_t', 'uint8_t'):
         return gen._to_int64(at, av)
+    if at in gimple_ctypes._FLOAT_TYPES:
+        # a double travels as a box so the runtime can apply `:.2f` to it
+        return gen._rt_call('int64_t', 'mojo_box_from_double',
+                            [gen._cast('double', av)])
     if at != 'char *':
         at, av = 'char *', gen._stringify_value(at, av)
     _l = gen._ensure_local('char *', av)
