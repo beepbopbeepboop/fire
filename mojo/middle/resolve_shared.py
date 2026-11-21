@@ -1695,7 +1695,7 @@ _NONE_TYPE_MARKER = 'NoneType'
 _SCALAR_CTYPES = frozenset(('int64_t', 'int', 'double', '_Bool'))
 
 
-def _aug_assign_value_type(gen, node) -> str:
+def _aug_assign_value_type(gen, node, target_ctype=None) -> str:
     """The C type of the new value an augmented assignment binds.
 
     `target OP= value` REBINDS the target to the result of `target OP value`,
@@ -1707,6 +1707,14 @@ def _aug_assign_value_type(gen, node) -> str:
     joined only `x`'s integer binding, the local was declared int64_t, and
     the double 4.5 was truncated back to 4 at the store.
 
+    `target_ctype` overrides the TARGET's type when the caller already knows
+    the slot it writes into and `gen.var_types` does not (or does not yet):
+    a parameter's declared C type is resolved by `funcs_shared._param_ctype`
+    before the body's `var_types` exists, and a module global's field type is
+    the one Phase 1.7 recorded. The answer must be computed from the REAL
+    target kind, not `_quick_type`'s int64_t unknown fallback, or `/` would
+    report true division on a pointer slot.
+
     The emitter's struct/`__iOP__`, runtime-object and boxed-PythonObject
     arms are different: they rebind the target to an object whose static type
     is the TARGET's own, which the join of the target's other bindings
@@ -1714,7 +1722,7 @@ def _aug_assign_value_type(gen, node) -> str:
     """
     op = _as_str(node.op)
     base_op = op[:-1]
-    lt = gen._quick_type(node.target)
+    lt = gen._quick_type(node.target) if target_ctype is None else _as_str(target_ctype)
     rt = _local_value_type(gen, node.value)
     if (base_op == '/'
             and lt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES

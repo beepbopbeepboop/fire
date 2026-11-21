@@ -392,6 +392,105 @@ _REF_SCALAR_CSET = frozenset({
     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
 
 
+def param_aug_rebinding_ctype(gen, func, pname: str, base_ctype: str):
+    """The widened C type a parameter's single slot needs after its body
+    REBINDS it with an augmented assignment, or None.
+
+    A parameter is one C variable for its whole life, so `def f(x): x /= 2`
+    cannot declare a fresh local for the result: the type has to be the
+    slot's. `resolve_shared._infer_local_var_types_core`'s augmented-
+    assignment join deliberately leaves a name whose only binding is `x OP=
+    v` out of the local table (a local declaration there would shadow the
+    parameter), so the parameter slot is where that same answer belongs.
+
+    The rebinding type comes from `resolve_shared._aug_assign_value_type`
+    (the one statement of what `x OP= v` binds), with `base_ctype` passed as
+    the target's type because the body's `var_types` does not exist yet when
+    the signature is resolved. Only a NUMERIC widening is returned: the
+    documented case is an int slot that would truncate a float (`x /= 2`,
+    `x += 0.5`), while a pointer/container answer is left to the existing
+    parameter-rebinding paths rather than guessed at here.
+
+    Memoized per (body identity, name, base type), like
+    `infra_infer._param_annotation_cached`: the signature passes ask this
+    same question several times and a large body walk is not free.
+    """
+    if not pname or pname.startswith('*') or not base_ctype:
+        return None
+    if not gimple_ctypes.TypeLattice.is_numeric(base_ctype):
+        return None
+    cache = getattr(gen, '_param_aug_rebind_cache', None)
+    if cache is None:
+        cache = {}
+        gen._param_aug_rebind_cache = cache
+    key = (id(func), _as_str(pname), _as_str(base_ctype))
+    if key in cache:
+        return cache[key] if cache[key] else None
+    # The walk is per FUNCTION, not per parameter: a signature pass resolves
+    # every parameter of every function, and re-walking a large body once
+    # per parameter would make this quadratic. `by_name` records every
+    # augmented assignment to every name in one pass; the per-name result
+    # is then answered from that list (the join is still per base type,
+    # because `/` between two int slots is true division).
+    func_cache = getattr(gen, '_param_aug_nodes_cache', None)
+    if func_cache is None:
+        func_cache = {}
+        gen._param_aug_nodes_cache = func_cache
+    by_name = func_cache.get(id(func))
+    if by_name is None:
+        by_name = {}
+
+        def walk(nodes):
+            for node in (nodes or []):
+                if (isinstance(node, AugAssignStmt)
+                        and isinstance(node.target, IdentExpr)):
+                    _bn = _as_str(node.target.name)
+                    _lst = by_name.get(_bn)
+                    if _lst is None:
+                        _lst = []
+                        by_name[_bn] = _lst
+                    _lst.append(node)
+                elif isinstance(node, IfStmt):
+                    walk(node.then_body)
+                    if node.else_body:
+                        walk(node.else_body)
+                    for _elif in (node.elifs or []):
+                        walk(_elif[1])
+                elif isinstance(node, (WhileStmt, ForStmt)):
+                    walk(node.body)
+                    if node.else_body:
+                        walk(node.else_body)
+                elif isinstance(node, TryStmt):
+                    walk(node.body)
+                    for _h in (node.handlers or []):
+                        walk(getattr(_h, 'body', None))
+                    if node.else_body:
+                        walk(node.else_body)
+                    if node.finally_body:
+                        walk(node.finally_body)
+                elif isinstance(node, WithStmt):
+                    walk(node.body)
+                # Deliberately no FunctionDef descent: a nested def's names
+                # are its own locals, the same boundary the local pre-pass
+                # stops at.
+
+        walk(getattr(func, 'body', None))
+        func_cache[id(func)] = by_name
+    from mojo.middle.resolve_shared import _aug_assign_value_type
+    found = None
+    for _an in (by_name.get(pname) or []):
+        _t = _aug_assign_value_type(gen, _an, base_ctype)
+        found = _t if found is None else gimple_ctypes.TypeLattice.join(found, _t)
+    widened = None
+    if found is not None:
+        _join = gimple_ctypes.TypeLattice.join(base_ctype, found)
+        if (_join != base_ctype
+                and gimple_ctypes.TypeLattice.is_numeric(_join)):
+            widened = _join
+    cache[key] = widened if widened else ''
+    return widened
+
+
 def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
                  is_self: bool = False) -> str:
     """Resolve parameter C type, applying argument convention qualifiers."""
@@ -538,6 +637,28 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # None). Box it the same generic way every other
         # no-runtime-representation type already is throughout this file.
         ctype = 'int64_t'
+    # A body that REBINDS the parameter with an augmented assignment
+    # (`x /= 2`, `x += 0.5`) changes the value's kind, and the parameter is
+    # one C variable for its whole life, so the SLOT must take that kind.
+    # Without this the int64_t slot truncated the double the emitter really
+    # computed (`4` where CPython prints `4.5`) — the parameter half of the
+    # float augmented-assignment bug. Deliberately BEFORE the annotation
+    # conflict check below: a genuine value-kind contradiction still boxes
+    # to the tagged int64_t word, and the box is the broader answer.
+    #
+    # This applies to an ANNOTATED parameter too. `x: Int` states a static
+    # type in Mojo source, but this codegen also compiles Python source
+    # (`.py` filenames), where an annotation is not enforced and Python's
+    # rebinding rule wins; truncating to the annotation would be a silently
+    # WRONG value, which is the worst answer here. Widening the one slot is
+    # the same trade `_infer_local_var_types` already makes for an annotated
+    # LOCAL that an augmented assignment rebinds, and it keeps the
+    # definition and every call site in agreement because both read this
+    # resolver (or `_inferred_param_types`, which `module_gen`'s
+    # `_gmh_reconcile_augmented_param_types` fills from the same rule).
+    _aug_wide = param_aug_rebinding_ctype(gen, node, pname, ctype)
+    if _aug_wide is not None:
+        ctype = _aug_wide
     # An ANNOTATED parameter whose BODY stores a value of another kind cannot
     # keep the annotation's C type for its whole life. `def f(x: str): x =
     # [x]` (Tools/c-analyzer's `normalize_selection` shape) declared the slot

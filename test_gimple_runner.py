@@ -3536,6 +3536,65 @@ def main():
 main()
 """)
 
+    # The same rebinding rule, one scope out: a PARAMETER is one C variable
+    # for its whole life, so `x /= 2` cannot declare a new local — the int64_t
+    # parameter slot truncated the double the emitter computed. The parameter
+    # slot widens instead (`funcs_shared.param_aug_rebinding_ctype`).
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_unannotated_parameter", """\
+def f(x):
+    x /= 2
+    print(x)
+f(9)
+
+def g(y):
+    y += 0.5
+    print(y)
+g(9)
+""")
+
+    # The ANNOTATED flavour. CPython evaluates a function annotation at def
+    # time, so the Mojo `Int` of the bug doc's repro is bound here; the
+    # compiler resolves the same annotation to its int64_t slot. Python's
+    # rebinding rule still wins over the annotation (the slot widens) — an
+    # annotation is not enforced in the Python-source mode this test uses,
+    # and truncating would be a silently wrong value.
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_annotated_parameter", """\
+Int = int
+def f(x: Int):
+    x /= 2
+    print(x)
+f(9)
+""")
+
+    # `global x` / module-level `x`: the field's C type is decided by the
+    # module-global scans (`_phase17_apply_augmented_global_types`), and the
+    # store then coerces to it. Without the augmented-assignment join the
+    # field stayed the int its plain `x = 9` froze and truncated.
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_a_global_rebound_in_a_function", """\
+x = 9
+def f():
+    global x
+    x /= 2
+f()
+print(x)
+
+y = 9
+def g():
+    global y
+    y += 0.5
+g()
+print(y)
+""")
+
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_a_module_global", """\
+x = 9
+x /= 2
+print(x)
+y = 9
+y += 0.5
+print(y)
+""")
+
     test_gimple_matches_cpython("gimple_float_truthiness_is_not_its_integer_part", """\
 def f():
     x = 0.0001
