@@ -62,7 +62,7 @@ def _cpp_declared_type(gen, node) -> str | None:
     # (e.g. a str/bytes element indexed off a char* stays char *).
     if isinstance(node, gimple_ctypes.SubscriptExpr) and isinstance(node.obj, gimple_ctypes.IdentExpr):
         bt = gen._cpp_declared_type(node.obj)
-        if gimple_ctypes.TypeLattice.is_cstr(bt):
+        if bt == 'char *':
             return 'char'
     return None
 
@@ -78,7 +78,7 @@ def _cpp_known_ptr_struct(gen, g_mtype: str) -> bool:
     so callers force such fields to `void *` instead. Used during the
     globals-struct assembly in gen_module."""
     base = g_mtype
-    if gimple_ctypes.TypeLattice.ends_in_star(base):
+    if base.endswith(' *'):
         base = base[:-2]
     base = base.strip().lstrip('*').strip()
     if base in gimple_ctypes._CPP_OPAQUE_PTR_STRUCTS:
@@ -96,7 +96,7 @@ def _cpp_struct_ptr_local(gen, name: str) -> str | None:
     if gen._cpp_declared is None:
         return None
     ct = gen._cpp_declared.get(name)
-    if ct and gimple_ctypes.TypeLattice.ends_in_star(ct):
+    if ct and ct.endswith(' *'):
         sn = ct[:-2]
         if sn in gen.struct_field_types:
             return sn
@@ -169,7 +169,7 @@ def _cpp_dict_key_expr(gen, idx_node, idx_cpp: str) -> str:
     self_fields = getattr(gen, '_cpp_gen_self_fields', None)
     ictype = gimple_exprtypes._infer_simple_expr_ctype(
         idx_node, gen._cpp_declared, self_fields, gen._async_api)
-    if gimple_ctypes.TypeLattice.is_cstr(ictype):
+    if ictype == 'char *':
         # An explicit (char *) cast: a range-for over a string-literal
         # tuple (`for k in ("a", "b"):`) binds its target to
         # `const char *` (C++ braced-init-list element type), and the
@@ -434,7 +434,7 @@ def _cpp_adapt_word_iter_yields(body_lines: list, value_ctype: str | None) -> li
     out = []
     for ln in body_lines:
         if '/*YFWORD*/' in ln:
-            if gimple_ctypes.TypeLattice.is_list(value_ctype):
+            if value_ctype == 'MojoList *':
                 ln = ln.replace('/*YFWORD*/ ', '(MojoList *)(intptr_t)')
             else:
                 ln = ln.replace('/*YFWORD*/ ', '')
@@ -818,7 +818,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # table: an unstamped node has no evidence of its own, and the
         # table's entry belongs to whichever module ran last.
         _ptr_ev = getattr(fn, '_ptr_evidence', ())
-        if ((gimple_ctypes.TypeLattice.is_cstr(ctype) or ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'))
+        if ((ctype == 'char *' or ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'))
                 and (pt is None or pt == '')
                 and pn in _ptr_ev
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
@@ -834,10 +834,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # a file handle or iterable passed in), so it is the runtime word,
             # not a narrowed pointer type inferred from a particular call site.
             ctype = 'int64_t'
-        if (gimple_ctypes.TypeLattice.is_word(ctype) and (pt is None or pt == '')
+        if (ctype == 'int64_t' and (pt is None or pt == '')
                 and pn in gimple_exprtypes._list_method_params(fn)):
             ctype = 'MojoList *'     # used as a list: its call sites just were not typed yet
-        if gimple_ctypes.TypeLattice.is_cstr(ctype) and pn in gimple_exprtypes._tagged_word_params(fn):
+        if ctype == 'char *' and pn in gimple_exprtypes._tagged_word_params(fn):
             # rebound from a heterogeneous `pop()`: the boxed word, not the
             # call sites' string (see `_tagged_word_params`).
             ctype = 'int64_t'
@@ -850,7 +850,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # machinery) — now handled by _cpp_struct_ptr_local/
         # _cpp_struct_method_refs. See bugs/hard/CODEGEN_generator_
         # struct_typed_param_refused.md.
-        _is_struct_ptr = (gimple_ctypes.TypeLattice.ends_in_star(ctype)
+        _is_struct_ptr = (ctype.endswith(' *')
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
@@ -1143,7 +1143,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 _r.value, declared, self_fields, gen._async_api,
                 None, frozenset(gen.struct_field_types.keys()),
                 method_return_types=gen.func_return_types)
-            if _t is not None and gimple_ctypes.TypeLattice.ends_in_star(_t) is False and _t in (
+            if _t is not None and _t.endswith(' *') is False and _t in (
                     'int', 'int64_t', 'double', '_Bool', 'char *'):
                 _ret_ct = _t if _ret_ct is None else (_t if _t == _ret_ct else 'int64_t')
         _ret_ct = _ret_ct or 'int64_t'
@@ -1198,7 +1198,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     _fn_elem_hints = _pl_elem_hints.get(fn.name) or {}
     if _fn_elem_hints:
         for _spn, _sct in param_ctypes:
-            if (gimple_ctypes.TypeLattice.is_list(_sct) and _fn_elem_hints.get(_spn)
+            if (_sct == 'MojoList *' and _fn_elem_hints.get(_spn)
                     and _spn not in gen._cpp_mixed_list_params):
                 gen._cpp_list_local_elem_types[_spn] = _fn_elem_hints[_spn]
     # Nested non-capturing sync helper `def`s referenced as callees inside
@@ -1338,7 +1338,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _yield_lines = [_bl for _bl in body_lines if 'co_yield' in _bl]
         _word_iter_only = (bool(_yield_lines)
                            and all('/*YFWORD*/' in _bl for _bl in _yield_lines))
-        if _word_iter_only and gimple_ctypes.TypeLattice.is_word(value_ctype) and not has_tuple_yield:
+        if _word_iter_only and value_ctype == 'int64_t' and not has_tuple_yield:
             # Tagged, so each word is yielded as the BOX the runtime's drain built for
             # it (its kind says string / int / double), not unwrapped to the bare word
             # (`mojo_box_word`), which is what lost the kind.
@@ -1351,7 +1351,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # consumes this generator through `for` loops, which bind the value as a
         # boxed word. Box each site by its marked ctype.
         _tagged_yield = bool((_word_iter_only or _delegates_only_to_tagged(gen, fn))
-                             and gimple_ctypes.TypeLattice.is_word(value_ctype) and not has_tuple_yield)
+                             and value_ctype == 'int64_t' and not has_tuple_yield)
         if _tagged_yield:
             gen._cpp_last_mixed_slots = True
         _has_dirent_word_yield_tags = any(
@@ -1376,10 +1376,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _has_tagged_delegate = any(f"co_yield {_tb}_value(" in _bl
                                    for _bl in body_lines for _tb in _tagged_bases)
         if ((value_ctype is None
-                or (gimple_ctypes.TypeLattice.is_cstr(value_ctype)
+                or (value_ctype == 'char *'
                     and any('/*Y:bytes*/' in _bl for _bl in body_lines))
                 or any('/*Y:none*/' in _bl for _bl in body_lines)
-                or (gimple_ctypes.TypeLattice.is_word(value_ctype) and _has_dirent_word_yield_tags))
+                or (value_ctype == 'int64_t' and _has_dirent_word_yield_tags))
                 and not has_tuple_yield
                 and (_gvk == 'w' or (_gvk is None and _has_tagged_delegate))):
             # the stack-switch kind analysis (which also checks the consumers)
@@ -1391,7 +1391,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 value_ctype = 'int64_t'
                 gen._cpp_last_mixed_slots = True
                 _tagged_yield = True
-            elif gimple_ctypes.TypeLattice.is_word(value_ctype) and _has_dirent_word_yield_tags:
+            elif value_ctype == 'int64_t' and _has_dirent_word_yield_tags:
                 # Uniform pointer-word yields (e.g. DirEntry.name/fsencode words)
                 # were marked as Y:str at emission but look like int64_t to the
                 # cpp typer; box them as tagged words so consumers see strings.
@@ -1417,7 +1417,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 value_ctype = 'int64_t'
                 gen._cpp_last_mixed_slots = True
                 _tagged_yield = True
-        elif (gimple_ctypes.TypeLattice.is_word(value_ctype)
+        elif (value_ctype == 'int64_t'
               and not has_tuple_yield and not _tagged_yield
               and any(('mojo_dirent_name(' in _bl or 'mojo_dirent_path(' in _bl
                        or 'mojo_fsencode_w(' in _bl)
@@ -1521,7 +1521,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             "values must agree on one scalar type (int64_t/double/_Bool) "
             "— they disagree, or one of them's value kind could not be "
             "resolved at all")
-    if (gimple_ctypes.TypeLattice.ends_in_star(value_ctype) and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
+    if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
 
@@ -1871,10 +1871,10 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     # A struct pointer travels in an integer register like any word (an
     # escaping method generator takes its receiver this way).
     for _pn, _ct in param_ctypes:
-        if _ct not in _SIG_WORD_CTYPES and not gimple_ctypes.TypeLattice.is_double(_ct) and not (
-                gimple_ctypes.TypeLattice.ends_in_star(_ct) and _ct[:-2] in gen.struct_field_types):
+        if _ct not in _SIG_WORD_CTYPES and _ct != 'double' and not (
+                _ct.endswith(' *') and _ct[:-2] in gen.struct_field_types):
             return []
-    _isd = ['1' if gimple_ctypes.TypeLattice.is_double(_ct) else '0' for _pn, _ct in param_ctypes]
+    _isd = ['1' if _ct == 'double' else '0' for _pn, _ct in param_ctypes]
     if len(_isd) - _isd.count('1') > 6:
         return []
     if any(_n.startswith('*') for _n in _names):
@@ -2423,7 +2423,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         # For now, allow int64_t and pointer types
         for _, ct in params_C:
             ct_n = 'int64_t' if ct == 'int' else ct
-            if not gimple_ctypes.TypeLattice.is_word(ct_n) and not (isinstance(ct_n, str) and ct_n.endswith('*')):
+            if ct_n != 'int64_t' and not (isinstance(ct_n, str) and ct_n.endswith('*')):
                 return False
         if any(isinstance(x, gimple_ctypes.NonlocalStmt)
                for x in gimple_exprtypes._walk_own_body(C.body)):
@@ -2452,7 +2452,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             return False
         c_ret_n = 'int64_t' if c_ret == 'int' else c_ret
         # Allow int64_t and pointer types as returns
-        if c_ret_n != 'void' and not gimple_ctypes.TypeLattice.is_word(c_ret_n) and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
+        if c_ret_n != 'void' and c_ret_n != 'int64_t' and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
             return False
         c_kw = _helper_kw_renames(params_C)
         c_emit = _emit_helper_body(C.body, hC, c_kw)
@@ -2831,7 +2831,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         # See the identical struct-pointer-acceptance note in
         # _gen_cpp_generator_unit — same allow-list, same reasoning,
         # same shared _cpp_expr body-side machinery.
-        _is_struct_ptr = (gimple_ctypes.TypeLattice.ends_in_star(ctype)
+        _is_struct_ptr = (ctype.endswith(' *')
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
@@ -2950,7 +2950,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (param_ctypes or []))
     declared: dict[str, str] = {}
     for _pn, _pct in param_ctypes:
-        if _pn in mut_capture_names and gimple_ctypes.TypeLattice.ends_in_star(_pct):
+        if _pn in mut_capture_names and _pct.endswith(' *'):
             declared[_pn] = _pct[:-2]
         else:
             declared[_pn] = _pct
@@ -3115,7 +3115,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     # MojoList*/MojoDict*/MojoSet*/MojoBytes*, char *, struct pointers,
     # etc.) are stored in the coroutine promise's result slot and read back
     # unchanged by awaiters/consumers.
-    if (value_ctype != 'void' and gimple_ctypes.TypeLattice.ends_in_star(value_ctype)
+    if (value_ctype != 'void' and value_ctype.endswith(' *')
             and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *',
                                     'MojoBytes *', 'char *', 'void *')
             and value_ctype[:-2] in gen.struct_field_types):
@@ -4106,7 +4106,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         # See the identical struct-pointer-acceptance note in
         # _gen_cpp_generator_unit — same allow-list, same reasoning,
         # same shared _cpp_expr body-side machinery.
-        _is_struct_ptr = (gimple_ctypes.TypeLattice.ends_in_star(ctype)
+        _is_struct_ptr = (ctype.endswith(' *')
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
@@ -4188,7 +4188,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
             f"{fn.name}: every `yield <value>` must carry a scalar "
             "value (int64_t/double/_Bool), and all of them must agree "
             "on one consistent type")
-    if (gimple_ctypes.TypeLattice.ends_in_star(value_ctype) and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
+    if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
 

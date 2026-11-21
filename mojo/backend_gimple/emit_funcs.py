@@ -205,7 +205,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # GIMPLE: cannot use component_ref directly as RHS of struct store;
                 # load into a temp first.
                 _cur_t = _as_str(gen._captures.get(vname) or 'int64_t')
-                if gimple_ctypes.TypeLattice.ends_in_star(_fct) and not gimple_ctypes.TypeLattice.ends_in_star(_cur_t):
+                if _fct.endswith(' *') and not _cur_t.endswith(' *'):
                     # THIS function holds the name by VALUE while the closure it
                     # is building wants it by REFERENCE: forward a box, not the
                     # value. Through a plain local, since a component_ref's
@@ -433,7 +433,7 @@ def _gen_stmt_FromImportStmt(gen, node):
             safe_owner = gimple_ctypes._c_field_name(_gv_owner) if _gv_owner else "root"
             _gv_field = f"_{safe_owner}_globals.{gimple_ctypes._c_field_name(name)}"
             _gv_decl = gen._global_c_decl_types.get(name, _gv_ctype)
-            if gimple_ctypes.TypeLattice.is_word(_gv_ctype) and gimple_ctypes.TypeLattice.ends_in_star(_gv_decl):
+            if _gv_ctype == 'int64_t' and _gv_decl.endswith(' *'):
                 # Declared pointer C type boxed as int64_t: load through the
                 # matching pointer type first, then cast via void * (the same
                 # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
@@ -1564,7 +1564,7 @@ def _selfhost_merge_field(_fields: dict[str, str], _name: str, _ct: str):
     # stuck at `int64_t` self-hosted while the shim correctly settled on
     # `_Bool`).
     if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
-                         and (gimple_ctypes.TypeLattice.ends_in_star(_ct) or gimple_ctypes.TypeLattice.is_bool(_ct))):
+                         and (_ct.endswith(' *') or _ct == '_Bool')):
         _fields[_name] = _ct
 
 
@@ -1900,7 +1900,7 @@ def _dvt_val_cts(_ann):
             _eparts = gimple_ctypes._split_top_level_commas(_einner)
             if len(_eparts) == 1 and _eparts[0].strip():
                 _ec = _selfhost_ann_ctype(_eparts[0].strip())
-                if _ec is not None and not gimple_ctypes.TypeLattice.is_word(_ec):
+                if _ec is not None and _ec != 'int64_t':
                     _nested = _ec
     return (_outer, _nested)
 
@@ -2902,7 +2902,7 @@ def _home_private_struct_pts(gen, info) -> list | None:
     for _p in _pts:
         _ps = _as_str(_p)
         _base = _ps[7:] if _ps[:7] == 'struct ' else _ps
-        if gimple_ctypes.TypeLattice.ends_in_star(_base):
+        if _base.endswith(' *'):
             _base = _base[:-2].strip()
         if _base in _generic_structs:
             return None
@@ -3817,7 +3817,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
             # keeps its own handling.)
             if not pname.startswith('**'):
                 _vc = _annotated_elem_ctype(gen, ptype.strip())
-                if _vc and not gimple_ctypes.TypeLattice.is_word(_vc):
+                if _vc and _vc != 'int64_t':
                     gen._elem_types.setdefault(bare, _vc)
             continue
         _pa = ptype.strip()
@@ -3833,7 +3833,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 continue
             _vann = _pin[1].strip()
             _vc = gen._resolve_type(_vann)
-            if _vc and not gimple_ctypes.TypeLattice.is_word(_vc):
+            if _vc and _vc != 'int64_t':
                 gen._dict_val_types.setdefault(bare, _vc)
             _vbase = _vann.split('[', 1)[0].strip()
             if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
@@ -3841,7 +3841,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                     _vann[_vann.index('[') + 1:_vann.rindex(']')].strip())
                 if len(_ei) == 1 and _ei[0].strip():
                     _ec = gen._resolve_type(_ei[0].strip())
-                    if _ec and not gimple_ctypes.TypeLattice.is_word(_ec):
+                    if _ec and _ec != 'int64_t':
                         gen._dict_nested_val_types.setdefault(bare, _ec)
             continue
         # `Span[T, origin]` carries an origin parameter after the element
@@ -3878,7 +3878,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 elif _t != _sc:
                     _same = False
                     break
-            if _same and _sc and not gimple_ctypes.TypeLattice.is_word(_sc):
+            if _same and _sc and _sc != 'int64_t':
                 gen._elem_types.setdefault(bare, 'MojoList *')
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
@@ -3893,7 +3893,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 # while the same value built by a constructor read
                 # `mojo_list_get_double`/`_mojo_at_double`.
                 _ec = 'double'
-            if _ec and not gimple_ctypes.TypeLattice.is_word(_ec):
+            if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)
 
 
@@ -4014,17 +4014,15 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         bare = pname.lstrip('*')
         if pname.startswith('*'):
             ctype = 'MojoList *'
+        elif ptype is None:
+            ctype = (gen._inferred_param_types.get(node.name, {}).get(pname)
+                     or gen._resolve_type(ptype))
         else:
-            # The functioning signature's own resolver, not a second direct
-            # `_resolve_type`: an annotated parameter whose body contradicts
-            # the annotation is the tagged `int64_t` word (`_param_ctype`),
-            # and return inference must see that same type or the body's
-            # `return selected` is typed by the annotation the body disproves.
-            ctype = gen._param_ctype(pname, ptype, node)
+            ctype = gen._resolve_type(ptype)
         gen.var_types[bare] = ctype
         # Register in _actual_types so _get_actual_type resolves the real
         # type for for-loop iterables and other dispatch paths.
-        if not gimple_ctypes.TypeLattice.is_word(ctype):
+        if ctype != 'int64_t':
             gen._actual_types[bare] = ctype
         # Record the semantic struct identity of a known-struct param so
         # member access can cast through the right struct pointer even
@@ -4100,7 +4098,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._nested_mixed_names.add(_as_str(_pmx_bare))
     _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
     for _pem_bare in _pem:
-        gen._words.mark_slot_kinds(_as_str(_pem_bare))
+        gen._maybe_kinds_vals.add(_as_str(_pem_bare))
     _pdv: dict = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for _pdv_key in _pdv:
         _pdv_bare = _as_str(_pdv_key)
@@ -4890,7 +4888,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
             _et2 = gen._resolve_type(_inner2[0].strip())
         except Exception:
             _et2 = None
-        if _et2 and not gimple_ctypes.TypeLattice.is_word(_et2):
+        if _et2 and _et2 != 'int64_t':
             gen._field_elem_types.setdefault(local, {})[f.name] = _et2
     gen._imported_typedef_structs.append(
         gimple_ctypes.StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
@@ -5612,8 +5610,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen.var_types[bare] = 'MojoList *'
             gen._actual_types[bare] = 'MojoList *'
         else:
+            ctype = gen._resolve_type(ptype)
             if ptype is None:
-                ctype = gen._resolve_type(ptype)
                 # The cross-call refinement (Pass 1.3e: every call site passes a
                 # string / float) is what the definition's signature declares, so
                 # the return-type inference below must read the parameter as it.
@@ -5621,10 +5619,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                     f"{struct_name}_{node.name}", {}).get(pname)
                 if _refined in ('char *', 'double'):
                     ctype = _refined
-            else:
-                ctype = gen._param_ctype(pname, ptype, node)
             gen.var_types[bare] = ctype
-            if not gimple_ctypes.TypeLattice.is_word(ctype):
+            if ctype != 'int64_t':
                 gen._actual_types[bare] = ctype
             pst = gen._param_struct_name(ptype)
             if pst:
@@ -5810,7 +5806,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         # type for for-loop iterables and other dispatch paths. Must happen
         # for ALL params, not just the else branch, because GimpleGen
         # methods hit hardcoded_params first and never reach the else branch.
-        if not gimple_ctypes.TypeLattice.is_word(ctype):
+        if ctype != 'int64_t':
             gen._actual_types[bare] = ctype
         # Record the semantic struct identity of a known-struct param so
         # member access can cast through the right struct pointer even

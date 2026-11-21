@@ -10949,23 +10949,13 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # Bind the run-exit state as a PLAIN local (rcases), not a let:
             # a `let` bound to a deep run certificate makes any record update
             # over it recurse in the elaborator.
-            #
-            # `hcert` is emitted FIRST, and the existential is inhabited by it
-            # rather than re-applying the certificate: `cert_args` instantiates
-            # the block's runs theorem at the nested run-exit state, and the
-            # kernel's check of that application is the advance's whole cost,
-            # so the old order — `refine ⟨(state), ?_⟩; exact cert` for the
-            # existential AND `hcert := cert` — paid it TWICE per advance,
-            # once per CFG path (`bigbody`'s 894 advances applied the
-            # certificates 1 788 times; this order applies them 894).  The
-            # top-level site below emits this order already; the per-block
-            # site predated it.
+            A(f"{IND}have hrun_ex_{bi} : ∃ s : Arm64State, "
+              f"arm64_runs {C} {m_run} ({state}) = some s := by")
+            A(f"{IND}  refine ⟨({exit_state}), ?_⟩")
+            A(f"{IND}  exact {cert_args}")
+            A(f"{IND}rcases hrun_ex_{bi} with ⟨s_{bi}, hrun_{bi}⟩")
             A(f"{IND}have hcert_{bi} : arm64_runs {C} {m_run} ({state}) = some ({exit_state}) "
               f":= {cert_args}")
-            A(f"{IND}have hrun_ex_{bi} : ∃ s : Arm64State, "
-              f"arm64_runs {C} {m_run} ({state}) = some s := "
-              f"⟨({exit_state}), hcert_{bi}⟩")
-            A(f"{IND}rcases hrun_ex_{bi} with ⟨s_{bi}, hrun_{bi}⟩")
             A(f"{IND}have hsid_{bi} : s_{bi} = ({exit_state}) := by")
             A(f"{IND}  injection hrun_{bi}.symm.trans hcert_{bi}")
             # Make this block's identity/unfolding available to the
@@ -13688,49 +13678,18 @@ def _find_extern_call(fn, sym: str):
     return None
 
 
-def _gen_code_defs(name: str, code: bytes, base: int, test_input: int,
-                   blocks: bool = False) -> str:
-    """Generate the code-memory definition and the run_result_exit helper.
-
-    `blocks=True` emits the image as a list of 64-byte blocks and reads a byte
-    with one `getD` per level, instead of one `List.getD` walk over the whole
-    flat list per byte.  The flat walk is O(image) per read: `arm64_step`
-    reads the instruction word at every step, and the kernel pays the full
-    peel for every occurrence in the universal proof's terms — measured on
-    `bigbody` (2 377-byte image, 64 CFG paths) as the difference between the
-    generated proof fitting the `-M 6144` budget and breaching it.  The dylib
-    lane keeps the flat list: `test_formal_call_proof_gen.py` pins
-    `dylib_code_list`'s shape as the whole image in one list.
-    """
+def _gen_code_defs(name: str, code: bytes, base: int, test_input: int) -> str:
+    """Generate the code-memory definition and the run_result_exit helper."""
     exit_addr = base + len(code)
-    if not blocks:
-        lst = ", ".join(f"0x{b:02x}" for b in code) + ", 0xc0, 0x03, 0x5f, 0xd6"
-        code_defs = (
-            f"def {name}_code_list : List UInt8 :=\n"
-            f"  [{lst}]\n"
-            f"\n"
-            f"def {name}_code (addr : Nat) : UInt8 :=\n"
-            f"  if addr < {base} then 0\n"
-            f"  else {name}_code_list.getD (addr - {base}) 0\n"
-            f"\n"
-        )
-    else:
-        img = code + b"\xc0\x03\x5f\xd6"
-        blk = 64
-        blks = ",\n  ".join(
-            "[" + ", ".join("0x%02x" % b for b in img[i:i + blk]) + "]"
-            for i in range(0, len(img), blk))
-        code_defs = (
-            f"def {name}_code_blocks : List (List UInt8) :=\n"
-            f"  [{blks}]\n"
-            f"\n"
-            f"def {name}_code (addr : Nat) : UInt8 :=\n"
-            f"  if addr < {base} then 0\n"
-            f"  else match {name}_code_blocks.getD ((addr - {base}) / {blk}) [] with\n"
-            f"    | c => c.getD ((addr - {base}) % {blk}) 0\n"
-            f"\n"
-        )
-    return code_defs + (
+    lst = ", ".join(f"0x{b:02x}" for b in code) + ", 0xc0, 0x03, 0x5f, 0xd6"
+    return (
+        f"def {name}_code_list : List UInt8 :=\n"
+        f"  [{lst}]\n"
+        f"\n"
+        f"def {name}_code (addr : Nat) : UInt8 :=\n"
+        f"  if addr < {base} then 0\n"
+        f"  else {name}_code_list.getD (addr - {base}) 0\n"
+        f"\n"
         f"def run_result_exit (st : Arm64State) (code : Nat → UInt8) "
         f"(exit : Nat) (fuel : Nat) : UInt64 :=\n"
         f"  match arm64_exec_go_exit st code exit fuel with\n"
@@ -15636,12 +15595,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"{_apply_args('mojo', enames)} := by\n"
             f"  {eval_eq_mojo_proof}"
         )
-    # `blocks=True`: the universal proof reads one byte per `arm64_step` on
-    # every CFG path, and a flat-list `getD` is O(image) per read — the
-    # block-chunked image is what keeps `bigbody`'s generated proof under the
-    # `-M` budget (see `_gen_code_defs`).  The dylib and frame lanes keep the
-    # flat list (their pins read the whole image from one list).
-    code_defs = _gen_code_defs(func_name, code, base_addr, test_input, blocks=True)
+    code_defs = _gen_code_defs(func_name, code, base_addr, test_input)
     extern_calls = _program_extern_calls(info)
     externs = list(getattr(prog, "externs", []) or [])
     _ret_type_of = {e.name: e.return_type for e in externs}

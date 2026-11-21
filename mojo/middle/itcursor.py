@@ -71,16 +71,16 @@ def slot_ctype(elem):
     reads as `int64_t` per element, exactly the reading `_lower_subscript`'s
     struct-pointer arm has always given such a span. The split between the
     representations lives in `read_at`, not here."""
-    if gimple_ctypes.TypeLattice.is_double(elem):
+    if elem == 'double':
         return 'double'
-    if gimple_ctypes.TypeLattice.is_cstr(elem):
+    if elem == 'char *':
         return 'char *'
     # Container elements (pair-lists from enumerate/zip, nested lists/dicts)
     # store their pointer as an int64_t word; the cursor must present them
     # typed as the container, not as a bare integer.
     if elem and ('MojoList *' in elem or 'MojoDict *' in elem or
                  'MojoSet *' in elem or 'MojoBytes *' in elem or
-                 'MojoStr *' in elem or gimple_ctypes.TypeLattice.ends_in_star(elem)):
+                 'MojoStr *' in elem or elem.endswith(' *')):
         return elem
     return 'int64_t'
 
@@ -149,7 +149,7 @@ def read_at(gen, rec, idx):
     # return below). Every container the branch was written for (MojoList *,
     # MojoDict *, MojoSet *, MojoBytes *, MojoStr *, struct pointers) has
     # `suf == 'int'`, so this changes nothing for them.
-    if elem and gimple_ctypes.TypeLattice.ends_in_star(elem) and suf == 'int':
+    if elem and elem.endswith(' *') and suf == 'int':
         raw = gen._rt_call('int64_t', f"mojo_list_get_{suf}", [_src2, _idx2])
         return elem, gen._cast(elem, raw)
     return vct, gen._rt_call(vct, f"mojo_list_get_{suf}", [_src2, _idx2])

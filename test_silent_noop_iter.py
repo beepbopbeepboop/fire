@@ -26,9 +26,9 @@ to lag the compiled backend on whole constructs (FORMAL.md §11.1's
 are wrong in the same way" — precisely the shared-bug blindness
 `test_runtime_diff.py` cannot see past.
 
-Slow by nature: every case compiles and links its own binary, so the full run
-is minutes rather than seconds. Individual cases can be named on the command
-line to run just those.
+Slow by nature: every case builds and links its own binary (~40 s each), so
+the full run is minutes rather than seconds. Individual cases can be named
+on the command line to run just those.
 
 Set GMOJO_HOME (FORMAL.md §11.3) — this file inherits it and does not set
 one, so two agents running it concurrently cannot collide.
@@ -44,19 +44,6 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOJO = os.path.join(HERE, 'fire.py')
 TIMEOUT = 300
-#: Compile one case through `fire.build_executable`, the single-translation-unit
-#: path `fire.py build` itself falls back to. NOT `fire.py build`: that is link
-#: mode, whose first use builds `build/libmojostdlib.<arch>.dylib` — 664
-#: modules, sequential, and ~an hour on a loaded box — and in a fresh tree (a
-#: clone, the integrator's `masterred_` snapshot) the first case paid that
-#: inside its own 300 s budget and timed out. Nothing in this file's subject
-#: (loop/iteration lowering in `gimple_codegen`) differs between the two build
-#: paths; `linkmode` and `runtimedylib` are the jobs that cover link mode.
-_INLINE_BUILD = (
-    'import sys, fire\n'
-    'p = sys.argv[1]\n'
-    'sys.exit(0 if fire.build_executable(p, open(p).read(), output=sys.argv[2]) else 1)\n'
-)
 
 _PASS = 0
 _FAIL = 0
@@ -73,9 +60,9 @@ def check(name, cond, detail=''):
         _FAIL += 1
 
 
-def _run(cmd, cwd=None, timeout=TIMEOUT):
+def _run(cmd, cwd=None):
     return subprocess.run(cmd, capture_output=True, text=True,
-                          errors='replace', timeout=timeout, cwd=cwd or HERE)
+                          errors='replace', timeout=TIMEOUT, cwd=cwd or HERE)
 
 
 def _reference_stdout(src, tmpdir):
@@ -94,16 +81,10 @@ def _reference_stdout(src, tmpdir):
     p = os.path.join(tmpdir, 'ref_case.py')
     with open(p, 'w') as fh:
         fh.write(src)
-    try:
-        r = _run([sys.executable, p])
-    except subprocess.TimeoutExpired:
-        return None
+    r = _run([sys.executable, p])
     if r.returncode == 0:
         return r.stdout
-    try:
-        r = _run([sys.executable, MOJO, 'run', p])
-    except subprocess.TimeoutExpired:
-        return None
+    r = _run([sys.executable, MOJO, 'run', p])
     return r.stdout if r.returncode == 0 else None
 
 
@@ -112,13 +93,7 @@ def _compiled_stdout(src, tmpdir, tag):
     with open(p, 'w') as fh:
         fh.write(src)
     exe = os.path.join(tmpdir, tag)
-    try:
-        b = _run([sys.executable, '-c', _INLINE_BUILD, p, exe])
-    except subprocess.TimeoutExpired:
-        # A TIMEOUT is a FAILURE of this case, not of the file: letting the
-        # exception escape loses every case after it (the gate's red for this
-        # job was exactly that -- an uncaught 300 s build timeout).
-        return None, f'BUILD TIMED OUT after {TIMEOUT}s'
+    b = _run([sys.executable, MOJO, 'build', '-o', exe, p])
     if b.returncode != 0 or not os.path.exists(exe):
         return None, f'BUILD FAILED: {b.stderr.strip().splitlines()[-1:] or b.stdout[-300:]}'
     r = _run([exe])

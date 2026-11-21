@@ -754,98 +754,6 @@ def test_dylib_link_key_includes_the_arch():
         os.unlink(obj)
 
 
-def test_client_stdlib_dylib_is_reused_until_an_input_changes():
-    """`stdlib_dylib` answers a warm checkout from its stamp, not from a full
-    `build_stdlib()`.
-
-    This is the cost the job `silentnoop` was red for: every `fire.py build`
-    asks for the library, and `build_stdlib()` re-derives 664 module keys and
-    runs `nm` over every object even when they are all CAS hits. That is
-    minutes on a loaded gate box, and in a fresh tree (`git archive` has no
-    `build/`) the first `silentnoop` case paid it inside its own 300 s budget
-    and timed out. The decision is unit-tested here with `build_stdlib`
-    stubbed, so this file does not pay for a stdlib build to check a stamp.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        out = os.path.join(d, 'libmojostdlib.arm64.dylib')
-        calls = []
-        real_build = bsd.build
-        real_key = bsd.stdlib_dylib_currency_key
-
-        def fake_build(modules, out, use_cache=True, link_runtime=False,
-                       extra_exports=None, jobs=1, opt_flag=None,
-                       track_local_deps=True, arch=None, stamp_key=None):
-            calls.append(out)
-            with open(out, 'wb') as f:
-                f.write(b'fake dylib %d' % len(calls))
-            if stamp_key:
-                bsd._write_stamp(out, stamp_key)
-            return out
-
-        key = ['key-one']
-        bsd.build = fake_build
-        bsd.stdlib_dylib_currency_key = lambda arch: key[0]
-        try:
-            got = bsd.stdlib_dylib(out=out, arch=ARM)
-            check(got == out and len(calls) == 1,
-                  'a cold client asks build once')
-            got = bsd.stdlib_dylib(out=out, arch=ARM)
-            check(got == out and len(calls) == 1,
-                  'a warm client is answered by the stamp, not by '
-                  'build_stdlib (the cost that made silentnoop time out)')
-            with open(out, 'ab') as f:
-                f.write(b'!')
-            bsd.stdlib_dylib(out=out, arch=ARM)
-            check(len(calls) == 2,
-                  "an artifact whose own bytes changed is rebuilt, not trusted")
-            key[0] = 'key-two'
-            bsd.stdlib_dylib(out=out, arch=ARM)
-            check(len(calls) == 3, 'a changed input key rebuilds')
-            bsd.stdlib_dylib(out=out, arch=ARM)
-            check(len(calls) == 3, 'and the rebuilt artifact is stamped again')
-        finally:
-            bsd.build = real_build
-            bsd.stdlib_dylib_currency_key = real_key
-
-    # The real key is a digest of the inputs, and the target arch is one of
-    # them: an x86 dylib must never be the answer an arm64 build is given.
-    check(bsd.stdlib_dylib_currency_key(ARM) ==
-          bsd.stdlib_dylib_currency_key(ARM),
-          'the currency key is deterministic for unchanged inputs')
-    check(bsd.stdlib_dylib_currency_key(ARM) !=
-          bsd.stdlib_dylib_currency_key(X86),
-          'the currency key separates the two architectures')
-
-
-def test_silentnoop_builds_without_the_shared_stdlib_dylib():
-    """`test_silent_noop_iter.py` builds a case WITHOUT link mode.
-
-    That file's job is loop lowering, and it used to compile each case with
-    `fire.py build` — link mode, whose first use builds the shared stdlib
-    dylib (664 modules, sequential). In a fresh tree that is ~an hour on a
-    loaded box, so the first case's 300 s budget was consumed by the SHARED
-    build and the job went red on master. The fix is `fire.build_executable`
-    (`_INLINE_BUILD`), the same fallback `fire.py build` uses; `linkmode` and
-    this file are what cover link mode.
-
-    A source pin rather than a build: the alternative — compile one case and
-    assert `build/libmojostdlib.*`'s mtime did not move — is racy on a machine
-    where another job may install that shared artifact mid-test, which is
-    exactly the machine a gate runs on. `inspect.getsource` is the same
-    mechanism this file already uses to pin `build_stdlib`'s default name.
-    """
-    import inspect
-    import test_silent_noop_iter as sni
-    body = inspect.getsource(sni._compiled_stdout)
-    check('_INLINE_BUILD' in body,
-          'the silentnoop harness builds through _INLINE_BUILD')
-    check("'build'" not in body,
-          'and not through `fire.py build` (link mode and the shared dylib)')
-    check('fire.build_executable' in sni._INLINE_BUILD,
-          '_INLINE_BUILD is the same single-translation-unit path fire.py '
-          'build falls back to')
-
-
 # ── 6b. one OUTPUT PATH, many concurrent builders ──────────────────────────
 #
 # The runtime dylib is content-addressed under a name that carries its digest,
@@ -1291,8 +1199,6 @@ def main():
     test_clang_can_compile_the_runtime_for_both_architectures()
     test_stdlib_dylib_default_output_carries_the_arch()
     test_dylib_link_key_includes_the_arch()
-    test_client_stdlib_dylib_is_reused_until_an_input_changes()
-    test_silentnoop_builds_without_the_shared_stdlib_dylib()
     test_runtime_dylib_leaves_no_staging_directory()
     test_arch_probe_leaves_no_directory()
     test_concurrent_builds_of_one_output_path_do_not_collide()

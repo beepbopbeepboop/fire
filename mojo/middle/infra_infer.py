@@ -1823,203 +1823,6 @@ def _rebound_to_other_container(body: list, pname: str, ctype: str) -> bool:
             return True
     return False
 
-
-# The C type spellings of the value kinds a PARAMETER annotation can name.
-# Kept as one table so the annotation half and the binding half of the
-# contradiction test below classify `str`, `int`, a list and a set the same
-# way -- the defect this feeds is exactly "the annotation says one kind and
-# the body stores another".
-_PARAM_CTYPE_KIND = {
-    'char *': 'str',
-    'MojoStr *': 'str',
-    'MojoBytes *': 'bytes',
-    '_Bool': 'bool',
-    'MojoList *': 'list',
-    'MojoDict *': 'dict',
-    'MojoSet *': 'set',
-}
-
-
-def _param_ctype_binding_kind(ctype) -> str | None:
-    """The value kind a parameter's declared/annotated C type names, or None
-    when the type is not one of the kinds a body binding can prove.
-
-    Deliberately narrow: a struct pointer or an opaque `int64_t` says nothing
-    about which Python kind a value is, so a rebinding of one of those is not
-    evidence of a contradiction."""
-    c = _as_str(ctype)
-    _k = _PARAM_CTYPE_KIND.get(c)
-    if _k is not None:
-        return _k
-    if gimple_ctypes.TypeLattice.is_float(c):
-        return 'float'
-    if gimple_ctypes.TypeLattice.is_signed(c) \
-            or gimple_ctypes.TypeLattice.is_unsigned(c):
-        return 'int'
-    return None
-
-
-def _param_value_binding_kind(gen, value) -> str | None:
-    """The value kind a BINDING's RHS provably produces, or None.
-
-    Only literal-shaped evidence is accepted, for the same reason
-    `_rebound_to_other_container` accepts only a container literal or a
-    container constructor: a call or a name whose kind the pre-pass cannot
-    resolve is silence, not a contradiction. `None` is returned separately as
-    the `'none'` kind because rebinding a parameter to `None` is compatible
-    with every annotation (the value model spells it as the NULL word)."""
-    if value is None:
-        return None
-    if isinstance(value, gimple_ctypes.NoneLiteral):
-        return 'none'
-    if isinstance(value, gimple_ctypes.IdentExpr) \
-            and _as_str(value.name) == 'None':
-        return 'none'
-    if isinstance(value, gimple_ctypes.StringLiteral):
-        return 'bytes' if getattr(value, 'is_bytes', False) else 'str'
-    if isinstance(value, gimple_ctypes.BoolLiteral):
-        return 'bool'
-    if isinstance(value, gimple_ctypes.IntLiteral):
-        return 'int'
-    if isinstance(value, gimple_ctypes.FloatLiteral):
-        return 'float'
-    if isinstance(value, gimple_ctypes.ListExpr) \
-            or isinstance(value, gimple_ctypes.TupleExpr):
-        return 'list'
-    if isinstance(value, gimple_ctypes.DictExpr):
-        return 'dict'
-    if isinstance(value, gimple_ctypes.SetExpr):
-        return 'set'
-    if isinstance(value, gimple_ctypes.CallExpr) \
-            and isinstance(value.func, gimple_ctypes.IdentExpr):
-        # Same constructor rule `_rebound_to_other_container` uses: the
-        # constructor builds its kind whatever it is handed.
-        return {
-            'list': 'list', 'tuple': 'list',
-            'dict': 'dict', 'frozendict': 'dict',
-            'set': 'set', 'frozenset': 'set',
-            'str': 'str', 'bytes': 'bytes', 'bytearray': 'bytes',
-            'int': 'int', 'float': 'float', 'bool': 'bool',
-        }.get(_as_str(value.func.name))
-    return None
-
-
-def _param_kind_is_container(kind) -> bool:
-    return kind in ('list', 'dict', 'set')
-
-
-def _param_kinds_are_numeric(kind_a: str, kind_b: str) -> bool:
-    """`bool` and `int` are one numeric family: `True` stored into an `Int`
-    parameter is not the annotation lie this detector exists for."""
-    return (kind_a in ('int', 'bool') and kind_b in ('int', 'bool'))
-
-
-def _param_annotation_conflict(gen, pname: str, ann_ctype, body) -> str | None:
-    """`'container'`, `'scalar'`, or None: how a body binding CONTRADICTS the
-    kind a parameter's annotation declares.
-
-    A parameter is one C variable for its whole life. When its annotation
-    says `str` (a `char *` slot) and the body does `selected = [selected]`,
-    storing the list pointer through the string slot is a silent
-    reinterpretation: every later string operation reads the list struct's
-    bytes as text. The same is true of an `int` parameter rebound to a
-    string, a list parameter rebound to an int, and every other pair of
-    distinct value kinds. This is the annotation-aware twin of
-    `_rebound_to_other_container` (which sees only the body's own bindings,
-    never the annotation) and of `_prebound_local_ctypes` (which deliberately
-    skips annotated names).
-
-    Returns the CATEGORY of the disagreement, which is what the consumers
-    need to pick a representation: `'container'` for two different container
-    kinds (the existing bare-word container box), `'scalar'` for two
-    different scalar kinds, and `'value'` for a container beside a scalar
-    (the runtime box that dispatches by kind). None means no provable
-    contradiction.
-    """
-    ann_kind = _param_ctype_binding_kind(ann_ctype)
-    if ann_kind is None:
-        return None
-    for n in _each_binding(body):
-        value = None
-        if isinstance(n, gimple_ctypes.AssignStmt):
-            if not isinstance(n.target, gimple_ctypes.IdentExpr) \
-                    or _as_str(n.target.name) != pname:
-                continue
-            value = n.value
-        elif isinstance(n, gimple_ctypes.VarDecl):
-            if _as_str(getattr(n, 'name', '')) != pname:
-                continue
-            value = n.value
-        else:
-            continue
-        val_kind = _param_value_binding_kind(gen, value)
-        if val_kind is None or val_kind == 'none' or val_kind == ann_kind:
-            continue
-        if _param_kinds_are_numeric(ann_kind, val_kind):
-            continue
-        if _param_kind_is_container(ann_kind) \
-                and _param_kind_is_container(val_kind):
-            return 'container'
-        if not _param_kind_is_container(ann_kind) \
-                and not _param_kind_is_container(val_kind):
-            return 'scalar'
-        return 'value'
-    return None
-
-
-def _param_annotation_cached(gen, pname: str, ann_ctype, body) -> str | None:
-    """`_param_annotation_conflict`, memoized per (body identity, name).
-
-    The two signature passes and the body's own declaration sites all ask
-    this same question for the same parameter, and a large function's body
-    walk is not free. Cached on the generator rather than at module scope so
-    a fresh compile cannot see a previous one's answer."""
-    cache = getattr(gen, '_param_conflict_cache', None)
-    if cache is None:
-        cache = {}
-        gen._param_conflict_cache = cache
-    key = (id(body), _as_str(pname), _as_str(ann_ctype))
-    got = cache.get(key)
-    if got is not None:
-        return got if got != '<none>' else None
-    ans = _param_annotation_conflict(gen, pname, ann_ctype, body or [])
-    cache[key] = '<none>' if ans is None else ans
-    return ans
-
-
-def param_annotation_conflicts(gen, pname: str, ann_ctype, body) -> str | None:
-    """Public spelling of `_param_annotation_cached` for the codegen's
-    parameter-type resolver (the middle tier owns the rule; the backend only
-    consumes its answer, so the annotation/binding classification cannot
-    drift between the two)."""
-    return _param_annotation_cached(gen, pname, ann_ctype, body)
-
-
-def param_boxed_names(gen, func) -> set:
-    """The parameter names of `func` whose annotation the body contradicts
-    in a way that needs the tagged word (a scalar beside a container, or two
-    different scalar kinds).
-
-    Used by the call site to box the argument by its own kind, so the callee
-    receives a word that still says what it is. A container-vs-container
-    disagreement needs no box (both are already words) and is excluded, as is
-    a same-family numeric rebinding."""
-    out: set = set()
-    body = getattr(func, 'body', None) or []
-    for _p in (getattr(func, 'params', None) or []):
-        _pn = _as_str(_p[0] if isinstance(_p, (tuple, list)) else _p)
-        _ann = _p[1] if isinstance(_p, (tuple, list)) and len(_p) > 1 else None
-        if _ann is None or _pn.startswith('*'):
-            continue
-        try:
-            _ann_ct = gen._resolve_type(_ann)
-        except Exception:
-            continue
-        _conf = _param_annotation_conflict(gen, _pn, _ann_ct, body)
-        if _conf == 'value' or _conf == 'scalar':
-            out.add(_pn)
-    return out
-
 def _seed_addressed_locals(gen, body: list):
     """Pre-scan `body` (BEFORE any statement in it compiles) for every
     plain-call `UnsafePointer(to=x)` / `Pointer(to=x)` / `OwnedPointer(
@@ -2183,7 +1986,7 @@ def _generator_value_ctype_for_next(gen, arg):
             return None
         if isinstance(arg.func, gimple_ctypes.MemberExpr) and isinstance(arg.func.obj, gimple_ctypes.IdentExpr):
             _ot = _as_str(gen.var_types.get(_as_str(arg.func.obj.name), ''))
-            if not gimple_ctypes.TypeLattice.ends_in_star(_ot):
+            if not _ot.endswith(' *'):
                 return None
             _sn = gimple_exprtypes._struct_name_of(_ot)
             if _sn not in gen.struct_field_types:
@@ -2961,7 +2764,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                 _v = _val
                 if isinstance(_v, gimple_ctypes.CallExpr):
                     _vt = gen._quick_type(_v)
-                    if gimple_ctypes.TypeLattice.ends_in_star(_vt) and _vt[:-2].strip() in gen.struct_field_types:
+                    if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
                         cand = _vt
                     # `next(<generator>)` is a POINTER result that is not a
                     # struct -- `char *` for a string-yielding generator, and
@@ -3142,13 +2945,13 @@ def _dict_value_locals(gen, body: list) -> tuple[dict, dict]:
         if name in out_vt:
             return                       # first store wins
         vt = gen._quick_type(n.value)
-        if gimple_ctypes.TypeLattice.is_word(vt):
+        if vt == 'int64_t':
             lit = _container_literal_ctype(n.value)
             if lit is not None:
                 vt = lit
         if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
                           'MojoSet *', 'MojoBytes *')
-                   or gimple_ctypes.TypeLattice.ends_in_star(vt)):
+                   or vt.endswith(' *')):
             out_vt[name] = vt
             # Element type of the value: for a list literal, the element type
             # of the container; for a char* (string), subscript yields char*;
@@ -3243,7 +3046,7 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
         if not isinstance(lam, gimple_ctypes.LambdaExpr):
             return
         bt = gen._quick_type(lam.body)
-        if bt and not gimple_ctypes.TypeLattice.is_word(bt):
+        if bt and bt != 'int64_t':
             out[name] = bt
 
     def note_def(fd):
@@ -3251,7 +3054,7 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
         if not name or name in out:
             return
         bt = _infer_return_type(gen, fd.body)
-        if bt and not gimple_ctypes.TypeLattice.is_word(bt):
+        if bt and bt != 'int64_t':
             out[name] = bt
 
     for n in _each_binding(body):
@@ -3324,7 +3127,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     _scratch_mark_ml: int = gen._scan_scratch_top
     _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
-        if _n not in _merged or gimple_ctypes.TypeLattice.is_word(_t):
+        if _n not in _merged or _t == 'int64_t':
             _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
@@ -3565,7 +3368,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
         # sentinel check) via this pre-pass's seeded entry, even though
         # _lower_list_literal's own (later) codegen-time assignment
         # correctly left it unset.
-        if not (gimple_ctypes.TypeLattice.is_word(_e) and gen._literal_elements_include_none(lit.elements)):
+        if not (_e == 'int64_t' and gen._literal_elements_include_none(lit.elements)):
             elem[v] = _e
         if lit.elements and isinstance(lit.elements[0], gimple_ctypes.ListExpr):
             elem[v] = 'MojoList *'
@@ -3640,7 +3443,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:  # Only if there's an inner type
                             _ct = gen._resolve_type(inner)
-                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
+                            if _ct and _ct != 'int64_t':
                                 elem[_v] = _ct
                 elif _ann is not None and isinstance(_val, gimple_ctypes.SetExpr):
                     _ann_str = _as_str(_ann)
@@ -3649,7 +3452,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:
                             _ct = gen._resolve_type(inner)
-                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
+                            if _ct and _ct != 'int64_t':
                                 elem[_v] = _ct
                 continue
             if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
@@ -3723,14 +3526,14 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:  # Only if there's an inner type
                             _ct = gen._resolve_type(inner)
-                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
+                            if _ct and _ct != 'int64_t':
                                 elem[v] = _ct
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
                 v = n.target.obj.name
                 vt = gen._quick_type(n.value)
                 if v not in _opaque and vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                           or gimple_ctypes.TypeLattice.ends_in_star(vt)):
+                           or vt.endswith(' *')):
                     dict_val.setdefault(v, vt)
                     # `lst[i] = <float>` is a LIST store when the key is
                     # not a string literal, and it is the only evidence

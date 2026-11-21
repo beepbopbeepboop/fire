@@ -1530,8 +1530,7 @@ def _publish_bytes(src_path: str, out: str) -> None:
 
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
           extra_exports: list = None, jobs: int = 1, opt_flag: str = None,
-          track_local_deps: bool = True, arch: str = None,
-          stamp_key: str = None) -> str:
+          track_local_deps: bool = True, arch: str = None) -> str:
     """`opt_flag` (e.g. '-O2'): folded into every module's AND the runtime's
     own object-compile flags, and into their CAS keys (so an -O2 build never
     serves a stale -O0-compiled object, or vice versa) — `_OBJ_FLAGS`/plain
@@ -1546,13 +1545,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     links against, the final link, the CAS keys and the artifact's own
     verification — see the architecture section at the top of this file for why
     each of those is separately necessary and why the verification is not
-    optional.
-
-    `stamp_key`: when given, the installed artifact's digest is recorded beside
-    `out` under that key, INSIDE the publish lock, so the stamp and the bytes it
-    describes cannot come from two different builds. `build_stdlib()` passes
-    `stdlib_dylib_currency_key(arch)`; nothing else does, so `fire dylib`
-    builds write no stamp."""
+    optional."""
     gcc = find_gcc()
     gxx = find_gxx()
     arch = normalize_arch(arch)
@@ -1854,8 +1847,6 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                     cas.stats['hits'] += 1
                     _publish_bytes(cached_dylib, out)
                     _arch_or_die(out, arch, 'cached dylib')
-                    if stamp_key:
-                        _write_stamp(out, stamp_key)
                     return out
                 cas.stats['misses'] += 1
 
@@ -1907,8 +1898,6 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             # artifact). Inside the lock, so the latecomer above finds it.
             with open(out, 'rb') as f:
                 cas.publish(link_key, '.dylib', f.read())
-            if stamp_key:
-                _write_stamp(out, stamp_key)
             return out
 
 
@@ -2261,7 +2250,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 859
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 857
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it
@@ -2433,8 +2422,18 @@ def format_export_report(total: int, misresolved: list, undefined: list) -> list
 _REPORT_CAP = 24
 
 
-def _runtime_header_entries() -> list:
-    """Every entry point the runtime headers advertise, one per name."""
+def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1,
+                 arch: str = None) -> str:
+    """Build the monolithic stdlib dylib from all auto-discovered library modules.
+
+    `arch` names the architecture the dylib is for; the default output NAME
+    gains it as well, because `build/libmojostdlib.dylib` is a fixed path and
+    two architectures writing to it would make the second build's success
+    depend on which ran last. The name is only defaulted when the caller did
+    not ask for a specific `out`."""
+    arch = normalize_arch(arch)
+    if out == DEFAULT_OUT:
+        out = os.path.join(HERE, 'build', f'libmojostdlib.{arch}.dylib')
     rt_exports = []
     seen = set()
     for hdr in _RUNTIME_HEADERS:
@@ -2442,149 +2441,6 @@ def _runtime_header_entries() -> list:
             if e['name'] not in seen:
                 seen.add(e['name'])
                 rt_exports.append(e)
-    return rt_exports
-
-
-def _runtime_tree_digest() -> str:
-    """Content digest of every file under `runtime/`.
-
-    `cas.compiler_fingerprint()` folds in `fire_runtime.c`/`.h` and the two
-    Metal files, but `build()` also compiles `runtime_units()` (the coroutine
-    and async units, `fire_re_engine.inc`, ...) and reads the optional-unit
-    headers. A currency key that trusted only the fingerprint would serve a
-    dylib after one of those changed, so the whole directory is hashed. It is
-    1.3 MB, ~0.02 s."""
-    parts = ['mojo-runtime-tree-v1']
-    for dirpath, dirnames, filenames in os.walk(RUNTIME):
-        dirnames.sort()
-        for name in sorted(filenames):
-            p = os.path.join(dirpath, name)
-            rel = os.path.relpath(p, RUNTIME).replace(os.sep, '/')
-            try:
-                parts.append(rel + '\x1f' + cas.file_digest(p))
-            except OSError:
-                parts.append(rel + '\x1f' + 'unreadable')
-    return cas._hash(*parts)
-
-
-def stdlib_dylib_currency_key(arch: str) -> str:
-    """The digest of every input the stdlib dylib's bytes are derived from.
-
-    Everything `build()` reads is represented here: the compiler sources and
-    the runtime files (`compiler_fingerprint`), the whole `runtime/` tree, the
-    stdlib sources (`stdlib_fingerprint`), the toolchain and object flags, the
-    target architecture, and the header entries the link key folds in. The
-    whole point is that this is CHEAP compared with `build()`: it hashes
-    sources, while `build()` computes 664 module keys and runs `nm` over every
-    object, which is what made a `fire.py build` of a three-line program take
-    the same time as a stdlib build (and made `silentnoop`'s first case
-    exhaust its 300 s budget)."""
-    gcc = find_gcc()
-    objflags = _OBJ_FLAGS + arch_flags(arch)
-    # The link key folds `extra_exports` in, so the currency key must too. A
-    # plain loop rather than a nested comprehension: this file is in `mojoc`'s
-    # own compile closure (`cas.selfhost_inputs()`).
-    export_rows = []
-    for e in _runtime_header_entries():
-        pairs = []
-        for k in sorted(e.keys()):
-            pairs.append(k + '=' + str(e[k]))
-        export_rows.append('\x1e'.join(pairs))
-    exports = '\x1d'.join(sorted(export_rows))
-    return cas._hash(
-        'mojo-stdlib-dylib-current-v1', cas.ABI_VERSION,
-        cas.compiler_fingerprint(), cas.stdlib_fingerprint(),
-        _runtime_tree_digest(), cas.toolchain_fingerprint(gcc, objflags),
-        normalize_arch(arch), exports)
-
-
-def _stamp_path(out: str) -> str:
-    return out + '.current'
-
-
-def _stamp_is_current(out: str, key: str) -> bool:
-    """Whether `out` is the artifact `key` names, by its own bytes.
-
-    The digest half is not decoration: the stamp and the dylib are two files,
-    and a concurrent build from a different key can replace one between the
-    two reads. A mismatch rebuilds, which is always safe."""
-    try:
-        with open(_stamp_path(out)) as f:
-            lines = f.read().split()
-    except OSError:
-        return False
-    if len(lines) != 2 or lines[0] != key:
-        return False
-    try:
-        return lines[1] == cas.file_digest(out)
-    except OSError:
-        return False
-
-
-def _write_stamp(out: str, key: str) -> None:
-    """Record `key` and the artifact's digest beside `out`, atomically.
-
-    Callers hold `_OutputLock(out)`: the stamp describes the bytes at `out`,
-    so writing it outside the install lock could pair one build's key with a
-    racing build's artifact."""
-    row = key + '\n' + cas.file_digest(out) + '\n'
-    p = _stamp_path(out)
-    tmp = p + '.tmp.%d' % os.getpid()
-    with open(tmp, 'w') as f:
-        f.write(row)
-    os.replace(tmp, p)
-
-
-def stdlib_dylib(out: str = None, arch: str = None, jobs: int = 1) -> str:
-    """The stdlib dylib `fire.py build` LINKS AGAINST, built on first use.
-
-    This is `build_stdlib()` plus a currency stamp, and the difference is
-    measured rather than cosmetic. `driver.compile_program` asks for this
-    library on EVERY build, and `build_stdlib()` answers by re-deriving all
-    664 module keys and running `nm` on every object even when every one of
-    them is a CAS hit — ~3 minutes on a loaded gate box for a program that
-    itself compiles in a second. That cost is invisible when a checkout has a
-    warm artifact, which is why it went unnoticed: the job that DID notice,
-    `silentnoop`, builds 26 programs with a 300 s budget each, and in a fresh
-    tree (the integrator's `masterred_` snapshot) the first one was charged
-    for the whole stdlib and timed out.
-
-    The stamp names the inputs (`stdlib_dylib_currency_key`) and the
-    artifact's own digest. A matching stamp means the artifact at `out` is
-    already the one those inputs produce, so there is nothing to derive. Any
-    input change, a missing stamp, or an artifact whose bytes disagree sends
-    it through `build_stdlib()`.  `tools/stdlib_dylib_ratchet.py` calls
-    `build_stdlib()` and not this function, so the `skip <module>:` lines it
-    reads are still produced by a real build every time it runs.
-
-    `out` is defaulted exactly as `build_stdlib()`'s is, per arch."""
-    arch = normalize_arch(arch)
-    if out is None:
-        out = os.path.join(HERE, 'build', f'libmojostdlib.{arch}.dylib')
-    key = stdlib_dylib_currency_key(arch)
-    if _stamp_is_current(out, key):
-        return out
-    built = build_stdlib(out=out, use_cache=True, jobs=jobs, arch=arch,
-                          stamp_key=key)
-    return built
-
-
-def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1,
-                 arch: str = None, stamp_key: str = None) -> str:
-    """Build the monolithic stdlib dylib from all auto-discovered library modules.
-
-    `arch` names the architecture the dylib is for; the default output NAME
-    gains it as well, because `build/libmojostdlib.dylib` is a fixed path and
-    two architectures writing to it would make the second build's success
-    depend on which ran last. The name is only defaulted when the caller did
-    not ask for a specific `out`.
-
-    `stamp_key` is passed through to `build()` and written beside `out` with
-    the artifact's digest inside the install lock; see `stdlib_dylib()`."""
-    arch = normalize_arch(arch)
-    if out == DEFAULT_OUT:
-        out = os.path.join(HERE, 'build', f'libmojostdlib.{arch}.dylib')
-    rt_exports = _runtime_header_entries()
     # track_local_deps=False: every module here IS a stdlib module, and the
     # whole stdlib closure is already folded into each one's key via
     # cas.stdlib_fingerprint(). Per-module local-dep tracking would only
@@ -2592,8 +2448,7 @@ def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1,
     # cold rebuild. It exists for `fire dylib` on a PROJECT's own file set
     # (BUG-2026-032), reached via driver.compile_dylib -> build(...).
     return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports,
-                 jobs=jobs, track_local_deps=False, arch=arch,
-                 stamp_key=stamp_key)
+                 jobs=jobs, track_local_deps=False, arch=arch)
 
 
 def main():
