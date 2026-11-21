@@ -3795,6 +3795,64 @@ else:
     print("double not false")
 """)
 
+    # A float operand makes an expression float-VALUED, and no integer
+    # folder can answer those, so `eval_const`'s unary sign arm (bool/int
+    # only) and its arithmetic arm (both operands bool/int) declined every
+    # such condition. `eval_const_bool_state` reads a declined fold as
+    # CONST_FALSE, so a module-level `if -0.5:`, `if 1.5 * 2:` and even
+    # `if not -0.0:` took the else arm and lost their then-arm before
+    # emission. The zero rows are the control: they printed the right arm
+    # before only because "declined, so false" coincided with the answer.
+    test_gimple_matches_cpython("gimple_module_constant_float_condition", """\
+def main():
+    pass
+
+if -0.5:
+    print("neg float truthy")
+else:
+    print("neg float falsy")
+
+if +0.5:
+    print("pos float truthy")
+else:
+    print("pos float falsy")
+
+if -0.0:
+    print("neg zero truthy")
+else:
+    print("neg zero falsy")
+
+if not -0.0:
+    print("not neg zero truthy")
+else:
+    print("not neg zero falsy")
+
+if 1.5 * 2:
+    print("product truthy")
+else:
+    print("product falsy")
+
+if 1.5 - 1.5:
+    print("zero difference truthy")
+else:
+    print("zero difference falsy")
+
+if 3.0 / 2:
+    print("quotient truthy")
+else:
+    print("quotient falsy")
+
+if 2 ** 0.5:
+    print("root truthy")
+else:
+    print("root falsy")
+
+if 1.5 % 1:
+    print("remainder truthy")
+else:
+    print("remainder falsy")
+""")
+
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env
     # struct, so the captured `double` crosses a struct field, a `malloc`'d env
