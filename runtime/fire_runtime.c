@@ -8408,59 +8408,38 @@ int64_t mojo_dict_slot_boxed(MojoDict *d, char *key)
     return _dict_slot_boxed(sl);
 }
 
-/* The SUBSCRIPT reads: `d[k]` in Python raises KeyError for an absent key,
- * and none of the sentinel getters above do — they answer their type's zero
- * so `.get`, `setdefault`, `pop(default)` and `in` can test presence. Using
- * them for a bare subscript is why `try: ... except KeyError:` never fired on
- * the compiled path (`d["missing"]` printed 0 and carried on). Each of these
- * finds the slot once and raises the real, catchable KeyError when it is not
- * there; the value conversion is the same one the getter above performs.
- * `_dict_lookup` is shared, so a subscript and a `.get` never disagree about
- * which slot a key names. */
-static _DictSlot *_dict_subscr_slot(MojoDict *d, char *key)
+/* `d.get(k)` with NO default argument: CPython answers the stored value on a
+ * hit and `None` on a miss. The `mojo_dict_get_*` getters all answer the
+ * value domain's ABSENT value (0 / NULL / 0.0), so a miss was
+ * indistinguishable from a stored 0 — `print({"a": 1}.get("zz"))` printed
+ * `0` where CPython prints `None` (the None-prints-as-0 and None-equals-0
+ * bug, whose doc was deleted with the fix). The one-lookup spelling
+ * is `_dict_slot_boxed` for a HIT (it already boxes a double/bool/None slot
+ * by its recorded kind and leaves an int/str slot's own word) and the shared
+ * None box for a MISS, which is exactly the tagged-word convention every
+ * consumer of an unknown-kind int64_t already reads. */
+static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key);
+
+static int64_t _dict_slot_boxed_or_none(_DictSlot *sl)
 {
-    _DictSlot *sl = _dict_lookup(d, key);
-    if (!sl) mojo_raise_key_error(key);
-    return sl;
+    if (!sl) return mojo_box_none();
+    return _dict_slot_boxed(sl);
 }
 
-int64_t mojo_dict_subscript_int(MojoDict *d, char *key)
-{ return _dict_subscr_slot(d, key)->val; }
-
-char *mojo_dict_subscript_str(MojoDict *d, char *key)
-{ return (char *)(uintptr_t)_dict_subscr_slot(d, key)->val; }
-
-double mojo_dict_subscript_double(MojoDict *d, char *key)
+int64_t mojo_dict_get_boxed(MojoDict *d, char *key)
 {
-    double v;
-    memcpy(&v, &_dict_subscr_slot(d, key)->val, sizeof v);
-    return v;
+    return _dict_slot_boxed_or_none(_dict_lookup(d, key));
 }
 
-int64_t mojo_dict_subscript_boxed(MojoDict *d, char *key)
-{ return _dict_slot_boxed(_dict_subscr_slot(d, key)); }
-
-/* The None-key subscript (`d[None]`, keykind 3) has no key text to report, so
- * its KeyError says `None` — CPython's own `str(KeyError(None))`. */
-static _DictSlot *_dict_subscr_slot_none(MojoDict *d)
+int64_t mojo_dict_get_boxed_bytes(MojoDict *d, MojoBytes *key)
 {
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    if (!sl) mojo_raise_key_error((char *)"None");
-    return sl;
+    return _dict_slot_boxed_or_none(_dict_lookup_bytes(d, key));
 }
 
-char *mojo_dict_subscript_none_str(MojoDict *d)
-{ return (char *)(uintptr_t)_dict_subscr_slot_none(d)->val; }
-
-double mojo_dict_subscript_none_double(MojoDict *d)
+int64_t mojo_dict_get_boxed_none(MojoDict *d)
 {
-    double v;
-    memcpy(&v, &_dict_subscr_slot_none(d)->val, sizeof v);
-    return v;
+    return _dict_slot_boxed_or_none(_dict_lookup_k(d, "", 3));
 }
-
-int64_t mojo_dict_subscript_none_boxed(MojoDict *d)
-{ return _dict_slot_boxed(_dict_subscr_slot_none(d)); }
 
 int mojo_dict_contains(MojoDict *d, char *key)
 {
@@ -8614,34 +8593,6 @@ int64_t mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key)
     _DictSlot *sl = _dict_lookup_bytes(d, key);
     return _dict_slot_boxed(sl);
 }
-
-/* The bytes-key subscript: same contract as the str-key family above (a bare
- * `d[b'k']` raises the catchable KeyError; `d.get(b'k')` keeps the sentinel).
- * `mojo_bytes_cstr_key` is the same NUL-terminated copy the lookup probes
- * with, so the message names the key that was actually searched for. */
-static _DictSlot *_dict_subscr_slot_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    if (!sl) {
-        char *k = mojo_bytes_cstr_key(key);
-        mojo_raise_key_error(k);
-        free(k);
-    }
-    return sl;
-}
-
-char *mojo_dict_subscript_bytes_str(MojoDict *d, MojoBytes *key)
-{ return (char *)(uintptr_t)_dict_subscr_slot_bytes(d, key)->val; }
-
-double mojo_dict_subscript_bytes_double(MojoDict *d, MojoBytes *key)
-{
-    double v;
-    memcpy(&v, &_dict_subscr_slot_bytes(d, key)->val, sizeof v);
-    return v;
-}
-
-int64_t mojo_dict_subscript_bytes_boxed(MojoDict *d, MojoBytes *key)
-{ return _dict_slot_boxed(_dict_subscr_slot_bytes(d, key)); }
 
 int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)
 {
@@ -16718,6 +16669,18 @@ int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw)
     return _dict_slot_boxed(sl);
 }
 
+int64_t mojo_dict_get_boxed_kw(MojoDict *d, int64_t kw)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { return mojo_dict_get_boxed(d, (char *)(intptr_t)kw); }
+    if (k == _KW_CONT) {
+        int64_t v = mojo_dict_get_boxed(d, ck);
+        mojo_dict_key_free(ck);
+        return v;
+    }
+    return _dict_slot_boxed_or_none(_dict_lookup_ik(d, kw));
+}
+
 double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)
 {
     char *ck; int k = _kw_kind(kw, &ck);
@@ -16745,74 +16708,6 @@ char *mojo_dict_get_str_kw(MojoDict *d, int64_t kw)
     }
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     return sl ? (char *)(uintptr_t)sl->val : NULL;
-}
-
-/* The SUBSCRIPT reads' `_kw` twins — `mojo_dict_subscript_*` with the key as a
- * raw word, spelled the same three-arm way as every twin above (boxed str,
- * container content key, integer). They exist because a bare `d[k]` now goes
- * through the raising subscript family: without a `_kw` twin, `_apply_kw_keys`
- * materialises the key word as text and a TUPLE key is looked up under its
- * repr instead of `mojo_dict_key_for`'s content key, which the store did use —
- * `d[("a", 1)] = ...; d[("a", 1)]` then raised a KeyError against itself.
- * `_dict_lookup_ik` answers the word's integer entry directly; an absent one
- * raises the same KeyError the str-key subscript does, with the key's decimal
- * spelling, and the container arm frees the key it allocated. */
-int64_t mojo_dict_subscript_int_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_int(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_subscript_int(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    return sl->val;
-}
-
-int64_t mojo_dict_subscript_boxed_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_boxed(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_subscript_boxed(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    return _dict_slot_boxed(sl);
-}
-
-double mojo_dict_subscript_double_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_double(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        double v = mojo_dict_subscript_double(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    double v;
-    memcpy(&v, &sl->val, sizeof(v));
-    return v;
-}
-
-char *mojo_dict_subscript_str_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_str(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        char *v = mojo_dict_subscript_str(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    return (char *)(uintptr_t)sl->val;
 }
 
 void mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v)
@@ -17357,18 +17252,15 @@ double mojo_min_double(void *args) {
  * the equivalent negative machine word, same as a real 64-bit register
  * would hold it — this runtime has no bignum type to hold the literal
  * value exactly the way Python's arbitrary-precision int does. */
-/* `int(x)`: a small word is a numeric argument (int(True), a truncating
- * int(float) that reached the generic path) and passes through; a string is
- * parsed exactly as CPython's one-argument `int(str)` parses it. `atoll`
- * used to answer 0 for "x" and 12 for "12abc" — no exception, so
- * `try: int(s) except ValueError:` never fired on the compiled path. The
- * decimal parse is the same strict one `int(s, 10)` uses (and the same
- * ValueError text: "invalid literal for int() with base 10: ..."), so the
- * two spellings cannot drift; note that a 0x/0o/0b prefix is a ValueError
- * here, as it is in CPython, and is only accepted with an explicit base. */
 int64_t mojo_make_int(char *s) {
     if ((intptr_t)s < 65536) return (int64_t)(intptr_t)s;
-    return mojo_make_int_base(s, 10);
+    if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
+        return (int64_t)strtoull(s + 2, NULL, 2);
+    if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O'))
+        return (int64_t)strtoull(s + 2, NULL, 8);
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        return (int64_t)strtoull(s + 2, NULL, 16);
+    return (int64_t)atoll(s);
 }
 double mojo_make_float(char *s) { return s ? atof(s) : 0.0; }
 /* See the header. The digits are accumulated in uint64_t with wraparound, the

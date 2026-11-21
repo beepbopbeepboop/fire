@@ -257,7 +257,6 @@ that is meant to be behaviour-preserving:
      `fs_words` instead of twelve fields; the six `gen._x_vals` names stay
      bound to the same set objects (assigned once at construction, `.clear()`
      per function), so no reader changes.
-  (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through `gen._words`; `test_type_string_ratchet.py` counts the direct spelling, baseline 10 = the six `bind` lines and docs. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
   2. Add read predicates on it (`words.may_be_box(name)`, `words.is_tagged(name)`,
      `words.is_dyn(name)`, `words.is_int_word(name)`) and move the ~200 readers
      (`x in gen._boxed_vals`) onto them by codemod, as the type-string codemods
@@ -294,12 +293,40 @@ that is meant to be behaviour-preserving:
   above now returns the tagged word. A copy `y = x` of a name bound to such a
   call keeps the box (`tagged_next_bind_name`). Still lost: a tagged value
   stored in a list/tuple/dict slot, and one passed as an argument (the
-  parameter is a plain word). Next, in order: (1) widen the local-int proof
-  to arithmetic on proven ints, `len(..)` and comparisons; (2) a parameter default `= None` makes the
-  parameter `DynWord`, and a call passing `None` passes `mojo_box_none()`
-  (see `bugs/CODEGEN_none_prints_as_zero_and_equals_zero.md`); (3) `dict.get`
-  and list slots read back as `DynWord`. Do NOT define `x == None` as
-  `x == 0`: that was tried and reverted (it makes `0 == None` true).
+  parameter is a plain word).
+  Landed 2026-11-20, the "may be None" decision widening past returns:
+  (a) an UNANNOTATED parameter declared `= None` is a tagged word
+  (`infra_infer.param_default_none_names`): `_param_ctype` keeps the
+  `int64_t` slot, `_box_param_call_args` boxes every argument by kind
+  (`mojo_box_none` for None, `mojo_box_int` for 0, including the omitted
+  argument's padded default), and `_reset_func` registers the name in
+  `boxed`/`tagged`/`dyn_word_locals` so reads and `print`/`str` dispatch by
+  the box's kind. `def label(value=None)` now tells `label()`, `label(None)`
+  and `label(0)` apart. Detection is limited to a slot that would otherwise
+  be the plain `int64_t`: an annotation or a call-site/usage-inferred
+  pointer type wins.
+  (b) `dict.get(k)` with NO default on a scalar/unknown value domain is the
+  boxed read (`runtime/fire_runtime.c`'s `mojo_dict_get_boxed*`, one lookup;
+  `emit_methods._ldm_get`): the slot's own word on a hit, `mojo_box_none()`
+  on a miss, so `print({"a": 1}.get("zz"))` is `None`. A binding
+  `x = d.get(k)` keeps the box (`emit_infra.dict_get_call_is_tagged`), so
+  `x is None`, `print(x)` and `x + 1` use the tagged machinery.
+  (c) a LOCAL whose every binding is `None` is the box-holding word
+  (`mixed_value_locals`' `{'none'}` rule), so `x = None; print(x)` prints
+  `None`. A name that also holds a str/container keeps its first-declared C
+  type, and module globals are excluded.
+  (d) `str(None)`, `repr(None)`, `f'{None}'` and `'%s' % None` spell `None`
+  (`_stringify_value`, `str`, `repr`), and `x is None` folds for a local
+  PROVABLY an int (`_local_is_provably_int`: `n = 0; n is None` is False).
+  Still lost: a name bound to `None` BESIDE another kind (it keeps the other
+  binding's C type), a `dict.get` on a double/str value domain or through a
+  container slot, a tagged word stored in a list/tuple/dict slot, and one
+  passed to a parameter not declared `= None`. Next, in order: (1) widen the
+  local-int proof to arithmetic on proven ints, `len(..)` and comparisons;
+  (2) carry the box across the remaining bindings (the 5b split); (3) read
+  list/tuple slots and every `.get` domain back as `DynWord`. Do NOT define
+  `x == None` as `x == 0`: that was tried and reverted (it makes
+  `0 == None` true).
 - **Stage 6, counted loops (started 2026-11-14).** `gen._loop_head(idx, n,
   bb_cond, bb_body, bb_post, bb_after, stmt)` and `gen._loop_tail(idx,
   bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of

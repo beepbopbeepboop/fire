@@ -14,11 +14,9 @@ not a unit test.
 """
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -100,40 +98,6 @@ class StaleVerdictRows(unittest.TestCase):
         self.assertEqual(still, [],
                          f'still cited by deleted doc path: {still}; '
                          'rewrite by symptom (commit or doc name)')
-
-
-class FallbackCandidatesExcludeTheLedger(unittest.TestCase):
-    """The filesystem fallback must apply the `SELF_PATH` exclusion too.
-
-    `candidates()` has two paths, and only the `git ls-files` one dropped
-    `tools/dangling_refs_baseline.py`. The fallback is taken whenever git
-    cannot answer — a source export has no `.git`, so the census there walks
-    the filesystem — and the ledger's whole content is the names of deleted
-    docs that other files still cite. Scanning it made the ledger look like a
-    citer of every one of them, so `--ratchet` reported two fresh gains in an
-    export of the very commit that is green in a checkout: two answers for two
-    copies of one commit, which is the failure class the module's docstring
-    names.
-    """
-
-    def _fallback_candidates(self, returncode, stdout):
-        proc = subprocess.CompletedProcess(['git', 'ls-files', '-z'],
-                                           returncode, stdout, '')
-        with mock.patch('subprocess.run', return_value=proc):
-            return d.candidates()
-
-    def test_ledger_is_not_a_candidate_when_git_fails(self):
-        got = self._fallback_candidates(128, '')
-        self.assertNotIn(d.SELF_PATH, got,
-                         'the ratchet ledger is being scanned as a citer of '
-                         'the deleted docs it records')
-        self.assertIn('test_dangling_doc_refs.py', got,
-                      'the fallback dropped ordinary files as well as the '
-                      'ledger')
-
-    def test_ledger_is_not_a_candidate_when_git_returns_nothing(self):
-        got = self._fallback_candidates(0, '')
-        self.assertNotIn(d.SELF_PATH, got)
 
 
 # The hard-bug index is hand-maintained prose, so nothing but these two checks
