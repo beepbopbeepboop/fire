@@ -2371,6 +2371,9 @@ int64_t mojo_box_int(int64_t v)
 {
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (!bx || !mojo_is_boxed(v)) return v;
+    /* `mojo_id`'s token is already an integer (the box address); unwrapping it
+     * answered the wrapped container. Same defect as `mojo_int_of_word`. */
+    if (bx->kind == 'i') return v;
     if (bx->kind != 'd') return bx->bits;
     return (int64_t)mojo_box_double(v);
 }
@@ -2397,6 +2400,12 @@ int64_t mojo_int_of_word(int64_t w)
             return mojo_make_int((char *)(intptr_t)bx->bits);
         if (bx->kind == 'n')
             mojo_raise_type_error((char *)"int() argument must be a string, a bytes-like object or a real, not 'NoneType'");
+        /* kind 'i' is `mojo_id`'s token: an INTEGER whose value IS the box
+         * address. Unwrapping to `bx->bits` answered the wrapped CONTAINER
+         * (or string) instead, so `int(id(x)) == id(x)` was False and a dict
+         * keyed by `int(id(x))` stopped matching the same token stored whole
+         * (bugs/CODEGEN_id_token_set_dedupes_by_container_content.md). */
+        if (bx->kind == 'i') return w;
         return bx->bits;
     }
     if (mojo_boxed_is_str(w))
