@@ -42,13 +42,17 @@ regex codemod once turned `x not in (...)` into `x is_int_word(not)`).
 **The blind spot.** Both oracles run the Python reference compiler. Neither can
 see a self-host failure: stage 5b steps 1-3 passed both and still broke
 `make bootstrap` (the self-hosted compile stubbed every `WordFacts` method).
-So any change that adds a module, a class, or a method called across modules
-also runs the **stub count**: `python3 fire.py --dump <module>.py` writes
-`<module>.ci` in the current directory, and
+A per-module `python3 fire.py --dump <module>.py` does NOT see it either
+(measured 2026-11-21 at `ef53815a1`: 0 stubs in `loops_shared.ci`, where the
+closure had ten). Only the whole-closure dump does, so the self-host check is
 
-    grep -c '{ mojo_print ((char \*)"[^"]*: unavailable in compiled mode' <module>.ci
+    python3 tools/c_oracle.py check --base <sha> --closure
 
-must not grow. The full check is `bootstrap-stage1-transitive` (owner-run; see §6).
+which runs `fire.py --dump-full fire.py` (what `bootstrap-stage1-transitive`
+runs) for both sides and fails on any NEW weak stub. It costs 5-8 minutes and
+about 6 GB, so the orchestrator runs it once per wave on the merged tree, not
+each worker. Any change that adds a module, a class, or a method called across
+modules gets it. The full check is still `make bootstrap` (owner-run; see §6).
 
 ## 3. Who does what
 
@@ -80,12 +84,18 @@ merge and one gate run. A wave lands before the next one starts.
 
 ### W0 — tooling and decisions (orchestrator, before any worker)
 
+Status 2026-11-21: items 1, 2 and 4 landed. `tools/c_oracle.py` (corpus hashing takes about 4 s for 285
+programs with `-j 6`, so every worker can afford it); nine tuple predicates in `TypeLattice` and the tuple
+table in `tools/type_string_codemod.py` (294 -> 115 tuple tests, C byte-identical on 285 programs); the
+ratchet no longer counts `mojo/middle/types.py`, where the predicates are defined; eight W1 packets
+(`bugs/GIR_W1_*.md`, 322 sites). Item 3 (the None decision) is the owner's.
+
+
 1. `tools/c_oracle.py`: `--base <commit>` hashes `tools/pydiff_corpus` (and
    the stub count of a fixed list of compiler modules) at that commit in a
    scratch worktree and caches the result under `build/c_oracle/<sha>.json`;
    with no flag it hashes the working tree and prints every program whose C
-   differs. This is what makes six parallel workers affordable: the base is
-   computed once per wave.
+   differs. `--closure` adds the whole-closure stub check.
 2. Extend `tools/type_string_codemod.py` with a tuple table
    (`('int', 'int64_t', '_Bool')` -> `is_int_word_or_bool`, ...) and add those
    predicates to `TypeLattice`, each with exactly the tuple's membership.
@@ -94,12 +104,13 @@ merge and one gate run. A wave lands before the next one starts.
 
 ### W1 — stage 4 tail (Haiku x up to 6)
 
-Remaining tuple tests and the hand cases the codemod cannot match, one packet
-per file: `emit_exprs.py` (32), `infra_infer.py` (6), `exprtypes.py` (6),
-`loops_shared.py`, `emit_calls.py`, `emit_infra.py`, ... Acceptance: oracle
-byte-identical, the file's counts fall, the orchestrator lowers the baselines
-at merge. Then the remaining `== 'int64_t'` / `== 'char *'` sites the codemod
-skipped (non-simple left sides) the same way.
+The 322 type-string tests the codemod cannot match (a left side it does not
+accept, or a tuple with no predicate), in eight packets that never share a
+file: `bugs/GIR_W1_{cpp_core,exprtypes,emit_loops,emit_calls,emit_exprs,
+emit_stmts,module_gen,emit_methods}.md`. `gimple_codegen.py` (6 sites) stays
+with the orchestrator. Acceptance: oracle byte-identical, the file's counts
+fall; the orchestrator lowers the baselines at merge and runs the closure check
+once on the merged tree.
 
 ### W2 — stage 2b builder (Opus design, then Haiku x up to 6)
 

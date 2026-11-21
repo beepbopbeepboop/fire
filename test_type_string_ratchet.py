@@ -42,26 +42,27 @@ PATTERNS = {
 }
 
 BASELINE = {
-    "endswith(' *')": 37,
-    "== 'int64_t'": 65,
-    "in (.., 'int64_t', ..)": 294,
-    # +1 on 2026-11-20: TypeLattice.is_cstr, the one definition call sites
-    # should use instead of spelling the test.
-    # also +1 each for is_word and is_double (same reason); +1 for is_int_word's body.
-    "== 'char *'": 75,
-    "== '_Bool'": 11,
-    "== 'double'": 10,
-    "== 'MojoList *'": 32,
-    "gen._emit( text": 270,
+    "endswith(' *')": 32,
+    "== 'int64_t'": 59,
+    "in (.., 'int64_t', ..)": 115,
+    "== 'char *'": 70,
+    "== '_Bool'": 6,
+    "== 'double'": 9,
+    "== 'MojoList *'": 31,
+    "gen._emit( text": 266,
     "direct word-set use": 10,
 }
 
 
 def sources() -> list:
+    """Every backend module EXCEPT mojo/middle/types.py: that file defines the
+    TypeLattice predicates, which are the one sanctioned spelling of each test."""
+    types_py = os.path.join(HERE, 'mojo', 'middle', 'types.py')
     return sorted(
-        glob.glob(os.path.join(HERE, 'mojo', 'backend_gimple', '*.py'))
+        p for p in glob.glob(os.path.join(HERE, 'mojo', 'backend_gimple', '*.py'))
         + glob.glob(os.path.join(HERE, 'mojo', 'middle', '*.py'))
-        + [os.path.join(HERE, 'gimple_codegen.py')])
+        + [os.path.join(HERE, 'gimple_codegen.py')]
+        if p != types_py)
 
 
 def counts() -> dict:

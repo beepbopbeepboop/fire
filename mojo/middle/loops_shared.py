@@ -127,7 +127,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
         if gimple_ctypes.TypeLattice.is_double(suf):
             return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
-        if elem in ('int64_t', 'int', '_Bool'):
+        if gimple_ctypes.TypeLattice.is_int_word_or_bool(elem):
             _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             # `_elem_of`'s int64_t is also its "nothing recorded" default: a
             # value with no element record at all is a word whose kind only

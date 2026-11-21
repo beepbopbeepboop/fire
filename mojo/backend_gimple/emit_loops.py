@@ -801,7 +801,7 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     Returns None for the untyped case, and the caller falls back to emitting
     the dispatch exactly as before.
     """
-    if lst_type not in ('int', 'int64_t', 'void *'):
+    if not gimple_ctypes.TypeLattice.is_int_word_or_voidp(lst_type):
         return None
     # A local that is ALSO bound to a generator handle somewhere (`dirs = _iglob(..)` /
     # `dirs = [d]`): the list evidence of one binding says nothing about the other.
@@ -1036,7 +1036,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         getattr(gen, 'current_func_name', None), ())
     if (isinstance(it, gimple_ctypes.IdentExpr)
             and it.name in _str_params
-            and it_type in ('int', 'int64_t', 'void *')):
+            and gimple_ctypes.TypeLattice.is_int_word_or_voidp(it_type)):
         _it64 = gen._to_int64(it_type, it_val)
         _strp = gen._coerce_to_type('int64_t', 'char *', _it64)
         gen._gen_for_cstr(var, _strp, node.body)
@@ -1275,7 +1275,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _lp_known = None
             if (_lp_known is not None
                     and gen._elem_of(_lp_known) == 'char *'
-                    and it_type in ('int', 'int64_t', 'void *')
+                    and gimple_ctypes.TypeLattice.is_int_word_or_voidp(it_type)
                     and not _loop_var_used_as_object(node.body, var)):
                 # A word with STRING-LIST evidence can still be an OPEN FILE
                 # HANDLE at run time. `c_common/strutil.py`'s
@@ -1315,7 +1315,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 gen._emit_label(_bb_done)
             elif _lp_known is not None:
                 gen._gen_for_list(var, _lp_known, node.body)
-            elif it_type in ('int', 'int64_t', 'void *'):
+            elif gimple_ctypes.TypeLattice.is_int_word_or_voidp(it_type):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
                 bb_not_dict = gen._new_bb(); bb_not_list = gen._new_bb()
                 bb_set = gen._new_bb(); bb_not_set = gen._new_bb()

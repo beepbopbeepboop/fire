@@ -1563,7 +1563,7 @@ def _selfhost_merge_field(_fields: dict[str, str], _name: str, _ct: str):
     # shim-vs-noshim divergence: `_selfhost_gimplegen_registered` etc.
     # stuck at `int64_t` self-hosted while the shim correctly settled on
     # `_Bool`).
-    if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
+    if _cur is None or (gimple_ctypes.TypeLattice.is_int_word_or_bool(_cur)
                          and (gimple_ctypes.TypeLattice.ends_in_star(_ct) or gimple_ctypes.TypeLattice.is_bool(_ct))):
         _fields[_name] = _ct
 
@@ -4364,7 +4364,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # `main` with a single explicit `return <value>` statement, so
     # `body_lines` has exactly one real entry, hit the crash). Length +
     # a plain, positive-index lookup is the established-safe replacement.
-    if node.name == 'main' and ret_type in ('int', 'int64_t'):
+    if node.name == 'main' and gimple_ctypes.TypeLattice.is_int_word(ret_type):
         _n_body_lines = len(gen.body_lines)
         _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
         if not _last_body_line.strip().startswith('return'):

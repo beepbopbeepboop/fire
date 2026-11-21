@@ -2040,7 +2040,7 @@ def param_default_none_names(gen, func, func_key: str = None) -> set:
         if not param_default_is_none(func, _pn):
             continue
         _ct = _inferred.get(_as_str(_pn)) if hasattr(_inferred, 'get') else None
-        if isinstance(_ct, str) and _ct not in ('int', 'int64_t'):
+        if isinstance(_ct, str) and not gimple_ctypes.TypeLattice.is_int_word(_ct):
             continue
         if not isinstance(_ct, str):
             # The other resolver `_param_ctype` consults for an unannotated
@@ -2610,7 +2610,7 @@ def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> b
             continue
         if _t in ('double', 'float', '_Bool'):
             return True
-        if _t in ('int', 'int64_t'):
+        if gimple_ctypes.TypeLattice.is_int_word(_t):
             if gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
                 return True
             # A bare-name container subscript beside a STRING arm
@@ -2736,7 +2736,7 @@ def _return_arms_are_int_or_none(acc: list, arms: list, body: list = None) -> bo
         elif _t in ('int', 'int64_t', '_Bool', 'double', 'float') \
                 and gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
             _has_scalar = True
-        elif _t in ('int', 'int64_t') and body is not None \
+        elif gimple_ctypes.TypeLattice.is_int_word(_t) and body is not None \
                 and isinstance(_node, IdentExpr) \
                 and _local_is_provably_int(body, _as_str(_node.name)):
             _has_scalar = True
@@ -2757,7 +2757,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # the mix from a differently-seeded type table.
         if (gimple_ctypes.TypeLattice.is_pointer(_rt)
                 and _return_arms_need_boxed_word(acc, arms, _rt)) \
-                or (_rt in ('int', 'int64_t')
+                or (gimple_ctypes.TypeLattice.is_int_word(_rt)
                     and _return_arms_are_int_or_none(acc, arms, body)):
             _mixed = getattr(gen, '_mixed_return_bodies', None)
             if _mixed is None:

@@ -1276,7 +1276,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 continue
             _existing_fn_ft = found.get(fn)
             if (fn not in found
-                    or (_existing_fn_ft in ('int', 'int64_t')
+                    or (gimple_ctypes.TypeLattice.is_int_word(_existing_fn_ft)
                         and _existing_fn_ft is not None)):
                 v = node.value
                 if isinstance(v, IdentExpr):
