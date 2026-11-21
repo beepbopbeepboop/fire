@@ -43,7 +43,7 @@ import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.coro as coro_mod
-import mojo.middle.valueinfo as gimple_valueinfo
+from mojo.middle.valueinfo import WordFacts
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
@@ -271,7 +271,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # ONE fresh WordFacts per function body replaces the six per-function
     # sets (boxed, tagged, dyn, int-word, maybe-kinds, boxed-container); the
     # historical names are re-bound to its sets (mojo/middle/valueinfo.py).
-    gen._words = gimple_valueinfo.WordFacts()
+    gen._words = WordFacts()
     gen._words.bind(gen)
     # `_tagged_word_vals` is the subset of `_boxed_vals` temps that are a
     # TAGGED generator word (a yield-kind box from `next(g)` on a mixed-kind
@@ -1070,7 +1070,7 @@ class FuncState:
         self.fs_struct_field_owners_items: dict = {}
         self.fs_struct_slot_kinds_items: dict = {}
         self.fs_local_bindings_cache: dict = {}
-        self.fs_words: gimple_valueinfo.WordFacts = gimple_valueinfo.WordFacts()
+        self.fs_words: WordFacts = WordFacts()
         self.fs_words_snap: list = []
 
 
@@ -3041,7 +3041,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             slit_name = gen._str_literal_to_slit(aval)
             temp = gen._new_val('char *', f'{slit_name}')
             aval = temp
-        if (gimple_ctypes.TypeLattice.is_word(atype) and gen._words.may_be_box(aval)
+        if (gimple_ctypes.TypeLattice.is_word(atype) and gen._word_may_be_box(aval)
                 and _is_pointer_view_helper(fname)):
             # `_as_dict(t[1])` / `_as_list(...)` / `_as_set(...)` / `_as_str(...)`
             # exist to put a pointer-typed STATIC view on a value the compiled
@@ -3061,7 +3061,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             _ub = gen._new_temp('int64_t')
             gen._rt_into(_ub, 'mojo_box_int', [f"{aval}"])
             aval = _ub
-        if (gimple_ctypes.TypeLattice.is_word(atype) and gen._words.may_be_box(aval)
+        if (gimple_ctypes.TypeLattice.is_word(atype) and gen._word_may_be_box(aval)
                 and not _is_pointer_view_helper(fname)
                 and not _as_str(fname).startswith(('mojo_', '__mojo_tuple_box_'))):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
@@ -3240,7 +3240,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     continue
                 _provable = (
                     actual_atype in ('double', 'float', '_Bool')
-                    or gen._words.is_int_word(aval)
+                    or gen._word_is_int_word(aval)
                     or (_anode is not None
                         and gimple_exprtypes.is_python_bool_expr(gen, _anode)))
                 if _provable:
@@ -3249,7 +3249,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 else:
                     _iv = (aval if gimple_ctypes.TypeLattice.is_word(atype)
                            else gen._cast('int64_t', f"{aval}"))
-                    if gen._words.may_be_box(aval):
+                    if gen._word_may_be_box(aval):
                         # a runtime-kinded list element read as a BOX: the string
                         # is the word inside it (a box's own address is not one)
                         _iv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _iv)])
@@ -3777,7 +3777,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # (`s = 3000000000; s = "sk"; d2[s] = 6; d2["sk"]` missed).
         # `mojo_cstr_or_int_str` answers the same way `print` does; the
         # result is a transient key, released after its one consuming call.
-        if (gen._words.is_dyn(val)
+        if (gen._word_is_dyn(val)
                 or _as_str(val) in getattr(gen, '_dyn_word_locals', ())):
             _dk = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                  [('int64_t', val)])
@@ -3837,7 +3837,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # loop no longer leaks one string per access. A caller that stores
         # the pointer, or reuses it across several calls, must not pass it.
         if transient and word_ok:
-            if gen._words.is_int_word(val):
+            if gen._word_is_int_word(val):
                 # This codegen PROVABLY knows the word is an integer (see
                 # `gen._int_word_vals`), so it supplies the answer instead of
                 # asking the runtime to work it out — which is the whole
@@ -3986,7 +3986,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
     # A local declared `char *` by a LATER assignment but which earlier held
     # a known integer (see `_track_pointer_actual_type`'s carry): consult the
     # provenance before bit-casting, since the integer's bits are not a pointer.
-    if gen._words.is_int_word(val):
+    if gen._word_is_int_word(val):
         iv = gen._cast('int64_t', val)
         ikey = gen._call_expr('char *', 'mojo_int_str_transient',
                               [('int64_t', iv)])
@@ -4731,7 +4731,7 @@ def box_word_value(gen, value_node, vtype: str, v: str) -> tuple:
     if vtype == 'MojoBytes *':
         return gen._call_expr('int64_t', 'mojo_box_from_bytes', [('void *', v)]), 'int64_t'
     if vtype in ('int', 'int64_t', '_Bool'):
-        if gen._words.may_be_box(v) or gen._words.is_tagged(v):
+        if gen._word_may_be_box(v) or gen._word_is_tagged(v):
             return v, 'int64_t'
         _w = gen._to_int64(vtype, v)
         if gimple_exprtypes.is_python_bool_expr(gen, value_node):
@@ -5390,7 +5390,7 @@ def _generator_to_list(gen, value: str) -> str:
         gen._void_call('mojo_list_append_word',
                        [('MojoList *', res), ('int64_t', val)])
         gen._struct_slot_kinds[res] = _RuntimeKinded(['int', 'str'])
-        gen._words.mark_slot_kinds(res)
+        gen._word_mark_slot_kinds(res)
     elif vct in ('char *', 'MojoStr *'):
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', res), ('const char *', val)])
@@ -5557,7 +5557,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # element type (the merged temp also carries set/list/box branches).
         gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
                        [('MojoList *', result), ('char', gen._new_val('char', "(char)'p'"))])
-        gen._words.mark_slot_kinds(result)
+        gen._word_mark_slot_kinds(result)
         # NO `gen._elem_types[result]` here, and that is load-bearing rather
         # than an omission. This arm merges FOUR different containers into one
         # temp, and the element type is a property of WHICH ONE, so a record
@@ -5583,7 +5583,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _sp = gen._coerce_to_type('int64_t', 'MojoSet *', it64)
         _sl = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', _sp)])
         gen._copy(result, _sl)
-        gen._words.mark_slot_kinds(str(result))
+        gen._word_mark_slot_kinds(str(result))
         gen._goto(bb_after)
         gen._emit_label(bb_not_set)
         # The unguarded `(MojoList *)value` this replaces walked `value->len`
@@ -5599,7 +5599,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit_label(bb_list)
         _lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
         gen._copy(result, _lp)
-        gen._words.mark_slot_kinds(str(result))
+        gen._word_mark_slot_kinds(str(result))
         gen._goto(bb_after)
         gen._emit_label(bb_none)
         # NOT a container at all: a plain int, a bool, a float's bit pattern, a
@@ -5617,7 +5617,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _ne = gen._call_expr('MojoList *', 'mojo_iter_boxed_list',
                              [('int64_t', it64)])
         gen._copy(result, _ne)
-        gen._words.mark_slot_kinds(str(result))
+        gen._word_mark_slot_kinds(str(result))
         gen._emit_label(bb_after)
         return result
     return gen._coerce_to_type(src_type, 'MojoList *', value)
@@ -5803,7 +5803,7 @@ def _list_repr_fn(gen, rav: str) -> str:
     # travel on the value (`mojo_list_set_kinds`), so the kinds-aware helper
     # reads them from the runtime row (see `_list_repr_call`). The single
     # list-wide ctype below is exact only for a list that really is uniform.
-    if gen._words.has_slot_kinds(rav) and et in ('double', 'int64_t'):
+    if gen._word_has_slot_kinds(rav) and et in ('double', 'int64_t'):
         return 'mojo_repr_list_kinds'
     if gimple_ctypes.TypeLattice.is_double(et):
         return 'mojo_repr_list_doubles'
@@ -6110,7 +6110,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         return gen._cast('char *', ev)
     # A slot read at a non-constant index may be a float BOX: `str(t[i])` and `f'{t[i]}'` render it as `mojo_repr_boxed`
     # does, the same as print (print(t[i]) already did; str() printed the box's integer word, 1 for 1.5).
-    if et in ('int', 'int64_t') and gen._words.may_be_box(_as_str(ev)):
+    if et in ('int', 'int64_t') and gen._word_may_be_box(_as_str(ev)):
         return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', _as_str(ev))])   # the raw word: _to_int64 would box it
     # A boxed container (a call result whose static type is int64_t/void*
     # but whose real value, per _get_actual_type, is a container) — same
@@ -6398,7 +6398,7 @@ def _to_int64(gen, ctype: str, val: str) -> str:
     # holds, and returns the input unchanged when it is not a box. Printing
     # does NOT come through here (it asks `mojo_repr_boxed`, which resolves
     # both cases in one call and must see the box itself).
-    if gen._words.may_be_box(val):
+    if gen._word_may_be_box(val):
         t = gen._new_temp('int64_t')
         gen._rt_into(t, 'mojo_box_int', [val])
         return t
@@ -6958,8 +6958,8 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         # `Properties.dump`'s `[f"{key}: {value}" for (key, value) in
         # simple_properties.items()]` printed `tier: 0` / `escapes: 1` where
         # the `for` spelling prints `tier: None` / `escapes: False`.
-        _compr_boxed_slots = (gen._words.has_slot_kinds(_iv)
-                              or gen._words.has_slot_kinds(_as_str(_iv))
+        _compr_boxed_slots = (gen._word_has_slot_kinds(_iv)
+                              or gen._word_has_slot_kinds(_as_str(_iv))
                               or is_dict_items
                               or _as_str(_iv) in gen._dict_items_val_elems)
         slot_types = gen._tuple_slot_types.get(_iv)
@@ -7061,7 +7061,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
                     # mark is live when its f-string/str() read takes the
                     # `mojo_repr_boxed` arm.
                     raw = gen._rt_call('int64_t', 'mojo_list_get_boxed', [_p, f"{i}"])
-                    gen._words.mark_boxed(cv)
+                    gen._word_mark_boxed(cv)
                     gen._emit(f"  {cv} = {raw};")
                 else:
                     raw = gen._rt_call('int64_t', 'mojo_list_get_int', [_p, f"{i}"])
@@ -7144,13 +7144,13 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._loop_head(idx64, len64, bb_cond, bb_body, bb_post, bb_after, False)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-    if gen._words.has_slot_kinds(_iv) and gen._type_of(_as_str(gen0.target)) == 'int64_t':
+    if gen._word_has_slot_kinds(_iv) and gen._type_of(_as_str(gen0.target)) == 'int64_t':
         # a list that carries its own per-slot kinds: read each slot as the box
         # the runtime hands back (a float / str slot is boxed), exactly as the
         # `for` statement over such a list does, so the target IS the element
         # and a comprehension over it keeps each element's kind.
         elem64 = gen._rt_call('int64_t', 'mojo_list_get_boxed', [_iv, idx64])
-        gen._words.mark_boxed(_tgt)
+        gen._word_mark_boxed(_tgt)
         gen._emit(f"  {_tgt} = (int64_t) {elem64};")
     elif gimple_ctypes.TypeLattice.is_double(suf):
         gen._rt_into(_tgt, 'mojo_list_get_double', [_iv, idx64])
@@ -7280,7 +7280,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
         # _declare_var; body reads resolve through _c_names).
         gen._copy(f"{gen._cname(_tgt)}", val)
         if api.get('mixed_slots') and gimple_ctypes.TypeLattice.is_word(vct):
-            gen._words.mark_boxed(gen._cname(_tgt))
+            gen._word_mark_boxed(gen._cname(_tgt))
             if not hasattr(gen, '_tagged_gen_vals'):
                 gen._tagged_gen_vals = set()
             gen._tagged_gen_vals.add(gen._cname(_tgt))
@@ -9032,7 +9032,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 _owned_boxed_reprs.append((_word, aval))
                 resolved_parts.append((atype, aval))
                 continue
-            if gen._words.is_boxed_container(aval):
+            if gen._word_is_boxed_container(aval):
                 # A call to a function whose returns disagree on container
                 # kind: the result IS a container, but which one is a runtime
                 # fact. Dispatch on the registries rather than reading it as
@@ -9067,7 +9067,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # `mojo_repr_boxed` result is a fresh buffer on every path.
             if _pi < len(args) and (_is_may_hold_float_param(gen, args[_pi])
                                     or _is_float_param_arith(gen, args[_pi])
-                                    or gen._words.is_tagged(aval)):
+                                    or gen._word_is_tagged(aval)):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)
@@ -9122,7 +9122,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 _cstr_held.append((aval, _rv))
                 resolved_parts.append(('char *', _rv))
                 continue
-            if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or gen._words.is_dyn(aval) \
+            if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or gen._word_is_dyn(aval) \
                     or (_pi < len(args) and isinstance(args[_pi], IdentExpr)
                         and _as_str(args[_pi].name) in gen._dyn_word_locals):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
@@ -9243,7 +9243,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 _stat = '_Bool'
         if gimple_ctypes.TypeLattice.is_cstr(atype):
             gen._rt_void(print_fn, [f"{aval}"])
-        elif atype in ('int', 'int64_t') and gen._words.may_be_box(aval):
+        elif atype in ('int', 'int64_t') and gen._word_may_be_box(aval):
             # A slot read out of a heterogeneous list at a NON-constant index
             # is a BOX when its runtime kind is a float: a heap cell, because
             # a float has no int64_t spelling and the generic `%ld` path

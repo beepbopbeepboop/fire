@@ -11683,9 +11683,13 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         _safe_home_pts = None
         if not _recorded_csym:
             try:
-                _safe_home_pts = _ggf_dup._home_def_pts(self, {
+                # The info record is a NAMED local: an inline dict literal reached
+                # the callee's declaration as an int64_t, which hashed a different
+                # overload suffix from the definition's MojoDict * parameter.
+                _home_info: dict = {
                     'module': sym_info.get('module'),
-                    'original_name': sym_info.get('original_name') or sym_name})
+                    'original_name': sym_info.get('original_name') or sym_name}
+                _safe_home_pts = _ggf_dup._home_private_struct_pts(self, _home_info)
             except Exception as _e:
                 gimple_ctypes._debug_note(
                     f'home def pts for {sym_name!r} from {sym_info.get("module")!r}', _e)

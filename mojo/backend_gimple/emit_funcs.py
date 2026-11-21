@@ -2858,7 +2858,7 @@ def _effective_param_types_hash(gen, bare_name: str) -> list | None:
     return pts
 
 
-def _home_private_struct_pts(gen, info) -> list | None:
+def _home_private_struct_pts(gen, info: dict) -> list | None:
     """`_home_signature_ctypes` of the one FunctionDef an import entry names, but
     ONLY when it names a struct private to the home module (some element is
     `struct N *`); else None, so every other import keeps its scanned types.
@@ -4100,7 +4100,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._nested_mixed_names.add(_as_str(_pmx_bare))
     _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
     for _pem_bare in _pem:
-        gen._words.mark_slot_kinds(_as_str(_pem_bare))
+        gen._word_mark_slot_kinds(_as_str(_pem_bare))
     _pdv: dict = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for _pdv_key in _pdv:
         _pdv_bare = _as_str(_pdv_key)

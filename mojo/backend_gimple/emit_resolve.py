@@ -2851,7 +2851,7 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     # dropped elements silently). `mojo_box_word` returns the slot's own word
     # for every box that has one and the input unchanged for a non-box.
     if (gimple_ctypes.TypeLattice.is_word(src) and gimple_ctypes.TypeLattice.ends_in_star(dst) and not dst.startswith('void')
-            and gen._words.may_be_box(val)):
+            and gen._word_may_be_box(val)):
         _uw = gen._new_temp('int64_t')
         gen._rt_into(_uw, 'mojo_box_word', [f"{val}"])
         val = _uw
@@ -3268,7 +3268,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     # A WORD whose kind only the runtime knows (a regex group, a match, a
     # DirEntry name): its repr is spelled by the kind the runtime reads off it.
     if rat in ('int', 'int64_t') and (
-            gen._words.is_dyn(rav)
+            gen._word_is_dyn(rav)
             or (isinstance(enode, gimple_ctypes.IdentExpr)
                 and _as_str(enode.name) in gen._dyn_word_locals)):
         return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
@@ -5281,7 +5281,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # single-TU `--dump myinterpreter.py`.
         _lr = gen.lower_expr(node.element)
         et = _as_str(_lr[0]); ev = _lr[1]
-        if gimple_ctypes.TypeLattice.is_word(et) and gen._words.may_be_box(ev):
+        if gimple_ctypes.TypeLattice.is_word(et) and gen._word_may_be_box(ev):
             # the element IS a tagged word taken straight off a tagged-word
             # generator (`list(g())`, `[v for v in g()]`): append it under the
             # kind it carries (a float box as a double, a bool as a bool, a
@@ -5290,9 +5290,9 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', res), ('int64_t', ev)])
             gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
-            gen._words.mark_slot_kinds(res)
+            gen._word_mark_slot_kinds(res)
             return
-        if gimple_ctypes.TypeLattice.is_word(et) and (gen._words.is_dyn(ev)
+        if gimple_ctypes.TypeLattice.is_word(et) and (gen._word_is_dyn(ev)
                                 or gen._is_dyn_word(None, ev)):
             # A runtime-kinded word (e.g. re.Match.group() returns a str/bytes
             # word whose kind is only known at run time, and the lowering marks
@@ -5301,7 +5301,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', res), ('int64_t', ev)])
             gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
-            gen._words.mark_slot_kinds(res)
+            gen._word_mark_slot_kinds(res)
             return
         suf = gimple_ctypes.TypeLattice.list_suffix(et)
         ev_cast = gen._cast_for_list(et, ev, suf)
@@ -5377,7 +5377,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         et = _as_str(_sr[0]); ev = _sr[1]
         if gimple_ctypes.TypeLattice.is_cstr(et):
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', res), ('char *', ev)])
-        elif gimple_ctypes.TypeLattice.is_word(et) and not gen._words.is_int_word(ev):
+        elif gimple_ctypes.TypeLattice.is_word(et) and not gen._word_is_int_word(ev):
             # A word of unknown kind: see mojo_set_add_word.
             gen._emit_call('void', '', 'mojo_set_add_word', [('MojoSet *', res), ('int64_t', ev)])
         else:

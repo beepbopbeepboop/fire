@@ -687,10 +687,10 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     gen._emit_label(bb_ok)
     result = gen._rt_call(vct, f"{base}_value", [av])
     if api.get('boxed_container'):
-        gen._words.mark_boxed_container(result)
+        gen._word_mark_boxed_container(result)
     if api.get('mixed_slots') and gimple_ctypes.TypeLattice.is_word(vct):
-        gen._words.mark_boxed(result)       # a tagged word: rendered by kind
-        gen._words.mark_tagged(result)
+        gen._word_mark_boxed(result)       # a tagged word: rendered by kind
+        gen._word_mark_tagged(result)
     gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     return vct, result
@@ -1864,7 +1864,7 @@ def _lower_class_attr_builtin(gen, node, fn):
                 else gen._to_int64(dt, dv)
             r = gen._call_expr('int64_t', 'mojo_class_getattr_default',
                                [('int64_t', tag), ('char *', nm), ('int64_t', dw)])
-        gen._words.mark_dyn(r)
+        gen._word_mark_dyn(r)
         return 'int64_t', r
     if fn == 'setattr' and len(node.args) == 3:
         vt, vv = gen.lower_expr(node.args[2])
@@ -1988,7 +1988,7 @@ def _lower_type_new(gen, node, args=None, meta=None):
                     pass
     except Exception:
         pass
-    gen._words.mark_dyn(cls)
+    gen._word_mark_dyn(cls)
     gen._rtobj_kinds[('v', cls)] = 'class'
     gen._rt_classes_made = True
     return 'int64_t', cls
@@ -2409,7 +2409,7 @@ def _lower_tuple_box_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             bv = gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', av)])
         elif gimple_ctypes.TypeLattice.is_double(at):
             bv = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', av)])
-        elif gen._words.may_be_box(_as_str(av)):
+        elif gen._word_may_be_box(_as_str(av)):
             # Already a tagged box (a loop target read with mojo_list_get_boxed):
             # pass the box itself. Unwrapping it to its bits would drop the kind
             # the tuple records, so a string box read back as an int.
@@ -2638,7 +2638,7 @@ def _lc_getattr(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _gres = gen._new_val('int64_t', f'{cond} ? {raw_dt} : {raw}')
             # An untyped attribute read: a word of unknown kind (see
             # `_dyn_word_vals`), exactly like `obj.<untyped member>`.
-            gen._words.mark_dyn(_gres)
+            gen._word_mark_dyn(_gres)
             return 'int64_t', _gres
         # `raw` is the dispatch's own int64_t word; in a `char *` result it
         # is either a borrowed string pointer (a hit) or 0 (the miss, which
@@ -2646,7 +2646,7 @@ def _lc_getattr(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         hit = gen._cast(_res, raw)
         return _res, gen._new_val(_res, f'{cond} ? {raw_dt} : {hit}')
     _gw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
-    gen._words.mark_dyn(_gw)   # see the identical note above
+    gen._word_mark_dyn(_gw)   # see the identical note above
     return 'int64_t', _gw
 
 
@@ -2908,7 +2908,7 @@ def _lc_next_word_receiver(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]
         _nr = gen._call_expr('int64_t', 'mojo_next_word',
                              [('int64_t', gen._to_int64(_w_t, _w_v)), ('int', _hasd),
                               ('int64_t', _dw)])
-        gen._words.mark_dyn(_nr)
+        gen._word_mark_dyn(_nr)
         return 'int64_t', _nr
     _shape = 'next(%s)' % (
         type(node.args[0]).__name__
@@ -3038,7 +3038,7 @@ def _lc_next_with_default(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
             gen._emit_label(bb_ok)
             ok_val = gen._rt_call(vct, f"{base}_value", [f"{av}"])
             if api.get('boxed_container'):
-                gen._words.mark_boxed_container(ok_val)
+                gen._word_mark_boxed_container(ok_val)
             gen._safe_coerce_emit(vct, vct, ok_val, result)
             gen._goto(bb_merge)
             gen._emit_label(bb_exhausted)
@@ -3057,10 +3057,10 @@ def _lc_next_with_default(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] 
             gen._goto(bb_merge)
             gen._emit_label(bb_merge)
             if api.get('boxed_container'):
-                gen._words.mark_boxed_container(result)
+                gen._word_mark_boxed_container(result)
             if api.get('mixed_slots') and gimple_ctypes.TypeLattice.is_word(vct):
-                gen._words.mark_boxed(result)       # a tagged word: rendered by kind
-                gen._words.mark_tagged(result)
+                gen._word_mark_boxed(result)       # a tagged word: rendered by kind
+                gen._word_mark_tagged(result)
             return vct, result
     return None
 
@@ -4568,7 +4568,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _cw = gen._to_int64(_cat, _cav)
             gen._void_call('mojo_chain_extend', [('MojoList *', _ch), ('int64_t', _cw)])
         gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
-        gen._words.mark_slot_kinds(_ch)
+        gen._word_mark_slot_kinds(_ch)
         return 'MojoList *', _ch
     # `type.__new__(type, name, bases, ns)` is `type(name, bases, ns)` spelled through the
     # metaclass slot (what `EnumType.__new__` writes as `type.__new__(metacls, ..)`). Only the
@@ -4627,7 +4627,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _res = gen._call_expr('MojoList *', 'mojo_fnmatch_filter',
                               [('MojoList *', _nl), ('int64_t', gen._to_int64(_pt, _pv))])
         gen._struct_slot_kinds[_res] = ginf._RuntimeKinded(['int', 'str'])
-        gen._words.mark_slot_kinds(_res)
+        gen._word_mark_slot_kinds(_res)
         return 'MojoList *', _res
     _dev = _lower_device_launch(gen, node)
     if _dev is not None:
@@ -6668,7 +6668,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     # The runtime answers it instead (`mojo_isinstance_p`'s int arm).
     _ov_name = _as_str(obj_val)
     _unknown_word = (type_name == 'int' and gimple_ctypes.TypeLattice.is_word(obj_type)
-                     and (gen._words.is_dyn(_ov_name)
+                     and (gen._word_is_dyn(_ov_name)
                           or _ov_name in gen._dyn_word_locals
                           or _ov_name in getattr(gen, '_cur_untyped_params', ())))
     if type_name in _SCALAR_TYPE_MATCH and not _unknown_word:
@@ -7489,7 +7489,7 @@ def _carry_elem_types(gen, src: str, dst: str) -> None:
 def _is_dyn_word_operand(gen, node, val: str) -> bool:
     """Is this operand a word whose kind only the runtime knows (see
     `_dyn_word_vals` / `_dyn_word_locals`)?"""
-    if gen._words.is_dyn(val):
+    if gen._word_is_dyn(val):
         return True
     return (isinstance(node, gimple_ctypes.IdentExpr)
             and _as_str(node.name) in gen._dyn_word_locals)
@@ -8593,10 +8593,10 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     # that promoted type as its element repr, which then wins over the kinds
     # row at print time. Nothing is lost by skipping the walk: a copy holds
     # the same words, and the copy's kinds row is the same row.
-    if _copy_src is not None and gen._words.has_slot_kinds(_copy_src):
+    if _copy_src is not None and gen._word_has_slot_kinds(_copy_src):
         _cp = gen._call_expr('MojoList *', 'mojo_list_copy',
                              [('MojoList *', _copy_src)])
-        gen._words.mark_slot_kinds(_cp)
+        gen._word_mark_slot_kinds(_cp)
         return 'MojoList *', _cp
     gen.temp_counter += 1
     var = f"_ctor_elem{gen.temp_counter}"
@@ -9444,7 +9444,7 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
     # an element type is meaningless across container kinds, which is why
     # `_lower_named_call` declines to record one on this arm either.
     if ret_type in ('int', 'int64_t') and lifted in gen._multi_kind_return_funcs:
-        gen._words.mark_boxed_container(t)
+        gen._word_mark_boxed_container(t)
     return ret_type, t
 
 
@@ -10705,7 +10705,7 @@ def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes
     if ret_type == 'void':
         return 'int', gen._new_val('int', '0')
     if gimple_ctypes.TypeLattice.is_word(ret_type):
-        gen._words.mark_dyn(raw_t)
+        gen._word_mark_dyn(raw_t)
     return 'int64_t', raw_t
 
 
@@ -10819,7 +10819,7 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         return 'double', t
     raw_t = gen._rt_call('int64_t', helper, call_args)
     if gimple_ctypes.TypeLattice.is_word(ret_type):
-        gen._words.mark_dyn(raw_t)   # nothing says what the callee returns: a word of unknown kind
+        gen._word_mark_dyn(raw_t)   # nothing says what the callee returns: a word of unknown kind
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
     # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape
@@ -11624,7 +11624,7 @@ def _lnc_bool(gen, arg_pairs: list) -> tuple[str, str] | None:
         gen._binop_into(_b, _n, '!=', _z)
         return '_Bool', _b
     if gimple_ctypes.TypeLattice.is_cstr(_bt) or (gimple_ctypes.TypeLattice.is_word(_bt) and (
-            gen._words.is_dyn(_bv) or _bv in gen._dyn_word_locals
+            gen._word_is_dyn(_bv) or _bv in gen._dyn_word_locals
             or _bv in getattr(gen, '_cur_untyped_params', ()))):
         # A string's truth is its length, and a word of unknown kind's is
         # whatever the runtime finds there -- the one place that answers
@@ -11691,7 +11691,7 @@ def _lnc_int(gen, arg_pairs: list) -> tuple[str, str] | None:
         # stored under "140..." and looked up in the integer domain, returning
         # None -- or raising `unhashable type: 'list'` when a prior line made
         # the token's kind visible.
-        gen._words.mark_int_word(_iow)
+        gen._word_mark_int_word(_iow)
         return 'int64_t', _iow
     if at in ('int', '_Bool'):
         return 'int64_t', gen._cast('int64_t', f"{av}")
@@ -12789,7 +12789,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # holds, promotes an int/None/bool box's word to double, and is a
         # no-op cast for a plain int. Without this, float(x) of a boxed 2.5
         # read the box pointer's bits as a double.
-        if at in ('int64_t', 'int', '_Bool') and gen._words.may_be_box(av):
+        if at in ('int64_t', 'int', '_Bool') and gen._word_may_be_box(av):
             return 'double', gen._call_expr('double', 'mojo_box_double', [('int64_t', av)])
         if at in ('int64_t', 'int', '_Bool'): return 'double', gen._cast('double', f"{av}")
         if gimple_ctypes.TypeLattice.is_double(at):                    return 'double', av
@@ -12821,8 +12821,8 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # container (`f(1)[0:1]` sliced the box cell as a list). The word is marked
     # as tagged for the consumers that dispatch by kind instead.
     if fname_raw in getattr(gen, '_ret_may_hold_mixed', ()):
-        gen._words.mark_boxed(t)
-        gen._words.mark_tagged(t)
+        gen._word_mark_boxed(t)
+        gen._word_mark_tagged(t)
         return ret_type, t
     # A multi-value return's per-slot types, carried across the call (see
     # gen._return_slot_types's declaration). Same reason and same shape as
@@ -12834,7 +12834,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     if fname_raw in getattr(gen, '_return_runtime_kinded', ()):
         # the callee returns a list that carries its own per-slot kinds
         gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
-        gen._words.mark_slot_kinds(t)
+        gen._word_mark_slot_kinds(t)
     if fname_raw in gen._return_elem_types:
         # Annotated `-> tuple[...]` functions resolve to boxed int64_t (see
         # _mojo_type), so unlike the MojoList*-typed case above the elem
@@ -12899,7 +12899,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # independent: an element type is about a single-kind callee's slots,
     # and this is about a callee that has none to give.
     if ret_type in ('int', 'int64_t') and gen._multi_kind_return_funcs.get(fname_raw):
-        gen._words.mark_boxed_container(t)
+        gen._word_mark_boxed_container(t)
     # A function that RETURNS a generator (`def mk(): return counter(3)`,
     # typed `MojoGenerator *` by Pass 1.3e/1.3f) — record the underlying
     # generator function's api on the call's result temp (Pass 1.3f-gen
@@ -12929,7 +12929,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # accessor, which is what every other list-returning function has always
     # emitted.
     if gimple_ctypes.TypeLattice.is_list(ret_type) and fname_raw in getattr(gen, '_return_maybe_kinds', ()):
-        gen._words.mark_slot_kinds(t)
+        gen._word_mark_slot_kinds(t)
     # ...and, for a returned heterogeneous list LITERAL, the per-slot kinds
     # themselves. Same whole-program scan (`_infer_return_maybe_kinds`), same
     # key, one step finer: the boolean above can only tell a read with no
@@ -13490,7 +13490,7 @@ def _mark_unknown_list_elem(gen, list_val: str, t: str) -> None:
     measured case is `_pnames[_i]` over a dict value holding unpacked
     parameter NAMES, whose `key + '::' + _pnames[_i]` rendered the address."""
     if gen._elem_types.get(list_val) is None:
-        gen._words.mark_dyn(t)
+        gen._word_mark_dyn(t)
 
 
 def _mark_unknown_dict_value(gen, dict_val: str, t: str, key_val: str = None, key_kind: str = None) -> None:
@@ -13505,7 +13505,7 @@ def _mark_unknown_dict_value(gen, dict_val: str, t: str, key_val: str = None, ke
     for reads whose slot kind is only known at runtime so repr/stringify can
     recover it (None/True/1.5, etc.) instead of printing the raw int64_t word."""
     if dict_val not in gen._dict_val_types:
-        gen._words.mark_dyn(t)
+        gen._word_mark_dyn(t)
     _dsr = getattr(gen, '_dict_slot_reads', None)
     if _dsr is None:
         return
@@ -13639,13 +13639,13 @@ def _ls_scalar_word(gen, idx_type, iv, ot, ov) -> tuple[str, str]:
     # container from the erased int64_t — a guess that read a str's bytes
     # as a list header. A list slot's float comes back BOXED, which is the
     # same tagged word the rest of this path already consumes.
-    if gen._words.is_tagged(ov):
+    if gen._word_is_tagged(ov):
         _wi = gen._to_int64(idx_type, iv)
         _wt = gen._call_expr('int64_t', 'mojo_word_subscript',
                              [('int64_t', ov), ('int64_t', _wi)])
-        gen._words.mark_boxed(_wt)
-        gen._words.mark_tagged(_wt)
-        gen._words.mark_dyn(_wt)
+        gen._word_mark_boxed(_wt)
+        gen._word_mark_tagged(_wt)
+        gen._word_mark_dyn(_wt)
         return 'int64_t', _wt
     # Check actual type for globals loaded as int64_t
     actual_type = gen._get_actual_type(ot, ov)
@@ -13722,8 +13722,8 @@ def _ls_scalar_word(gen, idx_type, iv, ot, ov) -> tuple[str, str]:
     # The same list, cast: it keeps the per-slot kinds the word carried (a
     # module global's, see _note_global_slot_kinds), or a mixed slice reads
     # its doubles' bits as ints.
-    if gen._words.has_slot_kinds(_as_str(ov)):
-        gen._words.mark_slot_kinds(_as_str(lp))
+    if gen._word_has_slot_kinds(_as_str(ov)):
+        gen._word_mark_slot_kinds(_as_str(lp))
     if _as_str(ov) in gen._struct_slot_kinds:
         gen._struct_slot_kinds[_as_str(lp)] = gen._struct_slot_kinds[_as_str(ov)]
     # Get element type: check _elem_types (if ov is a tracked temp), else check _nested_elem_types
@@ -13738,9 +13738,9 @@ def _ls_scalar_word(gen, idx_type, iv, ot, ov) -> tuple[str, str]:
     # one, a module global holding one) reads each slot through the boxed
     # accessor, as the direct list branch does: its tracked element type is
     # the promoted one, wrong for the int slots.
-    if gen._words.has_slot_kinds(_as_str(lp)):
+    if gen._word_has_slot_kinds(_as_str(lp)):
         t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [lp, idx64])
-        gen._words.mark_boxed(t)
+        gen._word_mark_boxed(t)
         return 'int64_t', t
     if gimple_ctypes.TypeLattice.is_cstr(elem):
         t = gen._rt_call('char *', 'mojo_list_get_str', [lp, idx64])
@@ -13944,9 +13944,9 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
     # slot. A list with no kinds of its own is unaffected: a set
     # membership test at compile time, and the identical accessor
     # otherwise.
-    if gen._words.has_slot_kinds(ov):
+    if gen._word_has_slot_kinds(ov):
         t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{ov}", idx64])
-        gen._words.mark_boxed(t)
+        gen._word_mark_boxed(t)
         return 'int64_t', t
     if gimple_ctypes.TypeLattice.is_double(suf):
         t = gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
@@ -14454,8 +14454,8 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         gen._cast_into(_np_cast, ot, _ip_cast)
         # The re-typed value is the same list: it keeps the element kinds the
         # original carried (a module global's, see _note_global_slot_kinds).
-        if gen._words.has_slot_kinds(_as_str(ov)):
-            gen._words.mark_slot_kinds(_np_cast)
+        if gen._word_has_slot_kinds(_as_str(ov)):
+            gen._word_mark_slot_kinds(_np_cast)
         if _as_str(ov) in gen._struct_slot_kinds:
             gen._struct_slot_kinds[_np_cast] = gen._struct_slot_kinds[_as_str(ov)]
         ov = _np_cast
@@ -14534,8 +14534,8 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
             t = gen._rt_call('MojoList *', 'mojo_list_slice_step', [_ovv, f"{_hs}", _sv, f"{_he}", f"{_ev}", f"{_stepv}"])
         else:
             t = gen._rt_call('MojoList *', 'mojo_list_slice', [f"{ov}", f"{start_v}", f"{stop_v}"])
-        if gen._words.has_slot_kinds(ov):
-            gen._words.mark_slot_kinds(t)
+        if gen._word_has_slot_kinds(ov):
+            gen._word_mark_slot_kinds(t)
             _slice_slot_kinds(gen, ov, node, t)
             gen._elem_types.pop(t, None)
             return 'MojoList *', t
@@ -14600,7 +14600,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         # operand in a separate statement.
         _wl = gen._ensure_local('int64_t', ov)
         t = gen._rt_call('int64_t', 'mojo_word_slice', [_wl, f"{start_v}", f"{stop_v}"])
-        gen._words.mark_dyn(t)
+        gen._word_mark_dyn(t)
         return 'int64_t', t
 
     # Plain pointer: return pointer to start (no bounds check)
