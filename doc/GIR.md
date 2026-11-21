@@ -2,7 +2,6 @@
 
 Status: stages 0, 1, 2a, 3a, 3b and 5a landed (2026-11-14). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
-How the remaining stages are being built with Sonnet/Haiku workers: `doc/GIR_WORKERS.md`.
 
 ## 1. What is wrong today (measured 2026-11-13)
 
@@ -196,7 +195,7 @@ that is meant to be behaviour-preserving:
   `label`. Each returns a typed value and appends an `Instr`.
   `_rt_call`/`_emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
   Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the count of
-  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them on 2026-11-20, 41 on 2026-11-21) are the next
+  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them) are the next
   mechanical batch: `gen._cast(T, x)`.
 - **Stage 3a (landed 2026-11-13). Exits are told, not recognised.**
   `_emit_cf` (`emit_infra.py`) replaces `_emit_through`. `gen._goto`,
@@ -295,40 +294,12 @@ that is meant to be behaviour-preserving:
   above now returns the tagged word. A copy `y = x` of a name bound to such a
   call keeps the box (`tagged_next_bind_name`). Still lost: a tagged value
   stored in a list/tuple/dict slot, and one passed as an argument (the
-  parameter is a plain word).
-  Landed 2026-11-20, the "may be None" decision widening past returns:
-  (a) an UNANNOTATED parameter declared `= None` is a tagged word
-  (`infra_infer.param_default_none_names`): `_param_ctype` keeps the
-  `int64_t` slot, `_box_param_call_args` boxes every argument by kind
-  (`mojo_box_none` for None, `mojo_box_int` for 0, including the omitted
-  argument's padded default), and `_reset_func` registers the name in
-  `boxed`/`tagged`/`dyn_word_locals` so reads and `print`/`str` dispatch by
-  the box's kind. `def label(value=None)` now tells `label()`, `label(None)`
-  and `label(0)` apart. Detection is limited to a slot that would otherwise
-  be the plain `int64_t`: an annotation or a call-site/usage-inferred
-  pointer type wins.
-  (b) `dict.get(k)` with NO default on a scalar/unknown value domain is the
-  boxed read (`runtime/fire_runtime.c`'s `mojo_dict_get_boxed*`, one lookup;
-  `emit_methods._ldm_get`): the slot's own word on a hit, `mojo_box_none()`
-  on a miss, so `print({"a": 1}.get("zz"))` is `None`. A binding
-  `x = d.get(k)` keeps the box (`emit_infra.dict_get_call_is_tagged`), so
-  `x is None`, `print(x)` and `x + 1` use the tagged machinery.
-  (c) a LOCAL whose every binding is `None` is the box-holding word
-  (`mixed_value_locals`' `{'none'}` rule), so `x = None; print(x)` prints
-  `None`. A name that also holds a str/container keeps its first-declared C
-  type, and module globals are excluded.
-  (d) `str(None)`, `repr(None)`, `f'{None}'` and `'%s' % None` spell `None`
-  (`_stringify_value`, `str`, `repr`), and `x is None` folds for a local
-  PROVABLY an int (`_local_is_provably_int`: `n = 0; n is None` is False).
-  Still lost: a name bound to `None` BESIDE another kind (it keeps the other
-  binding's C type), a `dict.get` on a double/str value domain or through a
-  container slot, a tagged word stored in a list/tuple/dict slot, and one
-  passed to a parameter not declared `= None`. Next, in order: (1) widen the
-  local-int proof to arithmetic on proven ints, `len(..)` and comparisons;
-  (2) carry the box across the remaining bindings (the 5b split); (3) read
-  list/tuple slots and every `.get` domain back as `DynWord`. Do NOT define
-  `x == None` as `x == 0`: that was tried and reverted (it makes
-  `0 == None` true).
+  parameter is a plain word). Next, in order: (1) widen the local-int proof
+  to arithmetic on proven ints, `len(..)` and comparisons; (2) a parameter default `= None` makes the
+  parameter `DynWord`, and a call passing `None` passes `mojo_box_none()`
+  (see `bugs/CODEGEN_none_prints_as_zero_and_equals_zero.md`); (3) `dict.get`
+  and list slots read back as `DynWord`. Do NOT define `x == None` as
+  `x == 0`: that was tried and reverted (it makes `0 == None` true).
 - **Stage 6, counted loops (started 2026-11-14).** `gen._loop_head(idx, n,
   bb_cond, bb_body, bb_post, bb_after, stmt)` and `gen._loop_tail(idx,
   bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of

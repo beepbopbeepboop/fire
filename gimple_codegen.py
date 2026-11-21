@@ -39,7 +39,7 @@ import ownership_check
 import unknown_decl_check
 import mlir
 import mojo.middle.coro as gimple_gen_coro
-from mojo.middle.valueinfo import WordFacts
+import mojo.middle.valueinfo as gimple_valueinfo
 import regex_compile
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
@@ -165,10 +165,6 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_get_int':          'int64_t',
     'mojo_dict_get_double':       'double',
     'mojo_dict_get_str':          'char *',
-    'mojo_dict_get_boxed':        'int64_t',
-    'mojo_dict_get_boxed_bytes':  'int64_t',
-    'mojo_dict_get_boxed_none':   'int64_t',
-    'mojo_dict_get_boxed_kw':     'int64_t',
     'mojo_dict_setdefault_int':   'int64_t',
     'mojo_dict_setdefault_str':   'char *',
     'mojo_dict_contains':         'int',
@@ -585,28 +581,6 @@ _SELFHOST_SIGS = {
         'void', ['Interpreter *', 'char *', 'MojoList *'], 'myinterpreter'),
     'Interpreter_execute': (
         'int64_t', ['Interpreter *', 'int64_t'], 'myinterpreter'),
-    # `mojo/middle/valueinfo.py`'s WordFacts (stage 5b). Pinned like the
-    # classes above: the self-hosted compile names these bare (`WordFacts_x`)
-    # from the caller's `gen._words.x(...)`, found no signature and emitted a
-    # weak "unavailable in compiled mode" stub that returned 0. The prototypes
-    # match the definitions in `mojo_middle_valueinfo_WordFacts_*`.
-    'WordFacts_has_slot_kinds': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_is_boxed_container': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_is_dyn': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_is_int_word': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_is_tagged': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_may_be_box': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_mark_boxed': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_mark_boxed_container': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_mark_dyn': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_mark_int_word': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_mark_slot_kinds': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_mark_tagged': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_unmark_int_word': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_snapshot': ('MojoList *', ['WordFacts *'], 'mojo_middle_valueinfo'),
-    'WordFacts___init__': ('void', ['WordFacts *'], 'mojo_middle_valueinfo'),
-    'WordFacts_bind': ('void', ['WordFacts *', 'int64_t'], 'mojo_middle_valueinfo'),
-    'WordFacts_restore_snapshot': ('void', ['WordFacts *', 'MojoList *'], 'mojo_middle_valueinfo'),
     # Arity AND width must match fire.jit's definition or the closure
     # gets "conflicting types for 'jit_compile_and_execute'".
     # `auto_gpu` is the 6th parameter, and the self-host lowers a
@@ -1742,7 +1716,7 @@ class GimpleGen:
         # value-keyed side tables, since these names are per-function temps.
         # the six name-keyed word sets live in one WordFacts (valueinfo.py);
         # `_reset_func` makes a fresh one per function body
-        self._words: WordFacts = WordFacts()
+        self._words: gimple_valueinfo.WordFacts = gimple_valueinfo.WordFacts()
         self._words.bind(self)
         # Function name -> the return type of the CALLABLE it returns
         # (`def mk(): return lambda: False`). Module scope for the same
@@ -3844,14 +3818,10 @@ class GimpleGen:
         'mojo_dict_set_double': ('void',   ['MojoDict *', 'char *', 'double']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
-        'mojo_dict_get_boxed':   ('int64_t',   ['MojoDict *', 'char *']),
-        'mojo_dict_get_boxed_bytes': ('int64_t', ['MojoDict *', 'MojoBytes *']),
-        'mojo_dict_get_boxed_none': ('int64_t', ['MojoDict *']),
         'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
         'mojo_dict_setdefault_str': ('char *',  ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
         'mojo_dict_get_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t']),
-        'mojo_dict_get_boxed_kw':   ('int64_t',  ['MojoDict *', 'int64_t']),
         'mojo_dict_get_double_kw':  ('double',   ['MojoDict *', 'int64_t']),
         'mojo_dict_get_str_kw':     ('char *',   ['MojoDict *', 'int64_t']),
         'mojo_dict_set_int_kw':     ('void',     ['MojoDict *', 'int64_t', 'int64_t']),
@@ -5697,10 +5667,8 @@ class GimpleGen:
     def _is_exc_class_name(self, name: str) -> bool:
         return ginf._is_exc_class_name(self, name)
     def _reset_func(self, body: list=None, params: list=None,
-                    allow_lambda_reduction: bool=True,
-                    default_none_params: set=None):
-        return ginf._reset_func(self, body, params, allow_lambda_reduction,
-                                default_none_params)
+                    allow_lambda_reduction: bool=True):
+        return ginf._reset_func(self, body, params, allow_lambda_reduction)
     def _record_sys_path_inserts(self, source: str, base_dir: str=None) -> None:
         return ginf._record_sys_path_inserts(self, source, base_dir)
     def _compile_link_inline_cpp_unit(self, cpp_code: str):
@@ -6076,37 +6044,6 @@ class GimpleGen:
         return grsl._cast(self, ctype, val)
     def _cast_into(self, dst: str, ctype: str, val: str) -> None:
         grsl._cast_into(self, dst, ctype, val)
-    # Stage 5b read/write wrappers over `self._words` (mojo/middle/valueinfo.py).
-    # Callers in the middle modules reach these through `gen`, whose type the
-    # self-hosted compile knows (the GimpleGen method table); a call spelled
-    # `gen._words.x(...)` on an untyped `gen` was emitted under the bare name
-    # `WordFacts_x` and had no declaration.
-    def _word_may_be_box(self, name: str) -> bool:
-        return self._words.may_be_box(name)
-    def _word_is_tagged(self, name: str) -> bool:
-        return self._words.is_tagged(name)
-    def _word_is_dyn(self, name: str) -> bool:
-        return self._words.is_dyn(name)
-    def _word_is_int_word(self, name: str) -> bool:
-        return self._words.is_int_word(name)
-    def _word_has_slot_kinds(self, name: str) -> bool:
-        return self._words.has_slot_kinds(name)
-    def _word_is_boxed_container(self, name: str) -> bool:
-        return self._words.is_boxed_container(name)
-    def _word_mark_boxed(self, name: str) -> None:
-        self._words.mark_boxed(name)
-    def _word_mark_tagged(self, name: str) -> None:
-        self._words.mark_tagged(name)
-    def _word_mark_dyn(self, name: str) -> None:
-        self._words.mark_dyn(name)
-    def _word_mark_int_word(self, name: str) -> None:
-        self._words.mark_int_word(name)
-    def _word_unmark_int_word(self, name: str) -> None:
-        self._words.unmark_int_word(name)
-    def _word_mark_slot_kinds(self, name: str) -> None:
-        self._words.mark_slot_kinds(name)
-    def _word_mark_boxed_container(self, name: str) -> None:
-        self._words.mark_boxed_container(name)
     def _copy(self, dst: str, src: str) -> None:
         grsl._copy(self, dst, src)
     def _binop(self, ctype: str, a: str, op: str, b: str) -> str:

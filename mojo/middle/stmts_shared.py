@@ -318,7 +318,7 @@ def _assign_target(gen, tgt, et, ev):
             # compiler error: in build2, at tree.cc:5208"). The hint's own
             # purpose is upgrading a target off the int64_t default, so it
             # must yield to any type that is not the default itself.
-            _decl_t = et if et and not gimple_ctypes.TypeLattice.is_int_word(et) else (hint or et or 'int64_t')
+            _decl_t = et if et and et not in ('int64_t', 'int') else (hint or et or 'int64_t')
             gen._declare_var(tgt.name, _decl_t)
         # A `None` / `False` / `True` / NULL-string slot read out of a
         # kind-mixed tuple is a BOX, a non-zero heap cell, but the local that
@@ -330,12 +330,12 @@ def _assign_target(gen, tgt, et, ev):
         # parsed was a generator; `for pn, pt in params: self._param_ctype(pn,
         # pt, s)` handed an unannotated parameter's None annotation to
         # `strdup` as a "type".
-        if gimple_ctypes.TypeLattice.is_word(et) and gen._word_may_be_box(ev):
+        if gimple_ctypes.TypeLattice.is_word(et) and gen._words.may_be_box(ev):
             _un = gen._new_temp('int64_t')
             gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
-            if gen._word_is_dyn(ev):
-                gen._word_mark_dyn(_un)
-            gen._word_mark_boxed(_un)
+            if gen._words.is_dyn(ev):
+                gen._words.mark_dyn(_un)
+            gen._words.mark_boxed(_un)
             # A tagged word stays tagged through the bind: the local holds the
             # same box, and the arithmetic/comparison selectors key off
             # `_tagged_word_vals` to read it by kind. Without this a call
@@ -344,20 +344,20 @@ def _assign_target(gen, tgt, et, ev):
             # recorded too, not just the temp: a later read of a plain local
             # lowers to the name itself, so a temp-only marker never reached
             # the operand (`a = f(0); print(a * 2)` printed the box address).
-            if gen._word_is_tagged(ev):
-                gen._word_mark_tagged(_un)
+            if gen._words.is_tagged(ev):
+                gen._words.mark_tagged(_un)
                 if (isinstance(tgt, IdentExpr)
                         and gen.var_types.get(_as_str(tgt.name), 'int64_t')
                         == 'int64_t'):
                     _tn = _as_str(tgt.name)
-                    gen._word_mark_tagged(_tn)
-                    gen._word_mark_boxed(_tn)
+                    gen._words.mark_tagged(_tn)
+                    gen._words.mark_boxed(_tn)
             ev = _un
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
         # A word of unknown kind landing in an int64_t local: the local is
         # that word now (see `_dyn_word_locals`).
-        if gen._word_is_dyn(ev) and gimple_ctypes.TypeLattice.is_word(gen.var_types[tgt.name]):
+        if gen._words.is_dyn(ev) and gimple_ctypes.TypeLattice.is_word(gen.var_types[tgt.name]):
             gen._dyn_word_locals.add(tgt.name)
         else:
             gen._dyn_word_locals.discard(tgt.name)
@@ -404,7 +404,7 @@ def _assign_target(gen, tgt, et, ev):
             if (gimple_ctypes.TypeLattice.is_word(set_et) and gen._elem_types.get(lp) is None
                     and lp not in gen._tuple_slot_types
                     and lp not in gen._nested_elem_types):
-                gen._word_mark_dyn(sev)
+                gen._words.mark_dyn(sev)
             gen._assign_target(sub, set_et, sev)
     elif isinstance(tgt, (gimple_ctypes.MemberExpr, gimple_ctypes.SubscriptExpr)):
         # `obj.a, obj.b = t` / `d[k], x = t`: an attribute or item slot as an
@@ -429,7 +429,7 @@ def _assign_target(gen, tgt, et, ev):
         _tt = et if et else 'int64_t'
         gen._declare_var(_tmp, _tt)
         gen._safe_coerce_emit(et, gen.var_types[_tmp], ev, gen._write_dest(_tmp))
-        if gen._word_is_dyn(ev) and gimple_ctypes.TypeLattice.is_word(gen.var_types[_tmp]):
+        if gen._words.is_dyn(ev) and gimple_ctypes.TypeLattice.is_word(gen.var_types[_tmp]):
             gen._dyn_word_locals.add(_tmp)
         if ev in gen._elem_types:
             gen._elem_types[_tmp] = gen._elem_types[ev]

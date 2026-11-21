@@ -2413,12 +2413,6 @@ int64_t mojo_int_of_word(int64_t w)
             return mojo_make_int((char *)(intptr_t)bx->bits);
         if (bx->kind == 'n')
             mojo_raise_type_error((char *)"int() argument must be a string, a bytes-like object or a real, not 'NoneType'");
-        /* kind 'i' is `mojo_id`'s token: an INTEGER whose value IS the box
-         * address. Unwrapping to `bx->bits` answered the wrapped CONTAINER
-         * (or string) instead, so `int(id(x)) == id(x)` was False and a dict
-         * keyed by `int(id(x))` stopped matching the same token stored whole
-         * (bugs/CODEGEN_id_token_set_dedupes_by_container_content.md). */
-        if (bx->kind == 'i') return w;
         return bx->bits;
     }
     if (mojo_boxed_is_str(w))
@@ -8484,39 +8478,6 @@ double mojo_dict_subscript_none_double(MojoDict *d)
 
 int64_t mojo_dict_subscript_none_boxed(MojoDict *d)
 { return _dict_slot_boxed(_dict_subscr_slot_none(d)); }
-
-/* `d.get(k)` with NO default argument: CPython answers the stored value on a
- * hit and `None` on a miss. The `mojo_dict_get_*` getters all answer the
- * value domain's ABSENT value (0 / NULL / 0.0), so a miss was
- * indistinguishable from a stored 0 — `print({"a": 1}.get("zz"))` printed
- * `0` where CPython prints `None` (the None-prints-as-0 and None-equals-0
- * bug, whose doc was deleted with the fix). The one-lookup spelling
- * is `_dict_slot_boxed` for a HIT (it already boxes a double/bool/None slot
- * by its recorded kind and leaves an int/str slot's own word) and the shared
- * None box for a MISS, which is exactly the tagged-word convention every
- * consumer of an unknown-kind int64_t already reads. */
-static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key);
-
-static int64_t _dict_slot_boxed_or_none(_DictSlot *sl)
-{
-    if (!sl) return mojo_box_none();
-    return _dict_slot_boxed(sl);
-}
-
-int64_t mojo_dict_get_boxed(MojoDict *d, char *key)
-{
-    return _dict_slot_boxed_or_none(_dict_lookup(d, key));
-}
-
-int64_t mojo_dict_get_boxed_bytes(MojoDict *d, MojoBytes *key)
-{
-    return _dict_slot_boxed_or_none(_dict_lookup_bytes(d, key));
-}
-
-int64_t mojo_dict_get_boxed_none(MojoDict *d)
-{
-    return _dict_slot_boxed_or_none(_dict_lookup_k(d, "", 3));
-}
 
 int mojo_dict_contains(MojoDict *d, char *key)
 {
@@ -16802,18 +16763,6 @@ int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw)
     }
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     return _dict_slot_boxed(sl);
-}
-
-int64_t mojo_dict_get_boxed_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_get_boxed(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_get_boxed(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    return _dict_slot_boxed_or_none(_dict_lookup_ik(d, kw));
 }
 
 double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)

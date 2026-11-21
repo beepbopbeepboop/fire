@@ -1,9 +1,9 @@
-# Land: should finished branch fix-gate-linked-list-struct-element-step4c land?
+# Land: should finished branch fix-gate-stdlib-syntax land?
 
-**Branch:** `work/fix-gate-linked-list-struct-element-step4c` (task `fix-gate-linked-list-struct-element-step4c`; its tip is also saved as `refs/archive/work/fix-gate-linked-list-struct-element-step4c`, so dropping it loses nothing).
-**Age:** last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-21 06:34:49
-**Original work:** The full gate (77c157bb) is red on master in job `linked-list-struct-element-step4c`. Last working commit: a679f97770. First not working: b6600228ca. Read the failing output in /Users/mrs/net/chatgpt/
-**Original claims:** gate:linked-list-struct-element-step4c
+**Branch:** `work/fix-gate-stdlib-syntax` (task `fix-gate-stdlib-syntax`; its tip is also saved as `refs/archive/work/fix-gate-stdlib-syntax`, so dropping it loses nothing).
+**Age:** last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 3 behind it; task started 2026-11-21 04:10:10
+**Original work:** The full gate (ee094736) is red on master in job `stdlib-syntax`. Last working commit: 46ef25daa9. First not working: b0910af726. Read the failing output in /Users/mrs/net/chatgpt/claude/work-verify/v
+**Original claims:** gate:stdlib-syntax
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-21 07:05:43: conflicts with master (last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-21 06:34:49)
-  Branch: work/fix-gate-linked-list-struct-element-step4c
-  Conflicting files: elaborate.py, test_module_cache.py
+- 2026-11-21 05:26:19: conflicts with master (last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 3 behind it; task started 2026-11-21 04:10:10)
+  Branch: work/fix-gate-stdlib-syntax
+  Conflicting files: elaborate.py, mojo/backend_gimple/emit_calls.py, mojo/middle/comptime_fn.py

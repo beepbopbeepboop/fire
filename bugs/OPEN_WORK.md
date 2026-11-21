@@ -43,7 +43,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/mid/FORMAL_eval_eq_mojo_bridge_red_on_head.md` | `bug-mid-formal-eval-eq-mojo-bridge-red-o` | `test_formal_eval_eq_mojo_bridge.py` is red on head (5 failures) |
+| `bugs/mid/FORMAL_eval_eq_mojo_bridge_red_on_head.md` | `bug-mid-formal-eval-eq-mojo-bridge-red-o-3` | `test_formal_eval_eq_mojo_bridge.py` is red on head (5 failures) |
 
 ### `formal/lean` — 1 document, 0 claimed
 

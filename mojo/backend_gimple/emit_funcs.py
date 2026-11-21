@@ -1563,7 +1563,7 @@ def _selfhost_merge_field(_fields: dict[str, str], _name: str, _ct: str):
     # shim-vs-noshim divergence: `_selfhost_gimplegen_registered` etc.
     # stuck at `int64_t` self-hosted while the shim correctly settled on
     # `_Bool`).
-    if _cur is None or (gimple_ctypes.TypeLattice.is_int_word_or_bool(_cur)
+    if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
                          and (gimple_ctypes.TypeLattice.ends_in_star(_ct) or gimple_ctypes.TypeLattice.is_bool(_ct))):
         _fields[_name] = _ct
 
@@ -2858,7 +2858,7 @@ def _effective_param_types_hash(gen, bare_name: str) -> list | None:
     return pts
 
 
-def _home_private_struct_pts(gen, info: dict) -> list | None:
+def _home_private_struct_pts(gen, info) -> list | None:
     """`_home_signature_ctypes` of the one FunctionDef an import entry names, but
     ONLY when it names a struct private to the home module (some element is
     `struct N *`); else None, so every other import keeps its scanned types.
@@ -3908,9 +3908,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _is_coro_body = bool(getattr(node, '_mojo_coro_body', False))
     gen._cur_func_is_coro = _is_coro_body
     gen._reset_func(node.body, node.params,
-                    allow_lambda_reduction=not _is_coro_body,
-                    default_none_params=ginf.param_default_none_names(
-                        gen, node, _as_str(node.name)))
+                    allow_lambda_reduction=not _is_coro_body)
     # Per-FUNCTION record of which locals hold a beta-reducible
     # capturing lambda (see mojo/middle/lambdareduce). Cleared here,
     # at a real per-function entry point, rather than in `_reset_func`
@@ -4102,7 +4100,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._nested_mixed_names.add(_as_str(_pmx_bare))
     _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
     for _pem_bare in _pem:
-        gen._word_mark_slot_kinds(_as_str(_pem_bare))
+        gen._words.mark_slot_kinds(_as_str(_pem_bare))
     _pdv: dict = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for _pdv_key in _pdv:
         _pdv_bare = _as_str(_pdv_key)
@@ -4364,7 +4362,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # `main` with a single explicit `return <value>` statement, so
     # `body_lines` has exactly one real entry, hit the crash). Length +
     # a plain, positive-index lookup is the established-safe replacement.
-    if node.name == 'main' and gimple_ctypes.TypeLattice.is_int_word(ret_type):
+    if node.name == 'main' and ret_type in ('int', 'int64_t'):
         _n_body_lines = len(gen.body_lines)
         _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
         if not _last_body_line.strip().startswith('return'):
@@ -5486,10 +5484,7 @@ def _struct_method_csym_static(qualifier: str, struct_name: str, method_name: st
 
 
 def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, overload_id: str = '') -> str:
-    gen._reset_func(node.body, node.params,
-                    default_none_params=ginf.param_default_none_names(
-                        gen, node,
-                        f"{struct_name}_{_as_str(node.name)}{overload_id}"))
+    gen._reset_func(node.body, node.params)
     # Per-function, same reason and same placement as gen_func's.
     gen._inlined_lambdas = {}
     gen._reset_no_candidates()
