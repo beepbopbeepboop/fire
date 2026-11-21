@@ -15175,6 +15175,23 @@ def main():
 main()
 """)
 
+    # The reducer for `gimple_id_is_an_integer`: four statements, and the set
+    # literal alone is enough. `id()`'s token is an interned box, and the set
+    # stored the box UNWRAPPED (`bx->bits`), i.e. the raw list pointer -- which
+    # `_set_word_key` content-keys because it is a registered list. Two
+    # distinct-but-equal lists therefore collapsed to one element while
+    # `id(a) != id(b)` stayed True. The fix stores the token (the box address)
+    # in `mojo_set_add_word`/`mojo_set_contains_word`, matching
+    # `mojo_set_discard_word`, which never unwrapped.
+    test_gimple_matches_cpython("gimple_id_set_dedupes_by_identity", """\
+def main():
+    a = [1, 2]
+    b = [1, 2]
+    ids = {id(a), id(b), id(a)}
+    print('set', len(ids), id(a) == id(b))
+main()
+""")
+
     # `c == in_str` where one side is a `char *` VALUE and the other an
     # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
     # the codegen cannot tell them apart in one pass (the slot is assigned its

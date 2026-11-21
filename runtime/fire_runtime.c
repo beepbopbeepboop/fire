@@ -9485,7 +9485,15 @@ void mojo_set_add_word(MojoSet *s, int64_t w)
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         if (bx->kind == 'n') { mojo_set_add_none(s); return; }
         if (bx->kind == 's') { mojo_set_add_bytes(s, (MojoBytes *)(intptr_t)bx->bits); return; }
-        w = bx->bits;
+        /* kind 'i' is `mojo_id`'s interned token, and only `mojo_id` makes
+         * one. The BOX ADDRESS is the identity, so it is what must join the
+         * set. Unwrapping to `bx->bits` handed the raw container pointer to
+         * the int-domain probe, whose `_set_word_key` CONTENT-keys a
+         * registered list -- so `{id(a), id(b), id(a)}` over two distinct
+         * equal lists collapsed to one element while `id(a) != id(b)` was
+         * still True (bugs/CODEGEN_set_of_id_tokens_collapses.md). */
+        mojo_set_add_int(s, w);
+        return;
     }
     if (mojo_boxed_is_str(w)) mojo_set_add_str(s, (char *)(intptr_t)w);
     else mojo_set_add_int(s, w);
@@ -9499,6 +9507,11 @@ int mojo_set_contains_word(MojoSet *s, int64_t w)
     if (mojo_is_boxed(w)) {
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         if (bx->kind == 'n') return mojo_set_contains_none(s);
+        /* kind 'i' is `mojo_id`'s token: probe the BOX ADDRESS, matching
+         * `mojo_set_add_word` (which stores it) and `mojo_set_discard_word`.
+         * Unwrapping here made `x in {id(x)}` false for the same reason the
+         * add side collapsed two equal lists. */
+        if (bx->kind == 'i') return mojo_set_contains_int(s, w);
         w = bx->bits;
     }
     if (mojo_set_contains_int(s, w)) return 1;
