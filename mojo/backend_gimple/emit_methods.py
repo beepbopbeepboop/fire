@@ -1127,7 +1127,7 @@ def _lower_maybe_bound_call(gen, fname_raw: str,
         ret_type = gen._global_callable_ret_types.get(fname_raw, 'int64_t')
     raw_t = gen._call_expr('int64_t', helper, lead +
                              [('int64_t', w) for w in widened[:8]])
-    if ret_type in ('int64_t', 'int'):
+    if gimple_ctypes.TypeLattice.is_int_word(ret_type):
         return ret_type, raw_t
     if ret_type == 'void':
         return 'int', gen._new_val('int', '0')
@@ -1166,7 +1166,7 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
     helper = f'mojo_bound_method_call_{min(n, 8)}'
     raw_t = gen._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
                              [('int64_t', w) for w in widened[:8]])
-    if ret_type in ('int64_t', 'int'):
+    if gimple_ctypes.TypeLattice.is_int_word(ret_type):
         return ret_type, raw_t
     if ret_type == 'void':
         return 'int', gen._new_val('int', '0')
@@ -2201,7 +2201,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
         return gen._stub_result(ot, ov_local,
                                 f'{_marker_mod}.{method}() — raises: module '
                                 f'not compiled')
-    if ot in ('int64_t', 'int') and method in _RE_DYN_METHODS:
+    if gimple_ctypes.TypeLattice.is_int_word(ot) and method in _RE_DYN_METHODS:
         return _lower_re_dynamic_call(gen, node, ov_local, method)
     if (ot in ('float', 'double') and not node.args
             and method in _FLOAT_BIT_ACCESSORS):
@@ -2319,7 +2319,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
     # (truthy only when its length is non-zero). The runtime answers
     # from the box. Only the no-argument dunder on an integer-scalar
     # receiver — any other shape keeps the echo exactly as before.
-    if (method == '__bool__' and ot in ('int64_t', 'int')
+    if (method == '__bool__' and gimple_ctypes.TypeLattice.is_int_word(ot)
             and not node.args and not getattr(node, 'kwargs', None)):
         # mojo_pyobject_truthy returns `int`; raw GIMPLE requires the
         # result in a same-type temp, and the box word materializes
@@ -2343,14 +2343,14 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
     # LinkedList/List `__hash__`): fold the value into the hasher. The hasher
     # is the word `mojo_hasher_new` made; the stdlib's `mut hasher` is that
     # same word, so nothing needs to be returned. Returns no value (`None`).
-    if (method == '__hash__' and ot in ('int64_t', 'int')
+    if (method == '__hash__' and gimple_ctypes.TypeLattice.is_int_word(ot)
             and len(node.args) == 1 and not getattr(node, 'kwargs', None)):
         _ht, _hv = gen.lower_expr(node.args[0])
         _hw = gen._cast('int64_t', _hv)
         gen._emit_call('void', '', 'mojo_hasher_update_int',
                        [('int64_t', _hw), ('int64_t', ov_local)])
         return 'int64_t', gen._new_val('int64_t', '0')
-    if (method == '__hash__' and ot in ('int64_t', 'int')
+    if (method == '__hash__' and gimple_ctypes.TypeLattice.is_int_word(ot)
             and not node.args and not getattr(node, 'kwargs', None)):
         # mojo_pyobject_hash returns `int64_t` — same raw-GIMPLE
         # same-type-target / plain-var-argument rules as `__bool__`.
@@ -2368,7 +2368,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
     # answered 0 to both — the latent value error those asserts would
     # have made live. Only the no-argument word-receiver accessors
     # change; every other scalar stub keeps its pre-branch behaviour.
-    if method in ('to_u32', 'value') and ot in ('int64_t', 'int') \
+    if method in ('to_u32', 'value') and gimple_ctypes.TypeLattice.is_int_word(ot) \
             and not node.args:
         return ot, ov_local
     # to_endian/from_endian for scalar types
@@ -5467,7 +5467,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `split` is both a string method and a pattern method: on a word of UNKNOWN kind
     # (a compiled pattern held in a local, `re.compile(...)`'s result) the run time
     # picks (`mojo_split_dyn`).
-    if (_as_str(func.member) == 'split' and ot in ('int64_t', 'int')
+    if (_as_str(func.member) == 'split' and gimple_ctypes.TypeLattice.is_int_word(ot)
             and (gen._word_is_dyn(ov)
                  or (isinstance(func.obj, gimple_ctypes.IdentExpr)
                      and _as_str(func.obj.name) in gen._dyn_word_locals))
@@ -6136,7 +6136,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
     # Method calls on boxed int64_t values (dict/list elements stored as pointers-as-int64_t)
     # Unbox to the actual struct type and call the real method.
-    if ot in ('int64_t', 'int') and method in ('emit_typedef', 'emit_table_init', 'emit_dispatch_call'):
+    if gimple_ctypes.TypeLattice.is_int_word(ot) and method in ('emit_typedef', 'emit_table_init', 'emit_dispatch_call'):
         for a in node.args: gen.lower_expr(a)
         vp = gen._new_temp('void *'); gen._cast_into(vp, 'void *', f"{ov}")
         dt = gen._new_temp('DispatchTable *'); gen._cast_into(dt, 'DispatchTable *', vp)
@@ -6147,7 +6147,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Boxed int64_t value that actually holds a struct pointer with a known method.
     # Common when accessing methods on list elements (e.g. errors[0].kind_name())
     # where the element type is known from _field_elem_types.
-    if ot in ('int64_t', 'int') and ov in gen._actual_types:
+    if gimple_ctypes.TypeLattice.is_int_word(ot) and ov in gen._actual_types:
         _actual_ptr_type = gen._actual_types[ov]
         _sn_method = gimple_exprtypes._struct_name_of(_actual_ptr_type)
         _sig_key = f'{_sn_method}_{method}'
@@ -6384,7 +6384,7 @@ def _ldm_pop(gen, ov: str, args: list) -> tuple:
     _pop_spread = (args[1] if len(args) == 2
                    and isinstance(args[1], gimple_ctypes.UnaryOp)
                    and args[1].op == '*' else None)
-    if _pop_spread is not None and val_type in ('int64_t', 'int') :
+    if _pop_spread is not None and gimple_ctypes.TypeLattice.is_int_word(val_type):
         _sl_t, _sl_v = gen.lower_expr(_pop_spread.operand)
         if gimple_ctypes.TypeLattice.is_list(_sl_t):
             _sl_n = gen._call_expr('int64_t', 'mojo_list_len', [(_sl_t, _sl_v)])
@@ -6607,7 +6607,7 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
         # result type from the value domain and only widening to `char *`
         # when a side needs it is what makes BOTH disagreeing rows right:
         # `d.get("a", "y")` prints `1` and `d.get("z", "y")` prints `y`.
-        _dflt_scalar = default_ty in ('char *', 'double', '_Bool') or default_ty in ('int64_t', 'int')
+        _dflt_scalar = default_ty in ('char *', 'double', '_Bool') or gimple_ctypes.TypeLattice.is_int_word(default_ty)
         if not _container_vt and (gimple_ctypes.TypeLattice.is_cstr(val_type) or gimple_ctypes.TypeLattice.is_cstr(default_ty)):
             result_type = 'char *'
         elif not _container_vt and result_type not in ('char *', 'double', '_Bool'):

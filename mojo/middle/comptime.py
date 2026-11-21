@@ -82,7 +82,7 @@ ComptimeVarStmt = _fc.ComptimeVarStmt
 # fire_compiler._as_comptimevar_node exists: a field read straight off a
 # boxed value lowers to runtime dispatch, which does not reliably carry this
 # struct (it turned `s.target` into the pointer's decimal address elsewhere).
-_as_comptimevar_node = _fc._as_comptimevar_node
+from fire_compiler import _as_comptimevar_node
 
 # Most elements a folded list comprehension may produce. Past this the value is
 # not folded (None), so the comptime-for it feeds falls back to the runtime

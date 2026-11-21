@@ -2040,7 +2040,7 @@ def _populate_decorated_method_wrapped(self, stmts, imported_stmts) -> None:
                 _dw_dret = self.func_return_types.get(_dw_csym_c)
                 if _dw_dret is None:
                     _dw_dret = self.func_return_types.get(_dw_ds)
-                if _as_str(_dw_dret) in ('int64_t', 'int'):
+                if gimple_ctypes.TypeLattice.is_int_word(_as_str(_dw_dret)):
                     _dw_dec_csym = _dw_csym_c
                     break
             if _dw_dec_csym is None:
@@ -2463,7 +2463,7 @@ def _emit_reflection_dispatch(self, parts):
                 if gimple_ctypes.TypeLattice.is_bool(ftype):
                     _ad_setter = 'mojo_dict_set_bool'
                     _ad_arg = f'obj->{safe_f}'
-                elif (ftype in ('int64_t', 'int') and _asdict_scalar_none_annot(
+                elif (gimple_ctypes.TypeLattice.is_int_word(ftype) and _asdict_scalar_none_annot(
                         (getattr(self, '_field_annotations', None) or {}).get(
                             sn + '.' + fname, ''))):
                     # `int | None`: the word 0 may be a None (this word

@@ -521,7 +521,7 @@ def _gen_stmt_VarDecl(gen, node):
             # slot type was thrown away and the value was immediately
             # coerced BACK to int64_t on the store (a `Config *` slot read
             # through `(Config *)` then `(void *)` then `(int64_t)`).
-            if gen.var_types.get(n) in ('int64_t', 'int') and et not in ('int64_t', 'int'):
+            if gen.var_types.get(n) in ('int64_t', 'int') and not gimple_ctypes.TypeLattice.is_int_word(et):
                 _redecl_upgrade_default(gen, n, et)
             gen._declare_var(n, et)
             gen._safe_coerce_emit(et, gen.var_types[n], ev, gen._write_dest(n))

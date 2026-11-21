@@ -318,7 +318,7 @@ def _assign_target(gen, tgt, et, ev):
             # compiler error: in build2, at tree.cc:5208"). The hint's own
             # purpose is upgrading a target off the int64_t default, so it
             # must yield to any type that is not the default itself.
-            _decl_t = et if et and et not in ('int64_t', 'int') else (hint or et or 'int64_t')
+            _decl_t = et if et and not gimple_ctypes.TypeLattice.is_int_word(et) else (hint or et or 'int64_t')
             gen._declare_var(tgt.name, _decl_t)
         # A `None` / `False` / `True` / NULL-string slot read out of a
         # kind-mixed tuple is a BOX, a non-zero heap cell, but the local that

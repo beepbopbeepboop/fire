@@ -8701,7 +8701,7 @@ def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     t = gen._new_temp('MojoDict *')
     if gimple_ctypes.TypeLattice.is_list(at):
         gen._emit_call('MojoDict *', t, 'mojo_dict_from_pairs', [('MojoList *', av)])
-    elif at in ('int64_t', 'int') or not gimple_ctypes.TypeLattice.ends_in_star(at) or at == 'void *':
+    elif gimple_ctypes.TypeLattice.is_int_word(at) or not gimple_ctypes.TypeLattice.ends_in_star(at) or at == 'void *':
         raw = gen._coerce_to_type(at, 'MojoDict *', av)
         gen._emit_call('MojoDict *', t, 'mojo_dict_copy', [('MojoDict *', raw)])
         av = raw
@@ -8740,7 +8740,7 @@ def _lower_builtin_frozendict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
             gen._emit_call('MojoDict *', t, 'mojo_frozendict_from_pairs', [('MojoList *', av)])
         elif at == 'MojoDict *':
             gen._emit_call('MojoDict *', t, 'mojo_frozendict_from_dict', [('MojoDict *', av)])
-        elif at in ('int64_t', 'int') or not gimple_ctypes.TypeLattice.ends_in_star(at) or at == 'void *':
+        elif gimple_ctypes.TypeLattice.is_int_word(at) or not gimple_ctypes.TypeLattice.ends_in_star(at) or at == 'void *':
             raw = gen._coerce_to_type(at, 'MojoDict *', av)
             gen._emit_call('MojoDict *', t, 'mojo_frozendict_from_dict', [('MojoDict *', raw)])
         else:
@@ -10873,7 +10873,7 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         # _generator_value_owned).
         gen._generator_value_owned[_gen_t] = True
         return 'MojoGenerator *', _gen_t
-    if ret_type in ('int64_t', 'int'):
+    if gimple_ctypes.TypeLattice.is_int_word(ret_type):
         return ret_type, raw_t
     # Narrow back to declared return type.
     t = gen._cast(ret_type, raw_t)
@@ -13483,7 +13483,7 @@ def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: s
         # GIMPLE: can't chain casts in one expr; split into two steps
         vp = gen._cast('void *', dp)
         i64p = gen._cast('int64_t *', vp)
-    elif ftype and isinstance(ftype, str) and ftype in ('int64_t', 'int'):
+    elif ftype and isinstance(ftype, str) and gimple_ctypes.TypeLattice.is_int_word(ftype):
         dp = gen._new_val(ftype, f"{obj_v}->{fname}")
         vp = gen._cast('void *', dp)
         i64p = gen._cast('int64_t *', vp)

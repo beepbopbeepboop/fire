@@ -4848,7 +4848,7 @@ def _cpp_expr(gen, e) -> str:
             # error ("request for member 'write' in 'self->CWriter::out',
             # which is of non-class type 'int64_t'").
             _fh_rc = _cpp_receiver_ctype(gen, e.func.obj)
-            if _fh_rc in ('int64_t', 'int') and e.func.member in ('write', 'read', 'close'):
+            if gimple_ctypes.TypeLattice.is_int_word(_fh_rc) and e.func.member in ('write', 'read', 'close'):
                 _fh_obj = gen._cpp_expr(e.func.obj)
                 if e.func.member == 'write' and len(e.args) == 1:
                     return (f"int_write((int64_t)({_fh_obj}), "
@@ -5962,7 +5962,7 @@ def _cpp_expr(gen, e) -> str:
                             _pack_stmts.append(
                                 f"mojo_dict_set_bool({_dictvar}, {_key}, "
                                 f"(int)({gen._cpp_expr(_kwv)}));")
-                        elif _vct in ('int64_t', 'int'):
+                        elif gimple_ctypes.TypeLattice.is_int_word(_vct):
                             _pack_stmts.append(
                                 f"mojo_dict_set_int({_dictvar}, {_key}, "
                                 f"(int64_t)({gen._cpp_expr(_kwv)}));")
@@ -6201,7 +6201,7 @@ def _cpp_expr(gen, e) -> str:
                                 # pointer argument into an int64 slot: word-pack
                                 arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
                             else:
-                                arg_exprs.append(f"({expected_pt})({ae})" if not gimple_ctypes.TypeLattice.is_word(expected_pt) else (ae if actype in ('int64_t', 'int') else f"(int64_t)({ae})"))
+                                arg_exprs.append(f"({expected_pt})({ae})" if not gimple_ctypes.TypeLattice.is_word(expected_pt) else (ae if gimple_ctypes.TypeLattice.is_int_word(actype) else f"(int64_t)({ae})"))
                             continue
                         else:
                             arg_exprs.append(f"({expected_pt})({ae})")
@@ -7667,7 +7667,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                             elif gimple_ctypes.TypeLattice.is_cstr(actype):
                                 arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
                             elif gimple_ctypes.TypeLattice.is_word(expected_pt):
-                                arg_exprs.append(ae if actype in ('int64_t', 'int') else f"(int64_t)({ae})")
+                                arg_exprs.append(ae if gimple_ctypes.TypeLattice.is_int_word(actype) else f"(int64_t)({ae})")
                             else:
                                 arg_exprs.append(f"({expected_pt})({ae})")
                             continue

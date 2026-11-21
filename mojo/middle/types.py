@@ -192,6 +192,14 @@ class TypeLattice:
         return t == 'MojoList *'
 
     @classmethod
+    def is_int_word(cls, t: str) -> bool:
+        """`t` is the C spelling of a plain int or the untyped word: exactly
+        `int` or `int64_t`, the pair the lowering tests with `in ('int', 'int64_t')`."""
+        if not t:
+            return False
+        return t == 'int' or t == 'int64_t'
+
+    @classmethod
     def is_word(cls, t: str) -> bool:
         """`t` is the untyped 64-bit word (`int64_t`). The one place that spells
         the test (stage 4, doc/GIR.md)."""
