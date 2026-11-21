@@ -4392,7 +4392,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
                 isinstance(_ja, UnaryOp) and _ja.op == '*'
                 for _ja in node.args)
             if len(node.args) == 0:
-                gen._emit(f'  {t} = (int64_t)0;')
+                gen._cast_into(t, 'int64_t', '0')
             elif len(node.args) == 1 and not _join_has_spread:
                 # os.path.join(*list) — single arg is a MojoList*
                 arg_type, arg_val = gen.lower_expr(node.args[0])
@@ -4496,7 +4496,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
             gen._cast_into(t, 'int', eq)
             gen._goto(bb_merge)
             gen._emit_label(bb_false)
-            gen._emit(f'  {t} = (int)0;')
+            gen._cast_into(t, 'int', '0')
             gen._emit_label(bb_merge)
             return 'int', t
         elif outer_member == 'normpath' and len(node.args) == 1:

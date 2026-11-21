@@ -331,7 +331,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     gen._copy(f"{gen._write_dest(name)}", av)
     cname = gen._cname(name)
     cur = gen._new_temp('int64_t')
-    gen._emit(f"  {cur} = (int64_t)0;")
+    gen._cast_into(cur, 'int64_t', '0')
     # The TOTAL length, read once here rather than at each use: see
     # mojo/middle/itcursor.py's `remaining` for why re-reading it per
     # condition is a different program.
@@ -4074,7 +4074,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         n = gen._call_expr('int64_t', gen._CONTAINER_LEN_FN[ctype], [(ctype, val)])
         b = gen._new_temp('_Bool')
         zero = gen._new_temp('int64_t')
-        gen._emit(f"  {zero} = (int64_t)0;")
+        gen._cast_into(zero, 'int64_t', '0')
         gen._binop_into(b, n, '!=', zero)
         return b
     if gimple_ctypes.TypeLattice.is_cstr(ctype):
@@ -4087,7 +4087,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
         gen._cast_into(ip, 'int64_t', val)
-        gen._emit(f"  {zero} = (int64_t)0;")
+        gen._cast_into(zero, 'int64_t', '0')
         gen._binop_into(b, ip, '!=', zero)
         return b
     if gimple_ctypes.TypeLattice.is_word(ctype) and (
@@ -4120,7 +4120,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
             return b
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
-        gen._emit(f"  {zero} = (int64_t)0;")
+        gen._cast_into(zero, 'int64_t', '0')
         gen._binop_into(b, f"{val}", '!=', zero)
         return b
     # int and other integer types: avoid GIMPLE type-mismatch by going through int64_t
@@ -4129,7 +4129,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         v64 = gen._new_temp('int64_t')
         z64 = gen._new_temp('int64_t')
         gen._cast_into(v64, 'int64_t', val)
-        gen._emit(f"  {z64} = (int64_t)0;")
+        gen._cast_into(z64, 'int64_t', '0')
         gen._binop_into(b, v64, '!=', z64)
         return b
     return val
@@ -7050,7 +7050,7 @@ def _gen_stmt_TryStmt(gen, node):
                 # than an inline `||`: this file's raw-GIMPLE dialect
                 # wants one comparison per statement.
                 zero_t = gen._new_temp('int64_t')
-                gen._emit(f"  {zero_t} = (int64_t)0;")
+                gen._cast_into(zero_t, 'int64_t', '0')
                 is_untagged = gen._new_temp('_Bool')
                 gen._binop_into(is_untagged, exc_type_t, '==', zero_t)
                 combined = gen._new_temp('_Bool')

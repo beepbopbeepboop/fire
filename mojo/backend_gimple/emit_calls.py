@@ -3141,7 +3141,7 @@ def _trap_unsupported_intrinsic(gen, name: str) -> tuple[str, str]:
     breaks the callers that take the word)."""
     gen._rt_void('mojo_unsupported_intrinsic', ['"' + name.replace('"', '') + '"'])
     t = gen._new_temp('int64_t')
-    gen._emit(f'  {t} = (int64_t)0;')
+    gen._cast_into(t, 'int64_t', '0')
     return 'int64_t', t
 
 
@@ -8869,7 +8869,7 @@ def _lower_imported_struct_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExp
         else:
             gen._cast_into(t, 'int64_t', gen._ensure_local(atype, aval))
     else:
-        gen._emit(f'  {t} = (int64_t)0;')
+        gen._cast_into(t, 'int64_t', '0')
     return 'int64_t', t
 
 
@@ -9081,7 +9081,7 @@ def _lower_opaque_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tup
         elif gimple_ctypes.TypeLattice.is_word(at):       gen._copy(t, f"{av}")
         else:                       gen._cast_into(t, 'int64_t', gen._ensure_local(at, av))
     else:
-        gen._emit(f'  {t} = (int64_t)0;')
+        gen._cast_into(t, 'int64_t', '0')
         # PART 6 (2026-10-23, family S): the zero-argument STRING
         # constructor. In this model the empty string IS word 0, and the
         # local that receives it must be tracked as a char* from the FIRST
@@ -11535,7 +11535,7 @@ def _lnc_bool(gen, arg_pairs: list) -> tuple[str, str] | None:
                              [(_bt, _bv)])
         _b = gen._new_temp('_Bool')
         _z = gen._new_temp('int64_t')
-        gen._emit(f'  {_z} = (int64_t)0;')
+        gen._cast_into(_z, 'int64_t', '0')
         gen._binop_into(_b, _n, '!=', _z)
         return '_Bool', _b
     if gimple_ctypes.TypeLattice.is_cstr(_bt) or (gimple_ctypes.TypeLattice.is_word(_bt) and (

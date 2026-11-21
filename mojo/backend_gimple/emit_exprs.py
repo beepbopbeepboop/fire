@@ -1470,7 +1470,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             ip = gen._new_temp('int64_t')
             zero = gen._new_temp('int64_t')
             gen._cast_into(ip, 'int64_t', ov)
-            gen._emit(f"  {zero} = (int64_t)0;")
+            gen._cast_into(zero, 'int64_t', '0')
             gen._binop_into(f"{t}", f"{ip}", '==', zero)
         elif gimple_ctypes.TypeLattice.is_word(ot):
             # `0LL`, not `(int64_t)0`: it becomes a COMPARISON OPERAND below,
@@ -6113,7 +6113,7 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
             # `` `A` <= c <= `Z` ``, which -fgimple only flags once the
             # surrounding function is large enough to hit the strict
             # low-level GIMPLE path — a minimal repro compiled "fine").
-            gen._emit(f"  {result} = (_Bool)1;")
+            gen._cast_into(result, '_Bool', '1')
             gen._goto(merge_bb)
         else:
             next_bb = gen._new_bb()
@@ -6121,7 +6121,7 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
             gen._emit_label(next_bb)
         left_node, lt, lv = right_node, rt, rv
     gen._emit_label(false_bb)
-    gen._emit(f"  {result} = (_Bool)0;")
+    gen._cast_into(result, '_Bool', '0')
     gen._goto(merge_bb)
     gen._emit_label(merge_bb)
     return '_Bool', result

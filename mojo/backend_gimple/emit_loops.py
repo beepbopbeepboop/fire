@@ -409,7 +409,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
 
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')
-    gen._emit(f'  {pos_var} = (int64_t)0;')
+    gen._cast_into(pos_var, 'int64_t', '0')
     # Byte size of one int64_t group-offset array. A literal, not `sizeof`:
     # `sizeof` is not a GIMPLE operand, so a `__GIMPLE` body (a method or a
     # lifted closure) that spelled it was refused by gcc -x c. int64_t is
@@ -515,7 +515,7 @@ def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
 
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')
-    gen._emit(f'  {pos_var} = (int64_t)0;')
+    gen._cast_into(pos_var, 'int64_t', '0')
     # Group-offset array byte size: why this is a literal is noted in _gen_for_regex_iter.
     gsize = gen._new_val('int64_t', str(8 * (ngroups + 1)))
     gstart_vp = gen._rt_call('void *', 'malloc', [gsize])
@@ -1834,7 +1834,7 @@ def _gen_for_zip_longest(gen, node):
     gt_t = gen._cmp(f"{len_ts[0]}", '>', f"{len_ts[1]}")
     n_t = gen._new_val('int64_t', f"{gt_t} ? {len_ts[0]} : {len_ts[1]}")
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -2109,7 +2109,7 @@ def _gen_for_zip(gen, node):
         n_t = gen._new_val('int64_t', f"{_shorter} ? {len_ts[_mi]} : {n_t}")
 
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -2154,7 +2154,7 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
 
     len_t = gen._rt_call('int64_t', 'mojo_strlen', [s_val])
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -2339,7 +2339,7 @@ def _gen_for_enumerate(gen, node):
     idx_t = gen._new_temp('int64_t')
     gen._rt_into(len64, 'mojo_list_len', [f"{list_ptr}"])
     gen._copy(len_t, len64)
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -2614,7 +2614,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         list_ptr = gen._coerce_to_type('int64_t', 'MojoList *', it_val)
     gen._rt_into(len64, 'mojo_list_len', [f"{list_ptr}"])
     gen._copy(len_t, len64)
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -2931,7 +2931,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
     idx_t = gen._new_temp('int64_t')
     gen._rt_into(len64, 'mojo_str_codepoint_len', [f"mojo_str_data({it_val})"])
     gen._copy(len_t, len64)
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -2947,7 +2947,7 @@ def _gen_for_bytes(gen, var: str, it_val: str, body: list):
     gen._declare_var(var, 'int64_t', force=gen.var_types.get(var, 'int64_t') != 'int64_t')
     len_t = gen._rt_call('int64_t', 'mojo_bytes_len', [it_val])
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -2964,7 +2964,7 @@ def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
     gen._declare_var(var, 'int64_t', force=gen.var_types.get(var, 'int64_t') != 'int64_t')
     len_t = gen._rt_call('int64_t', 'mojo_memoryview_len', [it_val])
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3018,7 +3018,7 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     gen._declare_var(var, 'char *', force=gen.var_types.get(var, 'char *') != 'char *')
     len_t = gen._rt_call('int64_t', 'mojo_strlen', [it_val])
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {idx_t} = (int64_t)0;")
+    gen._cast_into(idx_t, 'int64_t', '0')
 
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3417,7 +3417,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     cvn = _slot_cnames[_vi]
                     vt = _slot_ctypes[_vi]
                     if vt in ('int64_t', 'int', 'int32_t'):
-                        gen._emit(f"  {cvn} = (int64_t)0;")
+                        gen._cast_into(cvn, 'int64_t', '0')
                     elif gimple_ctypes.TypeLattice.ends_in_star(vt):
                         gen._emit(f"  {cvn} = ({vt})0;")
                     else:
