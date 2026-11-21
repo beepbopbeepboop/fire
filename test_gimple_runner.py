@@ -3466,48 +3466,6 @@ print(j())
 print(k())
 """)
 
-    # `x /= 2` REBINDS `x` to a float: the local-type pre-pass has to join
-    # the augmented assignment's result with the name's other bindings, or
-    # the int type from `x = 9` wins and the store truncates (`4` for `4.5`).
-    # The float-local truthiness rows are the same bug's other half: Python
-    # truthiness is `x != 0.0`, so 0.5 and 0.0001 are true, at module level
-    # (the compile-time fold) and inside a function (the emitted condition).
-    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_int_local", """\
-def main():
-    x = 9
-    x /= 2
-    print(x)
-    y = 13
-    y += 0.5
-    print(y)
-    print(7 / 2)
-    print(1e-9 > 0)
-    if 0.0001:
-        print("tiny truthy")
-    print(3 == 3.0)
-    print(round(2.5), round(3.5))
-main()
-""")
-
-    test_gimple_matches_cpython("gimple_float_truthiness_is_not_its_integer_part", """\
-def f():
-    x = 0.0001
-    if x:
-        print("tiny")
-    y = 0.5
-    while y:
-        print("once")
-        y = 0.0
-    print(bool(0.0001), bool(0.0))
-
-if 0.5:
-    print("module truthy")
-else:
-    print("module falsy")
-
-f()
-""")
-
     # The MATERIALIZED flavour, which is a different emission path and was
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env

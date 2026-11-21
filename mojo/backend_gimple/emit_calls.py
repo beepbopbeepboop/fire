@@ -11530,7 +11530,7 @@ def _lnc_bool(gen, arg_pairs: list) -> tuple[str, str] | None:
         gen._emit(f'  {_z} = (int64_t)0;')
         gen._binop_into(_b, _n, '!=', _z)
         return '_Bool', _b
-    if gimple_ctypes.TypeLattice.is_cstr(_bt) or _bt in ('double', 'float') or (_bt == 'int64_t' and (
+    if gimple_ctypes.TypeLattice.is_cstr(_bt) or (_bt == 'int64_t' and (
             _bv in gen._dyn_word_vals or _bv in gen._dyn_word_locals
             or _bv in getattr(gen, '_cur_untyped_params', ()))):
         # A string's truth is its length, and a word of unknown kind's is

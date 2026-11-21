@@ -4082,17 +4082,6 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         b = gen._new_temp('_Bool')
         gen._binop_into(b, n, '!=', '0')
         return b
-    if ctype in ('double', 'float'):
-        # Python's truthiness for a float is `x != 0.0`, NOT "its integer
-        # part is nonzero": the int64_t fallback below casts the value to
-        # int64_t first, so every float with |x| < 1 (`0.5`, `0.0001`) read
-        # as falsy — a real `if 0.0001:` took the else arm. Compare in the
-        # value's own type; gcc -fgimple accepts a double comparison (only
-        # inline float DIVISION has the expmed_mode_index ICE).
-        zero = gen._new_val(ctype, '0.0f' if ctype == 'float' else '0.0')
-        b = gen._new_temp('_Bool')
-        gen._binop_into(b, val, '!=', zero)
-        return b
     if ctype in ('void *',) or (gimple_ctypes.TypeLattice.ends_in_star(ctype) and not gimple_ctypes.TypeLattice.is_bool(ctype)):
         ip   = gen._new_temp('int64_t')
         zero = gen._new_temp('int64_t')

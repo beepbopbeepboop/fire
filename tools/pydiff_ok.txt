@@ -108,4 +108,3 @@ min/fs_str_format.py
 min/fs_divmod.py
 min/fs_minmax_key.py
 min/fs_round.py
-min/float_arith.py

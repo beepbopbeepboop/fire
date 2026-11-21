@@ -1668,34 +1668,6 @@ _NONE_TYPE_MARKER = 'NoneType'
 _SCALAR_CTYPES = frozenset(('int64_t', 'int', 'double', '_Bool'))
 
 
-def _aug_assign_value_type(gen, node) -> str:
-    """The C type of the new value an augmented assignment binds.
-
-    `target OP= value` REBINDS the target to the result of `target OP value`,
-    exactly as the emitter lowers it (`_gen_stmt_AugAssignStmt`'s fake
-    BinaryOp), so that expression's type is what the local-type pre-pass has
-    to join. The one rule `_quick_type`'s plain operand join does not model
-    is true division: `/` between two signed integers answers `double`
-    (`_lower_binary_tail`'s `int_true_div`). Without this, `x = 9; x /= 2`
-    joined only `x`'s integer binding, the local was declared int64_t, and
-    the double 4.5 was truncated back to 4 at the store.
-
-    The emitter's struct/`__iOP__`, runtime-object and boxed-PythonObject
-    arms are different: they rebind the target to an object whose static type
-    is the TARGET's own, which the join of the target's other bindings
-    already carries, so the join below is the right answer for those too.
-    """
-    op = _as_str(node.op)
-    base_op = op[:-1]
-    lt = gen._quick_type(node.target)
-    rt = _local_value_type(gen, node.value)
-    if (base_op == '/'
-            and lt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES
-            and rt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES):
-        return 'double'
-    return gimple_ctypes.TypeLattice.join(lt, rt)
-
-
 def _is_confident_scalar(gen, value) -> bool:
     """Whether `value`'s `_quick_type` answer is a REAL scalar rather than
     this scan's `int64_t` unknown fallback. Used by `_infer_local_var_types`
@@ -1781,11 +1753,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
     # `mojo_dict_iter_key` (`it->dict->slots[it->order[...]]`) while
     # compiling `./mojoc fire.py --dump-full`.
     inferred: dict[str, list] = {}
-    # Augmented-assignment bindings, kept apart until the join below: a name
-    # whose ONLY binding is an augmented assignment is a parameter/global
-    # (their type comes from elsewhere) and must not acquire a local
-    # declaration from the result type computed here.
-    aug_inferred: dict[str, list] = {}
 
     # Names assigned a CONFIDENT scalar (a real int/float/bool value, not
     # this scan's `int64_t` UNKNOWN fallback). An `int64_t` in
@@ -1899,16 +1866,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                                 and _zi < len(_as_node.value.elements)
                                 and _is_confident_scalar(gen, _as_node.value.elements[_zi])):
                             confident_scalars.add(vname)
-            elif (isinstance(node, gimple_ctypes.AugAssignStmt)
-                    and isinstance(node.target, gimple_ctypes.IdentExpr)):
-                # `x += 0.5` / `x /= 2`: the target is REBOUND to the
-                # expression's result, so its type belongs in the join. The
-                # name already has to be bound somewhere else (a parameter,
-                # or an assignment this scan records); see `aug_inferred`.
-                _aug_name = _as_str(node.target.name)
-                if _aug_name not in aug_inferred:
-                    aug_inferred[_aug_name] = []
-                aug_inferred[_aug_name].append(_aug_assign_value_type(gen, node))
             elif (isinstance(node, gimple_ctypes.VarDecl) and isinstance(node.name, str)
                     and ',' not in node.name):
                 # Fresh local, not a `node` reassignment — see the
@@ -2023,14 +1980,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
     finally:
         gen.var_types = _saved_var_types
         gen._scan_scratch_top = _scratch_mark
-
-    # Augmented assignments join only names the scan already knows are BOUND
-    # here. A name whose only binding is `x += v` is a parameter or a global
-    # (both typed outside this table), and giving it a local declaration from
-    # the join would shadow that type.
-    for _aug_name in aug_inferred:
-        if _aug_name in inferred:
-            inferred[_aug_name].extend(aug_inferred[_aug_name])
 
 # Join all types for each variable using TypeLattice
     result: dict[str, str] = {}
