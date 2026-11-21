@@ -3614,6 +3614,51 @@ else:
 f()
 """)
 
+    # A module-level `if` on a folded NON-NUMERIC constant used to take the
+    # else arm: `eval_const_bool` converted only a folded bool/int/float to a
+    # truth value, so a folded str/list/dict fell through to None and
+    # `eval_const_bool_state` reported CONST_FALSE (the tri-state cannot
+    # distinguish "fold failed" from "false"). `module_gen` then resolved the
+    # statement to its else arm, deleting the then-arm before emission.
+    # CPython's truthiness is the oracle: a non-empty string/list/dict is
+    # true, the empty form false.
+    test_gimple_matches_cpython("gimple_module_constant_container_condition", """\
+def main():
+    print("ran")
+
+if "x":
+    print("str yes")
+else:
+    print("str no")
+
+if [1]:
+    print("list yes")
+else:
+    print("list no")
+
+if {1: 2}:
+    print("dict yes")
+else:
+    print("dict no")
+
+if "":
+    print("empty str yes")
+else:
+    print("empty str no")
+
+if []:
+    print("empty list yes")
+else:
+    print("empty list no")
+
+if {}:
+    print("empty dict yes")
+else:
+    print("empty dict no")
+
+main()
+""")
+
     # The MATERIALIZED flavour, which is a different emission path and was
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env

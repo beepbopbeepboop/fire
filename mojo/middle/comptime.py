@@ -1656,14 +1656,17 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
 def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as a compile-time bool, or None.
 
-    A folded FLOAT answers its truthiness (`bool(0.5)` is True, and every
-    nonzero float is truthy) rather than "not a bool/int, so unknown": a
-    shape that folds to a float and is then not answered here is reported
-    FALSE by `eval_const_bool_state` below, which folded `if 0.0001:` to the
-    else arm at module level.
+    A folded value answers PYTHON truthiness, not just bool/int: a folded
+    float (`bool(0.5)` is True) and a folded container (`if "x":`, `if [1]:`,
+    `if {1: 2}:` are all True in CPython, and their empty forms False). A
+    shape that folds to a value and is then not answered here is reported
+    FALSE by `eval_const_bool_state` below, which folded `if 0.0001:` and
+    `if "x":` to the else arm at module level, deleting the then-arm before
+    emission.
     """
     v = eval_const(node, bindings, platform, conforms_to_pred)
-    if isinstance(v, (bool, int, float)):
+    if isinstance(v, (bool, int, float, str, bytes, list, tuple, dict, set,
+                      frozenset)):
         return bool(v)
     # Fallback: eval_const_int also folds what eval_const does not (calls,
     # via the hook).
