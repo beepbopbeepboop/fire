@@ -330,12 +330,12 @@ def _assign_target(gen, tgt, et, ev):
         # parsed was a generator; `for pn, pt in params: self._param_ctype(pn,
         # pt, s)` handed an unannotated parameter's None annotation to
         # `strdup` as a "type".
-        if et == 'int64_t' and ev in getattr(gen, '_boxed_vals', ()):
+        if et == 'int64_t' and gen._words.may_be_box(ev):
             _un = gen._new_temp('int64_t')
             gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
-            if ev in gen._dyn_word_vals:
-                gen._dyn_word_vals.add(_un)
-            gen._boxed_vals.add(_un)
+            if gen._words.is_dyn(ev):
+                gen._words.mark_dyn(_un)
+            gen._words.mark_boxed(_un)
             # A tagged word stays tagged through the bind: the local holds the
             # same box, and the arithmetic/comparison selectors key off
             # `_tagged_word_vals` to read it by kind. Without this a call
@@ -344,20 +344,20 @@ def _assign_target(gen, tgt, et, ev):
             # recorded too, not just the temp: a later read of a plain local
             # lowers to the name itself, so a temp-only marker never reached
             # the operand (`a = f(0); print(a * 2)` printed the box address).
-            if ev in getattr(gen, '_tagged_word_vals', ()):
-                gen._tagged_word_vals.add(_un)
+            if gen._words.is_tagged(ev):
+                gen._words.mark_tagged(_un)
                 if (isinstance(tgt, IdentExpr)
                         and gen.var_types.get(_as_str(tgt.name), 'int64_t')
                         == 'int64_t'):
                     _tn = _as_str(tgt.name)
-                    gen._tagged_word_vals.add(_tn)
-                    gen._boxed_vals.add(_tn)
+                    gen._words.mark_tagged(_tn)
+                    gen._words.mark_boxed(_tn)
             ev = _un
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
         # A word of unknown kind landing in an int64_t local: the local is
         # that word now (see `_dyn_word_locals`).
-        if ev in gen._dyn_word_vals and gen.var_types[tgt.name] == 'int64_t':
+        if gen._words.is_dyn(ev) and gen.var_types[tgt.name] == 'int64_t':
             gen._dyn_word_locals.add(tgt.name)
         else:
             gen._dyn_word_locals.discard(tgt.name)
@@ -404,7 +404,7 @@ def _assign_target(gen, tgt, et, ev):
             if (set_et == 'int64_t' and gen._elem_types.get(lp) is None
                     and lp not in gen._tuple_slot_types
                     and lp not in gen._nested_elem_types):
-                gen._dyn_word_vals.add(sev)
+                gen._words.mark_dyn(sev)
             gen._assign_target(sub, set_et, sev)
     elif isinstance(tgt, (gimple_ctypes.MemberExpr, gimple_ctypes.SubscriptExpr)):
         # `obj.a, obj.b = t` / `d[k], x = t`: an attribute or item slot as an
@@ -429,7 +429,7 @@ def _assign_target(gen, tgt, et, ev):
         _tt = et if et else 'int64_t'
         gen._declare_var(_tmp, _tt)
         gen._safe_coerce_emit(et, gen.var_types[_tmp], ev, gen._write_dest(_tmp))
-        if ev in gen._dyn_word_vals and gen.var_types[_tmp] == 'int64_t':
+        if gen._words.is_dyn(ev) and gen.var_types[_tmp] == 'int64_t':
             gen._dyn_word_locals.add(_tmp)
         if ev in gen._elem_types:
             gen._elem_types[_tmp] = gen._elem_types[ev]

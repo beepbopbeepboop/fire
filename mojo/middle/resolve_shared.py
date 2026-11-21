@@ -424,8 +424,8 @@ def _quick_type(gen, node) -> str:
             # A string and a word of unknown kind: the value may be either,
             # so it is the word -- the lowering (`_lower_BinaryOp`'s and/or
             # arm) types the result the same way, and the two must agree.
-            if ((gimple_ctypes.TypeLattice.is_cstr(lt) and rt == 'int64_t')
-                    or (lt == 'int64_t' and gimple_ctypes.TypeLattice.is_cstr(rt))):
+            if ((gimple_ctypes.TypeLattice.is_cstr(lt) and gimple_ctypes.TypeLattice.is_word(rt))
+                    or (gimple_ctypes.TypeLattice.is_word(lt) and gimple_ctypes.TypeLattice.is_cstr(rt))):
                 return 'int64_t'
             # A container pointer against a `_Bool`: the lowering turns the
             # whole `and`/`or` into a `_Bool` (`_lower_binary`'s `_bool_merge`),
@@ -1114,7 +1114,7 @@ def _quick_type(gen, node) -> str:
     # list slice -> list, str slice -> str, plain pointer -> same pointer).
     if isinstance(node, gimple_ctypes.SliceExpr):
         _st = gen._quick_type(node.obj)
-        if _st == 'int64_t' and isinstance(node.obj, gimple_ctypes.IdentExpr):
+        if gimple_ctypes.TypeLattice.is_word(_st) and isinstance(node.obj, gimple_ctypes.IdentExpr):
             # The object is a MODULE GLOBAL of this compile, whose semantic
             # type this estimator otherwise never consults (`var_types` is
             # per-function and has no entry for it), so `L[1:]` was the box
@@ -1351,7 +1351,7 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     _sp_count = 0
     _sp_seen = set()
     for _t in types:
-        if not _t or not _t.endswith(' *'):
+        if not _t or not gimple_ctypes.TypeLattice.ends_in_star(_t):
             continue
         if _t in ('char *', 'void *'):
             continue
@@ -1930,7 +1930,7 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                         _vt = gimple_ctypes._mojo_type(_vd_node.type_ann)
                     except Exception:
                         _vt = ''
-                if (not _vt or _vt == 'int64_t') and _vd_node.value is not None:
+                if (not _vt or gimple_ctypes.TypeLattice.is_word(_vt)) and _vd_node.value is not None:
                     _vt = _local_value_type(gen, _vd_node.value)
                 if _vt:
                     inferred.setdefault(vname, []).append(_vt)
@@ -2592,7 +2592,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
             if materialize is not None:
                 ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)
-            if better_ret != 'int64_t':
+            if not gimple_ctypes.TypeLattice.is_word(better_ret):
                 if (isinstance(better_ret, str)
                         and better_ret.startswith('MojoTuple_')
                         and not _body_builds_struct_tuple(

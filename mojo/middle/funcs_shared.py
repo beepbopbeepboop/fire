@@ -448,7 +448,7 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # bare declared name (the parser stores no star prefixes there),
     # matching how dup_def_signature_key looks the same table up.
     _pdflt = (getattr(node, 'param_defaults', None) or {}).get(pname.lstrip('*'))
-    if (ptype is None and ctype == 'int64_t'
+    if (ptype is None and gimple_ctypes.TypeLattice.is_word(ctype)
             and isinstance(_pdflt, StringLiteral)):
         # A `b'...'` default makes the param a `bytes` param; a plain string
         # default makes it a `str` (char *) param. bytes must NOT be
@@ -463,14 +463,14 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # `strlen()` the struct (non-deterministic length). An explicit
         # annotation still takes precedence (ptype is not None there).
         ctype = 'MojoBytes *'
-    elif (ptype is None and ctype == 'int64_t'
+    elif (ptype is None and gimple_ctypes.TypeLattice.is_word(ctype)
           and isinstance(_pdflt, FloatLiteral)):
         # The float half of the same rule: `scale=0.5` is a float parameter.
         # Left as the int64_t box, an omitted argument was padded with the
         # literal's bits as an integer. Generator parameters follow the same
         # rule (cpp_async's parameter loop reaches it through this resolver).
         ctype = 'double'
-    elif (ptype is None and ctype == 'int64_t'
+    elif (ptype is None and gimple_ctypes.TypeLattice.is_word(ctype)
           and isinstance(_pdflt, (DictExpr, TupleExpr, ListExpr, SetExpr))):
         # The CONTAINER-literal half of the rule the two branches above
         # state for strings: an unannotated parameter whose declared
@@ -1435,7 +1435,7 @@ def _home_signature_ctypes(gen, module: str, fs) -> list:
         return pts
     out = list(pts)
     for _i, (_pn, _pt) in enumerate(params):
-        if out[_i] == 'int64_t' and isinstance(_pt, str):
+        if gimple_ctypes.TypeLattice.is_word(out[_i]) and isinstance(_pt, str):
             _base = _pt.split('[', 1)[0].strip()
             if _base in structs:
                 out[_i] = 'struct ' + _base + ' *'

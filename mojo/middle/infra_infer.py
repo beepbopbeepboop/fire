@@ -3142,7 +3142,7 @@ def _dict_value_locals(gen, body: list) -> tuple[dict, dict]:
         if name in out_vt:
             return                       # first store wins
         vt = gen._quick_type(n.value)
-        if vt == 'int64_t':
+        if gimple_ctypes.TypeLattice.is_word(vt):
             lit = _container_literal_ctype(n.value)
             if lit is not None:
                 vt = lit
@@ -3243,7 +3243,7 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
         if not isinstance(lam, gimple_ctypes.LambdaExpr):
             return
         bt = gen._quick_type(lam.body)
-        if bt and bt != 'int64_t':
+        if bt and not gimple_ctypes.TypeLattice.is_word(bt):
             out[name] = bt
 
     def note_def(fd):
@@ -3251,7 +3251,7 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
         if not name or name in out:
             return
         bt = _infer_return_type(gen, fd.body)
-        if bt and bt != 'int64_t':
+        if bt and not gimple_ctypes.TypeLattice.is_word(bt):
             out[name] = bt
 
     for n in _each_binding(body):
@@ -3324,7 +3324,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     _scratch_mark_ml: int = gen._scan_scratch_top
     _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
-        if _n not in _merged or _t == 'int64_t':
+        if _n not in _merged or gimple_ctypes.TypeLattice.is_word(_t):
             _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
@@ -3565,7 +3565,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
         # sentinel check) via this pre-pass's seeded entry, even though
         # _lower_list_literal's own (later) codegen-time assignment
         # correctly left it unset.
-        if not (_e == 'int64_t' and gen._literal_elements_include_none(lit.elements)):
+        if not (gimple_ctypes.TypeLattice.is_word(_e) and gen._literal_elements_include_none(lit.elements)):
             elem[v] = _e
         if lit.elements and isinstance(lit.elements[0], gimple_ctypes.ListExpr):
             elem[v] = 'MojoList *'
@@ -3640,7 +3640,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:  # Only if there's an inner type
                             _ct = gen._resolve_type(inner)
-                            if _ct and _ct != 'int64_t':
+                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
                                 elem[_v] = _ct
                 elif _ann is not None and isinstance(_val, gimple_ctypes.SetExpr):
                     _ann_str = _as_str(_ann)
@@ -3649,7 +3649,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:
                             _ct = gen._resolve_type(inner)
-                            if _ct and _ct != 'int64_t':
+                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
                                 elem[_v] = _ct
                 continue
             if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
@@ -3723,7 +3723,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:  # Only if there's an inner type
                             _ct = gen._resolve_type(inner)
-                            if _ct and _ct != 'int64_t':
+                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
                                 elem[v] = _ct
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):

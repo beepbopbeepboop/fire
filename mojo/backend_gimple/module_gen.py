@@ -1373,7 +1373,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
             _ct0 = _ct
         elif _ct != _ct0:
             return None
-    return _ct0 if _ct0 and _ct0 != 'int64_t' else None
+    return _ct0 if _ct0 and not gimple_ctypes.TypeLattice.is_word(_ct0) else None
 
 
 
@@ -7995,7 +7995,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                 # `_elem_types[ov]`).
                 if isinstance(v, (ListExpr, TupleExpr, SetExpr)) and v.elements:
                     _cel = self._infer_list_elem_type(v.elements)
-                    if _cel and _cel != 'int64_t':
+                    if _cel and not gimple_ctypes.TypeLattice.is_word(_cel):
                         self._elem_types[mangled] = _cel
                 # UPGRADE an already-registered instance field's type —
                 # do NOT create one for a pure class-level attribute. A
@@ -8016,7 +8016,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                 # type ONCE above, then upgrading from it, is what makes the
                 # two agree for every spelling.
                 cur = self.struct_field_types[s.name].get(aname)
-                if cur is not None and cur in ('int', 'int64_t') and ctype != 'int64_t':
+                if cur is not None and cur in ('int', 'int64_t') and not gimple_ctypes.TypeLattice.is_word(ctype):
                     self.struct_field_types[s.name][aname] = ctype
                 if gimple_ctypes.TypeLattice.is_list(ctype) and isinstance(v, (ListExpr, TupleExpr)):
                     self._field_elem_types.setdefault(s.name, {})[aname] = (
@@ -8102,7 +8102,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # the raw-word Optional), non-pointer scalar payloads
                         # only (a pointer payload's None=NULL is already a
                         # distinguishable raw word).
-                        if (ft == 'int64_t' and _opt_m
+                        if (gimple_ctypes.TypeLattice.is_word(ft) and _opt_m
                                 and _as_str(s.name) in getattr(self, '_intu_structs', {})):
                             _payload_base = _fann_s.split('[')[0].strip()
                             if (_payload_base not in ('Pointer', 'UnsafePointer',
@@ -8112,7 +8112,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                     and '*' not in _fann_s):
                                 self._tagged_optional_fields.setdefault(
                                     _as_str(s.name), set()).add(f_name)
-                        if ft == 'int64_t' and _fann_s and _fann_s != _as_str(field.type_ann).strip():
+                        if gimple_ctypes.TypeLattice.is_word(ft) and _fann_s and _fann_s != _as_str(field.type_ann).strip():
                             ft = _mojo_type(_fann_s)
                         if isinstance(ft, str) and ft.startswith('MojoTuple_'):
                             # `var _iterators: Tuple[...]` — the chain/zip
@@ -8190,7 +8190,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # under its bare name (the one the rest of the
                         # emission keys on) and take the pointer spelling.
                         # Explicit loops, no f-string: self-host-safe.
-                        if (ft == 'int64_t' and _fann_s
+                        if (gimple_ctypes.TypeLattice.is_word(ft) and _fann_s
                                 and '.' in _fann_s and '[' not in _fann_s
                                 and '*' not in _fann_s):
                             _dparts = _fann_s.split('.')
@@ -8227,7 +8227,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # spelling per this codegen's universal struct-as-
                         # pointer convention (the same convention the
                         # capitalized branch and `_resolve_type` apply).
-                        if (ft == 'int64_t' and _fann_s
+                        if (gimple_ctypes.TypeLattice.is_word(ft) and _fann_s
                                 and '[' not in _fann_s and '.' not in _fann_s
                                 and '*' not in _fann_s):
                             _lcm_nf = getattr(self, '_local_cname_map', None)
@@ -8299,7 +8299,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
                         if _dv_early in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                             _nv_early = self._annotation_dict_nested_val_type(_as_str(field.type_ann))
-                            if _nv_early is not None and _nv_early != 'int64_t':
+                            if _nv_early is not None and not gimple_ctypes.TypeLattice.is_word(_nv_early):
                                 self._field_dict_nested_val_types.setdefault(
                                     s.name, {})[f_name] = _nv_early
                         # BUG-2026-023 residual (box.3d/game's
@@ -8388,7 +8388,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                             _slot_same = False
                                             break
                                     if (_slot_same and _slot_ct is not None
-                                            and _slot_ct != 'int64_t'):
+                                            and not gimple_ctypes.TypeLattice.is_word(_slot_ct)):
                                         self._field_nested_elem_types.setdefault(
                                             s.name, {})[f_name] = _slot_ct
 
@@ -9222,10 +9222,10 @@ def _gmp_apply_gimplegen_sigs(self, _gg_sigs) -> None:
             _outer_vt = _dv_row[0]
             _nested_vt = _dv_row[1]
             _raw_ann = _dv_row[2]
-            if _outer_vt and _as_str(_outer_vt) != 'int64_t':
+            if _outer_vt and not gimple_ctypes.TypeLattice.is_word(_as_str(_outer_vt)):
                 if _f not in _gg_dv:
                     _gg_dv[_f] = _as_str(_outer_vt)
-            if _nested_vt and _as_str(_nested_vt) != 'int64_t':
+            if _nested_vt and not gimple_ctypes.TypeLattice.is_word(_as_str(_nested_vt)):
                 if _f not in _gg_nv:
                     _gg_nv[_f] = _as_str(_nested_vt)
             if _raw_ann:
@@ -9236,7 +9236,7 @@ def _gmp_apply_gimplegen_sigs(self, _gg_sigs) -> None:
         for _ea_pair in _gg_eas.items():
             _ef = _as_str(_ea_pair[0])
             _ect = self._resolve_type(_as_str(_ea_pair[1]))
-            if _ect and _ect != 'int64_t':
+            if _ect and not gimple_ctypes.TypeLattice.is_word(_ect):
                 if 'GimpleGen' not in self._field_elem_types:
                     self._field_elem_types['GimpleGen'] = {}
                 _gg_et: dict = self._field_elem_types['GimpleGen']
@@ -10648,7 +10648,7 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
             # at the call site below, so this reader stays silent.
             return False
     _st = _as_str(st)
-    if _st == 'int64_t':
+    if gimple_ctypes.TypeLattice.is_word(_st):
         # `int64_t` is ALSO this codegen's BOX for a value whose kind nothing
         # resolved: a call/attribute result, an unpack target, an unannotated
         # parameter. The box may hold a container, so it is not proof of "a
@@ -10732,9 +10732,9 @@ def _gmh_static_arg_dict_val(self, a, dict_val, caller_name=None):
             return None
         if _l == _r:
             return _l
-        if _l == 'int64_t':
+        if gimple_ctypes.TypeLattice.is_word(_l):
             return _r
-        if _r == 'int64_t':
+        if gimple_ctypes.TypeLattice.is_word(_r):
             return _l
         return None
     return None
@@ -10814,7 +10814,7 @@ def _gmh_informative_elem_ctype(e):
     different call sites) reads correctly, and that is a coin flip
     either way — not worth re-rolling real stdlib code on while the
     breadth number is unmeasured."""
-    return e != 'int64_t' and e != ''
+    return not gimple_ctypes.TypeLattice.is_word(e) and e != ''
 
 
 def _gmh_note_literal_arg_elems(self, callee, pname, a):
@@ -10830,7 +10830,7 @@ def _gmh_note_literal_arg_elems(self, callee, pname, a):
         # An int list is the default and records no CONTRACT, but it is
         # still a call site: a sibling site that passes strings makes the
         # parameter kind-MIXED, not str.
-        if e == 'int64_t':
+        if gimple_ctypes.TypeLattice.is_word(e):
             self._param_int_elem_obs.setdefault(_as_str(callee), set()).add(
                 _as_str(pname))
         return
@@ -16606,7 +16606,7 @@ def gen_module_impl(self, stmts: list):
                 if pname == 'self':
                     idx += 1
                     continue
-                if idx < len(fpt) and pname in inferred and fpt[idx] == 'int64_t':
+                if idx < len(fpt) and pname in inferred and gimple_ctypes.TypeLattice.is_word(fpt[idx]):
                     fpt[idx] = inferred[pname]
                 idx += 1
 
@@ -17085,7 +17085,7 @@ def gen_module_impl(self, stmts: list):
                 # sites in GatedLinearAttention, two untyped ones in
                 # SwiGLU -- joined to (None, None), and every `g[i]` in it
                 # read back as raw int64 bits).
-                if _e == 'int64_t':
+                if gimple_ctypes.TypeLattice.is_word(_e):
                     _static_arg_int[0] = True
                     return None, None
                 return _e, _gmi_as_str(nested.get(_n))
@@ -17116,7 +17116,7 @@ def gen_module_impl(self, stmts: list):
             # the element as a boxed word cast to `char *` (always False).
             if not a.elements:
                 return None, None
-            if _e == 'int64_t':
+            if gimple_ctypes.TypeLattice.is_word(_e):
                 _static_arg_int[0] = True
                 return None, None
             if not self._literal_elements_include_none(a.elements):
@@ -17128,7 +17128,7 @@ def gen_module_impl(self, stmts: list):
             # no FunctionDef in `_fn_by_name`, so it answers None, the same
             # no-evidence answer every other unrecognised shape gives.
             _e = _callee_return_elem(_gmi_as_str(a.func.name))
-            if _e is None or _e == 'int64_t' or _e == '':
+            if _e is None or gimple_ctypes.TypeLattice.is_word(_e) or _e == '':
                 return None, None
             return _gmi_as_str(_e), None
         return None, None
@@ -22839,7 +22839,7 @@ def gen_module_impl(self, stmts: list):
                         # valid `double` expression (decimal point, exponent,
                         # or INFINITY/NAN) — no suffixing needed here.
                         _wexpr = f'mojo_box_from_double({_wf})'
-                    elif _wt == 'int64_t':
+                    elif gimple_ctypes.TypeLattice.is_word(_wt):
                         _wexpr = _wm
                     elif gimple_ctypes.TypeLattice.is_double(_wt):
                         _wexpr = f'mojo_box_from_double({_wm})'

@@ -35,12 +35,16 @@ PATTERNS = {
     # type-checks at the source; the builder calls (`_rt_call`, `_cast`,
     # `_copy`, `_goto`, `_binop`, ...) are checked by gimple_lint.
     "gen._emit( text": r"""\b(?:gen|self)\._emit\(""",
+    # Stage 5b: the six dynamic-word sets are read and written through
+    # `gen._words` (mojo/middle/valueinfo.py: `may_be_box`, `mark_tagged`, ...).
+    # A direct `gen._boxed_vals` is the old spelling.
+    "direct word-set use": r"""(?m)^(?![ \t]*#).*\b(?:gen|self)\._(?:boxed_vals|tagged_word_vals|dyn_word_vals|int_word_vals|maybe_kinds_vals|boxed_container_vals)\b""",
 }
 
 BASELINE = {
     "endswith(' *')": 67,
-    "== 'int64_t'": 405,
-    "in (.., 'int64_t', ..)": 312,
+    "== 'int64_t'": 101,
+    "in (.., 'int64_t', ..)": 313,
     # +1 on 2026-11-20: TypeLattice.is_cstr, the one definition call sites
     # should use instead of spelling the test.
     # also +1 each for is_word and is_double (same reason).
@@ -49,6 +53,7 @@ BASELINE = {
     "== 'double'": 61,
     "== 'MojoList *'": 54,
     "gen._emit( text": 298,
+    "direct word-set use": 10,
 }
 
 

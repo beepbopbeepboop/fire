@@ -62,14 +62,14 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # If the list is marked as having per-slot kinds that must be read
         # via mojo_list_get_boxed (e.g. a dict's keys materialized through
         # the opaque boxed path), use the boxed reader for every slot.
-        _mkv = (v in getattr(gen, '_maybe_kinds_vals', ()) or
-                lp in getattr(gen, '_maybe_kinds_vals', ()) or
-                _as_str(v) in getattr(gen, '_maybe_kinds_vals', ()) or
-                _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
+        _mkv = (gen._words.has_slot_kinds(v) or
+                gen._words.has_slot_kinds(lp) or
+                gen._words.has_slot_kinds(_as_str(v)) or
+                gen._words.has_slot_kinds(_as_str(lp)))
         if _mkv:
             _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
-            gen._boxed_vals.add(_ev)
-            gen._dyn_word_vals.add(_ev)
+            gen._words.mark_boxed(_ev)
+            gen._words.mark_dyn(_ev)
             return 'int64_t', _ev
         # A `struct.unpack(...)` result has ONE container ctype but a
         # per-slot real kind, statically known from the format string. The
@@ -133,7 +133,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             # value with no element record at all is a word whose kind only
             # the runtime knows (see `_dyn_word_vals`).
             if v not in gen._elem_types and lp not in gen._elem_types:
-                gen._dyn_word_vals.add(_ev)
+                gen._words.mark_dyn(_ev)
             return 'int64_t', _ev
         # Pointer elem that isn't char* (e.g. a nested MojoList*): read the
         # opaque int64_t then cast, matching the old 'int'-suffix handling.
@@ -144,7 +144,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # std/test/builtin/test_int.mojo's `a, b = divmod(...)`).
         if not elem or elem == 'unknown':
             _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
-            gen._dyn_word_vals.add(_ev)
+            gen._words.mark_dyn(_ev)
             return 'int64_t', _ev
         raw = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
         return elem, gen._cast(elem, raw)
@@ -156,12 +156,12 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     # R1/R5, shares _materialize_as_list with all()/any()/enumerate()/
     # *.join()/the list-pattern-target branch above in gimple_gen_stmts.py).
     lp = gen._materialize_as_list(vtype, v)
-    _mkv = (lp in getattr(gen, '_maybe_kinds_vals', ()) or
-            _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
+    _mkv = (gen._words.has_slot_kinds(lp) or
+            gen._words.has_slot_kinds(_as_str(lp)))
     if _mkv:
         _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
-        gen._boxed_vals.add(_ev)
-        gen._dyn_word_vals.add(_ev)
+        gen._words.mark_boxed(_ev)
+        gen._words.mark_dyn(_ev)
         return 'int64_t', _ev
     elem = gen._elem_of(lp)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
@@ -171,7 +171,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
     _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
     if lp not in gen._elem_types:
-        gen._dyn_word_vals.add(_ev)
+        gen._words.mark_dyn(_ev)
     return 'int64_t', _ev
 
 def _try_const_fold_int(gen, expr) -> int | None:
@@ -278,7 +278,7 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     _lp = _as_str(list_ptr)
     _nm = _as_str(name)
     gen._declare_var(_nm, 'MojoList *')
-    if slot_elem and slot_elem != 'int64_t':
+    if slot_elem and not gimple_ctypes.TypeLattice.is_word(slot_elem):
         gen._elem_types[_nm] = slot_elem
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
@@ -317,7 +317,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
     """
     _nm = _as_str(name)
     gen._declare_var(_nm, 'MojoList *')
-    if slot_elem and slot_elem != 'int64_t':
+    if slot_elem and not gimple_ctypes.TypeLattice.is_word(slot_elem):
         gen._elem_types[_nm] = slot_elem
     _dst = gen._cname(_nm)
     _lst = gen._new_temp('MojoList *')
