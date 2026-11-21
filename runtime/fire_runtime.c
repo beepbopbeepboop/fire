@@ -14159,6 +14159,26 @@ double mojo_dict_pop_double(MojoDict *d, char *key, double dflt) {
     return v;
 }
 
+/* `del d[k]` in the str-key domain. The deletion is CPython's item deletion,
+ * whose MISS is an error, not the defaulted pop's "answer the default": codegen
+ * lowered the statement to `mojo_dict_pop_int(d, k, 0)`, so `del d["y"]` on a
+ * dict without "y" silently did nothing and the `except KeyError:` handler
+ * never ran. The frozen check comes first and is the same one every pop above
+ * makes: a frozendict refuses deletion whatever the key, and its TypeError must
+ * not be shadowed by a KeyError from a key that happens to be absent. */
+static void _dict_del_k(MojoDict *d, char *key, int64_t keykind) {
+    if (!d) { mojo_raise_key_error(key); return; }
+    if (d->frozen)
+        mojo_raise_type_error((char *)"'frozendict' object does not support item deletion");
+    _DictSlot *sl = _dict_lookup_k(d, key, keykind);
+    if (!sl) { mojo_raise_key_error(key); return; }
+    _dict_remove_slot(d, sl);
+}
+
+void mojo_dict_del_item(MojoDict *d, char *key) {
+    _dict_del_k(d, key, 0 /* str key */);
+}
+
 MojoDict *mojo_dict_copy(MojoDict *d) {
     MojoDict *out = mojo_dict_new();
     if (d) mojo_dict_update(out, d);
@@ -16979,6 +16999,29 @@ char *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt)
 {
     return (char *)(uintptr_t)mojo_dict_pop_int_kw(d, kw,
                                                    (int64_t)(uintptr_t)dflt);
+}
+
+/* `del d[k]` with the key as a raw word, in the same three key kinds every
+ * other `_kw` twin here dispatches on (`mojo_dict_subscript_*_kw`). The two
+ * text-key arms delegate to the str-key deletion, so the raising and frozen
+ * behaviour cannot drift between them; the integer arm inlines the same two
+ * steps because `_dict_lookup_ik` is the integer probe. An absent integer key
+ * reports its decimal spelling, like the subscript twin. */
+void mojo_dict_del_item_kw(MojoDict *d, int64_t kw)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { mojo_dict_del_item(d, (char *)(intptr_t)kw); return; }
+    if (k == _KW_CONT) {
+        mojo_dict_del_item(d, ck);
+        mojo_dict_key_free(ck);
+        return;
+    }
+    if (!d) { mojo_raise_key_error(mojo_str_from_int(kw)); return; }
+    if (d->frozen)
+        mojo_raise_type_error((char *)"'frozendict' object does not support item deletion");
+    _DictSlot *sl = _dict_lookup_ik(d, kw);
+    if (!sl) { mojo_raise_key_error(mojo_str_from_int(kw)); return; }
+    _dict_remove_slot(d, sl);
 }
 /* The same two steps as mojo_dict_pop_double, over whichever key DOMAIN the
  * `_kw` word selects (see _kw_kind): probe the slot, then remove it. Spelled

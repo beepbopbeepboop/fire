@@ -682,7 +682,22 @@ def test_every_declaration_is_seen():
     #       `char *` out) — CPython 3.14's dedent. Word-shaped, word
     #       450 -> 451, total 968 -> 969; box stays 518.
     # `--fix` wrote this rung and every quoted figure above from one scan.
-    for header, want in (('fire_runtime.h', 885),   # --fix writes the live figure
+    # 885 -> 888 (2026-11-21, landing `CODEGEN_del_missing_dict_key_does_not_raise`):
+    # THREE names on the live header. One is master's own drift below the 885
+    # figure — `mojo_list_append_kinded`, the kinded append added after that
+    # rung was written and not counted by it — and TWO are from the fix that
+    # made `del d[k]` raise on an absent key instead of lowering to the
+    # defaulted pop and doing nothing:
+    #   +1  `mojo_dict_del_item` (`MojoDict *`, `char *` in, void out) — the
+    #       str-key deletion: frozen raises the item-deletion TypeError, an
+    #       absent key raises the catchable KeyError, a present one removes
+    #       the slot.
+    #   +1  `mojo_dict_del_item_kw` (`MojoDict *`, `int64_t` in, void out) —
+    #       its `_kw` twin. All three are BOX-shaped by the live rule: the
+    #       receiver is a named container type, so box 536 -> 539 and word
+    #       stays 459; total 995 -> 998. `--fix` wrote this rung and every
+    #       quoted figure from the same scan.
+    for header, want in (('fire_runtime.h', 888),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

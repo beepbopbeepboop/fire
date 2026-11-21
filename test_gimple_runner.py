@@ -15663,6 +15663,7 @@ def main():
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_except_around_builtin_errors_matches_cpython,
+                  test_del_missing_dict_key_raises_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
                   test_gimple_values_print_as_pointers_inside_containers,
                   test_dataclass_default_factory_fields_start_empty_and_per_instance):
@@ -17232,6 +17233,38 @@ def main():
         print("div zero")
     finally:
         print("finally")
+main()
+""")
+
+
+def test_del_missing_dict_key_raises_matches_cpython():
+    """`del d[k]` raises a catchable KeyError for an ABSENT key and really
+    removes a PRESENT one. It used to lower to `mojo_dict_pop_int(d, k, 0)`,
+    the defaulted pop, whose miss arm answered the default: the statement was
+    a silent no-op and the `except KeyError:` handler never ran. Both `del`
+    lowering arms are covered — a statically typed `MojoDict *` local, and
+    the dynamic dispatch an untyped parameter gets.
+    """
+    test_gimple_matches_cpython("gimple_del_missing_dict_key_raises", """\
+def remove_from(d, k):
+    try:
+        del d[k]
+    except KeyError:
+        print("param caught")
+    print(len(d))
+
+def main():
+    d = {"a": 1}
+    try:
+        del d["y"]
+    except KeyError:
+        print("del caught")
+    print(len(d))
+    del d["a"]
+    print(len(d))
+    e = {"b": 2}
+    remove_from(e, "zz")
+    remove_from(e, "b")
 main()
 """)
 

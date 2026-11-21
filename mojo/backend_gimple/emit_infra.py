@@ -3581,6 +3581,9 @@ _KW_DICT_FNS = frozenset([
     # wrote (caught by gimple_tuple_dict_key_is_content_keyed).
     'mojo_dict_subscript_int', 'mojo_dict_subscript_double',
     'mojo_dict_subscript_str', 'mojo_dict_subscript_boxed',
+    # `del d[k]`: its miss raises, so it cannot be the defaulted pop. With the
+    # twin here a word key keeps the integer/content-key domain the store used.
+    'mojo_dict_del_item',
     # The bool / None / struct setters. Absent from this set they were not
     # refused — `_apply_kw_keys` fell through to the "build the decimal string
     # now" arm, which stores the entry in the plain char* key DOMAIN while the
