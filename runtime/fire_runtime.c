@@ -2378,15 +2378,16 @@ int mojo_float_cmp_select(int64_t a, int64_t b, int ires, int dres)
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
- * zero) of a DOUBLE box, and the raw word for anything else — including a
- * non-double box, whose slot is not a number at all and whose word is what
- * the unboxed read returned. */
+ * zero) of a DOUBLE box, a kind-'i' id token read as its own integer value
+ * (the token word, not the object pointer it was minted from — see
+ * `mojo_id`), and the raw word for anything else. */
 int64_t mojo_box_int(int64_t v)
 {
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (!bx || !mojo_is_boxed(v)) return v;
-    if (bx->kind != 'd') return bx->bits;
-    return (int64_t)mojo_box_double(v);
+    if (bx->kind == 'd') return (int64_t)mojo_box_double(v);
+    if (bx->kind == 'i') return v;
+    return bx->bits;
 }
 
 /* Python's `int(x)` for a WORD of unknown kind — the one read `int(x)` must
@@ -2407,6 +2408,7 @@ int64_t mojo_int_of_word(int64_t w)
     if (mojo_is_boxed(w)) {
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         if (bx->kind == 'd') return (int64_t)mojo_box_double(w);
+        if (bx->kind == 'i') return w;
         if (bx->kind == 's' || bx->kind == 'p')
             return mojo_make_int((char *)(intptr_t)bx->bits);
         if (bx->kind == 'n')
@@ -2419,12 +2421,13 @@ int64_t mojo_int_of_word(int64_t w)
 }
 
 /* See the header: unwrap every box that has a word of its own, keep a float
- * box (and every non-box) as it is. */
+ * box and a kind-'i' id token (the token IS its integer identity) as they
+ * are, and every non-box as it is. */
 int64_t mojo_box_word(int64_t v)
 {
     if (!mojo_is_boxed(v)) return v;
     MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind == 'd') return v;
+    if (bx->kind == 'd' || bx->kind == 'i') return v;
     return bx->bits;
 }
 
@@ -9499,6 +9502,11 @@ void mojo_set_add_word(MojoSet *s, int64_t w)
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         if (bx->kind == 'n') { mojo_set_add_none(s); return; }
         if (bx->kind == 's') { mojo_set_add_bytes(s, (MojoBytes *)(intptr_t)bx->bits); return; }
+        /* A kind-'i' id token IS its integer identity: keep the token word,
+         * never unwrap it to the object pointer in bx->bits. Unwrapping lets
+         * _set_word_key see a registered container and dedupe by CONTENT,
+         * so {id(a), id(b)} collapses when a and b have equal content. */
+        if (bx->kind == 'i') { mojo_set_add_int(s, w); return; }
         w = bx->bits;
     }
     if (mojo_boxed_is_str(w)) mojo_set_add_str(s, (char *)(intptr_t)w);
@@ -9513,6 +9521,7 @@ int mojo_set_contains_word(MojoSet *s, int64_t w)
     if (mojo_is_boxed(w)) {
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         if (bx->kind == 'n') return mojo_set_contains_none(s);
+        if (bx->kind == 'i') return mojo_set_contains_int(s, w);
         w = bx->bits;
     }
     if (mojo_set_contains_int(s, w)) return 1;
@@ -9525,6 +9534,10 @@ void mojo_set_discard_word(MojoSet *s, int64_t w)
     if (mojo_is_str_box(w)) {
         mojo_set_discard_str(s, (char *)(intptr_t)mojo_str_box_word(w));
         return;
+    }
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        if (bx->kind == 'i') { mojo_set_discard_int(s, w); return; }
     }
     mojo_set_discard_int(s, w);
     if (mojo_boxed_is_str(w)) mojo_set_discard_str(s, (char *)(intptr_t)w);

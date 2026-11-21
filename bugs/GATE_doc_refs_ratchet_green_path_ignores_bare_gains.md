@@ -1,8 +1,8 @@
 # GATE: `doc-refs --ratchet` exits 0 while the BARE half has a gain
 
 **Job:** `doc-refs` (`python3 tools/dangling_doc_refs.py --ratchet`).
-**Status:** open. Not the same bug as
-`bugs/GATE_doc_refs_fallback_counts_its_own_ledger.md`: that one is
+**Status:** open. Not the same bug as the deleted
+`GATE_doc_refs_fallback_counts_its_own_ledger` doc: that one is
 `candidates()` counting the ledger in the no-git fallback. This one is
 `main()` computing the BARE verdict and then not consulting it when the
 prefixed half is clean, so the two checks disagree about the same tree.
@@ -17,7 +17,7 @@ prefixed half is clean, so the two checks disagree about the same tree.
     python3 test_suite.py
     # FAIL dangling refs: the BARE class has a ledger of its own ...
     #   BARE_BASELINE has 47 entries and the corpus has 48 citing files;
-    #   gains [('bugs/GATE_doc_refs_fallback_counts_its_own_ledger.md', 1, 0)]
+    #   gains [('GATE_doc_refs_fallback_counts_its_own_ledger (deleted doc)', 1, 0)]
 
     python3 - <<'EOF'
     import sys; sys.path.insert(0, 'tools')
@@ -26,7 +26,7 @@ prefixed half is clean, so the two checks disagree about the same tree.
     _bd, bf = d.bare_find()
     print(d.ratchet_verdict(by_file, bf)[1])
     EOF
-    # [('bugs/GATE_doc_refs_fallback_counts_its_own_ledger.md', 1, 0)]
+    # [('GATE_doc_refs_fallback_counts_its_own_ledger (deleted doc)', 1, 0)]
 
 So the gain is real (`ratchet_verdict` returns it), the walk sees it
 (`bare_find` returns 48 files against a 47-entry ledger), and `--ratchet`

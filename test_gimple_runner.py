@@ -15175,6 +15175,26 @@ def main():
 main()
 """)
 
+    # Minimal shape of the id-token set bug: two different lists with equal
+    # CONTENT must still contribute two distinct id() elements. Before the
+    # fix, mojo_set_add_word unwrapped a kind-'i' id box to the container
+    # pointer in bx->bits, _set_word_key turned that into a CONTENT key, and
+    # the two equal-content lists collapsed into one set element.
+    test_gimple_matches_cpython("gimple_id_token_set_dedupes_by_identity", """\
+def main():
+    a = [1, 2]
+    b = [1, 2]
+    ids = {id(a), id(b), id(a)}
+    print(len(ids))
+    print(id(a) != id(b))
+    # A different-content list must also be distinct.
+    c = [3, 4]
+    ids2 = {id(a), id(c)}
+    print(len(ids2))
+
+main()
+""")
+
     # `c == in_str` where one side is a `char *` VALUE and the other an
     # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
     # the codegen cannot tell them apart in one pass (the slot is assigned its
