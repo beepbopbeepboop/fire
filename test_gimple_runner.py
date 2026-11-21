@@ -3595,6 +3595,74 @@ y += 0.5
 print(y)
 """)
 
+    # The same truncation through the other typing paths the estimator reads
+    # for a `/`, from the doc this branch closes: `_quick_type`'s BinaryOp
+    # arm fell through to `join(int64_t, int64_t) = int64_t`, so a plain
+    # `x = x / 2` stored a double into the int64_t local and a `return n / 2`
+    # joined an int64_t return slot — while the emitter's `_lower_binary_tail`
+    # answered double. The rule is now shared (`gimple_ctypes._true_div_cotype`),
+    # so the estimator and the emitter cannot drift.
+    test_gimple_matches_cpython("gimple_true_division_widens_a_plain_int_local", """\
+def main():
+    x = 9
+    x = x / 2
+    print(x)
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_true_division_widens_a_return_expression", """\
+def half(n):
+    return n / 2
+
+def main():
+    print(half(9))
+main()
+""")
+
+    # The RETURN slot: by the `return` the local is ALREADY double — the
+    # augmented-assignment join above, and `x * 0.5` for the second — so the
+    # only thing that can cast it back into the int64_t return conversion is
+    # a stale estimate: `_infer_return_type` re-estimated the name before the
+    # local table existed (pass 2a runs before `_infer_local_var_types`), and
+    # a bare identifier answered its int64_t default. Passing the FunctionDef
+    # lets it merge the body's local table instead.
+    test_gimple_matches_cpython("gimple_true_division_widens_an_augmented_return_slot", """\
+def f():
+    x = 9
+    x /= 2
+    return x
+
+def main():
+    print(f())
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_true_division_widens_a_return_slot_local", """\
+def f():
+    x = 3.0
+    y = x * 0.5
+    return y
+
+def main():
+    print(f())
+main()
+""")
+
+    # The control that must NOT be widened: a PythonObject operand keeps its
+    # int64_t word of double bits — `_lower_binary_tail`'s box arm answers
+    # before the true-division gate, so `_true_div_cotype` refuses a box
+    # operand and the estimator says int64_t too. `4614838538166547251` is
+    # 3.4's double bits printed as that word. CPython cannot run the source,
+    # so this pins the emitted value directly rather than matching it.
+    test_gimple_stdout("gimple_python_object_division_keeps_its_box", """\
+def main():
+    a = PythonObject(34)
+    b = PythonObject(10)
+    c = a / b
+    print(c)
+main()
+""", "4614838538166547251\n", filename='true_div_box.py')
+
     test_gimple_matches_cpython("gimple_float_truthiness_is_not_its_integer_part", """\
 def f():
     x = 0.0001

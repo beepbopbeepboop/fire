@@ -5848,8 +5848,8 @@ class GimpleGen:
         return grsl.cpp_word_container_operator(kind, via_intptr)
     def _materialize_as_list(self, src_type: str, value: str) -> str:
         return ginf._materialize_as_list(self, src_type, value)
-    def _infer_return_type(self, body: list) -> str:
-        return ginf._infer_return_type(self, body)
+    def _infer_return_type(self, body: list, func_def=None) -> str:
+        return ginf._infer_return_type(self, body, func_def=func_def)
     def _quick_container_elem(self, node) -> str | None:
         return ginf._quick_container_elem(self, node)
     def _prepass_list_elem(self, elements) -> str:
