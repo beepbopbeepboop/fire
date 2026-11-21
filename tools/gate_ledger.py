@@ -107,6 +107,16 @@ def _splice(b, lo, hi, text):
     return (b[:lo] + text.encode() + b[hi:]).decode()
 
 
+def registered(src, job):
+    """True when JOB has a `test()`/`fanout()` registration of its own.
+
+    A fanout ITEM is named `<parent>:<file>` and has none: the parent's call
+    builds it, so there is no statement in tools/suite.py to splice a marker
+    into, and set_disabled is a no-op for it. The ledger has to know that
+    before its doc tells a fixer to remove an argument that does not exist."""
+    return next(iter(_registrations(src, job)), None) is not None
+
+
 def get_marker(src, job, kw_name):
     """The registration's text for keyword KW_NAME (`expect` or `disabled`), or None when empty or absent."""
     for call in _registrations(src, job):
@@ -235,11 +245,26 @@ def report_text(job, e, run_sha, log, subj_of):
     def show(sha):
         return "none recorded (no earlier full-gate run covered this job)" if not sha else "`%s` %s" % (sha[:10], subj_of(sha))
     fb = e.get("first_bad")
+    if e.get("registered") is False:
+        # A fanout item (`bootstrap-stage2-dumps:fib_jit.mojo`) is not a
+        # registration of its own, so set_disabled wrote nothing and there is no
+        # marker for a fixer to remove. The boilerplate that said there was is
+        # what sent the fifty stage2-dumps docs of 2026-11-21 after an argument
+        # that could not exist.
+        skipped = ("- **No marker:** `%s` is one item of the `%s` fanout and "
+                   "has no registration of its own, so there is no `disabled=` "
+                   "argument to remove: the gate runs it as part of that fanout. "
+                   "Fix the cause (when a producer is what is off, its doc is the "
+                   "switch), make the item pass, and delete this doc in the same "
+                   "commit." % (job, job.split(":", 1)[0]))
+    else:
+        skipped = ("- **Skipped:** the job's registration in `tools/suite.py` carries `disabled='%s'`, so the gate spends no time on it. "
+                   "To fix it: remove the `disabled=` argument, make the job pass, and delete this doc in the same commit."
+                   % doc_path(job))
     return ("## Gate ledger\n\n"
             "- **Last known working:** %s\n"
             "- **First known not working:** %s\n"
             "- **Seen red in the full gate at:** `%s` (log `%s`)\n"
-            "- **Skipped:** the job's registration in `tools/suite.py` carries `disabled='%s'`, so the gate spends no time on it. "
-            "To fix it: remove the `disabled=` argument, make the job pass, and delete this doc in the same commit.\n"
+            "%s\n"
             % (show(e.get("last_good")), show(fb) if fb else "not bisected: " + (e.get("bisect_note") or "unknown"),
-               run_sha[:10], log, doc_path(job)))
+               run_sha[:10], log, skipped))
