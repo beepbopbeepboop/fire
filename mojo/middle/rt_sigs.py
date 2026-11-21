@@ -836,6 +836,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_shlex_join': ['char *', 'MojoList *'],
     'mojo_sorted': ['void *', 'void *'],
     'mojo_sorted_by_keys': ['MojoList *', 'MojoList *', 'MojoList *', 'int'],
+    'mojo_sorted_kind': ['void *', 'void *', 'int'],
     'mojo_split_dyn': ['int64_t', 'int64_t', 'int64_t'],
     'mojo_sprintf_ptr': ['char *', 'char *', 'void *'],
     'mojo_sqlite3_bind_double': ['void', 'void *', 'int64_t', 'double'],

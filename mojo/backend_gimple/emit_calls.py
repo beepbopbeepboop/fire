@@ -7740,6 +7740,26 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
         _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
     gen._declare_var(_kvar, _kelem_t)
     gen._copy(f"{gen._cname(_kvar)}", f"{_read}")
+    # The element is a TUPLE when the list records per-slot types for its
+    # elements. Bind that record to the lambda's own parameter name for the
+    # duration of the synthesized call, so `key=lambda p: p[0]` reads slot 0
+    # with ITS type. Without it the subscript was an untyped int64_t address,
+    # the key was appended with `mojo_list_append_int`, and a keyed sort of
+    # `[("bob", 3), ...]` by `p[0]` compared the string POINTERS. The binding
+    # is saved and restored around the call because `_tuple_slot_types` is
+    # keyed by value name, and a parameter name is not unique across the
+    # functions one compile emits.
+    _elem_slots = gen._tuple_slot_types.get(av)
+    _slot_param = ''
+    _slot_had = False
+    _slot_old = None
+    if (_elem_slots is not None
+            and isinstance(key_expr, gimple_ctypes.LambdaExpr)
+            and len(key_expr.params) > 0):
+        _slot_param = _as_str(key_expr.params[0][0])
+        _slot_had = _slot_param in gen._tuple_slot_types
+        _slot_old = gen._tuple_slot_types.get(_slot_param)
+        gen._tuple_slot_types[_slot_param] = _elem_slots
     _saved_param_types = _bind_callable_element_param(gen, key_expr, _kelem_t)
     try:
         kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
@@ -7766,19 +7786,40 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
             kret_t = 'char *'
     finally:
         _unbind_callable_element_param(gen, key_expr, _saved_param_types)
+        if _slot_param:
+            if _slot_had:
+                gen._tuple_slot_types[_slot_param] = _slot_old
+            else:
+                gen._tuple_slot_types.pop(_slot_param, None)
     # A `char *` key is a STRING to compare (strcmp), not an address to
     # compare as an int64_t slot — `sorted(words, key=lambda w: w)` with
     # the int path ordered by address. The key's own lowered return type
     # is what decides that, and it is recorded on the keys list so the
     # in-place `l.sort(key=f)` path can hand the runtime the same answer
     # (mojo_sorted_by_keys re-derives it with the runtime's own probe).
+    #
+    # A DOUBLE key is its IEEE bits in an int64_t slot, so appending it as an
+    # int ordered every negative key after every positive one; append it as a
+    # double and record 'd' for the same reason a string key records 'p'.
+    # The int fallback records nothing: an int64_t here may equally be a box
+    # whose real kind only the runtime can answer, and the runtime's probe
+    # (_mojo_sort_keys_kind) already answers that case.
+    _key_kind = ''
     if kret_t == 'char *':
         gen._void_call('mojo_list_append_str', [('MojoList *', keys), ('char *', kret_v)])
         gen._elem_types[keys] = 'char *'
+        _key_kind = "'p'"
+    elif kret_t in gimple_ctypes._FLOAT_TYPES:
+        _kdbl = kret_v if kret_t == 'double' else gen._coerce_to_type(kret_t, 'double', kret_v)
+        gen._void_call('mojo_list_append_double', [('MojoList *', keys), ('double', _kdbl)])
+        _key_kind = "'d'"
     else:
         kret = gen._to_int64(kret_t, kret_v)
         gen._void_call('mojo_list_append_int', [('MojoList *', keys), ('int64_t', kret)])
     gen._loop_tail(kidx, bb_cond, '', bb_after, False)
+    if _key_kind:
+        gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
+                       [('MojoList *', keys), ('char', _key_kind)])
     return keys
 
 
@@ -7971,7 +8012,22 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
             t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
             gen._elem_types[t] = 'char *'
         else:
-            t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
+            # Tell the runtime what the slots HOLD, exactly as the method
+            # path already does (emit_methods' `l.sort()` arm). Without it
+            # mojo_sorted ordered the raw int64_t payloads, so `sorted([[2],
+            # [1, 2], [1]])` kept its input order (tuple/list POINTERS) and
+            # `sorted([-1.5, 2.5, 0.5])` ordered the IEEE bits. 0 stays "I
+            # do not know" and the runtime falls back to its own kinds table
+            # and discriminator.
+            _ek = _elem_before
+            if not _ek or _ek == 'int64_t':
+                _ek = gen._elem_of(av)
+            _ekind = '0'
+            if _ek != 'int64_t' or gen._elem_types.get(av):
+                _eb = gimple_ctypes.TypeLattice.slot_kind_byte(_ek)
+                _ekind = gimple_ctypes.TypeLattice.slot_kind_const(_eb)
+            t = gen._call_expr('MojoList *', 'mojo_sorted_kind',
+                               [(at, av), ('int', _ekind)])
     # sorted() only reorders — the result keeps the input's element /
     # nested-element (tuple-pair) types, so a later `for x, y in
     # sorted(lst):` tuple-target loop reads slots with the right accessor.

@@ -3887,6 +3887,54 @@ def main():
 main()
 """, "[[], [1], [1, 2], [1, 2, 3]]\n")
 
+    # `sorted()` must agree with CPython on BOTH halves of a `key=` ordering:
+    # every element is mapped through the key ONCE, and the keys — not the
+    # elements' raw int64_t slots — decide the order. The integer zero used to
+    # print as `None` because a keyed sort dropped the result list's per-slot
+    # kinds, and a zero slot with no kind row is the runtime's "boxed None"
+    # guess.
+    test_gimple_matches_cpython("gimple_sorted_key_order", """\
+def main():
+    words = ["pear", "Apple", "fig", "banana", ""]
+    print(sorted(words, key=len))
+    print(sorted(words, key=lambda w: w.lower()))
+    nums = [3, -7, 2, 0, -1]
+    print(sorted(nums, key=abs))
+    print(sorted(nums, key=lambda n: -n))
+main()
+""")
+
+    # A tuple is compared ELEMENT BY ELEMENT, and the sort is stable: the two
+    # `al` pairs of the keyed sorts keep their input order. `sorted(pairs)`
+    # used the generic int64 payload sort and ordered the tuple POINTERS, while
+    # `.sort(key=lambda p: p[0])` compared the string key's ADDRESS.
+    test_gimple_matches_cpython("gimple_sorted_tuple_order", """\
+def main():
+    pairs = [("bob", 3), ("al", 3), ("cy", 1), ("al", 0)]
+    print(sorted(pairs))
+    print(sorted(pairs, key=lambda p: p[1]))
+    pairs.sort(key=lambda p: p[0])
+    print(pairs)
+main()
+""")
+
+    # The same two properties on the shapes the repros do not spell out: a
+    # nested-list `sorted()` (elementwise, not by the inner list's address or
+    # its LENGTH first) and a `key=` whose value is a DOUBLE (bit-pattern
+    # ordering put every negative key after every positive one).
+    test_gimple_matches_cpython("gimple_sorted_nested_and_double_key", """\
+def main():
+    print(sorted([[2], [1, 2], [1]]))
+    xs = [0.9, 0.1, 0.5]
+    print(sorted(xs, key=lambda x: x))
+    nums = [-0.25, 0.75, 0.25]
+    nums.sort(key=lambda x: x)
+    print(nums)
+    ys = [-1.5, 2.5, 0.5, -3.0]
+    print(sorted(ys))
+main()
+""")
+
     # What Python REFUSES to sort must be refused here too, and loudly. The
     # silent no-op this replaced was indistinguishable from a sort that
     # happened to leave the list alone; a heterogeneous list's only correct
