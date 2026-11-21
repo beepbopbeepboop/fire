@@ -220,6 +220,41 @@ def fold_arith(op: str, left: int, right: int):
     return None
 
 
+def fold_arith_float(op: str, left: float, right: float):
+    """Fold one arithmetic operator on two FLOATS, or None.
+
+    The float half of `fold_arith`, and a separate function for the same
+    reason `fold_arith` is one: its annotated `int` parameters are what the
+    statically compiled backend types the arithmetic on, so a local that can
+    hold a `char *` must never reach that body. A caller enters here only
+    when an operand really is a float.
+
+    `eval_const_int` can never answer a float expression, so without this
+    fold the whole condition was declined and `eval_const_bool_state` read
+    the decline as CONST_FALSE: a module-level `if 1.5 * 2:` — and even
+    `if not -0.0:` — deleted its then-arm before emission. The operators are
+    `eval_const_int`'s own arithmetic set plus `/` (true division on floats),
+    and the result is checked to be a real number (`(-2.0) ** 0.5` is a
+    `complex`, not a condition) and a raising fold answers None, like every
+    other unanswerable shape here.
+    """
+    try:
+        l = float(left)
+        r = float(right)
+        if op == '+':   return l + r
+        if op == '-':   return l - r
+        if op == '*':   return l * r
+        if op == '/':   return l / r if r else None
+        if op == '//':  return l // r if r else None
+        if op == '%':   return l % r if r else None
+        if op == '**':
+            result = l ** r
+            return result if isinstance(result, float) else None
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+    return None
+
+
 # The unary operators `fold_unary_sign` knows, as a membership set so a caller
 # can ask the question without doing the arithmetic on an operator it does not
 # have. `formal/model.py`'s `_FOLD_UNARY` is the same three keys spelled as a
@@ -1152,9 +1187,29 @@ def _eval_compilation_target_pred(node):
     return None
 
 
+def folded_truth(value):
+    """The truth value of a value `eval_const` folded, or None when the fold
+    produced no value at all.
+
+    Truthiness is the source language's own (Python's) rule, so every folded
+    value answers it: `""`, `[]`, `{}` and `()` are false, their non-empty
+    counterparts true, and numbers are `!= 0`. Every place in this file that
+    turns a folded value into a bool goes through here, because two of them
+    used to accept only `bool`/`int`: a module-level `if` on a folded string,
+    list, tuple or dict had its then-arm deleted as CONST_FALSE, and the
+    `not` fold answered "not a number, so unfoldable" (which the same caller
+    then read as CONST_FALSE). That is how `if "x":` and `if not "":`
+    compiled to their else arms while the numbers-only cases looked right.
+    """
+    if isinstance(value, (bool, int, float, str, bytes, list, tuple, dict,
+                          set, frozenset)):
+        return bool(value)
+    return None
+
+
 def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None):
-    """Evaluate `node` as any compile-time constant (int, bool, or str) — or
-    None if it isn't foldable.
+    """Evaluate `node` as any compile-time constant — an int, bool, float,
+    str, or a list/tuple/dict of them — or None if it isn't foldable.
 
     `bindings` is the backend's `comptime NAME = value` table (the gimple
     path's `gen._comptime_vals`, the arm64 path's own). A superset of
@@ -1411,11 +1466,23 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
         return _sv
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const(node.operand, bindings, platform, conforms_to_pred)
+        # A float operand makes this a float fold, which `fold_unary_sign`
+        # (an integer sign table) and its `eval_const_int` fallback cannot
+        # answer at all: `if -0.5:` folded to None and its then-arm was
+        # deleted as CONST_FALSE. `+`/`-` are exact on a double; `~` has no
+        # float meaning (CPython raises), so it stays unfolded.
+        if isinstance(v, float) and node.op in ('+', '-'):
+            return -v if node.op == '-' else v
         return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
             and not isinstance(v, str) else None
     if isinstance(node, UnaryOp) and node.op == 'not':
-        v = eval_const(node.operand, bindings, platform, conforms_to_pred)
-        return not v if isinstance(v, (bool, int)) else None
+        # Truthiness of every folded value, not just numbers: `not "x"` is
+        # False and `not ""` is True. Answering None here made
+        # `eval_const_bool_state` read the shape as CONST_FALSE and delete
+        # the then-arm of a module-level `if not "":`.
+        t = folded_truth(eval_const(node.operand, bindings, platform,
+                                    conforms_to_pred))
+        return None if t is None else not t
     if isinstance(node, BinaryOp):
         op = node.op
         # DType equality is identity of the dtype, not identity of the marker's
@@ -1490,6 +1557,15 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
         if (isinstance(l, (int, bool)) and not isinstance(l, str)
                 and isinstance(r, (int, bool)) and not isinstance(r, str)):
             folded = fold_arith(op, l, r)
+            if folded is not None:
+                return folded
+        # A float operand makes the expression float-valued, and no integer
+        # folder can answer it, so this is the only place that can. Entering
+        # only on a REAL float keeps `7 % 2` and `2 ** 3` folding exactly as
+        # before (through `eval_const_int`'s fallback), which is what a
+        # `comptime` integer constant is entitled to.
+        if isinstance(l, float) or isinstance(r, float):
+            folded = fold_arith_float(op, l, r)
             if folded is not None:
                 return folded
         # String concatenation folds so comptime diagnostics can format
@@ -1656,18 +1732,17 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
 def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as a compile-time bool, or None.
 
-    A folded value answers PYTHON truthiness, not just bool/int: a folded
-    float (`bool(0.5)` is True) and a folded container (`if "x":`, `if [1]:`,
-    `if {1: 2}:` are all True in CPython, and their empty forms False). A
-    shape that folds to a value and is then not answered here is reported
-    FALSE by `eval_const_bool_state` below, which folded `if 0.0001:` and
-    `if "x":` to the else arm at module level, deleting the then-arm before
-    emission.
+    A folded value answers PYTHON truthiness (`folded_truth`), not just
+    bool/int: a folded float (`bool(0.5)` is True) and a folded container
+    (`if "x":`, `if [1]:`, `if {1: 2}:` are all True in CPython, and their
+    empty forms False). A shape that folds to a value and is then not
+    answered here is reported FALSE by `eval_const_bool_state` below, which
+    folded `if 0.0001:` and `if "x":` to the else arm at module level,
+    deleting the then-arm before emission.
     """
-    v = eval_const(node, bindings, platform, conforms_to_pred)
-    if isinstance(v, (bool, int, float, str, bytes, list, tuple, dict, set,
-                      frozenset)):
-        return bool(v)
+    t = folded_truth(eval_const(node, bindings, platform, conforms_to_pred))
+    if t is not None:
+        return t
     # Fallback: eval_const_int also folds what eval_const does not (calls,
     # via the hook).
     result = eval_const_int(node, bindings, call_hook, conforms_to_pred)
