@@ -2413,12 +2413,6 @@ int64_t mojo_int_of_word(int64_t w)
             return mojo_make_int((char *)(intptr_t)bx->bits);
         if (bx->kind == 'n')
             mojo_raise_type_error((char *)"int() argument must be a string, a bytes-like object or a real, not 'NoneType'");
-        /* kind 'i' is `mojo_id`'s token: an INTEGER whose value IS the box
-         * address. Unwrapping to `bx->bits` answered the wrapped CONTAINER
-         * (or string) instead, so `int(id(x)) == id(x)` was False and a dict
-         * keyed by `int(id(x))` stopped matching the same token stored whole
-         * (bugs/CODEGEN_id_token_set_dedupes_by_container_content.md). */
-        if (bx->kind == 'i') return w;
         return bx->bits;
     }
     if (mojo_boxed_is_str(w))

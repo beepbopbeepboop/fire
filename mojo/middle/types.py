@@ -191,66 +191,6 @@ class TypeLattice:
         """`t` is the C spelling of a list/tuple value (`MojoList *`)."""
         return t == 'MojoList *'
 
-    # Tuple-membership predicates (doc/GIR.md stage 4). Each one answers
-    # exactly what the tuple test it replaces answered, `None` included where
-    # the tuple lists it; `tools/type_string_codemod.py` maps each tuple to it.
-    @classmethod
-    def is_int_word_or_bool(cls, t: str) -> bool:
-        """`t in ('int', 'int64_t', '_Bool')`."""
-        if not t:
-            return False
-        return t == 'int' or t == 'int64_t' or t == '_Bool'
-
-    @classmethod
-    def is_int_word_or_voidp(cls, t: str) -> bool:
-        """`t in ('int', 'int64_t', 'void *')`."""
-        if not t:
-            return False
-        return t == 'int' or t == 'int64_t' or t == 'void *'
-
-    @classmethod
-    def is_py_scalar(cls, t: str) -> bool:
-        """`t in ('int64_t', 'double', '_Bool', 'char *')`: the C spellings of
-        Python's int, float, bool and str."""
-        if not t:
-            return False
-        return t == 'int64_t' or t == 'double' or t == '_Bool' or t == 'char *'
-
-    @classmethod
-    def is_word_or_cstr(cls, t: str) -> bool:
-        """`t in ('int64_t', 'char *')`."""
-        if not t:
-            return False
-        return t == 'int64_t' or t == 'char *'
-
-    @classmethod
-    def is_int_word_or_none(cls, t: str) -> bool:
-        """`t in (None, 'int', 'int64_t')`: also True for a missing type."""
-        if t is None:
-            return True
-        return t == 'int' or t == 'int64_t'
-
-    @classmethod
-    def is_word_or_none(cls, t: str) -> bool:
-        """`t in (None, 'int64_t')`: also True for a missing type."""
-        if t is None:
-            return True
-        return t == 'int64_t'
-
-    @classmethod
-    def is_word_or_bytes(cls, t: str) -> bool:
-        """`t in ('int64_t', 'MojoBytes *')`."""
-        if not t:
-            return False
-        return t == 'int64_t' or t == 'MojoBytes *'
-
-    @classmethod
-    def is_word_or_list(cls, t: str) -> bool:
-        """`t in ('int64_t', 'MojoList *')`."""
-        if not t:
-            return False
-        return t == 'int64_t' or t == 'MojoList *'
-
     @classmethod
     def is_int_word(cls, t: str) -> bool:
         """`t` is the C spelling of a plain int or the untyped word: exactly
