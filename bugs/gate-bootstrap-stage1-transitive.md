@@ -31,10 +31,3 @@ It is red on `master`: reproduce it there (`python3 tools/suite.py bootstrap-sta
 - Still NOT done: the named job `tools/suite.py bootstrap-stage1-transitive` has not been rerun green on master. The
   doc stays until it is. Two earlier `fire.py build` runs (pids 36526 and 72861) are still alive; they are no longer
   needed for this check, and their owner should stop them.
-
-## Gate ledger
-
-- **Last known working:** `7b29b4f689` integrate bug-interp-positional-bracket-on-bound-m
-- **First known not working:** `1010277e6f` Merge remote-tracking branch 'origin/master'
-- **Seen red in the full gate at:** `77c157bb07` (log `/Users/mrs/net/chatgpt/claude/work-verify/verify-77c157bb.log`)
-- **Skipped:** the job's registration in `tools/suite.py` carries `disabled='bugs/gate-bootstrap-stage1-transitive.md'`, so the gate spends no time on it. To fix it: remove the `disabled=` argument, make the job pass, and delete this doc in the same commit.

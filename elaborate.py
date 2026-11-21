@@ -28,7 +28,7 @@ from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to, eval_const_int)
-from mojo.middle.comptime_fn import resolve_struct_aliases, resolve_fn_comptime_refs
+from mojo.middle.comptime_fn import resolve_struct_aliases
 from gimple_codegen import _mojo_type
 from mojo.middle.exprtypes import _is_concrete_type_arg
 from mojo.middle.types import _body_builds_struct_tuple
@@ -691,12 +691,7 @@ def bind_type_args(template_src: str, type_args):
     that is shorter than the full parameter list names only the parameters after
     the `//`, and the deduced prefix is read from them (`_deduce_prefix_from_rest`).
     A full-length list is taken as written, which is what the instance's own
-    mangled mentions spell. A list that already carries the prefix but omits a
-    trailing default (`[True, T, origin]` of four, which the alias evaluators
-    produce) is taken as written too: the deduction above cannot tell it from
-    a short list by length, and its own answer is refused when no argument
-    pins the prefix, so the written positions stand exactly as they did before
-    the deduction existed.
+    mangled mentions spell.
 
     Supplied arguments are taken POSITIONALLY — the same `zip` the caller
     already used — and only the trailing ones can come from a default, because
@@ -718,20 +713,9 @@ def bind_type_args(template_src: str, type_args):
             supplied = supplied[:len(params)]
     k = deduced_param_count(template_src)
     if k and len(supplied) < len(params) and not any(p.startswith('*') for p in params):
-        # A SHORT bracket names only the parameters after `//`, so read the
-        # deduced prefix from its origin arguments. When that cannot be read,
-        # take the list AS WRITTEN — the positional rule every full-length
-        # caller already relies on. The two spellings are indistinguishable
-        # by length alone: `_struct_bind_args` (an internal alias evaluator)
-        # fills the `//` prefix itself and leaves the trailing default to the
-        # loop below, so `[True, T, origin]` for a 4-parameter struct is a
-        # PREFIXED list, not a short one. Re-deducing it duplicated the
-        # prefix and declined the instantiation, which is what turned
-        # LinkedList's `IteratorType` alias (and so every `__iter__` caller)
-        # back into an `int64_t` stub.
-        deduced = _deduce_prefix_from_rest(template_src, params, supplied, k)
-        if deduced is not None:
-            supplied = deduced
+        supplied = _deduce_prefix_from_rest(template_src, params, supplied, k)
+        if supplied is None:
+            return None
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
     if _first_unbound_type_param(params, supplied, defaults) is not None:
         return None
@@ -4028,21 +4012,6 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        # A comptime reference to ANOTHER struct's members in the body
-        # (`FPUtils[dtype].integral_type`, `FPUtils[dtype].exponent_bias()` in
-        # the stdlib's _ldexp_impl) is folded to its concrete value HERE, the
-        # way the struct path folds the struct's own aliases
-        # (resolve_struct_aliases in elaborate_generic_struct): the
-        # monomorphized instance is its own translation unit with no definition
-        # of a struct the home module merely imports, so the reference left in
-        # the source reads as a zero word and the type derived from it erases
-        # to the wrong dtype — the `float << float` that stopped the
-        # _ldexp_impl family (bugs/CODEGEN_stdlib_syntax_six_files_red_
-        # after_2026_11_20_merges). Done on the template, before
-        # monomorphize_source, so the instantiation's own key and signature see
-        # the same text. A reference that cannot be decided stays as written.
-        tmpl = resolve_fn_comptime_refs(tmpl, targs, module_src)
-
         nested_objects: list = []
         _, concrete = mm.monomorphize_source(tmpl, targs)
         # The instance is its own compilation unit (see elaborate_generic_struct): it
@@ -4091,13 +4060,6 @@ class Elaborator:
         # typed with it name the concrete dtype rather than staying erased. Done once on the
         # template so the instance object, its signature and its cache key all see the same text.
         tmpl = resolve_struct_aliases(tmpl, targs, module_src)
-        # The same folding for references in the struct's METHOD bodies
-        # (`FPUtils[Self.dtype].mantissa_width()`): the instance unit has no
-        # definition of the referenced struct either, so the reference is
-        # folded before monomorphization, where the home module's import map
-        # still locates it. resolve_struct_aliases covers only the struct's
-        # OWN `Self.<alias>` members; this covers every other struct mention.
-        tmpl = resolve_fn_comptime_refs(tmpl, targs, module_src)
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
         _validate_align_decorators_for_struct(module_src, tmpl, struct_name, targs)

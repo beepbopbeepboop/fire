@@ -2040,7 +2040,7 @@ def _populate_decorated_method_wrapped(self, stmts, imported_stmts) -> None:
                 _dw_dret = self.func_return_types.get(_dw_csym_c)
                 if _dw_dret is None:
                     _dw_dret = self.func_return_types.get(_dw_ds)
-                if gimple_ctypes.TypeLattice.is_int_word(_as_str(_dw_dret)):
+                if _as_str(_dw_dret) in ('int64_t', 'int'):
                     _dw_dec_csym = _dw_csym_c
                     break
             if _dw_dec_csym is None:
@@ -2227,7 +2227,7 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
             # pre-arm behavior.
             if 'property' in (getattr(m, 'decorators', None) or []):
                 _pa_ret = _as_str(ret)
-                if (gimple_ctypes.TypeLattice.ends_in_star(_pa_ret) or gimple_ctypes.TypeLattice.is_int_word_or_bool(_pa_ret)):
+                if (gimple_ctypes.TypeLattice.ends_in_star(_pa_ret) or _pa_ret in ('int64_t', 'int', '_Bool')):
                     _pa = self._getattr_property_arms
                     if _arms_sn not in _pa:
                         _pa[_arms_sn] = {}
@@ -2463,7 +2463,7 @@ def _emit_reflection_dispatch(self, parts):
                 if gimple_ctypes.TypeLattice.is_bool(ftype):
                     _ad_setter = 'mojo_dict_set_bool'
                     _ad_arg = f'obj->{safe_f}'
-                elif (gimple_ctypes.TypeLattice.is_int_word(ftype) and _asdict_scalar_none_annot(
+                elif (ftype in ('int64_t', 'int') and _asdict_scalar_none_annot(
                         (getattr(self, '_field_annotations', None) or {}).get(
                             sn + '.' + fname, ''))):
                     # `int | None`: the word 0 may be a None (this word
@@ -8023,7 +8023,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                 # type ONCE above, then upgrading from it, is what makes the
                 # two agree for every spelling.
                 cur = self.struct_field_types[s.name].get(aname)
-                if cur is not None and gimple_ctypes.TypeLattice.is_int_word(cur) and not gimple_ctypes.TypeLattice.is_word(ctype):
+                if cur is not None and cur in ('int', 'int64_t') and not gimple_ctypes.TypeLattice.is_word(ctype):
                     self.struct_field_types[s.name][aname] = ctype
                 if gimple_ctypes.TypeLattice.is_list(ctype) and isinstance(v, (ListExpr, TupleExpr)):
                     self._field_elem_types.setdefault(s.name, {})[aname] = (
@@ -8358,7 +8358,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                 _ann_el.split('[', 1)[1].rstrip(']').strip())
                             if _li:
                                 _et = self._resolve_type(_li[0].strip())
-                                if _et and not gimple_ctypes.TypeLattice.is_word_or_list(_et):
+                                if _et and _et not in ('int64_t', 'MojoList *'):
                                     self._field_elem_types.setdefault(s.name, {})[f_name] = _et
                                 elif gimple_ctypes.TypeLattice.is_list(_et):
                                     self._field_elem_types.setdefault(s.name, {})[f_name] = _et
@@ -9203,7 +9203,7 @@ def _gmp_apply_gimplegen_sigs(self, _gg_sigs) -> None:
             _f = _as_str(_fc_pair[0])
             _c = _as_str(_fc_pair[1])
             _cur = _gg_ft.get(_f)
-            if _cur is None or (gimple_ctypes.TypeLattice.is_int_word_or_bool(_cur) and gimple_ctypes.TypeLattice.ends_in_star(_c)):
+            if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and gimple_ctypes.TypeLattice.ends_in_star(_c)):
                 _gg_ft[_f] = _c
         _apply_gimplegen_frozen_sigs(self, _gg_sigs, True)
         # Recover the `_annotation_dict_val_type` seeding of
@@ -10228,18 +10228,10 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
     are pre-signature and either may be the first to see a function."""
     import mojo.middle.infra_infer as ginf
     self._param_box_names: dict[str, set] = {}
-    # The subset of `_param_box_names` whose boxed slot exists because the
-    # parameter is declared `= None`: a call that OMITS the argument pads the
-    # declared default, which must be the None box (the plain word 0 is the
-    # integer 0). See `infra_infer.param_default_none_names`.
-    self._param_box_none_defaults: dict[str, set] = {}
     for s in all_functions:
         if isinstance(s, FunctionDef):
-            _fs_pb = _as_funcdef_node(s)
             self._param_box_names[_as_str(s.name)] = ginf.param_boxed_names(
-                self, _fs_pb, _as_str(s.name))
-            self._param_box_none_defaults[_as_str(s.name)] = \
-                ginf.param_default_none_names(self, _fs_pb, _as_str(s.name))
+                self, _as_funcdef_node(s))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sd_pb = _as_structdef_node(s)
@@ -10247,9 +10239,7 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
                 _pm_pb = _as_funcdef_node(m)
                 _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
                 self._param_box_names[_pbk] = ginf.param_boxed_names(
-                    self, _pm_pb, _pbk)
-                self._param_box_none_defaults[_pbk] = \
-                    ginf.param_default_none_names(self, _pm_pb, _pbk)
+                    self, _pm_pb)
     # The DECLARATION half of the same rule, applied to the table every
     # signature reader consults. `funcs_shared._param_ctype` overrides a
     # flagged parameter to the tagged word for its OWN readers, but the
@@ -11805,13 +11795,9 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
         _safe_home_pts = None
         if not _recorded_csym:
             try:
-                # The info record is a NAMED local: an inline dict literal reached
-                # the callee's declaration as an int64_t, which hashed a different
-                # overload suffix from the definition's MojoDict * parameter.
-                _home_info: dict = {
+                _safe_home_pts = _ggf_dup._home_def_pts(self, {
                     'module': sym_info.get('module'),
-                    'original_name': sym_info.get('original_name') or sym_name}
-                _safe_home_pts = _ggf_dup._home_private_struct_pts(self, _home_info)
+                    'original_name': sym_info.get('original_name') or sym_name})
             except Exception as _e:
                 gimple_ctypes._debug_note(
                     f'home def pts for {sym_name!r} from {sym_info.get("module")!r}', _e)
@@ -12644,13 +12630,13 @@ def _gmp_global_literal_slot_ctypes(self, stmts: list) -> None:
                         [self._quick_type(e.elements[j]) for e in _els])
                         for j in range(_n)]
                     _slots = [st for st in _slots
-                              if gimple_ctypes.TypeLattice.is_py_scalar(st)]
+                              if st in ('int64_t', 'double', '_Bool', 'char *')]
                     if len(_slots) != _n:
                         _slots = None
             if _slots is None:
                 _joined = gimple_ctypes.TypeLattice.join_all(
                     [self._quick_type(e) for e in _els])
-                if gimple_ctypes.TypeLattice.is_py_scalar(_joined):
+                if _joined in ('int64_t', 'double', '_Bool', 'char *'):
                     _outer = _joined
         except Exception:
             _slots = None
@@ -12773,7 +12759,7 @@ def _gmp_scalar_params_from_observations(self, _fn_by_name: dict, _scalar_obs: d
             # literal at every call site is proof, and a real list there would be a
             # TypeError in Python (the method contract in `_apply_method_scalar_obs`
             # makes the same call).
-            if gimple_ctypes.TypeLattice.is_int_word_or_none(cur) or (gimple_ctypes.TypeLattice.is_list(cur) and _has_cs):
+            if cur in (None, 'int', 'int64_t') or (gimple_ctypes.TypeLattice.is_list(cur) and _has_cs):
                 resolved_type = 'double' if _has_dbl else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
 
@@ -12896,7 +12882,7 @@ def _gmp_apply_xmod_ctor_field_hints(self) -> None:
             if _xf_hfield not in self.struct_field_types[_xf_hstruct]:
                 continue
             _xf_cur = self.struct_field_types[_xf_hstruct].get(_xf_hfield)
-            if gimple_ctypes.TypeLattice.is_int_word_or_none(_xf_cur):
+            if _xf_cur in (None, 'int', 'int64_t'):
                 self.struct_field_types[_xf_hstruct][_xf_hfield] = _xf_ct
 
 
@@ -14884,7 +14870,7 @@ def gen_module_impl(self, stmts: list):
             if _ca_ct is not None:
                 self._global_var_types[_ca_m] = _ca_ct
                 _ca_cur = _gg_ft1.get(_ca_n)
-                if _ca_cur is None or gimple_ctypes.TypeLattice.is_int_word(_ca_cur):
+                if _ca_cur is None or _ca_cur in ('int', 'int64_t'):
                     _gg_ft1[_ca_n] = _ca_ct
             elif isinstance(_caf.value, StringLiteral):
                 self._global_var_types[_ca_m] = 'char *'
@@ -16603,7 +16589,7 @@ def gen_module_impl(self, stmts: list):
                 # pointer addition and gcc -fgimple died with "internal
                 # compiler error: in build2, at tree.cc" (bugs/
                 # COMPILE_FAIL_Tools_gdb_libpython).
-                if gimple_ctypes.TypeLattice.is_int_word_or_none(cur) \
+                if cur in (None, 'int', 'int64_t') \
                         or (gimple_ctypes.TypeLattice.is_list(cur) and not types_is_double):
                     self._inferred_param_types.setdefault(key, {})[pname] = (
                         'double' if types_is_double else 'char *')
@@ -18376,7 +18362,7 @@ def gen_module_impl(self, stmts: list):
             if _as_str(_an_pn) == pname and _an_pt is not None:
                 return False
         _cur = self._inferred_param_types.get(callee, {}).get(pname)
-        return gimple_ctypes.TypeLattice.is_int_word_or_none(_cur)
+        return _cur in (None, 'int', 'int64_t')
 
     _fl_changed = True
     while _fl_changed:

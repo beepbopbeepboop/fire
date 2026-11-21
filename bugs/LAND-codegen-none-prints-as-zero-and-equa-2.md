@@ -1,9 +1,9 @@
-# Land: should finished branch fix-gate-linked-list-struct-element-step4c land?
+# Land: should finished branch bug-codegen-none-prints-as-zero-and-equa-2 land?
 
-**Branch:** `work/fix-gate-linked-list-struct-element-step4c` (task `fix-gate-linked-list-struct-element-step4c`; its tip is also saved as `refs/archive/work/fix-gate-linked-list-struct-element-step4c`, so dropping it loses nothing).
-**Age:** last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-21 06:34:49
-**Original work:** The full gate (77c157bb) is red on master in job `linked-list-struct-element-step4c`. Last working commit: a679f97770. First not working: b6600228ca. Read the failing output in /Users/mrs/net/chatgpt/
-**Original claims:** gate:linked-list-struct-element-step4c
+**Branch:** `work/bug-codegen-none-prints-as-zero-and-equa-2` (task `bug-codegen-none-prints-as-zero-and-equa-2`; its tip is also saved as `refs/archive/work/bug-codegen-none-prints-as-zero-and-equa-2`, so dropping it loses nothing).
+**Age:** last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 39 behind it; task started 2026-11-20 21:54:13
+**Original work:** Fix the bug in bugs/CODEGEN_none_prints_as_zero_and_equals_zero.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test,
+**Original claims:** bug:CODEGEN_none_prints_as_zero_and_equals_zero
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-21 07:05:43: conflicts with master (last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 4 behind it; task started 2026-11-21 06:34:49)
-  Branch: work/fix-gate-linked-list-struct-element-step4c
-  Conflicting files: elaborate.py, test_module_cache.py
+- 2026-11-21 00:35:35: conflicts with master (last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 39 behind it; task started 2026-11-20 21:54:13)
+  Branch: work/bug-codegen-none-prints-as-zero-and-equa-2
+  Conflicting files: FORMAL.md, build_stdlib_dylib.py, formal/build.py, formal/model/builtins.py, mojo/backend_gimple/emit_exprs.py, mojo/backend_gimple/emit_infra.py, runtime/fire_runtime.c, runtime/fire_runtime.h, test_runtime_header_scan.py

@@ -82,7 +82,7 @@ ComptimeVarStmt = _fc.ComptimeVarStmt
 # fire_compiler._as_comptimevar_node exists: a field read straight off a
 # boxed value lowers to runtime dispatch, which does not reliably carry this
 # struct (it turned `s.target` into the pointer's decimal address elsewhere).
-from fire_compiler import _as_comptimevar_node
+_as_comptimevar_node = _fc._as_comptimevar_node
 
 # Most elements a folded list comprehension may produce. Past this the value is
 # not folded (None), so the comptime-for it feeds falls back to the runtime
@@ -1152,6 +1152,26 @@ def _eval_compilation_target_pred(node):
     return None
 
 
+def folded_truth(value):
+    """The truth value of a value `eval_const` folded, or None when the fold
+    produced no value at all.
+
+    Truthiness is the source language's own (Python's) rule, so every folded
+    value answers it: `""`, `[]`, `{}` and `()` are false, their non-empty
+    counterparts true, and numbers are `!= 0`. Every place in this file that
+    turns a folded value into a bool goes through here, because two of them
+    used to accept only `bool`/`int`: a module-level `if` on a folded string,
+    list, tuple or dict had its then-arm deleted as CONST_FALSE, and the
+    `not` fold answered "not a number, so unfoldable" (which the same caller
+    then read as CONST_FALSE). That is how `if "x":` and `if not "":`
+    compiled to their else arms while the numbers-only cases looked right.
+    """
+    if isinstance(value, (bool, int, float, str, bytes, list, tuple, dict,
+                          set, frozenset)):
+        return bool(value)
+    return None
+
+
 def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
@@ -1414,8 +1434,13 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
         return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
             and not isinstance(v, str) else None
     if isinstance(node, UnaryOp) and node.op == 'not':
-        v = eval_const(node.operand, bindings, platform, conforms_to_pred)
-        return not v if isinstance(v, (bool, int)) else None
+        # Truthiness of every folded value, not just numbers: `not "x"` is
+        # False and `not ""` is True. Answering None here made
+        # `eval_const_bool_state` read the shape as CONST_FALSE and delete
+        # the then-arm of a module-level `if not "":`.
+        t = folded_truth(eval_const(node.operand, bindings, platform,
+                                    conforms_to_pred))
+        return None if t is None else not t
     if isinstance(node, BinaryOp):
         op = node.op
         # DType equality is identity of the dtype, not identity of the marker's
@@ -1656,18 +1681,17 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
 def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as a compile-time bool, or None.
 
-    A folded value answers PYTHON truthiness, not just bool/int: a folded
-    float (`bool(0.5)` is True) and a folded container (`if "x":`, `if [1]:`,
-    `if {1: 2}:` are all True in CPython, and their empty forms False). A
-    shape that folds to a value and is then not answered here is reported
-    FALSE by `eval_const_bool_state` below, which folded `if 0.0001:` and
-    `if "x":` to the else arm at module level, deleting the then-arm before
-    emission.
+    A folded value answers PYTHON truthiness (`folded_truth`), not just
+    bool/int: a folded float (`bool(0.5)` is True) and a folded container
+    (`if "x":`, `if [1]:`, `if {1: 2}:` are all True in CPython, and their
+    empty forms False). A shape that folds to a value and is then not
+    answered here is reported FALSE by `eval_const_bool_state` below, which
+    folded `if 0.0001:` and `if "x":` to the else arm at module level,
+    deleting the then-arm before emission.
     """
-    v = eval_const(node, bindings, platform, conforms_to_pred)
-    if isinstance(v, (bool, int, float, str, bytes, list, tuple, dict, set,
-                      frozenset)):
-        return bool(v)
+    t = folded_truth(eval_const(node, bindings, platform, conforms_to_pred))
+    if t is not None:
+        return t
     # Fallback: eval_const_int also folds what eval_const does not (calls,
     # via the hook).
     result = eval_const_int(node, bindings, call_hook, conforms_to_pred)
