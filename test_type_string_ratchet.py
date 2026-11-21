@@ -39,13 +39,14 @@ PATTERNS = {
 
 BASELINE = {
     "endswith(' *')": 344,
-    "== 'int64_t'": 404,
+    "== 'int64_t'": 405,
     "in (.., 'int64_t', ..)": 312,
     # +1 on 2026-11-20: TypeLattice.is_cstr, the one definition call sites
     # should use instead of spelling the test.
+    # also +1 each for is_word and is_double (same reason).
     "== 'char *'": 159,
     "== '_Bool'": 68,
-    "== 'double'": 186,
+    "== 'double'": 187,
     "== 'MojoList *'": 203,
     "gen._emit( text": 298,
 }

@@ -7810,7 +7810,7 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
         gen._elem_types[keys] = 'char *'
         _key_kind = "'p'"
     elif kret_t in gimple_ctypes._FLOAT_TYPES:
-        _kdbl = kret_v if kret_t == 'double' else gen._coerce_to_type(kret_t, 'double', kret_v)
+        _kdbl = kret_v if gimple_ctypes.TypeLattice.is_double(kret_t) else gen._coerce_to_type(kret_t, 'double', kret_v)
         gen._void_call('mojo_list_append_double', [('MojoList *', keys), ('double', _kdbl)])
         _key_kind = "'d'"
     else:
@@ -8055,10 +8055,10 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
             # do not know" and the runtime falls back to its own kinds table
             # and discriminator.
             _ek = _elem_before
-            if not _ek or _ek == 'int64_t':
+            if not _ek or gimple_ctypes.TypeLattice.is_word(_ek):
                 _ek = gen._elem_of(av)
             _ekind = '0'
-            if _ek != 'int64_t' or gen._elem_types.get(av):
+            if not gimple_ctypes.TypeLattice.is_word(_ek) or gen._elem_types.get(av):
                 _eb = gimple_ctypes.TypeLattice.slot_kind_byte(_ek)
                 _ekind = gimple_ctypes.TypeLattice.slot_kind_const(_eb)
             t = gen._call_expr('MojoList *', 'mojo_sorted_kind',
