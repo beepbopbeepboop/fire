@@ -937,7 +937,15 @@ def main() -> int:
             for rel, (observed, allowed) in sorted(stale.items()):
                 print(f'  {rel}: {observed} (baseline {allowed}) — entry is '
                       f'stale; delete it, or re-run --write-baseline')
-        if not regressions:
+        # BOTH halves must be clean. Testing only `regressions` here let a
+        # BARE-only gain fall through to `return 0`: the green sentence was
+        # printed from the same walk that had found the gain, so `--ratchet`
+        # said "all at or below their baseline" and exited 0 while
+        # `test_suite.py`'s BARE row was red on exactly that file (the gate doc
+        # that filed this defect, since deleted). The single `ratchet_verdict`
+        # call above exists so the two halves cannot disagree about what a gain
+        # IS; they also cannot disagree about whether a gain is a FAILURE.
+        if not regressions and not bare_regressions:
             print(f'ratchet: no file gained a citation of a deleted doc '
                   f'({total} `bugs/`-prefixed across {len(by_file)} files, '
                   f'{bare_total} bare across {len(bare_by_file)} files, '

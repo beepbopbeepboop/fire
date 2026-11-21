@@ -12,6 +12,7 @@ never fail and is not a checker. The freshness-of-truth half is exercised
 with a stub `measure`, because running Lean per row is a manual campaign,
 not a unit test.
 """
+import io
 import os
 import re
 import subprocess
@@ -161,6 +162,45 @@ class HardIndexIsTrue(unittest.TestCase):
         on_disk = {f for f in os.listdir(HARD)
                    if f.endswith('.md') and f != 'README.md'}
         self.assertEqual(sorted(on_disk - _index_names()), [])
+
+
+# `--ratchet`'s green path used to test only the `bugs/`-prefixed half
+# (`if not regressions:`), so a BARE-only gain fell through to `return 0` while
+# the green sentence -- printed from the same walk that found the gain -- said
+# "all at or below their baseline". `test_suite.py`'s BARE row was red on
+# exactly that file. Pin both directions: a BARE-only gain fails, and the same
+# corpus with an empty BARE half stays green (so the pin cannot pass by making
+# the check always fail).
+class RatchetFailsOnBareOnlyGain(unittest.TestCase):
+    # Deliberately NOT `.md`-shaped: this file is scanned by the same walker,
+    # so a doc-shaped literal here would be read as a citation of a deleted doc
+    # and fail the ratchet. The verdict only compares a citing file's count
+    # against its ceiling, so the spelling does not matter to the check.
+    _CITER = 'bugs/PLANTED_CITER_FOR_BARE_GAIN'
+    _DELETED = 'PLANTED_DELETED_DOC_NOT_ON_DISK'
+
+    def _run_ratchet(self, prefixed, bare):
+        with mock.patch.object(d, 'find',
+                               return_value=({}, {}, prefixed)), \
+             mock.patch.object(d, 'bare_find',
+                               return_value=({}, bare)), \
+             mock.patch.object(d, 'stale_baseline_entries', return_value={}), \
+             mock.patch('sys.argv', ['dangling_doc_refs.py', '--ratchet']), \
+             mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            rc = d.main()
+        return rc, out.getvalue()
+
+    def test_a_bare_only_gain_exits_nonzero_and_names_the_file(self):
+        rc, text = self._run_ratchet(
+            {}, {self._CITER: [(self._DELETED, 1)]})
+        self.assertEqual(rc, 1, f'a BARE-only gain was reported as green: {text}')
+        self.assertIn(self._CITER, text,
+                      'the failure does not name the file that gained')
+
+    def test_the_same_corpus_with_a_clean_bare_half_is_green(self):
+        rc, text = self._run_ratchet({}, {})
+        self.assertEqual(rc, 0, f'a clean corpus was red: {text}')
+        self.assertIn('no file gained a citation', text)
 
 
 # The gate doc for this file's job claims the job is red on master and says to
