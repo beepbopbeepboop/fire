@@ -16630,6 +16630,23 @@ main()
 """)
 
 
+def test_dict_subclass_missing_value_not_reread_as_zero():
+    """A dict subclass __missing__ result is a computed word, not a dict slot,
+    so escaping consumers (print, return, ...) must not re-read the absent key
+    as 0."""
+    test_gimple_matches_cpython("gimple_dict_subclass_missing_value", """\
+class D(dict):
+    def __missing__(self, k):
+        return "miss:" + k
+
+def main():
+    d = D()
+    d["a"] = 1
+    print(d["a"], d["zz"])
+main()
+""")
+
+
 def test_star_unpack_of_generator_expression_in_call():
     """Star-unpacking a generator expression in a call argument is an ITERABLE
     spread, not a C pointer dereference: `f(*(... for ...))` used to lower the

@@ -14009,7 +14009,6 @@ def _ls_dict_subclass(gen, _dsub_r, idx_type, iv, ot, ov) -> tuple[str, str]:
         hv = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                             [('MojoDict *', dp), (kt, kv)])
         gen._copy(res, hv)
-        _mark_unknown_dict_value(gen, dp, res, kv, 'str')
         gen._goto(bb_done)
         gen._emit_label(bb_miss)
         miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
@@ -14017,6 +14016,12 @@ def _ls_dict_subclass(gen, _dsub_r, idx_type, iv, ot, ov) -> tuple[str, str]:
         gen._copy(res, mv)
         gen._goto(bb_done)
         gen._emit_label(bb_done)
+        # The __missing__ result is a computed word, not a dict slot. Recording
+        # a slot read here makes escaping consumers (print, return, ...) re-read
+        # the absent key as 0 instead of using the __missing__ value. The hit
+        # value is already boxed by mojo_dict_slot_boxed.
+        if dp not in gen._dict_val_types:
+            gen._words.mark_dyn(res)
         return 'int64_t', res
     t = gen._call_expr('int64_t', 'mojo_dict_subscript_boxed',
                        [('MojoDict *', dp), (kt, kv)])
