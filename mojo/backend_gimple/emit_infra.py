@@ -3616,6 +3616,9 @@ _KW_DICT_FNS = frozenset([
     # The no-default `.get` read (None on a miss, the slot's own word on a
     # hit): its `_kw` twin is the same one-lookup read for an integer key.
     'mojo_dict_get_boxed',
+    # `del d[k]`: its miss raises, so it cannot be the defaulted pop. With the
+    # twin here a word key keeps the integer/content-key domain the store used.
+    'mojo_dict_del_item',
     # The bool / None / struct setters. Absent from this set they were not
     # refused — `_apply_kw_keys` fell through to the "build the decimal string
     # now" arm, which stores the entry in the plain char* key DOMAIN while the
@@ -4773,7 +4776,21 @@ def boxed_param_names(gen) -> set:
     Only the two categories that need a box are included. A
     container-vs-container disagreement is already a bare word in both arms
     (`mixed_container_locals`), and a same-family numeric rebinding is
-    deliberately not a conflict, so neither needs the runtime tag."""
+    deliberately not a conflict, so neither needs the runtime tag.
+
+    The UNANNOTATED parameters of the same function go through the rule's
+    annotation-less twin (`untyped_param_mixed_kinds`) from
+    `_cur_untyped_params`, the name set `_reset_func` built from the same
+    params list: a body that binds one kind beside a read of another is the
+    same box-holding word with no annotation half, and its slot is already
+    the `int64_t` word `_param_ctype` declared, so the stores and reads must
+    take the same by-kind representation or the call site's box and the
+    body's read would be two spellings of one value.
+
+    An UNANNOTATED parameter declared `= None` is the box for the other
+    reason: None and the integer 0 are the same `int64_t` bits, so the slot
+    must hold the shared None box (`_reset_func`'s `_cur_default_none_params`,
+    selected by `infra_infer.param_default_none_names`)."""
     cached = getattr(gen, '_cur_boxed_params', None)
     if cached is not None:
         return cached
@@ -4786,6 +4803,14 @@ def boxed_param_names(gen) -> set:
         except Exception:
             _conf = None
         if _conf == 'value' or _conf == 'scalar':
+            out.add(_as_str(_pn))
+    for _pn in (getattr(gen, '_cur_untyped_params', None) or ()):
+        try:
+            _conf = untyped_param_mixed_kinds(gen, _as_str(_pn),
+                                              gen._cur_func_body)
+        except Exception:
+            _conf = None
+        if _conf is not None:
             out.add(_as_str(_pn))
     # A parameter declared `= None` is a box-holding word too (see
     # `_reset_func`): its reads dispatch on the box's kind.

@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-codegen-float-augmented-assignm-3 land?
+# Land: should finished branch bug-codegen-true-division-result-truncat land?
 
-**Branch:** `work/bug-land-codegen-float-augmented-assignm-3` (task `bug-land-codegen-float-augmented-assignm-3`; its tip is also saved as `refs/archive/work/bug-land-codegen-float-augmented-assignm-3`, so dropping it loses nothing).
-**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 4 commit(s) ahead of master, 57 behind it; task started 2026-11-21 00:09:24
-**Original work:** An earlier attempt left 4 commit(s) on branch work/bug-land-codegen-float-augmented-assignm-2, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted
-**Original claims:** bug:LAND-codegen-float-augmented-assignment-o
+**Branch:** `work/bug-codegen-true-division-result-truncat` (task `bug-codegen-true-division-result-truncat`; its tip is also saved as `refs/archive/work/bug-codegen-true-division-result-truncat`, so dropping it loses nothing).
+**Age:** last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 10 behind it; task started 2026-11-21 00:52:03
+**Original work:** Fix the bug in bugs/CODEGEN_true_division_result_truncated_by_an_int_local.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pi
+**Original claims:** bug:CODEGEN_true_division_result_truncated_by_an_int_local
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-21 00:38:46: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 4 commit(s) ahead of master, 57 behind it; task started 2026-11-21 00:09:24)
-  Branch: work/bug-land-codegen-float-augmented-assignm-3
-  Conflicting files: the bare-ratchet-green doc-refs bug doc (deleted when its fix landed), mojo/backend_gimple/emit_calls.py
+- 2026-11-21 02:45:24: conflicts with master (last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 10 behind it; task started 2026-11-21 00:52:03)
+  Branch: work/bug-codegen-true-division-result-truncat
+  Conflicting files: test_gimple_runner.py

@@ -10250,6 +10250,30 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
                     self, _pm_pb, _pbk)
                 self._param_box_none_defaults[_pbk] = \
                     ginf.param_default_none_names(self, _pm_pb, _pbk)
+    # The DECLARATION half of the same rule, applied to the table every
+    # signature reader consults. `funcs_shared._param_ctype` overrides a
+    # flagged parameter to the tagged word for its OWN readers, but the
+    # forward declarations, the method signature passes and the return-type
+    # seeds read `_inferred_param_types` directly, and a flagged slot still
+    # carrying its usage-inferred kind (`MojoList *` for `frozenset(
+    # selected)`) would declare one type and define another — the same
+    # declaration/definition split `_gmh_reconcile_param_container_kinds`
+    # exists to close, so the correction is one write to the shared table.
+    # An entry for an ANNOTATED parameter is ignored by every reader that
+    # honours annotations (`_param_ctype` decides from the annotation, the
+    # observation refiners skip annotated names), so the whole set goes in.
+    # Re-asserted from BOTH population passes: the scalar/struct observation
+    # refiners that run between them settle slots "left at the int64_t
+    # default" and would read a flagged slot as one, so the second pass
+    # restores the word after them.
+    _pbt = getattr(self, '_inferred_param_types', None)
+    if _pbt is not None:
+        for _pbk, _pbns in self._param_box_names.items():
+            if not _pbns:
+                continue
+            _pbf = _pbt.setdefault(_as_str(_pbk), {})
+            for _pbn in _pbns:
+                _pbf[_as_str(_pbn)] = 'int64_t'
 
 
 def _gmh_reconcile_param_container_kinds(self):
@@ -10280,7 +10304,21 @@ def _gmh_reconcile_param_container_kinds(self):
         if not _rp:
             _rp = {}
             self._inferred_param_types[_rn] = _rp
+        # Same deliberate-word exemption as the unanimous-container arm
+        # below: a slot `_gmh_record_param_box_names` retyped to `int64_t`
+        # because the body proved it a tagged word is NOT a usage guess the
+        # binding estimator may correct. The binding estimator is right
+        # that the name holds a list (it sees `selected = [selected]`),
+        # but the slot's reader is the word dispatch (a list APPEND under
+        # the runtime kind), and the forward declaration must match the
+        # definition's word signature — rule (a) running here is exactly
+        # the `int64_t` definition / `MojoList *` declaration split this
+        # function exists to close. The guard reads the recorded set,
+        # never the table value, so it holds after the record passes.
+        _pbns = (getattr(self, '_param_box_names', None) or {}).get(_rn)
         for _rpn in list(_rp.keys()):
+            if _pbns and _rpn in _pbns:
+                continue
             _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
             if _fixed != _rp[_rpn]:
                 _rp[_rpn] = _fixed
@@ -10291,8 +10329,19 @@ def _gmh_reconcile_param_container_kinds(self):
     for _fn, _pmap in _pct.items():
         if _fn not in self._inferred_param_types:
             self._inferred_param_types[_fn] = {}
+        # A slot the parameter's own body proved to be a tagged word
+        # (`_param_box_names`, written into the table by
+        # `_gmh_record_param_box_names`) holds a DELIBERATE int64_t, not an
+        # unresolved default: overriding it with the unanimous-container
+        # guess would declare the container kind the definition's box slot
+        # disproves — the same declaration/definition split this function
+        # exists to close. The guard reads the recorded set, never the table
+        # value, so it holds for a slot the refiners below retyped.
+        _pbns = (getattr(self, '_param_box_names', None) or {}).get(_fn)
         for _pname, _ctype in _pmap.items():
             if _ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                continue
+            if _pbns and _pname in _pbns:
                 continue
             _cur = self._inferred_param_types[_fn].get(_pname)
             if _cur in (None, 'int64_t', 'int', ''):

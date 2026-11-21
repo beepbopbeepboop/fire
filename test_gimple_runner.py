@@ -3614,6 +3614,51 @@ else:
 f()
 """)
 
+    # A module-level `if` on a folded NON-NUMERIC constant used to take the
+    # else arm: `eval_const_bool` converted only a folded bool/int/float to a
+    # truth value, so a folded str/list/dict fell through to None and
+    # `eval_const_bool_state` reported CONST_FALSE (the tri-state cannot
+    # distinguish "fold failed" from "false"). `module_gen` then resolved the
+    # statement to its else arm, deleting the then-arm before emission.
+    # CPython's truthiness is the oracle: a non-empty string/list/dict is
+    # true, the empty form false.
+    test_gimple_matches_cpython("gimple_module_constant_container_condition", """\
+def main():
+    print("ran")
+
+if "x":
+    print("str yes")
+else:
+    print("str no")
+
+if [1]:
+    print("list yes")
+else:
+    print("list no")
+
+if {1: 2}:
+    print("dict yes")
+else:
+    print("dict no")
+
+if "":
+    print("empty str yes")
+else:
+    print("empty str no")
+
+if []:
+    print("empty list yes")
+else:
+    print("empty list no")
+
+if {}:
+    print("empty dict yes")
+else:
+    print("empty dict no")
+
+main()
+""")
+
     # The MATERIALIZED flavour, which is a different emission path and was
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env
@@ -15666,9 +15711,12 @@ def main():
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_except_around_builtin_errors_matches_cpython,
+                  test_del_missing_dict_key_raises_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
                   test_gimple_values_print_as_pointers_inside_containers,
-                  test_dataclass_default_factory_fields_start_empty_and_per_instance):
+                  test_dataclass_default_factory_fields_start_empty_and_per_instance,
+                  test_param_annotation_contradicted_by_the_body,
+                  test_untyped_parameter_word_kind_not_recovered):
         try:
             _late()
         except AssertionError as e:
@@ -16477,6 +16525,43 @@ print(normalize_selection([]))
 print(sorted(normalize_selection("")))
 print(sorted(normalize_selection("a")))
 print(sorted(normalize_selection(selected="ab")))
+""")
+
+
+def test_untyped_parameter_word_kind_not_recovered():
+    """The UNANNOTATED twin of `test_param_annotation_contradicted_by_the_body`.
+
+    `def normalize_selection(selected, ...)` (no annotation) with a body
+    that rebinds the name to a list (`selected = [selected]`) and compares
+    it to `None`/`True`/`False` must get the same tagged `int64_t` word as
+    the annotated shape: the slot's kind is proven by the BODY, not by an
+    annotation. Before, usage inference typed the slot `MojoList *` (the
+    body iterates/frozensets it) and every reader split over that:
+    `None`/`True`/`False` arrived as their raw word bits (printed `0`/`1`/`0`
+    instead of their values) and a `''` argument segfaulted, while the
+    definition's word body and the declaration's pointer slot disagreed.
+
+    The binding-estimator reconcile that corrects a container-KIND error
+    (`list` vs `set`) must not treat that deliberate `int64_t` as a usage
+    guess to overwrite — the same declaration/definition split the annotated
+    fix closes. The two arms a `frozenset` repr cannot spell are compared by
+    sorted CONTENT against CPython, as in the annotated twin.
+    """
+    test_gimple_matches_cpython("gimple_untyped_parameter_word_kind_not_recovered", """\
+def normalize_selection(selected, *, possible=None):
+    if selected in (None, True, False):
+        return selected
+    elif isinstance(selected, str):
+        selected = [selected]
+    elif not selected:
+        return ()
+    return frozenset(selected)
+
+print(normalize_selection(None))
+print(normalize_selection(True))
+print(normalize_selection(False))
+print(sorted(normalize_selection('')))
+print(sorted(normalize_selection('a')))
 """)
 
 
@@ -17334,6 +17419,38 @@ def main():
         print("div zero")
     finally:
         print("finally")
+main()
+""")
+
+
+def test_del_missing_dict_key_raises_matches_cpython():
+    """`del d[k]` raises a catchable KeyError for an ABSENT key and really
+    removes a PRESENT one. It used to lower to `mojo_dict_pop_int(d, k, 0)`,
+    the defaulted pop, whose miss arm answered the default: the statement was
+    a silent no-op and the `except KeyError:` handler never ran. Both `del`
+    lowering arms are covered — a statically typed `MojoDict *` local, and
+    the dynamic dispatch an untyped parameter gets.
+    """
+    test_gimple_matches_cpython("gimple_del_missing_dict_key_raises", """\
+def remove_from(d, k):
+    try:
+        del d[k]
+    except KeyError:
+        print("param caught")
+    print(len(d))
+
+def main():
+    d = {"a": 1}
+    try:
+        del d["y"]
+    except KeyError:
+        print("del caught")
+    print(len(d))
+    del d["a"]
+    print(len(d))
+    e = {"b": 2}
+    remove_from(e, "zz")
+    remove_from(e, "b")
 main()
 """)
 

@@ -263,6 +263,8 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_dict_contains_kw': ['int', 'MojoDict *', 'int64_t'],
     'mojo_dict_contains_none': ['int', 'MojoDict *'],
     'mojo_dict_copy': ['MojoDict *', 'MojoDict *'],
+    'mojo_dict_del_item': ['void', 'MojoDict *', 'char *'],
+    'mojo_dict_del_item_kw': ['void', 'MojoDict *', 'int64_t'],
     'mojo_dict_destroy': ['void', 'MojoDict *'],
     'mojo_dict_eq': ['int', 'MojoDict *', 'MojoDict *', 'int', 'int'],
     'mojo_dict_free': ['void', 'MojoDict *'],
