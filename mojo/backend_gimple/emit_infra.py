@@ -5419,6 +5419,24 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # the slots with the int accessor.
         gen._elem_types[res] = 'int64_t'
         return res
+    if gimple_ctypes.TypeLattice.is_cstr(src_type):
+        # A string iterates as 1-char strings (CPython). Build a MojoList of
+        # char* slots, one per character. Record the element type so consumers
+        # that ask (enumerate's pair slot, comprehension element, star-unpack,
+        # ...) read the slots with the str accessor rather than as raw ints.
+        res = gen._new_temp('MojoList *')
+        gen._rt_into(res, 'mojo_list_new', [])
+        len_t = gen._rt_call('int64_t', 'mojo_strlen', [value])
+        idx = gen._new_temp('int64_t')
+        gen._emit(f"  {idx} = (int64_t)0;")
+        bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+        gen._loop_head(idx, len_t, bb_cond, bb_body, '', bb_after, False)
+        ch = gen._rt_call('char *', 'mojo_char_at_str', [value, idx])
+        gen._void_call('mojo_list_append_str',
+                       [('MojoList *', res), ('char *', ch)])
+        gen._loop_tail(idx, bb_cond, '', bb_after, False)
+        gen._elem_types[res] = 'char *'
+        return res
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
         _td = _tagged_dyn_read(gen, value, 'list')
         if _td is not None:

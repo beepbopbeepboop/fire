@@ -16703,6 +16703,43 @@ main()
 """)
 
 
+def test_gimple_values_print_as_pointers_inside_containers():
+    """CODEGEN_values_print_as_pointers_inside_containers: strings, nested
+    containers and bool-returning calls inside containers must print as
+    values, not raw pointer words / 1/0."""
+    test_gimple_matches_cpython("gimple_ptr_print_repro", """\
+def pair():
+    return ("a", "b")
+
+def main():
+    print(pair())
+    t = (-3.5, 3)
+    print(t)
+    d = {"ann": 3, "bo": 0}
+    print(list(d.items()))
+    print([(i, c) for i, c in enumerate("hi")])
+    print([[1, 2], [3, [4, []]]])
+main()
+""")
+    test_gimple_matches_cpython("gimple_bool_print_repro", """\
+def is_pos(n):
+    return n > 0
+
+def main():
+    r = is_pos(3)
+    print(r)
+    print(is_pos(-1))
+    flags = [is_pos(1), is_pos(-2)]
+    print(flags)
+    f = lambda n: n > 0
+    print(f(5))
+    print(not r)
+    print(bool(""))
+    print(bool("0"))
+main()
+""")
+
+
 # Keep the existing main if present; append our test call via module globals not needed
 # The test will be discovered by name if run differently, but easier to just run it directly
 if __name__ == '__main__':
