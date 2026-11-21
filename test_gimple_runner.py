@@ -17015,6 +17015,22 @@ def main():
     print([[1, 2], [3, [4, []]]])
 main()
 """)
+    test_gimple_matches_cpython("gimple_bool_append_repro", """\
+def main():
+    e = []
+    e.append(True)
+    print(e)
+    print(e[0])
+    f = []
+    f.append(False)
+    f.append(True)
+    print(f)
+    g = []
+    g.append(True)
+    g.append("x")
+    print(g)
+main()
+""")
     test_gimple_matches_cpython("gimple_bool_print_repro", """\
 def is_pos(n):
     return n > 0

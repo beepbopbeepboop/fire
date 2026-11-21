@@ -2341,6 +2341,20 @@ void mojo_list_append_double_kinded(MojoList *l, double v, char prior)
     _list_word_push(l, 'd', bits, prior);
 }
 
+/* `lst.append(<value>)` whose slot KIND the codegen knows but the value's
+ * static C type does not express, or a later append to a list that already
+ * carries a per-slot kinds row (see `_list_word_push`): push the word under
+ * `kind`, with `prior` describing any slots that row does not cover. A Python
+ * bool is the common case — it is the same 0/1 word an int is, so only the
+ * expression the codegen still holds can tell them apart — but a str/bytes/
+ * container appended after such a row exists must extend the row too, or the
+ * kinds-aware repr reads its slot with the int fallback and prints a pointer
+ * decimal. */
+void mojo_list_append_kinded(MojoList *l, int64_t v, char kind, char prior)
+{
+    _list_word_push(l, kind, v, prior);
+}
+
 /* The answer of `a OP b` for an arithmetic operator whose operands may be
  * float boxes: the double answer as a fresh box when either operand IS a
  * double box, else the integer answer. Both answers are computed by the

@@ -6985,7 +6985,20 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             av = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
             at = 'char *'
         if gimple_ctypes.TypeLattice.is_cstr(at):
-            gen._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
+            if gen._words.has_slot_kinds(ov):
+                # A list that already carries a per-slot kinds row (a bool or
+                # float append created one) must record this slot too, or the
+                # kinds-aware repr reads it with the int fallback and prints the
+                # string pointer as a decimal. The plain helper only updates
+                # the static element type, which is not what that repr reads.
+                _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
+                    gen._elem_types.get(ov) or 'int64_t')
+                gen._emit_call('void', '', 'mojo_list_append_kinded',
+                               [('MojoList *', ov),
+                                ('int64_t', gen._coerce_to_type('char *', 'int64_t', av)),
+                                ('char', "'p'"), ('char', "'" + _prior + "'")])
+            else:
+                gen._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
             gen._elem_types[ov] = 'char *'
             # Propagate _field_elem_types for char * append (was missing
             # — the str path had no propagation, only the int path did).
@@ -7008,6 +7021,26 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             gen._emit_call('void', '', 'mojo_list_append_double_kinded',
                            [('MojoList *', ov), ('double', av), ('char', "'" + _prior + "'")])
             gen._words.mark_slot_kinds(ov)
+        elif gimple_exprtypes.is_python_bool_expr(gen, args[0]):
+            # A Python bool is the same 0/1 word as an int (`_Bool` lowers to
+            # `int`), so the value alone cannot tell the printer which spelling
+            # it wants. The append site is the last place that CAN tell — the
+            # expression is still in hand — and it pushes the slot under
+            # MOJO_KIND_BOOL, exactly as `_list_literal_slot_kind` does for a
+            # literal's slot. Without it `[True]` printed `[1]` when the list
+            # was built `e = []; e.append(True)` rather than spelled as a
+            # literal. `prior` describes the slots already present, like the
+            # double path above: a bool appended to a list of ints must not make
+            # those ints render as bools.
+            _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._elem_types.get(ov) or 'int64_t')
+            if at in ('int', '_Bool'):
+                av = gen._coerce_to_type(at, 'int64_t', av)
+                at = 'int64_t'
+            gen._emit_call('void', '', 'mojo_list_append_kinded',
+                           [('MojoList *', ov), ('int64_t', av),
+                            ('char', "'b'"), ('char', "'" + _prior + "'")])
+            gen._words.mark_slot_kinds(ov)
         else:
             # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
             # than leaving it to `_emit_call`'s param-type lookup: in the
@@ -7028,10 +7061,31 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                                [('MojoList *', ov), ('int64_t', av)])
                 gen._words.mark_slot_kinds(ov)
             else:
-                if at in ('int', '_Bool'):
-                    av = gen._coerce_to_type(at, 'int64_t', av)
-                    at = 'int64_t'
-                gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+                # A pointer element on a list that already carries a kinds row
+                # must extend that row, or the kinds-aware repr reads the slot
+                # with the int fallback and prints a pointer decimal. The row is
+                # created by a bool/float append (the two kinds the static
+                # element type cannot express); a struct pointer maps to the
+                # int fallback and needs no byte of its own.
+                _ptr_elem = at
+                if not gimple_ctypes.TypeLattice.ends_in_star(_ptr_elem):
+                    _ptr_elem = gen._actual_types.get(_gmm_as_str(av), at)
+                _row_kind = ''
+                if gimple_ctypes.TypeLattice.ends_in_star(_ptr_elem):
+                    _row_kind = gimple_ctypes.TypeLattice.slot_kind_byte(_ptr_elem)
+                if gen._words.has_slot_kinds(ov) and _row_kind not in ('', 'i'):
+                    _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
+                        gen._elem_types.get(ov) or 'int64_t')
+                    gen._emit_call('void', '', 'mojo_list_append_kinded',
+                                   [('MojoList *', ov),
+                                    ('int64_t', gen._coerce_to_type(_ptr_elem, 'int64_t', av)),
+                                    ('char', "'" + _row_kind + "'"),
+                                    ('char', "'" + _prior + "'")])
+                else:
+                    if at in ('int', '_Bool'):
+                        av = gen._coerce_to_type(at, 'int64_t', av)
+                        at = 'int64_t'
+                    gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
             # A CALLABLE appended to a list, so a later `lst[0](...)` can
             # dispatch. The list literal records through the same helper (see
             # `_lower_list_literal`), and this is the `append` half: without

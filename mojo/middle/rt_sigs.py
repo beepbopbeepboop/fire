@@ -553,6 +553,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_list_append_double': ['void', 'MojoList *', 'double'],
     'mojo_list_append_double_kinded': ['void', 'MojoList *', 'double', 'char'],
     'mojo_list_append_int': ['void', 'MojoList *', 'int64_t'],
+    'mojo_list_append_kinded': ['void', 'MojoList *', 'int64_t', 'char', 'char'],
     'mojo_list_append_str': ['void', 'MojoList *', 'char *'],
     'mojo_list_append_str_kinded': ['void', 'MojoList *', 'char *'],
     'mojo_list_append_word': ['void', 'MojoList *', 'int64_t'],
