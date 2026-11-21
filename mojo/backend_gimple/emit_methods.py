@@ -2465,7 +2465,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
                     result = gen._new_val(ot, f'__builtin_bswap32((unsigned int){ov_local})')
                 except Exception:
                     result = ov_local
-            elif ot in ('uint64_t', 'int64_t'):
+            elif (gimple_ctypes.TypeLattice.is_word(ot) or gimple_ctypes.TypeLattice.is_uword(ot)):
                 try:
                     result = gen._new_val(ot, f'__builtin_bswap64((unsigned long long){ov_local})')
                 except Exception:
@@ -2544,7 +2544,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
                         gen._binop_into(_t_masked, _t_shift, '&', '255ULL')
                         gen._cast_into(f"{b}", 'int64_t', _t_masked)
                         gen._rt_void('mojo_list_append_int', [t, f"{b}"])
-            elif ot in ('uint64_t', 'int64_t'):
+            elif (gimple_ctypes.TypeLattice.is_word(ot) or gimple_ctypes.TypeLattice.is_uword(ot)):
                 if is_big:
                     for i in range(7, -1, -1):
                         b = gen._new_temp('int64_t')
@@ -5346,8 +5346,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # (For a real `Int *` receiver, the walked-in Int method handles it.)
     if func.member in ('_int_mlir_index', '__mlir_index__') and not node.args:
         rt, rv = gen.lower_expr(func.obj)
-        if rt in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-                  'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', '_Bool'):
+        if (gimple_ctypes.TypeLattice.is_int(rt) or gimple_ctypes.TypeLattice.is_bool(rt)):
             return rt, rv
 
     # Handle chained attribute calls: os.path.basename(arg) → int64_t_basename(arg)
@@ -6099,9 +6098,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if method in ('strip', 'lstrip', 'rstrip') and ot not in ('char *', 'void *') and not ot.startswith('Mojo'):
         # strip/lstrip/rstrip on non-string: these already have TODO stubs,
         # but catch cases where they'd generate an invalid method name
-        if ot in ('int', 'int64_t', '_Bool', 'double'):
+        if gimple_ctypes.TypeLattice.is_number_scalar(ot):
             return gen._stub_result('char *', gen._intern_string(''), f'{ot}.{method}() stubbed')
-    if method == 'get' and ot in ('_Bool', 'int', 'int64_t', 'double'):
+    if method == 'get' and gimple_ctypes.TypeLattice.is_number_scalar(ot):
         for a in node.args: gen.lower_expr(a)
         return gen._stub_result('int64_t', '(int64_t)0', f'{ot}.get() stubbed')
     if method in ('strip', 'lstrip', 'rstrip') and ot in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -6125,7 +6124,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # the whole point of this branch. gen._coerce_to_type('MojoList *',
     # 'MojoDict *', ...) would hard-raise (both are container-kind types),
     # breaking this recovery path for currently-working code.
-    if method in ('values', 'items') and ot in ('MojoList *', 'int64_t', 'int'):
+    if method in ('values', 'items') and (gimple_ctypes.TypeLattice.is_list(ot) or gimple_ctypes.TypeLattice.is_int_word(ot)):
         vp = gen._new_temp('void *'); gen._cast_into(vp, 'void *', f"{ov}")
         dp = gen._new_temp('MojoDict *'); gen._cast_into(dp, 'MojoDict *', vp)
         rt = 'MojoList *'
@@ -7419,7 +7418,7 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
             # bytes elements live in their own slot domain (set tag 2), so
             # `s.add(b'a')` twice is still one element and `b'a' in s` hits —
             # an int slot would store the raw pointer and give both failures.
-            if gen._elem_of(ov) in (None, 'int64_t'):
+            if gimple_ctypes.TypeLattice.is_word_or_none(gen._elem_of(ov)):
                 gen._elem_types[ov] = 'MojoBytes *'
             return gen._void_call('mojo_set_add_bytes', [('MojoSet *', ov), ('MojoBytes *', av)])
         at, av = _set_str_elem_arg(gen, ov, at, av)
@@ -7547,8 +7546,7 @@ def _format_arg_word(gen, at: str, av: str) -> str:
     an integer or a string pointer as itself (the runtime tells them apart,
     and `!r` needs to know which it was), anything else rendered with
     `str()` here, where its type is still known."""
-    if at in ('int', 'int64_t', 'int32_t', 'int16_t', 'int8_t',
-              'uint64_t', 'uint32_t', 'uint16_t', 'uint8_t'):
+    if gimple_ctypes.TypeLattice.is_int(at):
         return gen._to_int64(at, av)
     if at in gimple_ctypes._FLOAT_TYPES:
         # a double travels as a box so the runtime can apply `:.2f` to it
@@ -8028,7 +8026,7 @@ def _coerce_to_bytes(gen, t: str, v: str) -> str:
                               [('char *', v), ('char *', '"utf-8"'), ('char *', '"strict"')])
     # narrow scalar: widen through int64_t then route through the
     # chokepoint (safe - a scalar can never be a different container kind).
-    if t in ('int', 'char', '_Bool', 'int64_t'):
+    if (gimple_ctypes.TypeLattice.is_int_word_or_bool(t) or gimple_ctypes.TypeLattice.is_char(t)):
         v = gen._cast('int64_t', v)
         return gen._coerce_to_type('int64_t', 'MojoBytes *', v)
     # Genuinely unknown pointer (DESIGN.html R3 exception, NOT routed
@@ -8295,7 +8293,7 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
     # clamped [start[, end]] range.
     if method in ('find', 'index', 'rfind', 'rindex', 'count') and arg_pairs:
         backward = method in ('rfind', 'rindex')
-        by_value = arg_pairs[0][0] in ('int64_t', 'int', 'char', '_Bool')
+        by_value = (gimple_ctypes.TypeLattice.is_int_word_or_bool(arg_pairs[0][0]) or gimple_ctypes.TypeLattice.is_char(arg_pairs[0][0]))
         st, sp = _range_opts(gen, args, kwargs, 1)
         full = st == '0' and sp == 'MOJO_SLICE_STOP_OMITTED'
         if by_value:

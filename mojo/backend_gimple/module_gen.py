@@ -2659,9 +2659,7 @@ def _emit_reflection_dispatch(self, parts):
             if fname in bool_fields:
                 val_expr = f'({fref} ? "True" : "False")'
                 owned = 'F'
-            elif fname in boxed and ftype in (
-                    'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-                    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
+            elif fname in boxed and gimple_ctypes.TypeLattice.is_int(ftype):
                 val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.is_cstr(ftype):
@@ -2694,8 +2692,7 @@ def _emit_reflection_dispatch(self, parts):
                 else:
                     val_expr = f'_mojo_repr_dict({fref})'
                     owned = 'I' + fref
-            elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-                           'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
+            elif gimple_ctypes.TypeLattice.is_int(ftype):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.ends_in_star(ftype):
@@ -3400,7 +3397,7 @@ def _emit_reflection_dispatch(self, parts):
 
 # Placeholder ctype for a struct field whose value type this pass could not
 # resolve. MUST be machine-word sized: it is the "I don't know yet" marker
-# (the `_existing_fn_ft in ('int', 'int64_t')` re-resolution test below treats
+# (the `is_int_word(_existing_fn_ft)` re-resolution test below treats
 # it as provisional and lets a later, better-informed assignment overwrite
 # it), and a real Python int already resolves to 'int64_t' via the IntLiteral
 # branch — so 'int' was never the right answer for any KNOWN value, only the
@@ -12955,7 +12952,7 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                     _xg_tgt[_xg_pn] = 'int64_t'
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
                     continue
-                if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
+                if _xg_ct and gimple_ctypes.TypeLattice.is_int_word_or_none(_xg_tgt.get(_xg_pn)):
                     _xg_tgt[_xg_pn] = _xg_ct
                 elif ((gimple_ctypes.TypeLattice.is_cstr(_xg_ct)
                        and _xg_tgt.get(_xg_pn) in ('MojoList *', 'MojoSet *', 'MojoDict *'))
@@ -16630,7 +16627,7 @@ def gen_module_impl(self, stmts: list):
             _rkey = f"{_as_str(_rs.name)}_{_as_str(_rm.name)}"
             _rref = self._inferred_param_types.get(_rkey)
             if (not _rref or _rm.return_type is not None
-                    or self.func_return_types.get(_rkey) not in (None, 'int64_t')):
+                    or not gimple_ctypes.TypeLattice.is_word_or_none(self.func_return_types.get(_rkey))):
                 continue
             _saved_vt = dict(self.var_types)
             _saved_fn = self.current_func_name
@@ -18749,7 +18746,7 @@ def gen_module_impl(self, stmts: list):
                     v = node.value
                     if isinstance(v, IdentExpr) and v.name == pname:
                         _fld_types = self.struct_field_types.setdefault(_csn, {})
-                        if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
+                        if gimple_ctypes.TypeLattice.is_int_word_or_none(_fld_types.get(tgt.member)):
                             _fld_types[tgt.member] = _resolved_type
 
         # The CALLER-side twin of the same fixpoint: a free function's
@@ -19528,7 +19525,8 @@ def gen_module_impl(self, stmts: list):
                 if _annot is not None:
                     continue  # respect an explicit annotation
                 _cur = self._inferred_param_types.get(_callee, {}).get(_pname)
-                if _cur not in (None, 'int', 'int64_t', 'MojoList *'):
+                if not (gimple_ctypes.TypeLattice.is_int_word_or_none(_cur)
+                        or gimple_ctypes.TypeLattice.is_list(_cur)):
                     continue  # body evidence already picked a real type
                 self._inferred_param_types.setdefault(_callee, {})[_pname] = 'MojoGenerator *'
                 if len(_keys) == 1 and _keys[0] != '<conflict>':
@@ -20883,7 +20881,7 @@ def gen_module_impl(self, stmts: list):
                 and isinstance(_rs.value, CallExpr)
                 and isinstance(_rs.value.func, IdentExpr)):
             _gn = _rs.target.name
-            if self._global_c_decl_types.get(_gn) in ('int64_t', 'int'):
+            if gimple_ctypes.TypeLattice.is_int_word(self._global_c_decl_types.get(_gn)):
                 _crt = self.func_return_types.get(_rs.value.func.name, '')
                 # A CONTAINER return stays in the int64_t box the literal
                 # branches give its twin (`f = mk()` is the same global as

@@ -5083,10 +5083,10 @@ class GimpleGen:
         if own is None:
             return None
         cdecl = self._global_c_decl_types.get(name)
-        if (cdecl is not None and cdecl.endswith(' *')
+        if (cdecl is not None and TypeLattice.ends_in_star(cdecl)
                 and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *')):
             return cdecl
-        if own in ('int64_t', 'double', '_Bool', 'char *'):
+        if TypeLattice.is_py_scalar(own):
             return own
         if (own in ('MojoDict *', 'MojoList *', 'MojoSet *')
                 and not (cdecl is not None
@@ -6355,8 +6355,8 @@ def _selfhost_register_gimplegen(gen):
         # `_selfhost_merge_field` in gimple_gen_funcs.py (identical bug: a
         # `_Bool` field seen after an `int64_t` default was silently kept
         # at `int64_t` because only `_ct.endswith(' *')` was accepted).
-        if _gg_cur is None or (_gg_cur in ('int', 'int64_t', '_Bool')
-                                and (_gg_fc_s.endswith(' *') or _gg_fc_s == '_Bool')):
+        if _gg_cur is None or (TypeLattice.is_int_word_or_bool(_gg_cur)
+                                and (TypeLattice.ends_in_star(_gg_fc_s) or TypeLattice.is_bool(_gg_fc_s))):
             _gg_ft_seed[_gg_fk_s] = _gg_fc_s
     gen._selfhost_gimplegen_registered = True
 

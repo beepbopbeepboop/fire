@@ -2736,7 +2736,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # "C function name used as a value" branch already produces a
     # valid `_funcptr_*` void* value for a bare, uncalled function
     # name, which the generic dynamic-dispatch fallback further below
-    # (the `ot in ('int', 'int64_t', 'void *', ...)` case) then handles
+    # (the `is_int_word` / `is_voidp` / ... case) then handles
     # like any other opaque-pointer member read.
     # Excludes a real MODULE/NAMESPACE alias whose bare name also happens
     # to collide with a same-named top-level function pulled in from some
@@ -3367,7 +3367,9 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             return _boxed_ft, t
         gen._word_mark_dyn(raw)
         return 'int64_t', raw
-    elif ot in ('int', 'int64_t', 'void *', 'char *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+    elif (gimple_ctypes.TypeLattice.is_int_word_or_voidp(ot)
+          or gimple_ctypes.TypeLattice.is_cstr(ot)
+          or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *')):
         # Opaque Python object typed as int, void *, or built-in container — use runtime attribute accessor
         # GIMPLE requires function args to be simple vars, not cast expressions
         # A genuine 4-byte 'int' (as opposed to the 8-byte int64_t most
@@ -4594,7 +4596,7 @@ def _lbt_none_eq(gen, op: str, left_node, lt: str, lv: str, right_node, rt: str,
         _t = gen._new_temp('_Bool')
         gen._binop_into(_t, _p, op, '0')
         return '_Bool', _t
-    if _ptr_ty in ('int', 'int64_t', '_Bool', 'double', 'float'):
+    if (gimple_ctypes.TypeLattice.is_number_scalar(_ptr_ty) or gimple_ctypes.TypeLattice.is_float(_ptr_ty)):
         # ...and the same comparison when the other side is NOT a
         # pointer at all. `None == 0` is False in Python because
         # `NoneType.__eq__` returns NotImplemented and `int.__eq__(0,
@@ -4966,9 +4968,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # `x + "!"` keeps its concatenation lowering.
     if op in ginf._FLOAT_PARAM_OPS:
         _boxed = gen._words.boxed
-        if lv in _tagged and lv in _boxed and rt in ('int', 'int64_t', 'double', 'float'):
+        if lv in _tagged and lv in _boxed and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_float(rt)):
             lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
-        if rv in _tagged and rv in _boxed and lt in ('int', 'int64_t', 'double', 'float'):
+        if rv in _tagged and rv in _boxed and (gimple_ctypes.TypeLattice.is_int_word(lt) or gimple_ctypes.TypeLattice.is_float(lt)):
             rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
     # A BOXED operand beside a str under `+` is a string concatenation, for any
     # boxed value and not only a tagged word: Python's `int + str` and
@@ -5272,7 +5274,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # and fell through to plain numeric `*`, "invalid operands to
     # binary * (have 'char *' and 'int')" — found via Doc/tools/
     # check-epub.py's `s = 's' * (err_count != 1)`).
-    if op == '*' and gimple_ctypes.TypeLattice.is_cstr(lt) and rt in ('int', 'int64_t', 'uint64_t', '_Bool'):
+    if op == '*' and gimple_ctypes.TypeLattice.is_cstr(lt) and (gimple_ctypes.TypeLattice.is_int_word_or_bool(rt) or gimple_ctypes.TypeLattice.is_uword(rt)):
         t = gen._new_temp('char *')
         lv_local = gen._ensure_local(lt, lv)
         rv64 = gen._to_int64(rt, rv)
@@ -5280,7 +5282,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
 
     # int * char * → string repetition (flipped order)
-    if op == '*' and lt in ('int', 'int64_t', 'uint64_t', '_Bool') and gimple_ctypes.TypeLattice.is_cstr(rt):
+    if op == '*' and (gimple_ctypes.TypeLattice.is_int_word_or_bool(lt) or gimple_ctypes.TypeLattice.is_uword(lt)) and gimple_ctypes.TypeLattice.is_cstr(rt):
         t = gen._new_temp('char *')
         rv_local = gen._ensure_local(rt, rv)
         lv64 = gen._to_int64(lt, lv)
@@ -5301,7 +5303,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # meant triple-quoted strings/docstrings were never recognized at
     # all when this file compiles itself, cascading into a severe
     # performance blowup during self-hosted `--dump-full` of fire.py).
-    if op == '*' and lt == 'char' and rt in ('int', 'int64_t', 'uint64_t', '_Bool'):
+    if op == '*' and lt == 'char' and (gimple_ctypes.TypeLattice.is_int_word_or_bool(rt) or gimple_ctypes.TypeLattice.is_uword(rt)):
         sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._new_temp('char *')
         rv64 = gen._to_int64(rt, rv)
@@ -5309,7 +5311,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
 
     # int * bare `char` → string repetition (flipped order)
-    if op == '*' and lt in ('int', 'int64_t', 'uint64_t', '_Bool') and rt == 'char':
+    if op == '*' and (gimple_ctypes.TypeLattice.is_int_word_or_bool(lt) or gimple_ctypes.TypeLattice.is_uword(lt)) and rt == 'char':
         sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
         t = gen._new_temp('char *')
         lv64 = gen._to_int64(lt, lv)
@@ -5317,7 +5319,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
 
     # MojoList * * int → list repetition (e.g., [0] * n)
-    if op == '*' and gimple_ctypes.TypeLattice.is_list(lt) and rt in ('int', 'int64_t', 'uint64_t'):
+    if op == '*' and gimple_ctypes.TypeLattice.is_list(lt) and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_uword(rt)):
         cnt = gen._cast('int64_t', f"{rv}")
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
         # The repeat copies the source's ELEMENTS, so the result's element
@@ -5343,11 +5345,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op == '+' and lt == 'MojoBytes *' and rt == 'MojoBytes *':
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_concat', [('MojoBytes *', lv), ('MojoBytes *', rv)])
-    if op == '*' and lt == 'MojoBytes *' and rt in ('int', 'int64_t', 'uint64_t'):
+    if op == '*' and lt == 'MojoBytes *' and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_uword(rt)):
         cnt = gen._cast('int64_t', f"{rv}")
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_repeat', [('MojoBytes *', lv), ('int64_t', cnt)])
-    if op == '*' and rt == 'MojoBytes *' and lt in ('int', 'int64_t', 'uint64_t'):
+    if op == '*' and rt == 'MojoBytes *' and (gimple_ctypes.TypeLattice.is_int_word(lt) or gimple_ctypes.TypeLattice.is_uword(lt)):
         cnt = gen._cast('int64_t', f"{lv}")
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_repeat', [('MojoBytes *', rv), ('int64_t', cnt)])
@@ -5766,12 +5768,12 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # mojo_str_from_int(ch) — appending the DECIMAL BYTE CODES instead of
     # the character ("Hello, World!" became "72101108111144..." in
     # box.3d/game's ComputerMonitor.print_text). Mirror append's recovery.
-    if op == '+' and gimple_ctypes.TypeLattice.is_cstr(lt) and rt in ('char', 'int', 'int64_t') \
+    if op == '+' and gimple_ctypes.TypeLattice.is_cstr(lt) and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_char(rt)) \
             and (rt == 'char' or gen._actual_types.get(_as_str(rv)) == 'char'):
         rv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_s)])
         return 'char *', t
-    if op == '+' and gimple_ctypes.TypeLattice.is_cstr(rt) and lt in ('char', 'int', 'int64_t') \
+    if op == '+' and gimple_ctypes.TypeLattice.is_cstr(rt) and (gimple_ctypes.TypeLattice.is_int_word(lt) or gimple_ctypes.TypeLattice.is_char(lt)) \
             and (lt == 'char' or gen._actual_types.get(_as_str(lv)) == 'char'):
         lv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
@@ -7088,8 +7090,9 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
     # right operand is a container/string the runtime can walk -- a scalar
     # right operand is the codegen's own type error.
     if (x_is_word and not x_is_none
-            and (rt in ('MojoList *', 'MojoDict *', 'MojoSet *', 'char *',
-                        'MojoBytes *', 'int64_t', 'int'))):
+            and (gimple_ctypes.TypeLattice.is_word_value(rt)
+                 or gimple_ctypes.TypeLattice.is_bytes(rt)
+                 or gimple_ctypes.TypeLattice.is_int_word(rt))):
         _cw = gen._to_int64(rt, rv)
         _nw = xv if gimple_ctypes.TypeLattice.is_word(_as_str(xt)) else gen._to_int64(xt, xv)
         ti = gen._new_temp('int')
@@ -8122,7 +8125,8 @@ _GENERIC_SAFE_SLOT_KINDS = frozenset('pl')
 def _is_scalar_elem_kind(elem: str) -> bool:
     """True when a literal's joined element ctype is a scalar/Bytes, i.e. one
     whose slots `_mojo_generic_elem_repr` cannot name from the word alone."""
-    return (elem in ('int', 'int64_t', 'char', '_Bool')
+    return (gimple_ctypes.TypeLattice.is_int_word_or_bool(elem)
+            or gimple_ctypes.TypeLattice.is_char(elem)
             or elem in gimple_ctypes._FLOAT_TYPES
             or elem == 'MojoBytes *')
 

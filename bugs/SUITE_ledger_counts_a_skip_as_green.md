@@ -120,18 +120,3 @@ to re-derive the same cascade. Every one of those workers pays a
    `did not run`, not a `first_bad`. A test in `tools/test_integrate_probe_loop.py`
    for a probe whose jobs all SKIP (it must be PROBE REFUSED/NO EVIDENCE, never
    "right track"). Both use a synthetic `build/suite.log`, no gate run.
-
-## Relationship to the archived work-7804 note (2026-11-21)
-
-A parallel lane (work-7804, branch
-`work/fix-gate-bootstrap-stage2-dumps-bootstrap-validate-mojo`) reached the same
-three findings independently while chasing the same fifty-doc fanout, in a note
-named `SUITE_gate_ledger_phantom_bisect_and_per_item_docs` on that branch. It
-was never landed and is now dropped: sites 1-3 above cover its first three
-sections in more detail, `SUITE_fanout_item_red_is_misreported` covers the
-item-name half, and `ORCH_gate_ledger_false_skipped_paragraph` covers the false
-"Skipped" paragraph and the silent `set_disabled` no-op. Its only other change
-edited the per-item doc `gate-bootstrap-stage2-dumps:bootstrap-validate.mojo`,
-which master deleted (8d5b63bb1) once 416ed660c made a disabled producer's
-dependents SKIP instead of dying on the missing artifact. So nothing in it is
-missing from this tree, and this paragraph is the record of the drop.
