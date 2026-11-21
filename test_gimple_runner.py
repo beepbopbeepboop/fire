@@ -15666,7 +15666,9 @@ def main():
                   test_del_missing_dict_key_raises_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
                   test_gimple_values_print_as_pointers_inside_containers,
-                  test_dataclass_default_factory_fields_start_empty_and_per_instance):
+                  test_dataclass_default_factory_fields_start_empty_and_per_instance,
+                  test_param_annotation_contradicted_by_the_body,
+                  test_untyped_parameter_word_kind_not_recovered):
         try:
             _late()
         except AssertionError as e:
@@ -16376,6 +16378,43 @@ print(normalize_selection([]))
 print(sorted(normalize_selection("")))
 print(sorted(normalize_selection("a")))
 print(sorted(normalize_selection(selected="ab")))
+""")
+
+
+def test_untyped_parameter_word_kind_not_recovered():
+    """The UNANNOTATED twin of `test_param_annotation_contradicted_by_the_body`.
+
+    `def normalize_selection(selected, ...)` (no annotation) with a body
+    that rebinds the name to a list (`selected = [selected]`) and compares
+    it to `None`/`True`/`False` must get the same tagged `int64_t` word as
+    the annotated shape: the slot's kind is proven by the BODY, not by an
+    annotation. Before, usage inference typed the slot `MojoList *` (the
+    body iterates/frozensets it) and every reader split over that:
+    `None`/`True`/`False` arrived as their raw word bits (printed `0`/`1`/`0`
+    instead of their values) and a `''` argument segfaulted, while the
+    definition's word body and the declaration's pointer slot disagreed.
+
+    The binding-estimator reconcile that corrects a container-KIND error
+    (`list` vs `set`) must not treat that deliberate `int64_t` as a usage
+    guess to overwrite — the same declaration/definition split the annotated
+    fix closes. The two arms a `frozenset` repr cannot spell are compared by
+    sorted CONTENT against CPython, as in the annotated twin.
+    """
+    test_gimple_matches_cpython("gimple_untyped_parameter_word_kind_not_recovered", """\
+def normalize_selection(selected, *, possible=None):
+    if selected in (None, True, False):
+        return selected
+    elif isinstance(selected, str):
+        selected = [selected]
+    elif not selected:
+        return ()
+    return frozenset(selected)
+
+print(normalize_selection(None))
+print(normalize_selection(True))
+print(normalize_selection(False))
+print(sorted(normalize_selection('')))
+print(sorted(normalize_selection('a')))
 """)
 
 

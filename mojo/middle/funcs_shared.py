@@ -679,6 +679,21 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         if param_annotation_conflicts(gen, pname, ctype,
                                       getattr(node, 'body', None)):
             ctype = 'int64_t'
+    elif not _as_str(pname).startswith('*'):
+        # The UNANNOTATED twin of the rule above, and it must OVERRULE
+        # whatever the resolutions above picked: there is no annotation to
+        # contradict, so both sides of the comparison come from the body
+        # itself — a binding to one kind beside a read as another
+        # (`selected = [selected]` beside `isinstance(selected, str)`), the
+        # shape the usage inference resolves to one kind (`frozenset(
+        # selected)` says `MojoList *`) while the body disproves. The tagged
+        # word is the same answer, and it is the LAST word so the table
+        # entry, the coro registry and the default-literal refinement cannot
+        # keep the kind the body disproves. Star params are the packed
+        # MojoList/MojoDict slots, not words of unknown kind.
+        from mojo.middle.infra_infer import untyped_param_mixed_kinds
+        if untyped_param_mixed_kinds(gen, pname, getattr(node, 'body', None)):
+            ctype = 'int64_t'
     conv  = (getattr(node, 'param_convs', {}) or {}).get(pname)
     # PART 6 (2026-10-23, family D piece 2): a read-only-conv SCALAR param is
     # a pointer to the CALLER's variable — the reference semantics real Mojo
