@@ -916,6 +916,7 @@ int64_t     mojo_box_none(void);             /* None in a tagged word: renders N
 void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
 void        mojo_list_append_str_kinded(MojoList *l, const char *v);   /* a string slot under the 'p' kind */
 void        mojo_list_append_double_kinded(MojoList *l, double v, char prior);   /* append a double under kind 'd'; `prior` describes the slots already there */
+void        mojo_list_append_kinded(MojoList *l, int64_t v, char kind, char prior);   /* append a word under `kind`; use when a kinds row exists or the slot's kind is not in the value's C type */
 /* The result of `+`, `-` or `*` where one operand is a float-possible
  * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
  * answer and `dres` the double answer, both already computed. Returns a fresh
@@ -1717,29 +1718,6 @@ char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
 char *mojo_dict_get_str(MojoDict *d, char *key);
-/* `d[k]`, not `.get(k)`: a bare subscript of an ABSENT key raises a real,
- * catchable KeyError (CPython's behaviour), where the getters above answer
- * their type's zero so `.get`/`setdefault`/`in` can test presence. One slot
- * lookup per read, like the getter; the value conversion is identical. */
-int64_t     mojo_dict_subscript_int(MojoDict *d, char *key);
-double      mojo_dict_subscript_double(MojoDict *d, char *key);
-char *mojo_dict_subscript_str(MojoDict *d, char *key);
-int64_t     mojo_dict_subscript_boxed(MojoDict *d, char *key);
-int64_t     mojo_dict_subscript_bytes_boxed(MojoDict *d, MojoBytes *key);
-double      mojo_dict_subscript_bytes_double(MojoDict *d, MojoBytes *key);
-char       *mojo_dict_subscript_bytes_str(MojoDict *d, MojoBytes *key);
-/* The `d[None]` twins of the three above (keykind 3); an absent entry raises
- * `KeyError: None`. */
-int64_t     mojo_dict_subscript_none_boxed(MojoDict *d);
-double      mojo_dict_subscript_none_double(MojoDict *d);
-char       *mojo_dict_subscript_none_str(MojoDict *d);
-/* The `_kw` twins of the four str-key subscripts: the key arrives as a raw
- * machine word (a boxed str pointer, an integer, or a container whose content
- * key must be probed), exactly like `mojo_dict_slot_boxed_kw`. */
-int64_t     mojo_dict_subscript_int_kw(MojoDict *d, int64_t kw);
-double      mojo_dict_subscript_double_kw(MojoDict *d, int64_t kw);
-char       *mojo_dict_subscript_str_kw(MojoDict *d, int64_t kw);
-int64_t     mojo_dict_subscript_boxed_kw(MojoDict *d, int64_t kw);
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
 char *mojo_dict_repr_slot(MojoDict *d, char *key);
 int64_t mojo_dict_slot_boxed(MojoDict *d, char *key);
@@ -2285,12 +2263,6 @@ void *mojo_make_list(void);
 void *mojo_make_dict(void);
 void *mojo_make_set(void);
 void *mojo_make_tuple(void);
-/* `int(x)` with one argument. A word below 65536 is a numeric argument
- * passed through as a pointer-sized value; anything else is a `char *` and
- * is parsed as CPython's `int(str)` parses it (whitespace, one sign, digits
- * with single underscores between them, NO 0x/0o/0b prefix), raising a
- * catchable ValueError on invalid text. It is `mojo_make_int_base(s, 10)` —
- * see below for the parser. */
 int64_t mojo_make_int(char *s);
 /* `int(s, base)`: CPython's parse of a str in an explicit base (2..36, or 0
  * for "read the prefix like a literal") -- surrounding whitespace, one sign,

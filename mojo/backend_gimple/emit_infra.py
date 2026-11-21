@@ -3575,12 +3575,6 @@ _KW_DICT_FNS = frozenset([
     # formatted to get there (`d[i]` on a `Dict[Int, Int]` used to stringify the
     # key and release it every access).
     'mojo_dict_slot_boxed',
-    # The SUBSCRIPT reads (raising, unlike the sentinel getters) have the same
-    # `_kw` twins and the same three key kinds; without this the word is
-    # materialised as text and a tuple key misses the content key the store
-    # wrote (caught by gimple_tuple_dict_key_is_content_keyed).
-    'mojo_dict_subscript_int', 'mojo_dict_subscript_double',
-    'mojo_dict_subscript_str', 'mojo_dict_subscript_boxed',
     # The bool / None / struct setters. Absent from this set they were not
     # refused — `_apply_kw_keys` fell through to the "build the decimal string
     # now" arm, which stores the entry in the plain char* key DOMAIN while the

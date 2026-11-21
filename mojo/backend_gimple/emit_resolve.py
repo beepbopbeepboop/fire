@@ -3864,7 +3864,7 @@ def _list_arg_mojo_type(gen, arg, ctype):
     itself, or a local whose one binding proves its type
     (`_proven_local_types`). Anything else is unprovable, and the caller
     declines the shape exactly as every other unprovable argument does
-    (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
+    (bugs/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
     origin](span: Span[T, origin])` is the template this proof exists for)."""
     if not gimple_ctypes.TypeLattice.is_list(ctype):
         return None
@@ -4791,7 +4791,7 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
 
     ONE helper for every `Span *` parameter, not a `sort`-only branch: any
     future generic that takes a `Span` from a `List` (or a boxed Span)
-    argument converts here (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md,
+    argument converts here (bugs/CODEGEN_prelude_sort_is_not_resolved.md,
     planning decision 1a). `params` is the instance's C param types
     (elaborate's erased view), so the check is on the parameter, not the
     annotation text."""
