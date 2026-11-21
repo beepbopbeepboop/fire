@@ -123,5 +123,29 @@ class ProbeLocking(unittest.TestCase):
         self.assertNotIn("work-probe-test", wl)
 
 
+class RegenerateGenerated(unittest.TestCase):
+    """A round regenerates a generated file in its own tree and commits it only when it changed."""
+    def test_commits_only_a_real_change(self):
+        d = tempfile.mkdtemp()
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        def git(*a):
+            return subprocess.run(["git", "-C", d] + list(a), capture_output=True, text=True, env=env)
+        git("init", "-q"); os.makedirs(os.path.join(d, "tools")); os.makedirs(os.path.join(d, "runtime"))
+        open(os.path.join(d, "runtime", "h.h"), "w").write("int f(int);\n")
+        open(os.path.join(d, "tools", "gen_rt_sigs.py"), "w").write(
+            "import os\nsrc = open('runtime/h.h').read()\n"
+            "os.makedirs('mojo/middle', exist_ok=True)\nopen('mojo/middle/rt_sigs.py', 'w').write(src)\n")
+        git("add", "-A"); git("commit", "-q", "-m", "root")
+        before = git("rev-parse", "HEAD").stdout.strip()
+        I.regenerate_generated(d)                       # the table is stale: regenerated and committed
+        after = git("rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(before, after, "a stale generated file is committed")
+        self.assertEqual(git("log", "-1", "--format=%s").stdout.strip(),
+                         "integrate: regenerate mojo/middle/rt_sigs.py from runtime/*.h")
+        I.regenerate_generated(d)                       # already current: no new commit
+        self.assertEqual(git("rev-parse", "HEAD").stdout.strip(), after)
+
+
 if __name__ == "__main__":
     unittest.main()
