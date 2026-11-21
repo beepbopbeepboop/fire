@@ -4853,8 +4853,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is how `result /= part` in std/pathlib/path.mojo became a double division
     # of a pointer, which gcc rejects. The `%` gate has the same ordering issue
     # in principle, but its operands reach it unchanged, so it is left alone.
-    int_true_div = (op == '/' and lt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES
-                    and rt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)
+    int_true_div = gimple_ctypes._true_div_cotype(op, lt, rt) is not None
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
     # its payload in a hidden `_data: MojoBytes *` field — an inherited
     # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that

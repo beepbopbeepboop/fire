@@ -3710,7 +3710,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
                         getattr(node, 'body', None))):
             ret_type = 'MojoList *'
     else:
-        ret_type = gen._infer_return_type(node.body)
+        ret_type = gen._infer_return_type(node.body, node)
     if ci.is_re_sub_callback:
         ret_type = 'char *'
     gen.func_ret_type = ret_type

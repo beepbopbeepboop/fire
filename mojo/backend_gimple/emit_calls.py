@@ -12165,7 +12165,7 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
         # body. Left at the sibling's type, a void callee was used as an
         # expression ("invalid use of void expression").
         try:
-            _rt = gen._infer_return_type(_def.body)
+            _rt = gen._infer_return_type(_def.body, _def)
         except Exception:
             _rt = 'void'
         gen.func_return_types[_sym] = _rt or 'void'

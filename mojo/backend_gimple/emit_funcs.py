@@ -2075,13 +2075,13 @@ def _sgfs_ret_ct(gen, _m, _tgt_fn):
         if getattr(_tgt_fn, 'return_type', None) is not None:
             return _sgfs_resolve_ann(gen, _tgt_fn.return_type)
         try:
-            _r = gen._infer_return_type(_tgt_fn.body)
+            _r = gen._infer_return_type(_tgt_fn.body, _tgt_fn)
             if _r:
                 return _r
         except Exception:
             pass
     try:
-        _r = gen._infer_return_type(_m.body)
+        _r = gen._infer_return_type(_m.body, _m)
         if _r:
             return _r
     except Exception:
@@ -4154,10 +4154,10 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             for _cln, _clt in _closure_locals.items():
                 if _cln not in gen.var_types:
                     gen.var_types[_cln] = _clt
-            ret_type = gen._infer_return_type(node.body)
+            ret_type = gen._infer_return_type(node.body, node)
             gen.var_types = _saved_vt_rt
         else:
-            ret_type = gen._infer_return_type(node.body)
+            ret_type = gen._infer_return_type(node.body, node)
         # Special case: main() should return int, not void
         if node.name == 'main' and ret_type == 'void':
             ret_type = 'int64_t'
@@ -5705,7 +5705,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                     gen.var_types.setdefault(_lvn, _lvt)
         except Exception:
             pass
-        ret_type = gen._infer_return_type(node.body)
+        ret_type = gen._infer_return_type(node.body, node)
         gen.var_types = _saved_lv
         if ret_type == 'void':
             ret_type = 'void'
