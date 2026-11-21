@@ -3575,7 +3575,10 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
 def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     """`_gen_lifted_closure` without the ownership-state save/restore around
     it (see there). `ci` unannotated for the same reason as there."""
-    gen._reset_func(ci.inner_def.body, ci.inner_def.params)
+    gen._reset_func(ci.inner_def.body, ci.inner_def.params,
+                    default_none_params=ginf.param_default_none_names(
+                        gen, ci.inner_def,
+                        _as_str(getattr(ci.inner_def, 'name', ''))))
     # Set module context for global field access -- same fix, same reason
     # as _gen_struct_method's identical line just above: a lifted closure
     # is emitted BEFORE its owning gen_func/_gen_struct_method call sets
