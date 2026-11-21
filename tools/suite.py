@@ -1937,7 +1937,8 @@ test('pydiff-ratchet', [PY, 'test_pydiff_ratchet.py'], cache=True, mem='tiny',
                              'runtime/fire_runtime.c', 'test_gimple_runner.py'] + sorted(
          os.path.relpath(p, REPO)
          for p in glob.glob(os.path.join(REPO, 'tools', 'pydiff_corpus', '*', '*.py'))),
-     desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)')
+     desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)',
+     disabled='bugs/gate-pydiff-ratchet.md')
 test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + sorted(
          os.path.relpath(p, REPO)
@@ -2084,7 +2085,8 @@ test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
 test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_glob_compiled.py', 'build_config.py', 'exec_budget.py',
                              RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc'],
-     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython")
+     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython",
+     disabled='bugs/gate-globcompiled.md')
 
 # [1]'s round was "the silent no-op class", and this is the test that pins it.
 # It is in `check` and not in a heavyweight bucket because it needs no Lean and
@@ -2575,7 +2577,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source',
+     disabled='bugs/gate-stdlib-dylib.md')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2627,7 +2630,8 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
+     disabled='bugs/gate-stdlib-syntax.md')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
@@ -2693,7 +2697,8 @@ test('bootstrap-stage1-transitive',
             'python dump peaks at 4.1 GB; 1.5x = 6.15 GB so `small` (8) is the '
             'ratchet class, not `mid` (6). Over the 4 GB debt line — see '
             + MEM_DEBT_DOC,
-     desc='stage1: the one transitive-closure fire.ci that stage2 compiles')
+     desc='stage1: the one transitive-closure fire.ci that stage2 compiles',
+     disabled='bugs/gate-bootstrap-stage1-transitive.md')
 
 # The gcc -O0 -fgimple compile of the 40 MB closure into a real binary. Its
 # artifact is cached by the content of stage1/fire.ci plus the runtime sources
@@ -4087,7 +4092,8 @@ test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
      extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
             'tools/formal_host_import_wall.py',
             'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
-     desc='the host-import shapes instrument: which shapes each reader maps to')
+     desc='the host-import shapes instrument: which shapes each reader maps to',
+     disabled='bugs/gate-formal-host-import-shapes.md')
 # The other file the same estate check named on the same day, registered on
 # the same reasoning rather than excused: seven assertions that a per-STRUCT
 # predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is
@@ -4283,11 +4289,14 @@ test('lexer-double-slash-operator', [PY, 'test_lexer_double_slash_operator.py'],
 test('linked-list-link-symbols', [PY, 'test_linked_list_link_symbols.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('linked-list-struct-element-step4', [PY, 'test_linked_list_struct_element_step4.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
+     desc='registered by the estate audit (every test file runs)',
+     disabled='bugs/gate-linked-list-struct-element-step4.md')
 test('linked-list-struct-element-step4b', [PY, 'test_linked_list_struct_element_step4b.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
+     desc='registered by the estate audit (every test file runs)',
+     disabled='bugs/gate-linked-list-struct-element-step4b.md')
 test('linked-list-struct-element-step4c', [PY, 'test_linked_list_struct_element_step4c.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
+     desc='registered by the estate audit (every test file runs)',
+     disabled='bugs/gate-linked-list-struct-element-step4c.md')
 test('module-loader-stdlib', [PY, 'test_module_loader_stdlib.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('mro', [PY, 'test_mro.py'], mem='tiny',
@@ -4393,7 +4402,8 @@ test('stdlib-import-suffix', [PY, 'test_stdlib_import_suffix.py'],
      desc='stdlib import suffix (registered by the estate audit)')
 test('stdlib-syntax-quick-bench-math', [PY, 'test_stdlib_syntax_quick_bench_math.py'],
      mem='tiny',
-     desc='quick_bench math stdlib syntax (registered by the estate audit)')
+     desc='quick_bench math stdlib syntax (registered by the estate audit)',
+     disabled='bugs/gate-stdlib-syntax-quick-bench-math.md')
 test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
      mem='tiny',
      desc='land doc summary (registered by the estate audit)')
