@@ -3931,6 +3931,7 @@ class GimpleGen:
         'mojo_dict_items':       ('MojoList *', ['MojoDict *']),
         'mojo_dict_items_int':   ('MojoList *', ['MojoDict *']),
         'mojo_sorted':           ('MojoList *', ['void *']),
+        'mojo_sorted_kind':      ('MojoList *', ['void *', 'int']),
         'mojo_list_sorted_str':  ('MojoList *', ['MojoList *']),
         # `l.sort()`: the kind byte is a MOJO_KIND_* alphabet constant and
         # `keys` is NULL unless a `key=` built one, so the two are passed as
