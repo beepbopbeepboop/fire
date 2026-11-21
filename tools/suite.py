@@ -1934,12 +1934,12 @@ test('type-string-ratchet', [PY, 'test_type_string_ratchet.py'], cache=True, mem
 # only grow, so a fix that lands is locked in and a regression is named.
 test('pydiff-ratchet', [PY, 'test_pydiff_ratchet.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_pydiff_ratchet.py', 'tools/pydiff.py',
-                             'tools/pydiff_ok.txt', 'runtime/fire_runtime.h',
+                             'tools/pydiff_ok.txt', 'exec_budget.py',
+                             'runtime/fire_runtime.h',
                              'runtime/fire_runtime.c', 'test_gimple_runner.py'] + sorted(
          os.path.relpath(p, REPO)
          for p in glob.glob(os.path.join(REPO, 'tools', 'pydiff_corpus', '*', '*.py'))),
-     desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)',
-     disabled='bugs/gate-pydiff-ratchet.md')
+     desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)')
 test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + sorted(
          os.path.relpath(p, REPO)
@@ -2361,7 +2361,10 @@ test('preflight', [PY, '-c',
 test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
-            'test_memslot.py', 'tools/dangling_doc_refs.py'],
+            'test_memslot.py', 'tools/dangling_doc_refs.py',
+            # The budget census reads this helper's call sites (it is in
+            # `SHARED_BUDGET_HELPERS`), so it is an input to this job.
+            'tools/pydiff.py'],
      extraglob=['**/test_*.py', '**/*_test.py'],
      desc='the runner: drivers, deps, exclusivity, fanout, tally, log split',
      disabled='bugs/gate-suite-self-test.md')
