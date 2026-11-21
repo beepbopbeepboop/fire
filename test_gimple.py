@@ -10,6 +10,7 @@ import os
 import sys
 import gimple_codegen
 from gimple_codegen import compile_to_gimple
+import mojo.backend_gimple.emit_infra as ginf
 import fire_compiler
 import mojo.middle.infra_infer
 import platform
@@ -14656,7 +14657,7 @@ walk_span()
             _mmg._gmi_scan_imported_global_homes(gen, stmts)
             ctype, _cval = gen._lower_IdentExpr(_read_node())
             return (gen._own_imported_global_home.get('NAMES'), ctype,
-                    '\n'.join(gen.body_lines))
+                    '\n'.join(ginf.body_text(gen)))
 
         bad = []
         # 1. The owner is mid-compile: the owner's field, from the seeded type.

@@ -3862,7 +3862,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
         f"{_sig_kw}{ret_type} {ci.lifted_name} ({params_str})",
         "{",
         *gen.decls,
-        *gen.body_lines,
+        *ginf.body_text(gen),
         "}",
     ]
     gen._captures  = {}

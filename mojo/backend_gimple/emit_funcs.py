@@ -4366,7 +4366,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # a plain, positive-index lookup is the established-safe replacement.
     if node.name == 'main' and gimple_ctypes.TypeLattice.is_int_word(ret_type):
         _n_body_lines = len(gen.body_lines)
-        _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
+        _last_body_line = (gen.body_lines[_n_body_lines - 1].line()
+                           if _n_body_lines > 0 else '')
         if not _last_body_line.strip().startswith('return'):
             gen._ret('0')
 
@@ -4385,7 +4386,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         f"{ret_type} {safe} ({params_str})",
         "{",
         *gen.decls,
-        *gen.body_lines,
+        *ginf.body_text(gen),
         "}",
     ]
 
@@ -4585,7 +4586,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
         "  _ran = 1;",
         *_cai_call,
         *_dep_init_calls,
-        *gen.body_lines,
+        *ginf.body_text(gen),
         "}",
     ]
 
@@ -5910,7 +5911,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         f"{_sig_kw}{ret_type} {mangled} ({params_str})",
         "{",
         *gen.decls,
-        *gen.body_lines,
+        *ginf.body_text(gen),
         "}",
     ]
     gen._pop_import_scope()

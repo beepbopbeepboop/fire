@@ -35,6 +35,10 @@ PATTERNS = {
     # type-checks at the source; the builder calls (`_rt_call`, `_cast`,
     # `_copy`, `_goto`, `_binop`, ...) are checked by gimple_lint.
     "gen._emit( text": r"""\b(?:gen|self)\._emit\(""",
+    # ...and `build.raw` is the builder's adapter for a statement no family
+    # models yet, so it is the same debt and must not become the way around
+    # the count above. Only `_emit_raw` itself should call it.
+    "build.raw( text": r"""\bbuild\.raw\(""",
     # Stage 5b: the six dynamic-word sets are read and written through
     # `gen._words` (mojo/middle/valueinfo.py: `may_be_box`, `mark_tagged`, ...).
     # A direct `gen._boxed_vals` is the old spelling.
@@ -49,7 +53,8 @@ BASELINE = {
     "== '_Bool'": 6,
     "== 'double'": 9,
     "== 'MojoList *'": 31,
-    "gen._emit( text": 266,
+    "gen._emit( text": 256,
+    "build.raw( text": 1,
     "direct word-set use": 10,
 }
 

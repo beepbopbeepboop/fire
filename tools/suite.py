@@ -295,7 +295,12 @@ GIMPLE_SOURCES = (
     + sorted(os.path.relpath(p, REPO)
              for p in glob.glob(os.path.join(REPO, 'mojo', 'middle', '*.py')))
     + sorted(os.path.relpath(p, REPO)
-             for p in glob.glob(os.path.join(REPO, 'mojo', 'backend_gimple', '*.py'))))
+             for p in glob.glob(os.path.join(REPO, 'mojo', 'backend_gimple', '*.py')))
+    # The IR the backend builds statements with (mojo/ir/build.py and the
+    # Instr/Type shapes it returns) is codegen too: a change there can change
+    # every generated .ci, so it belongs in every cached check's key.
+    + sorted(os.path.relpath(p, REPO)
+             for p in glob.glob(os.path.join(REPO, 'mojo', 'ir', '*.py'))))
 
 # ── Named memory buckets ─────────────────────────────────────────────────────
 # Ceilings in GB, applied to a job's whole process TREE (memcap sums the tree

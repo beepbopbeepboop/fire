@@ -64,7 +64,7 @@ Four layers, in `mojo/ir/`:
 | `instr.py` | `Ex` (operand), `Instr` (statement), `Function`, `Module`, `Sig`. Ten statement shapes cover 98% of today's emission | landed |
 | `verify.py` | type-checks a `Module`, returns `Finding`s with stable codes | landed |
 | `reader.py` | TRANSITIONAL. Parses emitted `.ci` text and `runtime/*.h` into a `Module`, so the verifier can check today's string backend | landed |
-| `build.py` | the builder the lowering code will call instead of `gen._emit(f"...")` | stage 2 |
+| `build.py` | the builder the lowering code will call instead of `gen._emit(f"...")` | landed: copies, casts, arithmetic, calls, labels; `raw` is the adapter for the rest |
 
 Beside it, in `mojo/middle/`: `rt_sigs.py` (generated runtime signatures) and
 `rt_call.py` (which scalar arguments need a conversion statement).
@@ -191,13 +191,30 @@ that is meant to be behaviour-preserving:
   to the result type for arithmetic, to the wider operand for a comparison.
   `TEXT_BINOP_BASELINE` is 0: the last 16 text-spelled sites were rewritten on
   2026-11-14 and the baseline followed them down.
-- **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
-  `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
-  `label`. Each returns a typed value and appends an `Instr`.
-  `_rt_call`/`_emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
-  Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the count of
-  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them on 2026-11-20, 41 on 2026-11-21) are the next
-  mechanical batch: `gen._cast(T, x)`.
+- **Stage 2b (first families landed 2026-11-21). The builder.**
+  `mojo/ir/build.py`: `raw`, `copy`, `cast_into`, `binop_into`, `call_into`,
+  `call_void`, `label`. Each builds a typed `Instr` and appends it to
+  `gen.body_lines` through one chokepoint, `build.append`, which applies the
+  `#line` stamping rule the text emitter used to apply. `raw` is the adapter
+  for a statement no family has claimed yet and `_emit_raw` is its only
+  backend caller. Moved this round: copies (`_copy`), casts (`_cast_into`),
+  arithmetic (`_binop_into`), runtime calls (`_rt_call`/`_rt_into`/
+  `_rt_void`), program calls (`_emit_call`'s three result/void sites) and
+  labels (`_emit_label`). `_rt_args` and `_binop_text` gained a
+  list-returning sibling (`_binop_operands`) so the coercion stays where it
+  is while the statement becomes a shape. Byte-identical `.ci` on all 285
+  `tools/pydiff_corpus` programs (280 that compile; the 5 that do not are
+  empty in both). Ratchet: `test_type_string_ratchet.py` counts `gen._emit(`
+  / `self._emit(` (300 on 2026-11-20, 266 on 2026-11-21 before this round,
+  **256** after) and now also `build.raw(` (1: `_emit_raw`), so the adapter
+  cannot become the way around the first count. The cast sites
+  (`_new_val(T, f"(T2){x}")`, 418 on 2026-11-20, 41 on 2026-11-21) are the
+  next mechanical batch: `gen._cast(T, x)`.
+  Still to come for 2b: `load_field`/`store_field`/`br`/`cond_br`/`ret`, and
+  the coercion (which operand needs a conversion) moving in from
+  `rt_call`/`_rt_args`/`_binop_operands`. The control-flow four stay text
+  because `_emit_cf` is told the statement KIND and rewrites exits for a
+  `try`/`with` teardown; stage 3a's paragraph below says why.
 - **Stage 3a (landed 2026-11-13). Exits are told, not recognised.**
   `_emit_cf` (`emit_infra.py`) replaces `_emit_through`. `gen._goto`,
   `gen._ret`, `gen._ret_void` hand it the KIND of statement and its label or
@@ -214,8 +231,15 @@ that is meant to be behaviour-preserving:
   CONSEQUENCE: a call with a result that is spelled as text
   (`gen._new_val(t, f"{fn} ({x})")`) is never marked fresh, so its result
   leaks. Use `gen._rt_call(t, fn, [x])` -- a computed callee name is fine.
-- **Stage 3c. Statements are `Instr`, not strings.** `gen.body_lines` becomes
-  a list of `Instr`; the four function-assembly sites print it.
+- **Stage 3c (landed 2026-11-21). Statements are `Instr`, not strings.**
+  `gen.body_lines` holds `Instr`; `Instr.line()` is the ONE rule that renders
+  a body entry (two spaces of indent for a modelled statement, verbatim for
+  'opaque', and a blank line then column 0 for a label), and the four
+  function-assembly sites spread `ginf.body_text(gen)`. A statement no
+  family has modelled yet is an 'opaque' `Instr`, so this landing changed no
+  output; what changed is that a statement's shape now travels with it
+  instead of being recovered from its text. `mojo/ir` is in the compiler's
+  own import closure now, which is what its rule 2 was written for.
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the

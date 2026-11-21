@@ -47,6 +47,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 import mojo.middle.rt_call as rt_call
+import mojo.ir.build as build
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
@@ -2529,8 +2530,9 @@ def _bool_and(gen, left: str, right: str) -> str:
     return t
 
 
-def _rt_args(gen, fname: str, args: list) -> str:
-    """Spell the argument list of a call to runtime function `fname`.
+def _rt_args(gen, fname: str, args: list) -> list:
+    """The argument list of a call to runtime function `fname`, one spelling
+    per argument.
 
     `args` are VALUES (temp or variable names, or literal text), not
     `(ctype, value)` pairs: a call site states what it passes and never what
@@ -2541,10 +2543,10 @@ def _rt_args(gen, fname: str, args: list) -> str:
     step `_emit_call` takes, so a runtime call is converted the same way
     whichever of the two spells it."""
     fixed: list = ginf._repr_fix_args(gen, fname, args)
-    parts: list[str] = []
+    parts: list = []
     for a in fixed:
         parts.append(_as_str(a))
-    return ', '.join(parts)
+    return parts
 
 
 def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
@@ -2552,24 +2554,25 @@ def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
 
     THE way to call a runtime function for its value.  Do not spell the call
     as text inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
-    rhs: str = fname + ' (' + _rt_args(gen, fname, args) + ')'
+    fixed: list = _rt_args(gen, fname, args)
+    rhs: str = fname + ' (' + ', '.join(fixed) + ')'
     if _dtrace.enabled():
         _dtrace.note(_dtrace.str_hash(_as_str(ret_type)) ^ _dtrace.str_hash(rhs))
     t: str = gen._new_temp(ret_type)
     ginf.note_call_result(gen, t, fname)
-    gen._emit('  ' + t + ' = ' + rhs + ';')
+    build.call_into(gen, t, fname, fixed)
     return t
 
 
 def _rt_into(gen, dst: str, fname: str, args: list) -> None:
     """`dst = fname (args);` for a runtime function, into an existing temp."""
     ginf.note_call_result(gen, _as_str(dst).strip(), fname)
-    gen._emit('  ' + _as_str(dst) + ' = ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+    build.call_into(gen, _as_str(dst), fname, _rt_args(gen, fname, args))
 
 
 def _rt_void(gen, fname: str, args: list) -> None:
     """`fname (args);` for a runtime function called for its effect."""
-    gen._emit('  ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+    build.call_void(gen, fname, _rt_args(gen, fname, args))
 
 
 def _cast(gen, ctype: str, val: str) -> str:
@@ -2587,7 +2590,7 @@ def _cast(gen, ctype: str, val: str) -> str:
 def _cast_into(gen, dst: str, ctype: str, val: str) -> None:
     """`dst = (ctype) val;` into an existing temp, which must be declared
     `ctype`."""
-    gen._emit('  ' + _as_str(dst) + ' = (' + _as_str(ctype) + ')' + _as_str(val) + ';')
+    build.cast_into(gen, _as_str(dst), _as_str(ctype), _as_str(val))
 
 
 _C_COMPARE_OPS: dict[str, bool] = {'==': True, '!=': True, '<': True, '>': True,
@@ -2612,13 +2615,17 @@ def _widen_operand(gen, want: str, v: str) -> str:
     return v
 
 
-def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
-    """The right-hand side `a op b`, operands converted as GIMPLE requires.
+def _binop_operands(gen, ctype: str, a: str, op: str, b: str) -> list:
+    """The two operand spellings of `a op b`, converted as GIMPLE requires.
 
     Arithmetic: both operands must have the result's type, so a narrower or
     differently-classed variable is widened to `ctype`.  Comparison: the two
     operands must have each other's type, so the narrower is widened to the
-    wider (and an integer to a `double`); `ctype` (`_Bool`) is not consulted."""
+    wider (and an integer to a `double`); `ctype` (`_Bool`) is not consulted.
+
+    Returned as a list rather than joined text so the builder can make the
+    operation a statement shape; `_binop_text` is the joined form for the
+    statements that are still text."""
     a = _as_str(a)
     b = _as_str(b)
     if op in _C_COMPARE_OPS:
@@ -2644,7 +2651,16 @@ def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
     elif ctype != '':
         a = _widen_operand(gen, ctype, a)
         b = _widen_operand(gen, ctype, b)
-    return a + ' ' + op + ' ' + b
+    parts: list = []
+    parts.append(a)
+    parts.append(b)
+    return parts
+
+
+def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
+    """`a op b` as text; see `_binop_operands`."""
+    parts: list = _binop_operands(gen, ctype, a, op, b)
+    return parts[0] + ' ' + op + ' ' + parts[1]
 
 
 def _binop(gen, ctype: str, a: str, op: str, b: str) -> str:
@@ -2665,7 +2681,8 @@ def _binop_into(gen, dst: str, a: str, op: str, b: str) -> None:
     dst = _as_str(dst)
     dt = gen.var_types.get(dst)
     dts: str = '' if dt is None else _as_str(dt)
-    gen._emit('  ' + dst + ' = ' + _binop_text(gen, dts, a, op, b) + ';')
+    parts: list = _binop_operands(gen, dts, a, op, b)
+    build.binop_into(gen, dst, parts[0], op, parts[1])
 
 
 def _loop_head(gen, idx: str, n: str, bb_cond: str, bb_body: str,
@@ -2736,11 +2753,11 @@ def _copy(gen, dst: str, src: str) -> None:
         dts: str = _as_str(dt)
         sts: str = _as_str(st)
         if rt_call.copy_needs_cast(dts, sts):
-            gen._emit('  ' + dst + ' = (' + dts + ')' + src + ';')
+            build.copy(gen, dst, src, dts)
             return
         if dts == sts:
             ginf.carry_value_info(gen, dst, src)
-    gen._emit('  ' + dst + ' = ' + src + ';')
+    build.copy(gen, dst, src)
 
 
 def _goto(gen, label: str) -> None:
@@ -2774,8 +2791,7 @@ def _void_call(gen, fname: str, arg_pairs: list) -> tuple:
 
 
 def _emit_label(gen, label: str, freq_hint: str = ''):
-    ann = f'  /* {freq_hint} */' if freq_hint else ''
-    gen.body_lines.append(f"\n{label}:{ann}")
+    build.label(gen, label, freq_hint)
     gen._last_was_terminal = False
 
 
@@ -2935,7 +2951,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             _bl = getattr(gen, 'body_lines', None) or []
             _k = len(_bl) - 1
             while _k >= 0 and _k > len(_bl) - 400:
-                _ln = _bl[_k]
+                _ln = _bl[_k].line()
                 if _ln.startswith('#line '):
                     _parts = _ln.split()
                     if len(_parts) >= 2 and _parts[1].isdigit():
@@ -2952,7 +2968,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         _bl2 = getattr(gen, 'body_lines', None) or []
         _k2 = len(_bl2) - 1
         while _k2 >= 0 and len(_ctx) < 6 and _k2 > len(_bl2) - 200:
-            _l2 = _bl2[_k2].strip()
+            _l2 = _bl2[_k2].line().strip()
             if _l2 and not _l2.startswith('#'):
                 _ctx.append(_l2)
             _k2 -= 1

@@ -332,8 +332,9 @@ def count_text_calls() -> tuple:
 # ANY call still spelled as text, whatever its callee: a computed name
 # (`f"{base}_resume ({h})"`, `f"mojo_list_set_{suf} (...)"`), a user function,
 # a libc function.  `_rt_call` / `_rt_into` / `_rt_void` take a computed callee
-# name too.  May only shrink.
-TEXT_ANY_CALL_BASELINE = 7
+# name too.  May only shrink: `_emit_call`'s three result/void sites moved to
+# `build.call_into` / `build.call_void` on 2026-11-21 (7 -> 4).
+TEXT_ANY_CALL_BASELINE = 4
 
 
 def count_text_any_calls() -> tuple:

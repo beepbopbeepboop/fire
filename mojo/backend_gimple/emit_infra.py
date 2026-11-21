@@ -48,6 +48,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
+import mojo.ir.build as build
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import ownership_destruct
@@ -303,7 +304,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # names that cannot outlive it.
     gen._func_value_names = {}
     gen.decls:       list[str]         = []
-    gen.body_lines:  list[str]         = []
+    # Stage 3c: a body is a list of `Instr`, not of C text.  A statement a
+    # builder family models (mojo/ir/build.py) is stored as its shape; one no
+    # family has claimed yet is stored as 'opaque' text by `build.raw`, which
+    # is the adapter that shrinks.  Print it with `body_text`.
+    gen.body_lines:  list              = []
     gen.var_types:   dict[str, str]    = {}
     # PART 6 (2026-10-22, family C): the tagged-Optional read table is
     # per-function (temp names are per-function); clear it like the other
@@ -2519,16 +2524,25 @@ def _emit_raw(gen, line: str):
     # statement's); a statement that lowers to many lines is no longer
     # attributed to its first line plus a count. Directives, preprocessor
     # lines and blanks are not statement lines and are not stamped.
-    _d = getattr(gen, '_stmt_line_directive', None)
-    if _d and line.strip() and not line.lstrip().startswith('#'):
-        gen.body_lines.append(_d)
-    gen.body_lines.append(line)
+    # `build.append` applies that rule to every statement the builder emits.
+    build.raw(gen, line)
     # Not a terminal statement, as far as this function knows: the three
     # that are (`goto`, `return v`, `return`) are emitted by `_emit_cf` /
     # `_goto_raw`, which set the flag after this returns.
     gen._last_was_terminal = False
 
 
+def body_text(gen) -> list:
+    """`gen.body_lines` as printable C lines (doc/GIR.md, stage 3c).
+
+    A body entry is an `Instr`; `Instr.line()` is the one rule that turns a
+    shape into what the body prints. The function-assembly sites spread this
+    list into their line list, so none of them needs to know a statement's
+    kind."""
+    out: list = []
+    for s in gen.body_lines:
+        out.append(s.line())
+    return out
 
 
 def _elem_of(gen, name: str) -> str:
@@ -3480,7 +3494,6 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         else:
             coerced_args.append(aval)
     coerced_args = _repr_fix_args(gen, fname, coerced_args)
-    args_str = ', '.join(coerced_args)
     # For imported functions with known C signatures, use the declared return type
     # to avoid "invalid conversion in gimple call" when the caller guessed wrong.
     # Priority: _LIBC_DECLARED _KNOWN_SIGS (C stdlib) > imported_symbols > func_return_types.
@@ -3534,13 +3547,13 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
     if result_var and imported_ret and imported_ret != ret_type:
         call_tmp = gen._new_temp(imported_ret)
         note_call_result(gen, _as_str(call_tmp), fname)
-        gen._emit(f'  {call_tmp} = {fname} ({args_str});')
+        build.call_into(gen, call_tmp, fname, coerced_args)
         gen._safe_coerce_emit(imported_ret, ret_type, call_tmp, result_var)
     elif result_var:
         note_call_result(gen, _as_str(result_var).strip(), fname)
-        gen._emit(f'  {result_var} = {fname} ({args_str});')
+        build.call_into(gen, result_var, fname, coerced_args)
     else:
-        gen._emit(f'  {fname} ({args_str});')
+        build.call_void(gen, fname, coerced_args)
     for _lv, _bv, _le in _pending_list_unpacks:
         gen._emit(f'  if ({_bv}) {{')
         gen._emit(f'    {_list_unpack_name(_le)}({_lv}, {_bv}, -1);')

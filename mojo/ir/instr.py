@@ -120,6 +120,25 @@ class Instr:
             return self.label + ':'
         return self.text
 
+    def line(self) -> str:
+        """The statement as the gimple backend prints it (doc/GIR.md, stage 3c).
+
+        `show()` renders the statement itself; this adds what a C body needs
+        around it, so the function-assembly sites print a body with one rule
+        instead of one rule per statement kind:
+
+          - a modelled statement is indented two spaces, the statement
+            indentation of every `__GIMPLE` body this backend writes;
+          - 'opaque' text is printed verbatim (it carries its own indentation
+            and may be anything a statement lowers to);
+          - a label is at column 0 and starts its own block, which is why the
+            backend writes a blank line in front of it."""
+        if self.kind == 'opaque':
+            return self.text
+        if self.kind == 'label':
+            return '\n' + self.show() + self.text
+        return '  ' + self.show()
+
 
 class Sig:
     """A function signature."""
