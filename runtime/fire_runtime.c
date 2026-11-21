@@ -12206,7 +12206,10 @@ static MojoFmtSpec _fmt_parse(const char *spec) {
         while (*p >= '0' && *p <= '9') { f.prec = f.prec * 10 + (*p - '0'); p++; }
     }
     if (*p) f.type = *p;
-    if (zero && !f.align) { f.fill[0] = '0'; f.fill[1] = '\0'; f.fill_len = 1; f.align = '='; }
+    if (zero) {
+        f.fill[0] = '0'; f.fill[1] = '\0'; f.fill_len = 1;
+        if (!f.align) f.align = '=';
+    }
     return f;
 }
 
@@ -12346,12 +12349,6 @@ char *mojo_fmt_int(int64_t v, char *spec) {
     char body[96];
     for (size_t i = 0; i < n; i++) body[i] = digs[n - 1 - i];
     body[n] = '\0';
-    char *grouped = NULL;
-    const char *b = body;
-    if (f.group) {
-        grouped = _fmt_group(body, (char)f.group, base == 10 ? 3 : 4);
-        b = grouped;
-    }
     char pre[8] = {0};
     size_t k = 0;
     if (neg) pre[k++] = '-';
@@ -12359,6 +12356,38 @@ char *mojo_fmt_int(int64_t v, char *spec) {
     else if (f.sign == ' ') pre[k++] = ' ';
     if (f.alt && base != 10) { pre[k++] = '0'; pre[k++] = (t == 'X') ? 'X' : t; }
     pre[k] = '\0';
+    char align = f.align ? f.align : '>';
+    if (f.group && align == '=' && f.fill[0] == '0' && f.fill_len == 1) {
+        /* Sign-aware zero padding: the pad zeros are part of the number, so
+         * grouping must be applied to the digit string AFTER padding. Grouping
+         * adds separators, so iterate until the grouped result fills width. */
+        size_t pre_len = strlen(pre);
+        size_t dlen = strlen(body);
+        int64_t pad = 0;
+        char *grouped = NULL;
+        for (;;) {
+            char *padded = (char *)malloc((size_t)pad + dlen + 1);
+            if (!padded) { if (grouped) free(grouped); return (char *)""; }
+            for (int64_t i = 0; i < pad; i++) padded[i] = '0';
+            memcpy(padded + pad, body, dlen + 1);
+            char *next = _fmt_group(padded, (char)f.group, base == 10 ? 3 : 4);
+            free(padded);
+            if (grouped) free(grouped);
+            grouped = next;
+            if (!grouped) return (char *)"";
+            if ((int64_t)(pre_len + mojo_str_codepoint_len(grouped)) >= f.width) break;
+            pad++;
+        }
+        char *r = _fmt_finish(pre, grouped, &f, '>');
+        free(grouped);
+        return r;
+    }
+    char *grouped = NULL;
+    const char *b = body;
+    if (f.group) {
+        grouped = _fmt_group(body, (char)f.group, base == 10 ? 3 : 4);
+        b = grouped;
+    }
     char *r = _fmt_finish(pre, b, &f, '>');
     if (grouped) free(grouped);
     return r;
