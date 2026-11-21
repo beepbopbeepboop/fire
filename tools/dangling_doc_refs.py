@@ -591,6 +591,20 @@ def ratchet_verdict(by_file, bare_by_file=None, baseline=None,
             ratchet_regressions(bare_by_file or {}, bare))
 
 
+def ratchet_green(regressions, bare_regressions):
+    """True only when NEITHER class gained a citation of a deleted doc.
+
+    The ONE green condition `--ratchet` may take. The prefixed and bare halves
+    come from one `ratchet_verdict` call, so a caller that tests one of them
+    makes the other ledger unenforceable — which is exactly what happened here:
+    a bare-only gain printed "no file gained a citation ... all at or below
+    their baseline" and exited 0 while the bare corpus was above it. The
+    sentence and the exit code have to be the same verdict, so both the
+    decision and the tests read it here rather than at the call site.
+    """
+    return not regressions and not bare_regressions
+
+
 def write_baseline(by_file, bare_by_file=None, skip=(), baseline=None,
                    bare_baseline=None):
     """Regenerate BOTH ledger tables, and report what moved.
@@ -937,7 +951,7 @@ def main() -> int:
             for rel, (observed, allowed) in sorted(stale.items()):
                 print(f'  {rel}: {observed} (baseline {allowed}) — entry is '
                       f'stale; delete it, or re-run --write-baseline')
-        if not regressions:
+        if ratchet_green(regressions, bare_regressions):
             print(f'ratchet: no file gained a citation of a deleted doc '
                   f'({total} `bugs/`-prefixed across {len(by_file)} files, '
                   f'{bare_total} bare across {len(bare_by_file)} files, '
