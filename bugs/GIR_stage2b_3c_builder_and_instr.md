@@ -4,7 +4,9 @@ Plan source: `doc/GIR.md`, Stage 2b (`mojo/ir/build.py`) and Stage 3c (`gen.body
 
 ## Measured now
 
-- `gen._emit(` text calls: 256 (ratchet `gen._emit( text`; was 266).
+- `gen._emit(` text calls: 235 (ratchet `gen._emit( text`; 266 at the start of
+  this round, 245 of those under the corrected pattern — the 21 removed were
+  `emit_metal.py`'s own MSL `self._emit` calls, not gimple statements).
 - `build.raw(` sites: 1 (`_emit_raw`, the adapter; new ratchet).
 - `gen.body_lines` holds `Instr`; the four function-assembly sites print it
   through `ginf.body_text` (stage 3c is landed).
@@ -27,6 +29,12 @@ Verified by `python3 test_gir_builder.py` (new, 27 checks) and the corpus: all
 `.ci` before and after). `test_gimple.py` 471 passed, `test_gimple_lint.py`
 clean after lowering `TEXT_ANY_CALL_BASELINE` 7 -> 4, and
 `test_line_directives_per_generated_line.py` clean.
+
+The ratchet also stopped counting `mojo/backend_gimple/emit_metal.py` for
+`gen._emit(`: that file is a Metal Shading Language emitter with its own
+`_emit` method and no gimple statement, so its 21 `self._emit(` calls made
+the ratchet's floor 21 rather than 0 and a regression could hide behind them.
+With that correction the target below is reachable.
 
 ## Next step
 

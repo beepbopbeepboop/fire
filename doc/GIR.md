@@ -205,9 +205,13 @@ that is meant to be behaviour-preserving:
   is while the statement becomes a shape. Byte-identical `.ci` on all 285
   `tools/pydiff_corpus` programs (280 that compile; the 5 that do not are
   empty in both). Ratchet: `test_type_string_ratchet.py` counts `gen._emit(`
-  / `self._emit(` (300 on 2026-11-20, 266 on 2026-11-21 before this round,
-  **256** after) and now also `build.raw(` (1: `_emit_raw`), so the adapter
-  cannot become the way around the first count. The cast sites
+  / `self._emit(` (300 on 2026-11-20; 266 on 2026-11-21 before this round;
+  245 under the corrected pattern, which no longer counts `emit_metal.py`'s
+  21 `self._emit` calls — that file emits Metal Shading Language and writes
+  no gimple statement, so they could never move and made the floor 21
+  instead of 0; **235** after this round) and now also `build.raw(` (1:
+  `_emit_raw`), so the adapter cannot become the way around the first count.
+  The cast sites
   (`_new_val(T, f"(T2){x}")`, 418 on 2026-11-20, 41 on 2026-11-21) are the
   next mechanical batch: `gen._cast(T, x)`.
   Still to come for 2b: `load_field`/`store_field`/`br`/`cond_br`/`ret`, and

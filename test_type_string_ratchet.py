@@ -53,9 +53,19 @@ BASELINE = {
     "== '_Bool'": 6,
     "== 'double'": 9,
     "== 'MojoList *'": 31,
-    "gen._emit( text": 256,
+    "gen._emit( text": 235,
     "build.raw( text": 1,
     "direct word-set use": 10,
+}
+
+# A pattern whose SUBJECT is narrower than "every backend module".  The
+# `gen._emit( text` ratchet counts a statement spelled as GIMPLE C text;
+# `emit_metal.py` emits Metal Shading Language through its own `_emit` method
+# and writes no gimple statement at all, so its 21 `self._emit(` calls can
+# never move.  Leaving them in made the ratchet's floor 21 instead of 0,
+# where a real regression could hide behind them (measured 2026-11-21).
+_NOT_THIS_PATTERNS_SUBJECT = {
+    "gen._emit( text": {"mojo/backend_gimple/emit_metal.py"},
 }
 
 
@@ -71,8 +81,19 @@ def sources() -> list:
 
 
 def counts() -> dict:
-    texts = [open(p).read() for p in sources()]
-    return {k: sum(len(re.findall(v, t)) for t in texts) for k, v in PATTERNS.items()}
+    texts: list = []
+    for p in sources():
+        texts.append((os.path.relpath(p, HERE).replace(os.sep, '/'), open(p).read()))
+    out: dict = {}
+    for k in PATTERNS:
+        skip = _NOT_THIS_PATTERNS_SUBJECT.get(k, set())
+        n = 0
+        for rel, text in texts:
+            if rel in skip:
+                continue
+            n += len(re.findall(PATTERNS[k], text))
+        out[k] = n
+    return out
 
 
 def main(argv: list) -> int:
