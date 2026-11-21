@@ -2321,6 +2321,9 @@ char *mojo_str_word_fresh(int64_t v);
    wins; see mojo_dict_key_release's comment in the .c). */
 void mojo_dict_key_release(MojoDict *d, int64_t orig, char *s);
 void *mojo_sorted(void *iterable);
+/* sorted(x) with the ELEMENT kind the call site knows (a MOJO_KIND_* byte,
+   0 for unknown) — see mojo_list_sort's identical argument. */
+void *mojo_sorted_kind(void *iterable, int kind);
 /* sorted(x, key=f[, reverse]) — `keys` is the caller's per-element key list. */
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse);
 /* Reverse in place — used for sorted(x, reverse=True) with no key. */

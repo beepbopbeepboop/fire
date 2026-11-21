@@ -1236,6 +1236,23 @@ def _quick_type(gen, node) -> str:
             # own body.
             if _as_str(getattr(gen, 'var_types', {}).get(_as_str(obj.name))) == 'char *':
                 return 'char *'
+            # A TUPLE's own per-slot record answers the indexed slot's type.
+            # The call site that binds a tuple element to a lambda parameter
+            # (`sorted(pairs, key=lambda p: p[0])`) installs this record under
+            # the parameter name; asking it here is what lets the estimator
+            # say `char *` for a string slot, so the key is compared as a
+            # string instead of as its address (the lowering already reads
+            # through the same table). A later `_elem_types` answer cannot
+            # stand in for it: a tuple's element type is `MojoList *`, the
+            # tuple itself, while this is the slot's type.
+            _ts = getattr(gen, '_tuple_slot_types', {}).get(_as_str(obj.name))
+            if _ts is not None and isinstance(node.index, gimple_ctypes.IntLiteral):
+                try:
+                    _tsi = int(node.index.value)
+                except Exception:
+                    _tsi = None
+                if _tsi is not None and 0 <= _tsi < len(_ts):
+                    return _as_str(_ts[_tsi])
             e = gen._elem_types.get(obj.name)
             if e:
                 return e

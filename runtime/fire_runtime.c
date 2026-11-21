@@ -14406,14 +14406,18 @@ static int _mojo_sort_cmp_at(int64_t a, int64_t b, int kind, int depth)
 {
     if (kind != MOJO_KIND_LIST || depth >= MOJO_SORT_MAX_DEPTH)
         return _mojo_sort_cmp(a, b, kind);
-    /* Python's list ordering: shorter first, then elementwise. */
+    /* Python's sequence ordering: ELEMENTWISE, and only when one sequence is
+     * a prefix of the other does the shorter one sort first. (Length first
+     * is a different order: CPython puts `[1, 2]` before `[2]`, not after it.)
+     * Tuples and lists share this comparator because this runtime represents
+     * a tuple as a MojoList plus a marker. */
     MojoList *x = (MojoList *)(intptr_t)a;
     MojoList *y = (MojoList *)(intptr_t)b;
     if (x == y) return 0;
     if (!x) return -1;
     if (!y) return 1;
-    if (x->len != y->len) return x->len < y->len ? -1 : 1;
-    for (int64_t i = 0; i < x->len; i++) {
+    int64_t same = x->len < y->len ? x->len : y->len;
+    for (int64_t i = 0; i < same; i++) {
         /* The inner element's kind, by the same two sources _mojo_sort_kind
          * uses: the per-slot side table when the inner list recorded one,
          * else the runtime's own discriminator. */
@@ -14426,6 +14430,8 @@ static int _mojo_sort_cmp_at(int64_t a, int64_t b, int kind, int depth)
         int c = _mojo_sort_cmp_at(x->data[i], y->data[i], k, depth + 1);
         if (c) return c;
     }
+    if (x->len < y->len) return -1;
+    if (x->len > y->len) return 1;
     return 0;
 }
 
@@ -14504,36 +14510,110 @@ static int _mojo_sort_kind(MojoList *l, int kind)
     return s0 ? MOJO_KIND_STR : MOJO_KIND_INT;
 }
 
-/* The one ordering loop: selection sort, permuting `l` in place and — when
-   `keys` is given — the parallel key list with it, so the two stay aligned
-   (that is why mojo_sorted_by_keys has always permuted both).
+/* The kind to order a `key=` list by. Same two sources as _mojo_sort_kind,
+ * in the same order — the per-slot kinds a builder recorded (a `char *` key
+ * is recorded as 'p', a double key as 'd') and then the runtime's own
+ * string discriminator for an unrecorded word.
  *
- * Keys MOVED the slots, so a recorded per-slot kind string no longer
- * describes them; drop it, which is exactly what mojo_sorted_by_keys did for
- * the `sorted(x, key=f)` copy.  A KEYLESS sort needs no such step: it reaches
- * the loop with a recorded kinds string only when every slot agreed on one
- * kind (_mojo_sort_kind), and permuting identical kinds leaves it correct. */
+ * The discriminator is needed because a lambda called through a function
+ * POINTER reports `int64_t` whatever it returns, so `sorted(pairs,
+ * key=lambda p: p[0])` builds a keys list whose slots are real `char *`
+ * addresses with no static type to say so. It was passed to the ordering
+ * loop as MOJO_KIND_INT and compared by ADDRESS — `.sort(key=...)` came out
+ * in heap order. `mojo_sorted_by_keys` already probed for exactly this; the
+ * METHOD path trusted its call-site byte instead, so the two keyed sorts
+ * disagreed on the same key function. One helper now answers both. */
+static int _mojo_sort_keys_kind(MojoList *keys)
+{
+    if (!keys || keys->len < 1) return MOJO_KIND_INT;
+    const char *k = mojo_list_get_kinds(keys);
+    if (k && k[0]) {
+        char first = k[0];
+        int uniform = 1;
+        for (int64_t i = 1; i < keys->len; i++) {
+            char c = k[i] ? k[i] : MOJO_KIND_INT;
+            if (c != first) { uniform = 0; break; }
+        }
+        if (uniform) return first;
+    }
+    if (mojo_boxed_is_str(mojo_list_get_int(keys, 0))) return MOJO_KIND_STR;
+    if (keys->len > 1 && mojo_boxed_is_str(mojo_list_get_int(keys, 1)))
+        return MOJO_KIND_STR;
+    return MOJO_KIND_INT;
+}
+
+/* The one ordering loop: a STABLE insertion sort, permuting `l` in place and
+ * — when `keys` is given — the parallel key list with it, so the two stay
+ * aligned (that is why mojo_sorted_by_keys has always permuted both).
+ *
+ * Stable is a Python guarantee, not a nicety: `sorted(pairs, key=lambda p:
+ * p[1])` keeps equal keys in their input order, and the pairs repro's two
+ * `('al', ...)` entries depend on it. The selection-ish loop this replaces
+ * swapped any out-of-order pair, which could move an equal element past its
+ * predecessor. Adjacent swaps that stop on `c == 0` never do.
+ *
+ * A sort PERMUTES the slots, so a recorded per-slot kinds string has to move
+ * with them. Dropping it (what the keyed path used to do) loses each slot's
+ * kind: the repr then falls back to its "a zero word is a boxed None" guess,
+ * and `sorted([3, -7, 2, 0, -1], key=...)` printed `[None, -1, 2, 3, -7]`.
+ * A FRESH string rather than an in-place edit, because the recorded one is
+ * shared with every copy and slice taken from this list (mojo_list_inherit_
+ * kinds hands over the same pointer) — the same rule mojo_list_reverse and
+ * mojo_list_reversed follow. */
 static void _mojo_permute_by(MojoList *l, MojoList *keys, int kind, int reverse)
 {
     int64_t n = l->len;
     if (keys && keys->len < n) n = keys->len;
     if (n < 2) return;
-    if (keys) mojo_list_set_kinds(l, NULL);
-    for (int64_t i = 0; i < n; i++) {
-        for (int64_t j = i + 1; j < n; j++) {
-            int64_t ki = keys ? mojo_list_get_int(keys, i) : l->data[i];
+
+    const char *lk = mojo_list_get_kinds(l);
+    char *lk_new = NULL;
+    if (lk) {
+        size_t llen = strlen(lk);
+        size_t cap = (size_t)n > llen ? (size_t)n : llen;
+        lk_new = (char *)calloc(cap + 1, 1);
+        if (lk_new) memcpy(lk_new, lk, llen);
+    }
+    const char *kk = keys ? mojo_list_get_kinds(keys) : NULL;
+    char *kk_new = NULL;
+    if (kk) {
+        size_t klen = strlen(kk);
+        size_t cap = (size_t)keys->len > klen ? (size_t)keys->len : klen;
+        kk_new = (char *)calloc(cap + 1, 1);
+        if (kk_new) memcpy(kk_new, kk, klen);
+    }
+
+    for (int64_t i = 1; i < n; i++) {
+        int64_t j = i;
+        while (j > 0) {
+            int64_t ki = keys ? mojo_list_get_int(keys, j - 1) : l->data[j - 1];
             int64_t kj = keys ? mojo_list_get_int(keys, j) : l->data[j];
             int c = _mojo_sort_cmp_at(ki, kj, kind, 0);
             int swap = reverse ? (c < 0) : (c > 0);
-            if (!swap) continue;
-            int64_t t = l->data[i]; l->data[i] = l->data[j]; l->data[j] = t;
+            if (!swap) break;
+            int64_t t = l->data[j - 1];
+            l->data[j - 1] = l->data[j];
+            l->data[j] = t;
             if (keys) {
-                int64_t tk = mojo_list_get_int(keys, i);
-                mojo_list_set_int(keys, i, mojo_list_get_int(keys, j));
+                int64_t tk = mojo_list_get_int(keys, j - 1);
+                mojo_list_set_int(keys, j - 1, mojo_list_get_int(keys, j));
                 mojo_list_set_int(keys, j, tk);
             }
+            if (lk_new) {
+                char tc = lk_new[j - 1];
+                lk_new[j - 1] = lk_new[j];
+                lk_new[j] = tc;
+            }
+            if (kk_new) {
+                char tc = kk_new[j - 1];
+                kk_new[j - 1] = kk_new[j];
+                kk_new[j] = tc;
+            }
+            j--;
         }
     }
+    if (lk_new) mojo_list_set_kinds(l, lk_new);
+    if (kk_new) mojo_list_set_kinds(keys, kk_new);
 }
 
 /* `l.sort()`, in place.  `kind` is the ELEMENT kind codegen knew at the call
@@ -14552,7 +14632,12 @@ void mojo_list_sort(MojoList *l, int kind, int reverse, MojoList *keys)
      * tuple. */
     mojo_require_mutable_list(l, "sort");
     if (!l || l->len < 2) return;
-    if (!keys) {
+    if (keys) {
+        /* The keys are what get compared, so their kind — not the call
+         * site's guess at the ELEMENTS, and not an `int64_t` a function-
+         * pointer call cannot refine — decides the order. */
+        kind = _mojo_sort_keys_kind(keys);
+    } else {
         kind = _mojo_sort_kind(l, kind);
         if (!kind) {
             fprintf(stderr,
@@ -16779,58 +16864,35 @@ MojoList *mojo_list_reversed(MojoList *l) {
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse) {
     MojoList *dst = mojo_list_copy(items);
     if (!keys) return dst;
-    int kind = MOJO_KIND_INT;
-    if (keys->len > 0) {
-        if (mojo_boxed_is_str(mojo_list_get_int(keys, 0))) {
-            kind = MOJO_KIND_STR;
-        } else if (keys->len > 1
-                   && mojo_boxed_is_str(mojo_list_get_int(keys, 1))) {
-            kind = MOJO_KIND_STR;
-        }
-    }
+    int kind = _mojo_sort_keys_kind(keys);
     _mojo_permute_by(dst, keys, kind, reverse);
     return dst;
 }
 
-void *mojo_sorted(void *iterable) {
+/* `sorted(x)`, with the element kind the CALL SITE knows (a MOJO_KIND_*
+ * byte, 0 for "it did not know"). This is the same fact `mojo_list_sort`
+ * takes, and for the same reason: a MojoList slot is a raw int64_t, so
+ * ordering the slots as integers orders a list of doubles by their IEEE bits
+ * (every negative after every positive) and a list of tuples by the tuple
+ * POINTERS. The keyless `sorted(pairs)` repro returned the input order for
+ * exactly that reason while `.sort()` — which was already told the kind —
+ * was right.
+ *
+ * With no useful call-site answer the per-slot kinds row and then the
+ * runtime's own discriminator decide (_mojo_sort_kind, whose fallback is the
+ * old int64 payload order); `mojo_sorted` below is that spelling. */
+void *mojo_sorted_kind(void *iterable, int kind) {
     MojoList *src = (MojoList *)iterable;
-    /* The generic int64-payload sort. Correct for int lists, and wrong for a
-     * list whose elements are char* — see mojo_list_sorted_str below for why
-     * the codegen dispatches around this one. */
-    /* A list that records its OWN slot kinds says when every element is a string
-     * (a drained generator, `os.listdir`-style results): sort those as strings.
-     * The BYTES twin is the same fact for a bytes-typed generator: `sorted()`
-     * over a list whose slots are all 's' must order as bytes (memcmp then
-     * length — Python's bytes ordering), not by the struct pointer's value.
-     * `glob.glob(b'*.py', ...)` drained its generator to registered-bytes words
-     * (bugs/SUITE_globcompiled); with two or more matches the generic int64
-     * payload sort below would order them by ADDRESS, not lexically. */
-    if (src && src->len > 0) {
-        int all_str = 1, all_bytes = 1;
-        for (int64_t i = 0; i < src->len && (all_str || all_bytes); i++) {
-            char k = mojo_list_slot_kind(src, i);
-            if (k != 'p') all_str = 0;
-            if (k != MOJO_KIND_BYTES) all_bytes = 0;
-        }
-        if (all_str) {
-            MojoList *sd = mojo_list_sorted_str(src);
-            mojo_list_set_kinds_uniform(sd, 'p');
-            return (void *)sd;
-        }
-        if (all_bytes) {
-            MojoList *sd = mojo_list_copy(src);
-            /* Sorting PERMUTES the slots, so the per-slot kinds copied along no
-             * longer describe them; drop them, exactly as mojo_list_sorted_str
-             * does, then re-record the uniform kind the elements all share. */
-            mojo_list_set_kinds(sd, NULL);
-            _mojo_permute_by(sd, NULL, MOJO_KIND_BYTES, 0);
-            mojo_list_set_kinds_uniform(sd, MOJO_KIND_BYTES);
-            return (void *)sd;
-        }
-    }
     MojoList *dst = mojo_list_copy(src);
-    _mojo_permute_by(dst, NULL, MOJO_KIND_INT, 0);
+    if (!src) return (void *)dst;
+    int k = _mojo_sort_kind(src, kind);
+    if (!k) k = MOJO_KIND_INT;   /* mixed: keep the old lenient answer */
+    _mojo_permute_by(dst, NULL, k, 0);
     return (void *)dst;
+}
+
+void *mojo_sorted(void *iterable) {
+    return mojo_sorted_kind(iterable, 0);
 }
 
 /* String-aware `sorted()` variants. The generic mojo_sorted above compares
