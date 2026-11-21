@@ -71,7 +71,7 @@ if __name__ == '__main__':
     # `tmp_path` fixture) and was registered as the `module-loader-stdlib` job
     # with the command `python3 test_module_loader_stdlib.py`. With no
     # `__main__`, that command ran neither test -- exit 0, zero output, a job
-    # that could never fail (bugs/SUITE_module_loader_stdlib_job_is_noop.md).
+    # that could never fail (the no-op registered-job class).
     # suite.py has no pytest driver, so run them here, substituting a real
     # tempdir path object for `tmp_path` -- the pattern the other pytest-style
     # file in the tree uses.
