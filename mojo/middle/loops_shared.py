@@ -49,7 +49,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     accessor from the element type, mirroring the MojoList* branch."""
     real = gen._get_actual_type(vtype, v)
     idx64 = gen._cast('int64_t', f"{idx}")
-    if real == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(real):
         elem = gen._elem_of(v)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
         if vtype == real:

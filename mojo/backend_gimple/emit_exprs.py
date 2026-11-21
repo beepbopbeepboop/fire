@@ -1466,7 +1466,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             cond_i = gen._cast('int', f"{cond}")
             gen._binop_into(f"{t}", f"{cond_i}", '==', '0')
             return '_Bool', t
-        if ot in ('void *',) or (ot.endswith(' *') and ot != '_Bool'):
+        if ot in ('void *',) or (ot.endswith(' *') and not gimple_ctypes.TypeLattice.is_bool(ot)):
             ip = gen._new_temp('int64_t')
             zero = gen._new_temp('int64_t')
             gen._cast_into(ip, 'int64_t', ov)
@@ -1494,7 +1494,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             else:
                 zero = gen._new_val('int64_t', "0LL")
                 gen._binop_into(f"{t}", ov, '==', zero)
-        elif ot == '_Bool':
+        elif gimple_ctypes.TypeLattice.is_bool(ot):
             # GIMPLE: both operands of comparison must have same type
             # Cast _Bool to int before comparing with integer 0
             int_t = gen._cast('int', ov)
@@ -1732,7 +1732,7 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
     # Propagate element/dict-val type from stored field metadata so
     # subscript/iteration later recovers the right element type instead
     # of defaulting to int64_t (see BUG-2026-044).
-    if field_type == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(field_type):
         stored = gen._field_elem_types.get(struct_name, {}).get(node.member)
         if stored:
             gen._elem_types[t] = stored
@@ -1906,7 +1906,7 @@ def _lme_param_struct_field(gen, node, ot: str, ov) -> tuple[str, str]:
     # the subscript fell back to int64_t, and string elements came back
     # as raw boxed handles — box.3d/game's "set_variable then
     # get_variable returns 0" failures (BUG-2026-023 residual).
-    if field_type == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(field_type):
         stored = gen._field_elem_types.get(_pst, {}).get(node.member)
         if stored:
             gen._elem_types[t] = stored
@@ -3529,7 +3529,7 @@ def _boxed_propagate_container_elems(gen, member: str, ft: str, t: str) -> None:
     `_gen_for_iter`'s runtime dict-or-list dispatch — whose dict arm binds
     the loop variable to a `char *` key while the list arm binds a real
     element, declaring one variable with two incompatible types."""
-    if ft == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ft):
         _e = gen._known_field_elem_type(member)
         if _e:
             gen._elem_types[t] = _e
@@ -3588,7 +3588,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if isinstance(node.left, gimple_ctypes.SubscriptExpr):
             ot, obj_v = gen.lower_expr(node.left.obj)
             _, idx_v = gen.lower_expr(node.left.index)
-            if ot == 'MojoList *':
+            if gimple_ctypes.TypeLattice.is_list(ot):
                 elem = gen._elem_of(obj_v)
                 suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
@@ -3717,8 +3717,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         #   bool or  ptr  -> short-circuit stores a truthy bool    -> unsafe
         _lp = ltype.endswith(' *')
         _rp = isinstance(_rq, str) and _rq.endswith(' *')
-        _bool_merge = ((_lp and _rq == '_Bool')
-                       or (ltype == '_Bool' and _rp and node.op == 'or'))
+        _bool_merge = ((_lp and gimple_ctypes.TypeLattice.is_bool(_rq))
+                       or (gimple_ctypes.TypeLattice.is_bool(ltype) and _rp and node.op == 'or'))
         if _bool_merge:
             res_type = '_Bool'
         # A string on one side and a word of unknown kind on the other
@@ -3746,8 +3746,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # `... or fn.some_dict` took the container-pointer join below for a
         # word that may hold the bool 1.
         _bool_word = (not _bool_merge and not _mixed_word
-                      and ((ltype == '_Bool' and _rq == 'int64_t')
-                           or (ltype == 'int64_t' and _rq == '_Bool')
+                      and ((gimple_ctypes.TypeLattice.is_bool(ltype) and _rq == 'int64_t')
+                           or (ltype == 'int64_t' and gimple_ctypes.TypeLattice.is_bool(_rq))
                            or (ltype == 'int64_t' and _rq in ('MojoDict *', 'MojoList *', 'MojoSet *')
                                and gen._is_dyn_word(node.left, lval))))
         if _bool_word:
@@ -3798,7 +3798,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # constant: `and` only takes it on a FALSY left, `or` only on a
             # TRUTHY one.
             gen._cast_into(result, '_Bool', f"{'0' if node.op == 'and' else '1'}")
-        elif node.op == 'and' and ltype == '_Bool' and res_type.endswith(' *'):
+        elif node.op == 'and' and gimple_ctypes.TypeLattice.is_bool(ltype) and res_type.endswith(' *'):
             # `flag and ptr`, short-circuit edge: the left operand is known
             # false here, so the value is the null pointer. Written as the
             # constant, not as a cast of the `_Bool`: a pointer is never made
@@ -3843,7 +3843,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # kind. A following `... or x.some_dict` must not read it as the
         # dict pointer (it ran `mojo_dict_len` on the address 1).
         if (res_type == 'int64_t' and not _mixed_word
-                and rtype == '_Bool' and ltype == 'int64_t'):
+                and gimple_ctypes.TypeLattice.is_bool(rtype) and ltype == 'int64_t'):
             gen._dyn_word_vals.add(result)
         gen._goto(bb_merge)
         gen._emit_label(bb_merge)
@@ -4994,16 +4994,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # records the real MojoList*. Resolve through it so list+list still concats.
     alt = gen._actual_types.get(lv, gen.var_types.get(lv, lt))
     art = gen._actual_types.get(rv, gen.var_types.get(rv, rt))
-    if op == '+' and alt == 'MojoList *' and art == 'MojoList *':
-        lcast = lv if lt == 'MojoList *' else gen._coerce_to_type(lt, 'MojoList *', lv)
-        rcast = rv if rt == 'MojoList *' else gen._coerce_to_type(rt, 'MojoList *', rv)
+    if op == '+' and gimple_ctypes.TypeLattice.is_list(alt) and gimple_ctypes.TypeLattice.is_list(art):
+        lcast = lv if gimple_ctypes.TypeLattice.is_list(lt) else gen._coerce_to_type(lt, 'MojoList *', lv)
+        rcast = rv if gimple_ctypes.TypeLattice.is_list(rt) else gen._coerce_to_type(rt, 'MojoList *', rv)
         # `mojo_list_concat` copies both operands into a new list, so an operand
         # that is itself a fresh container (a display, a slice, a previous `+`)
         # is dead once it returns. Freshness is decided BEFORE the call is
         # emitted, and only for an operand that needed no cast, so what is freed
         # is exactly the pointer the concat read.
-        _free_l = lt == 'MojoList *' and lv != rv and gen._is_fresh_container_operand(left_node, lv)
-        _free_r = rt == 'MojoList *' and lv != rv and gen._is_fresh_container_operand(right_node, rv)
+        _free_l = gimple_ctypes.TypeLattice.is_list(lt) and lv != rv and gen._is_fresh_container_operand(left_node, lv)
+        _free_r = gimple_ctypes.TypeLattice.is_list(rt) and lv != rv and gen._is_fresh_container_operand(right_node, rv)
         t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lcast}", f"{rcast}"])
         if lcast in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lcast]
@@ -5014,7 +5014,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'MojoList *', t
 
     # MojoList + MojoList → mojo_list_concat
-    if op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
+    if op == '+' and gimple_ctypes.TypeLattice.is_list(lt) and gimple_ctypes.TypeLattice.is_list(rt):
         # `mojo_list_concat` copies both operands into a new list, so an operand
         # that is itself a fresh container (a display, a slice, a previous `+`)
         # is dead once it returns. Decide freshness BEFORE the call is emitted.
@@ -5030,7 +5030,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'MojoList *', t
 
     # MojoList * + int/int64_t → identity (DynamicVector not supported; treat as no-op)
-    if op == '+' and lt == 'MojoList *' and rt in ('int', 'int64_t'):
+    if op == '+' and gimple_ctypes.TypeLattice.is_list(lt) and rt in ('int', 'int64_t'):
         return 'MojoList *', lv
 
     # MojoList * + <pointer-ish> → mojo_list_concat after casting the RHS to
@@ -5040,9 +5040,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # concat is the correct lowering; without this we emit `MojoList * + char *`,
     # which gcc rejects. (Salvaged from the bootstrap bug-hunt; it advances the
     # self-host build past fire_compiler.py's emit().)
-    if op == '+' and lt == 'MojoList *' and rt.endswith(' *'):
+    if op == '+' and gimple_ctypes.TypeLattice.is_list(lt) and rt.endswith(' *'):
         rcast = rv
-        if rt != 'MojoList *':
+        if not gimple_ctypes.TypeLattice.is_list(rt):
             rcast = gen._coerce_to_type(rt, 'MojoList *', rv)
         t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rcast}"])
         if lv in gen._elem_types:
@@ -5058,7 +5058,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # it we emitted a literal `path + _t38`, i.e. pointer arithmetic on a
     # boxed handle, producing a garbage list that faulted later in
     # mojo_str_join (A5-BUG.md section 1's bootstrap failure).
-    if op == '+' and rt == 'MojoList *' and lt in ('int', 'int64_t', 'void *'):
+    if op == '+' and gimple_ctypes.TypeLattice.is_list(rt) and lt in ('int', 'int64_t', 'void *'):
         lcast = gen._coerce_to_type(lt, 'MojoList *', lv)
         t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lcast}", f"{rv}"])
         if rv in gen._elem_types:
@@ -5279,7 +5279,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
 
     # MojoList * * int → list repetition (e.g., [0] * n)
-    if op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
+    if op == '*' and gimple_ctypes.TypeLattice.is_list(lt) and rt in ('int', 'int64_t', 'uint64_t'):
         cnt = gen._cast('int64_t', f"{rv}")
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
         # The repeat copies the source's ELEMENTS, so the result's element
@@ -5386,7 +5386,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # statically known one `_elem_of` already tracks — a slot holds a raw
     # int64_t with no tag, so a list of strings can only be compared as
     # strings if the CALL SITE says so.
-    if op in ('==', '!=') and lt == 'MojoList *' and rt == 'MojoList *':
+    if op in ('==', '!=') and gimple_ctypes.TypeLattice.is_list(lt) and gimple_ctypes.TypeLattice.is_list(rt):
         # The element kind is the statically known one `_elem_of` tracks, and
         # it is NOT derivable from the C type alone: a bytes element is a
         # `MojoBytes *` in the slot, and comparing that as a raw int64_t
@@ -5739,7 +5739,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
         return 'char *', t
     # Fallback: catch list concatenation that wasn't handled above
-    if op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
+    if op == '+' and gimple_ctypes.TypeLattice.is_list(lt) and gimple_ctypes.TypeLattice.is_list(rt):
         t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rv}"])
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
@@ -6027,14 +6027,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # reported (std/utils/index.mojo's apply_fn, 2026-10-29).
     if (c_op == '%' and res_type in gimple_ctypes._SCALAR_INT_TYPES
             and lt in gimple_ctypes._SCALAR_INT_TYPES and rt in gimple_ctypes._SCALAR_INT_TYPES
-            and res_type != '_Bool' and not res_type.startswith('uint')):
+            and not gimple_ctypes.TypeLattice.is_bool(res_type) and not res_type.startswith('uint')):
         # GIMPLE takes a call only as a whole right-hand side, so the call is its
         # own statement and any narrowing cast is a second one (a cast around a
         # call is "invalid operand in unary operation" to gcc -fgimple).
         _fm = gen._call_expr('int64_t', '__mojo_floormod', [('int64_t', lv), ('int64_t', rv)])
         t = _fm if res_type == 'int64_t' else gen._cast(res_type, _fm)
     else:
-        if c_op in ('/', '%') and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool':
+        if c_op in ('/', '%') and res_type in gimple_ctypes._SCALAR_INT_TYPES and not gimple_ctypes.TypeLattice.is_bool(res_type):
             _chk = gen._call_expr('int64_t', 'mojo_int_divisor', [('int64_t', rv)])
             rv = _chk if res_type == 'int64_t' else gen._cast(res_type, _chk)
         # Narrow fixed-width integer arithmetic (a `Scalar[DType.*]` value with
@@ -6732,7 +6732,7 @@ def _definitive_scalar_type(gen, node) -> str | None:
             qt = _as_str(gen._quick_type(node) or '')
         except Exception:
             return None
-        if qt == '_Bool':
+        if gimple_ctypes.TypeLattice.is_bool(qt):
             # The estimator's _Bool answers are all specific rows (bool,
             # isinstance, all/any, a recorded `-> Bool`); the fallback never
             # produces _Bool, so the kind is proven.
@@ -6768,7 +6768,7 @@ def _definitive_binding_type(gen, name) -> str | None:
     if name in getattr(gen, '_global_var_types', {}):
         return None
     ctype = gen.var_types.get(name)
-    if ctype == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(ctype):
         return 'Bool'
     if ctype == 'double':
         return 'Float64'
@@ -6955,7 +6955,7 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
     # Free it once the test has read it. Only a display is treated this way (an
     # identifier, field or call result names a container somebody else owns);
     # a tuple literal lowers to a fresh heap list on every path.
-    if isinstance(right_node, gimple_ctypes.TupleExpr) and rt == 'MojoList *':
+    if isinstance(right_node, gimple_ctypes.TupleExpr) and gimple_ctypes.TypeLattice.is_list(rt):
         gen._rt_void('mojo_list_free', [rv])
     elif (isinstance(right_node, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr,
                                   gimple_ctypes.DictExpr))
@@ -7042,7 +7042,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         xt, xv = gen._char_to_cstr(xt, xv, True, True)
         gen._emit_call('int', ti, 'mojo_dict_contains',
                        [('MojoDict *', _dsub_dp), (xt, xv)])
-    elif rt == 'MojoList *':
+    elif gimple_ctypes.TypeLattice.is_list(rt):
         # Determine list element type: prefer actual list elem type over left operand
         if rv in gen._elem_types:
             list_elem = gen._elem_types[rv]
@@ -7572,7 +7572,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
             # Track nested element type if extending with a list that has tracked elements
             # IMPORTANT: Keep _elem_types[t] as 'MojoList *' (what t contains),
             # and set _nested_elem_types[t] to what those lists contain
-            if et == 'MojoList *' and ev in gen._elem_types:
+            if gimple_ctypes.TypeLattice.is_list(et) and ev in gen._elem_types:
                 # Don't overwrite _elem_types[t] - it correctly says t contains MojoList*
                 # Instead, track what those lists contain in _nested_elem_types
                 gen._nested_elem_types[t] = gen._elem_types[ev]
@@ -7600,7 +7600,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # tuple-target loop reads each slot with the right accessor
         # (char* -> get_str, otherwise boxed int64 -> get_int). Set before
         # _dict_items_val_elems so a dict-item tuple never lands here.
-        if et == 'MojoList *' and ev in gen._elem_types and t not in gen._dict_items_val_elems:
+        if gimple_ctypes.TypeLattice.is_list(et) and ev in gen._elem_types and t not in gen._dict_items_val_elems:
             gen._nested_elem_types.setdefault(t, gen._elem_types[ev])
             if ev in gen._tuple_slot_types:
                 gen._tuple_slot_types[t] = gen._tuple_slot_types[ev]
@@ -8540,7 +8540,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         # `((0, 7), (1, 8))` — the inner LISTS in tuple brackets. Same
         # carry, same reason, on the tuple path; the two lowerings differ
         # only in the `mojo_mark_as_tuple` at the end.
-        if et == 'MojoList *' and ev in gen._elem_types:
+        if gimple_ctypes.TypeLattice.is_list(et) and ev in gen._elem_types:
             gen._nested_elem_types.setdefault(t, gen._elem_types[ev])
             if ev in gen._tuple_slot_types:
                 gen._tuple_slot_types[t] = gen._tuple_slot_types[ev]
@@ -8707,7 +8707,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         if len(gen0.iterable.args) >= 2:
             _, _start_raw = gen.lower_expr(gen0.iterable.args[1])
             _start_val = gen._cast('int64_t', _start_raw)
-        if _inner_it_type != 'MojoList *':
+        if not gimple_ctypes.TypeLattice.is_list(_inner_it_type):
             # A dict, set, string or word of unknown kind: the same
             # materialization `enumerate` gets as a `for` statement
             # (`_materialize_as_list` asks the runtime what a word is). This
@@ -8803,7 +8803,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
 
     if is_range:
         gen._compr_range_loop(node, gen0, res, res_type)
-    elif it_type == 'MojoList *':
+    elif gimple_ctypes.TypeLattice.is_list(it_type):
         gen._compr_list_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'MojoStr *':
         gen._compr_str_loop(node, gen0, res, res_type, it_val)
@@ -8846,14 +8846,14 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # container the runtime walks generically does not mis-render as `None`
     # (or fault on a double's bit pattern). Mirrors `_lower_list_literal`'s
     # `mojo_list_set_elem_repr` call for struct elements.
-    if res_type == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(res_type):
         _et = gen._elem_types.get(res)
         _shim = None
         if _et == 'int64_t':
             _shim = 'mojo_repr_int'
         elif _et == 'double':
             _shim = 'mojo_repr_list_elem_double'
-        elif _et == '_Bool':
+        elif gimple_ctypes.TypeLattice.is_bool(_et):
             _shim = 'mojo_repr_list_elem_bool'
         if _shim is not None:
             gen._emit_call('void', '', 'mojo_list_set_elem_repr',

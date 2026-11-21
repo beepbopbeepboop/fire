@@ -291,7 +291,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     # cursor cannot cross the call, so bind a first-class runtime iterator word
     # instead. `next(it)` / `for x in it` on a word go through mojo_next_word /
     # mojo_iter_word, which consume it from the same position.
-    if (not _rebind and not is_decl and at == 'MojoList *'
+    if (not _rebind and not is_decl and gimple_ctypes.TypeLattice.is_list(at)
             and itc.iter_name_escapes_into_call(gen._cur_func_body, name)
             and gen._elem_of(av) not in (None, 'int64_t')):
         # An iterator over strings/floats handed to a function: the word the callee
@@ -302,17 +302,17 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
             "elements is passed to a function; only integer-element iterators can "
             "cross a call (the element kind is lost) -- falling back to interpreting "
             "this module from source instead")
-    if (not _rebind and not is_decl and at == 'MojoList *'
+    if (not _rebind and not is_decl and gimple_ctypes.TypeLattice.is_list(at)
             and itc.iter_name_escapes_into_call(gen._cur_func_body, name)):
         _liw = gen._call_expr('int64_t', 'mojo_listiter_new', [(at, av)])
         gen._declare_var(name, 'int64_t')
         gen._copy(f"{gen._write_dest(name)}", _liw)
         gen._dyn_word_locals.add(name)
         return True
-    if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):
+    if _rebind and (gen.var_types.get(name) != 'MojoList *' or not gimple_ctypes.TypeLattice.is_list(at)):
         return False
     data = None
-    if at == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(at):
         kind = 'list'
     elif at in ('int', 'int64_t', 'void *'):
         kind = 'list'
@@ -673,14 +673,14 @@ def _gen_stmt_VarDecl(gen, node):
         # `var tg = TaskGroup()` -- mirrors the `MojoAsync *` case just
         # above exactly (see `_lower_call`'s `TaskGroup()` construction
         # docstring / `self._taskgroup_var_api`'s own docstring).
-        if actual_dst == 'MojoList *' and v in gen._taskgroup_var_api:
+        if gimple_ctypes.TypeLattice.is_list(actual_dst) and v in gen._taskgroup_var_api:
             gen._taskgroup_var_api[node.name] = gen._taskgroup_var_api[v]
         # BUG-2026-023 residual: annotated `parts: List[String] = ...` with
         # an INITIALIZER takes this branch (not the else-branch below), so
         # seed the element type from the annotation here too — otherwise a
         # list filled via insert()/index-stores reads back as raw int64_t
         # handles (same gap as the no-initializer path's seeding below).
-        if actual_dst == 'MojoList *' or actual_dst == 'MojoSet *':
+        if gimple_ctypes.TypeLattice.is_list(actual_dst) or actual_dst == 'MojoSet *':
             _et = _annotation_container_elem_type(gen, node.type_ann, actual_dst)
             if _et and node.name not in gen._elem_types:
                 gen._elem_types[node.name] = _et
@@ -851,7 +851,7 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
     if dst != 'int64_t':
         if v in gen._struct_field_owners:
             gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
-        if dst == 'MojoList *' and v in gen._elem_types:
+        if gimple_ctypes.TypeLattice.is_list(dst) and v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
@@ -911,7 +911,7 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
         gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
     if tname in gen._actual_types:
         actual_type = gen._actual_types[tname]
-        if actual_type == 'MojoList *' and v in gen._elem_types:
+        if gimple_ctypes.TypeLattice.is_list(actual_type) and v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
@@ -975,7 +975,7 @@ def _join_dict_store(gen, key: str, value_node, vtype: str):
     if _kind is None or (_kind == 'none' and _prev_vt is None):
         return None
     _joined_vt = gimple_exprtypes.dict_kind_join(_prev_vt, _kind)
-    if _joined_vt == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(_joined_vt):
         _joined_vt = 'int64_t'
     if _seen_key in gen._dict_none_seen and _joined_vt not in (None, 'none'):
         _joined_vt = 'mixed'
@@ -1036,7 +1036,7 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
             gen._dict_val_types[tname] = gen._dict_val_types[v]
             if v in gen._dict_nested_val_types:
                 gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-    elif vtype == 'MojoList *':
+    elif gimple_ctypes.TypeLattice.is_list(vtype):
         if v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
@@ -2305,7 +2305,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         if (isinstance(node.target.obj, gimple_ctypes.IdentExpr)
                 and node.target.obj.name == 'sys'
                 and node.target.member == 'argv'):
-            _av = v if vtype == 'MojoList *' else gen._coerce_to_type(
+            _av = v if gimple_ctypes.TypeLattice.is_list(vtype) else gen._coerce_to_type(
                 vtype, 'MojoList *', v)
             gen._emit_call('void', '', 'mojo_replace_argv',
                             [('MojoList *', _av)])
@@ -2544,7 +2544,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # f.scopes[0] on a list-of-dicts field always returns int64_t
             # (see BUG-2026-044).  Keyed by field name (not variable name)
             # since that's what _lower_MemberExpr looks up.
-            if field_type == 'MojoList *' and v in gen._elem_types:
+            if gimple_ctypes.TypeLattice.is_list(field_type) and v in gen._elem_types:
                 gen._field_elem_types.setdefault(struct_name, {})[node.target.member] = gen._elem_types[v]
                 # Also store the dict value type for list-of-dicts fields
                 # so f.scopes[0]["key"] dispatches to mojo_dict_get_str
@@ -2612,7 +2612,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             if _ef in _tf:
                 gen._safe_coerce_emit(vtype, _tf[_ef], v, f'{obj_v}.{_ef}')
                 return
-        if ot == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(ot):
             elem = gen._elem_of(obj_v)
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
@@ -2778,7 +2778,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                                 gen._emit_dict_int_value_store(_bdp, 'char *', _bkv, vtype, v, node.value)
                                 _backed = True
                                 break
-                            elif isinstance(_bft, str) and _bft == 'MojoList *':
+                            elif isinstance(_bft, str) and gimple_ctypes.TypeLattice.is_list(_bft):
                                 _blist = f"{obj_v}->{gimple_ctypes._safe_field(_bf)}"
                                 elem_b = gen._elem_of(_blist) or gen._elem_types.get(_blist) or 'int64_t'
                                 suf_b = gimple_ctypes.TypeLattice.list_suffix(elem_b)
@@ -2797,7 +2797,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                                     gen._emit_dict_int_value_store(_bdp, 'char *', _bkv, vtype, v, node.value)
                                     _backed = True
                                     break
-                                elif _bft == 'MojoList *':
+                                elif gimple_ctypes.TypeLattice.is_list(_bft):
                                     _blist = f"{obj_v}->{gimple_ctypes._safe_field(_bf)}"
                                     elem_b = gen._elem_of(_blist) or gen._elem_types.get(_blist) or 'int64_t'
                                     suf_b = gimple_ctypes.TypeLattice.list_suffix(elem_b)
@@ -2971,7 +2971,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # and is rare — handle the common case, fall through otherwise.
             if vtype == 'MojoBytes *':
                 _rhs_b = v
-            elif vtype == 'MojoList *':
+            elif gimple_ctypes.TypeLattice.is_list(vtype):
                 _rhs_b = gen._rt_call('MojoBytes *', 'mojo_bytes_from_list', [f"{v}"])
             else:
                 _rhs_b = gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(vtype, v))
@@ -2979,7 +2979,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 start_v, stop_v = gen._lower_slice_bounds(stgt)
                 gen._rt_void('mojo_bytearray_splice', [f"{obj_v}", f"{start_v}", f"{stop_v}", f"{_rhs_b}"])
                 return
-        lp = obj_v if ot == 'MojoList *' else gen._coerce_to_type(
+        lp = obj_v if gimple_ctypes.TypeLattice.is_list(ot) else gen._coerce_to_type(
             'int64_t', 'MojoList *', gen._to_int64(ot, obj_v))
         # RHS (`vtype`, `v`) is already lowered above. Both splice paths
         # read it as a MojoList* (raw int64_t element slots) — a list/tuple
@@ -3192,7 +3192,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
         if (isinstance(node.target.obj, gimple_ctypes.IdentExpr)
                 and node.target.obj.name == 'sys'
                 and node.target.member == 'argv'):
-            _av = v if vtype == 'MojoList *' else gen._coerce_to_type(
+            _av = v if gimple_ctypes.TypeLattice.is_list(vtype) else gen._coerce_to_type(
                 vtype, 'MojoList *', v)
             gen._emit_call('void', '', 'mojo_replace_argv',
                             [('MojoList *', _av)])
@@ -3305,7 +3305,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
                     pass
         except Exception:
             pass
-        if ot == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(ot):
             elem = gen._elem_of(obj_v)
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
@@ -3584,7 +3584,7 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
     if vt in ('int', 'int64_t'):
         # A plain integer has an int64_t spelling, so it IS the word.
         return vtype, v
-    if vt == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(vt):
         # A bool is its OWN kind in the tagged word: the raw 1/0 prints as an
         # integer, and CPython prints True/False.
         return 'int64_t', gen._call_expr(
@@ -3597,7 +3597,7 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
     if gimple_ctypes.TypeLattice.is_cstr(vt):
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_str',
                                          [('char *', v)])
-    if vt == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(vt):
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_list',
                                          [('MojoList *', v)])
     if vt == 'MojoBytes *':
@@ -4025,7 +4025,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
     # have raised on `None.endswith` — so this is compiled-path-only).
     if ctype is None:
         ctype = ''
-    if ctype == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(ctype):
         return val
     # A module-level container global (`x: set = set()`) is deliberately
     # reported here as `ctype == 'int64_t'` — its C struct field is boxed
@@ -4082,7 +4082,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         b = gen._new_temp('_Bool')
         gen._binop_into(b, n, '!=', '0')
         return b
-    if ctype in ('void *',) or (ctype.endswith(' *') and ctype != '_Bool'):
+    if ctype in ('void *',) or (ctype.endswith(' *') and not gimple_ctypes.TypeLattice.is_bool(ctype)):
         ip   = gen._new_temp('int64_t')
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
@@ -4757,7 +4757,7 @@ def _gen_stmt_DelStmt(gen, node):
             # a slice) — an ambiguous/untracked boxed value is assumed to
             # be a list here, mirroring _lower_slice's own MojoList*
             # branch reasoning for the same ambiguity.
-            lp = ov if ot == 'MojoList *' else gen._coerce_to_type(
+            lp = ov if gimple_ctypes.TypeLattice.is_list(ot) else gen._coerce_to_type(
                 'int64_t', 'MojoList *', gen._to_int64(ot, ov))
             gen._rt_void('mojo_list_del_slice', [f"{lp}", f"{start_v}", f"{stop_v}"])
             continue
@@ -4769,7 +4769,7 @@ def _gen_stmt_DelStmt(gen, node):
         ot, ov = gen.lower_expr(target.obj)
         if isinstance(target.index, gimple_ctypes.SliceExpr):
             start_v, stop_v = gen._lower_slice_bounds(target.index)
-            lp = ov if ot == 'MojoList *' else gen._coerce_to_type(
+            lp = ov if gimple_ctypes.TypeLattice.is_list(ot) else gen._coerce_to_type(
                 'int64_t', 'MojoList *', gen._to_int64(ot, ov))
             gen._rt_void('mojo_list_del_slice', [f"{lp}", f"{start_v}", f"{stop_v}"])
             continue
@@ -4788,7 +4788,7 @@ def _gen_stmt_DelStmt(gen, node):
             gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
                              [('MojoDict *', ov), (key_type, key_val),
                               ('int64_t', '0')])
-        elif ot == 'MojoList *':
+        elif gimple_ctypes.TypeLattice.is_list(ot):
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
             # mojo_list_delitem, not mojo_list_pop_at: `del t[0]` and
@@ -5402,7 +5402,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                         gen._dict_val_types[tname] = gen._dict_val_types[v]
                         if v in gen._dict_nested_val_types:
                             gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-                elif vtype == 'MojoList *':
+                elif gimple_ctypes.TypeLattice.is_list(vtype):
                     if v in gen._elem_types:
                         gen._elem_types[tname] = gen._elem_types[v]
                         if v in gen._nested_elem_types:
@@ -5418,7 +5418,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                         gen._dict_val_types[tname] = gen._dict_val_types[v]
                         if v in gen._dict_nested_val_types:
                             gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-                elif vtype == 'MojoList *':
+                elif gimple_ctypes.TypeLattice.is_list(vtype):
                     if v in gen._elem_types:
                         gen._elem_types[tname] = gen._elem_types[v]
                         if v in gen._nested_elem_types:
@@ -5531,7 +5531,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
         elif isinstance(target, gimple_ctypes.SubscriptExpr):
             ot, obj_v = gen.lower_expr(target.obj)
             it2, idx_v = gen.lower_expr(target.index)
-            if ot == 'MojoList *':
+            if gimple_ctypes.TypeLattice.is_list(ot):
                 elem = gen._elem_of(obj_v)
                 suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")

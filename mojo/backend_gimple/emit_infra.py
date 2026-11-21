@@ -2217,7 +2217,7 @@ def owned_free_fn_for(gen, val: str, ctype: str) -> str:
     container table's blank answer for `char *` is not "nothing to free".
     Every place that emits a free for a specific lowered value goes through
     here so the choice is made in exactly one spot."""
-    if ctype == 'MojoList *' and val in gen._owned_str_elem_vals:
+    if gimple_ctypes.TypeLattice.is_list(ctype) and val in gen._owned_str_elem_vals:
         return 'mojo_list_free_owned_strs'
     if gimple_ctypes.TypeLattice.is_cstr(ctype):
         # Every producer that puts a `char *` in `_fresh_vals` allocates it:
@@ -2235,7 +2235,7 @@ def owned_push_fn_for(gen, val: str, ctype: str) -> str:
     """The cleanup thunk that matches `owned_free_fn_for` — the two must name
     the same teardown or an exception would unwind a value differently from the
     normal path."""
-    if ctype == 'MojoList *' and val in gen._owned_str_elem_vals:
+    if gimple_ctypes.TypeLattice.is_list(ctype) and val in gen._owned_str_elem_vals:
         return 'mojo_cleanup_push_list_strs'
     return _owned_push_runtime_fn(ctype)
 
@@ -2923,7 +2923,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             aval = _as_str(varargs[_vi][1])
             _vn = arg_nodes[n_fixed + _vi] if _nodes_ok else None
             if (isinstance(_vn, gimple_ctypes.UnaryOp) and _vn.op == '*'
-                    and (atype == 'MojoList *' or atype == 'int64_t')):
+                    and (gimple_ctypes.TypeLattice.is_list(atype) or atype == 'int64_t')):
                 _src = aval
                 if atype == 'int64_t':
                     _src = _as_str(gen._materialize_as_list('int64_t', aval))
@@ -2962,7 +2962,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # the remaining pairs in place.
             middle = []
             suffix = arg_pairs[i:]
-        if middle and all(at == 'MojoList *' for at, _ in middle):
+        if middle and all(gimple_ctypes.TypeLattice.is_list(at) for at, _ in middle):
             # Every middle pair is ALREADY a list: either
             # `_pack_vararg_trailing_params` repacked this call upstream, or
             # the padding installed its empty *args placeholder for a call
@@ -3357,7 +3357,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._cast_into(ip, 'int64_t', f"{aval}")
             gen._cast_into(pp, 'ModuleLoader *', ip)
             coerced_args.append(pp)
-        elif (actual_atype == 'MojoList *' and ptype.endswith(' *')
+        elif (gimple_ctypes.TypeLattice.is_list(actual_atype) and ptype.endswith(' *')
                 and ptype[:-2] in _LIST_MARSHAL_ELEMS):
             # A BOXED LIST where the callee declared a scalar-element pointer.
             #
@@ -4456,7 +4456,7 @@ def _mixed_scalar_binding_kind(gen, value, dict_val_types) -> str | None:
         return 'str'
     if gimple_ctypes.TypeLattice.is_float(t):
         return 'double'
-    if (t == '_Bool' or gimple_ctypes.TypeLattice.is_signed(t)
+    if (gimple_ctypes.TypeLattice.is_bool(t) or gimple_ctypes.TypeLattice.is_signed(t)
             or gimple_ctypes.TypeLattice.is_unsigned(t)):
         return 'int' if _mixed_scalar_int_binding(value) else None
     return None
@@ -5214,13 +5214,13 @@ def _convert_container_kind(gen, dst_type: str, src_type: str, value: str):
     _KIND = gimple_ctypes._CONTAINER_KIND_TYPES
     if dst_type not in _KIND or src_type not in _KIND or src_type == dst_type:
         return None
-    if dst_type == 'MojoList *' and src_type == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_list(dst_type) and src_type == 'MojoSet *':
         res = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
         _e = gen._elem_of(value)
         if _e:
             gen._elem_types[res] = _e
         return res
-    if dst_type == 'MojoList *' and src_type == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_list(dst_type) and src_type == 'MojoDict *':
         res = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', value)])
         gen._elem_types[res] = 'char *'
         return res
@@ -5360,7 +5360,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     the exact gap CODEGEN_all_any_dict_set_miscompile documented
     (that doc is gone, closed by this change).
     Fixing it here, once, closes it for all 5 call sites at once."""
-    if src_type == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(src_type):
         return value
     if src_type == 'MojoDict *':
         _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', value)])
@@ -5694,7 +5694,7 @@ def _list_repr_fn(gen, rav: str) -> str:
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
         return 'mojo_repr_list_ints'
-    if et == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(et):
         # `[True, False]` -- the generic path both formats a bool slot as
         # "1"/"0" (mojo_repr_int, not mojo_repr_bool) AND treats its False
         # (0) slot as the None sentinel, printing `[1, None]`. Mirrors the
@@ -6009,13 +6009,13 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             et = _real
             ev = gen._cast(_real, ev)
-    if et == 'MojoList *' or et == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_list(et) or et == 'MojoSet *':
         # A plain container value (a literal, or a local whose static type
         # is already known) reaches here directly, same value the `print`
         # dispatch already knows how to repr — reuse its helper choice
         # rather than falling through to the generic `mojo_str` branch
         # below, which reads the container's raw header bytes as text.
-        if et == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(et):
             fn, fn_args = gen._list_repr_call(ev)
         else:
             fn, fn_args = '_mojo_repr_set', [('MojoSet *', ev)]
@@ -6027,7 +6027,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', ev)])
     if et == 'MojoMemoryView *':
         return gen._call_expr('char *', 'mojo_memoryview_repr', [('MojoMemoryView *', ev)])
-    if et == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(et):
         # Python str(True)/str(False) → "True"/"False", not the "1"/"0"
         # the int path below would produce.
         return gen._call_expr('char *', 'mojo_bool_to_str', [('int', ev)])
@@ -8976,7 +8976,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 atype = 'char *'
             elif real in ('MojoList *', 'MojoSet *'):
                 lp = gen._cast(real, f"{aval}")
-                if real == 'MojoList *':
+                if gimple_ctypes.TypeLattice.is_list(real):
                     fn, fn_args = gen._list_repr_call(aval, lp)
                 else:
                     fn, fn_args = '_mojo_repr_set', [(real, lp)]
@@ -9060,7 +9060,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
         # predicate, which a dict store now uses too, so the two cannot
         # disagree about the same value (they did: `print(b)` said True while
         # `{'k': b}` printed `{'k': 1}`).
-        if _stat != '_Bool' and args and i < len(args):
+        if not gimple_ctypes.TypeLattice.is_bool(_stat) and args and i < len(args):
             if gimple_exprtypes.is_python_bool_expr(gen, args[i]):
                 _stat = '_Bool'
         if gimple_ctypes.TypeLattice.is_cstr(atype):
@@ -9087,7 +9087,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             dv = gen._cast('double', f"{aval}")
             rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
             gen._rt_void(print_fn, [f"{rv}"])
-        elif atype == 'MojoList *':
+        elif gimple_ctypes.TypeLattice.is_list(atype):
             # print(a_list) previously fell to the generic numeric
             # sprintf path below via printf_fmt('MojoList *'), printing
             # the raw boxed pointer as a decimal address — Python prints
@@ -9136,14 +9136,14 @@ def _gen_print(gen, args: list, kwargs: list = None):
             else:
                 _lp = gen._coerce_to_type(atype if atype in ('int64_t', 'int', 'void *') else 'int64_t',
                                           _stat, aval)
-                if _stat == 'MojoList *':
+                if gimple_ctypes.TypeLattice.is_list(_stat):
                     _fn, _fargs = gen._list_repr_call(aval, _lp)
                 else:
                     _fn, _fargs = '_mojo_repr_set', [(_stat, _lp)]
                 rv = _own_repr(gen, _fn, gen._call_expr('char *', _fn, _fargs),
                                _owned_reprs)
             gen._rt_void(print_fn, [f"{rv}"])
-        elif atype == '_Bool' or (_stat == '_Bool' and atype in ('int', 'int64_t', 'char *', 'long')):
+        elif gimple_ctypes.TypeLattice.is_bool(atype) or (gimple_ctypes.TypeLattice.is_bool(_stat) and atype in ('int', 'int64_t', 'char *', 'long')):
             # Python prints True/False; the generic numeric path below would
             # sprintf a _Bool with "%d" and print 1. Also reached for
             # `_Bool`-typed locals, which is how a comparison or a
@@ -10014,7 +10014,7 @@ def _owned_free_runtime_fn(ctype) -> str:
     always correctly typed."""
     if ctype == 'MojoDict *':
         return 'mojo_dict_free'
-    if ctype == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_list_free'
     if ctype == 'MojoSet *':
         return 'mojo_set_free'
@@ -10026,7 +10026,7 @@ def _owned_push_runtime_fn(ctype) -> str:
     for why this can't be a dict `.get()` call under self-hosting."""
     if ctype == 'MojoDict *':
         return 'mojo_cleanup_push_dict'
-    if ctype == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_cleanup_push_list'
     if ctype == 'MojoSet *':
         return 'mojo_cleanup_push_set'
@@ -10054,7 +10054,7 @@ def _owned_stack_push_runtime_fn(ctype) -> str:
     `_owned_free_runtime_fn`."""
     if ctype == 'MojoDict *':
         return 'mojo_cleanup_push_dict_stack'
-    if ctype == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_cleanup_push_list_stack'
     if ctype == 'MojoSet *':
         return 'mojo_cleanup_push_set_stack'
@@ -10243,7 +10243,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
             if name in gen._scope_armed:
                 _scope_register(gen, name, '')
     else:
-        if owns_str_elems and ctype == 'MojoList *':
+        if owns_str_elems and gimple_ctypes.TypeLattice.is_list(ctype):
             push_fn = 'mojo_cleanup_push_list_strs'
             free_fn = 'mojo_list_free_owned_strs'
         else:
@@ -10330,7 +10330,7 @@ def _emit_owned_local_frees(gen):
             # when `_no_closure_escapes` proved nothing built here outlives
             # the call -- see `_emit_mut_local_box_allocs`.
             runtime_fn = 'free'
-        elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
+        elif name in gen._owned_str_elem_names and gimple_ctypes.TypeLattice.is_list(ctype):
             # Decided at the DECLARATION, where the value was still the temp a
             # `_OWNS_STR_ELEMS` function returned; re-derived here from
             # `var_types` it would be indistinguishable from any other list,
@@ -10636,7 +10636,7 @@ def _owned_destroy_runtime_fn(ctype) -> str:
     under self-hosting."""
     if ctype == 'MojoDict *':
         return 'mojo_dict_destroy'
-    if ctype == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_list_destroy'
     if ctype == 'MojoSet *':
         return 'mojo_set_destroy'

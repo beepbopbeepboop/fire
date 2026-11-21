@@ -1564,7 +1564,7 @@ def _selfhost_merge_field(_fields: dict[str, str], _name: str, _ct: str):
     # stuck at `int64_t` self-hosted while the shim correctly settled on
     # `_Bool`).
     if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
-                         and (_ct.endswith(' *') or _ct == '_Bool')):
+                         and (_ct.endswith(' *') or gimple_ctypes.TypeLattice.is_bool(_ct))):
         _fields[_name] = _ct
 
 

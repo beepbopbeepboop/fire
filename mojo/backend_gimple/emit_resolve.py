@@ -2489,7 +2489,7 @@ def _bool_not(gen, ctype: str, val: str) -> str:
     if ctype.endswith(' *') or ctype == 'void *':
         iv = gen._cast('int64_t', val)
         zt = 'int64_t'
-    elif ctype == '_Bool':
+    elif gimple_ctypes.TypeLattice.is_bool(ctype):
         iv = gen._cast('int', val)
         zt = 'int'
     elif ctype in ('int', 'int64_t'):
@@ -2976,7 +2976,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             and s != d
             and (s.endswith(' *') or s in gimple_ctypes._SCALAR_INT_TYPES)):
         _tf = gen.struct_field_types[d]
-        if s == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(s):
             _lp = v
         else:
             _lv = gen._ensure_local(s, v)
@@ -3019,7 +3019,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
             elif d == 'int64_t':
                 gen._emit(f'  {dest} = {v}LL;')
-            elif d == '_Bool':
+            elif gimple_ctypes.TypeLattice.is_bool(d):
                 gen._cast_into(dest, '_Bool', f"{v}")
             else:
                 gen._copy(dest, f"{v}")
@@ -3028,7 +3028,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         if s == d:
             if d == 'int64_t' and v.lstrip('-').isdigit():
                 gen._cast_into(dest, 'int64_t', f"{v}")
-            elif d == '_Bool' and v.lstrip('-').isdigit():
+            elif gimple_ctypes.TypeLattice.is_bool(d) and v.lstrip('-').isdigit():
                 gen._cast_into(dest, '_Bool', f"{v}")
             else:
                 # Same C type, but the value's *declared* type may still be
@@ -3261,7 +3261,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     # `mojo_repr_bool` takes an `int`, not a `_Bool`, on purpose — this header
     # is included from the C++20 backend's translation units, where `_Bool`
     # does not exist — so the cast is the same one the print path makes.
-    if rat == '_Bool' or (enode is not None and rat in ('int', 'int64_t')
+    if gimple_ctypes.TypeLattice.is_bool(rat) or (enode is not None and rat in ('int', 'int64_t')
                           and gimple_exprtypes.is_python_bool_expr(gen, enode)):
         return gen._call_expr('char *', 'mojo_repr_bool',
                               [('int', gen._cast('int', rav))])
@@ -3307,7 +3307,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if gimple_ctypes.TypeLattice.is_cstr(rat):
         # A NULL str is None here (see mojo_repr_str_or_none in fire_runtime.c).
         return gen._call_expr('char *', 'mojo_repr_str_or_none', [('char *', rav)])
-    if rat == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(rat):
         # Unpacked into named locals, not splatted into the call: a `*call()`
         # of a returned tuple becomes ONE positional argument once
         # self-hosted (the whole `(fn, args)` pair printed as the callee).
@@ -3606,7 +3606,7 @@ def _proven_arg_mojo_type(gen, arg, ctype):
         if ctype == 'Span *':
             return _proven_span_arg_mojo_type(gen, arg)
         return _list_arg_mojo_type(gen, arg, ctype)
-    if ctype == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ctype):
         lst = _list_arg_mojo_type(gen, arg, ctype)
         if lst is not None:
             return lst
@@ -3866,7 +3866,7 @@ def _list_arg_mojo_type(gen, arg, ctype):
     declines the shape exactly as every other unprovable argument does
     (bugs/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
     origin](span: Span[T, origin])` is the template this proof exists for)."""
-    if ctype != 'MojoList *':
+    if not gimple_ctypes.TypeLattice.is_list(ctype):
         return None
     if isinstance(arg, gimple_ctypes.CallExpr):
         return _list_ctor_mojo_type(gen, arg)
@@ -3916,7 +3916,7 @@ def _inferred_arg_mojo_type(gen, arg, ctype):
     Literal inference is deliberately UNCHANGED on this path (a literal's
     `int64_t` erasure binds nothing here), so no binding an existing inferred
     call has can move — the List/Span proofs are purely additive."""
-    if ctype == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ctype):
         return _list_arg_mojo_type(gen, arg, ctype)
     if ctype in ('Span *', 'int64_t'):
         return _proven_span_arg_mojo_type(gen, arg)
@@ -4798,7 +4798,7 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
     for i, (ctype, val) in enumerate(arg_pairs):
         if i >= len(params) or params[i] != 'Span *':
             continue
-        if ctype == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(ctype):
             gen._struct_allocs_needed.add('Span')
             sp = gen._new_temp('Span *')
             gen._rt_into(sp, '_alloc_Span', [])
@@ -5179,7 +5179,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _it = _as_str(_ir[0])
         _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if _it.endswith(' *') and _it != 'MojoList *':
+        if _it.endswith(' *') and not gimple_ctypes.TypeLattice.is_list(_it):
             _iv = gen._cast('MojoList *', _iv_raw)
         gen._rt_void('mojo_list_extend', [res, f"{_iv}"])
         # Carry the inner result's ELEMENT TYPE onto the outer one. The
@@ -5342,7 +5342,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # `setdefault` (as the literal path also uses) so the first
         # iteration's answer is the one kept, exactly as the literal path
         # behaves when a literal mixes shapes.
-        if et == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(et):
             if ev in gen._elem_types:
                 # `_elem_types[res]` above stays 'MojoList *' (what res
                 # CONTAINS); `_nested_elem_types` says what those hold.

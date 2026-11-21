@@ -810,7 +810,7 @@ def _lower_builtin_bound_method_call(gen, fname_raw: str,
     argument typing (int vs str append), element-type propagation and
     return types all match the direct-call spelling exactly."""
     recv_ct, recv_v, method = gen._builtin_method_values[fname_raw]
-    if recv_ct == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(recv_ct):
         return gen._lower_list_method(recv_v, method, node.args, node.kwargs)
     if recv_ct == 'MojoDict *':
         return gen._lower_dict_method(recv_v, method, node.args)
@@ -875,7 +875,7 @@ def _dunder_ctype_family(ct) -> str:
         return 'char *' if gimple_ctypes.TypeLattice.is_cstr(t) else 'ptr'
     if t in ('float', 'double'):
         return 'float'
-    if t == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(t):
         return 'bool'
     if t.startswith('int') or t.startswith('uint') or t.endswith('_t'):
         return 'int'
@@ -1192,7 +1192,7 @@ def _struct_build_value_list(gen, arg_nodes: list, codes):
             # int64 slots (struct splat args are ints in practice:
             # zipfile `_write_end_record`'s `*extra`).
             _it, _iv = gen.lower_expr(a.operand)
-            _ip = (gen._ensure_local('MojoList *', _iv) if _it == 'MojoList *'
+            _ip = (gen._ensure_local('MojoList *', _iv) if gimple_ctypes.TypeLattice.is_list(_it)
                    else gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(_it, _iv)))
             gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', lst), ('MojoList *', _ip)])
             continue
@@ -2418,7 +2418,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
                 bt, bv = gen.lower_expr(bytes_arg)
                 # Try to read bytes from list
                 # For simplicity, handle common cases
-                if bt == 'MojoList *' or bt == 'int64_t':
+                if gimple_ctypes.TypeLattice.is_list(bt) or bt == 'int64_t':
                     # Try to extract bytes
                     result = gen._new_temp(ot)
                     if ot in ('uint16_t', 'int16_t', 'unsigned short', 'short'):
@@ -4395,7 +4395,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
             elif len(node.args) == 1 and not _join_has_spread:
                 # os.path.join(*list) — single arg is a MojoList*
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type == 'MojoList *':
+                if gimple_ctypes.TypeLattice.is_list(arg_type):
                     gen._emit_call('int64_t', t, 'int_join_list', [('int64_t', '0'), (arg_type, arg_val)])
                 elif arg_type == 'int64_t':
                     # might be word; try word join if unsure
@@ -4420,7 +4420,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
                 for _ja in node.args:
                     if isinstance(_ja, UnaryOp) and _ja.op == '*':
                         _jat, _jav = gen.lower_expr(_ja.operand)
-                        if _jat == 'MojoList *':
+                        if gimple_ctypes.TypeLattice.is_list(_jat):
                             _jcat = gen._call_expr(
                                 'MojoList *', 'mojo_list_concat',
                                 [('MojoList *', _jl), ('MojoList *', _jav)])
@@ -5875,7 +5875,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # ── Container / pointer / scalar dispatch ────────────────────────────
     if ot == 'MojoDict *':
         return gen._lower_dict_method(ov, method, node.args)
-    if ot == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(ot):
         return gen._lower_list_method(ov, method, node.args, node.kwargs)
     if ot == 'MojoSet *':
         return gen._lower_set_method(ov, method, node.args)
@@ -6337,7 +6337,7 @@ def _ldm_pop(gen, ov: str, args: list) -> tuple:
                    and args[1].op == '*' else None)
     if _pop_spread is not None and val_type in ('int64_t', 'int') :
         _sl_t, _sl_v = gen.lower_expr(_pop_spread.operand)
-        if _sl_t == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(_sl_t):
             _sl_n = gen._call_expr('int64_t', 'mojo_list_len', [(_sl_t, _sl_v)])
             _sl_0 = gen._call_expr('int64_t', 'mojo_list_get_int',
                                    [(_sl_t, _sl_v), ('int64_t', gen._new_val('int64_t', '(int64_t)0'))])
@@ -6703,7 +6703,7 @@ def _ldm_fromkeys(gen, ov: str, args: list) -> tuple:
                 isinstance(args[1], gimple_ctypes.IdentExpr)
                 and args[1].name == 'None'):
             _vkind = '4'; _vval = '0'
-        elif _vt == '_Bool':
+        elif gimple_ctypes.TypeLattice.is_bool(_vt):
             _vkind = '3'; _vval = gen._cast('int64_t', _vv)
         else:
             _vkind = '0'; _vval = gen._cast('int64_t', _vv)
@@ -7006,7 +7006,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             if (not _arg_narrowed) and (at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *'))):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
-                if actual_elem == 'MojoList *' and av in gen._elem_types:
+                if gimple_ctypes.TypeLattice.is_list(actual_elem) and av in gen._elem_types:
                     gen._nested_elem_types[ov] = gen._elem_types[av]
                 # Propagate to _field_elem_types when ov originated from a
                 # struct field (e.g. self.errors / self.blocks). The
@@ -7036,11 +7036,11 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
         # `mojo_list_extend` copies the elements out of its source, so a source
         # that is a fresh container (`l.extend([10, 20])`, `l.extend(s.split())`)
         # is dead once it returns.
-        _ext_fresh = at == 'MojoList *' and gen._is_fresh_container_operand(args[0], av)
+        _ext_fresh = gimple_ctypes.TypeLattice.is_list(at) and gen._is_fresh_container_operand(args[0], av)
         gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', ov), (at, av)])
         if _ext_fresh:
             gen._free_fresh_container(av, 'MojoList *')
-        if at == 'MojoList *' and av in gen._elem_types:
+        if gimple_ctypes.TypeLattice.is_list(at) and av in gen._elem_types:
             gen._elem_types[ov] = gen._elem_types[av]
             if av in gen._nested_elem_types:
                 gen._nested_elem_types[ov] = gen._nested_elem_types[av]
@@ -7436,7 +7436,7 @@ def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs,
         _fav = _as_str(_fa[1])
         _an = _nodes[_ai] if _ai < len(_nodes) else None
         if (isinstance(_an, gimple_ctypes.UnaryOp) and _an.op == '*'
-                and (_fat == 'MojoList *' or _fat == 'int64_t')):
+                and (gimple_ctypes.TypeLattice.is_list(_fat) or _fat == 'int64_t')):
             _src = _fav
             if _fat == 'int64_t':
                 _src = _as_str(gen._materialize_as_list('int64_t', _fav))

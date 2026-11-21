@@ -1097,7 +1097,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _meta[it_val] = _meta[orig_name]
 
     try:
-        if it_type == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(it_type):
             gen._gen_for_list(var, it_val, node.body, shadow_name=shadow_name)
         elif it_type == 'MojoStr *':
             gen._gen_for_str(var, it_val, node.body, shadow_name=shadow_name)
@@ -1706,7 +1706,7 @@ def _gen_for_zip_longest(gen, node):
     for arg in args:
         st, sv = gen.lower_expr(arg)
         st = gen._get_actual_type(st, sv)
-        if st != 'MojoList *':
+        if not gimple_ctypes.TypeLattice.is_list(st):
             raise ValueError(f"zip_longest over {st} is unsupported here")
         ptr = sv
         if ptr in gen.var_types and gen.var_types[ptr] == 'int64_t':
@@ -1899,7 +1899,7 @@ def _carry_nested_elem_type(gen, target, it_val, elem) -> None:
     `zip()` slot binding and the ordinary `for x in <list>` -- because they
     are the same step and a partial copy is exactly how the ordinary loop
     came to disagree with `zip()` about the same nested shape."""
-    if _as_str(elem) != 'MojoList *':
+    if not gimple_ctypes.TypeLattice.is_list(_as_str(elem)):
         return
     _inner = gen._nested_elem_types.get(_as_str(it_val))
     if _inner is not None:
@@ -2278,7 +2278,7 @@ def _gen_for_enumerate(gen, node):
         val_var = raw_val
 
     # Ensure underlying list
-    if lst_type == 'MojoList *':
+    if gimple_ctypes.TypeLattice.is_list(lst_type):
         list_ptr = lst_val
         if lst_val in gen.var_types and gen.var_types[lst_val] == 'int64_t':
             list_ptr = gen._coerce_to_type('int64_t', 'MojoList *', lst_val)
@@ -3911,7 +3911,7 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
                 gen._tagged_gen_tuple_locals = set()
             gen._tagged_gen_tuple_locals.add(vn)
             continue
-        if slot_elem == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(slot_elem):
             # A list-valued slot (`coro._tuple_slot_kind`'s 'list:<elem>'):
             # read the pointer bits back as the list, and record its element
             # type so `for x in <vn>` reads the elements with the right
@@ -4634,7 +4634,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
             # gap with an explicit cast (measured in the product2 ladder C:
             # `(MojoList *)` off the int64 word); mirror it so the slot
             # reads compile in both type states.
-            if elem_type == 'MojoList *':
+            if gimple_ctypes.TypeLattice.is_list(elem_type):
                 _listptr = nxt
             else:
                 _listptr = gen._cast('MojoList *', nxt)

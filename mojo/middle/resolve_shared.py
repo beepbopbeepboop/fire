@@ -240,7 +240,7 @@ def _and_or_operand_type(gen, node) -> str:
     takes its bool-merge path. Both the lowering (`_lower_BinaryOp`) and
     `_quick_type`'s own `and` / `or` rule ask this, so they agree."""
     qt: str = _as_str(gen._quick_type(node))
-    if qt == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(qt):
         return qt
     if isinstance(node, gimple_ctypes.CallExpr):
         fn = node.func
@@ -432,8 +432,8 @@ def _quick_type(gen, node) -> str:
             # so a CHAIN (`a or b or c`, parsed right-nested) must report
             # `_Bool` for its inner link too, or the outer link sees a pointer
             # type for a value that is the bool 1 and runs `mojo_dict_len` on it.
-            if ((lt.endswith(' *') and rt == '_Bool')
-                    or (lt == '_Bool' and rt.endswith(' *') and node.op == 'or')):
+            if ((lt.endswith(' *') and gimple_ctypes.TypeLattice.is_bool(rt))
+                    or (gimple_ctypes.TypeLattice.is_bool(lt) and rt.endswith(' *') and node.op == 'or')):
                 return '_Bool'
             return gimple_ctypes.TypeLattice.join(lt, rt)
         if node.op == '|':

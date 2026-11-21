@@ -45,9 +45,9 @@ BASELINE = {
     # should use instead of spelling the test.
     # also +1 each for is_word and is_double (same reason).
     "== 'char *'": 159,
-    "== '_Bool'": 68,
+    "== '_Bool'": 23,
     "== 'double'": 187,
-    "== 'MojoList *'": 203,
+    "== 'MojoList *'": 54,
     "gen._emit( text": 298,
 }
 
