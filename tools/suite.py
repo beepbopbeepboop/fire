@@ -2119,7 +2119,12 @@ test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
 # registration is the thing that was wrong.
 test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True, mem='tiny',
      deps=['preflight'], timeout=1500,
+     # The cases build through `fire.build_executable` in a `python3 -c`
+     # subprocess, so `fire.py` itself and the content-addressed codegen cache
+     # it uses are part of this job's subject: a change to either must not be
+     # hidden by a cached PASS recorded before it.
      extra=GIMPLE_SOURCES + ['test_silent_noop_iter.py', 'build_config.py',
+                             'fire.py', 'cas.py',
                              RUNTIME_SRC, RUNTIME_HDR],
      desc='the silent no-op class: no loop may iterate zero times, read a '
           'container as another kind, or drop reversed/findall order')
