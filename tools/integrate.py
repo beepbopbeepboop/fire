@@ -48,12 +48,24 @@ def take_integrator_lock(probe):
 
 
 @contextmanager
-def master_lock():
-    """Only one process moves master at a time: an exclusive flock around the fast-forward. Blocking, not try-lock: a
-    holder is bounded (it does one merge), and a landing that loses the race must wait, not be dropped."""
+def master_lock(wait_s=None):
+    """Only one process moves master at a time: an exclusive flock around the fast-forward (landings, and the ledger
+    commit of verify_landed.py). wait_s None blocks: a holder is bounded (it does one merge), and a landing that loses
+    the race must wait, not be dropped. wait_s N polls for N seconds, then raises TimeoutError, before the body runs."""
     f = open(os.path.join(C.ctl_dir(), "master.lock"), "a+")
     try:
-        fcntl.flock(f, fcntl.LOCK_EX)
+        if wait_s is None:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        else:
+            end = time.time() + wait_s
+            while True:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.time() > end:
+                        raise TimeoutError("master.lock busy for %ds" % wait_s)
+                    time.sleep(2)
         yield
     finally:
         f.close()

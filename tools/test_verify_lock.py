@@ -55,9 +55,9 @@ def main():
             w(repo, "suite.py", "line1\nMARK = 'someone else'\nline3\n"); g(repo, "commit", "-qam", "conflicting"); before = g(repo, "rev-parse", "HEAD")
             with mock.patch.object(C, "MAIN", repo):
                 assert V.land_ledger(new, sha, wait_s=0) is False and g(repo, "rev-parse", "HEAD") == before
-            # integrator lock busy: stays on its branch
+            # master.lock busy (a fast-forward is in progress): the ledger stays on its branch
             repo, sha, new = fresh(d, 4)
-            integ = open(os.path.join(ctl, "integrator.lock"), "w"); fcntl.flock(integ, fcntl.LOCK_EX)
+            integ = open(os.path.join(ctl, "master.lock"), "w"); fcntl.flock(integ, fcntl.LOCK_EX)
             with mock.patch.object(C, "MAIN", repo):
                 assert V.land_ledger(new, sha, wait_s=0) is False and g(repo, "rev-parse", "HEAD") == sha
             integ.close()

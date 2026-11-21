@@ -8,7 +8,7 @@ full suite. The full suite (`suite.py gate`, minus every gate that is OFF) costs
 least one first-parent commit since the last run touches something a gate reads (gate_ledger.pending): docs and the
 orchestration tools do not count. The gate takes HOURS, so it must not hold anything the integrator needs: it runs in
 ../work-verify on the sha master had when it started (master marches on meanwhile, and landings continue), under its OWN
-lock (verify.lock: one verifier at a time). Only the short step that lands its ledger commit takes the integrator lock.
+lock (verify.lock: one verifier at a time). Only the short step that lands its ledger commit takes master.lock (the lock every fast-forward takes).
 Machine memory is bounded by memslot as for every suite run. Runs are spaced by gates.json `full_every_minutes`
 (measured from the end of the last one). Its verdict goes to <common-git-dir>/control/verify.json and the per-job history to gate_ledger.json.
 
@@ -29,6 +29,7 @@ import argparse, fcntl, json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 import gate_ledger as G
+import integrate as I
 import stash_ff as SF
 
 VERIFY = os.path.join(C.PARENT, "work-verify")
@@ -153,22 +154,6 @@ def apply_findings(st, newly, recovered, sha, log, failed=()):
     return None
 
 
-def integrator_lock(wait_s=900):
-    """The integrator's lock, WAITED for (the verifier runs for hours and must not hold it; it needs it only for the
-    moment its ledger commit moves master). Returns the open lock file, or None if it could not be had in WAIT_S."""
-    lock = open(os.path.join(C.ctl_dir(), "integrator.lock"), "w")
-    end = time.time() + wait_s
-    while True:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return lock
-        except OSError:
-            if time.time() > end:
-                lock.close()
-                return None
-            time.sleep(5)
-
-
 def clear_untracked_twins(ledger):
     """Remove the MAIN-untracked bugs/gate-*.md copies that the ledger commit tracks, when their bytes are identical to
     the tracked copy. An untracked twin is what makes git refuse the merge ("would be overwritten by merge"), so every
@@ -193,24 +178,23 @@ def land_ledger(new, sha, wait_s=900):
     """Move master to include the ledger commit NEW (built on SHA, the commit the gate ran on). A gate takes hours, so
     master has almost always moved since SHA: then the commit is MERGED onto the master of the day, which is safe because
     it touches only suite.py's `disabled=` markers and bugs/gate-*.md docs; a conflict leaves it on branch verify-ledger.
-    The integrator lock is held only for this step."""
-    lock = integrator_lock(wait_s)
-    if lock is None:
-        print("ledger commit %s NOT landed: the integrator lock was busy for %ds; it stays on branch verify-ledger" % (new[:10], wait_s))
-        return False
+    master.lock is held only for this step, the same lock every landing's fast-forward takes (integrate.master_lock),
+    so the ledger commit waits for at most one fast-forward, never for a whole landing round."""
     try:
-        clear_untracked_twins(new)
-        if C.git("rev-parse", "master", cwd=C.MAIN) == sha:
-            st, detail = SF.merge(C.MAIN, "--ff-only", "verify-ledger")
-        else:
-            st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "gate ledger: merged onto the master of the day (the gate ran at %s)" % sha[:10],
-                                  "verify-ledger")
-        if st == "ok":
-            return True
-        print("ledger commit %s NOT landed (%s: %s); it stays on branch verify-ledger" % (new[:10], st, detail[:160]))
+        with I.master_lock(wait_s):
+            clear_untracked_twins(new)
+            if C.git("rev-parse", "master", cwd=C.MAIN) == sha:
+                st, detail = SF.merge(C.MAIN, "--ff-only", "verify-ledger")
+            else:
+                st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "gate ledger: merged onto the master of the day (the gate ran at %s)" % sha[:10],
+                                      "verify-ledger")
+            if st == "ok":
+                return True
+            print("ledger commit %s NOT landed (%s: %s); it stays on branch verify-ledger" % (new[:10], st, detail[:160]))
+            return False
+    except TimeoutError:
+        print("ledger commit %s NOT landed: master.lock was busy for %ds; it stays on branch verify-ledger" % (new[:10], wait_s))
         return False
-    finally:
-        lock.close()
 
 
 def verify_lock():
