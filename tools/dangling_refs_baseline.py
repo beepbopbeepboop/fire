@@ -32,7 +32,6 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
-    'bugs/LAND-fix-replan-gate-red-recover-land-2026-11-02-part5-p.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'build_stdlib_dylib.py': 1,
@@ -149,7 +148,6 @@ BASELINE = {
     # FIXTURE (`LAND-x.md`) to drive the retire machinery; the name does
     # not exist by construction, like the negative controls above.
     'tools/test_integrate_probe_loop.py': 1,
-    'tools/test_land_doc.py': 1,
     'tools/formal_chain_probe.py': 2,
     'tools/formal_fuzz.py': 26,
     'tools/formal_host_import_shapes.py': 1,
