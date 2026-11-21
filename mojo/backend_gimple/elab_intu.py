@@ -3587,7 +3587,17 @@ def _struct_bind_args(tmpl, written, origin_arg):
     `written` after the infer-only `//` group: infer-only `Bool` parameters
     (`mut: Bool, //`) take `True`, an `Origin[..]` parameter takes
     `origin_arg` where the alias passed its own origin parameter, and
-    trailing defaulted parameters are left to `bind_type_args`."""
+    trailing defaulted parameters are left to `bind_type_args`.
+
+    The result is a FULL PREFIX — it starts at the template's first parameter —
+    so the caller binds it with `full_prefix=True`. Without that, a list
+    shorter than the parameter list is read as the post-`//` arguments only and
+    the prefix is deduced a second time, shifting every argument one parameter
+    right: the second read may fail — `bind_type_args`' take-as-written
+    fallback then saves `_LinkedListIter` and
+    `test_linked_list_struct_element_step4*` today — or, when the shifted read
+    happens to parse (an origin alias in the element position), bind a silently
+    different instantiation."""
     import elaborate
     import monomorphize as mm
     hm = mm.head_match(tmpl)
@@ -3667,7 +3677,8 @@ def _eval_parametrized_aliases(work, mm, base, concrete):
                         'with no struct template')
             continue
         bound = _struct_bind_args(atmpl, written, origin_arg)
-        targs = elaborate.bind_type_args(atmpl, bound) if bound else None
+        targs = (elaborate.bind_type_args(atmpl, bound, full_prefix=True)
+                 if bound else None)
         if targs is None or not all(
                 isinstance(v, str) and v for v in targs.values()):
             work.refuse(f'{base}: comptime alias {aname} names {abase}[...] '

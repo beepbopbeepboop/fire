@@ -2060,6 +2060,26 @@ def test_type_param_markers_and_simd_unification(wd):
           and el.bind_type_args(_lit, ['True', 'Int64', 'MutOrigin'])
           == {'mut': 'True', 'T': 'Int64', 'origin': 'MutOrigin',
               'address_space': '0'})
+    # The alias expansion (`elab_intu._struct_bind_args`) writes a full prefix,
+    # with only TRAILING defaults absent, and now says so with `full_prefix`.
+    # The deduction binder#5 leans on is a GUESS about which spelling it was
+    # handed, and the guess can be wrong rather than merely unreadable: the
+    # prefixed `[True, MutOrigin, MutOrigin]` below re-deduces to
+    # ElementType='True', forward='MutOrigin' — a silently different
+    # instantiation (measured 2026-11-21 on this head).
+    check("binder#6: a full prefix binds positionally, never by a second deduction",
+          el.bind_type_args(_iter, ['True', 'MutOrigin', 'MutOrigin'],
+                            full_prefix=True)
+          == {'mut': 'True', 'ElementType': 'MutOrigin', 'origin': 'MutOrigin',
+              'forward': 'True'}
+          and el.bind_type_args(_lit, ['True', 'Int64', 'MutOrigin'],
+                                full_prefix=True)
+          == {'mut': 'True', 'T': 'Int64', 'origin': 'MutOrigin',
+              'address_space': '0'}
+          and el.bind_type_args(_lit, ['True', 'Int64', 'MutOrigin', '7'],
+                                full_prefix=True)
+          == {'mut': 'True', 'T': 'Int64', 'origin': 'MutOrigin',
+              'address_space': '7'})
     import monomorphize as _mm
     _shadow_src = ('def f():\n'
                    '    var x = Pointer[Int, MutOrigin](\n'
