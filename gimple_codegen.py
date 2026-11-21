@@ -39,6 +39,7 @@ import ownership_check
 import unknown_decl_check
 import mlir
 import mojo.middle.coro as gimple_gen_coro
+import mojo.middle.valueinfo as gimple_valueinfo
 import regex_compile
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
@@ -1713,7 +1714,10 @@ class GimpleGen:
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other
         # value-keyed side tables, since these names are per-function temps.
-        self._boxed_container_vals: set = set()
+        # the six name-keyed word sets live in one WordFacts (valueinfo.py);
+        # `_reset_func` makes a fresh one per function body
+        self._words: gimple_valueinfo.WordFacts = gimple_valueinfo.WordFacts()
+        self._words.bind(self)
         # Function name -> the return type of the CALLABLE it returns
         # (`def mk(): return lambda: False`). Module scope for the same
         # reason as `_return_slot_types` above: the point is to carry a
@@ -2472,7 +2476,6 @@ class GimpleGen:
         # an ordinary int-list subscript keeps emitting the plain
         # `mojo_list_get_int` it always did — the cost of the mechanism is
         # confined to the lists that can actually need it.
-        self._maybe_kinds_vals: set = set()
         # Container names whose elements are inner lists of mixed kinds (see
         # emit_infra._reset_func); reset per function.
         self._nested_mixed_names: set = set()
@@ -2481,7 +2484,6 @@ class GimpleGen:
         # than the value itself. Consulted by the two places that stringify
         # an `int64_t` — `print` and f-string/`str()` — so only a value that
         # could be a box pays for finding out. See mojo_repr_boxed.
-        self._boxed_vals: set = set()
         # Function name -> True when some `return` in its body hands back a
         # value whose per-slot kinds are recorded on the VALUE (a
         # `struct.unpack` of a format that mixes kinds). Read back at the
@@ -2903,7 +2905,6 @@ class GimpleGen:
         # `d[3000000000] = 1` was a SIGSEGV. See
         # RUNTIME_int64_key_above_2gb_dereferenced_as_pointer and
         # `_char_to_cstr`'s word_ok branch, the one consumer.
-        self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
         # TEMP names holding a FRESH CLOSURE a vetted call returned (the

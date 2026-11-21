@@ -252,7 +252,7 @@ that is meant to be behaviour-preserving:
   `__init__` leaks under the self-hosted compiler), so do not "simplify" it.
   Plan, in order, each step byte-identical C on `tools/pydiff_corpus` (hash
   `compile_to_gimple_with_cpp` output before and after):
-  1. A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
+  1. (LANDED 2026-11-20, byte-identical on 284 programs) A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
      six sets and has `save()` / `restore(saved)`; `FuncState` keeps ONE
      `fs_words` instead of twelve fields; the six `gen._x_vals` names stay
      bound to the same set objects (assigned once at construction, `.clear()`

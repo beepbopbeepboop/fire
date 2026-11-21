@@ -43,6 +43,7 @@ import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.coro as coro_mod
+import mojo.middle.valueinfo as gimple_valueinfo
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
@@ -245,12 +246,15 @@ def _reset_func(gen, body: list = None, params: list = None,
     # emit_loops' for-target; the reads in emit_exprs/emit_infra), so
     # per-function is not merely safe, it is the only scope in which the
     # name means anything.
-    gen._boxed_vals = set()
+    # ONE fresh WordFacts per function body replaces the six per-function
+    # sets (boxed, tagged, dyn, int-word, maybe-kinds, boxed-container); the
+    # historical names are re-bound to its sets (mojo/middle/valueinfo.py).
+    gen._words = gimple_valueinfo.WordFacts()
+    gen._words.bind(gen)
     # `_tagged_word_vals` is the subset of `_boxed_vals` temps that are a
     # TAGGED generator word (a yield-kind box from `next(g)` on a mixed-kind
     # generator). Same scope and reason as `_boxed_vals`: temp names restart
     # per function, so a stale entry would tag an unrelated temp.
-    gen._tagged_word_vals = set()
     # Same scope and same reason as `_boxed_vals` above: the writers are
     # `_lower_IdentExpr`'s two function-value branches and the sole reader is
     # `print`, all inside one function's lowering, and the keys are SSA temp
@@ -365,7 +369,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # A miss here is harmless (the value falls back to the runtime's own
     # discriminator, i.e. today's behaviour) which is what makes this table
     # safe to seed only where the answer is provable.
-    gen._int_word_vals.clear()
     gen._fresh_vals.clear()   # per function: temp names repeat across functions
     # (TEMPs holding a fresh closure, `_fresh_closure_vals`, reset by REBIND in
     # the ownership-assignment section below, never in place: a nested lifted
@@ -421,7 +424,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # as the try's own early return (`_elaborate_generic_call_lambda_1`
     # assigned a temp of the parent function and jumped to its finally).
     gen._emit_frames = []
-    gen._dyn_word_vals: set = set()
     # The LOCALS such a word was bound to (`x = obj.attr`, or one slot of an
     # unpack whose source carries no element type): same question, asked of
     # the name, because a later read of the local is the local itself.
@@ -506,7 +508,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # plain int list the two accessors return the same word, so that case is a
     # C-shape divergence only — which is the other reason not to leave it: a
     # divergence nobody can see is one nobody looks for.
-    gen._maybe_kinds_vals: set = set()
     # Names whose elements are inner lists of MIXED kinds, as seeded from the
     # cross-call contract (`_param_nested_mixed`) for this function's params.
     # Per function for the same reason `_maybe_kinds_vals` is: a param's
@@ -546,8 +547,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # created in `GimpleGen.__init__`, but a rebind there is a leak under the
     # self-hosted compiler, so it is emptied where every other per-function
     # table is.
-    gen._boxed_vals.clear()
-    gen._tagged_word_vals.clear()
     gen._func_value_names.clear()
     # The per-slot kind of a `struct.unpack` result (and of a local bound
     # from one), in the long-form spelling the statically-indexed MojoList
@@ -695,7 +694,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Call-result temps holding a container of statically UNKNOWN kind (see
     # `gen._boxed_container_vals`'s own comment). Value-keyed, so reset per
     # function with the rest of them.
-    gen._boxed_container_vals: set = set()
     gen._span_mut_params: dict[str, bool]  = {}  # param/var name → literal Span/StringSlice mut=True/False
     # NOTE: _field_elem_types is intentionally NOT reset here — it stores
     # per-struct metadata that must persist across function boundaries
@@ -955,8 +953,6 @@ class FuncState:
         self.fstemp_counter: int = 0
         self.fs_fresh_vals: set = set()
         self.fs_fresh_str_tmps: set = set()
-        self.fs_boxed_vals: set = set()
-        self.fs_tagged_word_vals: set = set()
         self.fs_func_value_names: dict = {}
         self.fsdecls: list = []
         self.fsbody_lines: list = []
@@ -978,7 +974,6 @@ class FuncState:
         self.fs_owned_env_names: set = set()
         self.fs_owned_box_names: set = set()
         self.fs_emit_frames: list = []
-        self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
         self.fs_dict_slot_reads: dict = {}
         self.fs_rtobj_kinds: dict = {}
@@ -986,8 +981,6 @@ class FuncState:
         self.fs_generator_var_api: dict = {}
         self.fs_async_var_api: dict = {}
         self.fs_taskgroup_var_api: dict = {}
-        self.fs_tagged_word_vals: set = set()
-        self.fs_maybe_kinds_vals: set = set()
         self.fs_nested_mixed_names: set = set()
         self.fsloop_stack: list = []
         self.fsexc_depth: int = 0
@@ -1006,7 +999,6 @@ class FuncState:
         self.fs_tuple_slot_types: dict = {}
         self.fs_dict_item_pair_vars: dict = {}
         self.fs_list_iter_cursor: dict = {}
-        self.fs_boxed_container_vals: set = set()
         self.fs_span_mut_params: dict = {}
         self.fs_actual_types: dict = {}
         self.fs_narrowed_exprs: dict = {}
@@ -1043,20 +1035,18 @@ class FuncState:
         self.fs_toplevel_bound_globals: list = []
         self.fs_cstr_key_src: dict = {}
         self.fs_kw_key_src: dict = {}
-        self.fs_int_word_vals: set = set()
         self.fs_struct_field_owners: dict = {}
         self.fs_struct_slot_kinds: dict = {}
         self.fs_cstr_key_src_items: dict = {}
         self.fs_kw_key_src_items: dict = {}
-        self.fs_int_word_vals_items: set = set()
         self.fs_fresh_vals_items: set = set()
-        self.fs_boxed_vals_items: set = set()
-        self.fs_tagged_word_vals_items: set = set()
         self.fs_func_value_names_items: dict = {}
         self.fs_fresh_str_tmps_items: set = set()
         self.fs_struct_field_owners_items: dict = {}
         self.fs_struct_slot_kinds_items: dict = {}
         self.fs_local_bindings_cache: dict = {}
+        self.fs_words: gimple_valueinfo.WordFacts = gimple_valueinfo.WordFacts()
+        self.fs_words_snap: list = []
 
 
 def save_func_state(gen) -> FuncState:
@@ -1070,8 +1060,6 @@ def save_func_state(gen) -> FuncState:
     st.fstemp_counter = gen.temp_counter
     st.fs_fresh_vals = gen._fresh_vals
     st.fs_fresh_str_tmps = gen._fresh_str_tmps
-    st.fs_boxed_vals = gen._boxed_vals
-    st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_func_value_names = gen._func_value_names
     st.fsdecls = gen.decls
     st.fsbody_lines = gen.body_lines
@@ -1093,7 +1081,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_owned_env_names = gen._owned_env_names
     st.fs_owned_box_names = gen._owned_box_names
     st.fs_emit_frames = gen._emit_frames
-    st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
     st.fs_dict_slot_reads = gen._dict_slot_reads
     st.fs_rtobj_kinds = gen._rtobj_kinds
@@ -1101,8 +1088,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_generator_var_api = gen._generator_var_api
     st.fs_async_var_api = gen._async_var_api
     st.fs_taskgroup_var_api = gen._taskgroup_var_api
-    st.fs_tagged_word_vals = gen._tagged_word_vals
-    st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fs_nested_mixed_names = gen._nested_mixed_names
     st.fsloop_stack = gen.loop_stack
     st.fsexc_depth = gen.exc_depth
@@ -1121,7 +1106,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_tuple_slot_types = gen._tuple_slot_types
     st.fs_dict_item_pair_vars = gen._dict_item_pair_vars
     st.fs_list_iter_cursor = gen._list_iter_cursor
-    st.fs_boxed_container_vals = gen._boxed_container_vals
     st.fs_span_mut_params = gen._span_mut_params
     st.fs_actual_types = gen._actual_types
     st.fs_narrowed_exprs = gen._narrowed_exprs
@@ -1163,15 +1147,8 @@ def save_func_state(gen) -> FuncState:
     st.fs_kw_key_src = gen._kw_key_src
     for _k in gen._kw_key_src:
         st.fs_kw_key_src_items[_k] = gen._kw_key_src[_k]
-    st.fs_int_word_vals = gen._int_word_vals
-    for _k in gen._int_word_vals:
-        st.fs_int_word_vals_items.add(_k)
     for _k in gen._fresh_vals:
         st.fs_fresh_vals_items.add(_k)
-    for _k in gen._boxed_vals:
-        st.fs_boxed_vals_items.add(_k)
-    for _k in gen._tagged_word_vals:
-        st.fs_tagged_word_vals_items.add(_k)
     for _k in gen._func_value_names:
         st.fs_func_value_names_items[_k] = gen._func_value_names[_k]
     for _k in gen._fresh_str_tmps:
@@ -1183,6 +1160,8 @@ def save_func_state(gen) -> FuncState:
     for _k in gen._struct_slot_kinds:
         st.fs_struct_slot_kinds_items[_k] = gen._struct_slot_kinds[_k]
     st.fs_local_bindings_cache = gen._local_bindings_cache
+    st.fs_words = gen._words
+    st.fs_words_snap = gen._words.snapshot()
     return st
 
 
@@ -1196,8 +1175,9 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen.temp_counter = st.fstemp_counter
     gen._fresh_vals = st.fs_fresh_vals
     gen._fresh_str_tmps = st.fs_fresh_str_tmps
-    gen._boxed_vals = st.fs_boxed_vals
-    gen._tagged_word_vals = st.fs_tagged_word_vals
+    gen._words = st.fs_words
+    gen._words.bind(gen)
+    gen._words.restore_snapshot(st.fs_words_snap)
     gen._func_value_names = st.fs_func_value_names
     gen.decls = st.fsdecls
     gen.body_lines = st.fsbody_lines
@@ -1219,7 +1199,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._owned_env_names = st.fs_owned_env_names
     gen._owned_box_names = st.fs_owned_box_names
     gen._emit_frames = st.fs_emit_frames
-    gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
     gen._dict_slot_reads = st.fs_dict_slot_reads
     gen._rtobj_kinds = st.fs_rtobj_kinds
@@ -1227,8 +1206,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._generator_var_api = st.fs_generator_var_api
     gen._async_var_api = st.fs_async_var_api
     gen._taskgroup_var_api = st.fs_taskgroup_var_api
-    gen._tagged_word_vals = st.fs_tagged_word_vals
-    gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen._nested_mixed_names = st.fs_nested_mixed_names
     gen.loop_stack = st.fsloop_stack
     gen.exc_depth = st.fsexc_depth
@@ -1247,7 +1224,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._tuple_slot_types = st.fs_tuple_slot_types
     gen._dict_item_pair_vars = st.fs_dict_item_pair_vars
     gen._list_iter_cursor = st.fs_list_iter_cursor
-    gen._boxed_container_vals = st.fs_boxed_container_vals
     gen._span_mut_params = st.fs_span_mut_params
     gen._actual_types = st.fs_actual_types
     gen._narrowed_exprs = st.fs_narrowed_exprs
@@ -1292,19 +1268,9 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._kw_key_src.clear()
     for _k in st.fs_kw_key_src_items:
         gen._kw_key_src[_k] = st.fs_kw_key_src_items[_k]
-    gen._int_word_vals = st.fs_int_word_vals
-    gen._int_word_vals.clear()
-    for _k in st.fs_int_word_vals_items:
-        gen._int_word_vals.add(_k)
     gen._fresh_vals.clear()
     for _k in st.fs_fresh_vals_items:
         gen._fresh_vals.add(_k)
-    gen._boxed_vals.clear()
-    for _k in st.fs_boxed_vals_items:
-        gen._boxed_vals.add(_k)
-    gen._tagged_word_vals.clear()
-    for _k in st.fs_tagged_word_vals_items:
-        gen._tagged_word_vals.add(_k)
     gen._func_value_names.clear()
     for _k in st.fs_func_value_names_items:
         gen._func_value_names[_k] = st.fs_func_value_names_items[_k]
