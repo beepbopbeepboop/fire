@@ -1760,7 +1760,8 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
      timeout=1800,
      extra=GIMPLE_SOURCES + ['test_module_cache.py', 'exec_budget.py',
                              'myinterpreter.py', 'fire.py', 'fire_main.py'],
-     desc='module cache end-to-end stages')
+     desc='module cache end-to-end stages',
+     disabled='bugs/gate-modcache.md')
 # Registered 2026-09-27. Found while implementing FORMAL.md phase 0:
 # `reflect._PROTO_RE` could not match a pointer return (`char *name(...)` — the
 # `*` is attached to the type with no space before the name), so it silently
@@ -2363,7 +2364,8 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
             'test_memslot.py', 'tools/dangling_doc_refs.py'],
      extraglob=['**/test_*.py', '**/*_test.py'],
-     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
+     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split',
+     disabled='bugs/gate-suite-self-test.md')
 
 # The ledger every job above reserves out of, tested on its own. In `smoke`
 # rather than nowhere, which is where it was for a commit: `test_memslot.py`
@@ -2726,7 +2728,8 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='small',
             '1.5x = 6.15 GB so `small` (8) is the ratchet class — `mid` (6) covers '
             'only 1.46x and the run was RESOURCE-capped at it. Over the 4 GB debt '
             'line — see ' + MEM_DEBT_DOC,
-     desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo')
+     desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo',
+     disabled='bugs/gate-bootstrap-stage2-cc.md')
 
 # `tiny` (4), down from `module` (24): 0.5 GB measured PER ITEM, the only
 # fanout item peak in the table, so the ratchet assigns 0.75 GB. `module` was
