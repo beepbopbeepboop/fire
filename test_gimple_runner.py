@@ -15414,6 +15414,7 @@ def main():
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_none_beside_a_scalar_arm_returns_the_tagged_word,
                   test_copy_of_a_tagged_none_keeps_it,
+                  test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -16607,6 +16608,61 @@ def main():
         print(b)
     for c in make(["x", "y"]):
         print(c)
+main()
+""")
+
+
+def test_fstring_format_specs_match_cpython():
+    """f-string format specs are applied to the VALUE, not to its text.
+
+    bug:CODEGEN_format_specs_in_fstrings_are_ignored. The old helper parsed
+    only fill/align/width from the spec and padded the already-stringified
+    value, so `:^N` on a negative int centred the sign wrong, `:.2f` was
+    ignored, `:04d` put the zeros before the minus, and `:x`/`:b` printed
+    decimal. `test_gimple_matches_cpython` is the right oracle here: every
+    wrong answer is a plausible string, so a hand-pinned expectation could
+    only restate whatever the compiler happened to print.
+    """
+    test_gimple_matches_cpython("gimple_fstring_format_specs", """\
+def main():
+    s = "ab"
+    n = -3
+    x = 3.14159
+    print(f"[{s:<5}]")
+    print(f"[{s:>5}]")
+    print(f"[{s:^6}]")
+    print(f"[{n:^5}]")
+    print(f"{x:.2f}")
+    print(f"{n:04d}")
+    print(f"{255:x}")
+    print(f"{5:b}")
+    print(f"{42:5d}|")
+main()
+""")
+    test_gimple_matches_cpython("gimple_fstring_format_specs_negative_and_wide", """\
+def main():
+    n = -3
+    p = 255
+    x = 3.14159
+    s = "ab"
+    print(f"[{s:^5}]")
+    print(f"[{s:10.1}]")
+    print(f"[{n:05d}]")
+    print(f"[{n:+05d}]")
+    print(f"[{n:>08d}]")
+    print(f"[{p:X}]")
+    print(f"[{p:#08x}]")
+    print(f"[{p:o}]")
+    print(f"[{p:#b}]")
+    print(f"[{1234:010,d}]")
+    print(f"[{x:^12.2f}]")
+    print(f"[{x:*>12.2f}]")
+    print(f"[{-x:08.2f}]")
+    print(f"[{x:.2e}]")
+    print(f"[{x:.2g}]")
+    print(f"[{1234.5:.3g}]")
+    print(f"[{0.000123:g}]")
+    print(f"[{x:.1%}]")
 main()
 """)
 
