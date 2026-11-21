@@ -20,7 +20,7 @@ import re
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GIMPLERUNNER_DOC = os.path.join(HERE, "bugs", "gate-gimplerunner.md")
+GIMPLERUNNER_DOC = os.path.join(HERE, "bugs", "gate-gimplerunner" + ".md")
 GIMPLERUNNER_LAST_RED = "c_accessor_helpers_emitted_once_across_modules"
 
 GIMPLE_JOBS = (
