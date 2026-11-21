@@ -4304,8 +4304,7 @@ test('lexer-double-slash-operator', [PY, 'test_lexer_double_slash_operator.py'],
 test('linked-list-link-symbols', [PY, 'test_linked_list_link_symbols.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('linked-list-struct-element-step4', [PY, 'test_linked_list_struct_element_step4.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)',
-     disabled='bugs/gate-linked-list-struct-element-step4.md')
+     desc='registered by the estate audit (every test file runs)')
 test('linked-list-struct-element-step4b', [PY, 'test_linked_list_struct_element_step4b.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('linked-list-struct-element-step4c', [PY, 'test_linked_list_struct_element_step4c.py'], mem='tiny',
