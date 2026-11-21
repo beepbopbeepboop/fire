@@ -100,25 +100,26 @@ def _generator_star_slot(api: dict, node) -> int | None:
 def _pack_generator_star_args(gen, arg_pairs: list, star: int) -> list:
     """Replace the trailing positional arguments from slot `star` on with
     one `MojoList *` built from them. Each element is appended with the
-    accessor its own C type needs -- `mojo_list_append_str` for a `char *`,
-    `mojo_list_append_double` for a `double`, and `mojo_list_append_int`
-    otherwise (the int64_t default, as `_pack_vararg_trailing_params` uses)
-    -- so the body's element reads (`mojo_list_get_str` / `_get_double` /
+    accessor its own C type needs and its slot recorded with the kind that
+    accessor stores (`_append_vararg_element` / `_vararg_elem_kind` /
+    `_pack_vararg_kinds`, shared with every other `*args` packing site) --
+    so the body's element reads (`mojo_list_get_str` / `_get_double` /
     `_get_int`, chosen from the call-site element kind) see the same bits
-    they were stored as. The scanner refuses a call whose trailing arguments
-    disagree in kind, so one list never mixes accessors. Expects every fixed
-    slot before `star` to be filled already."""
+    they were stored as, and the list's per-slot kinds describe a `char *`
+    or a double instead of leaving it to the int-vs-pointer heuristic. The
+    scanner refuses a call whose trailing arguments disagree in kind, so
+    one list never mixes accessors. Expects every fixed slot before `star`
+    to be filled already."""
     _fixed = arg_pairs[:star]
     _lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
-    for _at, _av in arg_pairs[star:]:
-        _ct = _as_str(_at)
-        if gimple_ctypes.TypeLattice.is_cstr(_ct):
-            gen._rt_void('mojo_list_append_str', [_lst, f"{_av}"])
-        elif gimple_ctypes.TypeLattice.is_double(_ct):
-            gen._rt_void('mojo_list_append_double', [_lst, f"{_av}"])
-        else:
-            _av = gen._coerce_to_type(_at, 'int64_t', _av)
-            gen._rt_void('mojo_list_append_int', [_lst, f"{_av}"])
+    _kind_bytes = []
+    for _gi in range(len(arg_pairs) - star):
+        _gt = _as_str(arg_pairs[star + _gi][0])
+        _gv = _as_str(arg_pairs[star + _gi][1])
+        _append_vararg_element(gen, _lst, _gt, _gv)
+        _kind_bytes.append(_vararg_elem_kind(_gt))
+    if _kind_bytes:
+        _pack_vararg_kinds(gen, _lst, ''.join(_kind_bytes))
     return _fixed + [('MojoList *', _lst)]
 
 
@@ -11123,6 +11124,80 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
     return _expanded
 
 
+def _vararg_elem_kind(ctype: str) -> str:
+    """The one byte per packed `*args` element that `mojo_list_set_kinds`'s
+    alphabet uses (the same mapping `TypeLattice.slot_kind_byte` gives a list
+    LITERAL, whose every consumer — the repr, the per-slot readers, the
+    sorters — needs), with the one deliberate departure from it: a
+    `MojoStr *` element is a pointer to the runtime's str STRUCT, not a
+    `char *` the `'p'` arm would `strlen`, so it keeps the int-word answer
+    instead of claiming to be a string.
+
+    The packed list's slots are raw int64_t words, so without this record a
+    `char *` element (the pointer's bits, stored by every accessor) prints as
+    a decimal address and a double prints its IEEE bits — the compiled
+    `show("a", "b")` gave `[4301523784, 4301523792]` where CPython gives
+    `['b', 'c']` (bugs/CODEGEN_varargs_count_wrong_and_star_elements_unboxed).
+    """
+    if ctype == 'char *':
+        return 'p'
+    if gimple_ctypes.TypeLattice.is_double(ctype):
+        return 'd'
+    if ctype == 'MojoBytes *':
+        return 's'
+    if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        return 'l'
+    return 'i'
+
+
+def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str) -> None:
+    """Append ONE packed `*args` element to the packed `MojoList *` `lst`
+    through the accessor its own C type needs — `mojo_list_append_str` for a
+    `char *`, `mojo_list_append_double` for a double, `mojo_list_append_int`
+    otherwise (a pointer's raw bits for every other pointer ctype, the
+    all-int64 storage every packed list used to have). The stored bits are
+    identical to the old single-accessor spelling either way; the accessor is
+    what GIMPLE's per-argument type check accepts without a hand-written
+    cast, and it is paired with the slot's record in `_vararg_elem_kind` so
+    the list describes each slot by what it actually holds. Shared by every
+    `*args` packing site: `_emit_call`'s trailing- and mid-list-`'...'` arms,
+    `_pack_vararg_trailing_params`, `_pack_kwargs_slot_call` and
+    `_pack_generator_star_args` — the generator arm's own copy of the
+    str/double/int dispatch is what this consolidated (see its docstring)."""
+    if ctype == 'char *':
+        gen._rt_void('mojo_list_append_str', [lst, f"{cvalue}"])
+    elif gimple_ctypes.TypeLattice.is_double(ctype):
+        gen._rt_void('mojo_list_append_double', [lst, f"{cvalue}"])
+    else:
+        cvalue = gen._coerce_to_type(ctype, 'int64_t', cvalue)
+        gen._rt_void('mojo_list_append_int', [lst, f"{cvalue}"])
+
+
+def _pack_vararg_kinds(gen, lst: str, kinds: str) -> None:
+    """Record the per-slot kinds of a packed `*args` list on the VALUE
+    (`mojo_list_set_kinds`, runtime/fire_runtime.c): without the row the
+    packed list is undescribed, so every derived value (`list(rest)`, a
+    slice, a copy, the whole result of a call that returns it) renders each
+    slot by the generic int-vs-pointer heuristic instead of by what it
+    holds — the string-element half of
+    bugs/CODEGEN_varargs_count_wrong_and_star_elements_unboxed.
+
+    `kinds` is one byte per slot in slot order and is empty when the pack
+    held no elements (an empty list has no slot to describe, and its `[]`
+    repr needs no row). The string travels as a codegen string-pool constant
+    (`_intern_string`), which satisfies the runtime's lifetime contract for
+    the row ("a codegen string-pool constant — never a temporary"), and the
+    call goes through `_emit_call` because a `_slit_` name must be loaded
+    into a `char *` temp before the call in `__GIMPLE` — the exact spelling
+    a list LITERAL's own `mojo_list_set_kinds` uses (emit_exprs.py's
+    `_lower_list_literal`). Every list->list copy inherits the row
+    (`mojo_list_inherit_kinds`), so `list(rest)` of a kinds-carrying pack
+    prints its elements right too."""
+    if not kinds:
+        return
+    gen._emit_call('void', '', 'mojo_list_set_kinds',
+                   [('MojoList *', lst),
+                    ('const char *', gen._intern_string(kinds))])
 
 
 def _pack_vararg_trailing_params(gen, fname, fname_raw, arg_pairs, kwarg_dict,
@@ -11194,9 +11269,14 @@ def _pack_vararg_trailing_params(gen, fname, fname_raw, arg_pairs, kwarg_dict,
     _fixed2 = arg_pairs[:_n_fixed2]
     _vararg2 = arg_pairs[_n_fixed2:]
     _lst2 = gen._rt_call('MojoList *', 'mojo_list_new', [])
-    for _at2, _av2 in _vararg2:
-        _av2 = gen._coerce_to_type(_at2, 'int64_t', _av2)
-        gen._rt_void('mojo_list_append_int', [_lst2, f"{_av2}"])
+    _kind_bytes2 = []
+    for _v2i in range(len(_vararg2)):
+        _at2 = _as_str(_vararg2[_v2i][0])
+        _av2 = _as_str(_vararg2[_v2i][1])
+        _append_vararg_element(gen, _lst2, _at2, _av2)
+        _kind_bytes2.append(_vararg_elem_kind(_at2))
+    if _kind_bytes2:
+        _pack_vararg_kinds(gen, _lst2, ''.join(_kind_bytes2))
     _trailing_pairs = []
     for _i2, _tpt in enumerate(_trailing_ptypes):
         _tname = (_trailing_names_defaults[_i2][0]
@@ -11502,9 +11582,14 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
         _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
         if _has_vararg:
             _lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
-            for _at, _av in _vararg_pairs:
-                _av = gen._coerce_to_type(_at, 'int64_t', _av)
-                gen._rt_void('mojo_list_append_int', [_lst, f"{_av}"])
+            _kind_bytes = []
+            for _kp in range(len(_vararg_pairs)):
+                _at = _as_str(_vararg_pairs[_kp][0])
+                _av = _as_str(_vararg_pairs[_kp][1])
+                _append_vararg_element(gen, _lst, _at, _av)
+                _kind_bytes.append(_vararg_elem_kind(_at))
+            if _kind_bytes:
+                _pack_vararg_kinds(gen, _lst, ''.join(_kind_bytes))
             arg_pairs = _fixed_pairs + [('MojoList *', _lst), _packed_dict_pair]
         else:
             # No `*args` slot at all: any leftover positional args (a
@@ -11731,23 +11816,38 @@ def _lnc_pad_args(gen, fname_raw: str, node: gimple_ctypes.CallExpr, _call_has_s
             and 0 <= len(arg_pairs) - 1 < _kw_slot):
         _fwd_kw_pair = arg_pairs.pop()
     _kwn_names = _kwarg_param_names(gen, fname_raw, fname, len(expected_params), kwarg_dict)
-    while len(arg_pairs) < len(expected_params):
-        if _kw_slot >= 0 and len(arg_pairs) == _kw_slot:
+    _pos = len(arg_pairs)
+    while _pos < len(expected_params):
+        # A `'...'` packing sentinel is not a fillable parameter: the vararg
+        # packing pass (`_emit_call`'s own `'...'` arm, or
+        # `_pack_vararg_trailing_params` upstream for a mid-list sentinel)
+        # emits the `MojoList *` pair for this slot, and padding it with 0
+        # made the callee see a PHANTOM element when no extra argument was
+        # passed — `show("a")` against `def show(first, *rest)` gave
+        # `rest == [0]` where CPython gives `rest == ()` (bugs/CODEGEN_
+        # varargs_count_wrong_and_star_elements_unboxed). Skip the slot and
+        # keep padding the trailing keyword-only params that follow it.
+        if _as_str(expected_params[_pos]) == '...':
+            _pos += 1
+            continue
+        if _kw_slot >= 0 and _pos == _kw_slot:
             arg_pairs.append(_fwd_kw_pair if _fwd_kw_pair is not None
                               else ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict)))
             kwarg_values = []
+            _pos += 1
             continue
         if _kwn_names is not None:
-            _kwn_here = _ggc_as_str(_kwn_names[len(arg_pairs)])
+            _kwn_here = _ggc_as_str(_kwn_names[_pos])
             if _kwn_here in kwarg_dict:
                 arg_pairs.append(kwarg_dict[_kwn_here])
+                _pos += 1
                 continue
         elif kwarg_values:
             arg_pairs.append(kwarg_values.pop(0))
+            _pos += 1
             continue
         # Map the missing positional slot to its param name via the
         # C-type-list position (param names aren't in expected_params).
-        _pos = len(arg_pairs)
         _dv = None
         if _dflts and 0 <= _pos - _first_dflt < len(_dflts):
             _dv = _dflts[_pos - _first_dflt][1]
@@ -11769,6 +11869,7 @@ def _lnc_pad_args(gen, fname_raw: str, node: gimple_ctypes.CallExpr, _call_has_s
             arg_pairs.append((_pct, '0'))
         else:
             arg_pairs.append(('int', '0'))
+        _pos += 1
     return None
 
 
