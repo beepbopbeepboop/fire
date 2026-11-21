@@ -1,4 +1,26 @@
-# CODEGEN: stdlib-syntax is red on four files (found 2026-11-20; two fixed)
+# CODEGEN: stdlib-syntax is red on four files (found 2026-11-20; all fixed)
+
+## Status
+
+FIXED 2026-11-21. The four remaining red files (the `_ldexp_impl` family)
+were the comptime-member-in-a-monomorphized-FUNCTION-instance half of the
+same defect the struct path already handled: `resolve_struct_aliases` folds
+the struct's OWN `Self.<alias>` members, but a body that reads ANOTHER
+struct's comptime member or calls its comptime-evaluable static method
+(`FPUtils[dtype].integral_type`, `FPUtils[dtype].exponent_bias()`,
+`FPUtils[dtype].mantissa_width()`) was never folded, so the isolated instance
+translation unit read the reference as a zero word, the dtype derived from it
+erased, and gcc rejected the `float << float`. `mojo/middle/comptime_fn.py`
+now exposes `resolve_fn_comptime_refs` (the same evaluator, extended with
+struct-member reads, static-method calls, comptime control flow, and the bare
+scalar spelling a monomorphized body carries) and `elaborate.py` folds the
+references on the template in BOTH `elaborate_generic_call` and
+`elaborate_generic_struct`, before `mm.instantiate`, so the instance's key,
+signature and source all see the same text. `emit_calls._dtype_cast_ctype`
+resolves a comptime-bound dtype name (the `cast[integral_type]()` shape)
+through the shared dtype table, and the SIMD/Scalar constructor arm reads the
+same helper. See `test_comptime_member_monomorphized_instance.py` for the
+before/after shape of the defect.
 
 `python3 tools/suite.py stdlib-syntax` reports `FAILED: 6 (0 expected, 6
 unexpected)`, `PASSED: 604`. The six files compiled on the tree before the
@@ -99,13 +121,16 @@ instance.
 regression. `transpile_file` truncates its message to 120 chars, so for the
 full gcc stderr call `compile_module_to_c_cached` in a try/except instead.)
 
-## Next step
+## Done when
 
-Bisect the four `_ldexp_impl` files on their own (the parent-commit check above
-gives the bad side; find the last good commit before it). The defect is in
-comptime member evaluation inside a monomorphized generic instance -- a
-`comptime` struct member that calls a generic (`FPUtils[Float32].integral_type`
--> `_integral_type_of[Float32]()`) returns the WRONG dtype there. Reproduce
-small first: a generic that reads a `comptime` member of a parameterized struct
-inside its own monomorphized instance, and check the declared C type of a local
-built from it.
+`test_comptime_member_monomorphized_instance.py` passes — the small-module
+guard (`test_comptime_member_folds_in_function_instance`: the monomorphized
+instance's local comes out `int32_t`, not the receiver's `double`, so the
+comptime member, the cast and the SIMD constructor all see the folded dtype)
+and the four stdlib transpile pins (`std/math/math.mojo`,
+`test/math/test_exp.mojo`, `test/math/test_ldexp.mojo`,
+`test/math/test_math.mojo`), which fail with the `gcc -c failed` message
+above on the unfixed tree:
+
+    python3 tools/memslot.py --gb 8 --label x -- \
+        python3 test_comptime_member_monomorphized_instance.py
