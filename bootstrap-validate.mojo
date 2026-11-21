@@ -62,9 +62,20 @@ def collect_sources():
     for pattern in ("*.mojo", "mojo/*.mojo"):
         for p in sorted(glob.glob(pattern)):
             sources.append((p, stem(p)))
+    # The core .py sources the bootstrap stages dump — this must be exactly
+    # tools/suite.py's PY_FILES, which is what the stage drivers enumerate
+    # (BOOTSTRAP_INPUTS = MOJO_FILES + PY_FILES). This list is a second copy
+    # only because this script is itself part of the bootstrap corpus the
+    # compiled binary dumps, so it may not grow new imports to share the
+    # constant; test_bootstrap_validate_source_list_regress.py keeps the two in
+    # step and proves each name is really checked. It DID go stale at the
+    # mojo.py -> fire.py rename (2026-09-26): it named mojo.py,
+    # mojo_compiler.py and mojo_main.py (all gone, so os.path.isfile skipped
+    # them silently) and omitted fire.py, fire_compiler.py and fire_main.py,
+    # so half the compiler's own artefacts were never required in any stage.
     for p in sorted([
-        "mojo.py", "mojo_compiler.py", "myinterpreter.py",
-        "module_loader.py", "mojo_main.py", "generated_dispatch.py",
+        "fire.py", "fire_compiler.py", "fire_main.py",
+        "myinterpreter.py", "module_loader.py", "generated_dispatch.py",
     ]):
         if os.path.isfile(p):
             sources.append((p, stem(p)))
