@@ -8746,10 +8746,8 @@ def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pai
     # static method reached through an instance, and `arg_pairs` does
     # not — so a padded slot's declared type is read at `_pos + shift`.
     _recv_shift = 0 if (is_class_ref and not _is_cls_receiver) else 1
+    _pos = len(arg_pairs)
     while len(arg_pairs) < expected_non_self:
-        _pos = len(arg_pairs)
-        _dv = (_method_dflts[_pos - _first_dflt][1]
-               if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
         # "No value" for a POINTER parameter is a typed NULL, not the
         # integer 0: 0 coerced into a `char *` parameter becomes the
         # one-character string "0" (via `mojo_cstr_or_int_str`), which
@@ -8759,6 +8757,18 @@ def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pai
         # = None)` delivered "0" and refused every file).
         _pct = (full_param_list[_pos + _recv_shift]
                 if 0 <= _pos + _recv_shift < len(full_param_list) else None)
+        # A `'...'` packing sentinel is not a fillable parameter — see
+        # `_lnc_pad_args`'s identical skip: the vararg packing pass emits
+        # the `MojoList *` pair for this slot, and padding it with 0 made
+        # a method with `*args` see a PHANTOM element when no extra
+        # argument was passed (bugs/CODEGEN_varargs_count_wrong_and_
+        # star_elements_unboxed). Skip the slot and keep padding the
+        # trailing params that follow it.
+        if _as_str(_pct) == '...':
+            _pos += 1
+            continue
+        _dv = (_method_dflts[_pos - _first_dflt][1]
+               if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
         if _dv is not None:
             arg_pairs.append(ggc._default_expr_to_pair(gen, _dv,
                                                        param_ctype=_pct))
@@ -8766,6 +8776,7 @@ def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pai
             arg_pairs.append((_pct, '0'))
         else:
             arg_pairs.append(('int', '0'))
+        _pos += 1
     return None
 
 

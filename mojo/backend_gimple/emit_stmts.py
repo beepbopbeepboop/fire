@@ -6285,16 +6285,27 @@ def _gen_stmt_ExprStmt(gen, node):
             # keyword values in call-site order, to whatever slot was next).
             _kwn_names = gen._kwarg_param_names(raw_name, fname,
                                                 len(expected_params), kwarg_dict)
-            while len(arg_pairs) < len(expected_params):
+            _pos = len(arg_pairs)
+            while _pos < len(expected_params):
+                # A `'...'` packing sentinel is not a fillable parameter —
+                # see `_lnc_pad_args`'s identical skip: the vararg packing
+                # pass emits the `MojoList *` pair for this slot, and
+                # padding it with 0 made a bare `show("a")` statement hand
+                # the callee a one-element `[0]` pack. Skip the slot and
+                # keep padding the trailing keyword-only params after it.
+                if _as_str(expected_params[_pos]) == '...':
+                    _pos += 1
+                    continue
                 if _kwn_names is not None:
-                    _kwn_here = _as_str(_kwn_names[len(arg_pairs)])
+                    _kwn_here = _as_str(_kwn_names[_pos])
                     if _kwn_here in kwarg_dict:
                         arg_pairs.append(kwarg_dict[_kwn_here])
+                        _pos += 1
                         continue
                 elif kwarg_values:
                     arg_pairs.append(kwarg_values.pop(0))
+                    _pos += 1
                     continue
-                _pos = len(arg_pairs)
                 _dv = None
                 if _dflts and 0 <= _pos - _n_req < len(_dflts):
                     _dv = _dflts[_pos - _n_req][1]
@@ -6315,6 +6326,7 @@ def _gen_stmt_ExprStmt(gen, node):
                     arg_pairs.append((_pct, '0'))
                 else:
                     arg_pairs.append(('int', '0'))
+                _pos += 1
         # Same float-box rule as `_lower_named_call` (see `_box_float_call_args`).
         arg_pairs = ginf._box_float_call_args(gen, raw_name, arg_pairs)
         ginf._tag_mixed_list_call_args(gen, raw_name, arg_pairs)
