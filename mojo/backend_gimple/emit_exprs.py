@@ -6990,6 +6990,27 @@ def _in_question_result(gen, ti: str, negate: bool) -> tuple[str, str]:
     return '_Bool', t
 
 
+def _in_defines_contains(gen, sn: str):
+    """The first class in `sn`'s chain (self first) that defines its own
+    `__contains__`, or None. `x in obj` for a user struct must call that
+    method (CPython defines `in` as `obj.__contains__(x)` — the same rule
+    `len(obj)` follows through _lower_builtin_len's struct branch). The
+    receiver is cast to the defining class when the method is inherited,
+    whose layout is a base-prefix of the derived one."""
+    seen = set()
+    stack = [sn]
+    while stack:
+        cur = stack.pop()
+        if not cur or cur in seen:
+            continue
+        seen.add(cur)
+        if gen._struct_defines_method(cur, '__contains__'):
+            return cur
+        for b in (getattr(gen, '_struct_bases', {}).get(cur) or []):
+            stack.append(b)
+    return None
+
+
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
                        x_is_none: bool = False,
                        x_is_word: bool = False) -> tuple[str, str]:
@@ -7232,7 +7253,28 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             cv = gen._cast('char', f"{xv}")
             needle = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
         gen._emit_call('int', ti, 'mojo_str_contains', [('char *', rv), ('char *', needle)])
-    elif rt in ('int64_t', 'int', 'void *') or gimple_ctypes.TypeLattice.ends_in_star(rt):
+    elif (rt.endswith(' *') and rt[:-2] in gen.struct_field_types
+          and _in_defines_contains(gen, rt[:-2]) is not None):
+        # `x in obj` with a user struct pointer: call the struct's
+        # `__contains__` statically, the same rule `len(obj)` follows
+        # (CPython defines `in` as `obj.__contains__(x)`). Before this arm
+        # a struct receiver reached the boxed tail below, which cast the
+        # struct address to a word and asked `mojo_in_dispatch_int` — that
+        # runtime only knows the list/dict/set allocation registries, so
+        # every user-class membership test silently answered False
+        # (`1 in P(1, 2)`). The item goes in as int64_t, the unannotated-
+        # param convention of the method bodies this calls (`_Bool
+        # P___contains__ (P * self, int64_t v)`); the return is the method's
+        # truth value, which the shared negate tail below turns into the
+        # `in`/`not in` bool.
+        _dc_in = _in_defines_contains(gen, rt[:-2])
+        import mojo.backend_gimple.emit_funcs as _gef_in
+        _cs_in = _gef_in._struct_method_csym(gen, _dc_in, '__contains__', '')
+        _recv_in = rv if _dc_in == rt[:-2] else gen._cast(f'{_dc_in} *', rv)
+        _item_in = gen._to_int64(xt, xv)
+        gen._emit_call('int', ti, _cs_in,
+                       [(f'{_dc_in} *', _recv_in), ('int64_t', _item_in)])
+    elif rt in ('int64_t', 'int', 'void *') or rt.endswith(' *'):
         # A container that reached here BOXED — no static type, most often
         # a cross-module module-global read (those accessors are declared
         # `int64_t`, so `gimple_ctypes._C_RESERVED_FUNCS` and friends

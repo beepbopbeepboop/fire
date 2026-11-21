@@ -1334,6 +1334,33 @@ def _infer_list_elem_type(gen, elements: list) -> str:
         # vouch for, and appending is the idiom the loops above already use.
         types.append('char *')
     _joined = gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
+    # TWO OR MORE DISTINCT STRUCT POINTER TYPES: the list holds instances of
+    # different classes, and no single pointer type can name the slots.
+    # Answer with the scalar box — the same answer `TypeLattice.join` already
+    # gives for a pair of struct pointers (both pointer, neither char/void),
+    # which is what makes a loop over a TWO-class list a dynamic word. The
+    # third class is where the left-to-right fold regressed: join(A*, B*)
+    # answers int64_t, and join(int64_t, C*) returns the pointer side — the
+    # LAST class — so the loop variable was statically typed `C *`:
+    # `a.speak()` on an `A` slot read `C`'s layout (a presence word that does
+    # not exist in `A`'s) and raised, while CPython calls each instance's own
+    # method. With an `int64_t` element type `_gen_for_list` marks the loop
+    # variable in `_dyn_word_locals`, and the method call on it goes through
+    # the per-tag dispatch that already exists for such words
+    # (`_mojo_dispatch_getattr` + `mojo_maybe_bound_call_N`) — no new path.
+    _sp_count = 0
+    _sp_seen = set()
+    for _t in types:
+        if not _t or not _t.endswith(' *'):
+            continue
+        if _t in ('char *', 'void *'):
+            continue
+        if _t in _sp_seen:
+            continue
+        _sp_seen.add(_t)
+        _sp_count += 1
+    if _sp_count > 1:
+        return 'int64_t'
     # A HETEROGENEOUS literal is not a string list. `TypeLattice.join`
     # short-circuits to `char *` whenever either side is `char *`, which is
     # right for an arithmetic result and wrong for STORAGE: the joined type
