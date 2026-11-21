@@ -2815,12 +2815,9 @@ def test_a_disabled_test_is_registered_but_never_runs():
 
     The dependent matters as much as the disabled test, and in the direction
     that is easy to get wrong: a disabled test has no verdict, so nothing
-    propagates from it. Before 2026-11-21 the dependent RAN behind it — which
-    is how a doc'd-off bootstrap producer (bootstrap-stage2-cc) let its
-    fifty-item dumps fanout run anyway, every item dying in a second on the
-    missing `./mojo`, one bug filed fifty ways. Now the dependent SKIPs,
-    naming the disabled dep and the doc that is the switch, the same shape as
-    the dependent of a failed dep. So `needs` skips, and the skip says why.
+    propagates from it. A dependent that treated DISABLED as a failure would be
+    SKIPPED behind a verdict that is never coming, silently stopping work that
+    has nothing to do with the bug being tracked. So `needs` runs and passes.
 
     Which job ran is read from the log's own per-job line, not from its output
     and not from a grep for the command: the runner logs every job's argv, so a
@@ -2858,12 +2855,11 @@ def test_a_disabled_test_is_registered_but_never_runs():
           reserved == 0 and ceiling == 55,
           f'reserved {reserved} GB of a {ceiling} GB class — a class that is '
           f'only a record must not be a claim on the machine')
-    check('disabled: a dependent SKIPs behind it, naming the doc',
-          re.search(r'(?m)^\[\s*\d+/\d+\]\s+skip\s+needs\b', text) is not None
-          and 'dependency is disabled: off' in text
-          and suite.MEM_DEBT_DOC in text,
-          'a disabled producer must stop its dependent with the doc named '
-          '(the switch), not let it run into the missing artifact')
+    check('disabled: a dependent is NOT skipped by it',
+          re.search(r'(?m)^\[\s*\d+/\d+\]\s+ok\s+needs\b', text) is not None
+          and 'dependency did not pass' not in text,
+          'a disabled dep made its dependent skip: the dependent would have '
+          'been skipped behind a verdict that is never coming')
     check('disabled: it is in the tally as its own status',
           '1 disabled' in out, f'expected a disabled counter: {out!r}')
     check('disabled: ...and it is listed with the doc, in its own section',
@@ -4368,9 +4364,7 @@ UNREGISTERED = {
     'test_dump_full_reports_closure_stubs.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     # tools/ pins, 2026-11-20; each runs directly (`python3 <file>`) and
-    # names its cause in its own docstring. (`test_integrate_probe_loop.py`
-    # was registered as `orch-integrate-probe-loop` and its excuse removed --
-    # an excuse for a registered file turns this check red.)
+    # names its cause in its own docstring.
     'tools/test_orchestrator_wedge.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
