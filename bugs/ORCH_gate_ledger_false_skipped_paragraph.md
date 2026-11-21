@@ -49,13 +49,39 @@ The ledger section states the marker state it actually produced:
   to tell "off, costs the gate nothing" from "runs red every gate" without
   checking the registry.
 
+## The same doc's repro line is also unsatisfiable for a fanout item
+
+The new-doc header `tools/verify_landed.py::write_doc` writes (line 115) says
+
+    Reproduce on master (`python3 tools/suite.py <job>`), then fix the cause.
+
+For a fanout item that command cannot work: items are expanded out of
+`fanout(...)` and are not in `REGISTRY`, so the name is rejected before the
+runner starts.
+
+    $ python3 tools/suite.py bootstrap-stage2-dumps:t_arith.mojo
+    suite.py: no such bucket or test: 'bootstrap-stage2-dumps:t_arith.mojo'
+    ...
+    exit 1
+
+`--only` does not reach an item either — `python3 tools/suite.py bootstrap
+--only 'bootstrap-stage2-dumps:t_arith'` prints `matched nothing` — so the
+only way to run one item is to run its parent (`python3 tools/suite.py
+bootstrap-stage2-dumps`) and read the per-item line out of `build/suite.log`.
+The header should say that when the job is a fanout item, for the same reason
+the "Skipped" paragraph should say "no marker": both sentences are written for
+a registration the item does not have. Measured 2026-11-21 on the t_arith
+review branch.
+
 ## Exact next step
 
 1. `tools/gate_ledger.py::report_text`: take the marked state (pass
    `e.get("marked")`, or compute `get_disabled(src, job)` at the call site) and
    emit the "Skipped" paragraph only when true; otherwise emit the
    no-registration wording above.
-2. `tools/verify_landed.py::write_doc`: pass it through (it already has `e`).
+2. `tools/verify_landed.py::write_doc`: pass it through (it already has `e`),
+   and in the same place give a fanout item a repro line that works — name the
+   parent `fanout(...)` job and say the item's line is in `build/suite.log`.
 3. Test in `tools/test_gate_ledger.py`: `report_text` for a plain `test(...)`
    with `marked=True` contains "carries", with `marked=False` does not, and for
    a `fanout` item name it says the item has no registration of its own.
