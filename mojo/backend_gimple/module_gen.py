@@ -6570,7 +6570,6 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
             f"{_tag_lines}"
             f"{_dsub_init}"
             f"{_sys_attr_inits}"
-            f"{_tag_lines}"
             f"}}"
         )
         parts.append('')
