@@ -17286,9 +17286,9 @@ MojoList *mojo_divmod(int64_t a, int64_t b) {
     q -= (a % b != 0 && (a ^ b) < 0);
     int64_t r = a - q * b;
     MojoList *out = mojo_list_new();
-    mojo_mark_as_tuple(out);
     mojo_list_append_int(out, q);
     mojo_list_append_int(out, r);
+    mojo_mark_as_tuple(out);   /* after the appends: a marked tuple refuses append */
     return out;
 }
 

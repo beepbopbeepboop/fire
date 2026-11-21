@@ -1,4 +1,4 @@
-# CODEGEN: `max(x, key=f)` ignores `key`; `divmod` with a negative operand crashes
+# CODEGEN: `max(x, key=f)` / `min(x, key=f)` ignore `key` (`divmod` fixed 2026-11-20)
 
 Found 2026-11-20 by `tools/pydiff.py` (this is what is left of the older "call arguments dropped" doc:
 `print(sep, end)`, `str.split/strip/replace/zfill/ljust/rjust/center` arguments and `sum(x, start)` are fixed).
@@ -19,9 +19,7 @@ def main():
 main()
 ```
 
-CPython line 5 is `bb` (`max` by length), compiled prints `c`: `key=` is dropped. Line 7
-`divmod(-7, 2)` ends the program with `Unhandled exception: 'tuple' object has no attribute 'append'`
-(CPython prints `(-4, 1)`). `round(2.675, 2)` should print `2.67` (CPython rounds the binary value, not the decimal text).
+CPython line 5 is `bb` (`max` by length), compiled prints `c`: `key=` is dropped. `divmod` is fixed (`mojo_divmod` marked its result a tuple before appending to it). `round(2.675, 2)` should print `2.67` (CPython rounds the binary value, not the decimal text).
 
 ## Where to look
 
