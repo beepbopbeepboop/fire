@@ -59,6 +59,30 @@ def passed_jobs(tree):
     return sorted(set(re.findall(r"^\[\s*\d+/\d+\] PASS\s+(\S+)", txt, re.M)))
 
 
+def failed_jobs(log):
+    """The failing JOBS a full-gate log reports, as the names the registry knows.
+
+    A fanout ITEM (`bootstrap-stage2-dumps:hello.mojo`) is not a job: only the
+    parent's `fanout(...)` call is a registration, and that is the one unit that
+    can carry a `disabled=` marker, a `bugs/gate-<job>.md` doc and one fix task.
+    The suite prints a `  FAIL     <job>  (0s)` progress line for every job while
+    it runs — one PER ITEM for a fanout — so the screen lines cannot be the
+    source of the ledger's job list: at c0182fd365 they turned one disabled
+    producer's cascade into fifty docs and fifty dispatched workers. The
+    `FAILED:` section names the registration, and `integrate.failed_job_names`
+    is the reader the landing gate already uses (one implementation of "which
+    jobs are red", not two). The per-job log lines add TIMEOUT/ERROR/RESOURCE,
+    which the FAILED section does not carry (a RESOURCE is not a verdict on the
+    output), so they are read too and their item suffix stripped the same way."""
+    try:
+        txt = open(log, errors="replace").read()
+    except OSError:
+        return []
+    names = I.failed_job_names(log) + re.findall(
+        r"^\[\s*\d+/\d+\] (?:TIMEOUT|ERROR|RESOURCE)\s+(\S+)", txt, re.M)
+    return sorted({n.split(":")[0] for n in names})
+
+
 def checkout(sha):
     """Put the verify tree on SHA. Nobody edits this tree, but something did (2026-11-12: a stray hand-edit of
     formal/build.py made `git checkout` abort, and the full gate silently did not run for 8 days while 239 landings
@@ -242,9 +266,7 @@ def main():
     with open(log, "w") as f:
         f.write("$ %s\n" % " ".join(cmd)); f.flush()
         rc = subprocess.run(cmd, cwd=VERIFY, stdout=f, stderr=subprocess.STDOUT).returncode
-    txt = open(log, errors="replace").read()
-    jobs = sorted(set(re.findall(r"^\s+FAIL\s+(\S+)", txt, re.M)
-                      + re.findall(r"^\[\s*\d+/\d+\] (?:TIMEOUT|ERROR|RESOURCE)\s+(\S+)", txt, re.M)))
+    jobs = failed_jobs(log)
     passed = [j for j in passed_jobs(VERIFY) if j not in jobs]
     verdict = dict(sha=sha, ok=rc == 0 and not jobs, rc=rc, failed=jobs, gates_off=list(C.gates_cfg().get("off", {})),
                    log=log, secs=round(time.time() - t0), at=time.strftime("%F %T"), epoch=time.time())
