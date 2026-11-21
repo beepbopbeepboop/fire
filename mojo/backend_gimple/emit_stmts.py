@@ -314,7 +314,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     data = None
     if gimple_ctypes.TypeLattice.is_list(at):
         kind = 'list'
-    elif gimple_ctypes.TypeLattice.is_int_word_or_voidp(at):
+    elif at in ('int', 'int64_t', 'void *'):
         kind = 'list'
         av = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(at, av))
         at = 'MojoList *'
@@ -521,7 +521,7 @@ def _gen_stmt_VarDecl(gen, node):
             # slot type was thrown away and the value was immediately
             # coerced BACK to int64_t on the store (a `Config *` slot read
             # through `(Config *)` then `(void *)` then `(int64_t)`).
-            if gen.var_types.get(n) in ('int64_t', 'int') and not gimple_ctypes.TypeLattice.is_int_word(et):
+            if gen.var_types.get(n) in ('int64_t', 'int') and et not in ('int64_t', 'int'):
                 _redecl_upgrade_default(gen, n, et)
             gen._declare_var(n, et)
             gen._safe_coerce_emit(et, gen.var_types[n], ev, gen._write_dest(n))
@@ -567,8 +567,8 @@ def _gen_stmt_VarDecl(gen, node):
             # `ginf.mixed_scalar_locals`. The DECLARATION is `int64_t` because
             # `_mixed`/`_inferred_var_types` above chose the box.
             _vn = gen._cname(node.name)
-            gen._word_mark_boxed(_vn)
-            gen._word_mark_tagged(_vn)
+            gen._words.mark_boxed(_vn)
+            gen._words.mark_tagged(_vn)
             gen._dyn_word_locals.add(node.name)
         # A module-level `var name = value`/`var name: T = value` (this
         # module's OWN top-level statement, or a nested `global name`
@@ -619,8 +619,8 @@ def _gen_stmt_VarDecl(gen, node):
         # answer — iteration and a computed subscript — which need the
         # runtime's own record on the value. Same guard, same reason: it is
         # the local name the read is keyed on, not the unpack temp.
-        if node.type_ann is None and gen._word_has_slot_kinds(v):
-            gen._word_mark_slot_kinds(node.name)
+        if node.type_ann is None and gen._words.has_slot_kinds(v):
+            gen._words.mark_slot_kinds(node.name)
         # Same propagation for a `struct.Struct(...)` handle's format string,
         # which is what lets `var s = struct.Struct('<if')` then
         # `s.unpack(buf)` recover the per-slot kinds. Same shape, same
@@ -844,10 +844,10 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
     # as an integer, and its later `in` key is bit-cast into an int word and
     # released with the pointer as its `orig` (`mojo_cstr_or_int_release`
     # `-Wint-conversion`, compiling mojo/backend_gimple/cpp_core.py).
-    if gen._word_is_int_word(v) and not rhs_is_none:
-        gen._word_mark_int_word(tname)
+    if gen._words.is_int_word(v) and not rhs_is_none:
+        gen._words.mark_int_word(tname)
     else:
-        gen._word_unmark_int_word(tname)
+        gen._words.unmark_int_word(tname)
     if not gimple_ctypes.TypeLattice.is_word(dst):
         if v in gen._struct_field_owners:
             gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
@@ -1084,10 +1084,10 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # discipline as `_track_pointer_actual_type`, which is why `K = "s"` on
     # the next line still clears it rather than leaving a stale record.
     # See bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
-    if gen._word_is_int_word(v):
-        gen._word_mark_int_word(tname)
+    if gen._words.is_int_word(v):
+        gen._words.mark_int_word(tname)
     else:
-        gen._word_unmark_int_word(tname)
+        gen._words.unmark_int_word(tname)
     ginf.carry_callable_ret_types(gen, v, tname)
     ginf.carry_callable_ret_from_call(gen, value_node, tname)
     # A bound METHOD stored into a module global. The globals-struct FIELD is
@@ -1134,7 +1134,7 @@ def _note_global_slot_kinds(gen, tname: str, v: str) -> None:
     if not hasattr(gen, '_global_slot_info'):
         gen._global_slot_info = {}
     info = {}
-    if gen._word_has_slot_kinds(v):
+    if gen._words.has_slot_kinds(v):
         info['mk'] = True
     if v in gen._elem_types:
         info['et'] = gen._elem_types[v]
@@ -1428,8 +1428,8 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             n_after64 = gen._cast('int64_t', f"{n_after}")
             star_stop = gen._binop('int64_t', total, '-', f"{n_after64}")
             star_v = gen._rt_call('MojoList *', 'mojo_list_slice', [f"{lp}", star_start, star_stop])
-            if gen._word_has_slot_kinds(lp):
-                gen._word_mark_slot_kinds(star_v)
+            if gen._words.has_slot_kinds(lp):
+                gen._words.mark_slot_kinds(star_v)
                 if lp in getattr(gen, '_struct_slot_kinds', {}):
                     gen._struct_slot_kinds[star_v] = gen._struct_slot_kinds[lp]
                 else:
@@ -1603,7 +1603,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # name itself, so its truthiness and its `or`/`and` ask the runtime
         # (`_dyn_word_locals`) rather than `!= 0`, which called an empty bytes
         # object true.
-        if gimple_ctypes.TypeLattice.is_word(vtype) and gen._word_is_dyn(v):
+        if gimple_ctypes.TypeLattice.is_word(vtype) and gen._words.is_dyn(v):
             gen._dyn_word_locals.add(_as_str(tname))
         # A generator handle bound to a local whose slot is a plain word (it also
         # holds a list on another path: `dirs = _iglob(...)` / `dirs = [dirname]`,
@@ -1662,7 +1662,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                      if isinstance(node.value, gimple_ctypes.IdentExpr) else None)
         _for_copy = (_copy_src is not None
                      and gimple_ctypes.TypeLattice.is_word(vtype)
-                     and gen._word_may_be_box(v)
+                     and gen._words.may_be_box(v)
                      and gen.var_types.get(_copy_src) == 'int64_t'
                      and ginf.tagged_for_target_name(gen, _copy_src))
         # A call to a float+pointer function is a tagged word too
@@ -1681,7 +1681,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
         _keep_tagged_box = (gimple_ctypes.TypeLattice.is_word(vtype)
-                            and (gen._word_is_tagged(v)
+                            and (gen._words.is_tagged(v)
                                  or _for_copy or _call_tagged)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                             and (_call_tagged
@@ -1695,20 +1695,8 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # A tagged word and a non-int64 name never mix: see
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
-        # A no-default `d.get(k)` on an UNKNOWN value domain is boxed so that
-        # a miss prints None (`emit_methods._ldm_get`). Stored into a name
-        # already declared a container/pointer, the name's consumers read its
-        # declared C type, not a box, so this word is unwrapped below
-        # (`mojo_box_word`) exactly as every `.get` result was before the miss
-        # gained the None representation. Only a tagged word the NAME-level
-        # rule keeps as a box is a representation conflict and refused.
-        _declared_t = _as_str(gen.var_types.get(_as_str(tname)) or '')
-        _boxed_get_into_container = (
-            gimple_ctypes.TypeLattice.ends_in_star(_declared_t)
-            and _declared_t not in ('char *', 'const char *')
-            and _as_str(v) in getattr(gen, '_dict_get_boxed_temps', ()))
-        _tagged_bind = ((gen._word_is_tagged(v) and not _boxed_get_into_container)
-                        or _for_copy or _call_tagged)
+        _tagged_bind = (gen._words.is_tagged(v) or _for_copy
+                        or _call_tagged)
         # A float/str/bool/int store into a box-holding name is boxed by its
         # kind here, BEFORE any refusal below reads the value's C type, so it
         # is carried by the box rather than refused. A container stored into a
@@ -1776,18 +1764,18 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             if tname not in gen.var_types:
                 gen._declare_var(tname, 'int64_t')
             _tn = gen._cname(tname)
-            gen._word_mark_boxed(_tn)
-            gen._word_mark_tagged(_tn)
+            gen._words.mark_boxed(_tn)
+            gen._words.mark_tagged(_tn)
             gen._dyn_word_locals.add(_as_str(tname))
-        elif gimple_ctypes.TypeLattice.is_word(vtype) and gen._word_may_be_box(v):
+        elif gimple_ctypes.TypeLattice.is_word(vtype) and gen._words.may_be_box(v):
             _bw = gen._new_temp('int64_t')
             gen._rt_into(_bw, 'mojo_box_word', [f"{v}"])
             v = _bw
-            gen._word_mark_dyn(v)
+            gen._words.mark_dyn(v)
         # A word of unknown kind bound to a local makes the LOCAL one too
         # (`leaf = getattr(node, fname)`): its later `str()` / `==` have to ask
         # the runtime, exactly as the temp's would have. See `_dyn_word_vals`.
-        if gen._word_is_dyn(v):
+        if gen._words.is_dyn(v):
             gen._dyn_word_locals.add(_as_str(tname))
         _note_rtobj_binding(gen, _as_str(tname), vtype, v)
         # Rebinding a genexp-materialised local to a non-genexp value (the
@@ -1950,7 +1938,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                         # assignment gives the local the value's own struct
                         # type, the by-value twin of the in-TU-struct-pointer
                         # correction above.
-                        if (gimple_ctypes.TypeLattice.is_int_word(ctype)
+                        if (ctype in ('int', 'int64_t')
                                 and isinstance(vtype, str)
                                 and vtype in gen.struct_field_types):
                             ctype = vtype
@@ -1969,7 +1957,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # — "pointer value used where a floating-point was expected". Real:
             # `q = 2.5; if q > 1: q = [1, 2]; return q`, the one shape of a
             # local rebound from a scalar to a container that refused to build.
-            if (gimple_ctypes.TypeLattice.is_int_word(ctype) and gimple_ctypes.TypeLattice.is_double(vtype)
+            if (ctype in ('int', 'int64_t') and gimple_ctypes.TypeLattice.is_double(vtype)
                     and tname not in ginf.multi_kind_locals(gen)):
                 ctype = 'double'
             # `a = Scalar[DType.uint8](250)` — the plain-assignment spelling
@@ -1981,7 +1969,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # the arithmetic below computes in 64-bit (measured: `250 + 10`
             # printed 260 where the width answer is 4). Same multi-kind
             # exclusion: a name rebound to two kinds keeps the honest box.
-            if (gimple_ctypes.TypeLattice.is_int_word(ctype)
+            if (ctype in ('int', 'int64_t')
                     and vtype in gimple_ctypes._NARROW_INT_CTYPES
                     and tname not in ginf.multi_kind_locals(gen)):
                 ctype = vtype
@@ -2092,8 +2080,8 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # int64_t against that pointer value would truncate/reinterpret
             # it as an integer at the coercion below. See
             # CODEGEN_untyped_param_string_passthrough_wrong.
-            if _pin_to_ground_truth and gimple_ctypes.TypeLattice.is_int_word(ctype) \
-                    and not gimple_ctypes.TypeLattice.is_int_word(vtype) and vtype.endswith('*'):
+            if _pin_to_ground_truth and ctype in ('int', 'int64_t') \
+                    and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                 ctype = vtype
             # `s: Set[Int] = {}` — an ANNOTATED assignment declares a
             # container kind, and an empty `{}` is a dict DISPLAY: evidence
@@ -2298,8 +2286,8 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         if getattr(node, 'type_ann', None) is None:
             if v in gen._struct_slot_kinds:
                 gen._struct_slot_kinds[tname] = gen._struct_slot_kinds[v]
-            if gen._word_has_slot_kinds(v):
-                gen._word_mark_slot_kinds(tname)
+            if gen._words.has_slot_kinds(v):
+                gen._words.mark_slot_kinds(tname)
             if v in gen._struct_formats:
                 gen._struct_formats[tname] = gen._struct_formats[v]
         gen._track_pointer_actual_type(tname, dst, v, vtype,
@@ -2391,7 +2379,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             _ton = node.target.obj.name
             if getattr(gen, '_rtobj_kinds', {}).get(('l', _ton)) == 'inst' or getattr(gen, '_rtobj_kinds', {}).get(('v', _ton)) == 'inst':
                 _rtobj_inst_assign = True
-        if _rtobj_inst_assign or gimple_ctypes.TypeLattice.is_int_word_or_voidp(ot):
+        if _rtobj_inst_assign or ot in ('int', 'int64_t', 'void *'):
             # Opaque Python object (e.g. `s.field = val` where `s`'s
             # static type isn't narrowed past a runtime isinstance()
             # check — this compiler doesn't track that): dispatch via
@@ -2703,7 +2691,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                                               vtype, v, node.value)
         else:
             # Opaque int-typed container: check if it's a list or dict
-            if gimple_ctypes.TypeLattice.is_int_word(ot):
+            if ot in ('int', 'int64_t'):
                 # Check if this is actually a list (from nested access) or dict
                 actual_type = gen._get_actual_type(ot, obj_v)
                 # Mirror the READ side's rule EXACTLY (`_lower_subscript` in
@@ -3218,7 +3206,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
         if _dv is not None:
             gen._dict_val_types[node.target.member] = _dv
         ot, ov = gen.lower_expr(node.target.obj)
-        if gimple_ctypes.TypeLattice.is_int_word(ot):
+        if ot in ('int', 'int64_t'):
             # See the AssignStmt MemberExpr branch above for why this
             # calls _mojo_dispatch_setattr, not the bare mojo_setattr
             # runtime stub (a no-op fallback, not a real implementation).
@@ -3337,7 +3325,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             else:
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
-        elif gimple_ctypes.TypeLattice.is_int_word(ot):
+        elif ot in ('int', 'int64_t'):
             # Opaque int/int64_t used as subscript target — could be a
             # list OR a dict (e.g. a closure-captured env field, or a
             # stubbed constructor like `collections.Counter[str]()`,
@@ -3593,7 +3581,7 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
     this compiler's own `_apply_binary_op` has, mixing `MojoString *` with
     int/bool/float arms."""
     vt = _as_str(vtype)
-    if gimple_ctypes.TypeLattice.is_int_word(vt):
+    if vt in ('int', 'int64_t'):
         # A plain integer has an int64_t spelling, so it IS the word.
         return vtype, v
     if gimple_ctypes.TypeLattice.is_bool(vt):
@@ -3795,7 +3783,7 @@ def _gen_stmt_ReturnStmt(gen, node):
             _dsr_hit = _dsr.get(v)
             if _dsr_hit is None and isinstance(node.value, gimple_ctypes.IdentExpr):
                 _dsr_hit = _dsr.get(_as_str(node.value.name))
-        if _dsr_hit is not None and gimple_ctypes.TypeLattice.is_int_word(vtype):
+        if _dsr_hit is not None and vtype in ('int', 'int64_t'):
             _dv, _kv, _kk = _dsr_hit
             if _kk == 'str':
                 v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
@@ -3925,7 +3913,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         elif (_fk and gimple_ctypes.TypeLattice.is_word(gen.func_ret_type)
                 and (v in ginf.multi_kind_locals(gen)
                      or v in ginf.mixed_container_locals(gen)
-                     or gen._word_is_boxed_container(v))):
+                     or gen._words.is_boxed_container(v))):
             # The returned value is a LOCAL BOUND TO CONTAINERS OF MORE THAN
             # ONE KIND, so it lowers to the box and the `vtype in (...)` arm
             # above never sees a second kind: `def probe(box, kind): if kind
@@ -4114,7 +4102,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._binop_into(b, ip, '!=', zero)
         return b
     if gimple_ctypes.TypeLattice.is_word(ctype) and (
-            gen._word_is_dyn(val) or val in gen._dyn_word_locals
+            gen._words.is_dyn(val) or val in gen._dyn_word_locals
             or val in getattr(gen, '_cur_untyped_params', ())
             or val in ginf.boxed_param_names(gen)):
         # A word of unknown kind: Python truthiness depends on WHAT it is (an
@@ -4822,7 +4810,7 @@ def _gen_stmt_DelStmt(gen, node):
             # "has no attribute 'pop'"). See mojo_list_delitem's definition.
             gen._emit_call('int64_t', '', 'mojo_list_delitem',
                              [('MojoList *', ov), ('int64_t', idx64)])
-        elif gimple_ctypes.TypeLattice.is_int_word_or_voidp(ot):
+        elif ot in ('int', 'int64_t', 'void *'):
             # Fully dynamic: the container's real type isn't known until
             # runtime (e.g. myinterpreter.py's `del obj[idx]`, where
             # `obj` is whatever value the INTERPRETED program's own
@@ -5485,7 +5473,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             # regardless of `ot` — confirmed via this doc's own minimal
             # repro (`slotnames = cls.__slot_names__ = []`, a chained
             # assignment), which reached exactly this path.
-            if gimple_ctypes.TypeLattice.is_int_word_or_voidp(ot):
+            if ot in ('int', 'int64_t', 'void *'):
                 member_str = target.member
                 key_slit = gen._intern_string(gimple_ctypes._c_escape(member_str))
                 key_tmp = gen._new_val('char *', f"{key_slit}")
@@ -5564,7 +5552,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
                                               vtype, v, node.value)
-            elif gimple_ctypes.TypeLattice.is_int_word(ot):
+            elif ot in ('int', 'int64_t'):
                 actual_type = gen._get_actual_type(ot, obj_v)
                 # Same read/write-symmetry rule as the other two subscript
                 # stores in this file (see the AssignStmt branch's comment):
@@ -6226,7 +6214,7 @@ def _gen_stmt_ExprStmt(gen, node):
         # all, exactly like the kwarg-padding duplication noted above).
         if raw_name in ('exit', 'quit') and len(arg_pairs) == 1:
             _ex_t, _ex_v = arg_pairs[0]
-            if not gimple_ctypes.TypeLattice.is_int_word_or_bool(_ex_t):
+            if _ex_t not in ('int', 'int64_t', '_Bool'):
                 _msg = gen._stringify_value(_ex_t, _ex_v)
                 gen._emit_call('void', '', 'mojo_print_stderr', [('char *', _msg)])
                 gen._rt_void('exit', ['1'])
@@ -6409,7 +6397,7 @@ def _gen_stmt_ExprStmt(gen, node):
             if (raw_name in ('__mojo_coro_yield_i', '__mojo_coro_yield_p')
                     and len(arg_pairs) == 2 and len(node.value.args) == 2
                     and isinstance(node.value.args[1], gimple_ctypes.IdentExpr)
-                    and gen._word_may_be_box(_as_str(arg_pairs[1][1]))):
+                    and gen._words.may_be_box(_as_str(arg_pairs[1][1]))):
                 _uw = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', arg_pairs[1][1])])
                 arg_pairs = [arg_pairs[0], ('int64_t', _uw)]
             # The call's own argument nodes, as `_call_expr` is given them, so a literal

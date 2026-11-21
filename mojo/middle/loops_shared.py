@@ -62,14 +62,14 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # If the list is marked as having per-slot kinds that must be read
         # via mojo_list_get_boxed (e.g. a dict's keys materialized through
         # the opaque boxed path), use the boxed reader for every slot.
-        _mkv = (gen._word_has_slot_kinds(v) or
-                gen._word_has_slot_kinds(lp) or
-                gen._word_has_slot_kinds(_as_str(v)) or
-                gen._word_has_slot_kinds(_as_str(lp)))
+        _mkv = (gen._words.has_slot_kinds(v) or
+                gen._words.has_slot_kinds(lp) or
+                gen._words.has_slot_kinds(_as_str(v)) or
+                gen._words.has_slot_kinds(_as_str(lp)))
         if _mkv:
             _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
-            gen._word_mark_boxed(_ev)
-            gen._word_mark_dyn(_ev)
+            gen._words.mark_boxed(_ev)
+            gen._words.mark_dyn(_ev)
             return 'int64_t', _ev
         # A `struct.unpack(...)` result has ONE container ctype but a
         # per-slot real kind, statically known from the format string. The
@@ -127,13 +127,13 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
         if gimple_ctypes.TypeLattice.is_double(suf):
             return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
-        if gimple_ctypes.TypeLattice.is_int_word_or_bool(elem):
+        if elem in ('int64_t', 'int', '_Bool'):
             _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             # `_elem_of`'s int64_t is also its "nothing recorded" default: a
             # value with no element record at all is a word whose kind only
             # the runtime knows (see `_dyn_word_vals`).
             if v not in gen._elem_types and lp not in gen._elem_types:
-                gen._word_mark_dyn(_ev)
+                gen._words.mark_dyn(_ev)
             return 'int64_t', _ev
         # Pointer elem that isn't char* (e.g. a nested MojoList*): read the
         # opaque int64_t then cast, matching the old 'int'-suffix handling.
@@ -144,7 +144,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # std/test/builtin/test_int.mojo's `a, b = divmod(...)`).
         if not elem or elem == 'unknown':
             _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
-            gen._word_mark_dyn(_ev)
+            gen._words.mark_dyn(_ev)
             return 'int64_t', _ev
         raw = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
         return elem, gen._cast(elem, raw)
@@ -156,12 +156,12 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     # R1/R5, shares _materialize_as_list with all()/any()/enumerate()/
     # *.join()/the list-pattern-target branch above in gimple_gen_stmts.py).
     lp = gen._materialize_as_list(vtype, v)
-    _mkv = (gen._word_has_slot_kinds(lp) or
-            gen._word_has_slot_kinds(_as_str(lp)))
+    _mkv = (gen._words.has_slot_kinds(lp) or
+            gen._words.has_slot_kinds(_as_str(lp)))
     if _mkv:
         _ev = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
-        gen._word_mark_boxed(_ev)
-        gen._word_mark_dyn(_ev)
+        gen._words.mark_boxed(_ev)
+        gen._words.mark_dyn(_ev)
         return 'int64_t', _ev
     elem = gen._elem_of(lp)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
@@ -171,7 +171,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
     _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
     if lp not in gen._elem_types:
-        gen._word_mark_dyn(_ev)
+        gen._words.mark_dyn(_ev)
     return 'int64_t', _ev
 
 def _try_const_fold_int(gen, expr) -> int | None:
