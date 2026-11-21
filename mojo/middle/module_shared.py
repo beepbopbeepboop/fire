@@ -315,7 +315,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
                     # boxed as int64_t by convention — leaving it is the
                     # pre-existing behavior, not a regression, and seeding it
                     # here would widen this pre-pass's blast radius.
-                    if _vt == 'char *':
+                    if gimple_ctypes.TypeLattice.is_cstr(_vt):
                         # A named, typed inner dict rather than a chained
                         # `_out.setdefault(...).setdefault(...)`: the chain's
                         # intermediate has no static type in the self-hosted

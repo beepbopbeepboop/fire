@@ -638,7 +638,7 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
         kt = _as_str(_pair[0])
         kv = _pair[1]
         _val_ty = kt if not _val_ty or _val_ty == kt else 'int64_t'
-        if kt == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(kt):
             gen._emit_call('void', '', 'mojo_dict_set_str',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
                              ('char *', kv)])

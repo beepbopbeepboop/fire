@@ -421,8 +421,8 @@ def _gmi_apply_call_site_param_evidence(gen, stmts: list):
                 continue
             ipt.setdefault(fname, {})[pname] = call_type
             continue
-        if not ((cur in containers and call_type == 'char *')
-                or (cur == 'char *' and call_type in containers)):
+        if not ((cur in containers and gimple_ctypes.TypeLattice.is_cstr(call_type))
+                or (gimple_ctypes.TypeLattice.is_cstr(cur) and call_type in containers)):
             # The two agree, or the disagreement is not the str/list
             # ambiguity this pass exists to settle. Leave it alone.
             continue
@@ -2664,7 +2664,7 @@ def _emit_reflection_dispatch(self, parts):
                     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
                 owned = 'T'
-            elif ftype == 'char *':
+            elif gimple_ctypes.TypeLattice.is_cstr(ftype):
                 val_expr = f'({fref} ? mojo_repr_str({fref}) : _mojo_repr_none())'
                 owned = 'T'
             elif ftype == '_Bool':
@@ -6999,7 +6999,7 @@ def _gmp_fill_missing_global_decls(self, _declared_global_inits: dict, _declared
                 c_type = 'int64_t'
             else:
                 c_type = 'void *' if (g_mtype and g_mtype.endswith(' *')) else (
-                    g_mtype if g_mtype == 'char *' else 'int64_t')
+                    g_mtype if gimple_ctypes.TypeLattice.is_cstr(g_mtype) else 'int64_t')
             _gname_s = _as_str(gname)
             # Declaration-time capture wins (see `_declared_global_inits`);
             # the re-scan below is the pre-existing fallback for paths that
@@ -9012,7 +9012,7 @@ def _gmp_ctor_init_param_fields(self, stmts: list, _ctor_init_methods: dict, _ct
             for _pname in _ctor_init_params[_cs_name2]:
                 _okey2 = _cs_name2 + '::' + _pname
                 _kind = _obs_kind.get(_okey2, '')
-                if _kind != 'char *' and _kind != 'double' \
+                if not gimple_ctypes.TypeLattice.is_cstr(_kind) and _kind != 'double' \
                         and _kind not in _CTOR_CONTAINER_CTYPES:
                     continue                    # none, or not unanimous
                 if _obs_conflict.get(_okey2) or _obs_container_conflict.get(_okey2):
@@ -10450,7 +10450,7 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
         return True
     if not st:
         return False
-    if _as_str(st) == 'char *' or _as_str(st) == 'double':
+    if gimple_ctypes.TypeLattice.is_cstr(_as_str(st)) or _as_str(st) == 'double':
         return True
     # An INTEGER observation is proof only when it is a REAL integer. The
     # `int64_t` STORAGE DEFAULT is not: `_infer_local_var_types` leaves it on
@@ -11121,7 +11121,7 @@ def _gmh_phase17_value_type(self, _value):
             ret = self.func_return_types.get(_value.func.name, '')
             if ret.endswith(' *'):
                 return ret
-            elif ret == 'char *':
+            elif gimple_ctypes.TypeLattice.is_cstr(ret):
                 return 'char *'
             elif ret == 'double':
                 return 'double'
@@ -11142,7 +11142,7 @@ def _gmh_phase17_value_type(self, _value):
                 # (int64_t/double/_Bool) still land on int64_t, matching
                 # this branch's old unconditional default.
                 qt2 = self._quick_type(_value)
-                return qt2 if (qt2 == 'char *' or qt2.endswith(' *') or qt2 == 'double') else 'int64_t'
+                return qt2 if (gimple_ctypes.TypeLattice.is_cstr(qt2) or qt2.endswith(' *') or qt2 == 'double') else 'int64_t'
         elif (isinstance(_value.func, MemberExpr)
                 and _value.func.member in ('read', 'readline')
                 and not _value.args):
@@ -11181,7 +11181,7 @@ def _gmh_phase17_value_type(self, _value):
             # discarded-pointer bug as the unknown-callee case above,
             # and with the same fix. Non-pointers still land on int64_t.
             qt4 = self._quick_type(_value)
-            return qt4 if (qt4 == 'char *' or qt4.endswith(' *') or qt4 == 'double') else 'int64_t'
+            return qt4 if (gimple_ctypes.TypeLattice.is_cstr(qt4) or qt4.endswith(' *') or qt4 == 'double') else 'int64_t'
     elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
             and _value.obj.name in self.imported_symbols):
         _mx_mod = self.imported_symbols[_value.obj.name].get('module')
@@ -11201,7 +11201,7 @@ def _gmh_phase17_value_type(self, _value):
         # char* value → 'char *', matching _lower_MemberExpr) are the
         # single source of truth for these RHS types.
         qt3 = self._quick_type(_value)
-        return qt3 if (qt3 == 'char *' or qt3 == 'double') else 'int64_t'
+        return qt3 if (gimple_ctypes.TypeLattice.is_cstr(qt3) or qt3 == 'double') else 'int64_t'
     elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
             and gimple_exprtypes.is_bound_method_value(
                 self, _value,
@@ -12526,7 +12526,7 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                     continue
                 if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
-                elif ((_xg_ct == 'char *'
+                elif ((gimple_ctypes.TypeLattice.is_cstr(_xg_ct)
                        and _xg_tgt.get(_xg_pn) in ('MojoList *', 'MojoSet *', 'MojoDict *'))
                       or (_xg_tgt.get(_xg_pn) == 'char *'
                           and _xg_ct in ('MojoList *', 'MojoSet *', 'MojoDict *'))):
@@ -12542,7 +12542,7 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                     # handed it a `char *` -- SIGSEGV in mojo_list_get_boxed
                     # (CODEGEN_str_iteration_link_mode_crash, package A).
                     _xg_tgt[_xg_pn] = _xg_ct
-                if _xg_ct == 'char *':
+                if gimple_ctypes.TypeLattice.is_cstr(_xg_ct):
                     self._coro_str_params.setdefault(_xg_body, set()).add(_xg_pn)
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
                 if _xg_ct == 'MojoBytes *':
@@ -16103,7 +16103,7 @@ def gen_module_impl(self, stmts: list):
                         _msbit = 4
                         if st == 'double':
                             _msbit = 1
-                        elif st == 'char *':
+                        elif gimple_ctypes.TypeLattice.is_cstr(st):
                             _msbit = 2
                         _msobs[_msk] = int(_msobs[_msk]) | _msbit
 
@@ -17574,7 +17574,7 @@ def gen_module_impl(self, stmts: list):
         for _pn0 in list(_pm.keys()):
             _pn = _as_str(_pn0)
             _e = _as_str(_as_list(_pm[_pn0])[0])
-            if _e != 'char *':
+            if not gimple_ctypes.TypeLattice.is_cstr(_e):
                 continue
             _isinst_elem = False
             for _bn in _walk_ast(_cfn.body):
@@ -18277,7 +18277,7 @@ def gen_module_impl(self, stmts: list):
                 # (the ctor-direction cross-call struct contract).
                 # Admission still requires unanimity (the conflict dict above),
                 # a registered struct, and no container-literal veto.
-                if _st2 != 'double' and _st2 != 'char *':
+                if _st2 != 'double' and not gimple_ctypes.TypeLattice.is_cstr(_st2):
                     if not (_st2.endswith(' *') and _st2[:-2] in self.struct_field_types):
                         continue                # none, or not unanimous
                 if _ctor_scalar_conflict.get(_skey2):
@@ -19765,7 +19765,7 @@ def gen_module_impl(self, stmts: list):
                             ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
                             if ret and ret.endswith(' *'):
                                 _gmh_phase17_set_gtype(self, _scan_stmt.name, ret, _scan_own)
-                            elif ret == 'char *':
+                            elif gimple_ctypes.TypeLattice.is_cstr(ret):
                                 _gmh_phase17_set_gtype(self, _scan_stmt.name, 'char *', _scan_own)
                             elif ret == 'double':
                                 _gmh_phase17_set_gtype(self, _scan_stmt.name, 'double', _scan_own)
@@ -21506,7 +21506,7 @@ def gen_module_impl(self, stmts: list):
                     # int64_t here, and returns int64_t for every shape the
                     # explicit rows above already handled identically.
                     _ivt = _gmh_phase17_value_type(self, value)
-                    if _ivt == 'char *':
+                    if gimple_ctypes.TypeLattice.is_cstr(_ivt):
                         global_decls.append(f"char * {gname};")
                         self._global_var_types[gname] = 'char *'
                         self._global_c_decl_types[gname] = 'char *'
@@ -21536,7 +21536,7 @@ def gen_module_impl(self, stmts: list):
                     global_decls.append(f"int64_t {gname};  /* {_mvt} */")
                     self._global_var_types[gname] = _mvt
                     self._global_c_decl_types[gname] = 'int64_t'
-                elif _mvt.endswith(' *') or _mvt == 'char *':
+                elif _mvt.endswith(' *') or gimple_ctypes.TypeLattice.is_cstr(_mvt):
                     global_decls.append(f"{_mvt} {gname};")
                     self._global_var_types[gname] = _mvt
                     self._global_c_decl_types[gname] = _mvt
@@ -21647,7 +21647,7 @@ def gen_module_impl(self, stmts: list):
             # `int64_t` that `module_loader`'s `int64_t _C_KEYWORDS` used to
             # disagree with every importer's `MojoSet *`).
             qt = self._quick_type(value) or 'int64_t'
-            if qt.endswith(' *') or qt == 'char *':
+            if qt.endswith(' *') or gimple_ctypes.TypeLattice.is_cstr(qt):
                 global_decls.append(f"{qt} {gname};")
                 self._global_var_types[gname] = qt
                 self._global_c_decl_types[gname] = (
@@ -21761,7 +21761,7 @@ def gen_module_impl(self, stmts: list):
                         # and returns int64_t for every shape this branch's
                         # explicit rows already handled identically.
                         _ivt = _gmh_phase17_value_type(self, _gv)
-                        if _ivt == 'char *':
+                        if gimple_ctypes.TypeLattice.is_cstr(_ivt):
                             global_decls.append(f"char * {gname};")
                             self._global_var_types[gname] = 'char *'
                             self._global_c_decl_types[gname] = 'char *'

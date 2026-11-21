@@ -393,7 +393,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     # wrongly dispatched on the raw string bytes (a hard segfault).
     # The parser contract guarantees the string form, so use it directly.
     text_type, text_val = gen.lower_expr(node.iterable.args[0])
-    if text_type != 'char *':
+    if not gimple_ctypes.TypeLattice.is_cstr(text_type):
         text_val = gen._cast('char *', gen._ensure_local(text_type, text_val))
 
     if pattern not in gen._regex_progs:
@@ -636,7 +636,7 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         text_node = it.args[1]
 
     text_type, text_val = gen.lower_expr(text_node)
-    if text_type != 'char *':
+    if not gimple_ctypes.TypeLattice.is_cstr(text_type):
         text_val = gen._cast('char *', gen._ensure_local(text_type, text_val))
 
     ngroups = _regex_prog_for(gen, pattern)['ngroups']
@@ -1101,7 +1101,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._gen_for_list(var, it_val, node.body, shadow_name=shadow_name)
         elif it_type == 'MojoStr *':
             gen._gen_for_str(var, it_val, node.body, shadow_name=shadow_name)
-        elif it_type == 'char *':
+        elif gimple_ctypes.TypeLattice.is_cstr(it_type):
             gen._gen_for_cstr(var, it_val, node.body)
         elif it_type == 'MojoBytes *':
             gen._gen_for_bytes(var, it_val, node.body)
@@ -1802,7 +1802,7 @@ def _gen_for_zip_longest(gen, node):
                 raise _zip_longest_fill_refusal(fill_ctype, "a float sequence")
             fills.append(fill_value)
         elif suf == 'str':
-            if (fill_ctype != 'char *'
+            if (not gimple_ctypes.TypeLattice.is_cstr(fill_ctype)
                     and not isinstance(fill_node, gimple_ctypes.StringLiteral)):
                 raise _zip_longest_fill_refusal(fill_ctype, "a string sequence")
             fills.append(f"(int64_t)(char *)({fill_value})")
@@ -1858,7 +1858,7 @@ def _gen_for_zip_longest(gen, node):
             vt = gen.var_types.get(vn, elem)
             if vt == 'double' and raw_ct == 'double':
                 gen._copy(f"{cvn}", sel)
-            elif vt == 'char *':
+            elif gimple_ctypes.TypeLattice.is_cstr(vt):
                 cs = gen._cast('char *', sel)
                 gen._copy(f"{cvn}", f"{cs}")
             elif vt == 'int64_t':
@@ -1965,7 +1965,7 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
         return
     if suf == 'str':
         raw = gen._rt_call('char *', 'mojo_list_get_str', [list_ptr, idx_t])
-        if vt == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(vt):
             gen._copy(f"{cvn}", raw)
         else:
             ip = gen._cast('int64_t', raw)
@@ -2238,7 +2238,7 @@ def _gen_for_enumerate(gen, node):
         gimple_ctypes._debug_note(
             'enumerate() over MojoGenerator* with no known api', lst_val)
 
-    if lst_type == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(lst_type):
         _gen_for_enumerate_str(gen, node, lst_val, start_val)
         return
 
@@ -2683,7 +2683,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 # divergence (`bootstrap-validate.mojo`'s
                 # `for path, base in sources:`).
                 ts = gen._rt_call('char *', 'mojo_list_get_str', [_as_str(ptr), f"{i}"])
-                if vt == 'char *':
+                if gimple_ctypes.TypeLattice.is_cstr(vt):
                     gen._copy(f"{cvn}", ts)
                 else:
                     ip = gen._cast('int64_t', ts)
@@ -3455,7 +3455,7 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
     _se = gen._elem_of(it_val) or 'int64_t'
     if _se == 'MojoBytes *':
         _loop_ctype, _read = 'MojoBytes *', 'mojo_set_val_bytes'
-    elif _se == 'char *':
+    elif gimple_ctypes.TypeLattice.is_cstr(_se):
         _loop_ctype, _read = 'char *', 'mojo_set_iter_val_str'
     else:
         _loop_ctype, _read = 'int64_t', 'mojo_set_iter_val_int'
@@ -3931,7 +3931,7 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
         vt = gen.var_types.get(vn, slot_elem)
         if suf == 'str':
             ts = gen._rt_call('char *', 'mojo_list_get_str', [list_ptr, f"{i}"])
-            if vt == 'char *':
+            if gimple_ctypes.TypeLattice.is_cstr(vt):
                 gen._copy(f"{cvn}", ts)
             else:
                 ip = gen._cast('int64_t', ts)

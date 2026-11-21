@@ -2989,7 +2989,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 _rv = gen._rt_call('double', 'mojo_list_get_double', [f"{_lp}", _idx])
                 if _fc == 'float':
                     _rv = gen._cast('float', _rv)
-            elif _fc == 'char *':
+            elif gimple_ctypes.TypeLattice.is_cstr(_fc):
                 _rv = gen._rt_call('char *', 'mojo_list_get_str', [f"{_lp}", _idx])
             elif _fc.endswith(' *'):
                 _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
@@ -3052,7 +3052,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 gen._copy(dest, f"{ip}")
             else:
                 gen._cast_into(dest, 'int', ip)
-        elif d == 'char *' and s == 'char':
+        elif gimple_ctypes.TypeLattice.is_cstr(d) and s == 'char':
             # A Python str of length 1 (a bare `char` in this codegen)
             # coerced into a `char *` STRING slot — e.g. the `char`
             # branch of a mixed-type ternary like `s[k-1] if k>0 else ''`
@@ -3304,7 +3304,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     # A call result may be a boxed dict-slot value carrying its runtime kind.
     if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
         return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
-    if rat == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(rat):
         # A NULL str is None here (see mojo_repr_str_or_none in fire_runtime.c).
         return gen._call_expr('char *', 'mojo_repr_str_or_none', [('char *', rav)])
     if rat == 'MojoList *':
@@ -5015,7 +5015,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     elif suf == 'str':
         temp_str = gen._rt_call('char *', 'mojo_list_get_str', [it_val, idx64])
         target_type = gen._type_of(val_var)
-        if target_type == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(target_type):
             gen._copy(f"{val_c}", temp_str)
         else:
             int_ptr = gen._cast('int64_t', temp_str)
@@ -5042,7 +5042,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
             _vt = gen.var_types.get(_vn, _pair_elem)
             if _pair_suf == 'str':
                 _sv = gen._rt_call('char *', 'mojo_list_get_str', [_pair_ptr, f"{_vi}"])
-                if _vt == 'char *':
+                if gimple_ctypes.TypeLattice.is_cstr(_vt):
                     gen._copy(f"{_vc}", _sv)
                 else:
                     _bv = gen._cast('int64_t', _sv)
@@ -5375,7 +5375,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # stub on the shimless `--dump`).
         _sr = gen.lower_expr(node.element)
         et = _as_str(_sr[0]); ev = _sr[1]
-        if et == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(et):
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', res), ('char *', ev)])
         elif et == 'int64_t' and ev not in gen._int_word_vals:
             # A word of unknown kind: see mojo_set_add_word.

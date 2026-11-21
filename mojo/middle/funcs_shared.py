@@ -454,7 +454,7 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # default makes it a `str` (char *) param. bytes must NOT be
         # conflated with str — b[i] is an int, not a 1-char string.
         ctype = 'MojoBytes *' if getattr(_pdflt, 'is_bytes', False) else 'char *'
-    elif (ptype is None and ctype == 'char *'
+    elif (ptype is None and gimple_ctypes.TypeLattice.is_cstr(ctype)
           and isinstance(_pdflt, StringLiteral) and getattr(_pdflt, 'is_bytes', False)):
         # A `b'...'` default is unambiguous `bytes` evidence and must win
         # over a weak usage-inferred `char *` — `len(b)` alone (the only

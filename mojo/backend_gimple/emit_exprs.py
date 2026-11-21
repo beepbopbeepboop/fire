@@ -1454,7 +1454,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
         # A word of unknown kind (an unannotated parameter, an untyped read)
         # too: `_ensure_bool_cond` asks the runtime for its truth value --
         # `w == 0` called `not {}` False.
-        if (ot in gen._CONTAINER_LEN_FN or ot == 'char *'
+        if (ot in gen._CONTAINER_LEN_FN or gimple_ctypes.TypeLattice.is_cstr(ot)
                 or (ot == 'int64_t' and (
                     ov in gen._dyn_word_vals or ov in gen._dyn_word_locals
                     or ov in getattr(gen, '_cur_untyped_params', ())))):
@@ -2571,7 +2571,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # linesep's raw newline must go through _c_escape (the same
             # shared helper every other string-emission site uses) or it
             # splices a literal line break into the .ci string pool.
-            if _bm_ctype == 'char *':
+            if gimple_ctypes.TypeLattice.is_cstr(_bm_ctype):
                 _bm_text = gen._intern_string(gimple_ctypes._c_escape(_bm_val))
             elif _bm_ctype == 'double':
                 _bm_text = _float_c_literal(_bm_val)
@@ -2813,7 +2813,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # see `_dyn_word_locals`): its C type says "string", which would send
         # `st.value` down the StringLiteral-identity shortcut below and hand
         # the caller the statement itself. It is read as the word it is.
-        if (ot == 'char *' and isinstance(node.obj, IdentExpr)
+        if (gimple_ctypes.TypeLattice.is_cstr(ot) and isinstance(node.obj, IdentExpr)
                 and _as_str(node.obj.name) in gen._dyn_word_locals):
             _dl = gen._ensure_local('char *', ov)
             ov = gen._cast('int64_t', _dl)
@@ -3000,7 +3000,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return 'int64_t', _ev
 
     # .value on char * (StringLiteral.value, kgen.string.value) → identity, the string itself
-    if node.member == 'value' and ot == 'char *':
+    if node.member == 'value' and gimple_ctypes.TypeLattice.is_cstr(ot):
         t = gen._new_val('char *', f"{ov}")
         return 'char *', t
 
@@ -3192,7 +3192,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # model and raised a fatal `AttributeError: name` at runtime (real:
     # Apple/__main__.py's module level `SCRIPT_NAME = Path(__file__).name`,
     # which crashed the whole program before main() ran).
-    if ot == 'char *' and node.member in ('name', 'parent'):
+    if gimple_ctypes.TypeLattice.is_cstr(ot) and node.member in ('name', 'parent'):
         if node.member == 'name':
             return 'char *', gen._call_expr('char *', 'int64_t_basename',
                                             [('char *', ov)])
@@ -3570,12 +3570,12 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             if nm not in gen.var_types:
                 gen._declare_var(nm, vtype)
                 # Track that this variable holds this type for concatenation detection
-                if vtype == 'char *':
+                if gimple_ctypes.TypeLattice.is_cstr(vtype):
                     gen._actual_types[nm] = 'char *'
             dst = gen.var_types[nm]
             gen._safe_coerce_emit(vtype, dst, vv, nm)
             # Update actual type tracking for string types
-            if dst == 'int' and vtype == 'char *':
+            if dst == 'int' and gimple_ctypes.TypeLattice.is_cstr(vtype):
                 gen._actual_types[nm] = 'char *'
             return dst, nm
         if isinstance(node.left, gimple_ctypes.MemberExpr):
@@ -3729,8 +3729,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # word that may be either, so it is typed as one and its truthiness
         # (and str()/==) ask the runtime.
         _mixed_word = (not _bool_merge
-                       and ((ltype == 'char *' and _rq == 'int64_t')
-                            or (ltype == 'int64_t' and _rq == 'char *')))
+                       and ((gimple_ctypes.TypeLattice.is_cstr(ltype) and _rq == 'int64_t')
+                            or (ltype == 'int64_t' and gimple_ctypes.TypeLattice.is_cstr(_rq))))
         # A `_Bool` against a word of unknown kind (`gen.is_generator or
         # getattr(fn, 'is_async', False)`): the result is a word that holds
         # the bool OR the attribute, so it is one of unknown kind too. And a
@@ -4570,7 +4570,7 @@ def _lbt_none_eq(gen, op: str, left_node, lt: str, lv: str, right_node, rt: str,
         _ans = 1 if op == '==' else 0
         gen._copy(_t, f"{_ans}")
         return '_Bool', _t
-    if _ptr_ty == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(_ptr_ty):
         # Same shape as the `is`/`is not` pointer-identity case below
         # (`(int64_t) p == (int64_t) 0`), for the same reason: GIMPLE
         # compares like with like, and this is the one spelling of
@@ -4958,7 +4958,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # capture to int64_t — see `_lb_as_set`'s docstring.)
     _lv_ptr_kind = _as_str(gen._get_actual_type(lt, lv)).endswith(' *') \
         if lv in getattr(gen, '_boxed_vals', ()) else False
-    if lv in getattr(gen, '_boxed_vals', ()) and rt == 'char *' and op == '+':
+    if lv in getattr(gen, '_boxed_vals', ()) and gimple_ctypes.TypeLattice.is_cstr(rt) and op == '+':
         gen._dyn_word_vals.add(lv)
     elif lv in getattr(gen, '_boxed_vals', ()):
         if op in _ident_ops and (op in ('is', 'is not')
@@ -4974,7 +4974,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lt = 'double'
     _rv_ptr_kind = _as_str(gen._get_actual_type(rt, rv)).endswith(' *') \
         if rv in getattr(gen, '_boxed_vals', ()) else False
-    if rv in getattr(gen, '_boxed_vals', ()) and lt == 'char *' and op == '+':
+    if rv in getattr(gen, '_boxed_vals', ()) and gimple_ctypes.TypeLattice.is_cstr(lt) and op == '+':
         gen._dyn_word_vals.add(rv)
     elif rv in getattr(gen, '_boxed_vals', ()):
         if op in _ident_ops and (op in ('is', 'is not')
@@ -5073,11 +5073,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # char * + char * → mojo_str_cat (including int64_t holding char* via actual_types)
     # Also handle int + char * when int is likely a string pointer
     def _as_charptr(typ, val, is_string_literal=False):
-        if typ == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(typ):
             return 'char *', val
         # Check if actual type is char*
         actual = gen._actual_types.get(val)
-        if actual == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(actual):
             cp = gen._new_temp('char *')
             ip = gen._cast('int64_t', f"{val}")
             gen._cast_into(cp, 'char *', ip)
@@ -5109,7 +5109,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         left_is_lit = isinstance(left_node, gimple_ctypes.StringLiteral)
         lt2, lv2 = _as_charptr(lt, lv, is_string_literal=right_is_lit)
         rt2, rv2 = _as_charptr(rt, rv, is_string_literal=left_is_lit)
-        if lt2 == 'char *' and rt2 == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(lt2) and gimple_ctypes.TypeLattice.is_cstr(rt2):
             t = gen._emit_str_cat(lv2, rv2,
                                   gen._is_fresh_operand(left_node, lv2),
                                   gen._is_fresh_operand(right_node, rv2))
@@ -5126,14 +5126,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                       or gen._is_dyn_word(left_node, lv))
         _rhs_boxed = (rv in getattr(gen, '_boxed_vals', ())
                       or gen._is_dyn_word(right_node, rv))
-        if right_is_lit and rt == 'char *' and lt in ('int', 'int64_t') and not _lhs_boxed:
+        if right_is_lit and gimple_ctypes.TypeLattice.is_cstr(rt) and lt in ('int', 'int64_t') and not _lhs_boxed:
             ip = gen._new_temp('int64_t')
             cp = gen._new_temp('char *')
             gen._cast_into(ip, 'int64_t', f"{lv}")
             gen._cast_into(cp, 'char *', ip)
             t = gen._call_expr('char *', 'mojo_str_cat', [('char *', cp), ('char *', rv)])
             return 'char *', t
-        if left_is_lit and lt == 'char *' and rt in ('int', 'int64_t') and not _rhs_boxed:
+        if left_is_lit and gimple_ctypes.TypeLattice.is_cstr(lt) and rt in ('int', 'int64_t') and not _rhs_boxed:
             ip = gen._new_temp('int64_t')
             cp = gen._new_temp('char *')
             gen._cast_into(ip, 'int64_t', f"{rv}")
@@ -5161,17 +5161,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # and the rendering is borrowed for a string -- never freed here.
         # A parameter some call site passed a string for is an unknown-kind word
         # in the same sense (`_is_may_hold_str_param`): the runtime decides.
-        if lt2 == 'char *' and rt2 == 'int64_t' and (
+        if gimple_ctypes.TypeLattice.is_cstr(lt2) and rt2 == 'int64_t' and (
                 gen._is_dyn_word(right_node, rv2)
                 or ginf._is_may_hold_str_param(gen, right_node)):
             sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', rv2)])
             return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), False)
-        if rt2 == 'char *' and lt2 == 'int64_t' and (
+        if gimple_ctypes.TypeLattice.is_cstr(rt2) and lt2 == 'int64_t' and (
                 gen._is_dyn_word(left_node, lv2)
                 or ginf._is_may_hold_str_param(gen, left_node)):
             sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', lv2)])
             return 'char *', gen._emit_str_cat(sv, rv2, False, gen._is_fresh_operand(right_node, rv2))
-        if lt2 == 'char *' and rt2 in ('int', 'int64_t', '_Bool'):
+        if gimple_ctypes.TypeLattice.is_cstr(lt2) and rt2 in ('int', 'int64_t', '_Bool'):
             _free_sv = True
             if gen._actual_types.get(rv2) == 'char':
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv2)])
@@ -5180,7 +5180,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 nv = gen._to_int64(rt2, rv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
             return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), _free_sv)
-        if rt2 == 'char *' and lt2 in ('int', 'int64_t', '_Bool'):
+        if gimple_ctypes.TypeLattice.is_cstr(rt2) and lt2 in ('int', 'int64_t', '_Bool'):
             _free_sv = True
             if gen._actual_types.get(lv2) == 'char':
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv2)])
@@ -5214,13 +5214,13 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # key — `print(len(s), b'k0' in s, b'k29' in s)` printed
         # `30 False False` (gimple_set_bytes_many_rehashes) where master
         # printed `30 True True` through mojo_bytes_concat.
-        if (lt2.endswith(' *') and rt2 == 'char *'
+        if (lt2.endswith(' *') and gimple_ctypes.TypeLattice.is_cstr(rt2)
                 and lt2 not in ('MojoBytes *', 'MojoMemoryView *')):
             lp = gen._cast('int64_t', f"{lv2}")
             sw = gen._cast('int64_t', f"{rv2}")
             t = gen._binop('int64_t', f"{lp}", '+', f"{sw}")
             return 'int64_t', t
-        if (rt2.endswith(' *') and lt2 == 'char *'
+        if (rt2.endswith(' *') and gimple_ctypes.TypeLattice.is_cstr(lt2)
                 and rt2 not in ('MojoBytes *', 'MojoMemoryView *')):
             lp = gen._cast('int64_t', f"{lv2}")
             sw = gen._cast('int64_t', f"{rv2}")
@@ -5234,7 +5234,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # and fell through to plain numeric `*`, "invalid operands to
     # binary * (have 'char *' and 'int')" — found via Doc/tools/
     # check-epub.py's `s = 's' * (err_count != 1)`).
-    if op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t', '_Bool'):
+    if op == '*' and gimple_ctypes.TypeLattice.is_cstr(lt) and rt in ('int', 'int64_t', 'uint64_t', '_Bool'):
         t = gen._new_temp('char *')
         lv_local = gen._ensure_local(lt, lv)
         rv64 = gen._to_int64(rt, rv)
@@ -5242,7 +5242,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
 
     # int * char * → string repetition (flipped order)
-    if op == '*' and lt in ('int', 'int64_t', 'uint64_t', '_Bool') and rt == 'char *':
+    if op == '*' and lt in ('int', 'int64_t', 'uint64_t', '_Bool') and gimple_ctypes.TypeLattice.is_cstr(rt):
         t = gen._new_temp('char *')
         rv_local = gen._ensure_local(rt, rv)
         lv64 = gen._to_int64(lt, lv)
@@ -5336,7 +5336,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         def _as_bytes(ct: str, cv: str):
             if ct == 'MojoBytes *':
                 return cv
-            if ct == 'char *':
+            if gimple_ctypes.TypeLattice.is_cstr(ct):
                 return gen._rt_call('MojoBytes *', 'mojo_bytes_from_cstr', [cv])
             if ct == 'MojoMemoryView *':
                 return gen._rt_call('MojoBytes *', 'mojo_memoryview_tobytes', [cv])
@@ -5562,9 +5562,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
     lv_is_str_lit = isinstance(left_node, gimple_ctypes.StringLiteral)
     if op in ('==', '!='):
-        uses_str = (lt == 'char *' or rt == 'char *' or rv_is_str_lit or lv_is_str_lit or
-                    (lt == 'int64_t' and (rv_is_str_lit or rt == 'char *')) or
-                    (rt == 'int64_t' and (lv_is_str_lit or lt == 'char *')))
+        uses_str = (gimple_ctypes.TypeLattice.is_cstr(lt) or gimple_ctypes.TypeLattice.is_cstr(rt) or rv_is_str_lit or lv_is_str_lit or
+                    (lt == 'int64_t' and (rv_is_str_lit or gimple_ctypes.TypeLattice.is_cstr(rt))) or
+                    (rt == 'int64_t' and (lv_is_str_lit or gimple_ctypes.TypeLattice.is_cstr(lt))))
         if uses_str:
             def _to_char_star(typ, var, is_other_str_lit=False):
                 # `_as_str(var)` for every INTERPOLATION of `var` (not the
@@ -5576,7 +5576,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 # stage2-vs-stage3 verify failure, e.g. `cwd == "..."`
                 # where `cwd = int_dirname(...)`).
                 _v = _as_str(var)
-                if typ == 'char *':
+                if gimple_ctypes.TypeLattice.is_cstr(typ):
                     t2 = gen._new_temp('char *'); gen._copy(t2, _v); return t2
                 # A raw single character (real C 'char', or an 'int'/'int64_t'
                 # holding a small ASCII code with no tracked pointer identity)
@@ -5642,7 +5642,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
 
             lw = _is_undecided_word(lt, lv, rv_is_str_lit)
             rw = _is_undecided_word(rt, rv, lv_is_str_lit)
-            if lw != rw and (lt == 'char *' or rt == 'char *'):
+            if lw != rw and (gimple_ctypes.TypeLattice.is_cstr(lt) or gimple_ctypes.TypeLattice.is_cstr(rt)):
                 # Exactly one side is an undecided word and the other a string
                 # VALUE (`char *`): `mojo_str_eq_word` answers it from the word
                 # itself. `_to_char_star`'s char-code path used to answer it by
@@ -5689,11 +5689,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # via mojo_cstr_cmp matches both C strncmp and the interpreter's
     # str ordering for ASCII.
     if op in ('<', '>', '<=', '>=') and (
-            lt == 'char *' or rt == 'char *'
+            gimple_ctypes.TypeLattice.is_cstr(lt) or gimple_ctypes.TypeLattice.is_cstr(rt)
             or gen._actual_types.get(_as_str(lv)) == 'char'
             or gen._actual_types.get(_as_str(rv)) == 'char'):
-        ls = lv if lt == 'char *' else gen._char_to_cstr(lt, lv, True)[1]
-        rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv, True)[1]
+        ls = lv if gimple_ctypes.TypeLattice.is_cstr(lt) else gen._char_to_cstr(lt, lv, True)[1]
+        rs = rv if gimple_ctypes.TypeLattice.is_cstr(rt) else gen._char_to_cstr(rt, rv, True)[1]
         cmp_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
         t = gen._new_temp('_Bool')
         gen._binop_into(t, cmp_t, op, '0')
@@ -5704,7 +5704,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return _lbt_identity(gen, op, lt, lv, rt, rv)
 
     # Fallback: catch string concatenation that wasn't handled above
-    if op == '+' and lt == 'char *' and rt == 'char *':
+    if op == '+' and gimple_ctypes.TypeLattice.is_cstr(lt) and gimple_ctypes.TypeLattice.is_cstr(rt):
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv)])
         return 'char *', t
     # `<string> + <single char>` (or the reverse) — e.g. `prefix += val[0]`
@@ -5728,12 +5728,12 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # mojo_str_from_int(ch) — appending the DECIMAL BYTE CODES instead of
     # the character ("Hello, World!" became "72101108111144..." in
     # box.3d/game's ComputerMonitor.print_text). Mirror append's recovery.
-    if op == '+' and lt == 'char *' and rt in ('char', 'int', 'int64_t') \
+    if op == '+' and gimple_ctypes.TypeLattice.is_cstr(lt) and rt in ('char', 'int', 'int64_t') \
             and (rt == 'char' or gen._actual_types.get(_as_str(rv)) == 'char'):
         rv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_s)])
         return 'char *', t
-    if op == '+' and rt == 'char *' and lt in ('char', 'int', 'int64_t') \
+    if op == '+' and gimple_ctypes.TypeLattice.is_cstr(rt) and lt in ('char', 'int', 'int64_t') \
             and (lt == 'char' or gen._actual_types.get(_as_str(lv)) == 'char'):
         lv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
@@ -5756,18 +5756,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # Real: Apple/__main__.py's `CROSS_BUILD_DIR / context.platform` /
     # `CROSS_BUILD_DIR / host_triple`, whose RHS lowers via
     # _mojo_dispatch_getattr to an untracked int64_t.
-    if op == '/' and (rt == 'char *'
-                      or (lt == 'char *' and rt in ('int', 'int64_t'))):
+    if op == '/' and (gimple_ctypes.TypeLattice.is_cstr(rt)
+                      or (gimple_ctypes.TypeLattice.is_cstr(lt) and rt in ('int', 'int64_t'))):
         t = gen._new_temp('char *')
         lv_str = lv
-        if lt != 'char *':
+        if not gimple_ctypes.TypeLattice.is_cstr(lt):
             lv_str = gen._new_temp('char *')
             lv_i64 = gen._new_temp('int64_t') if lt != 'int64_t' else lv
             if lt != 'int64_t':
                 gen._cast_into(f"{lv_i64}", 'int64_t', f"{lv}")
             gen._cast_into(f"{lv_str}", 'char *', f"{lv_i64}")
         rv_str = rv
-        if rt != 'char *':
+        if not gimple_ctypes.TypeLattice.is_cstr(rt):
             rv_str = gen._new_temp('char *')
             rv_i64 = gen._new_temp('int64_t') if rt != 'int64_t' else rv
             if rt != 'int64_t':
@@ -5849,10 +5849,10 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # char*-string special case elsewhere in this method (concatenation,
     # path-join, %-formatting) is completely unaffected.
     if op in ('&', '|', '^', '<<', '>>'):
-        if lt == 'char *' and rt != 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(lt) and not gimple_ctypes.TypeLattice.is_cstr(rt):
             lv = gen._cast('int64_t', f"{lv}")
             lt = 'int64_t'
-        if rt == 'char *' and lt != 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(rt) and not gimple_ctypes.TypeLattice.is_cstr(lt):
             rv = gen._cast('int64_t', f"{rv}")
             rt = 'int64_t'
 
@@ -6005,8 +6005,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # concatenation fallback when the LHS is a GENUINE string pointer;
     # `int64_t % int64_t` must stay numeric modulo (treating it as string
     # formatting broke real stdlib code like `value % range`).
-    if c_op == '%' and lt == 'char *':
-        rv_str = rv if rt == 'char *' else (gen._cast('char *', f"{rv}") if rt == 'int64_t' else gen._stringify_value(rt, rv))
+    if c_op == '%' and gimple_ctypes.TypeLattice.is_cstr(lt):
+        rv_str = rv if gimple_ctypes.TypeLattice.is_cstr(rt) else (gen._cast('char *', f"{rv}") if rt == 'int64_t' else gen._stringify_value(rt, rv))
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_str)])
         return 'char *', t
     # Integer `/` and `%` by a zero divisor RAISE ZeroDivisionError: the
@@ -6321,7 +6321,7 @@ def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
     whole program, including the four lines above it that were already right."""
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
-    lvs = lv if lt == 'char *' else gen._cast('char *', lv)
+    lvs = lv if gimple_ctypes.TypeLattice.is_cstr(lt) else gen._cast('char *', lv)
     rvs = rv if rt == 'MojoDict *' else gen._cast('MojoDict *', rv)
     # `_mojo_repr_dict`, the GENERATED per-TU dict walker, as the third
     # argument: it is how an UNKEYED spec (`'%s' % d`) renders the mapping,
@@ -6924,9 +6924,9 @@ def _lower_in_impl(gen, node: gimple_ctypes.BinaryOp, negate: bool) -> tuple[str
     # is now correct, but the declared local is still int64_t at the C
     # level, so callees expecting a real char*/pointer need an explicit
     # cast, not just the corrected bookkeeping type.
-    if xt == 'char *' and gen.var_types.get(xv) == 'int64_t':
+    if gimple_ctypes.TypeLattice.is_cstr(xt) and gen.var_types.get(xv) == 'int64_t':
         xv = gen._cast('char *', xv)
-    elif xt.endswith(' *') and xt != 'char *' and gen.var_types.get(xv) == 'int64_t':
+    elif xt.endswith(' *') and not gimple_ctypes.TypeLattice.is_cstr(xt) and gen.var_types.get(xv) == 'int64_t':
         xv = gen._cast(xt, xv)
     return gen._lower_in_impl_values(xt, xv, node.right, negate,
                                      x_is_none=is_none_needle(gen, node.left))
@@ -7065,7 +7065,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         # the `len(_types) == 1` unambiguity test never held, every boxed AST
         # `.name`/`.member` read stayed int64_t, and every struct method got a
         # garbage overload key (`Counter_inc_0_2`).
-        if list_elem == 'int64_t' and xt == 'char *':
+        if list_elem == 'int64_t' and gimple_ctypes.TypeLattice.is_cstr(xt):
             list_elem = 'char *'
         # Every arm below sets `ti` and falls through to the shared `negate`
         # tail at the end of this function; none of them may return early,
@@ -7077,7 +7077,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             # slot, and an int 0 slot matched None). A str list answers it
             # through the str helper with a NULL needle; any other list can
             # only hold None in a slot its kinds row names 'n'.
-            if list_elem == 'char *':
+            if gimple_ctypes.TypeLattice.is_cstr(list_elem):
                 _nil = gen._new_val('char *', '(char *)0')
                 gen._emit_call('int', ti, 'mojo_list_contains_str',
                                [('MojoList *', rv), ('char *', _nil)])
@@ -7105,7 +7105,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             xv_b = xv
             gen._emit_call('int', ti, 'mojo_list_contains_bytes',
                            [('MojoList *', rv), ('MojoBytes *', xv_b)])
-        elif list_elem == 'char *' and xt in ('int', 'int64_t', '_Bool'):
+        elif gimple_ctypes.TypeLattice.is_cstr(list_elem) and xt in ('int', 'int64_t', '_Bool'):
             # An int needle over a list whose elements are `char *`: a str
             # list, or a kind-mixed literal such as `["a", 1]`. Casting the
             # needle to `char *` (below) made mojo_list_contains_str strcmp
@@ -7160,7 +7160,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             # A None needle owns a slot tag of its own (mojo_set_add_none): the
             # int 0 it shares a word with is a different member.
             gen._emit_call('int', ti, 'mojo_set_contains_none', [('MojoSet *', rv)])
-        elif xt == 'char *':
+        elif gimple_ctypes.TypeLattice.is_cstr(xt):
             gen._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
         elif xt == 'int64_t' and _set_needle_is_word(gen, xv):
             # A word of unknown kind against a set that is not known to hold
@@ -7184,7 +7184,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         gen._emit_call('int', ti, 'mojo_bytes_contains', [('MojoBytes *', rv), ('MojoBytes *', needle)])
     elif rt == 'MojoStr *':
         gen._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
-    elif rt == 'char *':
+    elif gimple_ctypes.TypeLattice.is_cstr(rt):
         # `x in some_string` — substring/char membership via strstr
         # (mojo_str_contains). The left operand is the needle: a bare
         # `char` (e.g. `raw[i] in 'fFrRbBuUtT'`, a single indexed char)
@@ -7200,7 +7200,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         # heavily) stays green with this enabled.
         if xt == 'char':
             needle = gen._call_expr('char *', 'mojo_char_to_str', [('char', xv)])
-        elif xt == 'char *':
+        elif gimple_ctypes.TypeLattice.is_cstr(xt):
             needle = xv
         elif xt.endswith(' *'):
             needle = gen._cast('char *', f"{xv}")
@@ -7224,7 +7224,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         # through their allocation registries. Same runtime-dispatch shape
         # the for-loop over an opaque iterable already uses.
         _cv = gen._cast('int64_t', rv)
-        if xt == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(xt):
             gen._emit_call('int', ti, 'mojo_in_dispatch_str',
                            [('int64_t', _cv), ('char *', xv)])
         elif xt.endswith(' *'):
@@ -8035,7 +8035,7 @@ def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None, is_tuple=Fals
     # A STRING row is recorded only for a tuple: a tuple is the one display that
     # becomes a dict KEY (`mojo_dict_key_for` renders its slots by kind), and a
     # list of strings never is, so a list keeps no row and no allocation.
-    if not _is_scalar_elem_kind(elem) and not (is_tuple and elem == 'char *'):
+    if not _is_scalar_elem_kind(elem) and not (is_tuple and gimple_ctypes.TypeLattice.is_cstr(elem)):
         return False
     # A homogeneous INTEGER row is only true of integers: an `int64_t`
     # element that is a boxed node or string would be rendered as its address
@@ -8086,7 +8086,7 @@ def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
     inside the `mojo_list_extend` call: a call as another call's argument is
     not a GIMPLE operand this emitter can rely on.
     """
-    if et == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(et):
         _chars = gen._new_temp('MojoList *')
         gen._emit_call('MojoList *', _chars, 'mojo_str_chars', [('char *', ev)])
         ev = _chars
@@ -8292,7 +8292,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # the same characters.
         if kv.startswith('_slit_'):
             kv = gen._new_val('MojoBytes *', f"{kv}")
-    elif kt != 'char *':
+    elif not gimple_ctypes.TypeLattice.is_cstr(kt):
         # A non-scalar key (tuple, list, or other struct/pointer type
         # — e.g. `{('a', 'b'): ...}`, real Python code found in the
         # stdlib's own _compat_pickle.py) used to fall into the SAME
@@ -8397,7 +8397,7 @@ def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
             # `{b'a'}` are two different sets and `b'a' in s` never matches.
             gen._emit_call('void', '', 'mojo_set_add_bytes',
                            [('MojoSet *', t), ('MojoBytes *', ev)])
-        elif et == 'char *':
+        elif gimple_ctypes.TypeLattice.is_cstr(et):
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', t), ('char *', ev)])
         elif et == 'int64_t' and not _provably_int_word(gen, el, ev):
             # `{_hn}` of a word of unknown kind: see mojo_set_add_word. Under
@@ -8807,7 +8807,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._compr_list_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'MojoStr *':
         gen._compr_str_loop(node, gen0, res, res_type, it_val)
-    elif it_type == 'char *':
+    elif gimple_ctypes.TypeLattice.is_cstr(it_type):
         gen._compr_cstr_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'MojoDict *':
         gen._compr_dict_loop(node, gen0, res, res_type, it_val)

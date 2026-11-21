@@ -114,7 +114,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             _pc = _pst[idx]
             if _pc == 'double':
                 return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
-            if _pc == 'char *':
+            if gimple_ctypes.TypeLattice.is_cstr(_pc):
                 return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
             if _pc in ('int64_t', 'int', '_Bool', 'double', 'char', '', 'unknown'):
                 return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])

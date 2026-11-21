@@ -424,8 +424,8 @@ def _quick_type(gen, node) -> str:
             # A string and a word of unknown kind: the value may be either,
             # so it is the word -- the lowering (`_lower_BinaryOp`'s and/or
             # arm) types the result the same way, and the two must agree.
-            if ((lt == 'char *' and rt == 'int64_t')
-                    or (lt == 'int64_t' and rt == 'char *')):
+            if ((gimple_ctypes.TypeLattice.is_cstr(lt) and rt == 'int64_t')
+                    or (lt == 'int64_t' and gimple_ctypes.TypeLattice.is_cstr(rt))):
                 return 'int64_t'
             # A container pointer against a `_Bool`: the lowering turns the
             # whole `and`/`or` into a `_Bool` (`_lower_binary`'s `_bool_merge`),
@@ -1046,7 +1046,7 @@ def _quick_type(gen, node) -> str:
         # pathlib.Path attribute reads on a path-shaped char* value —
         # `.name` is basename and `.parent` is dirname, both real char*
         # results (see _lower_MemberExpr's matching char*-receiver case).
-        if ot == 'char *' and node.member in ('name', 'parent'):
+        if gimple_ctypes.TypeLattice.is_cstr(ot) and node.member in ('name', 'parent'):
             return 'char *'
         # Receiver's struct type unresolved (sn not in struct_field_types —
         # e.g. a free function's `self` param typed int64_t, so ot is
@@ -1336,8 +1336,8 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     # winning when it is not the common type. `void *` was tried here and is
     # wrong: appending a scalar element to a `void *` slot needs a cast the
     # list builder does not emit, which is its own `-Wint-conversion` error.
-    if _joined == 'char *' and any(
-            _t and _t.endswith(' *') and _t != 'char *' for _t in types):
+    if gimple_ctypes.TypeLattice.is_cstr(_joined) and any(
+            _t and _t.endswith(' *') and not gimple_ctypes.TypeLattice.is_cstr(_t) for _t in types):
         return 'int64_t'
     # A literal of NOTHING BUT Python bools is a `_Bool` list, which
     # `_list_repr_fn` routes to `mojo_repr_list_bools` (that helper exists for

@@ -939,7 +939,7 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
     write-side call sites (AssignStmt/AugAssignStmt/MultiAssignStmt), now
     shared here so the new except-as-bound-exception-object case (see
     `_is_except_as_member_target`) doesn't add a FOURTH copy of it."""
-    if vtype == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(vtype):
         # Record so a later read of this same attribute name (see
         # `self._except_attr_str_fields`'s own docstring) can cast the
         # generic boxed-int64_t dispatch result back to `char *`.
@@ -2958,7 +2958,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # ambiguity handling as `del x[a:b]`.
         stgt = node.target
         ot, obj_v = gen.lower_expr(stgt.obj)
-        if ot == 'MojoStr *' or ot == 'char *':
+        if ot == 'MojoStr *' or gimple_ctypes.TypeLattice.is_cstr(ot):
             # `s[a:b] = ...` is not valid Python (str is immutable).
             raise RuntimeError(
                 "cannot compile module: slice-assignment to a string "
@@ -3319,7 +3319,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             # unary operation". Found via mojolib BUG-2026-031: a closure
             # capturing an outer dict and doing `counts[key] += 1` inside it.
             _, key_tmp = gen._char_to_cstr(it, idx_v, True, True)
-            if vtype == 'char *':
+            if gimple_ctypes.TypeLattice.is_cstr(vtype):
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
@@ -3353,7 +3353,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 gen._cast_into(ip, 'int64_t', f"{obj_v}")
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                 _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-                if vtype == 'char *':
+                if gimple_ctypes.TypeLattice.is_cstr(vtype):
                     gen._emit_call('void', '', 'mojo_dict_set_str',
                                     [('MojoDict *', dp), ('char *', key_tmp2), ('char *', v)])
                 else:
@@ -3387,7 +3387,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             # through _lower_subscript's dict-subclass branch).
             _dsa_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
             _dsa_kt, _dsa_kv = gen._char_to_cstr(it, idx_v, True, True)
-            if vtype == 'char *':
+            if gimple_ctypes.TypeLattice.is_cstr(vtype):
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', _dsa_dp), ('char *', _dsa_kv),
                                  ('char *', v)])
@@ -3594,7 +3594,7 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
         dv = v if vt == 'double' else gen._cast('double', v)
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_double',
                                          [('double', dv)])
-    if vt == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(vt):
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_str',
                                          [('char *', v)])
     if vt == 'MojoList *':
@@ -4077,7 +4077,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._emit(f"  {zero} = (int64_t)0;")
         gen._binop_into(b, n, '!=', zero)
         return b
-    if ctype == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(ctype):
         n = gen._call_expr('int', 'mojo_truthy_cstr', [('char *', val)])
         b = gen._new_temp('_Bool')
         gen._binop_into(b, n, '!=', '0')
@@ -6582,7 +6582,7 @@ def _gen_stmt_RaiseStmt(gen, node):
     if isinstance(msg_arg, (gimple_ctypes.StringLiteral, gimple_ctypes.IdentExpr,
                             gimple_ctypes.BinaryOp)):
         mt, mv = gen.lower_expr(msg_arg)
-        if mt == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(mt):
             # The message must OUTLIVE the raise. An f-string / concatenation is
             # a fresh heap temp (and a message held in a local is owned by its
             # frame), and the unwind that follows `mojo_raise` frees both -- so
