@@ -10228,10 +10228,18 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
     are pre-signature and either may be the first to see a function."""
     import mojo.middle.infra_infer as ginf
     self._param_box_names: dict[str, set] = {}
+    # The subset of `_param_box_names` whose boxed slot exists because the
+    # parameter is declared `= None`: a call that OMITS the argument pads the
+    # declared default, which must be the None box (the plain word 0 is the
+    # integer 0). See `infra_infer.param_default_none_names`.
+    self._param_box_none_defaults: dict[str, set] = {}
     for s in all_functions:
         if isinstance(s, FunctionDef):
+            _fs_pb = _as_funcdef_node(s)
             self._param_box_names[_as_str(s.name)] = ginf.param_boxed_names(
-                self, _as_funcdef_node(s))
+                self, _fs_pb, _as_str(s.name))
+            self._param_box_none_defaults[_as_str(s.name)] = \
+                ginf.param_default_none_names(self, _fs_pb, _as_str(s.name))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sd_pb = _as_structdef_node(s)
@@ -10239,7 +10247,9 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
                 _pm_pb = _as_funcdef_node(m)
                 _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
                 self._param_box_names[_pbk] = ginf.param_boxed_names(
-                    self, _pm_pb)
+                    self, _pm_pb, _pbk)
+                self._param_box_none_defaults[_pbk] = \
+                    ginf.param_default_none_names(self, _pm_pb, _pbk)
 
 
 def _gmh_reconcile_param_container_kinds(self):

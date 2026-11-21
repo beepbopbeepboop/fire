@@ -120,7 +120,8 @@ def _is_exc_class_name(gen, name: str) -> bool:
 
 
 def _reset_func(gen, body: list = None, params: list = None,
-                allow_lambda_reduction: bool = True):
+                allow_lambda_reduction: bool = True,
+                default_none_params: set = None):
     # The enclosing AST body, kept so a later pass can answer "how is this
     # local USED?" — specifically the lambda beta-reduction, which may only
     # inline a `lambda`'s body at its call sites when the local holding it
@@ -273,6 +274,25 @@ def _reset_func(gen, body: list = None, params: list = None,
     # historical names are re-bound to its sets (mojo/middle/valueinfo.py).
     gen._words = gimple_valueinfo.WordFacts()
     gen._words.bind(gen)
+    # An UNANNOTATED parameter declared `= None` is a TAGGED word: None is the
+    # shared None box, so `is None` / `== None` can tell it from the integer
+    # 0, and every read dispatches on the box's kind. The CALL SITE boxes the
+    # argument (`_box_param_call_args`); this is the body-side half. Recorded
+    # under the bare name and its C spelling because reads arrive as either.
+    gen._cur_default_none_params = set(default_none_params or ())
+    for _dnp in gen._cur_default_none_params:
+        _dnps = _as_str(_dnp)
+        gen._words.mark_boxed(_dnps)
+        gen._words.mark_tagged(_dnps)
+        gen._dyn_word_locals.add(_dnps)
+        try:
+            _dnpc = gen._cname(_dnps)
+        except Exception:
+            _dnpc = None
+        if _dnpc:
+            gen._words.mark_boxed(_as_str(_dnpc))
+            gen._words.mark_tagged(_as_str(_dnpc))
+            gen._dyn_word_locals.add(_as_str(_dnpc))
     # `_tagged_word_vals` is the subset of `_boxed_vals` temps that are a
     # TAGGED generator word (a yield-kind box from `next(g)` on a mixed-kind
     # generator). Same scope and reason as `_boxed_vals`: temp names restart
@@ -450,6 +470,8 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unpack whose source carries no element type): same question, asked of
     # the name, because a later read of the local is the local itself.
     gen._dyn_word_locals: set = set()
+    # Parameters declared `= None` (tagged words; see `_reset_func`).
+    gen._cur_default_none_params: set = set()
     # Temp/var name -> (dict_temp, key_temp, key_ctype) for a `d[k]` read
     # whose value kind is only known on the slot at runtime. Repr/stringify
     # can ask the runtime (`mojo_dict_repr_slot`) instead of printing the raw
@@ -970,6 +992,7 @@ class FuncState:
         self.fs_cur_func_body: list = []
         self.fs_cur_func_params: set = set()
         self.fs_cur_untyped_params: set = set()
+        self.fs_cur_default_none_params: set = set()
         self.fs_cur_param_ann: dict = {}
         self.fs_cur_boxed_params: object = None
         self.fs_param_conflict_cache: dict = {}
@@ -1080,6 +1103,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_cur_func_body = gen._cur_func_body
     st.fs_cur_func_params = gen._cur_func_params
     st.fs_cur_untyped_params = gen._cur_untyped_params
+    st.fs_cur_default_none_params = gen._cur_default_none_params
     st.fs_cur_param_ann = gen._cur_param_ann
     st.fs_cur_boxed_params = gen._cur_boxed_params
     st.fs_param_conflict_cache = gen._param_conflict_cache
@@ -1198,6 +1222,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._cur_func_body = st.fs_cur_func_body
     gen._cur_func_params = st.fs_cur_func_params
     gen._cur_untyped_params = st.fs_cur_untyped_params
+    gen._cur_default_none_params = st.fs_cur_default_none_params
     gen._cur_param_ann = st.fs_cur_param_ann
     gen._cur_boxed_params = st.fs_cur_boxed_params
     gen._param_conflict_cache = st.fs_param_conflict_cache
@@ -3581,6 +3606,9 @@ _KW_DICT_FNS = frozenset([
     # wrote (caught by gimple_tuple_dict_key_is_content_keyed).
     'mojo_dict_subscript_int', 'mojo_dict_subscript_double',
     'mojo_dict_subscript_str', 'mojo_dict_subscript_boxed',
+    # The no-default `.get` read (None on a miss, the slot's own word on a
+    # hit): its `_kw` twin is the same one-lookup read for an integer key.
+    'mojo_dict_get_boxed',
     # The bool / None / struct setters. Absent from this set they were not
     # refused — `_apply_kw_keys` fell through to the "build the decimal string
     # now" arm, which stores the entry in the plain char* key DOMAIN while the
@@ -4077,6 +4105,35 @@ def cur_func_param_set(gen) -> set:
     return out
 
 
+def dict_get_call_is_tagged(gen, node) -> bool:
+    """Is this expression a no-default `d.get(k)` whose result is the tagged
+    word (`_ldm_get`'s scalar/unknown-value arm: the slot's own word on a hit,
+    the shared None box on a miss)?
+
+    Such a binding must keep the box when it is stored into a name, or the
+    miss's None box is unwrapped to the integer 0 and `x = d.get(k)` prints
+    `0` where CPython prints `None`. A str/double/container value domain is
+    excluded because those `.get` results keep their own C type."""
+    if not isinstance(node, gimple_ctypes.CallExpr):
+        return False
+    fn = getattr(node, 'func', None)
+    if not isinstance(fn, gimple_ctypes.MemberExpr) \
+            or _as_str(getattr(fn, 'member', '')) != 'get':
+        return False
+    obj = getattr(fn, 'obj', None)
+    if not isinstance(obj, gimple_ctypes.IdentExpr):
+        return False
+    if len(getattr(node, 'args', None) or []) != 1 \
+            or getattr(node, 'kwargs', None):
+        return False
+    try:
+        _vt = _as_str(gen._dict_val_of(_as_str(obj.name)))
+    except Exception:
+        return False
+    return (_vt not in ('char *', 'double', 'float', 'MojoDict *',
+                        'MojoList *', 'MojoSet *'))
+
+
 def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
     """True iff every binding of `name` in THIS function is a tagged word:
     either `name = next(g)` for one and the same generator local `g`, where
@@ -4108,6 +4165,12 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
             if not (tagged_for_target_name(gen, src)
                     or tagged_next_bind_name(gen, src, _seen | {name})):
                 return False
+            copies += 1
+            continue
+        # A no-default `d.get(k)` with a scalar/unknown value domain is the
+        # boxed read (`_ldm_get`): None on a miss, the slot's own word on a
+        # hit. Keep the box, or the miss's None unwraps to the integer 0.
+        if dict_get_call_is_tagged(gen, v):
             copies += 1
             continue
         # A call to a mixed-return function (`x = h(0)` where `h` returns
@@ -4601,6 +4664,11 @@ def mixed_value_locals(gen) -> set:
     dict_val_types, annotated = _scalar_mixed_prescan(gen, body)
 
     kinds: dict = {}
+    # Names with a binding that is neither None nor a provable
+    # container/scalar: their other kind is unknown (a str/struct/call
+    # handle), so they must NOT be turned into a box just because one
+    # binding is None (see the `{'none'}` rule below).
+    unproven: set = set()
 
     def note(name, value):
         _nm = _as_str(name)
@@ -4609,10 +4677,24 @@ def mixed_value_locals(gen) -> set:
             _qt = _as_str(gen._quick_type(value))
         except Exception:
             _qt = ''
-        if _qt in gimple_ctypes._CONTAINER_KIND_TYPES:
+        _is_none = (isinstance(value, gimple_ctypes.NoneLiteral) or (
+            isinstance(value, gimple_ctypes.IdentExpr)
+            and _as_str(value.name) == 'None'))
+        _is_contain = _qt in gimple_ctypes._CONTAINER_KIND_TYPES
+        _is_scalar = _mixed_scalar_binding_kind(gen, value, dict_val_types) is not None
+        if _is_contain:
             _ks.add('container')
-        if _mixed_scalar_binding_kind(gen, value, dict_val_types) is not None:
+        if _is_scalar:
             _ks.add('scalar')
+        if not (_is_none or _is_contain or _is_scalar):
+            unproven.add(_nm)
+        # `x = None` is a binding of a kind of its own: None is the shared
+        # None box, not the integer 0, so a name that holds it must be the
+        # box-holding word (`mixed_box_name`) whose reads dispatch by kind.
+        # Before this, `x = None; print(x)` printed `0` (the None-prints-as-0
+        # and None-equals-0 bug, whose doc was deleted with the fix).
+        if _is_none:
+            _ks.add('none')
 
     def visit(s):
         if isinstance(s, gimple_ctypes.AssignStmt):
@@ -4635,7 +4717,20 @@ def mixed_value_locals(gen) -> set:
 
     mixed = set()
     for _n, _ks in kinds.items():
-        if _ks == {'container', 'scalar'} and _n not in annotated:
+        # Only a name whose EVERY binding is None: then the box is the whole
+        # story and nothing else can disagree with it. A name with any other
+        # binding -- proven (a str/container) or unproven (a call/name this
+        # compile cannot type) -- has that binding's C type as its slot
+        # (first-decl-wins), and boxing the None side of it would hand the
+        # other consumer a box, so it keeps the representation it already
+        # had. Module globals are excluded outright: their cross-function
+        # type is the module field's, not a local box (`x = None` then
+        # `global x; x = "abc"` must stay a `char *` field).
+        if (_ks == {'none'} and _n not in annotated
+                and _n not in unproven
+                and _n not in (getattr(gen, '_global_var_types', None) or {})):
+            mixed.add(_n)
+        elif _ks == {'container', 'scalar'} and _n not in annotated:
             mixed.add(_n)
     # A PARAMETER whose annotation the body contradicts is the same
     # box-holding word, with the annotation as its first binding. Its reads
@@ -4678,6 +4773,9 @@ def boxed_param_names(gen) -> set:
             _conf = None
         if _conf == 'value' or _conf == 'scalar':
             out.add(_as_str(_pn))
+    # A parameter declared `= None` is a box-holding word too (see
+    # `_reset_func`): its reads dispatch on the box's kind.
+    out |= set(getattr(gen, '_cur_default_none_params', ()) or ())
     gen._cur_boxed_params = out
     return out
 
@@ -6071,6 +6169,10 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     `str(b)` all printed `1` for a `b = True` at module scope while the same
     value inside a `def` (where the name's inferred type IS `_Bool`) printed
     `True`. See `is_python_bool_expr`."""
+    # `str(None)` / `f'{None}'` / `'%s' % None` is "None", not the decimal of
+    # the integer word the literal lowers to.
+    if enode is not None and gen._is_none_literal(enode):
+        return gen._new_val('char *', gen._intern_string('None'))
     if gimple_ctypes.TypeLattice.is_cstr(et):
         return ev
     if enode is not None and et in ('int', 'int64_t') \
@@ -8667,6 +8769,17 @@ def _box_param_call_args(gen, callee: str, arg_pairs: list,
             continue
         _node = _by_slot.get(_i)
         if _node is None:
+            # The argument was OMITTED and padded with the parameter's
+            # declared default. For a parameter declared `= None` the pad
+            # pair is the plain word 0, which is the integer 0, not None:
+            # box the None the declaration promised. This is the only arm
+            # that can know the default (the caller only has the padded
+            # pair, not the AST node).
+            if _pn in (getattr(gen, '_param_box_none_defaults', None) or {}).get(
+                    _as_str(callee), ()):
+                out.append(('int64_t', gen._call_expr(
+                    'int64_t', 'mojo_box_none', [])))
+                continue
             out.append((_at, _av))
             continue
         _bv, _bt = box_word_value(gen, _node, _at, _av)

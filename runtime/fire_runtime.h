@@ -1741,6 +1741,12 @@ int64_t     mojo_dict_subscript_int_kw(MojoDict *d, int64_t kw);
 double      mojo_dict_subscript_double_kw(MojoDict *d, int64_t kw);
 char       *mojo_dict_subscript_str_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_subscript_boxed_kw(MojoDict *d, int64_t kw);
+/* `d.get(k)` with no default: the stored value's own word on a hit, the
+ * shared None box on a miss (see the C definition's comment). */
+int64_t     mojo_dict_get_boxed(MojoDict *d, char *key);
+int64_t     mojo_dict_get_boxed_bytes(MojoDict *d, MojoBytes *key);
+int64_t     mojo_dict_get_boxed_none(MojoDict *d);
+int64_t     mojo_dict_get_boxed_kw(MojoDict *d, int64_t kw);
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
 char *mojo_dict_repr_slot(MojoDict *d, char *key);
 int64_t mojo_dict_slot_boxed(MojoDict *d, char *key);

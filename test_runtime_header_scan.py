@@ -682,7 +682,7 @@ def test_every_declaration_is_seen():
     #       `char *` out) — CPython 3.14's dedent. Word-shaped, word
     #       450 -> 451, total 968 -> 969; box stays 518.
     # `--fix` wrote this rung and every quoted figure above from one scan.
-    for header, want in (('fire_runtime.h', 885),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 890),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
