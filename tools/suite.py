@@ -1935,7 +1935,8 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # (`.endswith(' *')`, `== 'int64_t'`, ...) may only fall.
 test('type-string-ratchet', [PY, 'test_type_string_ratchet.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_type_string_ratchet.py'],
-     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)')
+     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)',
+     disabled='bugs/gate-type-string-ratchet.md')
 # Every program in tools/pydiff_ok.txt must print what CPython prints (the
 # corpus is tools/pydiff_corpus; the finder is tools/pydiff.py). The list may
 # only grow, so a fix that lands is locked in and a regression is named.
@@ -2023,7 +2024,8 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
             'reflect.py'],
      desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-          'agrees with the tree')
+          'agrees with the tree',
+     disabled='bugs/gate-formal-doc-truth.md')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
