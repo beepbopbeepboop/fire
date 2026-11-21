@@ -52,7 +52,7 @@ BASELINE = {
     "== '_Bool'": 23,
     "== 'double'": 61,
     "== 'MojoList *'": 54,
-    "gen._emit( text": 298,
+    "gen._emit( text": 297,
     "direct word-set use": 10,
 }
 

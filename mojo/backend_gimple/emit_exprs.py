@@ -7685,7 +7685,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # _dict_items_val_elems so a dict-item tuple never lands here.
         if gimple_ctypes.TypeLattice.is_list(et) and ev in gen._elem_types and t not in gen._dict_items_val_elems:
             _ev_nested = gen._elem_types[ev]
-            _ev_mixed = (ev in gen._maybe_kinds_vals
+            _ev_mixed = (gen._words.has_slot_kinds(ev)
                          or len(set(gen._struct_slot_kinds.get(ev, []))) > 1)
             if _ev_mixed:
                 _nested_invalid = True
