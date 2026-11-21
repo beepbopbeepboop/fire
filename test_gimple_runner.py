@@ -15654,6 +15654,7 @@ def main():
                   test_none_argument_is_none_in_the_callee,
                   test_none_prints_as_none,
                   test_none_vs_zero_distinguished,
+                  test_dict_get_unknown_domain_into_a_list_local,
                   test_textwrap_dedent_matches_cpython,
                   test_mixed_return_none_string_and_set_arms,
                   test_none_held_in_local_with_if_join_is_none_needle,
@@ -16325,6 +16326,36 @@ def main():
     print(lst)
     print(None in [0, 1])
     print(0 in [None, 1])
+main()
+""")
+
+
+def test_dict_get_unknown_domain_into_a_list_local():
+    """A no-default `d.get(k)` whose value domain is only the `int64_t`
+    default (here `self.rows`, a class attribute) is boxed, so a miss prints
+    None. Bound to a local that is ALSO bound a list, the local keeps its
+    declared `MojoList *`: the word is unwrapped for the list consumers
+    instead of raising the tagged-word/container refusal. This is the shape
+    `module_gen.py`'s own `param_ctypes = self._mangled_signature_ctypes.get(
+    bare_mangled)` had, which made `fire.py --dump module_gen.py` refuse."""
+    test_gimple_matches_cpython("gimple_dict_get_of_lists", """\
+class Table:
+    def __init__(self):
+        self.rows = {}
+    def put(self, k, v):
+        self.rows[k] = v
+    def lookup(self, k):
+        out = []
+        out = self.rows.get(k)
+        return out
+
+def main():
+    t = Table()
+    t.put("a", [1, 2])
+    t.put("b", [3])
+    r = t.lookup("a")
+    print(len(r), r[1])
+    print(len(t.lookup("b")))
 main()
 """)
 

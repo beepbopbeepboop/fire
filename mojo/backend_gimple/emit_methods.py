@@ -6544,6 +6544,13 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
         gen._words.mark_boxed(_boxed)
         gen._words.mark_tagged(_boxed)
         gen._words.mark_dyn(_boxed)
+        # Provenance for the store side: a `.get` word whose value domain is
+        # only `int64_t`-by-default may really be a container (the caller's
+        # target name says so). `emit_stmts` unwraps the word instead of
+        # refusing when it lands in a container/pointer local.
+        if getattr(gen, '_dict_get_boxed_temps', None) is None:
+            gen._dict_get_boxed_temps = set()
+        gen._dict_get_boxed_temps.add(_as_str(_boxed))
         return 'int64_t', _boxed
     if gen._is_none_literal(args[0]):
         # `d.get(None)`: the None-key entry (keykind 3), which the integer 0

@@ -470,6 +470,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unpack whose source carries no element type): same question, asked of
     # the name, because a later read of the local is the local itself.
     gen._dyn_word_locals: set = set()
+    # Temp names `_ldm_get` boxed for a no-default `d.get(k)`: a store of one
+    # into a container/pointer local unwraps it (see emit_stmts). Temp names
+    # restart per function, so the set does too.
+    gen._dict_get_boxed_temps: set = set()
     # Parameters declared `= None` (tagged words; see `_reset_func`).
     gen._cur_default_none_params: set = set()
     # Temp/var name -> (dict_temp, key_temp, key_ctype) for a `d[k]` read
@@ -1023,6 +1027,7 @@ class FuncState:
         self.fs_owned_box_names: set = set()
         self.fs_emit_frames: list = []
         self.fs_dyn_word_locals: set = set()
+        self.fs_dict_get_boxed_temps: set = set()
         self.fs_dict_slot_reads: dict = {}
         self.fs_rtobj_kinds: dict = {}
         self.fs_struct_formats: dict = {}
@@ -1134,6 +1139,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_owned_box_names = gen._owned_box_names
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_locals = gen._dyn_word_locals
+    st.fs_dict_get_boxed_temps = gen._dict_get_boxed_temps
     st.fs_dict_slot_reads = gen._dict_slot_reads
     st.fs_rtobj_kinds = gen._rtobj_kinds
     st.fs_struct_formats = gen._struct_formats
@@ -1256,6 +1262,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._owned_box_names = st.fs_owned_box_names
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_locals = st.fs_dyn_word_locals
+    gen._dict_get_boxed_temps = st.fs_dict_get_boxed_temps
     gen._dict_slot_reads = st.fs_dict_slot_reads
     gen._rtobj_kinds = st.fs_rtobj_kinds
     gen._struct_formats = st.fs_struct_formats
@@ -4170,7 +4177,14 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
         # A no-default `d.get(k)` with a scalar/unknown value domain is the
         # boxed read (`_ldm_get`): None on a miss, the slot's own word on a
         # hit. Keep the box, or the miss's None unwraps to the integer 0.
+        # A name ALREADY declared a container/pointer cannot keep it: its
+        # consumers read the declared C type (a real dict of lists, e.g.
+        # `param_ctypes = self._mangled_signature_ctypes.get(mangled)`), and
+        # the store unwraps the word.
         if dict_get_call_is_tagged(gen, v):
+            _nt = _as_str(gen.var_types.get(_as_str(name)) or '')
+            if _nt.endswith(' *') and _nt not in ('char *', 'const char *'):
+                return False
             copies += 1
             continue
         # A call to a mixed-return function (`x = h(0)` where `h` returns

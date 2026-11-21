@@ -1695,8 +1695,20 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # A tagged word and a non-int64 name never mix: see
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
-        _tagged_bind = (gen._words.is_tagged(v) or _for_copy
-                        or _call_tagged)
+        # A no-default `d.get(k)` on an UNKNOWN value domain is boxed so that
+        # a miss prints None (`emit_methods._ldm_get`). Stored into a name
+        # already declared a container/pointer, the name's consumers read its
+        # declared C type, not a box, so this word is unwrapped below
+        # (`mojo_box_word`) exactly as every `.get` result was before the miss
+        # gained the None representation. Only a tagged word the NAME-level
+        # rule keeps as a box is a representation conflict and refused.
+        _declared_t = _as_str(gen.var_types.get(_as_str(tname)) or '')
+        _boxed_get_into_container = (
+            _declared_t.endswith(' *')
+            and _declared_t not in ('char *', 'const char *')
+            and _as_str(v) in getattr(gen, '_dict_get_boxed_temps', ()))
+        _tagged_bind = ((gen._words.is_tagged(v) and not _boxed_get_into_container)
+                        or _for_copy or _call_tagged)
         # A float/str/bool/int store into a box-holding name is boxed by its
         # kind here, BEFORE any refusal below reads the value's C type, so it
         # is carried by the box rather than refused. A container stored into a
