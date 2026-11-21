@@ -1,10 +1,11 @@
 # GATE: `doc-refs --ratchet` goes red when `git ls-files` cannot answer
 
 **Job:** `doc-refs` (`python3 tools/dangling_doc_refs.py --ratchet`).
-**Status:** open. Not the same bug as the retired `gate-doc-refs` filing; that
-one was a real citation gain in `tools/test_integrate_probe_loop.py`, fixed by
-its ledger entry (3783b2cf1). This is the tool disagreeing with itself about
-which files are candidates.
+**Status:** fixed 2026-11-20 at the root (see `## Done when`); the doc is
+deleted in the next commit. Not the same bug as the retired `gate-doc-refs`
+filing; that one was a real citation gain in
+`tools/test_integrate_probe_loop.py`, fixed by its ledger entry (3783b2cf1).
+This is the tool disagreeing with itself about which files are candidates.
 
 ## What I ran
 
@@ -59,3 +60,15 @@ Add a case to `test_dangling_doc_refs.py` that forces the fallback (mock
 tracked `.py` is. Verify with `python3 test_dangling_doc_refs.py` and
 `python3 tools/dangling_doc_refs.py --ratchet` in both the worktree and the
 `.tmp` export above.
+
+## Done when
+
+`python3 test_dangling_doc_refs.py` passes, including the two new cases in
+`FallbackCandidatesExcludeTheLedger`:
+`test_ledger_is_not_a_candidate_when_git_fails` (fails before the fix —
+`candidates()` returns `tools/dangling_refs_baseline.py` — and asserts an
+ordinary tracked `.py` is still returned) and
+`test_ledger_is_not_a_candidate_when_git_returns_nothing` (the exit-0/empty
+`git ls-files` trigger). And `python3 tools/dangling_doc_refs.py --ratchet`
+exits 0 both in this worktree and in the `.tmp/headmove` export above, with the
+same citations, none of them the ledger's own.
