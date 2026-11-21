@@ -129,6 +129,7 @@ def apply_findings(st, newly, recovered, sha, log, failed=()):
     again = [j for j in failed if j not in newly and st["jobs"].get(j, {}).get("red") and not G.get_disabled(src, j)]
     for j in list(newly) + again:
         e = st["jobs"][j]
+        e["registered"] = G.registered(src, j)     # a fanout ITEM has no marker to carry (see report_text)
         out = G.set_disabled(src, j)
         e["marked"] = G.get_disabled(out, j) is not None
         src = out
