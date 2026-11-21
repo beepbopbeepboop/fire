@@ -13697,16 +13697,16 @@ def _ls_scalar_word(gen, idx_type, iv, ot, ov) -> tuple[str, str]:
         idx_type_for_dict, idx_for_dict = gen._char_to_cstr(idx_type, iv, True, True)
         val_ctype = gen._dict_val_of(dp)
         if gimple_ctypes.TypeLattice.is_double(val_ctype):
-            t = gen._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
+            t = gen._call_expr('double', 'mojo_dict_subscript_double', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
             return 'double', t
         if gimple_ctypes.TypeLattice.is_cstr(val_ctype):
-            t = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
+            t = gen._call_expr('char *', 'mojo_dict_subscript_str', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
             return 'char *', t
         if gimple_ctypes.TypeLattice.is_cstr(idx_type_for_dict):
             _cks = getattr(gen, '_cstr_key_src', None)
             if _cks is not None:
                 _cks.pop(idx_for_dict, None)
-        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
+        t = gen._call_expr('int64_t', 'mojo_dict_subscript_boxed', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
         _mark_unknown_dict_value(gen, dp, t, idx_for_dict, 'str')
         return 'int64_t', t
     # Otherwise treat as MojoList* stored as int; cast and subscript
@@ -13798,12 +13798,12 @@ def _ls_dict(gen, idx_type, iv, ov) -> tuple[str, str]:
         val_ctype = gen._dict_val_of(ov)
         _mixed = gen._dict_val_mixed(ov)
         if gimple_ctypes.TypeLattice.is_cstr(val_ctype) and not _mixed:
-            return 'char *', gen._call_expr('char *', 'mojo_dict_get_bytes_str',
+            return 'char *', gen._call_expr('char *', 'mojo_dict_subscript_bytes_str',
                                             [('MojoDict *', ov), ('MojoBytes *', iv)])
         if gimple_ctypes.TypeLattice.is_double(val_ctype) and not _mixed:
-            return 'double', gen._call_expr('double', 'mojo_dict_get_bytes_double',
+            return 'double', gen._call_expr('double', 'mojo_dict_subscript_bytes_double',
                                             [('MojoDict *', ov), ('MojoBytes *', iv)])
-        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
+        t = gen._call_expr('int64_t', 'mojo_dict_subscript_bytes_boxed',
                            [('MojoDict *', ov), ('MojoBytes *', iv)])
         _mark_unknown_dict_value(gen, ov, t, iv, 'bytes')
         return 'int64_t', t
@@ -13812,15 +13812,15 @@ def _ls_dict(gen, idx_type, iv, ov) -> tuple[str, str]:
     val_ctype = gen._dict_val_of(ov)
     _mixed = gen._dict_val_mixed(ov)   # a dict of disagreeing values: only the boxed read keeps each slot's kind
     if gimple_ctypes.TypeLattice.is_double(val_ctype) and not _mixed:
-        t = gen._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (idx_type, iv)])
+        t = gen._call_expr('double', 'mojo_dict_subscript_double', [('MojoDict *', ov), (idx_type, iv)])
         return 'double', t
     if gimple_ctypes.TypeLattice.is_cstr(val_ctype) and not _mixed:
-        t = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (idx_type, iv)])
+        t = gen._call_expr('char *', 'mojo_dict_subscript_str', [('MojoDict *', ov), (idx_type, iv)])
         return 'char *', t
     if val_ctype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
         # Pointer value stored boxed as int64_t; recover the real type so a
         # later v[k2] / v.get(...) dispatches on the right container.
-        raw = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
+        raw = gen._call_expr('int64_t', 'mojo_dict_subscript_int', [('MojoDict *', ov), (idx_type, iv)])
         t = gen._cast(val_ctype, raw)
         # `d[k]` where `d: dict[K, dict[K2, V2]]` — carry V2 onto the inner
         # dict temp so `d[k][k2]` / `d[k].items()` type right (bug: every
@@ -13839,7 +13839,7 @@ def _ls_dict(gen, idx_type, iv, ov) -> tuple[str, str]:
     # slot read below under the key's CHARACTERS would make a later read of
     # the same name (`print(x)`) look the tuple up by its pointer, and miss.
     _word_key = _as_str(iv) in gen._kw_key_src
-    t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', ov), (idx_type, iv)])
+    t = gen._call_expr('int64_t', 'mojo_dict_subscript_boxed', [('MojoDict *', ov), (idx_type, iv)])
     if not _word_key:
         _mark_unknown_dict_value(gen, ov, t, iv, 'str' if gimple_ctypes.TypeLattice.is_cstr(idx_type) else None)
     return 'int64_t', t
@@ -14018,7 +14018,7 @@ def _ls_dict_subclass(gen, _dsub_r, idx_type, iv, ot, ov) -> tuple[str, str]:
         gen._goto(bb_done)
         gen._emit_label(bb_done)
         return 'int64_t', res
-    t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
+    t = gen._call_expr('int64_t', 'mojo_dict_subscript_boxed',
                        [('MojoDict *', dp), (kt, kv)])
     _mark_unknown_dict_value(gen, dp, t, kv, 'str')
     return 'int64_t', t
@@ -14233,10 +14233,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         val_ctype = gen._dict_val_of(ov)
         _mixed = gen._dict_val_mixed(ov)
         if gimple_ctypes.TypeLattice.is_double(val_ctype) and not _mixed:
-            return 'double', gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
+            return 'double', gen._call_expr('double', 'mojo_dict_subscript_none_double', [('MojoDict *', ov)])
         if gimple_ctypes.TypeLattice.is_cstr(val_ctype) and not _mixed:
-            return 'char *', gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
-        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none', [('MojoDict *', ov)])
+            return 'char *', gen._call_expr('char *', 'mojo_dict_subscript_none_str', [('MojoDict *', ov)])
+        t = gen._call_expr('int64_t', 'mojo_dict_subscript_none_boxed', [('MojoDict *', ov)])
         _mark_unknown_dict_value(gen, ov, t, None, 'none')
         return 'int64_t', t
 

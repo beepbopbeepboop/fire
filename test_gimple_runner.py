@@ -240,8 +240,15 @@ def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
         return []
-    reads = [ln.strip() for ln in body.splitlines() if 'mojo_dict_get' in ln]
-    got = any('mojo_dict_get_str' in r for r in reads)
+    reads = [ln.strip() for ln in body.splitlines()
+             if 'mojo_dict_get' in ln or 'mojo_dict_subscript' in ln]
+    # The bare-subscript reads moved from the sentinel `mojo_dict_get_*`
+    # getters (which answer 0 for an absent key) to the raising
+    # `mojo_dict_subscript_*` family. Both spellings answer the same
+    # question here — WHICH VALUE TYPE the slot is read as — so the
+    # contract accepts either.
+    got = any('mojo_dict_get_str' in r or 'mojo_dict_subscript_str' in r
+              for r in reads)
     if got != want:
         print(f"FAIL  {name}: {fn} {'does' if want else 'does not'} read its "
               f"dict slot as a string, wanted {want} (reader calls: {reads})")
@@ -15505,6 +15512,7 @@ def main():
                   test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
+                  test_except_around_builtin_errors_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
                   test_gimple_values_print_as_pointers_inside_containers,
                   test_dataclass_default_factory_fields_start_empty_and_per_instance):
@@ -17005,6 +17013,42 @@ def main():
     print(not r)
     print(bool(""))
     print(bool("0"))
+main()
+""")
+
+
+def test_except_around_builtin_errors_matches_cpython():
+    """The builtin operations below raise real, catchable exceptions on the
+    compiled path, as they do in CPython: `int("x")` a ValueError (it used to
+    answer 0), `d["zz"]` a KeyError (it used to answer the slot's zero),
+    `[...][99]` an IndexError, and `1 // 0` a ZeroDivisionError. Before the
+    fixes the handlers printed plausible values instead of running, so nothing
+    fell over — only CPython on the same text says which answer is right."""
+    test_gimple_matches_cpython("gimple_except_around_builtin_errors", """\
+def safe_int(s):
+    try:
+        return int(s)
+    except ValueError:
+        return -1
+
+def main():
+    print(safe_int("12"))
+    print(safe_int("x"))
+    d = {"a": 1}
+    try:
+        print(d["zz"])
+    except KeyError:
+        print("no key")
+    try:
+        print([1, 2][99])
+    except IndexError:
+        print("no index")
+    try:
+        print(1 // 0)
+    except ZeroDivisionError:
+        print("div zero")
+    finally:
+        print("finally")
 main()
 """)
 
