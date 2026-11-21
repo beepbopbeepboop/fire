@@ -226,12 +226,6 @@ _LEGACY_NAMES_OKAY = {
     'fire.py': 4,                                  # rename history, stage2/mojo, Real Mojo's own
     'test_cli_usage_text.py': 2,                   # this file's own "what it used to print"
     'test_selfhost_memory.py': 1,                  # the self-host binary's own dump flag
-    # The two below quote `bootstrap-stage2-dumps`' own argv — the compiled
-    # stage binary run with cwd='stage2' (see that registration in
-    # tools/suite.py) — in the comments pinning the crash it measured. The
-    # name there is the artifact, not this tool.
-    'gimple_codegen.py': 1,                        # stage2 binary argv, in the GimpleGen lifetime note
-    'test_gimple.py': 1,                           # the same measurement in the lazy-init pin's docstring
     'myinterpreter.py': 2,                         # real-Mojo `build`'s diagnostic shape, quoted as itself (both renderers)
     'test_attr_error_messages.py': 2,              # real-Mojo `build`'s block pinned against the reference
     'mojo/backend_gimple/emit_resolve.py': 1,      # stage2/mojo

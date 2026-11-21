@@ -2050,8 +2050,8 @@ def param_default_none_names(gen, func, func_key: str = None) -> set:
                 import mojo.middle.coro as _coro
                 _ck = _coro._CALLSITE_PARAM_KINDS.get(
                     _as_str(getattr(func, 'name', '')), {}).get(_as_str(_pn))
-                if isinstance(_ck, str) and not gimple_ctypes.TypeLattice.is_int_word_or_none(_coro._KIND_TO_SLOT_CTYPE.get(
-                        _ck)):
+                if isinstance(_ck, str) and _coro._KIND_TO_SLOT_CTYPE.get(
+                        _ck) not in (None, 'int', 'int64_t'):
                     continue
             except Exception:
                 pass
@@ -2733,7 +2733,7 @@ def _return_arms_are_int_or_none(acc: list, arms: list, body: list = None) -> bo
         _node = arms[_i] if _i < len(arms) else None
         if _t != 'void' and _is_none_return_arm(_node):
             _has_none = True
-        elif (gimple_ctypes.TypeLattice.is_number_scalar(_t) or gimple_ctypes.TypeLattice.is_float(_t)) \
+        elif _t in ('int', 'int64_t', '_Bool', 'double', 'float') \
                 and gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
             _has_scalar = True
         elif gimple_ctypes.TypeLattice.is_int_word(_t) and body is not None \

@@ -39,7 +39,6 @@ from fire_compiler import for_target_is_tuple, for_target_names, target_slots
 import mojo.middle.iter_factory as iter_factory
 import mojo.middle.coro as coro_mod
 import mojo.middle.types as gimple_ctypes
-import mojo.ir.build as build
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.itcursor as itc
@@ -152,7 +151,7 @@ def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
         gen._binop_into(t_gt, f"{ctr}", '>', f"{stop_v}")
         t_zero = gen._new_val('int64_t', "(int64_t)0")
         gen._binop_into(t_spos, f"{step_v}", '>', t_zero)
-        build.assign(gen, f'{cond_t}', f'{t_spos} ? {t_lt} : {t_gt}')
+        gen._emit(f"  {cond_t} = {t_spos} ? {t_lt} : {t_gt};")
     else:
         cond_t = gen._binop('_Bool', ctr, cond_op, f"{stop_v}")
     gen._cond_goto(cond_t, bb_body, bb_after)
@@ -331,7 +330,7 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
         if env_var != '0':
             gen._cast_into(env_t, 'void *', f"{env_var}")
         else:
-            build.assign(gen, f'{env_t}', f'(void *)0')
+            gen._emit(f'  {env_t} = (void *)0;')
         return fn_ptr_t, env_t
     # Fallback: treat callback as a simple function pointer.
     #
@@ -674,8 +673,8 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
             _gep = gen._rt_call('int64_t *', '_mojo_at_int64_t', [f"{gend}", f"{_gi64}"])
             _gsv = gen._new_temp('int64_t')
             _gev = gen._new_temp('int64_t')
-            build.assign(gen, f'{_gsv}', f'*{_gsp}')
-            build.assign(gen, f'{_gev}', f'*{_gep}')
+            gen._emit(f'  {_gsv} = *{_gsp};')
+            gen._emit(f'  {_gev} = *{_gep};')
             # A group that did not participate in this match has gstart
             # -1 (the engine initialises every slot to -1 before
             # matching); real `re.findall` yields an empty string for an
@@ -986,7 +985,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             it_type, it_val = gen.lower_expr(_int_recv)
         elif (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr)
                 and it.func.name in gen.var_types and it.func.name not in gen.func_return_types
-                and (gimple_ctypes.TypeLattice.is_word_or_cstr(gen.var_types.get(it.func.name)) or gimple_ctypes.TypeLattice.is_voidp(gen.var_types.get(it.func.name)))):
+                and gen.var_types.get(it.func.name) in ('int64_t', 'void *', 'char *')):
             # `for x in f(args):` where `f` is a callable VARIABLE or PARAMETER (`for check in
             # checks: for d, e in check(a):`). The callee may be a compiled GENERATOR, whose
             # call yields a live handle only when dispatched by `mojo_dyn_call` (a plain
@@ -1206,8 +1205,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # fallthrough (and a comprehension result, and several builtin
             # stubs) produce — and looked for a `void___has_next__` that
             # cannot exist, then REFUSED. That made the boxed runtime
-            # dispatch below, whose own `is_int_word_or_voidp(it_type)` test
-            # names `void *` explicitly, unreachable for
+            # dispatch below, whose own `it_type in ('int', 'int64_t',
+            # 'void *')` test names `void *` explicitly, unreachable for
             # `void *` — the two arms contradicted each other and the
             # narrower one won. `for x in reversed(seq)` therefore ran zero
             # times with a `mojo_unsupported_iter` naming `void *`, which is
@@ -2132,7 +2131,7 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     elif isinstance(target, str):
         parts = [target, '_enum_val']
     else:
-        build.comment(gen, "/* TODO: enumerate(str) non-string target */")
+        gen._emit("  /* TODO: enumerate(str) non-string target */")
         return
     idx_var = parts[0] if len(parts) >= 1 else '_enum_i'
     val_var = parts[1] if len(parts) >= 2 else '_enum_val'
@@ -2250,7 +2249,7 @@ def _gen_for_enumerate(gen, node):
     elif isinstance(target, str):
         parts = [target, '_enum_val']
     else:
-        build.comment(gen, "/* TODO: enumerate non-string target */")
+        gen._emit(f"  /* TODO: enumerate non-string target */")
         return
 
     idx_var = parts[0] if len(parts) >= 1 else '_enum_i'
@@ -2307,7 +2306,7 @@ def _gen_for_enumerate(gen, node):
             list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
-    gen._declare_var(idx_var, 'int64_t', force=not gimple_ctypes.TypeLattice.is_word_or_none(gen.var_types.get(idx_var)))
+    gen._declare_var(idx_var, 'int64_t', force=gen.var_types.get(idx_var) not in (None, 'int64_t'))
     star_elem = None
     if val_is_star:
         # The starred slot is a LIST of what follows the index, not the
@@ -2785,7 +2784,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 # boxed target is read as a double, so `x + 1` over `[10, 20]`
                 # printed 11.0.
                 gen._word_mark_tagged(cvar)
-            build.assign(gen, f'{cvar}', f'(int64_t) {elem64}')
+            gen._emit(f"  {cvar} = (int64_t) {elem64};")
         elif gimple_ctypes.TypeLattice.is_double(suf):
             gen._rt_into(cvar, 'mojo_list_get_double', [f"{list_ptr}", idx_t])
         elif suf == 'str':
@@ -2813,7 +2812,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 # pointer — into an int64_t-typed var is a hard "makes
                 # integer from pointer" error. Keep it boxed: the member
                 # access on it goes through the runtime tag dispatch.
-                build.assign(gen, f'{cvar}', f'(int64_t) {elem64}')
+                gen._emit(f"  {cvar} = (int64_t) {elem64};")
     # `for item in <d.items()>:` binds ONE var to the whole [key, value]
     # pair — record it (with the dict's value type) so `item.key` /
     # `item.value` in the body read the right slot with the right
@@ -3407,31 +3406,31 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 vn0 = var_names[0]
                 cvn0 = _slot_cnames[0]
                 vt0 = _slot_ctypes[0]
-                if gimple_ctypes.TypeLattice.is_int(vt0):
+                if vt0 in ('int64_t', 'int', 'int32_t'):
                     vp = gen._cast('void *', f"{key_tmp}")
                     box = gen._cast('int64_t', vp)
                     gen._copy(f"{cvn0}", f"{box}")
                 else:
-                    build.assign(gen, f'{cvn0}', f'(char *) {key_tmp}')
+                    gen._emit(f"  {cvn0} = (char *) {key_tmp};")
                 for _vi in range(1, len(var_names)):
                     vn = var_names[_vi]
                     cvn = _slot_cnames[_vi]
                     vt = _slot_ctypes[_vi]
-                    if gimple_ctypes.TypeLattice.is_int(vt):
+                    if vt in ('int64_t', 'int', 'int32_t'):
                         gen._cast_into(cvn, 'int64_t', '0')
                     elif gimple_ctypes.TypeLattice.ends_in_star(vt):
-                        build.assign(gen, f'{cvn}', f'({vt})0')
+                        gen._emit(f"  {cvn} = ({vt})0;")
                     else:
-                        build.assign(gen, f'{cvn}', f'(char *)0')
+                        gen._emit(f"  {cvn} = (char *)0;")
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
-        if gimple_ctypes.TypeLattice.is_int(vt):
+        if vt in ('int64_t', 'int', 'int32_t'):
             vp = gen._cast('void *', f"{key_tmp}")
             box = gen._cast('int64_t', vp)
             gen._copy(f"{cvar}", f"{box}")
         else:
-            build.assign(gen, f'{cvar}', f'(char *) {key_tmp}')
+            gen._emit(f"  {cvar} = (char *) {key_tmp};")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -3843,7 +3842,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
             _ptr_ctype = f"{gen._captures[_mn]} *"
             _ptr_var = f"_mutptr_{_mn}"
             gen._declare_var(_ptr_var, _ptr_ctype)
-            build.assign(gen, f'{_ptr_var}', f'{gen._env_param}->{gimple_ctypes._c_field_name(_mn)}')
+            gen._emit(f"  {_ptr_var} = {gen._env_param}->{gimple_ctypes._c_field_name(_mn)};")
             gen._gimple_mut_ptr[_mn] = _ptr_var
     for stmt in node.body:
         gen.gen_stmt(stmt)
@@ -3863,7 +3862,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
         f"{_sig_kw}{ret_type} {ci.lifted_name} ({params_str})",
         "{",
         *gen.decls,
-        *ginf.body_text(gen),
+        *gen.body_lines,
         "}",
     ]
     gen._captures  = {}
@@ -4378,8 +4377,8 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._declare_var(val_var, vct)
     cidx = gen._cname(idx_var); cval = gen._cname(val_var)
     ctr = gen._new_temp('int64_t')
-    build.assign(gen, ctr,
-                 f"{start_val}" if start_val is not None else '(int64_t)0')
+    gen._emit(f"  {ctr} = {start_val};" if start_val is not None
+              else f"  {ctr} = (int64_t)0;")
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb(); bb_check_exc = gen._new_bb()
     gen._goto(bb_cond)
@@ -4584,10 +4583,10 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         temp_top1 = gen._new_temp('int')
         temp_inc  = gen._new_temp('int')
         temp_top2 = gen._new_temp('int')
-        build.assign(gen, f'{temp_top1}', f'_mojo_exc_top')
+        gen._emit(f"  {temp_top1} = _mojo_exc_top;")
         gen._binop_into(temp_inc, temp_top1, '+', '1')
-        build.assign(gen, f'_mojo_exc_top', f'{temp_inc}')
-        build.assign(gen, f'{temp_top2}', f'_mojo_exc_top')
+        gen._emit(f"  _mojo_exc_top = {temp_inc};")
+        gen._emit(f"  {temp_top2} = _mojo_exc_top;")
         gen._rt_void('mojo_cleanup_checkpoint_save', [])
         gen._rt_into(sj_ret, 'setjmp', [f"_mojo_exc_stack[{temp_top2}]"])
         gen._binop_into(cond_t, sj_ret, '!=', '0')
@@ -4620,7 +4619,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         gimple_ctypes._debug_note('iterator loop has no __has_next__/__next__ (no expressible loop condition)', iter_base)
         gen._emit_unsupported_iter(f'{iter_base} (no __has_next__)', node)
         cond_t = gen._new_temp('_Bool')
-        build.assign(gen, f'{cond_t}', f'0')
+        gen._emit(f"  {cond_t} = 0;")
         gen._cond_goto(cond_t, bb_body, bb_after)
 
     gen._loop_depth += 1
@@ -4720,8 +4719,9 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                 if _acc is None:
                     gimple_ctypes._debug_note(
                         'multi-target loop slot ctype unlowered', _tc)
-                    build.comment(gen, f"/* multi-target loop: unsupported "
-                                       f"slot ctype {_tc} for target {_tn} */")
+                    gen._emit(
+                        f"  /* multi-target loop: unsupported slot ctype "
+                        f"{_tc} for target {_tn} */")
                     continue
                 _sv = gen._rt_call(_tc, f"{_acc}", [f"{_listptr}", f"{_i}"])
                 gen._copy(f"{gen._cname(_tn)}", f"{_sv}")
@@ -4729,7 +4729,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
             gen._copy(f"{gen._cname(var)}", nxt)
     else:
         gimple_ctypes._debug_note('iterator loop body has no __next__', iter_base)
-        build.comment(gen, f"/* TODO: no __next__ on {iter_base} */")
+        gen._emit(f"  /* TODO: no __next__ on {iter_base} */")
     gen.loop_stack.append((bb_post, bb_after))
     if use_raise_exhaustion:
         # A `break` out of this loop lowers to `goto <bb_after>;`, which

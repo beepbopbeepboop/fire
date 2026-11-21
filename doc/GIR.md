@@ -1,6 +1,6 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0, 1, 2a, 2b, 3a, 3b, 3c and 5a landed (2026-11-21). This file is the plan and the rules. Read it
+Status: stages 0, 1, 2a, 3a, 3b and 5a landed (2026-11-14). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
 How the remaining stages are being built with Sonnet/Haiku workers: `doc/GIR_WORKERS.md`.
 
@@ -64,7 +64,7 @@ Four layers, in `mojo/ir/`:
 | `instr.py` | `Ex` (operand), `Instr` (statement), `Function`, `Module`, `Sig`. Ten statement shapes cover 98% of today's emission | landed |
 | `verify.py` | type-checks a `Module`, returns `Finding`s with stable codes | landed |
 | `reader.py` | TRANSITIONAL. Parses emitted `.ci` text and `runtime/*.h` into a `Module`, so the verifier can check today's string backend | landed |
-| `build.py` | the builder the lowering code will call instead of `gen._emit(f"...")` | landed: `gen._emit` sites are 0; `raw` is the adapter for the rest |
+| `build.py` | the builder the lowering code will call instead of `gen._emit(f"...")` | stage 2 |
 
 Beside it, in `mojo/middle/`: `rt_sigs.py` (generated runtime signatures) and
 `rt_call.py` (which scalar arguments need a conversion statement).
@@ -191,50 +191,13 @@ that is meant to be behaviour-preserving:
   to the result type for arithmetic, to the wider operand for a comparison.
   `TEXT_BINOP_BASELINE` is 0: the last 16 text-spelled sites were rewritten on
   2026-11-14 and the baseline followed them down.
-- **Stage 2b (landed 2026-11-21). The builder.**
-  `mojo/ir/build.py`: `raw`, `copy`, `cast_into`, `assign`, `binop_into`,
-  `call_into`, `call_void`, `label`, `comment`, `cond_br`, `if_block`,
-  `else_if_block`, `else_block`, `end_block`, `if_call`. Each builds a typed
-  `Instr` and appends it to `gen.body_lines` through one chokepoint,
-  `build.append`, which applies the `#line` stamping rule the text emitter
-  used to apply AND clears `gen._last_was_terminal` (the text emitter did
-  that for every ordinary statement; a family that moved without it turned
-  the statement after a jump into a block terminator and dropped an emitted
-  `goto` — measured on `flow/15_try_finally_order.py`). `raw` is the adapter
-  for a statement no family has claimed yet and `_emit_raw` is its only
-  backend caller. Landed in two rounds: copies (`_copy`), casts
-  (`_cast_into`), arithmetic (`_binop_into`), runtime calls
-  (`_rt_call`/`_rt_into`/`_rt_void`), program calls (`_emit_call`'s three
-  result/void sites) and labels (`_emit_label`); then every remaining
-  `gen._emit` site — assignments of every destination spelling, comments,
-  the one- and two-armed conditional branch, if/else-if/else/end blocks and
-  the `if (c) f (...);` one-statement body — across `emit_calls`,
-  `emit_exprs`, `emit_methods`, `emit_stmts`, `emit_loops`, `emit_infra`,
-  `emit_funcs`, `emit_resolve` and `cpp_async`. `_rt_args` and
-  `_binop_text` gained a list-returning sibling (`_binop_operands`) so the
-  coercion stays where it is while the statement becomes a shape.
-  Byte-identical `.ci` on all 285 `tools/pydiff_corpus` programs against
-  master (`tools/c_oracle.py`). Ratchet: `test_type_string_ratchet.py`
-  counts `gen._emit(` / `self._emit(` (300 on 2026-11-20; 266 on
-  2026-11-21 before the first round; 245 under the corrected pattern, which
-  no longer counts `emit_metal.py`'s 21 `self._emit` calls — that file emits
-  Metal Shading Language and writes no gimple statement, so they could never
-  move and made the floor 21 instead of 0; 235 after the first round;
-  **0** now) and `build.raw(` (1: `_emit_raw`), so the adapter cannot become
-  the way around the first count. `test_gimple_lint.py`'s
-  `TEXT_ANY_CALL_BASELINE` fell 4 -> 1 (the one left is the Metal `for`, not
-  a gimple statement) and `TEXT_CF_BASELINE` 1 -> 0 (`_cond_goto` is
-  `build.cond_br` now).
-  Not 2b's: the cast expressions (`_new_val(T, f"(T2){x}")`, 418 on
-  2026-11-20, 41 on 2026-11-21) become `gen._cast(T, x)`; `load_field` /
-  `store_field` as named shapes (an assignment already models the statement,
-  and its operands are spellings until stage 4); `br` / `ret` as `Instr`s,
-  which needs `_emit_cf` to take an `Instr` instead of its statement text —
-  do that one alone; and the coercion (which operand needs a conversion)
-  moving in from `rt_call`/`_rt_args`/`_binop_operands`, which is the stage-4
-  boundary. The control-flow four stay text because `_emit_cf` is told the
-  statement KIND and rewrites exits for a `try`/`with` teardown; stage 3a's
-  paragraph below says why.
+- **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
+  `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
+  `label`. Each returns a typed value and appends an `Instr`.
+  `_rt_call`/`_emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
+  Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the count of
+  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them on 2026-11-20, 41 on 2026-11-21) are the next
+  mechanical batch: `gen._cast(T, x)`.
 - **Stage 3a (landed 2026-11-13). Exits are told, not recognised.**
   `_emit_cf` (`emit_infra.py`) replaces `_emit_through`. `gen._goto`,
   `gen._ret`, `gen._ret_void` hand it the KIND of statement and its label or
@@ -251,34 +214,14 @@ that is meant to be behaviour-preserving:
   CONSEQUENCE: a call with a result that is spelled as text
   (`gen._new_val(t, f"{fn} ({x})")`) is never marked fresh, so its result
   leaks. Use `gen._rt_call(t, fn, [x])` -- a computed callee name is fine.
-- **Stage 3c (landed 2026-11-21). Statements are `Instr`, not strings.**
-  `gen.body_lines` holds `Instr`; `Instr.line()` is the ONE rule that renders
-  a body entry (two spaces of indent for a modelled statement, verbatim for
-  'opaque', and a blank line then column 0 for a label), and the four
-  function-assembly sites spread `ginf.body_text(gen)`. A statement no
-  family has modelled yet is an 'opaque' `Instr`, so this landing changed no
-  output; what changed is that a statement's shape now travels with it
-  instead of being recovered from its text. `mojo/ir` is in the compiler's
-  own import closure now, which is what its rule 2 was written for.
+- **Stage 3c. Statements are `Instr`, not strings.** `gen.body_lines` becomes
+  a list of `Instr`; the four function-assembly sites print it.
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the
   counts of `.endswith(' *')` (344; 67 after the codemod), `== 'int64_t'` (404), `in (.., 'int64_t')`
   (312), `== 'char *'` (398; 159 after the 2026-11-20 codemod that turned 240 of them into `TypeLattice.is_cstr(x)`, byte-identical C on 284 programs), `== '_Bool'` (68; 23 after the codemod), `== 'double'` (187) and
   `== 'MojoList *'` (203) may only shrink.
-  *Measured 2026-11-21 after the stage-4 tail* (two rounds: the first added the representation-class
-  predicates — `is_dict`, `is_set`, `is_bytes`, `is_uword`, `is_char`, `is_voidp`, `is_boxable`,
-  `is_word_value`, `is_c_scalar`, `is_number_scalar` — and taught the codemod to emit a
-  disjunction of classes for a tuple that is a union of them; the second added the single-type
-  spellings the tail still needed — `is_str`, `is_span`, `is_u8`, `is_c_long`, `is_void`,
-  `is_cpp_bool`/`is_cpp_int_scalar` for the C++ emitter's `bool` — and the unsolved marker
-  `is_unsolved` (`''`/`'unknown'`) with its two word compositions, and took the tuple pattern to
-  **0**): `in (..)` 0, `== 'int64_t'` 54, `== 'char *'` 62, `endswith(' *')` 16, `== 'MojoList *'`
-  29, `== '_Bool'` 2, `== 'double'` 8, C byte-identical on all 285 `tools/pydiff_corpus` programs.
-  `python3 test_type_string_ratchet.py --per-file` is the per-file census;
-  `test_type_lattice_predicates.py` pins each predicate's exact membership and each codemod table
-  entry. The remaining `==` tests are the ones whose left side is an expression the codemod
-  deliberately does not accept; the tuple pattern can only shrink from here.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for
@@ -289,75 +232,42 @@ that is meant to be behaviour-preserving:
   This CHANGES generated code: 33 compiler modules compile differently
   (about 770 fewer statements; a boxed fallback read becomes a typed read
   where the element type is now known). Small programs are unchanged.
-  The six dynamic-word facts (`_boxed_vals`, `_dyn_word_vals`,
+  NOT carried yet: the six dynamic-word SETS (`_boxed_vals`, `_dyn_word_vals`,
   `_tagged_word_vals`, `_int_word_vals`, `_maybe_kinds_vals`,
-  `_boxed_container_vals`) joined it in stage 5b step 4 (below), which
-  carries `dyn` / `int_word` / `slot_kinds` / `boxed_container` across a copy,
-  turns a copied Box into a `DynWord` (the read-side half), and records why
-  the Box kind itself does not travel: its carry needs the bind-side
-  "needs boxing" fact to be split from the read-side "is a box".
-- **Stage 5b. One value-info record. LANDED 2026-11-21 (steps 1-4).**
-  The name-keyed tables are fields of one `ValueInfo` record per temp:
-  `kind` is `Int / Erased(T) / DynWord / Box / Plain` and three flags
-  (`Tagged`, `SlotKinds`, `BoxedContainer`) carry the facts that are not a
-  kind. `int64_t` therefore splits into
+  `_boxed_container_vals`). Carrying them was measured and changes far more
+  (it adds ~1,200 box/repr calls); each needs its own look.
+- **Stage 5b. One value-info record.** The name-keyed tables become fields
+  of one `ValueInfo` object per temp. `int64_t` splits into
   Int / Erased(T) / DynWord / Box in the value's info.
   *Measured 2026-11-20 (the guide for the next round).* The six
   dynamic-word sets, by uses / files / writers (`.add`, `.update`, `[x] =`):
   `_boxed_vals` 93/11/30, `_dyn_word_vals` 75/8/51, `_tagged_word_vals`
   61/7/19, `_int_word_vals` 46/7/9, `_maybe_kinds_vals` 84/11/33,
-  `_boxed_container_vals` 17/6/8: about 376 sites.
-  Plan, in order, each step byte-identical C on `tools/pydiff_corpus` except
-  step 4, which the plan allows to change C (hash
-  `compile_to_gimple_with_cpp` output before and after, review per program):
+  `_boxed_container_vals` 17/6/8: about 376 sites. Each is created in
+  `GimpleGen.__init__` AND again in `emit_infra.py` (lines near 248, 424, 509,
+  698), emptied per function (`.clear()` near 368, 549, 1296-1305), and saved
+  and restored across nested function bodies by `FuncState`
+  (`emit_infra.py` ~958-1310: an `fs_*` field and an `fs_*_items` copy for
+  each). Two of them (`_boxed_vals`, `_tagged_word_vals`) have the save code
+  written TWICE in `FuncState`; the rebinding is deliberate (a rebind in
+  `__init__` leaks under the self-hosted compiler), so do not "simplify" it.
+  Plan, in order, each step byte-identical C on `tools/pydiff_corpus` (hash
+  `compile_to_gimple_with_cpp` output before and after):
   1. (LANDED 2026-11-20, byte-identical on 284 programs) A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
      six sets and has `save()` / `restore(saved)`; `FuncState` keeps ONE
-     `fs_words` instead of twelve fields.
-   (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through the `gen._word_*` wrappers; `test_type_string_ratchet.py` counts the direct spelling, now 0. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
+     `fs_words` instead of twelve fields; the six `gen._x_vals` names stay
+     bound to the same set objects (assigned once at construction, `.clear()`
+     per function), so no reader changes.
+  (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through `gen._words`; `test_type_string_ratchet.py` counts the direct spelling, baseline 10 = the six `bind` lines and docs. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
   2. Add read predicates on it (`words.may_be_box(name)`, `words.is_tagged(name)`,
      `words.is_dyn(name)`, `words.is_int_word(name)`) and move the ~200 readers
      (`x in gen._boxed_vals`) onto them by codemod, as the type-string codemods
      did. Ratchet: a text count of `gen._boxed_vals` etc. may only shrink.
   3. Add writers (`words.mark_tagged(name)` ...) and move the ~150 writers.
-  4. (LANDED 2026-11-21) The storage is one `ValueInfo` record per temp,
-     holding the `Int / Erased(T) / DynWord / Box` kind and the three flags the
-     old sets spelled (`Tagged`, `SlotKinds`, `BoxedContainer`); the six
-     historical sets are derived READ-ONLY views (`WordFacts.boxed`, ...).
-     Two consequences a single kind forces, each measured over the 285 corpus
-     programs (`compile_to_gimple_with_cpp` output, before vs after) and
-     reviewed per program:
-     * `is_dyn` is true for a Box (a box is a word whose kind only the runtime
-       knows). 9 programs change C and NONE changes its CPython verdict (all 9
-       were already WRONG/CRASH): 4 print a boxed word through
-       `mojo_cstr_or_int_str` instead of `mojo_repr_boxed`, 4 ask
-       `mojo_truthy_word` instead of comparing the box against 0 (the correct
-       truthiness for a `False` box), and one stops folding an `isinstance`
-       over a word of runtime-known kind. Only 2 of the 9 change their stdout
-       at all, and in both the old and the new output is an address where
-       CPython prints a value — the programs were wrong before too. A Box may
-       also be a CONTAINER pointer (`mojo_list_get_boxed` hands one back), so
-       a lowering that asks `is_dyn` takes the runtime-word path there instead
-       of the typed-pointer one (e.g. an `or` merge of a boxed container
-       becomes an `int64_t` iterated through the runtime's kind dispatch).
-       That is safe (`mojo_truthy_word` handles registered lists/dicts/sets and
-       `mojo_cstr_or_int_str` renders boxes by kind), just less precise; the
-       bind/read split in the next item is where it gets refined.
-     * `Box` still does not travel AS a Box, and that is recorded, not
-       pending: a copy gets the READ-side half as `DynWord` (the runtime
-       decides the kind) but not the BIND-side one, and `Tagged` stays with
-       the Box kind. Carrying the Box kind for real makes
-       `mojo/middle/infra_infer.py` — a self-host-closure module — refuse to
-       compile (`_pn2 = _chosen.get('param_names') or []`: the `or` merge's
-       dict-get arm is tagged and the merge temp is stored into a
-       `MojoList *` local), because the bind path reads the value's tag as a
-       decision about the NAME's representation. Splitting the read-side
-       "kind is a runtime fact" from the bind-side "this name holds a box"
-       is the next step; `carry`'s docstring carries the full measurement and
-       `bugs/GIR_stage5b_box_carry_needs_the_bind_fact_split.md` is the work
-       doc.
-     `test_gimple.py`'s `test_word_facts_one_record_per_temp` pins the record,
-     the read-only views and the carry boundary; `test_gimple_runner.py`'s
-     `test_copy_of_a_dynamic_word_keeps_it` pins the copied dynamic word.
+  4. Only then change the storage to one `ValueInfo` per temp and give it the
+     `Int / Erased(T) / DynWord / Box` kind; that step is allowed to change C
+     (it is the one that carries the sets across copies, +~1,200 box/repr
+     calls measured), and must be landed alone with its own diff review.
 - **Stage 5c. Optional values (measured 2026-11-20; first slice landed).**
   Why the split in 5b matters, measured on `tools/pydiff_corpus`: of 240
   programs only 60 matched CPython, and the largest single cause (about a

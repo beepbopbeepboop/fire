@@ -96,8 +96,8 @@ class ReportText(unittest.TestCase):
         e.setdefault("first_bad", "S2")
         return G.report_text(job, e, "S3" * 4, "verify-S3.log", lambda s: "subject")
 
-    def test_a_marked_job_names_its_disabled_marker(self):
-        self.assertIn("disabled='%s'" % _doc("gate-gimple"), self.text("gimple", registered=True, marked=True))
+    def test_a_registered_job_names_its_disabled_marker(self):
+        self.assertIn("disabled='%s'" % _doc("gate-gimple"), self.text("gimple", registered=True))
 
     def test_a_fanout_item_says_there_is_no_marker_and_names_the_parent(self):
         t = self.text("dumps:x.mojo", registered=False)
@@ -105,21 +105,8 @@ class ReportText(unittest.TestCase):
         self.assertIn("one item of the `dumps` fanout", t)
         self.assertIn("no registration of its own", t)
 
-    def test_a_registration_the_splice_could_not_mark_does_not_claim_a_marker(self):
-        """`set_marker` writes nothing when the registration already carries an
-        `expect=`/`disabled=` marker somebody wrote, so `marked` is False while the
-        job IS registered: the doc must not claim a switch the splice never wrote.
-        Stating the produced marker state, not the registration's existence, is the
-        root cause of the 2026-11-21 fifty-doc cascade's false paragraph."""
-        t = self.text("gamma", registered=True, marked=False)
-        self.assertNotIn("disabled='", t)
-        self.assertIn("No marker", t)
-        self.assertIn("RUNS this job", t)
-
-    def test_an_unrecorded_marker_state_is_not_a_claim(self):
-        # No `marked` recorded: the ledger does not know a marker was written, so
-        # the doc may not tell a fixer to remove one.
-        self.assertNotIn("disabled='", self.text("gimple", registered=True))
+    def test_an_unrecorded_registration_state_keeps_the_registered_wording(self):
+        self.assertIn("disabled='", self.text("gimple"))
 
     def test_registered_tells_a_fanout_item_from_its_parent(self):
         self.assertTrue(G.registered(SRC, "eps"))
@@ -129,28 +116,13 @@ class ReportText(unittest.TestCase):
 class Ledger(unittest.TestCase):
     def test_a_new_red_takes_the_previous_run_as_last_good(self):
         st = {}
-        new, rec = G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [], "passed": ["j"]})
+        new, rec = G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": []})
         self.assertEqual(new, ["j"])
         self.assertEqual(st["jobs"]["j"]["last_good"], "S1")
 
-    def test_a_job_that_did_not_run_in_the_previous_run_has_no_last_good(self):
-        """A SKIP is in neither `failed` nor `passed`, and absence from FAILED is not a pass. Reading it as one gave
-        all fifty `bootstrap-stage2-dumps:<item>` entries the same `last_good` from a run whose own log skipped them
-        and whose producer was red at that very sha (2026-11-21)."""
-        st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [], "passed": ["other"]})
-        self.assertIsNone(st["jobs"]["j"]["last_good"])
-        self.assertIn("did not report this job green", st["jobs"]["j"]["bisect_note"])
-
-    def test_a_previous_run_with_no_passed_set_is_not_evidence(self):
-        # A verify.json written before `passed` was recorded cannot say the job was green.
-        st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": []})
-        self.assertIsNone(st["jobs"]["j"]["last_good"])
-
     def test_a_job_red_in_the_previous_run_has_no_known_good(self):
         st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": ["j"], "passed": []})
+        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": ["j"]})
         self.assertIsNone(st["jobs"]["j"]["last_good"])
 
     def test_still_red_is_not_new_and_keeps_its_history(self):

@@ -15,18 +15,15 @@ import json
 import os
 import sys
 import tempfile
-import time
 import unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import autointegrate as A
 import control as C
 import integrate as I
 import probe_triage as PT
 import swarm as S
-import verify_landed as V
 
 
 class ProbeVerdicts(unittest.TestCase):
@@ -186,134 +183,6 @@ class ProbeAlwaysReports(unittest.TestCase):
         code, printed = self.run_probe(lambda: sys.exit(1))
         self.assertEqual(code, 1)
         self.assertNotIn("PROBE ERROR", printed)
-
-
-class SuiteVerdicts(unittest.TestCase):
-    """The runner's own per-job verdict line is the evidence; a process exit code is not.
-
-    `[ i/n] ok <job>` / `skip` / `FAIL` is what suite.py records about each job (`_TAG`), and the PER-TEST row
-    `ok <registration> N job(s)` is the worst item's status for a fanout. Reading `rc == 0` as "right track" scored a
-    selection that SKIPped behind a disabled dep as green, and reading `rc != 0` as "red" made a fanout ITEM name
-    (rejected at every commit) red at every commit: one red producer's cascade produced fifty phantom bisections.
-    """
-
-    def tree(self, text):
-        d = tempfile.mkdtemp()
-        os.makedirs(os.path.join(d, "build"))
-        p = os.path.join(d, "build", "suite.log")
-        open(p, "w").write(text)
-        return d, p
-
-    LOG = ("[  1/4] ok       gimple                                     1.0s\n"
-           "[  2/4] ok       bootstrap-stage2-dumps:a.mojo              0.0s\n"
-           "[  3/4] skip     bootstrap-stage2-dumps:class_jit.mojo     0.0s\n"
-           "[  4/4] FAIL     runner                                     0.5s\n"
-           "testing:\n"
-           "  ok       gimple                           1 job(s)\n"
-           "      ok       gimple                           1.0s\n"
-           "  skip     bootstrap-stage2-dumps           45 job(s)\n"
-           "      ok       bootstrap-stage2-dumps:a.mojo             0.0s\n"
-           "      skip     bootstrap-stage2-dumps:class_jit.mojo     0.0s\n"
-           "  FAIL     runner                           1 job(s)\n"
-           "      FAIL     runner                           0.5s\n")
-
-    def test_pass_skip_and_fail_are_three_different_answers(self):
-        _d, p = self.tree(self.LOG)
-        self.assertEqual(I.job_verdict(p, "gimple"), "green")
-        self.assertEqual(I.job_verdict(p, "bootstrap-stage2-dumps:class_jit.mojo"), "no-evidence")
-        self.assertEqual(I.job_verdict(p, "runner"), "red")
-
-    def test_a_registration_is_answered_by_its_own_row_not_one_of_its_items(self):
-        _d, p = self.tree(self.LOG)
-        self.assertEqual(I.job_verdict(p, "bootstrap-stage2-dumps"), "no-evidence")
-        self.assertEqual(I.job_verdict(p, "bootstrap-stage2-dumps:a.mojo"), "green")
-
-    def test_a_name_the_runner_never_saw_has_no_evidence(self):
-        _d, p = self.tree(self.LOG)
-        self.assertEqual(I.job_verdict(p, "bootstrap-stage2-dumps:not_selected.mojo"), "no-evidence")
-
-    def test_a_log_older_than_the_run_is_not_evidence(self):
-        # A run that died before the runner started leaves the PREVIOUS run's log in place; `since` refuses it.
-        _d, p = self.tree(self.LOG)
-        old = time.time() - 60
-        os.utime(p, (old, old))
-        self.assertEqual(I.job_verdict(p, "gimple", since=time.time()), "no-evidence")
-
-    def test_passed_jobs_reads_the_runners_ok_tag_and_only_registrations(self):
-        d, _p = self.tree(self.LOG)
-        self.assertEqual(V.passed_jobs(d), ["gimple"])
-
-
-class ProbeNeedsEvidence(unittest.TestCase):
-    """`autointegrate.probe` answers green / red / no-evidence from the run's own verdict lines, never its exit code."""
-
-    def probe(self, body, rc=0):
-        d = tempfile.mkdtemp()
-        os.makedirs(os.path.join(d, "build"))
-
-        def run(*a, **k):
-            if body is not None:
-                open(os.path.join(d, "build", "suite.log"), "w").write(body)
-            return rc, "--jobs run finished"
-
-        with mock.patch.object(A, "run_integrate", side_effect=run), \
-                mock.patch.object(A.I, "INTEG", d):
-            return A.probe(["bug-a"], ["gimple"])
-
-    def test_a_pass_is_the_right_track(self):
-        self.assertEqual(self.probe("[  1/1] ok       gimple                           0.0s\n"), "green")
-
-    def test_a_skip_behind_a_disabled_dep_is_no_evidence_even_though_it_exits_0(self):
-        # THE regression: the selection SKIPs and exits 0, which used to be scored "right track" for a job that never ran.
-        self.assertEqual(self.probe("[  1/1] skip     gimple   0.0s\n", rc=0), "no-evidence")
-
-    def test_a_failing_verdict_is_the_wrong_track(self):
-        self.assertEqual(self.probe("[  1/1] FAIL     gimple   0.1s\n", rc=1), "red")
-
-    def test_a_pass_verdict_in_a_run_that_did_not_finish_cleanly_is_not_evidence(self):
-        # A non-zero run with every requested job `ok` is a run that reported something else wrong (the tally, a
-        # resource cap after the jobs): it is not evidence that the jobs pass the way a landing gate needs.
-        self.assertEqual(self.probe("[  1/1] ok       gimple   0.0s\n", rc=1), "no-evidence")
-
-    def test_a_run_that_never_reached_the_suite_is_not_evidence(self):
-        # integrate.py can refuse before the runner starts; the previous run's ok line must not answer for this one.
-        d = tempfile.mkdtemp()
-        os.makedirs(os.path.join(d, "build"))
-        p = os.path.join(d, "build", "suite.log")
-        open(p, "w").write("[  1/1] ok       gimple                           0.0s\n")
-        old = time.time() - 60
-        os.utime(p, (old, old))
-        with mock.patch.object(A, "run_integrate", return_value=(0, "PROBE REFUSED: nothing to check")), \
-                mock.patch.object(A.I, "INTEG", d):
-            self.assertEqual(A.probe(["bug-a"], ["gimple"]), "no-evidence")
-
-    def test_a_bisect_with_no_evidence_names_no_branch(self):
-        with mock.patch.object(A, "probe", return_value="no-evidence"):
-            self.assertIsNone(A.bisect_first_bad(["a", "b", "c", "d"], ["gimple"]))
-
-    def test_a_bisect_still_finds_the_branch_when_every_probe_answers(self):
-        with mock.patch.object(A, "probe", side_effect=["green", "red"]):
-            self.assertEqual(A.bisect_first_bad(["a", "b", "c", "d"], ["gimple"]), 2)
-
-
-class BisectStopsWithoutEvidence(unittest.TestCase):
-    """verify_landed's bisect asks the suite for each commit's verdict; a commit where the job did not run has no
-    answer, so the bisect stops with a note instead of picking the first commit in the range as "first bad"."""
-
-    def test_no_evidence_names_no_first_bad(self):
-        e = {"last_good": "S1"}
-        with mock.patch.object(V, "job_is_red_at", return_value="no-evidence"), \
-                mock.patch.object(V.G, "commits_between", return_value=["c1", "c2"]):
-            V.bisect_job("bootstrap-stage2-dumps:class_jit.mojo", e, "S2")
-        self.assertIsNone(e["first_bad"])
-        self.assertIn("job did not run at c1; cannot bisect", e["bisect_note"])
-
-    def test_a_red_probe_still_bisects(self):
-        e = {"last_good": "S1"}
-        with mock.patch.object(V, "job_is_red_at", side_effect=lambda j, c: "red" if c >= "c2" else "green"), \
-                mock.patch.object(V.G, "commits_between", return_value=["c1", "c2", "c3"]):
-            V.bisect_job("j", e, "S3")
-        self.assertEqual(e["first_bad"], "c2")
 
 
 if __name__ == "__main__":

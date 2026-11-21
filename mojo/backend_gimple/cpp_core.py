@@ -460,7 +460,7 @@ def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
         casted = []
         for i, a in enumerate(out):
             pt = expected[i + 1]
-            if (gimple_ctypes.TypeLattice.is_c_scalar(pt)
+            if (pt in ('int64_t', 'int', 'double', '_Bool', 'char *')
                     or (isinstance(pt, str) and gimple_ctypes.TypeLattice.ends_in_star(pt))):
                 casted.append(f"({pt})({a})")
             else:
@@ -771,7 +771,7 @@ def _cpp_receiver_ctype(gen, e):
             _root_ct = declared.get(_root.name)
         elif isinstance(_root, gimple_ctypes.MemberExpr):
             _root_ct = _cpp_receiver_ctype(gen, _root)
-        if _root_ct is None or gimple_ctypes.TypeLattice.is_word_or_cstr(_root_ct):
+        if _root_ct in ('char *', 'int64_t', None):
             return 'char *'
         return None
     if isinstance(e, gimple_ctypes.MemberExpr):
@@ -1627,7 +1627,7 @@ def _cpp_expr_static_ctype(gen, e):
             or gen._cpp_struct_ptr_local(e.func.obj.name)
         if _rs and e.func.member in gen._struct_method_names.get(_rs, ()):
             _rt = gen.func_return_types.get(gen._struct_method_csym(_rs, e.func.member, ''))
-            if (gimple_ctypes.TypeLattice.is_word_value(_rt) or gimple_ctypes.TypeLattice.is_bool(_rt)):
+            if _rt in ('char *', 'int64_t', '_Bool', 'MojoList *', 'MojoDict *', 'MojoSet *'):
                 return _rt
     if isinstance(e, gimple_ctypes.CallExpr) and isinstance(e.func, gimple_ctypes.MemberExpr):
         if e.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
@@ -1673,8 +1673,8 @@ def _cpp_expr_static_ctype(gen, e):
             _struct_name = gen._cpp_struct_ptr_local(_obj_name)
         if _struct_name:
             _ft = gen.struct_field_types.get(_struct_name, {}).get(e.member)
-            if (gimple_ctypes.TypeLattice.is_word_value(_ft)
-                    or gimple_ctypes.TypeLattice.is_double(_ft)):
+            if _ft in ('char *', 'int64_t', 'double', '_Bool', 'MojoList *',
+                       'MojoDict *', 'MojoSet *'):
                 return _ft
         # A module-level CONSTANT read as a value (`os.linesep`) — the same
         # real field read `_cpp_expr`'s MemberExpr case now emits, and the
@@ -1971,7 +1971,7 @@ def _cpp_assign_cast_type(gen, val):
     if _m:
         _t = _m.group(1).strip()
         _t = _t.replace('MojoSet*', 'MojoSet *')
-        return _t if gimple_ctypes.TypeLattice.is_word_value(_t) else None
+        return _t if _t in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'int64_t') else None
     # runtime string / list producers, by the name the emitted text starts with
     _m = re.match(r'(mojo_[a-z0-9_]+)\(', val)
     if _m and _m.group(1) in _CPP_RT_RETURN_CTYPE:
@@ -1987,7 +1987,7 @@ def _cpp_assign_cast_type(gen, val):
     if _m:
         _t = (gen.func_return_types.get(_m.group(1))
               or gen.func_return_types.get(gen._func_csym(_m.group(1))))
-        return _t if gimple_ctypes.TypeLattice.is_word_value(_t) else None
+        return _t if _t in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'int64_t') else None
     return None
 
 
@@ -2094,7 +2094,7 @@ def _cpp_dyn_call_expr(gen, e):
     float register. A `*x` / `**x` spread cannot be a double."""
     if not (isinstance(e.func, gimple_ctypes.IdentExpr)
             and gen._cpp_declared is not None
-            and gimple_ctypes.TypeLattice.is_word_or_cstr(gen._cpp_declared.get(e.func.name))
+            and gen._cpp_declared.get(e.func.name) in ('int64_t', 'char *')
             and (e.func.name in getattr(gen, '_cpp_param_names', ())
                  or e.func.name in getattr(gen, '_cpp_word_locals', ())
                  or e.func.name in getattr(gen, '_cpp_unpacked_call_words', ()))):
@@ -2125,7 +2125,7 @@ def _cpp_dyn_call_expr(gen, e):
         if gimple_ctypes.TypeLattice.is_double(_fct) and not _spread:
             parts.append(f"mojo_list_append_double_kinded(_a, (double)({gen._cpp_expr(_op)}), 'i'); ")
             continue
-        if not gimple_ctypes.TypeLattice.is_word_value(_fct):
+        if _fct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
             try:
                 gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator callable-valued parameter {_fname!r} bad arg type {_fct!r}')
             except Exception:
@@ -2162,7 +2162,7 @@ def _cpp_dyn_call_expr(gen, e):
             parts.append(f'mojo_dict_set_double(_k, (char *)"{_kn}", '
                          f"(double)({gen._cpp_expr(_kv)})); ")
             continue
-        if not gimple_ctypes.TypeLattice.is_word_value(_kct):
+        if _kct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
             try:
                 gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator callable-valued parameter {_fname!r} bad kwarg type {_kct!r}')
             except Exception:
@@ -2509,7 +2509,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
         _at = arg_ctypes[_i]
         if isinstance(_pt, str) and gimple_ctypes.TypeLattice.ends_in_star(_pt):
             cargs.append(f"({_pt})({_ae})")
-        elif (isinstance(_pt, str) and gimple_ctypes.TypeLattice.is_number_scalar(_pt)
+        elif (isinstance(_pt, str) and _pt in ('int64_t', 'int', '_Bool', 'double')
               and isinstance(_at, str) and gimple_ctypes.TypeLattice.ends_in_star(_at)):
             # A pointer value into a scalar parameter: the callee's own C
             # entry point declares a word (`_iter_significant_lines(infile)`
@@ -2770,11 +2770,11 @@ def _cpp_tagged_next_api(gen, expr):
 
 def _cpp_mark_tagged_word(gen, name: str):
     """Record `name` as a local that holds a TAGGED word (see
-    `_cpp_is_tagged_word_expr`). The set is declared in `GimpleGen.__init__`
-    rather than created on first use: the generator unit initialises it, but
-    the for-loop emitter also runs inside async bodies, and a lazy
-    `if not hasattr(...)` initialiser never runs in the compiled compiler
-    (the field exists and is NULL there — see `GimpleGen.__init__`)."""
+    `_cpp_is_tagged_word_expr`). The set is created on demand: the generator
+    unit initialises it, but the for-loop emitter also runs inside async
+    bodies, which do not."""
+    if not hasattr(gen, '_cpp_tagged_word_names'):
+        gen._cpp_tagged_word_names = set()
     gen._cpp_tagged_word_names.add(name)
 
 
@@ -3347,7 +3347,7 @@ def _cpp_expr(gen, e) -> str:
                 # reads from, rather than inventing a second one.
                 gen._cpp_param_struct_names.add(outer_ft[:-2])
                 return f"(({outer_ft})(self->{gimple_ctypes._safe_field(e.obj.member)}))->{gimple_ctypes._safe_field(e.member)}"
-            if gimple_ctypes.TypeLattice.is_c_scalar(outer_ft):
+            if outer_ft in ('int', 'int64_t', 'double', '_Bool', 'char *'):
                 # An attribute read on an OPAQUE scalar-typed self-field
                 # (`self.parser.sep`, where `parser = os.path` — a
                 # module object this codegen stores as an opaque int —
@@ -3474,7 +3474,8 @@ def _cpp_expr(gen, e) -> str:
             _chain_root = _chain_root.obj
         if isinstance(_chain_root, gimple_ctypes.IdentExpr) \
                 and gen._cpp_declared is not None \
-                and gimple_ctypes.TypeLattice.is_number_scalar(gen._cpp_declared.get(_chain_root.name)):
+                and gen._cpp_declared.get(_chain_root.name) in (
+                    'int', 'int64_t', 'double', '_Bool'):
             # A member read off a WORD (an object whose class the body cannot name: an
             # element drained from another generator, a dynamic-class instance): ask the run
             # time - every module registers its struct reflection with `mojo_getattr_any`.
@@ -4170,7 +4171,7 @@ def _cpp_expr(gen, e) -> str:
                     _arg_is_word = False
                     if isinstance(_arg_node, gimple_ctypes.IdentExpr):
                         decl = getattr(gen, '_cpp_declared', None) or {}
-                        if gimple_ctypes.TypeLattice.is_word_or_bytes(decl.get(_arg_node.name)):
+                        if decl.get(_arg_node.name) in ('int64_t', 'MojoBytes *'):
                             _arg_is_word = True
                     if _arg_is_word:
                         return f"mojo_os_path_split_w({a[0]})"
@@ -4651,7 +4652,7 @@ def _cpp_expr(gen, e) -> str:
                     _act = _cpp_expr_static_ctype(gen, _fa)
                     if _act is None:
                         _act = _cpp_receiver_ctype(gen, _fa)
-                    if (gimple_ctypes.TypeLattice.is_int_word_or_bool(_act) or gimple_ctypes.TypeLattice.is_char(_act)):
+                    if _act in ('int64_t', '_Bool', 'int', 'char'):
                         _fmt_args.append(f"mojo_list_append_int(_fmt_l, (int64_t)({gen._cpp_expr(_fa)})); ")
                     elif gimple_ctypes.TypeLattice.is_cstr(_act):
                         _fmt_args.append(f"mojo_list_append_str(_fmt_l, (char *)({gen._cpp_expr(_fa)})); ")
@@ -4873,7 +4874,8 @@ def _cpp_expr(gen, e) -> str:
             # keep their real lowerings.
             if isinstance(e.func.obj, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared is not None \
-                    and gimple_ctypes.TypeLattice.is_number_scalar(gen._cpp_declared.get(e.func.obj.name)):
+                    and gen._cpp_declared.get(e.func.obj.name) in (
+                        'int', 'int64_t', 'double', '_Bool'):
                 gimple_ctypes._debug_note('stubbed operation',
                             f'generator-body method call on opaque scalar '
                             f'local {e.func.obj.name}.{e.func.member}()')
@@ -5000,7 +5002,7 @@ def _cpp_expr(gen, e) -> str:
                         fn_return_types=_cpp_trusted_fn_return_types(gen))
                 except Exception:
                     _sct = None
-                if gimple_ctypes.TypeLattice.is_cpp_int_scalar(_sct):
+                if _sct in ('int64_t', '_Bool', 'bool', 'int'):
                     return f"mojo_str_from_int((int64_t)({args[0]}))"
                 if gimple_ctypes.TypeLattice.is_double(_sct):
                     return f"mojo_repr_float((double)({args[0]}))"
@@ -5169,7 +5171,7 @@ def _cpp_expr(gen, e) -> str:
                         else:
                             _fmts.append('1')
                     elif (_obj_ct is not None
-                          and not (gimple_ctypes.TypeLattice.is_word(_obj_ct) or gimple_ctypes.TypeLattice.is_voidp(_obj_ct))):
+                          and _obj_ct not in ('int64_t', 'void *')):
                         _fmts.append('0')
                     elif _obj_ct in ('char *', 'MojoStr *', 'MojoList *'):
                         # Static pointer ctype that does NOT match the
@@ -5654,7 +5656,8 @@ def _cpp_expr(gen, e) -> str:
             if (fname == 'callable' and len(e.args) == 1
                     and isinstance(e.args[0], gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
-                    and gimple_ctypes.TypeLattice.is_word_or_cstr(gen._cpp_declared.get(e.args[0].name))
+                    and gen._cpp_declared.get(e.args[0].name) in (
+                        'int64_t', 'char *')
                     and e.args[0].name in getattr(gen, '_cpp_param_names', ())):
                 # A parameter holding a word: ask the runtime (see
                 # `mojo_is_callable_word`) instead of the always-true stub
@@ -5914,7 +5917,7 @@ def _cpp_expr(gen, e) -> str:
                             fn_return_types=_cpp_trusted_fn_return_types(gen),
                             module_global_types=getattr(
                                 gen, '_cpp_module_global_ctypes', None))
-                        if gimple_ctypes.TypeLattice.is_cpp_int_scalar(_act):
+                        if _act in ('int64_t', 'int', '_Bool', 'bool'):
                             _pack_stmts.append(
                                 f"mojo_list_append_int({_listvar}, "
                                 f"(int64_t)({args[_i]}));")
@@ -6191,10 +6194,8 @@ def _cpp_expr(gen, e) -> str:
                         elif isinstance(expected_pt, str) and expected_pt.endswith('*'):
                             arg_exprs.append(f"({expected_pt})({ae})")
                             continue
-                        elif gimple_ctypes.TypeLattice.is_cpp_int_scalar(expected_pt):
-                            if (gimple_ctypes.TypeLattice.is_bool(actype)
-                                    or gimple_ctypes.TypeLattice.is_bool(expected_pt)
-                                    or gimple_ctypes.TypeLattice.is_cpp_bool(expected_pt)):
+                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
+                            if gimple_ctypes.TypeLattice.is_bool(actype) or expected_pt in ('_Bool', 'bool'):
                                 arg_exprs.append(f"(int64_t)({ae})")
                             elif isinstance(actype, str) and actype.endswith('*'):
                                 # pointer argument into an int64 slot: word-pack
@@ -6207,7 +6208,7 @@ def _cpp_expr(gen, e) -> str:
                             continue
                     # Fallback to old behavior: int/bool args, plus any
                     # pointer-shaped arg passed as an int64_t word.
-                    if (not gimple_ctypes.TypeLattice.is_c_scalar(actype)
+                    if (actype not in ('int64_t', 'int', '_Bool', 'char *', 'double')
                             and not (isinstance(actype, str) and actype.endswith('*'))):
                         raise gimple_exprtypes._UnsupportedGeneratorShape(
                             f"calling the closure returned by '{factory_name}': "
@@ -7444,7 +7445,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if gimple_exprtypes._is_asyncio_sleep_call(target):
                 self_fields = getattr(gen, '_cpp_gen_self_fields', None)
                 arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(target.args[0], declared, self_fields)
-                if not (gimple_ctypes.TypeLattice.is_word(arg_ctype) or gimple_ctypes.TypeLattice.is_double(arg_ctype)):
+                if arg_ctype not in ('int64_t', 'double'):
                     raise gimple_exprtypes._UnsupportedAsyncShape(
                         "asyncio.sleep()'s argument must be a scalar "
                         "int64_t/double seconds expression")
@@ -7611,8 +7612,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # each of its four `wrapper` closures. `declared[name] ==
         # 'int64_t'` is this coroutine sub-compiler's own convention for
         # an opaque callable pointer (mirrors the ordinary, non-async
-        # GIMPLE path's identical `is_int_word_or_bool(_fname_var_ctype)
-        # or is_voidp(_fname_var_ctype)` guard in _lower_call/_gen_stmt_ExprStmt —
+        # GIMPLE path's identical `_fname_var_ctype in ('int', 'int64_t',
+        # 'void *', '_Bool')` guard in _lower_call/_gen_stmt_ExprStmt —
         # see _lower_fnptr_call). Uses the SAME mojo_fnptr_call_N()
         # runtime helper (declared `static inline` in fire_runtime.h,
         # which this .cpp translation unit already #includes) rather
@@ -7660,10 +7661,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         elif isinstance(expected_pt, str) and gimple_ctypes.TypeLattice.ends_in_star(expected_pt):
                             arg_exprs.append(f"({expected_pt})({ae})")
                             continue
-                        elif gimple_ctypes.TypeLattice.is_cpp_int_scalar(expected_pt):
-                            if (gimple_ctypes.TypeLattice.is_bool(actype)
-                                    or gimple_ctypes.TypeLattice.is_bool(expected_pt)
-                                    or gimple_ctypes.TypeLattice.is_cpp_bool(expected_pt)):
+                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
+                            if gimple_ctypes.TypeLattice.is_bool(actype) or expected_pt in ('_Bool', 'bool'):
                                 arg_exprs.append(f"(int64_t)({ae})")
                             elif gimple_ctypes.TypeLattice.is_cstr(actype):
                                 arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
@@ -7675,7 +7674,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         else:
                             arg_exprs.append(f"({expected_pt})({ae})")
                             continue
-                    if not gimple_ctypes.TypeLattice.is_c_scalar(actype):
+                    if actype not in ('int64_t', 'int', 'double', '_Bool', 'char *'):
                         raise gimple_exprtypes._UnsupportedAsyncShape(
                             f"calling captured function '{fname}': argument "
                             "must be a scalar int64_t/double/_Bool/char* expression")
@@ -7925,6 +7924,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         # then `render()`), so a call through it is a dynamic call.
                         # A set of its own, read only by `_cpp_dyn_call_expr`, so
                         # nothing else that keys on `_cpp_word_locals` changes.
+                        if not hasattr(gen, '_cpp_unpacked_call_words'):
+                            gen._cpp_unpacked_call_words = set()
                         gen._cpp_unpacked_call_words.add(el.name)
                     if _tup_is_list_val:
                         # Read each slot with the accessor the TARGET's
@@ -8160,7 +8161,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     and isinstance(s.target.obj, gimple_ctypes.IdentExpr)):
                 obj_ct = (gen._cpp_declared.get(s.target.obj.name)
                           if gen._cpp_declared is not None else None)
-                if not (obj_ct is None or gimple_ctypes.TypeLattice.is_word_or_list(obj_ct)):
+                if obj_ct not in (None, 'MojoList *', 'int64_t'):
                     raise gimple_exprtypes._UnsupportedGeneratorShape(
                         "full-slice assignment target's declared type "
                         f"({obj_ct!r}) is not a list")
@@ -8321,6 +8322,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 _wl = _cpp_lambda_word_expr(gen, s.value)
                 if _wl is not None:
                     ctype = 'int64_t'
+                    if not hasattr(gen, '_cpp_word_locals'):
+                        gen._cpp_word_locals = set()
                     gen._cpp_word_locals.add(name)
                     val = _wl
             elif gen._cpp_is_callable_value_expr(s.value):
@@ -8353,6 +8356,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # `mojo_dyn_call` (see `_cpp_dyn_call_expr`) like a call through a
                 # callable parameter, not an "unresolved callee".
                 ctype = 'int64_t'
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(name)
             elif (name == 'fix_row'
                     or (isinstance(s.value, gimple_ctypes.CallExpr)
@@ -8362,15 +8367,19 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # (a closure) whose value is an opaque word; treat it as a
                 # callable local so calls through it lower via mojo_dyn_call.
                 ctype = 'int64_t'
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(name)
             elif (isinstance(s.value, gimple_ctypes.CallExpr)
                     and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                     and s.value.func.name in getattr(gen, '_cpp_param_names', ())
-                    and gimple_ctypes.TypeLattice.is_word_or_cstr(declared.get(s.value.func.name))):
+                    and declared.get(s.value.func.name) in ('int64_t', 'char *')):
                 # The result of a call through a callable PARAMETER is an
                 # UNSOLVED word (see `_cpp_dyn_call_expr`): the local that
                 # holds it is a word too, never a guessed string.
                 ctype = 'int64_t'
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(name)
             elif _cpp_exc_ctor_value(gen, s.value):
                 # `e = ValueError('boom')` — `_cpp_expr` lowers the RHS to
@@ -8498,7 +8507,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # container and string in this model is one pointer-sized word.
         _decl_t = declared.get(name)
         if (isinstance(val, str) and val.startswith('@@CSYM:')
-                and gimple_ctypes.TypeLattice.is_word_value(_decl_t)):
+                and _decl_t in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *')):
             return [f"{indent}{cpp_name} = _mj_w({val});"]
         _acast = _cpp_assign_cast_type(gen, val)
         if (_acast is None and isinstance(s.value, gimple_ctypes.IdentExpr)
@@ -8507,7 +8516,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             _vt0 = gen._cpp_declared.get(s.value.name)
             if _vt0 in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
                 _acast = _vt0
-        if (_acast is not None and gimple_ctypes.TypeLattice.is_word_value(_decl_t)
+        if (_acast is not None and _decl_t in ('int64_t', 'char *', 'MojoList *',
+                                               'MojoDict *', 'MojoSet *')
                 and _acast != _decl_t):
             return [f"{indent}{cpp_name} = ({_decl_t})(intptr_t)({val});"]
         # A `lambda *a, **k` assigned into a variable that already holds a
@@ -9584,6 +9594,8 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # arm (`mojo_iter_word` -> `mojo_file_lines`) instead of the
                 # boxed-list arm, which read the FILE* as a MojoList (garbage
                 # length, loop body ran zero times silently).
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(_open_alias_name)
         elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
@@ -9976,6 +9988,8 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 # `yield a, b, check, d` site in `_iter_filenames`), so a
                 # later `check()` call lowers through mojo_dyn_call rather
                 # than emitting an invalid `int64_t()` C++ call.
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(nm)
             if nm not in declared:
                 declared[nm] = slot_ct
@@ -10111,9 +10125,11 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
             and (s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
                  or s.iterable.func.name in getattr(gen, '_cpp_word_locals', ()))
-            and gimple_ctypes.TypeLattice.is_word_or_cstr(declared.get(s.iterable.func.name))):
+            and declared.get(s.iterable.func.name) in ('int64_t', 'char *')):
         _wi = gen._cpp_fresh_name("_mg_witer")
         declared[_wi] = 'MojoList *'
+        if not hasattr(gen, '_cpp_word_iter_locals'):
+            gen._cpp_word_iter_locals = set()
         gen._cpp_word_iter_locals.add(_wi)
         try:
             _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
@@ -10292,6 +10308,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 pass
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
             try:
                 _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
@@ -10562,6 +10580,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             _elem_ctype = _foreign_iter[_resolved_foreign] or 'int64_t'
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
             # Build call preserving positional/keyword args.
             try:
@@ -11286,7 +11306,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 and len(s.iterable.args) == 1 and not s.iterable.kwargs
                 and isinstance(s.iterable.args[0], gimple_ctypes.IdentExpr)
                 and gen._cpp_declared is not None
-                and gimple_ctypes.TypeLattice.is_word_or_list(gen._cpp_declared.get(s.iterable.args[0].name))
+                and gen._cpp_declared.get(s.iterable.args[0].name)
+                in ('int64_t', 'MojoList *')
                 and isinstance(target, str) and not for_target_is_tuple(target)):
             _rv_src = s.iterable.args[0].name
             _rv_elem = getattr(gen, '_cpp_list_local_elem_types', {}).get(_rv_src)
@@ -11918,6 +11939,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # Try to handle like word iterable
                 _wi = gen._cpp_fresh_name("_mg_witer")
                 declared[_wi] = 'MojoList *'
+                if not hasattr(gen, '_cpp_word_iter_locals'):
+                    gen._cpp_word_iter_locals = set()
                 gen._cpp_word_iter_locals.add(_wi)
                 _call_txt = gen._cpp_expr(s.iterable)
                 _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
@@ -12588,6 +12611,8 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             and isinstance(_yf_call.func, gimple_ctypes.IdentExpr)):
         _yf_dyn = _cpp_dyn_call_expr(gen, _yf_call)
         if _yf_dyn is not None:
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
             _yfl = gen._cpp_fresh_name("_mg_yfw")
             gen._cpp_word_iter_locals.add(_yfl)
             return [f"{indent}MojoList *{_yfl} = mojo_iter_word((int64_t)(intptr_t)({_yf_dyn}));",
@@ -12621,6 +12646,8 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             and getattr(gen, '_cpp_declared', None) is not None
             and gen._cpp_declared.get(call.name) == 'int64_t'
             and call.name not in getattr(gen, '_cpp_generator_var_api', {})):
+        if not hasattr(gen, '_cpp_word_iter_locals'):
+            gen._cpp_word_iter_locals = set()
         _ywl = gen._cpp_fresh_name("_mg_yfwl")
         gen._cpp_word_iter_locals.add(_ywl)
         return [f"{indent}MojoList *{_ywl} = mojo_iter_word((int64_t)(intptr_t)({gen._cpp_expr(call)}));",

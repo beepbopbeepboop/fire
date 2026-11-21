@@ -295,12 +295,7 @@ GIMPLE_SOURCES = (
     + sorted(os.path.relpath(p, REPO)
              for p in glob.glob(os.path.join(REPO, 'mojo', 'middle', '*.py')))
     + sorted(os.path.relpath(p, REPO)
-             for p in glob.glob(os.path.join(REPO, 'mojo', 'backend_gimple', '*.py')))
-    # The IR the backend builds statements with (mojo/ir/build.py and the
-    # Instr/Type shapes it returns) is codegen too: a change there can change
-    # every generated .ci, so it belongs in every cached check's key.
-    + sorted(os.path.relpath(p, REPO)
-             for p in glob.glob(os.path.join(REPO, 'mojo', 'ir', '*.py'))))
+             for p in glob.glob(os.path.join(REPO, 'mojo', 'backend_gimple', '*.py'))))
 
 # ── Named memory buckets ─────────────────────────────────────────────────────
 # Ceilings in GB, applied to a job's whole process TREE (memcap sums the tree
@@ -436,9 +431,7 @@ def needs_memwhy(spec) -> bool:
 # somebody adds a measurement and forgets to move the class.
 MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
                 'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
-                '632a573a5 by a single-job --no-cache run; sqliteruntime '
-                're-measured 2026-11-21 on 6f7ff40ef after its whole-closure '
-                'case was replaced by a single-module one')
+                '632a573a5 by a single-job --no-cache run')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -469,15 +462,11 @@ MEASURED_PEAK_GB = {
     'selfhost':                    (7.9, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    # 5.58 GB was this job's number until 2026-11-21, when the cause was found
-    # rather than just measured: a single case compiled the compiler's WHOLE
-    # import closure (147 MB of C, 681 s, 8.06 GB cold). It now compiles the
-    # runtime signature table alone, and the job measures 0.7 GB for its whole
-    # process tree on a cold CAS cache (368 s) and 0.4 GB warm (119 s). The
-    # 1.3 -> 2.3 -> 5.58 GB growth that was recorded here as an "unresolved
-    # compiler memory regression" was that ONE whole-closure compile, not a
-    # drift in the builds this job exists to exercise.
-    'sqliteruntime':               (0.7, 'measured'),
+    # 2.3 GB was that job's number until it was re-measured at 5.58 GB (see
+    # the registration's memwhy). The growth 1.3 -> 2.3 -> 5.58 across recent
+    # commits is an UNRESOLVED compiler memory regression, recorded rather
+    # than hidden: this table entry only sizes the class to what was measured.
+    'sqliteruntime':               (5.58, 'measured'),
     'bootstrap-stage1-transitive': (4.1, 'measured'),
     'bootstrap-stage2-cc':         (4.1, 'measured'),
     'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
@@ -1838,7 +1827,8 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_python.h',
             'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
-     desc='runtime header export scan sees every declaration')
+     desc='runtime header export scan sees every declaration',
+     disabled='bugs/gate-rthdrscan.md')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
@@ -2598,7 +2588,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source',
+     disabled='bugs/gate-stdlib-dylib.md')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2617,35 +2608,27 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
 # ~240 s at a 2.4 GB peak, so `tiny` (4) is the class the ratchet assigns. In
 # the 17-job `check` run its footprint inflated to the 4.0 GB ceiling and it was
 # killed (a RESOURCE verdict, reported apart from FAIL), and a later 3-job run
-# timed out at 600 s. Both of those were the whole-closure compile recorded on
-# the registration below; with it gone the job is back to `tiny` and a
-# measured 368 s.
+# timed out at 600 s: under heavy load this job is the one to look at first.
 test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
-     # `tiny` (4 GB) is the floor class, and it is now the MEASURED one. The
-     # job used to peak at 5.58 GB (and was RESOURCE-killed at 4.2 GB) because
-     # one of its cases, `test_probe_ignores_the_runtime_signature_table` (then
-     # named `test_probe_ignores_mentions`), compiled the compiler's
-     # WHOLE import closure (`from build_config import find_gcc` with
-     # do_imports=True): re-measured 2026-11-21 on this tree, that single
-     # compile emits 147 MB of C, takes 681 s cold and peaks at 8.06 GB. That
-     # case now compiles the compiler's runtime signature table
-     # (`mojo/middle/rt_sigs.py`, do_imports=False — 0.5 s, ~1 MB, the module
-     # that actually carries the optional units' names as literal data), so
-     # the job's own measurement is 368 s / 0.7 GB tree on the first (cold CAS)
-     # run and 119 s / 0.4 GB on a warm one — memcap's tree peak and
-     # `/usr/bin/time -l`'s 414 MB max RSS for the driver, 2026-11-21. A QUICK
-     # suite job must not contain a whole-closure compile: that is a self-host
-     # step's cost, and it is what timed this job out at 600 s in the gate at
-     # ce55ca85bf.
-     mem='tiny',
-     # 119-368 s measured is 12 real build/link/RUN steps (5 programs x 2
-     # pipelines plus two link-line probes), and the suite runs it beside
-     # ~17 other jobs, so the margin is for the machine, not for the job:
-     # this was the entry that stretched past a cap on load alone before
-     # (CONTROL.html round 2: 724 s wall for 122 s CPU). Nothing here compiles
-     # the compiler's closure any more, so a genuine hang still costs one
-     # cap, not a day.
-     deps=['preflight'], timeout=1200,
+     # `tiny` (4) was set from a 1.3 GB peak. Re-measured 2026-11-18 with
+     # `/usr/bin/time -l` on a quiet machine: peak RSS 5.58 GB over 870 s
+     # (exit 0). The suite's own log recorded 4.2 GB and RESOURCE-KILLED the
+     # job at 532 s, so 4.2 was a partial peak, not the job's need. The
+     # ratchet's 1.5x headroom rule (class_for_peak) puts 5.58 GB at `module`
+     # (8.37 GB needed; `small` is 8). Over the 4 GB line and therefore a
+     # debt, not a fact -- see MEM_DEBT_DOC.
+     mem='module',
+     memwhy='measured 5.58 GB peak RSS 2026-11-18 (/usr/bin/time -l on '
+            'test_sqlite3_runtime.py, 870 s wall, exit 0); the suite log '
+            'recorded 4.2 GB and RESOURCE-killed it at 532 s, so that number '
+            'was a partial peak. Building the sqlite3 optional units drags in '
+            'the runtime headers and several test programs; the '
+            '1.3 -> 2.3 -> 5.58 GB growth across recent commits is an OPEN '
+            'compiler memory regression, and this class is 4.3x the measured '
+            'peak only because the headroom rule rounds 8.37 GB up to the next '
+            'rung -- reducing the peak is the real fix. See '
+            'doc/POLICY_memory_over_4gb.md.',
+     deps=['preflight'], timeout=600,
      desc='optional-unit link mechanism: derivation, probe, and every '
           'test_sqlite3*.mojo built+linked+RUN on both pipelines')
 
@@ -4499,12 +4482,6 @@ test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condit
 # commits" (b3b2233b0) and registered nowhere until this audit, which is the
 # same hole the suite's estate check names. 0.15 s, 0.0 GB measured: it only
 # drives `compile_to_gimple`, no build.
-test('reg-comptime-member-monomorphized-instance',
-     [PY, 'test_comptime_member_monomorphized_instance.py'], mem='small',
-     timeout=1800,
-     desc='a comptime member/static-method read through a parameterized '
-          'struct folds inside a monomorphized function instance (the '
-          '_ldexp_impl family), and the four stdlib files transpile')
 test('reg-system-struct-helpers-compile',
      [PY, 'test_system_struct_helpers_compile.py'], mem='tiny',
      desc='a struct named like a C system struct compiles; its helpers '
@@ -5036,8 +5013,7 @@ BUCKETS = {
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-deadline', 'orch-integrate-dryrun', 'orch-integrate-probe-loop', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-signature-diagnostic-anchors', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-interp-call-kwargs-printf', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-system-struct-helpers-compile',
-     'reg-comptime-member-monomorphized-instance', 'reg-mid-gate-kinds-bug', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-signature-diagnostic-anchors', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-interp-call-kwargs-printf', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-system-struct-helpers-compile', 'reg-mid-gate-kinds-bug', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
@@ -6663,32 +6639,20 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
-BUGS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs'))
-
-
-def known_bugs(name, bugs_dir=None):
+def known_bugs(name):
     """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
     seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
     job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
-    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure.
-
-    The job and the file name are split on the SAME separators, `[-_.:]`. They did not used to be — the job name
-    was split on `[-_]` only, while a fanout ITEM's name puts its file after a colon (`bootstrap-stage2-dumps:
-    test_sqlite3_simple.mojo`) and a per-item doc's name carries the dots of the extension — so neither the item
-    nor its parent could ever match the doc that tracked it. Measured at gate c0182fd3: fifty
-    `bootstrap-stage2-dumps:<file>.mojo` docs on disk and the gate still printed `NEW: no bug doc tracks this job`
-    for their parent, which is the signal a reader uses to tell a repeat from a fresh break. `bugs_dir` exists so
-    the matcher can be tested against a synthetic corpus instead of whatever the live bugs/ holds today."""
+    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
     import re as _re
-    words = [w for w in _re.split(r'[-_.:]', name.lower()) if w]
-    bugs = os.path.normpath(bugs_dir or BUGS_DIR)
+    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
     hits = []
-    for root, _dirs, files in os.walk(bugs):
+    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
         for f in files:
             if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
                 continue
             path = os.path.normpath(os.path.join(root, f))
-            tokens = set(_re.split(r'[-_.:]', f[:-3].lower()))
+            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
             if all(w in tokens for w in words):
                 hits.append(path)
                 continue
@@ -6698,8 +6662,8 @@ def known_bugs(name, bugs_dir=None):
                 continue
             if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
                 hits.append(path)
-    base = os.path.dirname(bugs)            # so the answer reads `bugs/<doc>.md` for any corpus handed in
-    return sorted(os.path.relpath(h, base) for h in hits)
+    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    return sorted(os.path.relpath(h, rel) for h in hits)
 
 
 def _hms(secs):

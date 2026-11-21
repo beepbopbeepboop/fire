@@ -9,9 +9,9 @@ review and landing. Read `doc/GIR.md` first.
 | stage | state | what is left |
 |---|---|---|
 | 0, 1, 2a, 3a, 3b, 5a | landed | — |
-| 2b builder | landed 2026-11-21: `mojo/ir/build.py`; `gen._emit( text` 0, `build.raw(` 1 | the 41 cast expressions become `gen._cast`; `_emit_cf` taking an `Instr` for `br`/`ret` |
-| 3c `Instr` body | landed 2026-11-21: `gen.body_lines` holds `Instr` | — |
-| 4 Type objects | predicates landed (`is_cstr`, `is_list`, `is_dict`, `is_set`, `is_bytes`, `is_bool`, `is_double`, `is_word`, `is_uword`, `is_char`, `is_voidp`, `ends_in_star`, `is_int_word`, `is_int`, `is_boxable`, `is_word_value`, `is_c_scalar`, `is_number_scalar`, ...) | 17 `in (..'int64_t'..)` tuples, 54 `== 'int64_t'`, 62 `== 'char *'`, 16 `endswith(' *')`, 29 `== 'MojoList *'`, 2 `== '_Bool'`, 8 `== 'double'` (measured 2026-11-21); then `var_types` holding `Type` |
+| 2b builder | partial: 27 constant assignments moved to `_cast_into` | `mojo/ir/build.py` does not exist; 270 `gen._emit(` text calls; 41 `_new_val(T, f"(T2)...")` casts |
+| 3c `Instr` body | not started | needs 2b |
+| 4 Type objects | predicates landed (`is_cstr`, `is_list`, `is_bool`, `is_double`, `is_word`, `ends_in_star`, `is_int_word`) | 294 `in (..'int64_t'..)` tuples, 65 `== 'int64_t'`, 75 `== 'char *'`, 37 `endswith(' *')`, 32 `== 'MojoList *'`, 11 `== '_Bool'`, 10 `== 'double'`; then `var_types` holding `Type` |
 | 5b ValueInfo | steps 1-3 landed (`WordFacts`, `gen._word_*`) | step 4: one record per temp, `Int / Erased / DynWord / Box` |
 | 5c optional values | slices landed (param `= None`, `dict.get`, all-None locals) | needs the owner's None decision (§6); then the slices in `doc/GIR.md` 5c "Next" |
 | 6 shape | loops 16+7 converted; 61 arms and 18+ passes extracted | cursor loops; 29 nested functions with captured locals; passes that bind a name |
@@ -88,15 +88,7 @@ Status 2026-11-21: items 1, 2 and 4 landed. `tools/c_oracle.py` (corpus hashing 
 programs with `-j 6`, so every worker can afford it); nine tuple predicates in `TypeLattice` and the tuple
 table in `tools/type_string_codemod.py` (294 -> 115 tuple tests, C byte-identical on 285 programs); the
 ratchet no longer counts `mojo/middle/types.py`, where the predicates are defined; eight W1 packets
-(`bugs/GIR_W1_*.md`, 322 sites). The 2026-11-21 stage-4 tail (two rounds) added the
-representation-class predicates (`is_dict`/`is_set`/`is_bytes`/`is_uword`/`is_char`/
-`is_voidp`/`is_boxable`/`is_word_value`/`is_c_scalar`/`is_number_scalar`), taught the codemod to emit
-a disjunction of classes, to read a tuple wrapped across lines, and to rewrite a module that imports
-`TypeLattice` directly, then added the single-type spellings the last 17 tuples needed (`is_str`,
-`is_span`, `is_u8`, `is_c_long`, `is_void`, the C++ emitter's `is_cpp_bool`/`is_cpp_int_scalar`) and
-the unsolved marker `is_unsolved` (`''`/`'unknown'`), and took the counts to 0 / 54 / 62 / 16 / 29 / 2 / 8 (tuple / int64 / char* /
-endswith / list / bool / double), C byte-identical on 285 programs; each packet's table was
-re-measured. Item 3 (the None decision) is the owner's.
+(`bugs/GIR_W1_*.md`, 322 sites). Item 3 (the None decision) is the owner's.
 
 
 1. `tools/c_oracle.py`: `--base <commit>` hashes `tools/pydiff_corpus` (and
@@ -120,12 +112,7 @@ with the orchestrator. Acceptance: oracle byte-identical, the file's counts
 fall; the orchestrator lowers the baselines at merge and runs the closure check
 once on the merged tree.
 
-### W2 — stage 2b builder (LANDED 2026-11-21, not as a wave)
-
-Status: landed in two rounds by one worker instead of six packets; every
-`gen._emit(` site is gone and `build.raw` is down to its adapter. What is
-left of the stage (the 41 cast expressions, `_emit_cf` taking an `Instr` for
-`br`/`ret`) is in `doc/GIR.md`'s stage 2b paragraph. The plan as written:
+### W2 — stage 2b builder (Opus design, then Haiku x up to 6)
 
 1. Opus: `mojo/ir/build.py` per `doc/GIR.md` 2b, self-hostable (rule 2), each
    function emitting exactly the text `gen._emit` emits today for that shape,

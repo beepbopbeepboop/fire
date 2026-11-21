@@ -134,26 +134,6 @@ BASE_WORDS: dict[str, bool] = {
 }
 
 
-def type_named(name: str) -> Type:
-    """The interned `Type` whose C spelling is `name`.
-
-    The spelling comes from the backend, which still writes types as text
-    (doc/GIR.md, stage 4), so this is the bridge the builder uses to put a
-    type on a cast instruction.  A scalar spelling gets its real `Type`; a
-    spelling ending in `*` is a pointer to whatever is before it; anything
-    else is an aggregate known only by its name."""
-    name = name.strip()
-    t = _INTERN.get(name)
-    if t is not None:
-        return t
-    base = BASE_TYPES.get(name)
-    if base is not None:
-        return base
-    if name.endswith('*'):
-        return ptr_to(type_named(name[:-1].strip()))
-    return struct_named(name)
-
-
 def trivially_convertible(dst: Type, src: Type) -> bool:
     """May a `src` value be used where `dst` is expected with NO cast
     statement?  This is GIMPLE's `useless_type_conversion_p`."""

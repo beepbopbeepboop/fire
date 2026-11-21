@@ -1,22 +1,17 @@
-# GIR W1 packet `emit_methods`: rewrite the remaining C-type string tests in 4 file(s)
+# GIR W1 packet `emit_methods`: rewrite the remaining C-type string tests in 5 file(s)
 
 STOP: claimed by the Claude W1 wave (doc/GIR_WORKERS.md); the orchestrator removes this line if the wave releases it
 
 Stage 4 tail of `doc/GIR.md`, run as described in `doc/GIR_WORKERS.md` (W1). Mechanical, and the
-generated C must NOT change. About 26 sites, all in these files and nowhere else:
+generated C must NOT change. About 42 sites, all in these files and nowhere else:
 
 | file | sites left (by ratchet pattern) |
 |---|---|
-| `mojo/backend_gimple/emit_methods.py` | endswith(' *'): 1, == 'int64_t': 1, in (.., 'int64_t', ..): 2, == 'char *': 1, == 'MojoList *': 1 |
+| `mojo/backend_gimple/emit_methods.py` | endswith(' *'): 1, == 'int64_t': 1, in (.., 'int64_t', ..): 12, == 'char *': 1, == 'MojoList *': 1 |
 | `mojo/middle/resolve_shared.py` | == 'int64_t': 1, == 'char *': 8 |
-| `mojo/middle/infra_infer.py` | == 'char *': 4, == 'MojoList *': 1 |
+| `mojo/middle/infra_infer.py` | in (.., 'int64_t', ..): 2, == 'char *': 4, == 'MojoList *': 1 |
 | `mojo/backend_gimple/emit_funcs.py` | endswith(' *'): 1, == 'char *': 4, == 'MojoList *': 1 |
-
-`mojo/backend_gimple/cpp_async.py` was in this packet and is done (its four tuple tests became
-`is_int_word`/`is_double`/`is_bool`/`is_boxable` calls on 2026-11-21).
-
-Re-measure before you start: `python3 test_type_string_ratchet.py --per-file` is the census; the
-table above is a snapshot (2026-11-21, after the stage-4 tail round).
+| `mojo/backend_gimple/cpp_async.py` | in (.., 'int64_t', ..): 4 |
 
 `tools/type_string_codemod.py` already rewrote every site it can match. The sites left have a left
 side it does not accept (a call, a `.get(..)`, a parenthesized expression) or a tuple it has no
@@ -51,15 +46,6 @@ Rewrite a test ONLY with a predicate whose answer is EXACTLY the old test's answ
 | `t in ('int64_t', 'MojoList *')` | `is_word_or_list(t)` |
 
 Tuple order does not matter. `t != X` and `t not in (...)` become `not <predicate>(t)`.
-
-The rest of the vocabulary is the `TUPLES` table in `tools/type_string_codemod.py`: a tuple that is
-the union of several representation classes maps to a DISJUNCTION of their predicates
-(`is_uword`, `is_char`, `is_voidp`, `is_dict`, `is_set`, `is_bytes`, `is_boxable`,
-`is_word_value`, `is_c_scalar`, `is_number_scalar`), e.g.
-`t in ('int', 'int64_t', 'uint64_t')` -> `is_int_word(t) or is_uword(t)`. Run the codemod
-(`python3 tools/type_string_codemod.py --check`) before working by hand: it rewrites every one of
-these, including tuples wrapped across lines, in a file that names either `gimple_ctypes` or
-`TypeLattice`. `python3 test_type_lattice_predicates.py` pins every entry's exact membership.
 
 SKIP (leave unchanged and list in your report): a test inside a string (emitted C text, a message, an
 f-string), a chained comparison (`a == b == 'int64_t'`), a tuple not in the table, and any site where

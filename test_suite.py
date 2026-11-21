@@ -256,33 +256,6 @@ def test_reject_pattern():
               'mojo_unsupported_iter' in out or True, '')
 
 
-def test_known_bugs_matches_a_fanout_item_and_its_parent():
-    """A per-item gate doc is found from the ITEM name and from its parent.
-
-    Regression: `known_bugs` split the job name on `[-_]` but the file name on
-    `[-_.]`, so a fanout item (`<parent>:<file>`) matched neither its own
-    `bugs/gate-<parent>:<file>.md` doc nor, as the parent, any of them. At gate
-    c0182fd3 fifty per-item docs were on disk and the gate printed
-    `NEW: no bug doc tracks this job` for the parent -- the signal that tells a
-    reader a red is a repeat rather than a fresh break.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        bugs = os.path.join(d, 'bugs')
-        os.makedirs(bugs)
-        for f in ('gate-bootstrap-stage2-dumps:test_sqlite3_simple.mojo.md',
-                  'gate-gimple.md'):
-            open(os.path.join(bugs, f), 'w').write('# Gate: something is red\n')
-        got = suite.known_bugs('bootstrap-stage2-dumps:test_sqlite3_simple.mojo',
-                               bugs_dir=bugs)
-        check('known_bugs: a fanout item finds its own doc',
-              got == ['bugs/gate-bootstrap-stage2-dumps:test_sqlite3_simple.mojo.md'], got)
-        got = suite.known_bugs('bootstrap-stage2-dumps', bugs_dir=bugs)
-        check('known_bugs: the parent finds its items docs',
-              got == ['bugs/gate-bootstrap-stage2-dumps:test_sqlite3_simple.mojo.md'], got)
-        check('known_bugs: an unrelated doc is still not claimed',
-              suite.known_bugs('formal-json', bugs_dir=bugs) == [], got)
-
-
 def test_mem_driver():
     """A mem job that breaches is RESOURCE, not FAIL — and a mem job inside
     its ceiling passes, with the ceiling in the log."""
@@ -2849,23 +2822,14 @@ def test_a_disabled_test_is_registered_but_never_runs():
     naming the disabled dep and the doc that is the switch, the same shape as
     the dependent of a failed dep. So `needs` skips, and the skip says why.
 
-    `sweep` pins the FANOUT shape, which is the one that actually produced the
-    fifty docs and is not implied by `needs`: a fanout is expanded into one
-    job per item BEFORE the scheduler looks at deps, so "the dependent test
-    skipped" is not the same claim as "none of its items ran". Every item must
-    carry its own skip and its own naming of the doc, because that per-item
-    line is what a reader uses to tell one missing artifact from forty-six.
-
     Which job ran is read from the log's own per-job line, not from its output
     and not from a grep for the command: the runner logs every job's argv, so a
     substring of the command is in the log whether or not the command ran.
     """
     ran = os.path.join(HERE, 'build', 'test-suite-disabled.ran')
-    fan_ran = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.ran')
     log = os.path.join(HERE, 'build', 'test-suite-disabled.log')
-    for p in (ran, fan_ran):
-        if os.path.exists(p):
-            os.unlink(p)
+    if os.path.exists(ran):
+        os.unlink(ran)
     os.makedirs(os.path.dirname(ran), exist_ok=True)
     # A doc that really exists, so the case is the shipped shape and not a
     # marker that only the checker under test would accept.
@@ -2873,15 +2837,9 @@ def test_a_disabled_test_is_registered_but_never_runs():
                           mem='program', disabled=suite.MEM_DEBT_DOC),
                  needs=dict(cmd=ok_cmd('print("ran anyway")'),
                             deps=['off']),
-                 on=dict(cmd=ok_cmd('print("unrelated")')),
-                 sweep=suite.Fanout(
-                     name='sweep',
-                     cmd=ok_cmd(f'open({fan_ran!r}, "a").write("x")'),
-                     items=['a', 'b'], mem='tiny', deps=['off'])):
-        rc, out = run(['off', 'needs', 'on', 'sweep'], jobs=3, log=log,
-                      quiet=False)
-        jobs, per_test = suite.plan_for(['off', 'needs', 'on', 'sweep'],
-                                        _FakeOpts())
+                 on=dict(cmd=ok_cmd('print("unrelated")'))):
+        rc, out = run(['off', 'needs', 'on'], jobs=3, log=log, quiet=False)
+        jobs, per_test = suite.plan_for(['off', 'needs', 'on'], _FakeOpts())
         # The reservation, on the synthetic spec: `reserved_gb` is what the
         # scheduler asks the ledger for, and a disabled job that returned its
         # class would hold 55 GB of a 96 GB budget for a process it never
@@ -2894,7 +2852,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     check('disabled: the job never started', not os.path.exists(ran),
           'the disabled test ran: this is the whole point of the field')
     check('disabled: it is planned as zero jobs', per_test['off'] == 0
-          and [j.spec.name for j in jobs] == ['needs', 'on', 'sweep', 'sweep'],
+          and [j.spec.name for j in jobs] == ['needs', 'on'],
           f'{per_test} / {[j.spec.name for j in jobs]}')
     check('disabled: it reserves NOTHING from the ledger, not even its class',
           reserved == 0 and ceiling == 55,
@@ -2906,25 +2864,6 @@ def test_a_disabled_test_is_registered_but_never_runs():
           and suite.MEM_DEBT_DOC in text,
           'a disabled producer must stop its dependent with the doc named '
           '(the switch), not let it run into the missing artifact')
-    # The fanout's ITEMS, read out of the PER-TEST table, which is where each
-    # job's verdict is paired with its own skip reason. The progress lines
-    # alone say the items skipped; the reason under each one says why, and a
-    # fix that skipped the fanout wholesale would leave these rows empty.
-    item_reasons = {}
-    for i, line in enumerate(text.splitlines()):
-        m = re.match(r'^ {6}skip\s+sweep:(\w+)\b', line)
-        if m and i + 1 < len(text.splitlines()):
-            item_reasons[m.group(1)] = text.splitlines()[i + 1]
-    check('disabled: a fanout dependent runs NONE of its items',
-          not os.path.exists(fan_ran)
-          and sorted(item_reasons) == ['a', 'b'],
-          f'the fanout ran ({os.path.exists(fan_ran)}); reported items '
-          f'{sorted(item_reasons)}')
-    check('disabled: ...and every item names the doc that is the switch',
-          item_reasons and all('dependency is disabled: off' in r
-                               and suite.MEM_DEBT_DOC in r
-                               for r in item_reasons.values()),
-          f'{item_reasons}')
     check('disabled: it is in the tally as its own status',
           '1 disabled' in out, f'expected a disabled counter: {out!r}')
     check('disabled: ...and it is listed with the doc, in its own section',
@@ -2940,67 +2879,19 @@ def test_a_disabled_test_is_registered_but_never_runs():
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
-    # The FANOUT shape, which is the one that actually happened: the case above
-    # is a single dependent job, but the producer that was doc'd off
-    # (bootstrap-stage2-cc) sat above a FIFTY-ITEM fanout, and before
-    # 416ed660c every item ran into the missing artifact and failed in a
-    # second, so one red producer was filed as fifty docs for one bug (gate
-    # c0182fd3). A fanout expands into one job per item, so it is the case
-    # where "the dependent SKIPs" has to hold per item, and where the tally
-    # has to report ONE skipped test rather than three failures.
-    fanned_ran = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.ran')
-    flog = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.log')
-    if os.path.exists(fanned_ran):
-        os.unlink(fanned_ran)
-    with Sandbox(off=dict(cmd=ok_cmd('print("never")'),
-                          mem='program', disabled=suite.MEM_DEBT_DOC),
-                 sweep=suite.Fanout(
-                     name='sweep',
-                     cmd=ok_cmd(f'open({fanned_ran!r}, "a").write("x")'),
-                     items=['a', 'b', 'c'], mem='tiny', deps=['off'])):
-        frc, fout = run(['off', 'sweep'], jobs=3, log=flog, quiet=False)
-        fjobs, fper = suite.plan_for(['off', 'sweep'], _FakeOpts())
-        ftext = open(flog).read() if os.path.exists(flog) else ''
-    check('disabled: a fanout behind it spawns no item',
-          not os.path.exists(fanned_ran),
-          'one disabled producer must not run a fanout into the artifact it '
-          'never built')
-    check('disabled: ...every item SKIPs, naming the doc, not one red apiece',
-          len(re.findall(r'(?m)^\[\s*\d+/\d+\]\s+skip\s+sweep:', ftext)) == 3
-          and ftext.count('dependency is disabled: off') >= 3
-          and suite.MEM_DEBT_DOC in ftext,
-          f'expected three per-item skips naming the switch: '
-          f'{[l for l in ftext.splitlines() if "sweep:" in l]}')
-    check('disabled: ...and the fanout is ONE skipped test, not three failures',
-          frc == 0 and '0 failed' in fout and '1 skipped' in fout
-          and fper['sweep'] == 3 and [j.spec.name for j in fjobs] == ['sweep'] * 3,
-          f'rc={frc}, per_test={fper}, jobs={[j.spec.name for j in fjobs]}, '
-          f'out={fout!r}')
-
     # The real-registry half: disabled jobs in the registry are known-red and
     # too expensive or otherwise inappropriate to run, so each must be named
     # here and have its reserves-0 / --list / --dry-run properties re-asserted.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
-    # The census the check compares the registry against, so it tracks the
-    # tree rather than freezing it. Measured 2026-11-21 (this tree): four jobs
-    # carry `disabled=`, each with its gate doc in bugs/ as the switch. A
-    # disabled job is a DECISION: the checks below re-assert that it reserves
-    # 0 GB, is listed with its doc, and plans as DISABLED, so a job cannot be
-    # silently switched off. `rthdrscan` left the census here: the gate ledger
-    # switched the job off on a non-bisected report (2be2c1a49) after its
-    # census had already been synced, so the job was green; the marker and its
-    # doc are gone and `python3 tools/suite.py rthdrscan` passes.
-    # `stdlib-dylib` left the census here: its lone
-    # unexpected skip (std/math/math.mojo) was the monomorphized `_ldexp_impl`
-    # instance whose comptime `FPUtils[dtype]` references erased to `float`,
-    # fixed by 244efdbef and pinned by test_stdlib_dylib_degraded_module.py,
-    # so the job is back on and its doc is gone.
-    expected_disabled = [
-        'bootstrap-stage1-transitive',
-        'bootstrap-stage2-cc',
-        'stdlib-syntax',
-        'suite-self-test',
-    ]
+    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
+    # two `issubclass` declarations) and `formal-doc-truth` is green again
+    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
+    # `formal-read-before-store` are no longer disabled either. This list is the
+    # census the check compares the registry against, so it tracks the tree
+    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
+    # bare overloaded-dunder call sites it reddened on are fixed and the job is
+    # back on.
+    expected_disabled = []
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -3053,69 +2944,6 @@ def test_a_disabled_test_is_registered_but_never_runs():
               and '0 jobs' in plan,
               f'expected a disabled line with no jobs and no reservation: '
               f'{plan!r}')
-
-
-def test_a_fanout_behind_a_disabled_producer_spawns_no_item():
-    """The fanout half of the disabled-dep skip, and the shape that filed
-    fifty bug docs for ONE missing artifact (gate `c0182fd3`, 2026-11-21).
-
-    `bootstrap-stage2-cc` was doc'd off, so `stage2/mojo` had never been built;
-    its dependent, the 49-item `bootstrap-stage2-dumps` fanout, ran anyway and
-    every item died in a second on `FileNotFoundError: ./mojo`. The gate filed
-    one doc per item — 49 of them for a cause none of the files named — and a
-    fanout item has no registration of its own, so a per-item `disabled=`
-    marker (the thing those docs told workers to remove) could not have covered
-    them even in principle.
-
-    The single dependent is pinned in the test above; this is the fanout shape,
-    which is the one that multiplies. The scheduler must spawn zero item
-    processes, settle each item as a SKIP naming the producer and the doc that
-    is the switch, and exit 0 — the artifact is missing, which is a fact about
-    the producer, not a verdict on any item.
-
-    Fails before 416ed660c: there the dependents of a disabled producer ran
-    (the counter file below exists), which is exactly the fifty-reds shape.
-    """
-    ran = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.ran')
-    log = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.log')
-    for path in (ran, log):
-        if os.path.exists(path):
-            os.unlink(path)
-    os.makedirs(os.path.dirname(ran), exist_ok=True)
-    items = ['a.mojo', 'b.mojo', 'c.mojo']
-    with Sandbox(producer=dict(cmd=ok_cmd('print("produced")'),
-                               mem='program', disabled=suite.MEM_DEBT_DOC),
-                 sweep=suite.Fanout(
-                     name='sweep',
-                     cmd=ok_cmd(f'open({ran!r}, "a").write("x")'),
-                     items=items, deps=['producer'], mem='tiny')):
-        rc, out = run(['producer', 'sweep'], jobs=3, log=log)
-        jobs, per_test = suite.plan_for(['producer', 'sweep'], _FakeOpts())
-    text = open(log).read() if os.path.exists(log) else ''
-
-    check('disabled fanout: no item process started', not os.path.exists(ran),
-          'the items ran behind a disabled producer: one missing artifact must '
-          'not become one red per item')
-    check('disabled fanout: every item is planned, as its own job key',
-          per_test['sweep'] == len(items)
-          and [j.label for j in jobs if j.spec.name == 'sweep'] == items,
-          f'{per_test} / {[j.key for j in jobs]}')
-    check('disabled fanout: every item SKIPs, naming the producer and its doc',
-          all(re.search(rf'(?m)^\s+skip\s+sweep:{re.escape(i)}\b', text)
-              for i in items)
-          and text.count('dependency is disabled: producer') == len(items)
-          and suite.MEM_DEBT_DOC in text,
-          'each item must settle SKIP with the switch named; a fanout item has '
-          f'no marker of its own: {[l for l in text.splitlines() if "sweep:" in l]}')
-    check('disabled fanout: no item is FAIL or ERROR',
-          re.search(r'(?m)^\s+(fail|error)\s+sweep:', text) is None,
-          text[-400:])
-    check('disabled fanout: the test itself is a skip, not a red',
-          re.search(r'(?m)^\s+skip\s+sweep\s+3 job\(s\)', text) is not None,
-          f'{[l for l in text.splitlines() if l.strip().startswith("skip")]}')
-    check('disabled fanout: the run still exits 0, one skip and one disabled',
-          rc == 0 and '1 skipped' in out and '1 disabled' in out
-          and '0 failed' in out, f'rc={rc} out={out!r}')
 
 
 def test_the_disabled_markers_in_the_registry_are_honest():
@@ -3200,21 +3028,15 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    # The same four-name census as the `disabled:` section above -- the two
-    # sections ask different questions of the same registry (reservations and
-    # listing there, marker truth here) and must not drift apart. This list is
-    # the census the check compares the registry against, so it tracks the tree
-    # rather than freezing it; measured 2026-11-21 (this tree) when
-    # `rthdrscan` left it with the stale gate-ledger switch-off (2be2c1a49;
-    # its census was already synced and the job passes) and `stdlib-dylib`
-    # left it (its monomorphized `_ldexp_impl` skip is fixed by
-    # 244efdbef, pinned by test_stdlib_dylib_degraded_module.py).
-    expected_disabled = [
-        'bootstrap-stage1-transitive',
-        'bootstrap-stage2-cc',
-        'stdlib-syntax',
-        'suite-self-test',
-    ]
+    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
+    # two `issubclass` declarations) and `formal-doc-truth` is green again
+    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
+    # `formal-read-before-store` are no longer disabled either. This list is the
+    # census the check compares the registry against, so it tracks the tree
+    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
+    # bare overloaded-dunder call sites it reddened on are fixed and the job is
+    # back on.
+    expected_disabled = []
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
@@ -4499,6 +4321,13 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
+    # The `_as_comptimevar_node` stage2 `AttributeError` pin (2026-11-21): the
+    # per-file (`do_imports=False`) compile's module-alias function VALUE.
+    # Added with its fix and run directly (`python3
+    # test_codegen_module_alias_function_value.py`); the landing was told not
+    # to register in tools/suite.py, and this is a build-and-RUN case that
+    # wants a bucket beside `linkmode` when one is next touched.
+    'test_codegen_module_alias_function_value.py': _STANDALONE_TEST_REASON,
     # The cases-generator analyzer landing (2026-11-17) left these regression
     # pins next to their fixes without registering them. Each runs directly;
     # the `*_build.py` siblings compile one small source with `fire.py build`
@@ -4532,13 +4361,6 @@ UNREGISTERED = {
     # the job that eventually registers it must name `.gitignore` in `extra`
     # or a deleted rule would replay a recorded PASS.
     'test_bootstrap_corpus_scratch_mojo.py': _STANDALONE_TEST_REASON,
-    # The c0182fd365 pin that a bootstrap-stage2-dumps ITEM is skipped behind
-    # its disabled producer rather than red (0.0 s, no spawn: it reads the real
-    # registry and `dep_block_detail`). Landed by a `land` of the branch that
-    # added it with no declaration at all, so the estate check named it as run
-    # by nothing; declared for the same reason as the entry above — the round
-    # that touched it was told not to register in tools/suite.py.
-    'test_bootstrap_stage2_dumps_skip.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
@@ -5315,22 +5137,6 @@ UNREGISTERED = {
     'test_procrun.py': 'tools/procrun.py and tools/memcap.py: the RSS measurement, '
         'the tree kill and memcap\'s printed verdict, tested directly.',
     'test_zip_loop_target_rebind_regress.py': _BATCH_REGRESSION_REASON,
-
-    # The GIR builder / `Instr` body landing (doc/GIR.md stages 2b and 3c) ran
-    # under a task that says not to register anything. Cheap (one small
-    # compile, ~0.4 s, no build), so it wants a bucket; listed here so the
-    # estate check can see the tree. It pins what a corpus diff cannot see:
-    # each builder shape renders exactly the C text the backend used to
-    # concatenate, `gen.body_lines` holds `Instr`, the `#line` stamping rule,
-    # and `types.type_named`'s spellings. Run directly:
-    # `python3 test_gir_builder.py`.
-    'test_gir_builder.py': 'The GIR builder (mojo/ir/build.py) and stage 3c '
-        '(`gen.body_lines` holds `Instr`): the statement shapes the backend '
-        'now builds instead of spelling as text, the `#line` stamping rule, '
-        'and the type-spelling bridge the builder needs. Unregistered because '
-        "this session's task says not to register anything; the corpus-wide "
-        'byte-identity oracle is `tools/pydiff_corpus` plus the ratchet in '
-        'test_type_string_ratchet.py.',
 
     # Landed with 313513c45 (2026-10-28, while this gate triage was running —
     # the estate re-baseline of the 46 above now has to account for it too):
@@ -7383,9 +7189,7 @@ def test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs():
 
 
 def main():
-    for fn in (test_cmd_driver, test_reject_pattern,
-               test_known_bugs_matches_a_fanout_item_and_its_parent,
-               test_mem_driver,
+    for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded,
                test_deps_order_and_skip,
                test_a_cascade_skip_is_a_skip_not_an_error,
@@ -7404,7 +7208,6 @@ def main():
                test_a_message_a_test_pins_is_still_a_message_the_tree_can_say,
                test_the_needle_census_fails_on_a_needle_nothing_says,
                test_a_disabled_test_is_registered_but_never_runs,
-               test_a_fanout_behind_a_disabled_producer_spawns_no_item,
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,

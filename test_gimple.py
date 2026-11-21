@@ -10,7 +10,6 @@ import os
 import sys
 import gimple_codegen
 from gimple_codegen import compile_to_gimple
-import mojo.backend_gimple.emit_infra as ginf
 import fire_compiler
 import mojo.middle.infra_infer
 import platform
@@ -115,18 +114,6 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/middle/solvers.py::ClosureInfo.__init__": "the solver's own record",
     "mojo/middle/solvers.py::DispatchTable.__init__": "ditto",
     "mojo/middle/solvers.py::DispatchTable.add_method": "ditto",
-    # The stage-5b value record (mojo/middle/valueinfo.py) is the backend's own
-    # per-temp fact table, not an AST node; `kind` is its one word kind (Int /
-    # Erased / DynWord / Box), which happens to share a name with
-    # `Comprehension.kind`. Writing it cannot stale a walk memo.
-    "mojo/middle/valueinfo.py::ValueInfo.__init__": "the value record's own dataclass, not an AST node",
-    "mojo/middle/valueinfo.py::WordFacts.mark_boxed": "ditto",
-    "mojo/middle/valueinfo.py::WordFacts.mark_tagged": "ditto",
-    "mojo/middle/valueinfo.py::WordFacts.mark_dyn": "ditto",
-    "mojo/middle/valueinfo.py::WordFacts.mark_int_word": "ditto",
-    "mojo/middle/valueinfo.py::WordFacts.unmark_int_word": "ditto",
-    "mojo/middle/valueinfo.py::WordFacts.snapshot": "ditto",
-    "mojo/middle/valueinfo.py::WordFacts.carry": "ditto",
 }
 
 
@@ -432,31 +419,24 @@ def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     cast is a consequence of the proof, not a guess from the ABI.
     """
     import mojo.backend_gimple.emit_resolve as er
-    import mojo.ir.build as build
 
     class G:
-        # The lowering calls the BUILDER now (doc/GIR.md stage 2b), so this
-        # fake emitter carries the three fields `build.append` touches
-        # instead of a text `_emit`.
         _struct_allocs_needed = set()
 
         def __init__(self):
             self.n = 0
             self.lines = []
-            self.body_lines = []
-            self._stmt_line_directive = None
-            self._last_was_terminal = False
 
         def _new_temp(self, ctype):
             self.n += 1
             self.lines.append(f'/* temp {ctype} */')
             return f'_t{self.n}'
 
-        def text(self):
-            return '\n'.join(self.lines + ginf.body_text(self))
+        def _emit(self, text):
+            self.lines.append(text)
 
         def _rt_into(self, dest, name, args):
-            build.call_into(self, dest, name, args)
+            self.lines.append(f'  {dest} = {name}();')
 
     problems = []
     g = G()
@@ -465,8 +445,8 @@ def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     if out != [('Span *', '_t1')]:
         problems.append(f'proved boxed Span became {out!r}, '
                         f'want [(Span *, _t1)]')
-    if '(Span *) interval' not in g.text():
-        problems.append(f'the cast is missing from {g.text()!r}')
+    if not any('(Span *) interval' in ln for ln in g.lines):
+        problems.append(f'the cast is missing from {g.lines!r}')
     g = G()
     out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')],
                                span_proofs=[False])
@@ -484,7 +464,7 @@ def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     out = er._coerce_span_args(g, ['Span *'], [('MojoList *', 'items')])
     if out[0][0] != 'Span *':
         problems.append(f'a List argument was not converted: {out!r}')
-    text = g.text()
+    text = '\n'.join(g.lines)
     if '->_len = items->len' in text or '->_data = (char *) items->data' in text:
         problems.append(f'the span store uses a raw component_ref: {text!r}')
     # The `_data` store may carry the `(char *)` cast, but only over the TEMP
@@ -670,47 +650,6 @@ def f():
     if problems:
         raise AssertionError('; '.join(problems))
     print("PASS  proven_span_local_from_a_list_projection")
-
-
-def test_global_slot_info_is_declared_in_generator_init():
-    """Pin: the module-global slot-kind table exists on a fresh GimpleGen.
-
-    `emit_stmts._note_global_slot_kinds` used to create `_global_slot_info`
-    behind `if not hasattr(gen, '_global_slot_info')`. Self-hosted, every
-    `self.<field> = ...` anywhere in the class puts the field in GimpleGen's
-    compiled struct from the start, so `hasattr` answered True, the lazy
-    `dict()` never ran, and the first module-global store went through a NULL
-    MojoDict -- `_dict_set_raw_seq_kind_k` SIGSEGV in the stage2 dump of every
-    program with a module-level container assignment (array_ops_jit.mojo's
-    `arr = [1, 2, 3, 4, 5]`). Declaring it with the other module-scope global
-    tables in `GimpleGen.__init__` is the fix, so this asserts the table is
-    there BEFORE any statement lowers (Python's `hasattr` would happily
-    create it later, which is why the crash never reproduced here).
-    """
-    gen = gimple_codegen.GimpleGen()
-    if '_global_slot_info' not in vars(gen):
-        raise AssertionError(
-            "_global_slot_info is not initialised by GimpleGen.__init__; on "
-            "the self-hosted path hasattr() then reports the NULL struct "
-            "field as present and the first module-global store segfaults")
-    if not isinstance(gen._global_slot_info, dict):
-        raise AssertionError(
-            f"_global_slot_info starts as "
-            f"{type(gen._global_slot_info).__name__}, want dict")
-    # The record is a MODULE-scope fact, so the store path has to survive the
-    # table being present but empty: a global mixed list read after a function
-    # boundary (the table's whole reason to exist) must still compile.
-    ok, _c_src, stderr = gimple_compiles("""\
-a = [1, 2.5]
-def show():
-    print(a[1])
-show()
-""")
-    if not ok:
-        lines = stderr.splitlines()
-        raise AssertionError('the module-global mixed list did not compile: '
-                             + (lines[0] if lines else 'gcc reported no text'))
-    print("PASS  global_slot_info_is_declared_in_generator_init")
 
 
 def defined_param_ctype(c_src: str, func_name: str, param_name: str) -> str:
@@ -992,140 +931,6 @@ def box_bystander(d):
             for line in stderr.splitlines()[:6]:
                 print(f"      {line}")
         _FAIL += 1
-
-
-def test_word_facts_one_record_per_temp():
-    """`WordFacts` stores ONE record per temp; the six historical sets are
-    read-only views over it (doc/GIR.md stage 5b step 4).
-
-    This is the storage half of stage 5b. The six name-keyed sets could say
-    `boxed` and `dyn` at once for the same temp, and `boxed` alone meant both
-    "this word may be a heap box, render it by kind" and "this word needs
-    unboxing" — so a copy had to drop the fact (carrying it either way was
-    wrong for some reader). The record has a KIND (Int / Erased / DynWord /
-    Box / Plain) plus the three flags that are not a kind (Tagged,
-    SlotKinds, BoxedContainer), which is what lets a reader ask the question
-    the old sets conflated.
-
-    Box and Tagged do not travel through `WordFacts.carry` AS SUCH: a copied
-    box becomes a `DynWord` (the read-side fact) and the Tagged flag stays
-    with the Box kind. That boundary is measured and recorded in the method's
-    own docstring (carrying the Box kind makes a self-host-closure module
-    refuse to compile, because the bind path reads the value's tag as a
-    decision about the NAME). This test pins that boundary too, so the next
-    step has to change it on purpose.
-
-    Pinned here rather than through a `.mojo` program because the record
-    mostly changes what the backend KNOWS: its C changes on 9 of the 285
-    corpus programs and all 9 were already WRONG/CRASH against CPython, so an
-    end-to-end test cannot tell the record from the facts it stores. The
-    value-carrying half is pinned end to end by `test_gimple_runner.py`'s
-    `test_copy_of_a_dynamic_word_keeps_it`.
-    """
-    global _PASS, _FAIL
-    name = "word_facts_one_record_per_temp"
-    try:
-        from mojo.middle.valueinfo import WordFacts
-    except ImportError as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    problems = []
-
-    def want(cond, why):
-        if not cond:
-            problems.append(why)
-
-    empty = WordFacts()
-    want(not empty.may_be_box('x') and not empty.is_tagged('x')
-         and not empty.is_dyn('x') and not empty.is_int_word('x'),
-         "a fresh WordFacts knows nothing")
-    want(empty.boxed == set() and empty.tagged == set()
-         and empty.dyn == set() and empty.int_word == set(),
-         "a read must not create a record")
-
-    # A tagged box: the two facts the old pair of sets needed, in ONE record.
-    w = WordFacts()
-    w.mark_tagged('t')
-    want(w.may_be_box('t'), "a tagged word is a box")
-    want(w.is_tagged('t'), "mark_tagged records the tag")
-    want(w.is_dyn('t'),
-         "a box is a word whose kind only the runtime knows")
-    want(not w.is_int_word('t'), "a box is never a proven integer")
-    want('t' in w.boxed and 't' in w.tagged and 't' not in w.int_word,
-         "the historical sets are views over the record")
-    w.boxed.add('not-a-record')
-    want(not w.may_be_box('not-a-record'),
-         "`boxed` is a READ-ONLY view: adding to it must not create a fact")
-    want('not-a-record' not in w.boxed,
-         "the view is derived from the record on every read")
-
-    # The record picks ONE kind when two marks contradict: a box is an
-    # observation of a heap cell, and an integer proof is about bits a
-    # producer computed, so a box seen at the temp outranks it — in either
-    # order — and a later 'dynamic word' mark does not erase the box.
-    w.mark_dyn('t')
-    want(w.may_be_box('t'), "mark_dyn does not demote a box")
-    w.mark_int_word('i')
-    w.mark_boxed('i')
-    want(w.may_be_box('i') and not w.is_int_word('i'),
-         "a box seen at a temp outranks an earlier integer proof")
-    w.mark_int_word('i')
-    want(w.may_be_box('i') and not w.is_int_word('i'),
-         "a later integer mark cannot unmake a box")
-
-    # The proven-integer half still travels with a copy, and can be withdrawn.
-    w.mark_int_word('n')
-    w.carry('n2', 'n')
-    want(w.is_int_word('n2'), "a copy of a proven integer is proven too")
-    w.unmark_int_word('n2')
-    want(not w.is_int_word('n2'), "unmark_int_word withdraws the proof")
-
-    # The facts that are not a kind travel with a copy as well.
-    w.mark_slot_kinds('k')
-    w.carry('k2', 'k')
-    want(w.has_slot_kinds('k2'), "per-slot kinds travel with a copy")
-    w.mark_boxed_container('c')
-    w.carry('c2', 'c')
-    want(w.is_boxed_container('c2'), "an unknown container kind travels too")
-
-    # THE CARRY BOUNDARY (see `carry`'s docstring): a copy gets the READ-side
-    # half of a box (the runtime decides the kind) but not the BIND-side one
-    # (the copy is not claimed to be a heap box a name must unbox), and the
-    # Tagged flag stays with the Box kind it modifies.
-    w.mark_boxed('b')
-    w.mark_tagged('tb')
-    w.carry('b2', 'b')
-    w.carry('tb2', 'tb')
-    want(w.is_dyn('b2'),
-         "a copy of a box is a word whose kind the runtime decides")
-    want(not w.may_be_box('b2'),
-         "Box itself does not travel through a copy (see carry's docstring)")
-    want(w.is_dyn('tb2') and not w.is_tagged('tb2'),
-         "Tagged does not travel either; the tag belongs to the Box kind")
-
-    # A nested body saves and restores the whole record map.
-    snap = w.snapshot()
-    w.mark_dyn('extra')
-    w.restore_snapshot(snap)
-    want(not w.is_dyn('extra'), "restore_snapshot drops post-snapshot records")
-    want(w.may_be_box('t') and w.is_tagged('t'),
-         "restore_snapshot puts the saved records back")
-
-    # One record per temp, not one per fact: asking the views does not split
-    # a temp across several containers.
-    solo = WordFacts()
-    solo.mark_boxed('v')
-    solo.mark_tagged('v')
-    want(solo.boxed == {'v'} and solo.tagged == {'v'},
-         "one temp is one record, whatever the number of facts")
-
-    if problems:
-        print(f"FAIL  {name}: " + "; ".join(problems))
-        _FAIL += 1
-    else:
-        print(f"PASS  {name}")
-        _PASS += 1
 
 
 def test_gimple_operators_are_actually_gimple():
@@ -1959,97 +1764,6 @@ def test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals():
         _FAIL += 1
 
 
-def test_every_lazily_initialised_generator_table_exists():
-    """Pin: no `if not hasattr(gen, 'x'): gen.x = <container>` lazy init is left.
-
-    Self-hosted, `hasattr(gen, 'x')` answers True for every field of
-    GimpleGen's synthetic struct -- the field exists from construction, so the
-    guard's body never runs and the field stays NULL. The first
-    `gen.x.add(...)` / `gen.x[k] = v` is then a NULL MojoDict/MojoSet/MojoList
-    dereference. Measured in a stage2 binary (the compiled compiler):
-    `./mojo --dump ../array_ops_jit.mojo` died in `_dict_set_raw_seq_kind_k`
-    (d == NULL) under `emit_stmts._note_global_slot_kinds`, whose
-    `_global_slot_info` guard had been skipped, on that file's module-level
-    `arr = [1, 2, 3, 4, 5]`.
-
-    A fresh `GimpleGen()` therefore has to own every table some lowering path
-    creates lazily, and this scans the sources for a guard naming a field that
-    is not declared in `GimpleGen.__init__`. It also checks that the declared
-    initial value is the container TYPE the guard creates (`set()` vs `{}` vs
-    `[]`), because declaring the wrong one would be the same crash under a
-    different accessor. A dynamic `setattr(gen, <name>, ...)` lazy init cannot
-    be checked statically at all, so the shape is rejected outright.
-    """
-    import re as _re
-    gen = gimple_codegen.GimpleGen()
-    repo = os.path.dirname(os.path.abspath(gimple_codegen.__file__))
-    paths = [os.path.join(repo, 'gimple_codegen.py'),
-             os.path.join(repo, 'mojo', 'middle', 'closures.py')]
-    backend = os.path.join(repo, 'mojo', 'backend_gimple')
-    paths += sorted(os.path.join(backend, f) for f in os.listdir(backend)
-                    if f.endswith('.py'))
-    guard = _re.compile(
-        r"if not hasattr\((?P<recv>gen|self|ctx), "
-        r"'(?P<name>[A-Za-z_]\w*)'\):")
-    expect = {'set()': set, '{}': dict, '[]': list}
-    missing, wrong, dynamic = [], [], []
-    for path in paths:
-        try:
-            with open(path) as f:
-                src = f.read()
-        except OSError:
-            continue
-        rel = os.path.relpath(path, repo)
-        # A name that the guard only CHECKS (never assigns) is not a lazy
-        # init: it is a "was this optional field set" question and declaring
-        # it is a separate decision. Only the create-then-use shape is pinned,
-        # in either spelling:
-        #     if not hasattr(gen, 'x'):
-        #         gen.x = set()
-        #     if not hasattr(gen, 'x'): gen.x = set()
-        for m in guard.finditer(src):
-            name = m.group('name')
-            tail = src[m.end():m.end() + 400]
-            # A comment between the guard and the assignment it creates is
-            # common ("gen_module_impl creates this just before ..."), and it
-            # does not make the shape any less of a lazy initializer.
-            tail = _re.sub(r"(?m)^[ \t]*#[^\n]*\n", "", tail)
-            am = _re.match(
-                r"(?:[ \t]*\n)*[ \t]*(?:" + m.group('recv') + r")\." +
-                _re.escape(name) + r"[^=\n]*=\s*(set\(\)|\{\}|\[\])", tail)
-            if am is None:
-                continue
-            line = src.count('\n', 0, m.start()) + 1
-            rhs = am.group(1)
-            if name not in vars(gen):
-                missing.append(f"{rel}:{line} {name}")
-            elif type(getattr(gen, name)) is not expect[rhs]:
-                wrong.append(f"{rel}:{line} {name} is "
-                             f"{type(getattr(gen, name)).__name__}, guard "
-                             f"creates {expect[rhs].__name__}")
-        for m in _re.finditer(r"if not hasattr\(\s*(?P<recv>gen|self|ctx)\s*,\s*"
-                              r"(?P<var>[A-Za-z_]\w*)\s*\):", src):
-            tail = src[m.end():m.end() + 400]
-            if _re.search(r"setattr\(\s*" + m.group('recv') + r"\s*,\s*" +
-                          _re.escape(m.group('var')) + r"\s*,", tail):
-                line = src.count('\n', 0, m.start()) + 1
-                dynamic.append(f"{rel}:{line}")
-    problems = []
-    if missing:
-        problems.append("not declared in GimpleGen.__init__: "
-                        + "; ".join(missing))
-    if wrong:
-        problems.append("declared with the wrong container type: "
-                        + "; ".join(wrong))
-    if dynamic:
-        problems.append("a setattr() lazy init cannot be checked; declare the "
-                        "field in GimpleGen.__init__ instead: "
-                        + "; ".join(dynamic))
-    if problems:
-        raise AssertionError("; ".join(problems))
-    print("PASS  every_lazily_initialised_generator_table_exists")
-
-
 def _isolate(thunk):
     """Run one test and return the exception it escaped with, or None.
 
@@ -2401,8 +2115,6 @@ def main():
     # Same defect, same table family, in the BOX marker that sat next to it
     # with the fix omitted.
     _run_isolated(lambda: test_box_marker_scope(), 'test_box_marker_scope (line 1074)')
-    # Stage 5b step 4: one ValueInfo record per temp; the six sets are views.
-    _run_isolated(lambda: test_word_facts_one_record_per_temp(), 'test_word_facts_one_record_per_temp (line 1076)')
     # `!x` and `a && b` are not GIMPLE, and a `__GIMPLE` body must be.
     _run_isolated(lambda: test_gimple_operators_are_actually_gimple(), 'test_gimple_operators_are_actually_gimple (line 1076)')
     # A local rebound to a different struct has no single pointer type.
@@ -14944,7 +14656,7 @@ walk_span()
             _mmg._gmi_scan_imported_global_homes(gen, stmts)
             ctype, _cval = gen._lower_IdentExpr(_read_node())
             return (gen._own_imported_global_home.get('NAMES'), ctype,
-                    '\n'.join(ginf.body_text(gen)))
+                    '\n'.join(gen.body_lines))
 
         bad = []
         # 1. The owner is mid-compile: the owner's field, from the seeded type.
@@ -16234,8 +15946,6 @@ main()
 
     _run_isolated(test_two_same_name_free_functions_get_distinct_symbols,
                   'two_same_name_free_functions_get_distinct_symbols')
-    _run_isolated(test_every_lazily_initialised_generator_table_exists,
-                  'every_lazily_initialised_generator_table_exists')
     _run_isolated(test_local_generic_struct_in_own_module_keeps_methods_and_plain_overloads,
                   'local_generic_struct_in_own_module_keeps_methods_and_plain_overloads')
     _run_isolated(test_scalar_integer_dtype_resolution,
@@ -16255,8 +15965,6 @@ main()
                   'proven_list_local_keeps_element_type_across_inplace_store')
     _run_isolated(test_proven_span_local_from_a_list_projection,
                   'proven_span_local_from_a_list_projection')
-    _run_isolated(lambda: test_global_slot_info_is_declared_in_generator_init,
-                  'global_slot_info_is_declared_in_generator_init')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

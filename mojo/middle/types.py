@@ -178,21 +178,6 @@ class TypeLattice:
         return t == 'char *'
 
     @classmethod
-    def is_str(cls, t: str) -> bool:
-        """`t` is the C spelling of a lazy `MojoStr` string VALUE
-        (`MojoStr *`). Distinct from `is_cstr`, which is the EAGER C string
-        (`char *`): the two are different representations, so a test that wants
-        "either string" asks both."""
-        return t == 'MojoStr *'
-
-    @classmethod
-    def is_span(cls, t: str) -> bool:
-        """`t` is the C spelling of a Mojo `Span` (`Span *`). Its element type
-        is erased from the C type, so a consumer that needs it must prove the
-        Mojo type elsewhere (`emit_resolve`'s span proof)."""
-        return t == 'Span *'
-
-    @classmethod
     def ends_in_star(cls, t: str) -> bool:
         """`t` is spelled as a pointer to something (`... *`): a struct, list,
         string or other handle. Narrower than `is_pointer`, which also accepts
@@ -205,21 +190,6 @@ class TypeLattice:
     def is_list(cls, t: str) -> bool:
         """`t` is the C spelling of a list/tuple value (`MojoList *`)."""
         return t == 'MojoList *'
-
-    @classmethod
-    def is_dict(cls, t: str) -> bool:
-        """`t` is the C spelling of a dict value (`MojoDict *`)."""
-        return t == 'MojoDict *'
-
-    @classmethod
-    def is_set(cls, t: str) -> bool:
-        """`t` is the C spelling of a set value (`MojoSet *`)."""
-        return t == 'MojoSet *'
-
-    @classmethod
-    def is_bytes(cls, t: str) -> bool:
-        """`t` is the C spelling of a bytes value (`MojoBytes *`)."""
-        return t == 'MojoBytes *'
 
     # Tuple-membership predicates (doc/GIR.md stage 4). Each one answers
     # exactly what the tuple test it replaces answered, `None` included where
@@ -234,7 +204,9 @@ class TypeLattice:
     @classmethod
     def is_int_word_or_voidp(cls, t: str) -> bool:
         """`t in ('int', 'int64_t', 'void *')`."""
-        return cls.is_int_word(t) or cls.is_voidp(t)
+        if not t:
+            return False
+        return t == 'int' or t == 'int64_t' or t == 'void *'
 
     @classmethod
     def is_py_scalar(cls, t: str) -> bool:
@@ -279,72 +251,6 @@ class TypeLattice:
             return False
         return t == 'int64_t' or t == 'MojoList *'
 
-    # The UNSOLVED marker (doc/GIR.md stage 4 tail). `''` and `'unknown'` are
-    # the two spellings the inference leaves behind when it has no answer, and
-    # callers that want "no answer" must ask this rather than re-spell one of
-    # them — one of them was already written beside the other in a single
-    # tuple (`loops_shared`'s slot-kind test), which is the evidence that they
-    # are one fact. A MISSING table entry (`None`) is deliberately NOT this:
-    # it is a separate predicate (`is_int_word_or_none`, `is_word_or_none`),
-    # because a `not in` test that must reject an absent entry would otherwise
-    # start accepting it.
-    @classmethod
-    def is_unsolved(cls, t: str) -> bool:
-        """`t` is the inference's "no answer" marker: `''` or `'unknown'`."""
-        if t is None:
-            return False
-        return t == '' or t == 'unknown'
-
-    @classmethod
-    def is_word_or_unsolved(cls, t: str) -> bool:
-        """The word, or no type at all: `t in ('int64_t', '', 'unknown')`."""
-        return cls.is_word(t) or cls.is_unsolved(t)
-
-    @classmethod
-    def is_int_word_or_unsolved(cls, t: str) -> bool:
-        """`t in ('int', 'int64_t', '', 'unknown')`."""
-        return cls.is_int_word(t) or cls.is_unsolved(t)
-
-    # The representation CLASSES below compose the single-type predicates
-    # above rather than re-spelling their memberships: each is the answer to
-    # one question about the value model, and `tools/type_string_codemod.py`
-    # emits them (or a disjunction of them) for the tuples that spelled the
-    # same union by hand. Composition matters for correctness as well as for
-    # one-place-ness: a class that later gains a member (a new container
-    # handle, say) is then gained at every call site at once.
-    @classmethod
-    def is_boxable(cls, t: str) -> bool:
-        """A Python value that occupies exactly one boxed slot: the untyped
-        word, a float, a bool, a string, or a container handle.
-        `t in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
-        'MojoDict *', 'MojoSet *')`."""
-        return (cls.is_word(t) or cls.is_double(t) or cls.is_bool(t)
-                or cls.is_cstr(t) or cls.is_list(t) or cls.is_dict(t)
-                or cls.is_set(t))
-
-    @classmethod
-    def is_word_value(cls, t: str) -> bool:
-        """A value held in one machine word that is NOT a float or a bool: the
-        untyped word, a string, or a container handle. (A double travels in a
-        real C double and a bool in a `_Bool`, so neither is a word value.)
-        `t in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *')`."""
-        return (cls.is_word(t) or cls.is_cstr(t) or cls.is_list(t)
-                or cls.is_dict(t) or cls.is_set(t))
-
-    @classmethod
-    def is_c_scalar(cls, t: str) -> bool:
-        """A scalar the C lowering can declare, cast and pass as itself: the
-        4-byte int, the word, a double, a bool or a string.
-        `t in ('int', 'int64_t', 'double', '_Bool', 'char *')`."""
-        return (cls.is_int_word(t) or cls.is_double(t) or cls.is_bool(t)
-                or cls.is_cstr(t))
-
-    @classmethod
-    def is_number_scalar(cls, t: str) -> bool:
-        """A scalar that is not a string: the 4-byte int, the word, a double or
-        a bool. `t in ('int', 'int64_t', 'double', '_Bool')`."""
-        return cls.is_int_word(t) or cls.is_double(t) or cls.is_bool(t)
-
     @classmethod
     def is_int_word(cls, t: str) -> bool:
         """`t` is the C spelling of a plain int or the untyped word: exactly
@@ -360,48 +266,6 @@ class TypeLattice:
         return t == 'int64_t'
 
     @classmethod
-    def is_uword(cls, t: str) -> bool:
-        """`t` is the UNSIGNED machine word (`uint64_t`) — `is_word`'s unsigned
-        twin, for a value that is a count or an index and may have been tagged
-        unsigned (the bswap/bit-length paths and the list/bytes repeat counts)."""
-        return t == 'uint64_t'
-
-    @classmethod
-    def is_char(cls, t: str) -> bool:
-        """`t` is the single-byte character scalar (`char`, not `char *`).
-        Distinct from `is_int_word`: a `char` is narrower than the word and
-        needs widening before it is appended, cast or compared as an int."""
-        return t == 'char'
-
-    @classmethod
-    def is_u8(cls, t: str) -> bool:
-        """`t` is the unsigned byte scalar (`uint8_t`). Distinct from `is_char`
-        (a signed C `char`): both are one byte but only `char` is the string
-        byte the indexing paths produce."""
-        return t == 'uint8_t'
-
-    @classmethod
-    def is_c_long(cls, t: str) -> bool:
-        """`t` is the bare C `long` spelling — the declared return type of a
-        runtime call such as `sysconf` (`gimple_codegen._KNOWN_SIGS`). It is
-        deliberately not in the promotion lattice (`_TYPE_SIGNED`): a `long` is
-        formatted and cast as a scalar, but it must not be promoted as a Mojo
-        integer width."""
-        return t == 'long'
-
-    @classmethod
-    def is_void(cls, t: str) -> bool:
-        """`t` is exactly `void` (no value), as opposed to `is_voidp`'s
-        untyped pointer (`void *`) or a missing/unsolved type."""
-        return t == 'void'
-
-    @classmethod
-    def is_voidp(cls, t: str) -> bool:
-        """`t` is the untyped pointer (`void *`) — the C spelling of `None` and
-        of an opaque handle whose real type the body cannot name."""
-        return t == 'void *'
-
-    @classmethod
     def is_double(cls, t: str) -> bool:
         """`t` is exactly `double` (not `float`; see `is_float` for both)."""
         return t == 'double'
@@ -411,24 +275,6 @@ class TypeLattice:
         if not t:
             return False
         return t == '_Bool'
-
-    @classmethod
-    def is_cpp_bool(cls, t: str) -> bool:
-        """`t` is the C++ spelling of a bool (`bool`, where C spells it
-        `_Bool`). The main backend's vocabulary is `_Bool` — `_TYPE_MAP` and
-        `_c_to_cpp_scalar_type` translate on the way into `.cpp` text — so
-        `is_bool` deliberately stays the C question (200+ call sites depend on
-        that); this is the C++ emitter's twin. A `bool`-annotated MOJO field is
-        not this: `_TYPE_MAP` lowers that one to `int`."""
-        return t == 'bool'
-
-    @classmethod
-    def is_cpp_int_scalar(cls, t: str) -> bool:
-        """`t` is one of the C++ emitter's integer-like scalars:
-        `t in ('int', 'int64_t', '_Bool', 'bool')` — `is_int_word` composed
-        with the two bool spellings. These are the values that emitter lowers
-        through `(int64_t)` at a call argument or in a `*args` pack."""
-        return cls.is_int_word(t) or cls.is_bool(t) or cls.is_cpp_bool(t)
 
     @classmethod
     def join(cls, t1: str, t2: str) -> str:

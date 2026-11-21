@@ -30,6 +30,10 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+# The one writer for "`<alias>.<member>` names a function of the module that
+# alias holds" (see its docstring): shared with the module-qualified CALL
+# paths, so the VALUE form this file answers cannot drift from them.
+from mojo.middle.funcs_shared import register_module_member_function
 
 def _ident_call_name(gen, func_node) -> str:
     """`func_node.name` for a call whose callee is an IdentExpr, forced to
@@ -131,18 +135,41 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
         _fname = _as_str(node.member)
     if not _fname:
         return None
-    # A local shadows a module-level name, a global shadows a function of
-    # the same name, and a struct/class name is a type, not a callable —
-    # all three are decided by Python scoping before "is it a function?"
-    # ever matters.
-    if _fname in getattr(gen, 'var_types', ()) or \
-            _fname in getattr(gen, '_global_var_types', ()) or \
-            _fname in getattr(gen, 'struct_field_types', ()):
+    # A local shadows a module-level name, and a global shadows a function of
+    # the same name — Python scoping decides both, but only for the BARE-NAME
+    # spelling, and for `m.f` where `m` really is a MODULE alias: an attribute
+    # of a module is not shadowed by any local or module-level `f`
+    # (`_module_alias_names`, the set the `import` statements populate and an
+    # ordinary `from X import name` binding never does). A struct/class name
+    # is a type, not a callable, in every spelling.
+    _module_member = (
+        isinstance(node, gimple_ctypes.MemberExpr)
+        and isinstance(node.obj, gimple_ctypes.IdentExpr)
+        and _as_str(node.obj.name) in getattr(gen, '_module_alias_names', ()))
+    if _fname in getattr(gen, 'struct_field_types', ()):
+        return None
+    if not _module_member and (
+            _fname in getattr(gen, 'var_types', ())
+            or _fname in getattr(gen, '_global_var_types', ())):
         return None
     _gen_api = getattr(gen, '_generator_api', None) or {}
     _is_gen = _fname in _gen_api
     if not _is_gen and _fname not in getattr(gen, 'func_return_types', ()):
-        return None
+        # `x = m.f` where `f` belongs to the module the alias `m` holds but
+        # this TU did not INLINE it (the per-file `do_imports=False` compile
+        # the bootstrap dumps use inlines nothing, so `func_return_types`
+        # cannot know it). Without this the read is not a callable value at
+        # all and the caller falls through to the generic dynamic-dispatch
+        # fallback — `_mojo_dispatch_getattr(NULL, "f")` on the module
+        # marker, a fatal `AttributeError: f` at the statement (measured:
+        # `_fc._as_comptimevar_node`, every stage2 dump). Register it exactly
+        # as the module-qualified CALL path does, then answer it the same way
+        # every other registered import is answered below.
+        if _module_member:
+            register_module_member_function(
+                gen, _as_str(node.obj.name), _fname)
+        if _fname not in getattr(gen, 'func_return_types', ()):
+            return None
     _c_name = gen._func_csym(_fname)
     if _fname in gen._c_names:
         _c_name = gen._c_names[_fname]

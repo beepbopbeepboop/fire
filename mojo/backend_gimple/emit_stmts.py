@@ -37,7 +37,6 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
-import mojo.ir.build as build
 import mojo.middle.solvers as gimple_solvers
 
 
@@ -220,7 +219,7 @@ def gen_stmt(gen, node):
         gen._gen_stmt_StructDef(node)
     else:
         gimple_ctypes._debug_note('unknown statement dropped', node_kind)
-        build.comment(gen, f"/* TODO: {node_kind} */")
+        gen._emit(f"  /* TODO: {node_kind} */")
 
     gen._stmt_line_directive = _outer_line_directive
 
@@ -294,7 +293,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     # mojo_iter_word, which consume it from the same position.
     if (not _rebind and not is_decl and gimple_ctypes.TypeLattice.is_list(at)
             and itc.iter_name_escapes_into_call(gen._cur_func_body, name)
-            and not gimple_ctypes.TypeLattice.is_word_or_none(gen._elem_of(av))):
+            and gen._elem_of(av) not in (None, 'int64_t')):
         # An iterator over strings/floats handed to a function: the word the callee
         # gets back from next() carries no kind, so it would print as an integer.
         # Refuse (the module falls back to source) rather than answer wrong.
@@ -522,7 +521,7 @@ def _gen_stmt_VarDecl(gen, node):
             # slot type was thrown away and the value was immediately
             # coerced BACK to int64_t on the store (a `Config *` slot read
             # through `(Config *)` then `(void *)` then `(int64_t)`).
-            if gimple_ctypes.TypeLattice.is_int_word(gen.var_types.get(n)) and not gimple_ctypes.TypeLattice.is_int_word(et):
+            if gen.var_types.get(n) in ('int64_t', 'int') and not gimple_ctypes.TypeLattice.is_int_word(et):
                 _redecl_upgrade_default(gen, n, et)
             gen._declare_var(n, et)
             gen._safe_coerce_emit(et, gen.var_types[n], ev, gen._write_dest(n))
@@ -1132,6 +1131,8 @@ def _note_global_slot_kinds(gen, tname: str, v: str) -> None:
     module scope printed `4612811918334230528`). The record is the last store's;
     a read compiled before any store has no record, as before.
     """
+    if not hasattr(gen, '_global_slot_info'):
+        gen._global_slot_info = {}
     info = {}
     if gen._word_has_slot_kinds(v):
         info['mk'] = True
@@ -1284,7 +1285,7 @@ def _lower_out_param_store(gen, node) -> bool:
             _ann = None if '[' in _ann_full else _ann_full
     if _ann != _vb[:-2].strip():
         return False
-    build.assign(gen, f'*{gen._c_names.get(_tn, _tn)}', f'*{_vav}')
+    gen._emit(f"  *{gen._c_names.get(_tn, _tn)} = *{_vav};")
     return True
 
 
@@ -1350,11 +1351,13 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             _rhs = node.value
             if isinstance(_rhs, gimple_ctypes.MemberExpr) and isinstance(_rhs.obj, gimple_ctypes.IdentExpr):
                 if _rhs.obj.name == 'frozendict' and _rhs.member == 'fromkeys' and not gen._locally_binds_name(_rhs.obj.name):
+                    if not hasattr(gen, '_frozendict_fromkeys_callables'): gen._frozendict_fromkeys_callables = set()
                     gen._frozendict_fromkeys_callables.add(node.target.name)
                     try: gen._frozendict_fromkeys_callables.add(gen._cname(node.target.name))
                     except Exception: pass
             elif isinstance(_rhs, gimple_ctypes.MemberExpr) and isinstance(_rhs.obj, gimple_ctypes.IdentExpr):
                 if _rhs.obj.name in ('dict', 'OrderedDict') and _rhs.member == 'fromkeys' and not gen._locally_binds_name(_rhs.obj.name):
+                    if not hasattr(gen, '_dict_fromkeys_callables'): gen._dict_fromkeys_callables = set()
                     gen._dict_fromkeys_callables.add(node.target.name)
                     try: gen._dict_fromkeys_callables.add(gen._cname(node.target.name))
                     except Exception: pass
@@ -1557,13 +1560,13 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 _dsr.pop(_as_str(tname), None)
         # Track frozendict/dict fromkeys callable values
         try:
-            if v in gen._frozendict_fromkeys_callables:
+            if hasattr(gen, '_frozendict_fromkeys_callables') and v in gen._frozendict_fromkeys_callables:
                 gen._frozendict_fromkeys_callables.add(tname)
                 try:
                     gen._frozendict_fromkeys_callables.add(gen._cname(tname))
                 except Exception:
                     pass
-            if v in gen._dict_fromkeys_callables:
+            if hasattr(gen, '_dict_fromkeys_callables') and v in gen._dict_fromkeys_callables:
                 gen._dict_fromkeys_callables.add(tname)
                 try:
                     gen._dict_fromkeys_callables.add(gen._cname(tname))
@@ -1621,6 +1624,8 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 _vk2 = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
                     _as_str(_gapi2.get('value_ctype') or 'int64_t'))
                 if _vk2 is not None:
+                    if not hasattr(gen, '_gen_handle_word_locals'):
+                        gen._gen_handle_word_locals = set()
                     gen._gen_handle_word_locals.add(_as_str(tname))
                     _hw2 = gen._to_int64(vtype, v)
                     _kv2 = gen._new_val('int64_t', str(_vk2))
@@ -2544,7 +2549,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 else:
                     _some_t = gen._new_temp('_Bool')
                     gen._copy(_some_t, f"{_some}")
-                build.assign(gen, f'{ov}{op}{_sf}_is_some', f'{_some_t}')
+                gen._emit(f'  {ov}{op}{_sf}_is_some = {_some_t};')
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the
             # element type for subscript/list-iter dispatch — without this,
@@ -2884,12 +2889,10 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                                             # struct allocation elsewhere in this codegen.
                                             _esz = gen._new_val('int64_t', f"(int64_t) sizeof({_ect})")
                                             _nbytes = gen._binop('int64_t', _esz, '*', f"{_acnt}")
-                                        build.call_void(gen, 'memcpy',
-                                            [f'{addr}->{safe_fn}',
-                                             f'{v}->{safe_fn}', f'{_nbytes}'], True)
+                                        gen._emit(f"  memcpy({addr}->{safe_fn}, {v}->{safe_fn}, {_nbytes});")
                                         continue
                                     fv = gen._new_val(ftype, f"{v}->{safe_fn}")
-                                    build.assign(gen, f'{addr}->{safe_fn}', f'{fv}')
+                                    gen._emit(f"  {addr}->{safe_fn} = {fv};")
                                 # The presence words are not in `fields` (see
                                 # StructDef.presence_fields): copy them too, so
                                 # the copy answers hasattr as its source does.
@@ -2936,7 +2939,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             addr = gen._rt_call(ot, f"_mojo_at_{gimple_ctypes._c_id(elem_t)}", [f"{ptr_typed}", f"{idx64}"])
                             v_cast = gen._new_temp(elem_t)
                             gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
-                            build.assign(gen, f'*{addr}', f'{v_cast}')
+                            gen._emit(f"  *{addr} = {v_cast};")
                     elif (isinstance(ot, str)
                           and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
                           and not gimple_ctypes.TypeLattice.is_word(ot)):
@@ -2954,7 +2957,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             gen._safe_coerce_emit(vtype, ot, v, _wv)
                             gen._copy(f"{obj_v}", _wv)
                     else:
-                        build.assign(gen, f'{obj_v}[{idx_v}]', f'{v}')
+                        gen._emit(f"  {obj_v}[{idx_v}] = {v};")
     elif isinstance(node.target, gimple_ctypes.SliceExpr):
         # `x[a:b] = y` / `x[:] = y` / `x[::k] = y` — a real in-place splice
         # of a list, matching Python semantics (remove the slice's slots,
@@ -3036,7 +3039,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         gen._safe_coerce_emit(addr_t, 'int64_t *', addr_v, ptr_tmp)
         val_tmp = gen._new_temp(vtype)
         gen._safe_coerce_emit(vtype, vtype, v, val_tmp)
-        build.assign(gen, f'*{ptr_tmp}', f'{val_tmp}')
+        gen._emit(f"  *{ptr_tmp} = {val_tmp};")
     else:
         pass
 
@@ -3415,7 +3418,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 addr = gen._rt_call(ot, f"_mojo_at_{cn}", [f"{ptr_t}", idx64])
                 v_cast = gen._new_temp(elem_t)
                 gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
-                build.assign(gen, f'*{addr}', f'{v_cast}')
+                gen._emit(f"  *{addr} = {v_cast};")
         else:
             if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                 # Try __setitem__ as last resort
@@ -3481,7 +3484,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
                                         "falling back to interpreting this module from "
                                         "source instead")
                             else:
-                                build.assign(gen, f'{obj_v}[{idx_v}]', f'{v}')
+                                gen._emit(f"  {obj_v}[{idx_v}] = {v};")
                         except RuntimeError:
                             raise
                         except Exception:
@@ -3514,9 +3517,9 @@ def _gen_stmt_AugAssignStmt(gen, node):
                                         "falling back to interpreting this module from "
                                         "source instead")
                             else:
-                                build.assign(gen, f'{obj_v}[{idx_v}]', f'{v}')
+                                gen._emit(f"  {obj_v}[{idx_v}] = {v};")
                     else:
-                        build.assign(gen, f'{obj_v}[{idx_v}]', f'{v}')
+                        gen._emit(f"  {obj_v}[{idx_v}] = {v};")
     else:
         pass  # complex aug-assign target: no-op
 
@@ -3900,6 +3903,8 @@ def _gen_stmt_ReturnStmt(gen, node):
         # kinds at run time: record that THIS FUNCTION returns such a list, so
         # a call site marks its result runtime-kinded too (`ginf._RuntimeKinded`).
         if isinstance(gen._struct_slot_kinds.get(v), ginf._RuntimeKinded):
+            if not hasattr(gen, '_return_runtime_kinded'):
+                gen._return_runtime_kinded = set()
             gen._return_runtime_kinded.add(gen.current_func_name)
         if v in gen._elem_types and not _is_empty_container_literal(node.value):
             gen._return_elem_types[gen.current_func_name] = gen._elem_types[v]
@@ -4134,7 +4139,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
             # Same-type component-ref read into the `_Bool` temp, NO
             # parens: `t = (p->b)` is a gimple-frontend error in a
             # `__GIMPLE`-tagged function, `t = p->b` is not (m4 shape).
-            build.assign(gen, f'{b}', f'{_ov}{_op}{_sf}_is_some')
+            gen._emit(f"  {b} = {_ov}{_op}{_sf}_is_some;")
             return b
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
@@ -4783,7 +4788,7 @@ def _gen_stmt_DelStmt(gen, node):
         if not isinstance(target, gimple_ctypes.SubscriptExpr):
             gimple_ctypes._debug_note('DelStmt target not supported (only container[key]/[slice])',
                         type(target).__name__)
-            build.comment(gen, f"/* TODO: del {type(target).__name__} not supported */")
+            gen._emit(f"  /* TODO: del {type(target).__name__} not supported */")
             continue
         ot, ov = gen.lower_expr(target.obj)
         if isinstance(target.index, gimple_ctypes.SliceExpr):
@@ -4851,7 +4856,7 @@ def _gen_stmt_DelStmt(gen, node):
             gen._emit_label(bb_after)
         else:
             gimple_ctypes._debug_note('DelStmt subscript on unsupported container type', ot)
-            build.comment(gen, f"/* TODO: del on {ot} not supported */")
+            gen._emit(f"  /* TODO: del on {ot} not supported */")
 
 
 def _resolve_dotted_case_pattern(gen, subj_type: str, pattern):
@@ -5276,7 +5281,7 @@ def _gen_stmt_MatchStmt(gen, node):
                 if args:
                     # Only bind when the isinstance guard holds: bail to fail_bb
                     # otherwise, so the attribute read never runs on a non-instance.
-                    build.cond_br(gen, f'!{cv}', fail_bb)
+                    gen._emit(f"  if (!{cv}) goto {fail_bb};")
                     _ma_names = _resolve_class_match_args(gen, pattern.func, args,
                                                           getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0)
                     for _ma_i, subpat in enumerate(args):
@@ -5602,7 +5607,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     addr = gen._rt_call(ot, f"_mojo_at_{cn}", [f"{ptr_t}", f"{idx64}"])
                     v_cast = gen._new_temp(elem_t)
                     gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
-                    build.assign(gen, f'*{addr}', f'{v_cast}')
+                    gen._emit(f"  *{addr} = {v_cast};")
             elif (isinstance(ot, str)
                   and ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
                   and not gimple_ctypes.TypeLattice.is_word(ot)):
@@ -5620,7 +5625,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._safe_coerce_emit(vtype, ot, v, _wv)
                     gen._copy(obj_v, _wv)
             elif not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
-                build.assign(gen, f'{obj_v}[{idx_v}]', f'{v}')
+                gen._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
             pass  # complex multi-assign target: no-op
 
@@ -6773,7 +6778,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         temp_var = gen._new_temp('void *')
         gen._rt_into(temp_var, 'mojo_exc_obj_get', [])
         bound = gen._new_temp(exc_ctype)
-        build.assign(gen, f'{bound}', f'({exc_ctype}) {temp_var}')
+        gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
         # The name is a heap box when a nested closure or a class declared in
         # THIS function captures it by reference. References inside the
         # handler go through `bound` above, but the box is what the capture
@@ -6787,7 +6792,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         gen._c_names[bind_name] = bound
         if _box_dest is not None:
             _box_ct = gen._boxed_mut_locals[bind_name]
-            build.assign(gen, f'{_box_dest}', f'({_box_ct}) {bound}')
+            gen._emit(f"  {_box_dest} = ({_box_ct}) {bound};")
     gen._last_was_terminal = False
     _bscope = ginf._open_block_scope(gen)
     for s in handler.body:
@@ -6850,10 +6855,10 @@ def _gen_stmt_TryStmt(gen, node):
     temp_inc = gen._new_temp('int')
     temp_top2 = gen._new_temp('int')
     temp_addr = gen._new_temp('void *')  # jmp_buf is int[48], use void* to avoid type mismatch
-    build.assign(gen, f'{temp_top1}', f'_mojo_exc_top')
+    gen._emit(f"  {temp_top1} = _mojo_exc_top;")
     gen._binop_into(temp_inc, temp_top1, '+', '1')
-    build.assign(gen, f'_mojo_exc_top', f'{temp_inc}')
-    build.assign(gen, f'{temp_top2}', f'_mojo_exc_top')
+    gen._emit(f"  _mojo_exc_top = {temp_inc};")
+    gen._emit(f"  {temp_top2} = _mojo_exc_top;")
     # Snapshot the cleanup-thunk stack depth this level unwinds back down to
     # on an exception (doc/OWNERSHIP_MODEL.md's exception-handling option 2)
     # — must happen after the _mojo_exc_top bump above (it indexes the
@@ -7306,7 +7311,7 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
                      else gen.func_return_types.get(exit_fn, '_Bool'))
             gen._emit_call(ret_t, '', exit_fn, [(ct, cv)] + _extra_args)
         else:
-            build.comment(gen, f"/* with: __exit__ ({sn}) */")
+            gen._emit(f"  /* with: __exit__ ({sn}) */")
 
 
 def _with_is_assert_raises(expr):
@@ -7445,7 +7450,7 @@ def _gen_stmt_WithStmt(gen, node):
         elif has_enter:
             enter_v = gen._call_expr(enter_ret_t, enter_fn, [(et, ctx_v)])
         else:
-            build.comment(gen, f"/* with: __enter__ ({struct_name}) */")
+            gen._emit(f"  /* with: __enter__ ({struct_name}) */")
             enter_v = ctx_v
             enter_ret_t = et
         # Register the item for its TEARDOWN before deciding anything about
@@ -7532,10 +7537,10 @@ def _gen_stmt_WithStmt(gen, node):
             temp_top1 = gen._new_temp('int')
             temp_inc  = gen._new_temp('int')
             temp_top2 = gen._new_temp('int')
-            build.assign(gen, f'{temp_top1}', f'_mojo_exc_top')
+            gen._emit(f"  {temp_top1} = _mojo_exc_top;")
             gen._binop_into(temp_inc, temp_top1, '+', '1')
-            build.assign(gen, f'_mojo_exc_top', f'{temp_inc}')
-            build.assign(gen, f'{temp_top2}', f'_mojo_exc_top')
+            gen._emit(f"  _mojo_exc_top = {temp_inc};")
+            gen._emit(f"  {temp_top2} = _mojo_exc_top;")
             _ar_cell_snap = gmp._cattr_snapshot(gen)
             # Checkpoint the cleanup-thunk stack exactly like the try/
             # except idiom: on the longjmp the runtime unwinds to it.
@@ -7647,10 +7652,10 @@ def _gen_stmt_WithStmt(gen, node):
         temp_inc = gen._new_temp('int')
         temp_top2 = gen._new_temp('int')
         temp_addr = gen._new_temp('void *')  # jmp_buf is int[48], use void* to avoid type mismatch
-        build.assign(gen, f'{temp_top1}', f'_mojo_exc_top')
+        gen._emit(f"  {temp_top1} = _mojo_exc_top;")
         gen._binop_into(temp_inc, temp_top1, '+', '1')
-        build.assign(gen, f'_mojo_exc_top', f'{temp_inc}')
-        build.assign(gen, f'{temp_top2}', f'_mojo_exc_top')
+        gen._emit(f"  _mojo_exc_top = {temp_inc};")
+        gen._emit(f"  {temp_top2} = _mojo_exc_top;")
         # See _gen_stmt_TryStmt's identical checkpoint-save call for why.
         gen._rt_void('mojo_cleanup_checkpoint_save', [])
         # GIMPLE: pass array element directly to setjmp (decays to int*)

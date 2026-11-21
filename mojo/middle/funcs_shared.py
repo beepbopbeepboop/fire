@@ -375,7 +375,7 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
         # Apply unanimous container evidence when usage left the slot at the
         # int64_t default, but preserve scalar (char* / double) or struct
         # conclusions.
-        if gimple_ctypes.TypeLattice.is_int_word_or_unsolved(ctype):
+        if ctype in ('int64_t', 'int', ''):
             return _xc
         return _xc
     if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -1051,6 +1051,98 @@ def register_imported_symbol(gen, name: str, info: dict,
             (' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp)
             for cp in (_c_params or [])
         ]
+
+
+def register_module_member_function(gen, module_name: str, member_name: str,
+                                    sub_ref=None):
+    """Record `<module_name>.<member_name>` as an imported top-level FUNCTION
+    of the module a bare `import M as module_name` alias names, so a use site
+    resolves to that definition's real mangled symbol.
+
+    Both spellings of "a module member is a function" need exactly this:
+    the module-qualified CALL (`m.f(...)`, `_lower_method_call`'s two
+    branches) and the module-qualified VALUE (`x = m.f`, `_callable_value_
+    symbol` / `_lower_MemberExpr`). It lives here, in the middle tier, so
+    both reach one implementation — `_lower_MemberExpr` used to answer the
+    value form from `func_return_types` alone, and that table only carries
+    THIS module's own defs plus the defs of modules a whole-program INLINE
+    compile pulled in. The per-file (`do_imports=False`) path the bootstrap
+    dumps use inlines nothing, so `f = _fc._as_comptimevar_node` missed the
+    branch and fell through to the generic dynamic-dispatch fallback — a
+    `_mojo_dispatch_getattr(NULL, "_as_comptimevar_node")` on the module
+    marker, which is a fatal `AttributeError: _as_comptimevar_node` the
+    instant the statement runs, at compile time of every later file.
+
+    Three steps, and all are required:
+
+    1. Resolve through re-exports: `_find_symbol_home_module` answers the
+       module that DEFINES the name (`emit_resolve` re-exports a sibling's
+       helpers), because the mangled symbol is qualified by the DEFINER.
+    2. `_note_own_func_home` pins that home for `_func_qualifier`, which
+       matters when the definer is compiled later in an import cycle.
+    3. Register the MEMBER itself. A bare `import X as alias` records the
+       MODULE in `imported_symbols`, never its members, and `_func_csym`/
+       `_func_mangleable` key off the SYMBOL's own entry — without it the
+       use site emits `_funcptr_<unqualified name>`, or a weak
+       "unavailable in compiled mode" stub, and links to nothing.
+
+    Registration happens ONLY when nothing registered the name already: an
+    import this compile resolved properly (`_emit_stdlib_import_externs`, a
+    `from X import Y`) has the DEFINING module's own signature, and
+    overwriting it with a locally rebuilt one was measured to produce
+    `non-trivial conversion in 'function_decl'`.
+
+    Returns `(sub_ref, raw_export_entry)`: the module ref the alias names
+    after re-export hops, and the scan's (un-upgraded) entry when the member
+    was not registered yet AND that module exports it, else None.
+    """
+    if sub_ref is None:
+        _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
+        sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
+                   or module_name)
+    # A MISS is answered from a per-gen cache: every module-alias attribute
+    # read that is not a function (`re.X`, `json.Y`, a constant the earlier
+    # branches did not special-case) would otherwise re-read and re-scan the
+    # aliased module's whole source on every use site. Keyed as one string, not
+    # a tuple: on the self-hosted path a tuple key hashes by ADDRESS.
+    _misses = getattr(gen, '_module_member_fn_misses', None)
+    if _misses is None:
+        _misses = {}
+        gen._module_member_fn_misses = _misses
+    _miss_key = module_name + '.' + member_name
+    if _miss_key in _misses:
+        # `_as_str`: a dict VALUE read back on the self-hosted path is
+        # int64_t, and this return value is a module ref every caller uses as
+        # a string (the same reason `_as_str` guards every other dict read in
+        # this file).
+        return _as_str(_misses[_miss_key]), None
+    try:
+        _defining = gen._find_symbol_home_module(sub_ref, member_name, 'fn')
+    except Exception:
+        _defining = None
+    if _defining and _defining != sub_ref:
+        sub_ref = _defining
+    try:
+        gen._note_own_func_home(member_name, sub_ref, record_scope=False)
+    except Exception:
+        pass
+    if member_name in (getattr(gen, 'imported_symbols', None) or {}):
+        return sub_ref, None
+    try:
+        _exps, _qual = gen._local_sibling_module_exports(sub_ref)
+    except Exception:
+        _exps, _qual = None, None
+    _raw = (_exps or {}).get(member_name)
+    if _raw:
+        _entry = gen._resolved_export_entry(sub_ref, member_name, _raw)
+        if _entry:
+            _entry = dict(_entry)
+            _entry['module'] = sub_ref
+            gen._register_imported_symbol(member_name, _entry, member_name,
+                                          write_param_types=True)
+    else:
+        _misses[_miss_key] = sub_ref
+    return sub_ref, _raw
 
 
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:

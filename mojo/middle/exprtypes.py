@@ -892,7 +892,7 @@ def _is_python_bool_field(gen, node) -> bool:
         if _sn and _name_set_has(_bf.get(_sn), _member):
             return True
     for _rt in _receiver_ctypes(gen, _recv):
-        if not _rt or not TypeLattice.ends_in_star(_rt):
+        if not _rt or not _rt.endswith(' *'):
             continue
         _rsn = _struct_name_of(_rt)
         if _rsn and _name_set_has(_bf.get(_rsn), _member):
@@ -932,7 +932,7 @@ def _is_python_bool_method(gen, node) -> bool:
     if not _bm:
         return False
     for _rt in _receiver_ctypes(gen, _f.obj):
-        if not _rt or not TypeLattice.ends_in_star(_rt):
+        if not _rt or not _rt.endswith(' *'):
             continue
         if _name_set_has(_bm.get(_struct_name_of(_rt)), _as_str_node(_f.member)):
             return True
@@ -974,10 +974,10 @@ def _is_known_struct_ptr_ctype(ctype, known_structs) -> bool:
     struct names this compile actually has a layout for, e.g.
     `self.struct_field_types.keys()`) is the single source of truth this
     checks against, mirroring `_gen_cpp_generator_unit`'s own identical
-    `TypeLattice.ends_in_star(ctype) and ctype[:-2] in self.struct_field_types` check
+    `ctype.endswith(' *') and ctype[:-2] in self.struct_field_types` check
     for a struct-typed generator PARAMETER — reused here rather than
     re-deriving a second notion of "is this really a struct pointer"."""
-    return known_structs is not None and isinstance(ctype, str) and TypeLattice.ends_in_star(ctype) and (ctype[:-2] in known_structs)
+    return known_structs is not None and isinstance(ctype, str) and ctype.endswith(' *') and (ctype[:-2] in known_structs)
 
 def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, self_struct_ctype: str | None=None, module_global_types: dict | None=None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
@@ -1046,7 +1046,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
         if self_fields is None:
             return None
         ft = self_fields.get(e.member)
-        if TypeLattice.is_py_scalar(ft):
+        if ft in ('int64_t', 'double', '_Bool', 'char *'):
             return ft
         if _is_known_struct_ptr_ctype(ft, known_structs):
             return ft
@@ -1109,7 +1109,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
                 recv_ctype = _infer_simple_expr_ctype(_next_arg, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype, module_global_types=module_global_types)
             if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
                 rt = method_return_types.get(f'{recv_ctype[:-2]}___next__')
-                if TypeLattice.is_boxable(rt):
+                if rt in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
                     return rt
                 if _is_known_struct_ptr_ctype(rt, known_structs):
                     return rt
@@ -1132,7 +1132,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return known[e.func.name]
         if fn_return_types is not None:
             _frt = fn_return_types.get(e.func.name)
-            if isinstance(_frt, str) and (TypeLattice.is_boxable(_frt) or (TypeLattice.ends_in_star(_frt) and known_structs is not None and (_frt[:-2] in known_structs))):
+            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double', 'int64_t', '_Bool') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
                 return _frt
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
         if isinstance(e.func.obj, MemberExpr) and isinstance(e.func.obj.obj, IdentExpr) and (e.func.obj.obj.name == 'os') and (e.func.obj.member == 'path'):
@@ -1171,7 +1171,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             key = _receiver_key(e.func.obj)
             if key is not None and key in dict_val_types:
                 vt = dict_val_types[key]
-                if TypeLattice.is_py_scalar(vt):
+                if vt in ('int64_t', 'double', '_Bool', 'char *'):
                     return vt
                 if _is_known_struct_ptr_ctype(vt, known_structs):
                     return vt
@@ -1179,7 +1179,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             recv_ctype = _infer_simple_expr_ctype(e.func.obj, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, module_global_types=module_global_types)
             if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
                 rt = method_return_types.get(f'{recv_ctype[:-2]}_{e.func.member}')
-                if TypeLattice.is_py_scalar(rt):
+                if rt in ('int64_t', 'double', '_Bool', 'char *'):
                     return rt
                 if _is_known_struct_ptr_ctype(rt, known_structs):
                     return rt
@@ -1220,9 +1220,9 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
     emission — since that side genuinely is C and bool/_Bool are ABI-
     identical there (1-byte, same representation), only the SPELLING needs
     to differ per language."""
-    if TypeLattice.is_bool(ctype):
+    if ctype == '_Bool':
         return 'bool'
-    if TypeLattice.is_cstr(ctype):
+    if ctype == 'char *':
         return 'char *'
     return ctype
 
@@ -1521,7 +1521,7 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
             # sometimes a tuple) and otherwise uses as a string -- is a string
             # in the non-tuple case this yield sits in.
             for _si, _el in enumerate(n.value.elements):
-                if (TypeLattice.is_word(site[_si]) and isinstance(_el, IdentExpr)
+                if (site[_si] == 'int64_t' and isinstance(_el, IdentExpr)
                         and _name_has_str_evidence(_el.name, fn)):
                     site[_si] = 'char *'
         elif (isinstance(n, YieldFromExpr) and isinstance(n.value, CallExpr)
@@ -1881,7 +1881,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
             elif ctype != t:
                 if 'MojoList *' in (ctype, t) and 'char *' in (ctype, t):
                     return None
-                if TypeLattice.is_cstr(ctype) or TypeLattice.is_cstr(t):
+                if ctype == 'char *' or t == 'char *':
                     # Widen to the common `char *` representation ONLY when
                     # both sides are pointer-shaped — which is all the
                     # coroutine's single promise slot can hold (a struct
@@ -1893,7 +1893,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                     # refusal. Mirrors the mixed int/string check in
                     # coro.py's _generator_value_kind, which is what routes
                     # such a generator here in the first place.
-                    if TypeLattice.ends_in_star(ctype) and TypeLattice.ends_in_star(t):
+                    if ctype.endswith(' *') and t.endswith(' *'):
                         ctype = 'char *'
                     else:
                         return None
@@ -1908,7 +1908,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
             # callable as a word: what the call yields is an unsolved word.
             if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
                     and known is not None
-                    and TypeLattice.is_word_or_cstr(known.get(n.value.func.name))
+                    and known.get(n.value.func.name) in ('int64_t', 'char *')
                     and n.value.func.name in {_p[0] for _p in (fn.params or [])}):
                 t = 'int64_t'
             # The same for a word bound by unpacking a module function's returned
@@ -1935,24 +1935,24 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 return None
             if ctype is None:
                 ctype = t
-                _word_only = _word_iter and TypeLattice.is_word(t)
+                _word_only = _word_iter and t == 'int64_t'
             elif ctype == t:
-                if TypeLattice.is_word(t) and not _word_iter:
+                if t == 'int64_t' and not _word_iter:
                     _word_only = False
             else:
-                if _word_iter and TypeLattice.is_word(t) and TypeLattice.is_list(ctype):
+                if _word_iter and t == 'int64_t' and ctype == 'MojoList *':
                     # The word iterator's elements ARE the boxed tuple lists
                     # this generator already yields (the `_iter_filenames`
                     # `yield from items` shape: `items` is a first-class
                     # iterator over the 4-tuples another site yields).
                     # Nothing to change here; emission casts the word.
                     pass
-                elif _word_only and TypeLattice.is_word(ctype) and TypeLattice.is_list(t):
+                elif _word_only and ctype == 'int64_t' and t == 'MojoList *':
                     ctype = t
                     _word_only = False
                 elif 'MojoList *' in (ctype, t) and 'char *' in (ctype, t):
                     return None
-                elif TypeLattice.is_cstr(ctype) or TypeLattice.is_cstr(t):
+                elif ctype == 'char *' or t == 'char *':
                     # Widen to the common `char *` representation ONLY when
                     # both sides are pointer-shaped — which is all the
                     # coroutine's single promise slot can hold (a struct
@@ -1964,7 +1964,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                     # refusal. Mirrors the mixed int/string check in
                     # coro.py's _generator_value_kind, which is what routes
                     # such a generator here in the first place.
-                    if TypeLattice.ends_in_star(ctype) and TypeLattice.ends_in_star(t):
+                    if ctype.endswith(' *') and t.endswith(' *'):
                         ctype = 'char *'
                     else:
                         return None
@@ -2027,9 +2027,9 @@ def dict_value_kind(gen, node):
     _vt = gen._quick_type(node)
     if _vt in _FLOAT_TYPES:
         return 'double'
-    if TypeLattice.is_cstr(_vt):
+    if _vt == 'char *':
         return 'char *'
-    if _vt and TypeLattice.ends_in_star(_vt) and gen.struct_field_types.get(_vt[:-2].strip()):
+    if _vt and _vt.endswith(' *') and gen.struct_field_types.get(_vt[:-2].strip()):
         return _vt
     return None
 
@@ -2077,7 +2077,7 @@ def _dict_literal_first_sample_ctype(gen, pairs) -> str:
         _vt = gen._quick_type(_pair[1])
         if _vt in _FLOAT_TYPES:
             return 'double'
-        if TypeLattice.is_cstr(_vt):
+        if _vt == 'char *':
             return 'char *'
         # A STRUCT value is nameable, and naming it is what the container half
         # of the repr machinery needs: the store (`emit_dict_int_value_store`)
@@ -2101,7 +2101,7 @@ def _dict_literal_first_sample_ctype(gen, pairs) -> str:
         # same reason: a ctype that merely ends in ` *` is a container or a
         # runtime type whose accessor rules are a separate question), so no
         # scalar, `char *`, bytes or container answer changes.
-        if TypeLattice.ends_in_star(_vt) and gen.struct_field_types.get(_vt[:-2].strip()):
+        if _vt.endswith(' *') and gen.struct_field_types.get(_vt[:-2].strip()):
             return _vt
         return 'int64_t'
     return 'int64_t'
@@ -2119,7 +2119,7 @@ def dict_literal_val_ctype(gen, pairs) -> str:
         kind = dict_kind_join(kind, dict_value_kind(gen, _pair[1]))
     if kind == 'mixed':
         return 'mixed'
-    if TypeLattice.is_bool(kind):
+    if kind == '_Bool':
         return 'int64_t'
     if kind not in (None, 'none'):
         return kind
@@ -2153,7 +2153,7 @@ def is_bound_method_value(gen, node, obj_ctype: str) -> bool:
     pointer."""
     if not (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)):
         return False
-    if not TypeLattice.ends_in_star(obj_ctype):
+    if not obj_ctype.endswith(' *'):
         return False
     owner = _struct_name_of(obj_ctype)
     return (f"{owner}_{node.member}" in gen.func_return_types
@@ -2199,7 +2199,7 @@ def struct_elem_repr_shim(gen, ctype: str) -> str:
     if not (getattr(gen, 'emit_struct_defs', False)
             or getattr(gen, '_elem_repr_hosted', False)):
         return ''
-    if not ctype or not TypeLattice.ends_in_star(ctype):
+    if not ctype or not ctype.endswith(' *'):
         return ''
     sn = ctype[:-2].strip()
     if not sn or not _struct_name_of(ctype):
@@ -2611,11 +2611,11 @@ def _cpp_word_of_kind(ctype: str, expr: str) -> str:
     tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
     if ctype == 'None':
         return "mojo_box_none()"
-    if TypeLattice.is_double(ctype):
+    if ctype == 'double':
         return f"mojo_box_from_double((double)({expr}))"
-    if TypeLattice.is_bool(ctype):
+    if ctype == '_Bool':
         return f"mojo_box_from_bool((int64_t)({expr}))"
-    if TypeLattice.is_cstr(ctype):
+    if ctype == 'char *':
         # boxed by kind like the others: a raw pointer is only read as a
         # string when the runtime registered it (a C++ literal is not)
         return f"mojo_box_from_str((char *)({expr}))"

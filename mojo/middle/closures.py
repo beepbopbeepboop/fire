@@ -263,9 +263,9 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
     ctx._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
     # `ctx._skip_closure_factory_lift` (closure factories with a `nonlocal` in
     # the returned closure) is filled by gen_module_impl, and only for a module
-    # with a generator/async function; this pass just reads it. It is declared
-    # in `GimpleGen.__init__`, not created here: a lazy `hasattr` initialiser
-    # never runs in the compiled compiler (the field exists and is NULL there).
+    # with a generator/async function; this pass just reads it.
+    if not hasattr(ctx, '_skip_closure_factory_lift'):
+        ctx._skip_closure_factory_lift = set()
 
     def _scan_for_closures(ctx, outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""

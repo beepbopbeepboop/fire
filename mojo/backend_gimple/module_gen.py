@@ -910,18 +910,18 @@ wrong-static-answer failure the whole table exists to avoid.
     The list-literal arm was MISSING, and the omission is what
     `CODEGEN_list_element_read_defaults_to_str_across_a_call` is:
     `_lower_list_literal` records the per-slot kinds of a heterogeneous
-    literal on the value (`mojo_list_set_kinds`) and records the per-slot
-    kinds fact on it (`gen._word_mark_slot_kinds`) — but only while THAT
-    function is being lowered. A `return [x, 1, s]` therefore described
-    itself perfectly and lost every word of it at the boundary, because this
-    function (which decides the cross-function half) did not recognise the
-    one producer that is not a `struct.unpack`. So
+    literal on the value (`mojo_list_set_kinds`) and marks it in
+    `gen._maybe_kinds_vals` — but only while THAT function is being
+    lowered. A `return [x, 1, s]` therefore described itself perfectly
+    and lost every word of it at the boundary, because this function
+    (which decides the cross-function half) did not recognise the one
+    producer that is not a `struct.unpack`. So
     `def mixed(x: Float64, s: String): return [x, 1, s]` bound to a local in
     the caller left that local's element type at the unknown-element default
     `str`, and every read of it went through `mojo_list_get_str` — so `a[0]`,
     which holds `2.5`'s IEEE-754 bit pattern `0x4004000000000000`, was handed
     to `strlen` and the program died with SIGSEGV. Marking the callee makes
-    the call site record the same per-slot-kinds fact on the result
+    the call site register the result in `_maybe_kinds_vals`
     (`emit_calls.py`'s `_lower_named_call`), which is the flag the subscript
     and iteration lowerings already consult for `mojo_list_get_boxed`.
 
@@ -1019,7 +1019,7 @@ def _infer_return_maybe_kinds(gen, body, params=None,
     (iteration, a computed subscript) has to be lowered as a BOXED read
     (mojo_list_get_boxed), and whether it may be is a compile-time
     decision. Inside one function the marker rides along on the local name
-    (`gen._word_has_slot_kinds`); across a `return` it cannot, so it is
+    (`gen._maybe_kinds_vals`); across a `return` it cannot, so it is
     inferred here and read back at the call site, the same
     whole-program-then-lower-the-callee shape Pass 2c already uses for
     `_return_elem_types`.
@@ -2659,7 +2659,9 @@ def _emit_reflection_dispatch(self, parts):
             if fname in bool_fields:
                 val_expr = f'({fref} ? "True" : "False")'
                 owned = 'F'
-            elif fname in boxed and gimple_ctypes.TypeLattice.is_int(ftype):
+            elif fname in boxed and ftype in (
+                    'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+                    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.is_cstr(ftype):
@@ -2692,7 +2694,8 @@ def _emit_reflection_dispatch(self, parts):
                 else:
                     val_expr = f'_mojo_repr_dict({fref})'
                     owned = 'I' + fref
-            elif gimple_ctypes.TypeLattice.is_int(ftype):
+            elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+                           'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.ends_in_star(ftype):
@@ -3397,7 +3400,7 @@ def _emit_reflection_dispatch(self, parts):
 
 # Placeholder ctype for a struct field whose value type this pass could not
 # resolve. MUST be machine-word sized: it is the "I don't know yet" marker
-# (the `is_int_word(_existing_fn_ft)` re-resolution test below treats
+# (the `_existing_fn_ft in ('int', 'int64_t')` re-resolution test below treats
 # it as provisional and lets a later, better-informed assignment overwrite
 # it), and a real Python int already resolves to 'int64_t' via the IntLiteral
 # branch — so 'int' was never the right answer for any KNOWN value, only the
@@ -10341,7 +10344,7 @@ def _gmh_reconcile_param_container_kinds(self):
             if _pbns and _pname in _pbns:
                 continue
             _cur = self._inferred_param_types[_fn].get(_pname)
-            if (gimple_ctypes.TypeLattice.is_int_word_or_none(_cur) or gimple_ctypes.TypeLattice.is_unsolved(_cur)):
+            if _cur in (None, 'int64_t', 'int', ''):
                 self._inferred_param_types[_fn][_pname] = _ctype
 
 
@@ -12488,6 +12491,8 @@ def _gmp_discover_closures(self, stmts: list) -> None:
         # Prevent lifting of closure factories with nonlocal
         try:
             from mojo.middle import closures as _closures
+            if not hasattr(self, '_skip_closure_factory_lift'):
+                self._skip_closure_factory_lift = set()
             _fns0 = [fn for fn in _walk_ast(stmts) if isinstance(fn, FunctionDef)]
             # Only a module with a generator/async function takes the coroutine
             # lift (captures copied by value); see the refusal below.
@@ -12950,7 +12955,7 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                     _xg_tgt[_xg_pn] = 'int64_t'
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
                     continue
-                if _xg_ct and gimple_ctypes.TypeLattice.is_int_word_or_none(_xg_tgt.get(_xg_pn)):
+                if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
                 elif ((gimple_ctypes.TypeLattice.is_cstr(_xg_ct)
                        and _xg_tgt.get(_xg_pn) in ('MojoList *', 'MojoSet *', 'MojoDict *'))
@@ -13416,10 +13421,13 @@ def gen_module_impl(self, stmts: list):
     if getattr(self, 'auto_gpu', True) and __file__ != '<bootstrap>':
         # The synthesiser needs somewhere to record per-buffer element counts
         # (a GEMM's A is M*K, B is K*N, C is M*N, and one count cannot say
-        # that). Filled before the synthesis, and read by the classification
-        # pass below -- which must NOT re-initialise it. Both tables are
-        # declared in `GimpleGen.__init__` (a lazy `hasattr` initialiser never
-        # runs in the compiled compiler).
+        # that). Created HERE, before the synthesis, and read by the
+        # classification pass below -- which is why that pass creates it only if
+        # absent rather than re-initialising it.
+        if not hasattr(self, '_device_launch_lengths'):
+            self._device_launch_lengths = {}
+        if not hasattr(self, '_device_launch_grids'):
+            self._device_launch_grids: dict = {}
         stmts, _synth_names = _gmi_offload.offload_module(
             stmts, lengths_sink=self._device_launch_lengths,
             grids_sink=self._device_launch_grids)
@@ -13465,8 +13473,9 @@ def gen_module_impl(self, stmts: list):
     # pass silently wiped it -- measured, every buffer came out sized to the
     # kernel's single Int parameter and two tests failed while the plumbing
     # looked correct. The other two tables ARE reset per module and should be;
-    # this one carries information from an earlier pass (it is declared, and
-    # therefore created once per gen, in `GimpleGen.__init__`).
+    # this one carries information from an earlier pass.
+    if not hasattr(self, '_device_launch_lengths'):
+        self._device_launch_lengths: dict = {}
     _device_kernels_meta: dict = {}
     _gmp_device_kernel_meta(self, stmts, _device_explicit, _device_fallbacks, _device_kernels_meta, _device_kinds)
     self._actual_types['stmts'] = 'MojoList *'
@@ -16621,7 +16630,7 @@ def gen_module_impl(self, stmts: list):
             _rkey = f"{_as_str(_rs.name)}_{_as_str(_rm.name)}"
             _rref = self._inferred_param_types.get(_rkey)
             if (not _rref or _rm.return_type is not None
-                    or not gimple_ctypes.TypeLattice.is_word_or_none(self.func_return_types.get(_rkey))):
+                    or self.func_return_types.get(_rkey) not in (None, 'int64_t')):
                 continue
             _saved_vt = dict(self.var_types)
             _saved_fn = self.current_func_name
@@ -18740,7 +18749,7 @@ def gen_module_impl(self, stmts: list):
                     v = node.value
                     if isinstance(v, IdentExpr) and v.name == pname:
                         _fld_types = self.struct_field_types.setdefault(_csn, {})
-                        if gimple_ctypes.TypeLattice.is_int_word_or_none(_fld_types.get(tgt.member)):
+                        if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
                             _fld_types[tgt.member] = _resolved_type
 
         # The CALLER-side twin of the same fixpoint: a free function's
@@ -19470,6 +19479,8 @@ def gen_module_impl(self, stmts: list):
     # in-chain imports, a base method may `return cls.gen_method(...)` where
     # gen_method is a generator on subclasses but not on the base. Analyze
     # each (concrete_struct, method) with cls/self resolved to that struct.
+    if not hasattr(self, '_method_returns_generator'):
+        self._method_returns_generator = {}
     _gmp_generator_returning_methods(self, stmts)
 
     _param_gen_obs: dict[str, dict[str, dict]] = {}  # callee -> {pname -> {fname: count}}
@@ -19517,8 +19528,7 @@ def gen_module_impl(self, stmts: list):
                 if _annot is not None:
                     continue  # respect an explicit annotation
                 _cur = self._inferred_param_types.get(_callee, {}).get(_pname)
-                if not (gimple_ctypes.TypeLattice.is_int_word_or_none(_cur)
-                        or gimple_ctypes.TypeLattice.is_list(_cur)):
+                if _cur not in (None, 'int', 'int64_t', 'MojoList *'):
                     continue  # body evidence already picked a real type
                 self._inferred_param_types.setdefault(_callee, {})[_pname] = 'MojoGenerator *'
                 if len(_keys) == 1 and _keys[0] != '<conflict>':
@@ -19854,7 +19864,7 @@ def gen_module_impl(self, stmts: list):
                 if _bm_sn in self.struct_field_types:
                     _bm_rt = self.func_return_types.get(
                         f"{_bm_sn}_{gimple_ctypes._safe_name(_as_str(_value.member))}")
-                    if isinstance(_bm_rt, str) and not (gimple_ctypes.TypeLattice.is_word_or_unsolved(_bm_rt) or gimple_ctypes.TypeLattice.is_void(_bm_rt)):
+                    if isinstance(_bm_rt, str) and _bm_rt not in ('', 'int64_t', 'void'):
                         self._global_callable_ret_types[_gname] = _bm_rt
 
     def _phase17_scan_try_branches(_try_stmt):
@@ -20797,6 +20807,8 @@ def gen_module_impl(self, stmts: list):
 
         except Exception as _me_err:
             try:
+                if not hasattr(self, '_lsp_recovery_errors'):
+                    self._lsp_recovery_errors = []
                 self._lsp_recovery_errors.append(_me_err)
                 # The refusal itself is not lost: it is recorded here and
                 # re-raised by `gen_module` for LSP/front-end error recovery,
@@ -20871,7 +20883,7 @@ def gen_module_impl(self, stmts: list):
                 and isinstance(_rs.value, CallExpr)
                 and isinstance(_rs.value.func, IdentExpr)):
             _gn = _rs.target.name
-            if gimple_ctypes.TypeLattice.is_int_word(self._global_c_decl_types.get(_gn)):
+            if self._global_c_decl_types.get(_gn) in ('int64_t', 'int'):
                 _crt = self.func_return_types.get(_rs.value.func.name, '')
                 # A CONTAINER return stays in the int64_t box the literal
                 # branches give its twin (`f = mk()` is the same global as

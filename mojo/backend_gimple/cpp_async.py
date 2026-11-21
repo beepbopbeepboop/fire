@@ -38,7 +38,6 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
-import mojo.ir.build as build
 from mojo.middle.types import _FOREIGN_CALLABLES
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1144,7 +1143,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 _r.value, declared, self_fields, gen._async_api,
                 None, frozenset(gen.struct_field_types.keys()),
                 method_return_types=gen.func_return_types)
-            if _t is not None and gimple_ctypes.TypeLattice.ends_in_star(_t) is False and gimple_ctypes.TypeLattice.is_c_scalar(_t):
+            if _t is not None and gimple_ctypes.TypeLattice.ends_in_star(_t) is False and _t in (
+                    'int', 'int64_t', 'double', '_Bool', 'char *'):
                 _ret_ct = _t if _ret_ct is None else (_t if _t == _ret_ct else 'int64_t')
         _ret_ct = _ret_ct or 'int64_t'
         _ret_base = (f"{base}_return_slot")
@@ -2835,7 +2835,8 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
-        if not gimple_ctypes.TypeLattice.is_boxable(ctype) and not _is_struct_ptr:
+        if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
+                         'MojoDict *', 'MojoSet *') and not _is_struct_ptr:
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 f"{fn.name}: async function parameter '{pn}' has "
                 f"unsupported type {ctype!r} (only int64_t/"
@@ -3051,7 +3052,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
                 isinstance(n, gimple_ctypes.ReturnStmt) and n.value is not None
                 for n in gimple_exprtypes._walk_ast(fn.body)):
             annotated = gen._resolve_type(fn.return_type) if fn.return_type else None
-            if (gimple_ctypes.TypeLattice.is_word(annotated) or gimple_ctypes.TypeLattice.is_double(annotated) or gimple_ctypes.TypeLattice.is_bool(annotated)):
+            if annotated in ('int64_t', 'double', '_Bool'):
                 value_ctype = annotated
         func_decls = list(gen._cpp_func_scope_decls)
     finally:
@@ -3619,7 +3620,7 @@ def _resolve_and_start_task(gen, inner) -> tuple[str, dict] | None:
         else:
             arg_pairs.append(gen.lower_expr(gimple_ctypes.IdentExpr(name=_cap_name)))
     handle = gen._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
-    build.call_void(gen, 'mojo_async_schedule_ready', [handle])
+    gen._emit(f"  mojo_async_schedule_ready ({handle});")
     return handle, api
 
 
@@ -4109,7 +4110,8 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
-        if not gimple_ctypes.TypeLattice.is_boxable(ctype) and not _is_struct_ptr:
+        if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
+                         'MojoDict *', 'MojoSet *') and not _is_struct_ptr:
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 f"{fn.name}: async generator parameter '{pn}' has "
                 f"unsupported type {ctype!r} (only int64_t/"
