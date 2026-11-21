@@ -7631,6 +7631,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_prefix_kinds))])
+    _nested_invalid = False
     for el, et, ev in lowered:
         # Spread element (*seq): extend the list instead of appending
         if _is_star_spread(el):
@@ -7683,9 +7684,21 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # (char* -> get_str, otherwise boxed int64 -> get_int). Set before
         # _dict_items_val_elems so a dict-item tuple never lands here.
         if gimple_ctypes.TypeLattice.is_list(et) and ev in gen._elem_types and t not in gen._dict_items_val_elems:
-            gen._nested_elem_types.setdefault(t, gen._elem_types[ev])
-            if ev in gen._tuple_slot_types:
-                gen._tuple_slot_types[t] = gen._tuple_slot_types[ev]
+            _ev_nested = gen._elem_types[ev]
+            _ev_mixed = (ev in gen._maybe_kinds_vals
+                         or len(set(gen._struct_slot_kinds.get(ev, []))) > 1)
+            if _ev_mixed:
+                _nested_invalid = True
+                gen._nested_elem_types.pop(t, None)
+            elif not _nested_invalid:
+                _prev = gen._nested_elem_types.get(t)
+                if _prev is None:
+                    gen._nested_elem_types[t] = _ev_nested
+                elif _prev != _ev_nested:
+                    _nested_invalid = True
+                    gen._nested_elem_types.pop(t, None)
+            if not _nested_invalid and ev in gen._tuple_slot_types:
+                gen._tuple_slot_types.setdefault(t, gen._tuple_slot_types[ev])
         # Propagate dict value type from appended dict elements to the
         # list temp, so subsequent list[0]["key"] knows the dict value
         # type (char * vs int64_t vs double) — see BUG-2026-044.
