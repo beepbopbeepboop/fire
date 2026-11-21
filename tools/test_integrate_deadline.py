@@ -86,5 +86,42 @@ class HolderRecord(unittest.TestCase):
             winner.close()
 
 
+class ProbeLocking(unittest.TestCase):
+    """Phase 2: a probe takes no integrator lock and gates in its own tree; a landing still takes the lock."""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.patch = mock.patch.object(C, "ctl_dir", lambda: self.d)
+        self.patch.start()
+        self.held = open(os.path.join(self.d, "integrator.lock"), "a+")
+        fcntl.flock(self.held, fcntl.LOCK_EX | fcntl.LOCK_NB)   # another integrator holds the lock
+
+    def tearDown(self):
+        self.held.close()
+        self.patch.stop()
+
+    def test_probe_takes_no_lock_while_a_landing_holds_it(self):
+        self.assertIsNone(I.take_integrator_lock(probe=True))
+
+    def test_landing_refuses_while_the_lock_is_held(self):
+        with self.assertRaises(SystemExit):
+            I.take_integrator_lock(probe=False)
+
+    def test_probe_tree_is_removed_from_the_repo(self):
+        repo = os.path.join(self.d, "repo")
+        os.mkdir(repo)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "root"], check=True, env=env)
+        tree = os.path.join(self.d, "work-probe-test")
+        subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "--detach", tree, "HEAD"], check=True)
+        self.assertTrue(os.path.isdir(tree))
+        with mock.patch.object(C, "MAIN", repo):
+            I.remove_probe_tree(tree)
+        self.assertFalse(os.path.exists(tree))
+        wl = subprocess.run(["git", "-C", repo, "worktree", "list"], capture_output=True, text=True).stdout
+        self.assertNotIn("work-probe-test", wl)
+
+
 if __name__ == "__main__":
     unittest.main()
