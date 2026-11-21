@@ -83,7 +83,7 @@ the way a dynamic word is handled, without adding a shadowing local:
 
 Check both the store (`print(x)` inside the function) and the return
 (`return x` is a separate int-return-slot truncation, filed in
-`CODEGEN_true_division_result_truncated_by_an_int_local.md`).
+`CODEGEN_true_division_result_truncated_by_an_int_local.md`, now closed).
 
 ## Done when
 

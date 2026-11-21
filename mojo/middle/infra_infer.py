@@ -3280,7 +3280,7 @@ def _lambda_call_ret_table(gen, body: list) -> dict:
     return _merged_lr
 
 
-def _infer_return_type_with_locals(gen, body: list) -> str:
+def _infer_return_type_with_locals(gen, body: list, func_def=None) -> str:
     """`_infer_return_type`, but with the body's own pointer-valued locals
     visible to it (see `_prebound_local_ctypes`).
 
@@ -3298,6 +3298,27 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     `env_additions | wasi_sdk_env(context)` then passed an integer to
     `mojo_dict_union` (a hard `-Wint-conversion` error in
     `Tools/wasm/wasi/__main__.py`).
+
+    When `func_def` (the body's own `FunctionDef`) is given, the body's
+    full local table is made visible the same way. That is the OTHER
+    scalar the `int64_t` default erases: a local the body declares
+    `double` (a true-division or float-arithmetic result: `x = 9; x /= 2`
+    or `y = x * 0.5`) whose `return x` read the name it had not bound yet
+    and inferred `int64_t f(void)` over a `double` local, casting 4.5 back
+    to 4 at the return. The table merged here is the SAME computation the
+    codegen declares each local from (`resolve_shared._infer_local_var_
+    types`), so the return slot and the local's own declaration cannot
+    disagree; it is merged strictly additive (a name an earlier pass
+    decided for keeps that answer) and computed fresh, because every
+    caller of this entry point passes a body at a different pass, and the
+    tables these passes hold for the same body are what this function
+    exists to make irrelevant.
+
+    The body's PythonObject box locals ride the same window: `return a / 2`
+    with box local `a` must stay the int64 box the emitter's box arm
+    returns, and `_quick_type`'s true-division gate reads the box set the
+    emission will build, which is computed from the body here (see
+    `resolve_shared._body_pybox_locals`).
 
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it — with ONE exception. An
@@ -3326,6 +3347,21 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     for _n, _t in _locals.items():
         if _n not in _merged or gimple_ctypes.TypeLattice.is_word(_t):
             _merged[_n] = _t
+    # The body's own local table (see the docstring): strictly additive —
+    # a name an earlier pass already put in `var_types` (a parameter, or a
+    # prebound pointer local the loop above just recorded) keeps that
+    # answer. A failed scan is the pre-existing behaviour (no overlay),
+    # never a reason the return inference itself should raise.
+    if func_def is not None:
+        try:
+            from mojo.middle.resolve_shared import _infer_local_var_types as _lt_scan
+            _lt_table = _lt_scan(gen, func_def)
+        except Exception:
+            _lt_table = None
+        if _lt_table:
+            for _ln, _lt in _as_dict(_lt_table).items():
+                if _ln not in _merged:
+                    _merged[_ln] = _as_str(_lt)
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
     # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
@@ -3352,6 +3388,15 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     # already carrying a real return type keeps it.
     _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
     gen._lambda_call_ret_types = _lambda_call_ret_table(gen, body)
+    # The body's box locals, same window: installed so `_quick_type`'s
+    # true-division gate (and `_py_box_expr` in general) answers for this
+    # body the way the emission of it will, then restored.
+    _saved_pb = getattr(gen, '_pybox_vars', None)
+    _saved_pd = getattr(gen, '_pybox_double_vars', None)
+    from mojo.middle.resolve_shared import _body_pybox_locals
+    _pb_names, _pb_dbl = _body_pybox_locals(gen, body)
+    gen._pybox_vars = (set() if _saved_pb is None else set(_saved_pb)) | _pb_names
+    gen._pybox_double_vars = (set() if _saved_pd is None else set(_saved_pd)) | _pb_dbl
     try:
         return _infer_return_type_core(gen, body)
     finally:
@@ -3360,14 +3405,19 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         gen._dict_val_types = _saved_dv
         gen._dict_val_elem_types = _saved_de
         gen._lambda_call_ret_types = _saved_lr
+        gen._pybox_vars = _saved_pb
+        gen._pybox_double_vars = _saved_pd
 
 
-def _infer_return_type(gen, body: list) -> str:
+def _infer_return_type(gen, body: list, func_def=None) -> str:
     """`gen`'s public return-type inference: the core scan, with the
-    body's own pointer-valued locals made visible to it. Every consumer
-    (free functions, struct methods, lifted closures, lambdas) goes
-    through this one entry point, so the fix cannot be half-applied."""
-    return _infer_return_type_with_locals(gen, body)
+    body's own pointer-valued locals and, when the body's `FunctionDef`
+    node is passed as `func_def`, its full local table made visible.
+    Every consumer (free functions, struct methods, lifted closures,
+    lambdas) goes through this one entry point, so the fix cannot be
+    half-applied. Lambdas and synthetic bodies pass only the body and get
+    exactly the pre-local-table behaviour."""
+    return _infer_return_type_with_locals(gen, body, func_def=func_def)
 
 
 def multi_kind_locals(gen) -> set:

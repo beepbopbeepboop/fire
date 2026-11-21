@@ -5129,7 +5129,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
             _rd_target = _rd_defs.get(_rd_name)
             if _rd_target is None or _rd_target is _rd_fn:
                 continue
-            _rd_ret = self._infer_return_type(_rd_target.body)
+            _rd_ret = self._infer_return_type(_rd_target.body, _rd_target)
             if _rd_ret not in _GMI_NONCALLABLE_DECORATOR_RET:
                 continue
             # An untyped parameter infers as int64_t, so `return f` looks
@@ -12227,7 +12227,7 @@ def _gmp_infer_return_types_late(self, all_functions: list) -> None:
             for _cln, _clt in self._closure_value_locals(_p3b_s.body).items():
                 if _cln not in self.var_types:
                     self.var_types[_cln] = _clt
-            inferred = self._infer_return_type(_p3b_s.body)
+            inferred = self._infer_return_type(_p3b_s.body, _p3b_s)
             if _p3b_s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_3b
@@ -12875,7 +12875,7 @@ def _gmp_infer_return_types(self, stmts: list, all_functions: list) -> None:
                 else:
                     self.var_types[pname] = self._param_ctype(
                         pname, ptype, _as_s_p1)
-            inferred = self._infer_return_type(_as_s_p1.body)
+            inferred = self._infer_return_type(_as_s_p1.body, _as_s_p1)
             if _as_s_p1.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.func_return_types[_as_s_p1.name] = inferred
@@ -15605,7 +15605,7 @@ def gen_module_impl(self, stmts: list):
                                     self.var_types.setdefault(_vn, _vt)
                         except Exception:
                             pass
-                        inferred = self._infer_return_type(m.body)
+                        inferred = self._infer_return_type(m.body, m)
                         key = _mangled_key
                         if self.func_return_types.get(key) != inferred:
                             self.func_return_types[key] = inferred
@@ -15807,7 +15807,7 @@ def gen_module_impl(self, stmts: list):
                                 self.var_types.setdefault(_vn, _vt)
                     except Exception:
                         pass
-                    _ret_type = self._infer_return_type(m.body)
+                    _ret_type = self._infer_return_type(m.body, m)
                     self.var_types = _saved_var_types
                     self._scan_scratch_top = _scratch_mark_sm
                 # Self-hosting bootstrap: the frozen GimpleGen signature
@@ -16403,7 +16403,7 @@ def gen_module_impl(self, stmts: list):
                     self.var_types[_rpn] = _rref[_rpn]
                 else:
                     self.var_types[_rpn] = self._resolve_type(_rpt)
-            _rinf = self._infer_return_type(_rm.body)
+            _rinf = self._infer_return_type(_rm.body, _rm)
             if _rinf in ('char *', 'double'):
                 self.func_return_types[_rkey] = _rinf
             self.var_types.clear()
@@ -19133,7 +19133,7 @@ def gen_module_impl(self, stmts: list):
                                              or self._resolve_type(ptype))
                 else:
                     self.var_types[bare] = self._param_ctype(pname, ptype, s)
-            inferred = self._infer_return_type(s.body)
+            inferred = self._infer_return_type(s.body, s)
             if s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_23e
