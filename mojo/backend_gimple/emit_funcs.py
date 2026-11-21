@@ -3908,7 +3908,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _is_coro_body = bool(getattr(node, '_mojo_coro_body', False))
     gen._cur_func_is_coro = _is_coro_body
     gen._reset_func(node.body, node.params,
-                    allow_lambda_reduction=not _is_coro_body)
+                    allow_lambda_reduction=not _is_coro_body,
+                    default_none_params=ginf.param_default_none_names(
+                        gen, node, _as_str(node.name)))
     # Per-FUNCTION record of which locals hold a beta-reducible
     # capturing lambda (see mojo/middle/lambdareduce). Cleared here,
     # at a real per-function entry point, rather than in `_reset_func`
@@ -5484,7 +5486,10 @@ def _struct_method_csym_static(qualifier: str, struct_name: str, method_name: st
 
 
 def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, overload_id: str = '') -> str:
-    gen._reset_func(node.body, node.params)
+    gen._reset_func(node.body, node.params,
+                    default_none_params=ginf.param_default_none_names(
+                        gen, node,
+                        f"{struct_name}_{_as_str(node.name)}{overload_id}"))
     # Per-function, same reason and same placement as gen_func's.
     gen._inlined_lambdas = {}
     gen._reset_no_candidates()

@@ -10193,7 +10193,7 @@ fn main():
     n[b'a'] = 1
     n['a'] = 2
     print(n.get(b'a'), n.get('a'), n.pop(b'a'), len(n), n['a'])
-""", "7 0 -1\n7 0 0\n-1 2\n7 8 0\n3 3 1\n9 9 3 2\nv v 0\n1.5\n1 2 1 1 2\n")
+""", "7 None -1\n7 0 0\n-1 2\n7 8 0\n3 3 1\n9 9 3 2\nv v 0\n1.5\n1 2 1 1 2\n")
 
     # `x in <dict>` where the DICT arrived at the test with its static type
     # erased -- a dict handed to an unannotated parameter, which is what any
@@ -15765,6 +15765,9 @@ def main():
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_none_argument_is_none_in_the_callee,
+                  test_none_prints_as_none,
+                  test_none_vs_zero_distinguished,
+                  test_dict_get_unknown_domain_into_a_list_local,
                   test_textwrap_dedent_matches_cpython,
                   test_mixed_return_none_string_and_set_arms,
                   test_none_held_in_local_with_if_join_is_none_needle,
@@ -16371,6 +16374,105 @@ def r(x: str):
 
 
 print(repr(r(None)), r(None), repr(r("")), repr(r("0")))
+""")
+
+
+def test_none_prints_as_none():
+    """A None stored in a return value, a dict miss, a local, a list slot, an
+    f-string and `str()` prints `None`, not the integer `0`. The function with
+    a `None` arm returns the tagged word, `dict.get` with no default answers
+    the None box on a miss, and a local bound to None is a box-holding word.
+    The bug was "None prints as 0 and equals 0"; its doc was deleted with this
+    case."""
+    test_gimple_matches_cpython("gimple_none_prints_as_none", """\
+def find(items, target):
+    i = 0
+    for x in items:
+        if x == target:
+            return i
+        i += 1
+    return None
+
+def main():
+    print(find([5, 0], 9))
+    print(find([5, 0], 5))
+    d = {"a": 1}
+    print(d.get("zz"))
+    print(d.get("a"))
+    x = None
+    print(x)
+    print([None, 1])
+    print([0, 1])
+    print(f"{x}")
+    print(str(None))
+    print(repr(None))
+    got = d.get("zz")
+    hit = d.get("a")
+    print(got, got is None, hit, hit is None, hit + 1)
+    print(d.get("zz") is None, d.get("a") is None)
+main()
+""")
+
+
+def test_none_vs_zero_distinguished():
+    """`None` and the integer `0` are different values everywhere this program
+    observes them: an unannotated parameter declared `= None` (a tagged word,
+    so `label(0)` takes the zero arm and `label()`/`label(None)` take the None
+    arm), `0 == None` / `0 is None` / `None == None`, and a local bound to 0
+    (provably an int, so `n is None` is False)."""
+    test_gimple_matches_cpython("gimple_none_vs_zero_distinguished", """\
+def label(value=None):
+    if value is None:
+        return "missing"
+    if value == 0:
+        return "zero"
+    return "value"
+
+def main():
+    print(label())
+    print(label(None))
+    print(label(0))
+    print(label(-1))
+    print(0 == None)
+    print(None == None)
+    n = 0
+    print(n is None)
+    print([0, 1, 2][0])
+    lst = [0, 1]
+    print(lst)
+    print(None in [0, 1])
+    print(0 in [None, 1])
+main()
+""")
+
+
+def test_dict_get_unknown_domain_into_a_list_local():
+    """A no-default `d.get(k)` whose value domain is only the `int64_t`
+    default (here `self.rows`, a class attribute) is boxed, so a miss prints
+    None. Bound to a local that is ALSO bound a list, the local keeps its
+    declared `MojoList *`: the word is unwrapped for the list consumers
+    instead of raising the tagged-word/container refusal. This is the shape
+    `module_gen.py`'s own `param_ctypes = self._mangled_signature_ctypes.get(
+    bare_mangled)` had, which made `fire.py --dump module_gen.py` refuse."""
+    test_gimple_matches_cpython("gimple_dict_get_of_lists", """\
+class Table:
+    def __init__(self):
+        self.rows = {}
+    def put(self, k, v):
+        self.rows[k] = v
+    def lookup(self, k):
+        out = []
+        out = self.rows.get(k)
+        return out
+
+def main():
+    t = Table()
+    t.put("a", [1, 2])
+    t.put("b", [3])
+    r = t.lookup("a")
+    print(len(r), r[1])
+    print(len(t.lookup("b")))
+main()
 """)
 
 

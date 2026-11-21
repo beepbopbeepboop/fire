@@ -1995,6 +1995,70 @@ def param_annotation_conflicts(gen, pname: str, ann_ctype, body) -> str | None:
     return _param_annotation_cached(gen, pname, ann_ctype, body)
 
 
+def param_default_is_none(func, pname: str) -> bool:
+    """Is `pname`'s declared default the literal `None`?
+
+    That declaration says the parameter is OPTIONAL (`value=None`), not that
+    it is an integer zero that happens to be the default: a caller may pass
+    None, the integer 0, or any other value, and the body is entitled to tell
+    them apart with `is None` / `== None`."""
+    _defs = getattr(func, 'param_defaults', None) or {}
+    _d = _defs.get(_as_str(pname).lstrip('*'))
+    if isinstance(_d, gimple_ctypes.NoneLiteral):
+        return True
+    return isinstance(_d, IdentExpr) and _as_str(_d.name) == 'None'
+
+
+def param_default_none_names(gen, func, func_key: str = None) -> set:
+    """The UNANNOTATED parameters of `func` declared `= None`.
+
+    They are optionally-None values: the declared default is `None`, so the
+    slot has to be able to hold both None and a real value, and the integer 0
+    must not be the same word as None (`def label(value=None): if value is
+    None: ...; if value == 0: ...`). Such a parameter is the TAGGED word, the
+    representation the runtime already has (`mojo_box_none` / `mojo_box_int`,
+    read by `mojo_word_is_none`, `mojo_repr_boxed`, `mojo_truthy_word`): a
+    call site boxes the argument by its kind and the body's stores and reads
+    dispatch on the box's kind.
+
+    Excluded when the parameter resolved to a declared C type that already has
+    a distinct absent value: an annotated parameter keeps its annotation, and
+    an UNANNOTATED one that usage inference or its call sites resolved to a
+    pointer/container (a nullable `char *`, where None is NULL) keeps that
+    type. Only a slot that would otherwise be the plain `int64_t` word — where
+    None and 0 are the same bits — is boxed."""
+    out: set = set()
+    _ann = {_as_str(_p[0]): (_p[1] if isinstance(_p, (tuple, list)) and len(_p) > 1 else None)
+            for _p in (getattr(func, 'params', None) or [])
+            if isinstance(_p, (tuple, list))}
+    _inferred = (getattr(gen, '_inferred_param_types', None) or {}).get(
+        _as_str(func_key) if func_key is not None
+        else _as_str(getattr(func, 'name', ''))) or {}
+    for _pn in _ann:
+        if _ann[_pn] is not None or _as_str(_pn).startswith('*'):
+            continue
+        if not param_default_is_none(func, _pn):
+            continue
+        _ct = _inferred.get(_as_str(_pn)) if hasattr(_inferred, 'get') else None
+        if isinstance(_ct, str) and _ct not in ('int', 'int64_t'):
+            continue
+        if not isinstance(_ct, str):
+            # The other resolver `_param_ctype` consults for an unannotated
+            # parameter is the whole-module call-site kind scan. A slot every
+            # call site passes a str/float for is that type, not the box.
+            try:
+                import mojo.middle.coro as _coro
+                _ck = _coro._CALLSITE_PARAM_KINDS.get(
+                    _as_str(getattr(func, 'name', '')), {}).get(_as_str(_pn))
+                if isinstance(_ck, str) and _coro._KIND_TO_SLOT_CTYPE.get(
+                        _ck) not in (None, 'int', 'int64_t'):
+                    continue
+            except Exception:
+                pass
+        out.add(_as_str(_pn))
+    return out
+
+
 # The value kind an `isinstance(p, T)` type argument names, by the BUILTIN
 # name `T` carries (a tuple of names is read as all of them). The same
 # container-vs-scalar split the annotation twin draws, so `selected =
@@ -2138,12 +2202,14 @@ def untyped_param_mixed_kinds(gen, pname: str, body) -> str | None:
     return _untyped_param_mixed_kinds_cached(gen, pname, body)
 
 
-def param_boxed_names(gen, func) -> set:
+def param_boxed_names(gen, func, func_key: str = None) -> set:
     """The parameter names of `func` that need the tagged word: an
     ANNOTATION the body contradicts (a scalar beside a container, or two
-    different scalar kinds), or NO annotation whose own body use proves the
+    different scalar kinds), NO annotation whose own body use proves the
     same mixed kind (`untyped_param_mixed_kinds`, the annotation-less twin —
-    the usage inference picks one kind and the body disproves it).
+    the usage inference picks one kind and the body disproves it), or an
+    UNANNOTATED parameter declared `= None` (`param_default_none_names`,
+    where None and the integer 0 would otherwise be the same bits).
 
     Used by the call site to box the argument by its own kind, so the callee
     receives a word that still says what it is. A container-vs-container
@@ -2169,6 +2235,7 @@ def param_boxed_names(gen, func) -> set:
             _conf = _param_annotation_conflict(gen, _pn, _ann_ct, body)
         if _conf == 'value' or _conf == 'scalar':
             out.add(_pn)
+    out |= param_default_none_names(gen, func, func_key)
     return out
 
 def _seed_addressed_locals(gen, body: list):

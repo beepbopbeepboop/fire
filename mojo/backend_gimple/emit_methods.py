@@ -6514,6 +6514,44 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
     # halves existed and only the pairing was missing, so
     # `d[b'a'] = 7; d.get(b'a')` read the str domain and answered 0.
     _sfx = '_bytes' if key_is_bytes else ''
+    # NO DEFAULT ARGUMENT on a scalar/unknown value domain: CPython answers
+    # the stored value on a hit and `None` on a miss, and the
+    # `mojo_dict_get_*` getters answer the domain's absent value (0 / NULL /
+    # 0.0) either way, so `print({"a": 1}.get("zz"))` printed `0` (the
+    # None-prints-as-0 and None-equals-0 bug, doc deleted with the fix). The
+    # boxed read answers a hit by the slot's own kind (`_dict_slot_boxed`)
+    # and a miss with the shared None box, so the result is a TAGGED word:
+    # print/str render it by kind, `is None` asks the box's kind, and
+    # arithmetic dispatches by it.
+    # It must be the ONLY key lookup emitted: a transient key's release is
+    # emitted right after its call, so a spare raw read first would free the
+    # key before this one ran and this one always missed.
+    # A str value domain keeps its `char *` result (the NULL miss is the
+    # nullable-pointer convention); a double/container domain is left as it
+    # was, since those results cannot carry the None box in their C type.
+    if default_val is None and not gimple_ctypes.TypeLattice.is_cstr(val_type) \
+            and not gimple_ctypes.TypeLattice.is_double(val_type) \
+            and val_type not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        if gen._is_none_literal(args[0]):
+            _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed_none',
+                                    [('MojoDict *', ov)])
+        elif key_is_bytes:
+            _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed_bytes',
+                                    [('MojoDict *', ov), (key_type, key_val)])
+        else:
+            _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed',
+                                    [('MojoDict *', ov), (key_type, key_val)])
+        gen._words.mark_boxed(_boxed)
+        gen._words.mark_tagged(_boxed)
+        gen._words.mark_dyn(_boxed)
+        # Provenance for the store side: a `.get` word whose value domain is
+        # only `int64_t`-by-default may really be a container (the caller's
+        # target name says so). `emit_stmts` unwraps the word instead of
+        # refusing when it lands in a container/pointer local.
+        if getattr(gen, '_dict_get_boxed_temps', None) is None:
+            gen._dict_get_boxed_temps = set()
+        gen._dict_get_boxed_temps.add(_as_str(_boxed))
+        return 'int64_t', _boxed
     if gen._is_none_literal(args[0]):
         # `d.get(None)`: the None-key entry (keykind 3), which the integer 0
         # the literal lowers to would miss (it reads the int-0 entry).
