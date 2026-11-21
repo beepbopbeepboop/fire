@@ -123,6 +123,15 @@ def _is_selfhost_source_file(path: str) -> bool:
     # module level, because that edge IS the middle-tier import cycle.
     import gimple_codegen
     _rp = _cached_realpath(os.path.abspath(path))
+    # A virtual filename (a label passed to compile_to_gimple, not a real
+    # source file on disk) must not be classified as compiler source just
+    # because its abspath lands inside the compiler root. Tests pass names
+    # like `inherit.py` to select Python-mode scoping; resolving that against
+    # a CWD that is the compiler root would make _is_compiler_root(_dir) True
+    # and emit selfhost-only forward decls (e.g. WordFacts *) into a normal
+    # program, which then fails to compile. Real selfhost files exist.
+    if not os.path.isfile(_rp):
+        return False
     _sd = gimple_codegen._SELFHOST_DIR
     _rsd = _cached_realpath(_sd)
     _dir = os.path.dirname(_rp)
