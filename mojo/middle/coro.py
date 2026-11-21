@@ -5187,7 +5187,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env, extra_containers=None
                 and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
             containers[_ln] = 'MojoList *'
             ct = _KIND_CTYPE[v[1]]
-            if ct == 'int64_t':
+            if gimple_ctypes.TypeLattice.is_word(ct):
                 int_lists.append(_ln)
             else:
                 kinds[_ln] = ct
@@ -9112,7 +9112,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     _real_ct = []
     for (_n, a), pk in zip(real_params, param_kinds):
         ct = _mojo_to_c_type(a)
-        if ct == 'int64_t' and pk == 'd':
+        if gimple_ctypes.TypeLattice.is_word(ct) and pk == 'd':
             ct = 'double'          # unannotated param, kind from call sites
         _real_ct.append(ct)
     c_params = _lead + _real_ct

@@ -42,16 +42,16 @@ PATTERNS = {
 }
 
 BASELINE = {
-    "endswith(' *')": 67,
-    "== 'int64_t'": 101,
+    "endswith(' *')": 37,
+    "== 'int64_t'": 64,
     "in (.., 'int64_t', ..)": 313,
     # +1 on 2026-11-20: TypeLattice.is_cstr, the one definition call sites
     # should use instead of spelling the test.
     # also +1 each for is_word and is_double (same reason).
-    "== 'char *'": 159,
-    "== '_Bool'": 23,
-    "== 'double'": 61,
-    "== 'MojoList *'": 54,
+    "== 'char *'": 75,
+    "== '_Bool'": 11,
+    "== 'double'": 10,
+    "== 'MojoList *'": 32,
     "gen._emit( text": 270,
     "direct word-set use": 10,
 }
@@ -79,7 +79,7 @@ def main(argv: list) -> int:
     for k in PATTERNS:
         if now[k] > BASELINE[k]:
             print('  FAIL  %s: %d, baseline %d -- ask a Type/TypeLattice method '
-                  'instead of adding a string test' % (k, now[k], BASELINE[k]))
+                  'instead of adding a string test (python3 tools/type_string_codemod.py rewrites the simple ones)' % (k, now[k], BASELINE[k]))
             failures += 1
         elif now[k] < BASELINE[k]:
             print('  FAIL  %s: %d, baseline %d -- fixed! lower BASELINE[%r] to %d '

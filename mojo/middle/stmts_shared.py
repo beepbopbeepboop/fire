@@ -93,7 +93,7 @@ def _annotation_container_elem_type(gen, ann, ctype: str) -> str | None:
         _et = gen._resolve_type(_parts[0].strip())
     except Exception:
         return None
-    return _et if _et and _et != 'int64_t' else None
+    return _et if _et and not gimple_ctypes.TypeLattice.is_word(_et) else None
 
 def _bracket_inner(s: str) -> str:
     """The text between `s`'s FIRST `[` and its final `]`. Not
@@ -150,7 +150,7 @@ def _annotation_dict_nested_val_type(gen, ann) -> str | None:
                         _bracket_inner(v))
                     if len(eparts) == 1 and eparts[0].strip():
                         _e = gen._resolve_type(eparts[0].strip())
-                        return _e if _e and _e != 'int64_t' else None
+                        return _e if _e and not gimple_ctypes.TypeLattice.is_word(_e) else None
     return None
 
 def _iter_ast(n):
@@ -280,7 +280,7 @@ def _note_rtobj_binding(gen, name, vtype, val):
     (`gen._rtobj_kinds`); any other value rebinding the name drops it, because the name is no
     longer known to hold one."""
     kind = gen._rtobj_kinds.get(('v', val))
-    if kind is not None and vtype == 'int64_t':
+    if kind is not None and gimple_ctypes.TypeLattice.is_word(vtype):
         gen._rtobj_kinds[('l', name)] = kind
     else:
         gen._rtobj_kinds.pop(('l', name), None)
@@ -330,7 +330,7 @@ def _assign_target(gen, tgt, et, ev):
         # parsed was a generator; `for pn, pt in params: self._param_ctype(pn,
         # pt, s)` handed an unannotated parameter's None annotation to
         # `strdup` as a "type".
-        if et == 'int64_t' and gen._words.may_be_box(ev):
+        if gimple_ctypes.TypeLattice.is_word(et) and gen._words.may_be_box(ev):
             _un = gen._new_temp('int64_t')
             gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
             if gen._words.is_dyn(ev):
@@ -357,7 +357,7 @@ def _assign_target(gen, tgt, et, ev):
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
         # A word of unknown kind landing in an int64_t local: the local is
         # that word now (see `_dyn_word_locals`).
-        if gen._words.is_dyn(ev) and gen.var_types[tgt.name] == 'int64_t':
+        if gen._words.is_dyn(ev) and gimple_ctypes.TypeLattice.is_word(gen.var_types[tgt.name]):
             gen._dyn_word_locals.add(tgt.name)
         else:
             gen._dyn_word_locals.discard(tgt.name)
@@ -401,7 +401,7 @@ def _assign_target(gen, tgt, et, ev):
             # No element record for the unpacked value at all: each slot is a
             # word whose kind only the runtime knows (`r, p, m = TABLE[k]`
             # over a dict of tuples, `m` a str or None).
-            if (set_et == 'int64_t' and gen._elem_types.get(lp) is None
+            if (gimple_ctypes.TypeLattice.is_word(set_et) and gen._elem_types.get(lp) is None
                     and lp not in gen._tuple_slot_types
                     and lp not in gen._nested_elem_types):
                 gen._words.mark_dyn(sev)
@@ -429,7 +429,7 @@ def _assign_target(gen, tgt, et, ev):
         _tt = et if et else 'int64_t'
         gen._declare_var(_tmp, _tt)
         gen._safe_coerce_emit(et, gen.var_types[_tmp], ev, gen._write_dest(_tmp))
-        if gen._words.is_dyn(ev) and gen.var_types[_tmp] == 'int64_t':
+        if gen._words.is_dyn(ev) and gimple_ctypes.TypeLattice.is_word(gen.var_types[_tmp]):
             gen._dyn_word_locals.add(_tmp)
         if ev in gen._elem_types:
             gen._elem_types[_tmp] = gen._elem_types[ev]

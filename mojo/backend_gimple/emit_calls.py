@@ -11139,7 +11139,7 @@ def _vararg_elem_kind(ctype: str) -> str:
     `show("a", "b")` gave `[4301523784, 4301523792]` where CPython gives
     `['b', 'c']` (bugs/CODEGEN_varargs_count_wrong_and_star_elements_unboxed).
     """
-    if ctype == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(ctype):
         return 'p'
     if gimple_ctypes.TypeLattice.is_double(ctype):
         return 'd'
@@ -11164,7 +11164,7 @@ def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str) -> None:
     `_pack_vararg_trailing_params`, `_pack_kwargs_slot_call` and
     `_pack_generator_star_args` — the generator arm's own copy of the
     str/double/int dispatch is what this consolidated (see its docstring)."""
-    if ctype == 'char *':
+    if gimple_ctypes.TypeLattice.is_cstr(ctype):
         gen._rt_void('mojo_list_append_str', [lst, f"{cvalue}"])
     elif gimple_ctypes.TypeLattice.is_double(ctype):
         gen._rt_void('mojo_list_append_double', [lst, f"{cvalue}"])
