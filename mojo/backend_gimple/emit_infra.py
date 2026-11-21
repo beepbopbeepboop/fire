@@ -3082,10 +3082,10 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 gen._cast_into(ip, 'int64_t', f"{aval}")
             gen._cast_into(vp, 'void *', ip)
             coerced_args.append(vp)
-        elif ptype == 'void *' and actual_atype.endswith(' *'):
+        elif ptype == 'void *' and gimple_ctypes.TypeLattice.ends_in_star(actual_atype):
             vp = gen._cast('void *', f"{aval}")
             coerced_args.append(vp)
-        elif ptype == 'int64_t' and (actual_atype in ('int', '_Bool', 'char *', 'void *') or actual_atype.endswith(' *')):
+        elif ptype == 'int64_t' and (actual_atype in ('int', '_Bool', 'char *', 'void *') or gimple_ctypes.TypeLattice.ends_in_star(actual_atype)):
             ct = gen._new_temp('int64_t')
             if gimple_ctypes.TypeLattice.is_cstr(atype):
                 aval_local = gen._ensure_local('char *', aval)
@@ -3094,7 +3094,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             elif atype == 'void *':
                 aval_local = gen._ensure_local('void *', aval)
                 gen._cast_into(ct, 'int64_t', aval_local)
-            elif atype.endswith(' *'):
+            elif gimple_ctypes.TypeLattice.ends_in_star(atype):
                 # Any struct pointer → void * → int64_t
                 aval_local = gen._ensure_local(atype, aval)
                 vp = gen._cast('void *', aval_local)
@@ -3238,7 +3238,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     coerced_args.append(gen._call_expr(
                         'char *', 'mojo_word_cstr_value', [('int64_t', _iv)]))
 
-        elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
+        elif gimple_ctypes.TypeLattice.ends_in_star(ptype) and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one
             # branch, and they need OPPOSITE handling (BUG-2026-016,
@@ -3302,21 +3302,21 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     gen._cast_into(ip3, 'int64_t', f"{aval}")
                 gen._cast_into(pp, ptype, ip3)
                 coerced_args.append(pp)
-        elif ptype == 'int64_t' and atype.endswith(' *'):
+        elif ptype == 'int64_t' and gimple_ctypes.TypeLattice.ends_in_star(atype):
             # pointer passed where int64_t expected — cast via int64_t
             ip = gen._cast('int64_t', f"{aval}")
             coerced_args.append(ip)
         elif ptype == 'int' and atype in ('int64_t', '_Bool'):
             ct = gen._cast('int', f"{aval}")
             coerced_args.append(ct)
-        elif ptype == 'int' and atype.endswith(' *'):
+        elif ptype == 'int' and gimple_ctypes.TypeLattice.ends_in_star(atype):
             # char*/pointer passed where int expected — convert via int64_t
             ip = gen._new_temp('int64_t')
             it = gen._new_temp('int')
             gen._cast_into(ip, 'int64_t', f"{aval}")
             gen._cast_into(it, 'int', ip)
             coerced_args.append(it)
-        elif ptype.endswith(' *') and atype == 'int':
+        elif gimple_ctypes.TypeLattice.ends_in_star(ptype) and atype == 'int':
             # int passed where pointer expected — convert via int64_t
             ip = gen._new_temp('int64_t')
             pp = gen._new_temp(ptype)
@@ -3343,7 +3343,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._emit(f'  {_sp}->_data = {aval};')
             gen._rt_into(f'{_sp}->_len', 'mojo_strlen', [f"{aval}"])
             coerced_args.append(_sp)
-        elif ptype.endswith(' *') and gimple_ctypes.TypeLattice.is_cstr(atype):
+        elif gimple_ctypes.TypeLattice.ends_in_star(ptype) and gimple_ctypes.TypeLattice.is_cstr(atype):
             # char* passed where other pointer type expected
             ip = gen._new_temp('int64_t')
             pp = gen._new_temp(ptype)
@@ -3357,7 +3357,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._cast_into(ip, 'int64_t', f"{aval}")
             gen._cast_into(pp, 'ModuleLoader *', ip)
             coerced_args.append(pp)
-        elif (gimple_ctypes.TypeLattice.is_list(actual_atype) and ptype.endswith(' *')
+        elif (gimple_ctypes.TypeLattice.is_list(actual_atype) and gimple_ctypes.TypeLattice.ends_in_star(ptype)
                 and ptype[:-2] in _LIST_MARSHAL_ELEMS):
             # A BOXED LIST where the callee declared a scalar-element pointer.
             #
@@ -3389,7 +3389,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._emit(f'  {_mb} = {_list_pack_name(_elem)}({aval}, -1);')
             coerced_args.append(_mb)
             _pending_list_unpacks.append((aval, _mb, _elem))
-        elif ptype.endswith(' *') and atype.endswith(' *') and ptype != atype:
+        elif gimple_ctypes.TypeLattice.ends_in_star(ptype) and gimple_ctypes.TypeLattice.ends_in_star(atype) and ptype != atype:
             # Two different pointer types (e.g. MojoList * where MojoDict * is
             # declared, or a struct ptr vs Span *): cast via a temp rather than
             # forwarding an un-typed mismatched pointer (review finding #5).
@@ -3729,7 +3729,7 @@ def _tagged_dyn_read(gen, val: str, want: str) -> str | None:
     if want == 'list':
         _raw = gen._rt_call('int64_t', 'mojo_tagged_list', [f"(int64_t){box}", f"{pos}"])
         return gen._coerce_to_type('int64_t', 'MojoList *', _raw)
-    if want == 'double':
+    if gimple_ctypes.TypeLattice.is_double(want):
         return gen._rt_call('double', 'mojo_tagged_double', [f"(int64_t){box}", f"{pos}"])
     return gen._rt_call('int64_t', 'mojo_tagged_int', [f"(int64_t){box}", f"{pos}"])
 
@@ -3764,7 +3764,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         if actual == 'char':
             cv = gen._cast('char', val)
             return 'char *', gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
-        if actual is not None and actual.endswith(' *'):
+        if actual is not None and gimple_ctypes.TypeLattice.ends_in_star(actual):
             # A KNOWN-boxed pointer (a char*/MojoDict*/... value that was
             # type-erased through an int64_t slot elsewhere in this
             # codegen's dynamic-typing convention, tracked explicitly in
@@ -3952,7 +3952,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # with `_cstr_key_src`, whose `mojo_cstr_or_int_release` frees a
         # content key outright rather than pooling it, because it is a repr
         # walker's heap string and not a pool block.
-        if word_ok and (typ.endswith(' *') or typ == 'void *'):
+        if word_ok and (gimple_ctypes.TypeLattice.ends_in_star(typ) or typ == 'void *'):
             word = gen._new_val('int64_t', f'(int64_t)(intptr_t){val}')
             key = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                  [('int64_t', word)])
@@ -4149,7 +4149,7 @@ def is_non_int_c_type(ctype) -> bool:
     or a pointer (a str is a `char *`, a container a `Mojo... *`). An integer
     type, bool included, is the word's own kind and is not refused here."""
     return ctype is not None and (
-        ctype in gimple_ctypes._SCALAR_FLOAT_TYPES or ctype.endswith(' *'))
+        ctype in gimple_ctypes._SCALAR_FLOAT_TYPES or gimple_ctypes.TypeLattice.ends_in_star(ctype))
 
 
 def tagged_mixed_name(gen, name) -> bool:
@@ -4643,7 +4643,7 @@ def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
         # everywhere else. Only a container stored into a `mixed_value_locals`
         # name reaches here.
         return gen._to_int64(vtype, v), 'int64_t'
-    if vtype == 'double':
+    if gimple_ctypes.TypeLattice.is_double(vtype):
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)]), 'int64_t'
     if gimple_ctypes.TypeLattice.is_cstr(vtype):
         return gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', v)]), 'int64_t'
@@ -5298,7 +5298,7 @@ def _generator_to_list(gen, value: str) -> str:
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', res), ('const char *', val)])
         gen._elem_types[res] = 'char *'
-    elif vct == 'double':
+    elif gimple_ctypes.TypeLattice.is_double(vct):
         gen._void_call('mojo_list_append_double',
                        [('MojoList *', res), ('double', val)])
         gen._elem_types[res] = 'double'
@@ -5419,7 +5419,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # the slots with the int accessor.
         gen._elem_types[res] = 'int64_t'
         return res
-    if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
+    if src_type in ('int64_t', 'int', 'void *') or gimple_ctypes.TypeLattice.ends_in_star(src_type):
         _td = _tagged_dyn_read(gen, value, 'list')
         if _td is not None:
             return _td
@@ -5648,7 +5648,7 @@ def _list_repr_fn(gen, rav: str) -> str:
     # are indistinguishable in the raw slot).
     nested = gen._nested_elem_types.get(rav)
     if isinstance(nested, list) and len(nested) == 2 and nested[0] == 'int64_t':
-        if nested[1] == 'double':
+        if gimple_ctypes.TypeLattice.is_double(nested[1]):
             return 'mojo_repr_list_pairs_d'
         if nested[1] in ('char *', 'MojoStr *'):
             return 'mojo_repr_list_pairs_s'
@@ -5690,7 +5690,7 @@ def _list_repr_fn(gen, rav: str) -> str:
     # list-wide ctype below is exact only for a list that really is uniform.
     if rav in gen._maybe_kinds_vals and et in ('double', 'int64_t'):
         return 'mojo_repr_list_kinds'
-    if et == 'double':
+    if gimple_ctypes.TypeLattice.is_double(et):
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
         return 'mojo_repr_list_ints'
@@ -6050,9 +6050,9 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             return _sv
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float', '__fp16'):
-        fv = ev if et == 'double' else gen._cast('double', ev)
+        fv = ev if gimple_ctypes.TypeLattice.is_double(et) else gen._cast('double', ev)
         return gen._call_expr('char *', 'mojo_repr_float', [('double', fv)])
-    if et.endswith(' *') and et != 'void *':
+    if gimple_ctypes.TypeLattice.ends_in_star(et) and et != 'void *':
         # A struct value: consult the receiver's OWN dunder, `__str__`
         # first and `__repr__` second, which is CPython's order for
         # `str(x)` and is what makes `str(p)` stop printing the bare type
@@ -6291,7 +6291,7 @@ def _to_int64(gen, ctype: str, val: str) -> str:
         # GIMPLE: can't redundantly cast global int64_t to int64_t; just load
         return gen._ensure_local('int64_t', val)
     t = gen._new_temp('int64_t')
-    if ctype.endswith(' *'):
+    if gimple_ctypes.TypeLattice.ends_in_star(ctype):
         # Pointer → int64_t requires void* intermediate in GIMPLE
         val_local = gen._ensure_local(ctype, val)
         vp = gen._cast('void *', val_local)
@@ -7037,7 +7037,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         elem64 = gen._rt_call('int64_t', 'mojo_list_get_boxed', [_iv, idx64])
         gen._boxed_vals.add(_tgt)
         gen._emit(f"  {_tgt} = (int64_t) {elem64};")
-    elif suf == 'double':
+    elif gimple_ctypes.TypeLattice.is_double(suf):
         gen._rt_into(_tgt, 'mojo_list_get_double', [_iv, idx64])
     elif suf == 'str':
         # mojo_list_get_str returns char*, handle type mismatch with target variable
@@ -8388,7 +8388,7 @@ def _float_operand_as_double(gen, ctype: str, val: str, maybe_box: bool) -> str:
     already one; any other integer is converted."""
     if maybe_box:
         return _as_str(gen._call_expr('double', 'mojo_box_double', [('int64_t', val)]))
-    if ctype == 'double':
+    if gimple_ctypes.TypeLattice.is_double(ctype):
         return _as_str(val)
     # Operands are bare names: a parenthesised operand is `expected expression
     # before '(' token` inside a `__GIMPLE` function.
@@ -8442,7 +8442,7 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
             dres = gen._binop('double', _as_str(dl), '-', _as_str(dprod))
     else:
         dres = gen._binop('double', _as_str(dl), op, _as_str(dr))
-    if lt == 'double' or rt == 'double':
+    if gimple_ctypes.TypeLattice.is_double(lt) or gimple_ctypes.TypeLattice.is_double(rt):
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     # The integer answer reads a maybe-box operand as its integer
     # (`mojo_box_int`), exactly as `_unbox_float_param_operand` does.
@@ -8489,7 +8489,7 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     out = []
     for _i, (_at, _av) in enumerate(arg_pairs):
         _pn = _as_str(_pnames[_i]) if _i < len(_pnames) else None
-        if _pn is not None and _pn in _names and _as_str(_at) == 'double':
+        if _pn is not None and _pn in _names and gimple_ctypes.TypeLattice.is_double(_as_str(_at)):
             out.append(('int64_t', gen._rt_call('int64_t', 'mojo_box_from_double', [_as_str(_av)])))
         else:
             out.append((_at, _av))
@@ -8671,7 +8671,7 @@ def _peek_is_user_method(gen, call) -> bool:
     obj = fn.obj
     if isinstance(obj, gimple_ctypes.IdentExpr):
         rt = gen._type_of(_as_str(obj.name))
-        if isinstance(rt, str) and rt.endswith(' *'):
+        if isinstance(rt, str) and gimple_ctypes.TypeLattice.ends_in_star(rt):
             return 'peek' in gen._struct_method_names.get(rt[:-2], ())
     return any('peek' in ms for ms in gen._struct_method_names.values())
 
@@ -8999,12 +8999,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
         # runner's gimple_enumerate_value_printed /
         # gimple_global_from_enumerate_call).
         _wct = None
-        if isinstance(atype, str) and atype.endswith(' *') \
+        if isinstance(atype, str) and gimple_ctypes.TypeLattice.ends_in_star(atype) \
                 and atype[:-2] in getattr(gen, '_intu_prereg_structs', ()):
             _wct = atype
         else:
             _wact = gen._get_actual_type(atype, aval)
-            if isinstance(_wact, str) and _wact.endswith(' *') \
+            if isinstance(_wact, str) and gimple_ctypes.TypeLattice.ends_in_star(_wact) \
                     and _wact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
                 _wct = _wact
                 aval = gen._cast(_wact, f"{aval}")
@@ -9018,7 +9018,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
         # uses). With neither the value falls through as it did. This arm did
         # not exist, so `print(p)` printed the object's ADDRESS as a decimal
         # while `str(p)` / `repr(p)` were right.
-        if isinstance(atype, str) and atype.endswith(' *') and atype != 'void *':
+        if isinstance(atype, str) and gimple_ctypes.TypeLattice.ends_in_star(atype) and atype != 'void *':
             _psn = atype[:-2].strip()
             if _psn in gen.struct_field_types:
                 _pcall = user_dunder_repr_call(gen, _psn, atype, aval,
@@ -9076,7 +9076,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             rv = gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', aval)])
             gen._rt_void(print_fn, [f"{rv}"])
         elif atype in ('double', 'float', '__fp16'):
-            dv = aval if atype == 'double' else gen._cast('double', f"{aval}")
+            dv = aval if gimple_ctypes.TypeLattice.is_double(atype) else gen._cast('double', f"{aval}")
             rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
             gen._rt_void(print_fn, [f"{rv}"])
         elif _float8_dtype.float8_spelling_of_ctype(atype) is not None:
@@ -10039,7 +10039,7 @@ def _struct_ptr_owned(gen, name: str, ctype) -> bool:
     declaration gate (`maybe_push_owned_local` pushed it). The second condition
     matters: a candidate that never went through the gate — whatever its type —
     must never be freed just because it is a candidate."""
-    if ctype is None or not ctype.endswith(' *'):
+    if ctype is None or not gimple_ctypes.TypeLattice.ends_in_star(ctype):
         return False
     base = ctype[:-2].strip()
     if not gimple_ctypes.TypeLattice.is_cstr(ctype) and (base not in gen._analysis_structs or base not in gen.struct_field_types):
@@ -10235,7 +10235,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         gen._owned_stack_allocated.add(name)
         push_fn = _owned_stack_push_runtime_fn(ctype)
         free_fn = _owned_destroy_runtime_fn(ctype)
-        if push_fn == '' and ctype is not None and ctype.endswith(' *'):
+        if push_fn == '' and ctype is not None and gimple_ctypes.TypeLattice.ends_in_star(ctype):
             # A stack-homed struct instance has nothing to tear down (no
             # buffers of its own are owned through it) and nothing to unwind:
             # record the name as handled and register no free.
@@ -10249,7 +10249,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         else:
             push_fn = _owned_push_runtime_fn(ctype)
             free_fn = _owned_free_runtime_fn(ctype)
-        if push_fn == '' and ctype is not None and ctype.endswith(' *'):
+        if push_fn == '' and ctype is not None and gimple_ctypes.TypeLattice.ends_in_star(ctype):
             # A struct instance (a constructor call of a vetted struct): a plain
             # heap block, torn down with free() and, on an exception, by a PTR
             # thunk. Vetting is the analysis table; here only its C type is

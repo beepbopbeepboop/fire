@@ -178,6 +178,15 @@ class TypeLattice:
         return t == 'char *'
 
     @classmethod
+    def ends_in_star(cls, t: str) -> bool:
+        """`t` is spelled as a pointer to something (`... *`): a struct, list,
+        string or other handle. Narrower than `is_pointer`, which also accepts
+        function-pointer spellings that merely contain a `*`."""
+        if not t:
+            return False
+        return t.endswith(' *')
+
+    @classmethod
     def is_list(cls, t: str) -> bool:
         """`t` is the C spelling of a list/tuple value (`MojoList *`)."""
         return t == 'MojoList *'

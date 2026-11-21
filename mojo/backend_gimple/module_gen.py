@@ -2227,7 +2227,7 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
             # pre-arm behavior.
             if 'property' in (getattr(m, 'decorators', None) or []):
                 _pa_ret = _as_str(ret)
-                if (_pa_ret.endswith(' *') or _pa_ret in ('int64_t', 'int', '_Bool')):
+                if (gimple_ctypes.TypeLattice.ends_in_star(_pa_ret) or _pa_ret in ('int64_t', 'int', '_Bool')):
                     _pa = self._getattr_property_arms
                     if _arms_sn not in _pa:
                         _pa[_arms_sn] = {}
@@ -2421,7 +2421,7 @@ def _emit_reflection_dispatch(self, parts):
             if re.match(r'^.+\[\d+\]$', ftype):
                 name_lits.append(f'"{fname}"')
                 continue
-            if ftype.endswith(' *'):
+            if gimple_ctypes.TypeLattice.ends_in_star(ftype):
                 get_lines.append(
                     f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)(intptr_t)obj->{safe_f};')
                 set_lines.append(
@@ -2698,7 +2698,7 @@ def _emit_reflection_dispatch(self, parts):
                            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
                 owned = 'T'
-            elif ftype.endswith(' *'):
+            elif gimple_ctypes.TypeLattice.ends_in_star(ftype):
                 # A field whose declared type is a struct this compile
                 # reflected is rendered through that struct's OWN dump, not
                 # through the tag-based dispatch: the field's type is written
@@ -5996,7 +5996,7 @@ def _gmp_emit_generator_cpp_units(self) -> None:
             while _gm_frontier:
                 _gm_cur = _gm_frontier.pop()
                 for _gm_fct in self.struct_field_types.get(_gm_cur, {}).values():
-                    if isinstance(_gm_fct, str) and _gm_fct.endswith(' *'):
+                    if isinstance(_gm_fct, str) and gimple_ctypes.TypeLattice.ends_in_star(_gm_fct):
                         _gm_fld_sn = _gm_fct[:-2]
                         if (_gm_fld_sn in self.struct_field_types
                                 and _gm_fld_sn not in _gm_struct_names_seen):
@@ -6107,7 +6107,7 @@ def _gmp_emit_generator_cpp_units(self) -> None:
                 while _mirror_frontier:
                     _mf_cur = _mirror_frontier.pop()
                     for _mf_fct in self.struct_field_types.get(_mf_cur, {}).values():
-                        if isinstance(_mf_fct, str) and _mf_fct.endswith(' *'):
+                        if isinstance(_mf_fct, str) and gimple_ctypes.TypeLattice.ends_in_star(_mf_fct):
                             _mf_sn = _mf_fct[:-2]
                             if (_mf_sn in self.struct_field_types
                                     and _mf_sn not in _cpp_preamble_typedef_structs
@@ -6985,7 +6985,7 @@ def _gmp_fill_missing_global_decls(self, _declared_global_inits: dict, _declared
                 c_type = _own_t
             elif gname in self._global_c_decl_types:
                 c_type = self._global_c_decl_types[gname]
-            elif g_mtype and g_mtype.endswith(' *') \
+            elif g_mtype and gimple_ctypes.TypeLattice.ends_in_star(g_mtype) \
                     and self._cpp_known_ptr_struct(g_mtype):
                 c_type = g_mtype
             elif g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -6998,7 +6998,7 @@ def _gmp_fill_missing_global_decls(self, _declared_global_inits: dict, _declared
                 # `int64_t arr` under MOJO_NO_SHIM=1.
                 c_type = 'int64_t'
             else:
-                c_type = 'void *' if (g_mtype and g_mtype.endswith(' *')) else (
+                c_type = 'void *' if (g_mtype and gimple_ctypes.TypeLattice.ends_in_star(g_mtype)) else (
                     g_mtype if gimple_ctypes.TypeLattice.is_cstr(g_mtype) else 'int64_t')
             _gname_s = _as_str(gname)
             # Declaration-time capture wins (see `_declared_global_inits`);
@@ -7347,7 +7347,7 @@ def _gmp_struct_params_from_observations(self, _STRUCT_FALLBACKS: list[str], _fn
                 _all_struct_ptr = True
                 for _t in types:
                     _t_str = _gmi_as_str(_t)
-                    if not (_t_str.endswith(' *') and _t_str[:-2] in self.struct_field_types):
+                    if not (gimple_ctypes.TypeLattice.ends_in_star(_t_str) and _t_str[:-2] in self.struct_field_types):
                         _all_struct_ptr = False
                         break
                 if _all_struct_ptr:
@@ -7373,7 +7373,7 @@ def _gmp_struct_params_from_observations(self, _STRUCT_FALLBACKS: list[str], _fn
             if len(_sole) != 1:
                 continue
             _st = _gmi_as_str(_sole[0])
-            if not _st.endswith(' *'):
+            if not gimple_ctypes.TypeLattice.ends_in_star(_st):
                 continue
             if _st[:-2] not in self.struct_field_types:
                 continue
@@ -8268,7 +8268,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                         ft = f"{_lcm_pw[_inner_base]} *"
                                     else:
                                         ft = f'{_inner_base} *'
-                            elif ft.endswith(' *') and _outer_base in self.struct_field_types:
+                            elif gimple_ctypes.TypeLattice.ends_in_star(ft) and _outer_base in self.struct_field_types:
                                 # Same local-first rule for the bare-annotation
                                 # spelling: a previous branch resolved `ft` to a
                                 # struct pointer and the annotation's base is a
@@ -8522,7 +8522,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                      else getattr(getattr(_f, 'target', None),
                                                   'name', None)) == fn
                                 for _f in s.fields))
-                    can_override = ((existing_ft == 'int' and ft.endswith(' *'))
+                    can_override = ((existing_ft == 'int' and gimple_ctypes.TypeLattice.ends_in_star(ft))
                                     or (existing_ft == s.name + ' *'
                                         and ft != existing_ft
                                         and not _annotated_self))
@@ -9012,7 +9012,7 @@ def _gmp_ctor_init_param_fields(self, stmts: list, _ctor_init_methods: dict, _ct
             for _pname in _ctor_init_params[_cs_name2]:
                 _okey2 = _cs_name2 + '::' + _pname
                 _kind = _obs_kind.get(_okey2, '')
-                if not gimple_ctypes.TypeLattice.is_cstr(_kind) and _kind != 'double' \
+                if not gimple_ctypes.TypeLattice.is_cstr(_kind) and not gimple_ctypes.TypeLattice.is_double(_kind) \
                         and _kind not in _CTOR_CONTAINER_CTYPES:
                     continue                    # none, or not unanimous
                 if _obs_conflict.get(_okey2) or _obs_container_conflict.get(_okey2):
@@ -9051,7 +9051,7 @@ def _gmp_apply_gimplegen_sigs(self, _gg_sigs) -> None:
             _f = _as_str(_fc_pair[0])
             _c = _as_str(_fc_pair[1])
             _cur = _gg_ft.get(_f)
-            if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _c.endswith(' *')):
+            if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and gimple_ctypes.TypeLattice.ends_in_star(_c)):
                 _gg_ft[_f] = _c
         _apply_gimplegen_frozen_sigs(self, _gg_sigs, True)
         # Recover the `_annotation_dict_val_type` seeding of
@@ -10189,7 +10189,7 @@ def _gmh_arg_scalar_type(self, caller_name, a, deep_str=False,
                     return None
             else:
                 _ot = self._inferred_var_types.get(_as_str(caller_name), {}).get(_on)
-                if not (isinstance(_ot, str) and _ot.endswith(' *')):
+                if not (isinstance(_ot, str) and gimple_ctypes.TypeLattice.ends_in_star(_ot)):
                     return None
                 _own = _ot[:-2]
         else:
@@ -10274,7 +10274,7 @@ def _gmh_arg_struct_ptr_type(self, caller_name, a, caller_struct=None):
         # the one existing in-closure recursion in this file already
         # forwards all of them for the same reason.
         st = _gmh_arg_scalar_type(self, caller_name, a, False, False, None)
-        if not (isinstance(st, str) and st.endswith(' *')):
+        if not (isinstance(st, str) and gimple_ctypes.TypeLattice.ends_in_star(st)):
             return None
         if st[:-2] in self.struct_field_types:
             return st
@@ -10293,16 +10293,16 @@ def _gmh_arg_struct_ptr_type(self, caller_name, a, caller_struct=None):
             if not _own2:
                 return None
             _ft2 = self.struct_field_types.get(_own2, {}).get(_as_str(a.member))
-            if (isinstance(_ft2, str) and _ft2.endswith(' *')
+            if (isinstance(_ft2, str) and gimple_ctypes.TypeLattice.ends_in_star(_ft2)
                     and _ft2[:-2] in self.struct_field_types):
                 return _ft2
             return None
         _ot = self._inferred_var_types.get(_as_str(caller_name), {}).get(
             _as_str(_obj.name))
-        if not (isinstance(_ot, str) and _ot.endswith(' *')):
+        if not (isinstance(_ot, str) and gimple_ctypes.TypeLattice.ends_in_star(_ot)):
             return None
         _ft = self.struct_field_types.get(_ot[:-2], {}).get(_as_str(a.member))
-        if (isinstance(_ft, str) and _ft.endswith(' *')
+        if (isinstance(_ft, str) and gimple_ctypes.TypeLattice.ends_in_star(_ft)
                 and _ft[:-2] in self.struct_field_types):
             return _ft
         return None
@@ -10450,7 +10450,7 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
         return True
     if not st:
         return False
-    if gimple_ctypes.TypeLattice.is_cstr(_as_str(st)) or _as_str(st) == 'double':
+    if gimple_ctypes.TypeLattice.is_cstr(_as_str(st)) or gimple_ctypes.TypeLattice.is_double(_as_str(st)):
         return True
     # An INTEGER observation is proof only when it is a REAL integer. The
     # `int64_t` STORAGE DEFAULT is not: `_infer_local_var_types` leaves it on
@@ -11119,11 +11119,11 @@ def _gmh_phase17_value_type(self, _value):
             return f"{_value.func.name} *"
         elif isinstance(_value.func, IdentExpr):
             ret = self.func_return_types.get(_value.func.name, '')
-            if ret.endswith(' *'):
+            if gimple_ctypes.TypeLattice.ends_in_star(ret):
                 return ret
             elif gimple_ctypes.TypeLattice.is_cstr(ret):
                 return 'char *'
-            elif ret == 'double':
+            elif gimple_ctypes.TypeLattice.is_double(ret):
                 return 'double'
             else:
                 # Delegate the unknown-callee fallback to _quick_type,
@@ -11142,7 +11142,7 @@ def _gmh_phase17_value_type(self, _value):
                 # (int64_t/double/_Bool) still land on int64_t, matching
                 # this branch's old unconditional default.
                 qt2 = self._quick_type(_value)
-                return qt2 if (gimple_ctypes.TypeLattice.is_cstr(qt2) or qt2.endswith(' *') or qt2 == 'double') else 'int64_t'
+                return qt2 if (gimple_ctypes.TypeLattice.is_cstr(qt2) or gimple_ctypes.TypeLattice.ends_in_star(qt2) or gimple_ctypes.TypeLattice.is_double(qt2)) else 'int64_t'
         elif (isinstance(_value.func, MemberExpr)
                 and _value.func.member in ('read', 'readline')
                 and not _value.args):
@@ -11181,18 +11181,18 @@ def _gmh_phase17_value_type(self, _value):
             # discarded-pointer bug as the unknown-callee case above,
             # and with the same fix. Non-pointers still land on int64_t.
             qt4 = self._quick_type(_value)
-            return qt4 if (gimple_ctypes.TypeLattice.is_cstr(qt4) or qt4.endswith(' *') or qt4 == 'double') else 'int64_t'
+            return qt4 if (gimple_ctypes.TypeLattice.is_cstr(qt4) or gimple_ctypes.TypeLattice.ends_in_star(qt4) or gimple_ctypes.TypeLattice.is_double(qt4)) else 'int64_t'
     elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
             and _value.obj.name in self.imported_symbols):
         _mx_mod = self.imported_symbols[_value.obj.name].get('module')
         if (_mx_mod and _value.member in self._global_var_types
                 and getattr(self, '_global_to_module', {}).get(_value.member) == _mx_mod):
             _mx_t = self._global_var_types[_value.member]
-            if _mx_t.endswith(' *'):
+            if gimple_ctypes.TypeLattice.ends_in_star(_mx_t):
                 return _mx_t
             elif gimple_ctypes.TypeLattice.is_bool(_mx_t):
                 return 'int'
-            elif _mx_t == 'double':
+            elif gimple_ctypes.TypeLattice.is_double(_mx_t):
                 return 'double'
             else:
                 return 'int64_t'
@@ -11201,7 +11201,7 @@ def _gmh_phase17_value_type(self, _value):
         # char* value → 'char *', matching _lower_MemberExpr) are the
         # single source of truth for these RHS types.
         qt3 = self._quick_type(_value)
-        return qt3 if (gimple_ctypes.TypeLattice.is_cstr(qt3) or qt3 == 'double') else 'int64_t'
+        return qt3 if (gimple_ctypes.TypeLattice.is_cstr(qt3) or gimple_ctypes.TypeLattice.is_double(qt3)) else 'int64_t'
     elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
             and gimple_exprtypes.is_bound_method_value(
                 self, _value,
@@ -11213,11 +11213,11 @@ def _gmh_phase17_value_type(self, _value):
         return 'MojoBoundMethod *'
     else:
         qt = self._quick_type(_value) or 'int64_t'
-        if qt.endswith(' *'):
+        if gimple_ctypes.TypeLattice.ends_in_star(qt):
             return qt
         elif gimple_ctypes.TypeLattice.is_bool(qt):
             return 'int'
-        elif qt == 'double':
+        elif gimple_ctypes.TypeLattice.is_double(qt):
             # A float literal (or float-valued expression) is a `double`
             # global; collapsing it to int64_t made the definer's accessor
             # disagree with the importer's `extern double`.
@@ -12259,7 +12259,7 @@ def _gmp_forward_struct_params(self, _STRUCT_FALLBACKS: list[str], _caller_bodie
                     _fan = _as_str(_fa.name)
                     _fst = self._inferred_param_types.get(
                         _fcaller, {}).get(_fan)
-                    if not (isinstance(_fst, str) and _fst.endswith(' *')
+                    if not (isinstance(_fst, str) and gimple_ctypes.TypeLattice.ends_in_star(_fst)
                             and _fst[:-2] in self.struct_field_types):
                         continue
                     _fq = _as_str(_fpns[_fi])
@@ -15060,7 +15060,7 @@ def gen_module_impl(self, stmts: list):
                 # declaration it has always had.
                 _mft = 'int'
                 _afn = _assigned_member_ctypes.get((obj_name, fn))
-                if _afn and (_afn.endswith(' *') or _afn in ('double', 'float')):
+                if _afn and (gimple_ctypes.TypeLattice.ends_in_star(_afn) or _afn in ('double', 'float')):
                     _mft = _afn
                 self.struct_field_types[target_struct][fn] = _mft
                 if target_def is not None and not any(
@@ -16053,7 +16053,7 @@ def gen_module_impl(self, stmts: list):
                         rstruct = caller_struct
                     else:
                         t = self._inferred_var_types.get(caller_name, {}).get(recv.name)
-                        if isinstance(t, str) and t.endswith(' *'):
+                        if isinstance(t, str) and gimple_ctypes.TypeLattice.ends_in_star(t):
                             rstruct = t[:-2]
                 meth = (_method_scalar_ann.get(rstruct, {}) if rstruct else {}) \
                     .get(call.func.member)
@@ -16101,7 +16101,7 @@ def gen_module_impl(self, stmts: list):
                             _msobs[_msk] = 0
                             _msobs_params[_msg] = _as_str(_msobs_params[_msg]) + '\x1f' + _as_str(pnames[i])
                         _msbit = 4
-                        if st == 'double':
+                        if gimple_ctypes.TypeLattice.is_double(st):
                             _msbit = 1
                         elif gimple_ctypes.TypeLattice.is_cstr(st):
                             _msbit = 2
@@ -17217,13 +17217,13 @@ def gen_module_impl(self, stmts: list):
                     _mrstruct = caller_struct
                 else:
                     _mt = self._inferred_var_types.get(caller_name, {}).get(_mrecv.name)
-                    if isinstance(_mt, str) and _mt.endswith(' *'):
+                    if isinstance(_mt, str) and gimple_ctypes.TypeLattice.ends_in_star(_mt):
                         _mrstruct = _mt[:-2]
             elif (isinstance(_mrecv, MemberExpr) and isinstance(_mrecv.obj, IdentExpr)
                     and _mrecv.obj.name == 'self' and caller_struct
                     and caller_struct in self.struct_field_types):
                 _mft = self.struct_field_types[caller_struct].get(_mrecv.member)
-                if isinstance(_mft, str) and _mft.endswith(' *'):
+                if isinstance(_mft, str) and gimple_ctypes.TypeLattice.ends_in_star(_mft):
                     _mrstruct = _mft[:-2]
             if not _mrstruct:
                 continue
@@ -18121,7 +18121,7 @@ def gen_module_impl(self, stmts: list):
     _ctor_struct_cands: dict = {}        # "<struct>::<pname>" -> [ "<Struct> *", ... ]
 
     def _note_struct_cand(_k, _t):
-        if not _t.endswith(' *'):
+        if not gimple_ctypes.TypeLattice.ends_in_star(_t):
             return
         _cl = _ctor_struct_cands.get(_k)
         if _cl is None:
@@ -18277,8 +18277,8 @@ def gen_module_impl(self, stmts: list):
                 # (the ctor-direction cross-call struct contract).
                 # Admission still requires unanimity (the conflict dict above),
                 # a registered struct, and no container-literal veto.
-                if _st2 != 'double' and not gimple_ctypes.TypeLattice.is_cstr(_st2):
-                    if not (_st2.endswith(' *') and _st2[:-2] in self.struct_field_types):
+                if not gimple_ctypes.TypeLattice.is_double(_st2) and not gimple_ctypes.TypeLattice.is_cstr(_st2):
+                    if not (gimple_ctypes.TypeLattice.ends_in_star(_st2) and _st2[:-2] in self.struct_field_types):
                         continue                # none, or not unanimous
                 if _ctor_scalar_conflict.get(_skey2):
                     # Two or more DIFFERENT struct pointers were passed here.
@@ -18287,7 +18287,7 @@ def gen_module_impl(self, stmts: list):
                     # dispatch on the receiver's runtime `__mojo_type_id`
                     # instead of lowering to the scalar no-op stub.
                     _pc = _ctor_struct_cands.get(_skey2) or []
-                    if len(_pc) >= 2 and all(_p.endswith(' *') for _p in _pc):
+                    if len(_pc) >= 2 and all(gimple_ctypes.TypeLattice.ends_in_star(_p) for _p in _pc):
                         _pcn = sorted([_p[:-2] for _p in _pc])
                         self._poly_slot_cands[_skey2] = _pcn
                         self._poly_struct_defs = {
@@ -18363,7 +18363,7 @@ def gen_module_impl(self, stmts: list):
                         continue                # respect default-value inference
                     _cp_slot = _as_str(_cpc.func.name) + '::' + _as_str(_cp_pnames[_cp_i])
                     _cp_st = self._ctor_lit_param_types.get(_cp_slot, '')
-                    if not (_cp_st.endswith(' *') and _cp_st[:-2] in self.struct_field_types):
+                    if not (gimple_ctypes.TypeLattice.ends_in_star(_cp_st) and _cp_st[:-2] in self.struct_field_types):
                         continue
                     _cp_cur = self._inferred_param_types.get(_as_str(_cpn), {}).get(_cp_argn)
                     if _cp_cur is not None and _cp_cur not in _STRUCT_FALLBACKS:
@@ -19380,7 +19380,7 @@ def gen_module_impl(self, stmts: list):
             # string as a list header and segfaulted on any module whose
             # global is assigned a call (`_C_KEYWORDS = frozenset({...})`).
             _ret = self.func_return_types.get(_value.func.name)
-            if isinstance(_ret, str) and _ret.endswith(' *'):
+            if isinstance(_ret, str) and gimple_ctypes.TypeLattice.ends_in_star(_ret):
                 _gmh_phase17_set_gtype(self, _gname, _ret, _own)
                 if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *',
                             'MojoGenerator *'):
@@ -19419,7 +19419,7 @@ def gen_module_impl(self, stmts: list):
             # this pre-scan; without it the call answered `int64_t` and a
             # `-> str` method printed its pointer's decimal.
             _bm_ct = self._global_var_types.get(_as_str(_value.obj.name))
-            if isinstance(_bm_ct, str) and _bm_ct.endswith(' *'):
+            if isinstance(_bm_ct, str) and gimple_ctypes.TypeLattice.ends_in_star(_bm_ct):
                 _bm_sn = _bm_ct[:-2]
                 if _bm_sn in self.struct_field_types:
                     _bm_rt = self.func_return_types.get(
@@ -19763,11 +19763,11 @@ def gen_module_impl(self, stmts: list):
                     elif isinstance(_scan_stmt.value, CallExpr):
                         if isinstance(_scan_stmt.value.func, IdentExpr):
                             ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
-                            if ret and ret.endswith(' *'):
+                            if ret and gimple_ctypes.TypeLattice.ends_in_star(ret):
                                 _gmh_phase17_set_gtype(self, _scan_stmt.name, ret, _scan_own)
                             elif gimple_ctypes.TypeLattice.is_cstr(ret):
                                 _gmh_phase17_set_gtype(self, _scan_stmt.name, 'char *', _scan_own)
-                            elif ret == 'double':
+                            elif gimple_ctypes.TypeLattice.is_double(ret):
                                 _gmh_phase17_set_gtype(self, _scan_stmt.name, 'double', _scan_own)
                             else:
                                 _gmh_phase17_set_gtype(self, _scan_stmt.name, 'int64_t', _scan_own)
@@ -19784,7 +19784,7 @@ def gen_module_impl(self, stmts: list):
                             _gmh_phase17_set_gtype(self, _scan_stmt.name, 'int64_t', _scan_own)
                     else:
                         qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                        _gmh_phase17_set_gtype(self, _scan_stmt.name, qt if (qt.endswith(' *') or qt in ('_Bool', 'double')) else 'int64_t', _scan_own)
+                        _gmh_phase17_set_gtype(self, _scan_stmt.name, qt if (gimple_ctypes.TypeLattice.ends_in_star(qt) or qt in ('_Bool', 'double')) else 'int64_t', _scan_own)
                 else:
                     _gmh_phase17_set_gtype(self, _scan_stmt.name, 'int64_t', _scan_own)
         elif isinstance(_scan_stmt, TryStmt):
@@ -20481,7 +20481,7 @@ def gen_module_impl(self, stmts: list):
                 # `mk() -> {"a": 1}`). Non-container pointer returns are
                 # exactly the shape this loop was written for, and they
                 # still widen below.
-                if isinstance(_crt, str) and _crt.endswith(' *') \
+                if isinstance(_crt, str) and gimple_ctypes.TypeLattice.ends_in_star(_crt) \
                         and _crt not in ('MojoDict *', 'MojoList *', 'MojoSet *',
                                          'MojoGenerator *'):
                     self._global_c_decl_types[_gn] = _crt
@@ -21468,7 +21468,7 @@ def gen_module_impl(self, stmts: list):
                 self._global_c_decl_types[gname] = f"{struct_name} *"
             elif isinstance(value.func, IdentExpr):
                 ret = self.func_return_types.get(value.func.name, '')
-                if ret.endswith(' *'):
+                if gimple_ctypes.TypeLattice.ends_in_star(ret):
                     if ret in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                         # A CONTAINER global is BOXED at the C level
                         # (`int64_t`, semantic type kept in
@@ -21510,7 +21510,7 @@ def gen_module_impl(self, stmts: list):
                         global_decls.append(f"char * {gname};")
                         self._global_var_types[gname] = 'char *'
                         self._global_c_decl_types[gname] = 'char *'
-                    elif _ivt == 'double':
+                    elif gimple_ctypes.TypeLattice.is_double(_ivt):
                         global_decls.append(f"double {gname};")
                         self._global_var_types[gname] = 'double'
                         self._global_c_decl_types[gname] = 'double'
@@ -21536,11 +21536,11 @@ def gen_module_impl(self, stmts: list):
                     global_decls.append(f"int64_t {gname};  /* {_mvt} */")
                     self._global_var_types[gname] = _mvt
                     self._global_c_decl_types[gname] = 'int64_t'
-                elif _mvt.endswith(' *') or gimple_ctypes.TypeLattice.is_cstr(_mvt):
+                elif gimple_ctypes.TypeLattice.ends_in_star(_mvt) or gimple_ctypes.TypeLattice.is_cstr(_mvt):
                     global_decls.append(f"{_mvt} {gname};")
                     self._global_var_types[gname] = _mvt
                     self._global_c_decl_types[gname] = _mvt
-                elif _mvt == 'double':
+                elif gimple_ctypes.TypeLattice.is_double(_mvt):
                     global_decls.append(f"double {gname};")
                     self._global_var_types[gname] = 'double'
                     self._global_c_decl_types[gname] = 'double'
@@ -21555,7 +21555,7 @@ def gen_module_impl(self, stmts: list):
                 and getattr(self, '_global_to_module', {}).get(value.member)
                     == self.imported_symbols[value.obj.name].get('module')):
             _mx_t = self._global_var_types[value.member]
-            if _mx_t.endswith(' *'):
+            if gimple_ctypes.TypeLattice.ends_in_star(_mx_t):
                 # `_mx_t` is the OWNER's SEMANTIC type; the C FIELD spelling
                 # belongs to the owner's declared struct field, and this
                 # import mirror must match it: the read loads the owner's
@@ -21647,7 +21647,7 @@ def gen_module_impl(self, stmts: list):
             # `int64_t` that `module_loader`'s `int64_t _C_KEYWORDS` used to
             # disagree with every importer's `MojoSet *`).
             qt = self._quick_type(value) or 'int64_t'
-            if qt.endswith(' *') or gimple_ctypes.TypeLattice.is_cstr(qt):
+            if gimple_ctypes.TypeLattice.ends_in_star(qt) or gimple_ctypes.TypeLattice.is_cstr(qt):
                 global_decls.append(f"{qt} {gname};")
                 self._global_var_types[gname] = qt
                 self._global_c_decl_types[gname] = (
@@ -21657,7 +21657,7 @@ def gen_module_impl(self, stmts: list):
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'
                 self._global_c_decl_types[gname] = 'int'
-            elif qt == 'double':
+            elif gimple_ctypes.TypeLattice.is_double(qt):
                 # The same `double` answer `_phase17_value_type` and the
                 # VarDecl pre-scan give: an imported float global's accessor is
                 # `extern double` (module_loader's export c_return_type).
@@ -21742,7 +21742,7 @@ def gen_module_impl(self, stmts: list):
                     # declared `int64_t` — "assignment to 'int64_t' from
                     # 'World *'" (box.3d/game's engine_create_world()).
                     _ret = self.func_return_types.get(_gv.func.name, '')
-                    if _ret.endswith(' *'):
+                    if gimple_ctypes.TypeLattice.ends_in_star(_ret):
                         if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                             # Boxed, for the same reason and with the same
                             # convention as _gscan_declare_global's identical
@@ -21765,7 +21765,7 @@ def gen_module_impl(self, stmts: list):
                             global_decls.append(f"char * {gname};")
                             self._global_var_types[gname] = 'char *'
                             self._global_c_decl_types[gname] = 'char *'
-                        elif _ivt == 'double':
+                        elif gimple_ctypes.TypeLattice.is_double(_ivt):
                             global_decls.append(f"double {gname};")
                             self._global_var_types[gname] = 'double'
                             self._global_c_decl_types[gname] = 'double'
@@ -21968,12 +21968,12 @@ def gen_module_impl(self, stmts: list):
             if init_val is None:
                 init_val = inits.get(gname)
             if not init_val or init_val == '0' or 'mojo_' in str(init_val) or 'new' in str(init_val):
-                if c_type.endswith(' *'):
+                if gimple_ctypes.TypeLattice.ends_in_star(c_type):
                     init_val = f'({c_type})0'
                 else:
                     init_val = '0'
             elif init_val.startswith('"') or init_val.startswith("'"):
-                if c_type.endswith(' *'):
+                if gimple_ctypes.TypeLattice.ends_in_star(c_type):
                     pass
                 else:
                     # A POINTER literal initializing a NON-pointer field.
@@ -21999,13 +21999,13 @@ def gen_module_impl(self, stmts: list):
                     init_val = f'(int64_t)(void *){init_val}'
             elif init_val.lstrip('-').isdigit():
                 pass
-            elif c_type == 'double':
+            elif gimple_ctypes.TypeLattice.is_double(c_type):
                 # A `double` field's initializer is the C spelling of a float
                 # literal (`_extract_init_expr`'s FloatLiteral row); resetting
                 # it to 0 silently zeroed `var F = 2.5`.
                 pass
             else:
-                if c_type.endswith(' *'):
+                if gimple_ctypes.TypeLattice.ends_in_star(c_type):
                     init_val = f'({c_type})0'
                 else:
                     init_val = '0'
@@ -22660,7 +22660,7 @@ def gen_module_impl(self, stmts: list):
                         _wexpr = f'mojo_box_from_double({_wf})'
                     elif _wt == 'int64_t':
                         _wexpr = _wm
-                    elif _wt == 'double':
+                    elif gimple_ctypes.TypeLattice.is_double(_wt):
                         _wexpr = f'mojo_box_from_double({_wm})'
                     elif _wt.endswith('*'):
                         _wexpr = f'(int64_t)(intptr_t){_wm}'

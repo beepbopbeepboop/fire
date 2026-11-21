@@ -1986,7 +1986,7 @@ def _generator_value_ctype_for_next(gen, arg):
             return None
         if isinstance(arg.func, gimple_ctypes.MemberExpr) and isinstance(arg.func.obj, gimple_ctypes.IdentExpr):
             _ot = _as_str(gen.var_types.get(_as_str(arg.func.obj.name), ''))
-            if not _ot.endswith(' *'):
+            if not gimple_ctypes.TypeLattice.ends_in_star(_ot):
                 return None
             _sn = gimple_exprtypes._struct_name_of(_ot)
             if _sn not in gen.struct_field_types:
@@ -2764,7 +2764,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                 _v = _val
                 if isinstance(_v, gimple_ctypes.CallExpr):
                     _vt = gen._quick_type(_v)
-                    if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
+                    if gimple_ctypes.TypeLattice.ends_in_star(_vt) and _vt[:-2].strip() in gen.struct_field_types:
                         cand = _vt
                     # `next(<generator>)` is a POINTER result that is not a
                     # struct -- `char *` for a string-yielding generator, and
@@ -2951,7 +2951,7 @@ def _dict_value_locals(gen, body: list) -> tuple[dict, dict]:
                 vt = lit
         if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
                           'MojoSet *', 'MojoBytes *')
-                   or vt.endswith(' *')):
+                   or gimple_ctypes.TypeLattice.ends_in_star(vt)):
             out_vt[name] = vt
             # Element type of the value: for a list literal, the element type
             # of the container; for a char* (string), subscript yields char*;
@@ -3533,7 +3533,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                 v = n.target.obj.name
                 vt = gen._quick_type(n.value)
                 if v not in _opaque and vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                           or vt.endswith(' *')):
+                           or gimple_ctypes.TypeLattice.ends_in_star(vt)):
                     dict_val.setdefault(v, vt)
                     # `lst[i] = <float>` is a LIST store when the key is
                     # not a string literal, and it is the only evidence

@@ -218,7 +218,7 @@ that is meant to be behaviour-preserving:
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the
-  counts of `.endswith(' *')` (344), `== 'int64_t'` (404), `in (.., 'int64_t')`
+  counts of `.endswith(' *')` (344; 67 after the codemod), `== 'int64_t'` (404), `in (.., 'int64_t')`
   (312), `== 'char *'` (398; 159 after the 2026-11-20 codemod that turned 240 of them into `TypeLattice.is_cstr(x)`, byte-identical C on 284 programs), `== '_Bool'` (68; 23 after the codemod), `== 'double'` (187) and
   `== 'MojoList *'` (203) may only shrink.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**

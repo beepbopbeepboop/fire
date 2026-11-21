@@ -1194,7 +1194,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     'the handle at run time', it_val)
                 _gen_for_unknown_generator(gen, var, it_val, node.body,
                                            node=node, shadow_name=shadow_name)
-        elif ((it_type.endswith(' *') and it_type != 'void *')
+        elif ((gimple_ctypes.TypeLattice.ends_in_star(it_type) and it_type != 'void *')
               or it_type.endswith('*')):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
             #
@@ -1753,7 +1753,7 @@ def _gen_for_zip_longest(gen, node):
     for si, (ptr, elem) in enumerate(seqs):
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
         reaches = _zip_longest_reaches(args, si)
-        if suf == 'double':
+        if gimple_ctypes.TypeLattice.is_double(suf):
             slot_reads.append(('double', lambda p=ptr: f"mojo_list_get_double ({p}, {gen._ziptmp})"))
         elif suf == 'str':
             slot_reads.append(('str', lambda p=ptr: f"mojo_list_get_str ({p}, {gen._ziptmp})"))
@@ -1775,7 +1775,7 @@ def _gen_for_zip_longest(gen, node):
             fills.append(_ZIP_LONGEST_ABSENT[suf])
             continue
         if fill_node is None:
-            if suf == 'double':
+            if gimple_ctypes.TypeLattice.is_double(suf):
                 # The default fill is `absent`, and this is the one slot type
                 # that cannot carry it: the loop target is a C `double` and
                 # every double is a value here, so `None` and `0.0` are the
@@ -1797,7 +1797,7 @@ def _gen_for_zip_longest(gen, node):
                     "Pass an explicit float `fillvalue`, or zip two float "
                     "sequences of the same length.")
             fills.append(_ZIP_LONGEST_ABSENT[suf])
-        elif suf == 'double':
+        elif gimple_ctypes.TypeLattice.is_double(suf):
             if not gimple_ctypes.TypeLattice.is_float(fill_ctype):
                 raise _zip_longest_fill_refusal(fill_ctype, "a float sequence")
             fills.append(fill_value)
@@ -1847,16 +1847,16 @@ def _gen_for_zip_longest(gen, node):
             cvn = gen._cname(vn)
             in_t = gen._cmp(idx_t, '<', f"{len_ts[si]}")
             raw = gen._new_val(
-                'double' if raw_ct == 'double' else ('char *' if raw_ct == 'str' else 'int64_t'),
+                'double' if gimple_ctypes.TypeLattice.is_double(raw_ct) else ('char *' if raw_ct == 'str' else 'int64_t'),
                 read_fn())
-            if raw_ct == 'double':
+            if gimple_ctypes.TypeLattice.is_double(raw_ct):
                 sel = gen._new_val('double', f"{in_t} ? {raw} : {fills[si]}")
             elif raw_ct == 'str':
                 sel = gen._new_val('int64_t', f"{in_t} ? (int64_t){raw} : {fills[si]}")
             else:
                 sel = gen._new_val('int64_t', f"{in_t} ? {raw} : {fills[si]}")
             vt = gen.var_types.get(vn, elem)
-            if vt == 'double' and raw_ct == 'double':
+            if gimple_ctypes.TypeLattice.is_double(vt) and gimple_ctypes.TypeLattice.is_double(raw_ct):
                 gen._copy(f"{cvn}", sel)
             elif gimple_ctypes.TypeLattice.is_cstr(vt):
                 cs = gen._cast('char *', sel)
@@ -1946,7 +1946,7 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
         _ssuf = gimple_ctypes.TypeLattice.list_suffix(_se)
         if _ssuf == 'str':
             _star_val = gen._rt_call('char *', 'mojo_list_get_str', [list_ptr, idx_t])
-        elif _ssuf == 'double':
+        elif gimple_ctypes.TypeLattice.is_double(_ssuf):
             _star_val = gen._rt_call('double', 'mojo_list_get_double', [list_ptr, idx_t])
         else:
             _star_val = gen._rt_call('int64_t', 'mojo_list_get_int', [list_ptr, idx_t])
@@ -1956,9 +1956,9 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
     cvn = gen._cname(vn)
     vt = gen.var_types.get(vn, elem)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-    if suf == 'double':
+    if gimple_ctypes.TypeLattice.is_double(suf):
         raw = gen._rt_call('double', 'mojo_list_get_double', [list_ptr, idx_t])
-        if vt == 'double':
+        if gimple_ctypes.TypeLattice.is_double(vt):
             gen._copy(f"{cvn}", raw)
         else:
             gen._safe_coerce_emit('double', vt, raw, cvn)
@@ -1982,7 +1982,7 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
     # A pointer element (struct pointer or nested container) keeps its real
     # type so `.member` / subscript reads inside the body resolve statically
     # instead of falling to the boxed dynamic-dispatch path.
-    if elem and elem.endswith(' *'):
+    if elem and gimple_ctypes.TypeLattice.ends_in_star(elem):
         gen._actual_types[vn] = elem
     _carry_nested_elem_type(gen, vn, list_ptr, elem)
 
@@ -2403,14 +2403,14 @@ def _gen_for_enumerate(gen, node):
         _se_suf = gimple_ctypes.TypeLattice.list_suffix(star_elem)
         if _se_suf == 'str':
             _sv = gen._rt_call('char *', 'mojo_list_get_str', [f"{list_ptr}", idx_t])
-        elif _se_suf == 'double':
+        elif gimple_ctypes.TypeLattice.is_double(_se_suf):
             _sv = gen._rt_call('double', 'mojo_list_get_double', [f"{list_ptr}", idx_t])
         else:
             _sv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{list_ptr}", idx_t])
         gen._copy(f"{cval_var}", _sv)
         _emit_starred_slot_from_value(gen, starred_slot_name(raw_val),
                                       star_elem, cval_var, star_elem)
-    elif suf == 'double':
+    elif gimple_ctypes.TypeLattice.is_double(suf):
         gen._rt_into(cval_var, 'mojo_list_get_double', [f"{list_ptr}", idx_t])
     elif suf == 'str':
         temp_str = gen._rt_call('char *', 'mojo_list_get_str', [f"{list_ptr}", idx_t])
@@ -2785,7 +2785,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 # printed 11.0.
                 gen._tagged_word_vals.add(cvar)
             gen._emit(f"  {cvar} = (int64_t) {elem64};")
-        elif suf == 'double':
+        elif gimple_ctypes.TypeLattice.is_double(suf):
             gen._rt_into(cvar, 'mojo_list_get_double', [f"{list_ptr}", idx_t])
         elif suf == 'str':
             # mojo_list_get_str returns char*, but var might be int64_t
@@ -3418,7 +3418,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     vt = _slot_ctypes[_vi]
                     if vt in ('int64_t', 'int', 'int32_t'):
                         gen._emit(f"  {cvn} = (int64_t)0;")
-                    elif vt.endswith(' *'):
+                    elif gimple_ctypes.TypeLattice.ends_in_star(vt):
                         gen._emit(f"  {cvn} = ({vt})0;")
                     else:
                         gen._emit(f"  {cvn} = (char *)0;")
@@ -3941,9 +3941,9 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
                 # identical fixup for the same "boxed into an int64_t
                 # var" situation.
                 gen._actual_types[vn] = 'char *'
-        elif suf == 'double':
+        elif gimple_ctypes.TypeLattice.is_double(suf):
             dv = gen._rt_call('double', 'mojo_list_get_double', [list_ptr, f"{i}"])
-            if vt == 'double':
+            if gimple_ctypes.TypeLattice.is_double(vt):
                 gen._copy(f"{cvn}", dv)
             else:
                 gen._safe_coerce_emit('double', vt, dv, cvn)
@@ -4658,7 +4658,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                 _ainf = _ainfs[_i]
                 _acc = _slot_acc.get(_tc)
                 if _acc is None and isinstance(_tc, str) \
-                        and _tc.endswith(' *'):
+                        and gimple_ctypes.TypeLattice.ends_in_star(_tc):
                     # PART 6 (2026-10-23, family D piece 2): a struct-
                     # pointer slot (the element_copies unpack): the tuple
                     # slot stores the element's WORD as int64_t (the E1

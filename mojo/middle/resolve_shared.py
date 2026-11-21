@@ -432,8 +432,8 @@ def _quick_type(gen, node) -> str:
             # so a CHAIN (`a or b or c`, parsed right-nested) must report
             # `_Bool` for its inner link too, or the outer link sees a pointer
             # type for a value that is the bool 1 and runs `mojo_dict_len` on it.
-            if ((lt.endswith(' *') and gimple_ctypes.TypeLattice.is_bool(rt))
-                    or (gimple_ctypes.TypeLattice.is_bool(lt) and rt.endswith(' *') and node.op == 'or')):
+            if ((gimple_ctypes.TypeLattice.ends_in_star(lt) and gimple_ctypes.TypeLattice.is_bool(rt))
+                    or (gimple_ctypes.TypeLattice.is_bool(lt) and gimple_ctypes.TypeLattice.ends_in_star(rt) and node.op == 'or')):
                 return '_Bool'
             return gimple_ctypes.TypeLattice.join(lt, rt)
         if node.op == '|':
@@ -487,7 +487,7 @@ def _quick_type(gen, node) -> str:
             _nrw = gen._narrowed_exprs.get(f'i:{node.args[0].name}')
             if _nrw is not None:
                 _gt = _as_str(_nrw[0])
-            if isinstance(_gt, str) and _gt.endswith(' *'):
+            if isinstance(_gt, str) and gimple_ctypes.TypeLattice.ends_in_star(_gt):
                 _gf = (gen.struct_field_types.get(_gt[:-2].strip()) or {}).get(
                     node.args[1].value)
                 if isinstance(_gf, str) and _gf in gimple_ctypes._CONTAINER_KIND_TYPES:
@@ -693,9 +693,9 @@ def _quick_type(gen, node) -> str:
         _sot = ''
         if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             _sot = gen.var_types.get(node.func.obj.name, '')
-        if not (_sot and _sot.endswith(' *')):
+        if not (_sot and gimple_ctypes.TypeLattice.ends_in_star(_sot)):
             _sot = gen._quick_type(node.func.obj)
-        if (not (isinstance(_sot, str) and _sot.endswith(' *'))
+        if (not (isinstance(_sot, str) and gimple_ctypes.TypeLattice.ends_in_star(_sot))
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.name in ('self', 'cls')):
             # `cls.<method>(...)` / `self.<method>(...)` in a method body:
@@ -715,7 +715,7 @@ def _quick_type(gen, node) -> str:
                 _crt = gen.func_return_types.get(f"{_cstruct}_{node.func.member}")
                 if _crt:
                     return _crt
-        if isinstance(_sot, str) and _sot.endswith(' *'):
+        if isinstance(_sot, str) and gimple_ctypes.TypeLattice.ends_in_star(_sot):
             _ssn = gimple_exprtypes._struct_name_of(_sot)
             if _ssn in gen.struct_field_types:
                 _smeth = node.func.member
@@ -1354,7 +1354,7 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     # wrong: appending a scalar element to a `void *` slot needs a cast the
     # list builder does not emit, which is its own `-Wint-conversion` error.
     if gimple_ctypes.TypeLattice.is_cstr(_joined) and any(
-            _t and _t.endswith(' *') and not gimple_ctypes.TypeLattice.is_cstr(_t) for _t in types):
+            _t and gimple_ctypes.TypeLattice.ends_in_star(_t) and not gimple_ctypes.TypeLattice.is_cstr(_t) for _t in types):
         return 'int64_t'
     # A literal of NOTHING BUT Python bools is a `_Bool` list, which
     # `_list_repr_fn` routes to `mojo_repr_list_bools` (that helper exists for

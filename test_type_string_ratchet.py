@@ -38,7 +38,7 @@ PATTERNS = {
 }
 
 BASELINE = {
-    "endswith(' *')": 344,
+    "endswith(' *')": 67,
     "== 'int64_t'": 405,
     "in (.., 'int64_t', ..)": 312,
     # +1 on 2026-11-20: TypeLattice.is_cstr, the one definition call sites
@@ -46,7 +46,7 @@ BASELINE = {
     # also +1 each for is_word and is_double (same reason).
     "== 'char *'": 159,
     "== '_Bool'": 23,
-    "== 'double'": 187,
+    "== 'double'": 61,
     "== 'MojoList *'": 54,
     "gen._emit( text": 298,
 }

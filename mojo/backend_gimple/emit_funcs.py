@@ -205,7 +205,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # GIMPLE: cannot use component_ref directly as RHS of struct store;
                 # load into a temp first.
                 _cur_t = _as_str(gen._captures.get(vname) or 'int64_t')
-                if _fct.endswith(' *') and not _cur_t.endswith(' *'):
+                if gimple_ctypes.TypeLattice.ends_in_star(_fct) and not gimple_ctypes.TypeLattice.ends_in_star(_cur_t):
                     # THIS function holds the name by VALUE while the closure it
                     # is building wants it by REFERENCE: forward a box, not the
                     # value. Through a plain local, since a component_ref's
@@ -433,7 +433,7 @@ def _gen_stmt_FromImportStmt(gen, node):
             safe_owner = gimple_ctypes._c_field_name(_gv_owner) if _gv_owner else "root"
             _gv_field = f"_{safe_owner}_globals.{gimple_ctypes._c_field_name(name)}"
             _gv_decl = gen._global_c_decl_types.get(name, _gv_ctype)
-            if _gv_ctype == 'int64_t' and _gv_decl.endswith(' *'):
+            if _gv_ctype == 'int64_t' and gimple_ctypes.TypeLattice.ends_in_star(_gv_decl):
                 # Declared pointer C type boxed as int64_t: load through the
                 # matching pointer type first, then cast via void * (the same
                 # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
@@ -1564,7 +1564,7 @@ def _selfhost_merge_field(_fields: dict[str, str], _name: str, _ct: str):
     # stuck at `int64_t` self-hosted while the shim correctly settled on
     # `_Bool`).
     if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
-                         and (_ct.endswith(' *') or gimple_ctypes.TypeLattice.is_bool(_ct))):
+                         and (gimple_ctypes.TypeLattice.ends_in_star(_ct) or gimple_ctypes.TypeLattice.is_bool(_ct))):
         _fields[_name] = _ct
 
 
@@ -2902,7 +2902,7 @@ def _home_private_struct_pts(gen, info) -> list | None:
     for _p in _pts:
         _ps = _as_str(_p)
         _base = _ps[7:] if _ps[:7] == 'struct ' else _ps
-        if _base.endswith(' *'):
+        if gimple_ctypes.TypeLattice.ends_in_star(_base):
             _base = _base[:-2].strip()
         if _base in _generic_structs:
             return None

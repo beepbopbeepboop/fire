@@ -83,7 +83,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # subscript, which genuinely has none.
         _sk = gen._struct_slot_kinds.get(v)
         if _sk is not None and 0 <= idx < len(_sk):
-            if _sk[idx] == 'double':
+            if gimple_ctypes.TypeLattice.is_double(_sk[idx]):
                 return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if _sk[idx] == 'bytes':
                 # A bytes slot is a `MojoBytes *` stored in the raw int64_t
@@ -112,7 +112,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         _pst = gen._tuple_slot_types.get(v)
         if _pst is not None and 0 <= idx < len(_pst):
             _pc = _pst[idx]
-            if _pc == 'double':
+            if gimple_ctypes.TypeLattice.is_double(_pc):
                 return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if gimple_ctypes.TypeLattice.is_cstr(_pc):
                 return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
@@ -125,7 +125,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             return _pc, gen._coerce_to_type('int64_t', _pc, _pr)
         if suf == 'str':
             return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
-        if suf == 'double':
+        if gimple_ctypes.TypeLattice.is_double(suf):
             return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
         if elem in ('int64_t', 'int', '_Bool'):
             _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
@@ -167,7 +167,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     if suf == 'str':
         return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
-    if suf == 'double':
+    if gimple_ctypes.TypeLattice.is_double(suf):
         return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
     _ev = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
     if lp not in gen._elem_types:
