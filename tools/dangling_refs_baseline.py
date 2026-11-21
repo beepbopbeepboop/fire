@@ -145,6 +145,11 @@ BASELINE = {
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/dangling_doc_refs.py': 1,
     'tools/dataclass_reflection_sites.py': 2,
+    # 2026-11-20: two integrator/orchestrator pins name a doc-shaped
+    # FIXTURE (`LAND-x.md`) to drive the retire machinery; the name does
+    # not exist by construction, like the negative controls above.
+    'tools/test_integrate_probe_loop.py': 1,
+    'tools/test_land_doc.py': 1,
     'tools/formal_chain_probe.py': 2,
     'tools/formal_fuzz.py': 26,
     'tools/formal_host_import_shapes.py': 1,
