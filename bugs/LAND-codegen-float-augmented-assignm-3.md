@@ -33,4 +33,4 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 ## Status
 - 2026-11-21 00:38:46: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 4 commit(s) ahead of master, 57 behind it; task started 2026-11-21 00:09:24)
   Branch: work/bug-land-codegen-float-augmented-assignm-3
-  Conflicting files: bugs/GATE_doc_refs_bare_regression_alone_reports_green.md, mojo/backend_gimple/emit_calls.py
+  Conflicting files: the bare-ratchet-green doc-refs bug doc (deleted when its fix landed), mojo/backend_gimple/emit_calls.py

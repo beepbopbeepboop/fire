@@ -33,4 +33,4 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 ## Status
 - 2026-11-21 00:35:35: conflicts with master (last commit 2026-11-21, first unlanded commit 2026-11-21; 2 commit(s) ahead of master, 9 behind it; task started 2026-11-20 23:36:01)
   Branch: work/bug-codegen-del-missing-dict-key-does-no
-  Conflicting files: bugs/GATE_doc_refs_ratchet_green_path_ignores_bare_gains.md
+  Conflicting files: the bare-ratchet-green doc-refs bug doc (deleted when its fix landed)
