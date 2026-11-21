@@ -28,7 +28,7 @@ from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to, eval_const_int)
-from mojo.middle.comptime_fn import resolve_struct_aliases
+from mojo.middle.comptime_fn import resolve_struct_aliases, resolve_fn_comptime_refs
 from gimple_codegen import _mojo_type
 from mojo.middle.exprtypes import _is_concrete_type_arg
 from mojo.middle.types import _body_builds_struct_tuple
@@ -4012,6 +4012,21 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
+        # A comptime reference to ANOTHER struct's members in the body
+        # (`FPUtils[dtype].integral_type`, `FPUtils[dtype].exponent_bias()` in
+        # the stdlib's _ldexp_impl) is folded to its concrete value HERE, the
+        # way the struct path folds the struct's own aliases
+        # (resolve_struct_aliases in elaborate_generic_struct): the
+        # monomorphized instance is its own translation unit with no definition
+        # of a struct the home module merely imports, so the reference left in
+        # the source reads as a zero word and the type derived from it erases
+        # to the wrong dtype — the `float << float` that stopped the
+        # _ldexp_impl family (bugs/CODEGEN_stdlib_syntax_six_files_red_
+        # after_2026_11_20_merges). Done on the template, before
+        # monomorphize_source, so the instantiation's own key and signature see
+        # the same text. A reference that cannot be decided stays as written.
+        tmpl = resolve_fn_comptime_refs(tmpl, targs, module_src)
+
         nested_objects: list = []
         _, concrete = mm.monomorphize_source(tmpl, targs)
         # The instance is its own compilation unit (see elaborate_generic_struct): it
@@ -4060,6 +4075,13 @@ class Elaborator:
         # typed with it name the concrete dtype rather than staying erased. Done once on the
         # template so the instance object, its signature and its cache key all see the same text.
         tmpl = resolve_struct_aliases(tmpl, targs, module_src)
+        # The same folding for references in the struct's METHOD bodies
+        # (`FPUtils[Self.dtype].mantissa_width()`): the instance unit has no
+        # definition of the referenced struct either, so the reference is
+        # folded before monomorphization, where the home module's import map
+        # still locates it. resolve_struct_aliases covers only the struct's
+        # OWN `Self.<alias>` members; this covers every other struct mention.
+        tmpl = resolve_fn_comptime_refs(tmpl, targs, module_src)
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
         _validate_align_decorators_for_struct(module_src, tmpl, struct_name, targs)
