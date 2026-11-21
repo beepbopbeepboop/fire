@@ -2085,8 +2085,7 @@ test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
 test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_glob_compiled.py', 'build_config.py', 'exec_budget.py',
                              RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc'],
-     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython",
-     disabled='bugs/gate-globcompiled.md')
+     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython")
 
 # [1]'s round was "the silent no-op class", and this is the test that pins it.
 # It is in `check` and not in a heavyweight bucket because it needs no Lean and
