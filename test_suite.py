@@ -4348,7 +4348,6 @@ UNREGISTERED = {
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     # tools/ pins, 2026-11-20; each runs directly (`python3 <file>`) and
     # names its cause in its own docstring.
-    'tools/test_integrate_probe_loop.py': _STANDALONE_TEST_REASON,
     'tools/test_orchestrator_wedge.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
     'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
