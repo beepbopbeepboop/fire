@@ -4347,6 +4347,13 @@ UNREGISTERED = {
     # told not to touch tools/suite.py; it is a 0.0 s table pin and wants a
     # bucket (beside gates-bootstrap-not-off / gates-coro-jobs-not-off).
     'test_gates_gimple_jobs_not_off.py': _STANDALONE_TEST_REASON,
+    # The c0182fd365 pin that a scratch probe is not a bootstrap job (0.0 s of
+    # `git` calls plus suite.tracked_mojo_files). Declared for the same reason:
+    # the review round that added it was told not to register in tools/suite.py.
+    # Its second assertion reads `.gitignore` through `git check-ignore`, so
+    # the job that eventually registers it must name `.gitignore` in `extra`
+    # or a deleted rule would replay a recorded PASS.
+    'test_bootstrap_corpus_scratch_mojo.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
