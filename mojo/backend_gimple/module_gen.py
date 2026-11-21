@@ -1373,7 +1373,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
             _ct0 = _ct
         elif _ct != _ct0:
             return None
-    return _ct0 if _ct0 and not gimple_ctypes.TypeLattice.is_word(_ct0) else None
+    return _ct0 if _ct0 and _ct0 != 'int64_t' else None
 
 
 
@@ -6536,14 +6536,6 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
         # '__mojo_type_id'` from `_init_timespec` (a user struct named like a C
         # system struct; bugs/stdlib/STDLIB_system_struct_name_helpers_need_the_
         # struct_body.md). Zeroing is all the system header's layout needs.
-        # The tag word must be written AFTER the memset: `_p->__mojo_type_id =`
-        # before `memset(_p, 0, sizeof)` zeroes the tag back to 0, so the
-        # instance's `mojo_read_type_tag` is 0 and every tag comparison
-        # (isinstance, `in`/`==`/`repr` dispatch, `_mojo_dispatch_getattr`)
-        # misses the struct (regression in 3530da89e, which moved the tag
-        # lines above the memset to skip system structs; the original order
-        # was memset -> tag). The `_is_system_struct` guard is what still
-        # skips system structs, so the order is safe to restore.
         _is_system_struct = sn in _SYSTEM_STRUCT_NAMES
         _tag_lines = (
             '' if _is_system_struct else
@@ -6560,9 +6552,9 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
             f"{{\n"
             f"{_dsub_decls}"
             f"  memset (_p, 0, sizeof({sn}));\n"
+            f"{_tag_lines}"
             f"{_dsub_init}"
             f"{_sys_attr_inits}"
-            f"{_tag_lines}"
             f"}}"
         )
         parts.append('')
@@ -7995,7 +7987,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                 # `_elem_types[ov]`).
                 if isinstance(v, (ListExpr, TupleExpr, SetExpr)) and v.elements:
                     _cel = self._infer_list_elem_type(v.elements)
-                    if _cel and not gimple_ctypes.TypeLattice.is_word(_cel):
+                    if _cel and _cel != 'int64_t':
                         self._elem_types[mangled] = _cel
                 # UPGRADE an already-registered instance field's type —
                 # do NOT create one for a pure class-level attribute. A
@@ -8016,7 +8008,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                 # type ONCE above, then upgrading from it, is what makes the
                 # two agree for every spelling.
                 cur = self.struct_field_types[s.name].get(aname)
-                if cur is not None and cur in ('int', 'int64_t') and not gimple_ctypes.TypeLattice.is_word(ctype):
+                if cur is not None and cur in ('int', 'int64_t') and ctype != 'int64_t':
                     self.struct_field_types[s.name][aname] = ctype
                 if gimple_ctypes.TypeLattice.is_list(ctype) and isinstance(v, (ListExpr, TupleExpr)):
                     self._field_elem_types.setdefault(s.name, {})[aname] = (
@@ -8102,7 +8094,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # the raw-word Optional), non-pointer scalar payloads
                         # only (a pointer payload's None=NULL is already a
                         # distinguishable raw word).
-                        if (gimple_ctypes.TypeLattice.is_word(ft) and _opt_m
+                        if (ft == 'int64_t' and _opt_m
                                 and _as_str(s.name) in getattr(self, '_intu_structs', {})):
                             _payload_base = _fann_s.split('[')[0].strip()
                             if (_payload_base not in ('Pointer', 'UnsafePointer',
@@ -8112,7 +8104,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                     and '*' not in _fann_s):
                                 self._tagged_optional_fields.setdefault(
                                     _as_str(s.name), set()).add(f_name)
-                        if gimple_ctypes.TypeLattice.is_word(ft) and _fann_s and _fann_s != _as_str(field.type_ann).strip():
+                        if ft == 'int64_t' and _fann_s and _fann_s != _as_str(field.type_ann).strip():
                             ft = _mojo_type(_fann_s)
                         if isinstance(ft, str) and ft.startswith('MojoTuple_'):
                             # `var _iterators: Tuple[...]` — the chain/zip
@@ -8190,7 +8182,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # under its bare name (the one the rest of the
                         # emission keys on) and take the pointer spelling.
                         # Explicit loops, no f-string: self-host-safe.
-                        if (gimple_ctypes.TypeLattice.is_word(ft) and _fann_s
+                        if (ft == 'int64_t' and _fann_s
                                 and '.' in _fann_s and '[' not in _fann_s
                                 and '*' not in _fann_s):
                             _dparts = _fann_s.split('.')
@@ -8227,7 +8219,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # spelling per this codegen's universal struct-as-
                         # pointer convention (the same convention the
                         # capitalized branch and `_resolve_type` apply).
-                        if (gimple_ctypes.TypeLattice.is_word(ft) and _fann_s
+                        if (ft == 'int64_t' and _fann_s
                                 and '[' not in _fann_s and '.' not in _fann_s
                                 and '*' not in _fann_s):
                             _lcm_nf = getattr(self, '_local_cname_map', None)
@@ -8299,7 +8291,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
                         if _dv_early in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                             _nv_early = self._annotation_dict_nested_val_type(_as_str(field.type_ann))
-                            if _nv_early is not None and not gimple_ctypes.TypeLattice.is_word(_nv_early):
+                            if _nv_early is not None and _nv_early != 'int64_t':
                                 self._field_dict_nested_val_types.setdefault(
                                     s.name, {})[f_name] = _nv_early
                         # BUG-2026-023 residual (box.3d/game's
@@ -8388,7 +8380,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                             _slot_same = False
                                             break
                                     if (_slot_same and _slot_ct is not None
-                                            and not gimple_ctypes.TypeLattice.is_word(_slot_ct)):
+                                            and _slot_ct != 'int64_t'):
                                         self._field_nested_elem_types.setdefault(
                                             s.name, {})[f_name] = _slot_ct
 
@@ -8633,143 +8625,6 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                             _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
-
-
-def _gmp_order_struct_fields_base_first(self, all_struct_defs: list) -> None:
-    """Give every struct that HAS bases a base-prefix (MRO) field layout,
-    and complete its field set with the bases' fields.
-
-    One pass of `gen_module_impl`, called immediately after
-    `_gmp_register_struct_fields`, whose per-struct field tables (declared,
-    constructor-assigned, read-minted) are final by then.
-
-    The instance layout must be the base layout with the derived's own
-    fields appended: `super().__init__` writes the base's fields at the
-    base's offsets, so a derived field placed BEFORE a base field overlaps
-    the base's slot (Cat's layout {tag, lives, name} put `lives` where
-    Animal's layout {tag, name} writes `name` — the base constructor
-    silently clobbered the derived field, and `speak` read the presence
-    word instead of `name`). Field order is the insertion order of the
-    `struct_field_types[S]` dict, and the typedef reads the `s.fields`
-    VarDecl list first, so both are rebuilt together, in the same order.
-    `s.fields` keeps the non-VarDecl class-body entries in their original
-    RELATIVE order (the merge convention that base declarations precede the
-    class's own, which `_own_class_field_index` relies on). A base field the
-    derived never mentions (so the read-mint pass never created it) is
-    minted here from the base's table — without the slot the base's
-    `__init__` would write past the derived layout. In-place dict reorder
-    (delete + reinsert, same object) because other passes may hold the
-    table reference. Idempotent: safe to run on the shared StructDef.fields
-    from more than one generator instance compiling the same structure."""
-    node_by_name = {}
-    for _s0 in all_struct_defs:
-        if isinstance(_s0, StructDef):
-            _sd0 = _as_structdef_node(_s0)
-            node_by_name.setdefault(_as_str(_sd0.name), _sd0)
-    _layout_done = set()
-
-    def _order_of(sn):
-        """Ensure `sn` has its final base-first field order; return it."""
-        if sn in _layout_done:
-            return list(self.struct_field_types.get(sn, {}).keys())
-        _layout_done.add(sn)  # mark first: inheritance-cycle guard
-        sdef = node_by_name.get(sn)
-        table = self.struct_field_types.get(sn, {})
-        if sdef is None:
-            return list(table.keys())
-        desired = []
-        source = {}
-        seen = set()
-        for b in (getattr(sdef, 'bases', None) or []):
-            b = _as_str(b)
-            if not b:
-                continue
-            if self.struct_field_types.get(b) is None:
-                continue  # unresolved / external base: no layout to prefix
-            for f in _order_of(b):
-                if f in seen:
-                    continue
-                seen.add(f)
-                desired.append(f)
-                source[f] = b
-        for f in list(table.keys()):
-            if f not in seen:
-                seen.add(f)
-                desired.append(f)
-        # A base field the derived never mentions has no slot of its own:
-        # mint it from the base that supplies it, same shape the read-mint
-        # pass uses (registry entry + VarDecl + presence tracking).
-        #
-        # "No slot" means no DECLARATION of the field in `sdef.fields` in
-        # EITHER class-body spelling (`_class_field_decl`: a `NAME = v`
-        # AssignStmt as well as a `var NAME = v` VarDecl), plus a bare
-        # no-value non-container VarDecl, which `_class_field_decl` does
-        # not name: an annotated class-body field (`a: int = 3`) is an
-        # AssignStmt declaration that the field-typing pass registered in
-        # the table WITHOUT a VarDecl, so testing VarDecls alone minted a
-        # phantom second declaration AND presence-tracked the field (its
-        # bit is set only by the direct-store path, which never runs for a
-        # default-initialized field) — `@dataclass` instances then raised
-        # AttributeError on every field (gimple_dataclass_default_factory).
-        _declared = set()
-        for _fe in sdef.fields:
-            _cfd = _class_field_decl(_fe)
-            if _cfd is not None:
-                _declared.add(_as_str(_cfd[0]))
-            if isinstance(_fe, VarDecl) and _fe.name:
-                _declared.add(_as_str(_fe.name))
-        for f in desired:
-            if f not in table:
-                b = source.get(f)
-                if b is None:
-                    continue
-                table[f] = _as_str(self.struct_field_types[b][f])
-            if f not in _declared:
-                sdef.fields.append(VarDecl(name=f, type_ann=None, value=None))
-                _mark_presence_field(sdef, f)
-                _declared.add(f)
-                _walk_ast_invalidate(sdef)
-        if desired != list(table.keys()):
-            _snap = {f: table[f] for f in table}
-            for _old in list(_snap.keys()):
-                del table[_old]
-            for f in desired:
-                if f in _snap:
-                    table[f] = _snap[f]
-        _vd_by_name = {}
-        _other_entries = []
-        for _fe in sdef.fields:
-            if isinstance(_fe, VarDecl):
-                _fn = _as_str(_fe.name)
-                if _fn not in _vd_by_name:
-                    _vd_by_name[_fn] = _fe
-            else:
-                _other_entries.append(_fe)
-        # Layout order for the table's fields, then EVERY remaining VarDecl
-        # in its original relative order — NOT just the table's: a class-body
-        # `var` attribute of a function-scoped class is a per-execution CELL
-        # with no entry in the field table (see _cattr_value_is_cell), yet its
-        # VarDecl in `.fields` is what `_own_class_field_index` must find for
-        # the `_classattr_` global's declaration (dropping it left the global
-        # undeclared: `'_classattr_C__name' undeclared` in `_init_C`).
-        _vd_in_layout = []
-        _used_vd = set()
-        for f in desired:
-            if f in _vd_by_name:
-                _vd_in_layout.append(_vd_by_name[f])
-                _used_vd.add(id(_vd_by_name[f]))
-        _extra_vds = [_fe for _fe in sdef.fields
-                      if isinstance(_fe, VarDecl) and id(_fe) not in _used_vd]
-        _new_fields = _vd_in_layout + _extra_vds + _other_entries
-        if _new_fields != list(sdef.fields):
-            sdef.fields = _new_fields
-            _walk_ast_invalidate(sdef)
-        return desired
-
-    for _s1 in all_struct_defs:
-        if isinstance(_s1, StructDef):
-            _sd1 = _as_structdef_node(_s1)
-            _order_of(_as_str(_sd1.name))
 
 
 def _gmp_assign_struct_cnames(self, all_struct_defs: list) -> None:
@@ -9222,10 +9077,10 @@ def _gmp_apply_gimplegen_sigs(self, _gg_sigs) -> None:
             _outer_vt = _dv_row[0]
             _nested_vt = _dv_row[1]
             _raw_ann = _dv_row[2]
-            if _outer_vt and not gimple_ctypes.TypeLattice.is_word(_as_str(_outer_vt)):
+            if _outer_vt and _as_str(_outer_vt) != 'int64_t':
                 if _f not in _gg_dv:
                     _gg_dv[_f] = _as_str(_outer_vt)
-            if _nested_vt and not gimple_ctypes.TypeLattice.is_word(_as_str(_nested_vt)):
+            if _nested_vt and _as_str(_nested_vt) != 'int64_t':
                 if _f not in _gg_nv:
                     _gg_nv[_f] = _as_str(_nested_vt)
             if _raw_ann:
@@ -9236,7 +9091,7 @@ def _gmp_apply_gimplegen_sigs(self, _gg_sigs) -> None:
         for _ea_pair in _gg_eas.items():
             _ef = _as_str(_ea_pair[0])
             _ect = self._resolve_type(_as_str(_ea_pair[1]))
-            if _ect and not gimple_ctypes.TypeLattice.is_word(_ect):
+            if _ect and _ect != 'int64_t':
                 if 'GimpleGen' not in self._field_elem_types:
                     self._field_elem_types['GimpleGen'] = {}
                 _gg_et: dict = self._field_elem_types['GimpleGen']
@@ -10648,7 +10503,7 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
             # at the call site below, so this reader stays silent.
             return False
     _st = _as_str(st)
-    if gimple_ctypes.TypeLattice.is_word(_st):
+    if _st == 'int64_t':
         # `int64_t` is ALSO this codegen's BOX for a value whose kind nothing
         # resolved: a call/attribute result, an unpack target, an unannotated
         # parameter. The box may hold a container, so it is not proof of "a
@@ -10732,9 +10587,9 @@ def _gmh_static_arg_dict_val(self, a, dict_val, caller_name=None):
             return None
         if _l == _r:
             return _l
-        if gimple_ctypes.TypeLattice.is_word(_l):
+        if _l == 'int64_t':
             return _r
-        if gimple_ctypes.TypeLattice.is_word(_r):
+        if _r == 'int64_t':
             return _l
         return None
     return None
@@ -10814,7 +10669,7 @@ def _gmh_informative_elem_ctype(e):
     different call sites) reads correctly, and that is a coin flip
     either way — not worth re-rolling real stdlib code on while the
     breadth number is unmeasured."""
-    return not gimple_ctypes.TypeLattice.is_word(e) and e != ''
+    return e != 'int64_t' and e != ''
 
 
 def _gmh_note_literal_arg_elems(self, callee, pname, a):
@@ -10830,7 +10685,7 @@ def _gmh_note_literal_arg_elems(self, callee, pname, a):
         # An int list is the default and records no CONTRACT, but it is
         # still a call site: a sibling site that passes strings makes the
         # parameter kind-MIXED, not str.
-        if gimple_ctypes.TypeLattice.is_word(e):
+        if e == 'int64_t':
             self._param_int_elem_obs.setdefault(_as_str(callee), set()).add(
                 _as_str(pname))
         return
@@ -15097,7 +14952,6 @@ def gen_module_impl(self, stmts: list):
     # neither can quietly diverge from the other.
     self._xf_own_ctor_params = _xf_own_ctor_params
     _gmp_register_struct_fields(self, stmts, _xf_own_ctor_params, all_struct_defs, imported_stmts)
-    _gmp_order_struct_fields_base_first(self, all_struct_defs)
 
     _struct_by_name = {st.name: st for st in all_struct_defs
                         if isinstance(st, StructDef)
@@ -16606,7 +16460,7 @@ def gen_module_impl(self, stmts: list):
                 if pname == 'self':
                     idx += 1
                     continue
-                if idx < len(fpt) and pname in inferred and gimple_ctypes.TypeLattice.is_word(fpt[idx]):
+                if idx < len(fpt) and pname in inferred and fpt[idx] == 'int64_t':
                     fpt[idx] = inferred[pname]
                 idx += 1
 
@@ -17085,7 +16939,7 @@ def gen_module_impl(self, stmts: list):
                 # sites in GatedLinearAttention, two untyped ones in
                 # SwiGLU -- joined to (None, None), and every `g[i]` in it
                 # read back as raw int64 bits).
-                if gimple_ctypes.TypeLattice.is_word(_e):
+                if _e == 'int64_t':
                     _static_arg_int[0] = True
                     return None, None
                 return _e, _gmi_as_str(nested.get(_n))
@@ -17116,7 +16970,7 @@ def gen_module_impl(self, stmts: list):
             # the element as a boxed word cast to `char *` (always False).
             if not a.elements:
                 return None, None
-            if gimple_ctypes.TypeLattice.is_word(_e):
+            if _e == 'int64_t':
                 _static_arg_int[0] = True
                 return None, None
             if not self._literal_elements_include_none(a.elements):
@@ -17128,7 +16982,7 @@ def gen_module_impl(self, stmts: list):
             # no FunctionDef in `_fn_by_name`, so it answers None, the same
             # no-evidence answer every other unrecognised shape gives.
             _e = _callee_return_elem(_gmi_as_str(a.func.name))
-            if _e is None or gimple_ctypes.TypeLattice.is_word(_e) or _e == '':
+            if _e is None or _e == 'int64_t' or _e == '':
                 return None, None
             return _gmi_as_str(_e), None
         return None, None
@@ -21020,7 +20874,7 @@ def gen_module_impl(self, stmts: list):
         # into EVERY module's artifact, so every closure carried a stub
         # definition whether or not a call reached it, and the closure check
         # (`fire.py --dump-full`, bootstrap-stage1-transitive) reads that as an
-        # incomplete closure (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md).
+        # incomplete closure (bugs/CODEGEN_prelude_sort_is_not_resolved.md).
         # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('Span_byte_length',       'int64_t Span_byte_length(...);'),
         ('_stat_macos',            'int64_t _stat_macos(...);'),
@@ -22839,7 +22693,7 @@ def gen_module_impl(self, stmts: list):
                         # valid `double` expression (decimal point, exponent,
                         # or INFINITY/NAN) — no suffixing needed here.
                         _wexpr = f'mojo_box_from_double({_wf})'
-                    elif gimple_ctypes.TypeLattice.is_word(_wt):
+                    elif _wt == 'int64_t':
                         _wexpr = _wm
                     elif gimple_ctypes.TypeLattice.is_double(_wt):
                         _wexpr = f'mojo_box_from_double({_wm})'

@@ -2501,7 +2501,7 @@ def _bool_not(gen, ctype: str, val: str) -> str:
     # `0LL` for the 64-bit zero (a C-style cast is not a legal gimple
     # OPERAND — see _inc_val), `(int)0` for the int one, which does need the
     # cast because it is not a literal this emitter writes bare.
-    zero = (gen._new_val('int64_t', '0LL') if gimple_ctypes.TypeLattice.is_word(zt)
+    zero = (gen._new_val('int64_t', '0LL') if zt == 'int64_t'
             else gen._new_val('int', '(int)0'))
     t = gen._new_temp('_Bool')
     gen._binop_into(t, f"{iv}", '==', f"{zero}")
@@ -2850,8 +2850,8 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     # header and crashed the self-hosted compiler (and, in a plain program,
     # dropped elements silently). `mojo_box_word` returns the slot's own word
     # for every box that has one and the input unchanged for a non-box.
-    if (gimple_ctypes.TypeLattice.is_word(src) and gimple_ctypes.TypeLattice.ends_in_star(dst) and not dst.startswith('void')
-            and gen._words.may_be_box(val)):
+    if (src == 'int64_t' and gimple_ctypes.TypeLattice.ends_in_star(dst) and not dst.startswith('void')
+            and val in getattr(gen, '_boxed_vals', ())):
         _uw = gen._new_temp('int64_t')
         gen._rt_into(_uw, 'mojo_box_word', [f"{val}"])
         val = _uw
@@ -2996,7 +2996,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 _rv = gen._cast(_fc, _rv)
             else:
                 _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
-                if not gimple_ctypes.TypeLattice.is_word(_fc):
+                if _fc != 'int64_t':
                     _rv = gen._cast(_fc, _rv)
             gen._emit(f'  {dest}.{_fn} = {_rv};')
         return
@@ -3017,7 +3017,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 gen._rt_into(dest, 'mojo_int16_from_int64', [f"{v}LL"])
             elif d == 'int32_t':
                 gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
-            elif gimple_ctypes.TypeLattice.is_word(d):
+            elif d == 'int64_t':
                 gen._emit(f'  {dest} = {v}LL;')
             elif gimple_ctypes.TypeLattice.is_bool(d):
                 gen._cast_into(dest, '_Bool', f"{v}")
@@ -3026,7 +3026,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             return
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
         if s == d:
-            if gimple_ctypes.TypeLattice.is_word(d) and v.lstrip('-').isdigit():
+            if d == 'int64_t' and v.lstrip('-').isdigit():
                 gen._cast_into(dest, 'int64_t', f"{v}")
             elif gimple_ctypes.TypeLattice.is_bool(d) and v.lstrip('-').isdigit():
                 gen._cast_into(dest, '_Bool', f"{v}")
@@ -3048,7 +3048,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 vp = gen._cast('void *', f"{v}")
                 v = vp
             ip = gen._cast('int64_t', f"{v}")
-            if gimple_ctypes.TypeLattice.is_word(d):
+            if d == 'int64_t':
                 gen._copy(dest, f"{ip}")
             else:
                 gen._cast_into(dest, 'int', ip)
@@ -3268,7 +3268,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     # A WORD whose kind only the runtime knows (a regex group, a match, a
     # DirEntry name): its repr is spelled by the kind the runtime reads off it.
     if rat in ('int', 'int64_t') and (
-            gen._words.is_dyn(rav)
+            rav in gen._dyn_word_vals
             or (isinstance(enode, gimple_ctypes.IdentExpr)
                 and _as_str(enode.name) in gen._dyn_word_locals)):
         return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
@@ -3363,7 +3363,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if rat in ('double', 'float'):
         rav_d = rav if gimple_ctypes.TypeLattice.is_double(rat) else gen._cast('double', rav)
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
-    rav64 = rav if gimple_ctypes.TypeLattice.is_word(rat) else gen._cast('int64_t', rav)
+    rav64 = rav if rat == 'int64_t' else gen._cast('int64_t', rav)
     # A word of unknown kind (boxed dict-slot value, tagged word, string
     # pointer held in int64_t, or plain integer): render via the runtime's
     # generic repr discriminator. For a plain integer it is the same decimal.
@@ -3864,7 +3864,7 @@ def _list_arg_mojo_type(gen, arg, ctype):
     itself, or a local whose one binding proves its type
     (`_proven_local_types`). Anything else is unprovable, and the caller
     declines the shape exactly as every other unprovable argument does
-    (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
+    (bugs/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
     origin](span: Span[T, origin])` is the template this proof exists for)."""
     if not gimple_ctypes.TypeLattice.is_list(ctype):
         return None
@@ -4312,7 +4312,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     # note). Computed from the call's own syntax, so an explicit-type-args
     # call to a Span-taking generic keeps the old ABI and its old diagnostic.
     _span_proofs = [
-        gimple_ctypes.TypeLattice.is_word(ct) and _proven_span_arg_mojo_type(gen, a) is not None
+        ct == 'int64_t' and _proven_span_arg_mojo_type(gen, a) is not None
         for a, (ct, _v) in zip(node.args, arg_pairs)
     ]
     return gen._emit_generic_instantiation(info, arg_pairs,
@@ -4791,7 +4791,7 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
 
     ONE helper for every `Span *` parameter, not a `sort`-only branch: any
     future generic that takes a `Span` from a `List` (or a boxed Span)
-    argument converts here (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md,
+    argument converts here (bugs/CODEGEN_prelude_sort_is_not_resolved.md,
     planning decision 1a). `params` is the instance's C param types
     (elaborate's erased view), so the check is on the parameter, not the
     annotation text."""
@@ -4828,7 +4828,7 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
             gen._emit(f"  {sp}->_data = (char *) {_data};")
             gen._emit(f"  {sp}->_len = {_len};")
             arg_pairs[i] = ('Span *', sp)
-        elif gimple_ctypes.TypeLattice.is_word(ctype) and span_proofs is not None and span_proofs[i]:
+        elif ctype == 'int64_t' and span_proofs is not None and span_proofs[i]:
             # A Span carried in a boxed word — `List[Span[X, o]].pop()` and
             # `[i]` lower to the element's `int64_t` slot (the list stores
             # words, not typed values). The element-type proof in
@@ -5008,7 +5008,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     # An element whose kind nothing recorded is a word of unknown kind (see
     # `_dyn_word_locals`), exactly as in the `for` statement's enumerate.
-    if (not elem or gimple_ctypes.TypeLattice.is_word(elem)) and gen.var_types.get(val_var) == 'int64_t':
+    if (not elem or elem == 'int64_t') and gen.var_types.get(val_var) == 'int64_t':
         gen._dyn_word_locals.add(_as_str(val_var))
     if gimple_ctypes.TypeLattice.is_double(suf):
         gen._rt_into(val_c, 'mojo_list_get_double', [it_val, idx64])
@@ -5023,7 +5023,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     else:
         raw64 = gen._rt_call('int64_t', 'mojo_list_get_int', [it_val, idx64])
         target_type = gen._type_of(val_var)
-        if target_type and not gimple_ctypes.TypeLattice.is_word(target_type):
+        if target_type and target_type != 'int64_t':
             gen._safe_coerce_emit('int64_t', target_type, raw64, val_c)
         else:
             gen._emit(f"  {val_c} = (int64_t) {raw64};")
@@ -5050,7 +5050,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
                     gen._actual_types[_vn] = 'char *'
             else:
                 _iv = gen._rt_call('int64_t', 'mojo_list_get_int', [_pair_ptr, f"{_vi}"])
-                if gimple_ctypes.TypeLattice.is_word(_vt):
+                if _vt == 'int64_t':
                     gen._copy(f"{_vc}", _iv)
                 else:
                     gen._safe_coerce_emit('int64_t', _vt, _iv, _vc)
@@ -5281,7 +5281,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # single-TU `--dump myinterpreter.py`.
         _lr = gen.lower_expr(node.element)
         et = _as_str(_lr[0]); ev = _lr[1]
-        if gimple_ctypes.TypeLattice.is_word(et) and gen._words.may_be_box(ev):
+        if et == 'int64_t' and ev in gen._boxed_vals:
             # the element IS a tagged word taken straight off a tagged-word
             # generator (`list(g())`, `[v for v in g()]`): append it under the
             # kind it carries (a float box as a double, a bool as a bool, a
@@ -5290,9 +5290,9 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', res), ('int64_t', ev)])
             gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
-            gen._words.mark_slot_kinds(res)
+            gen._maybe_kinds_vals.add(res)
             return
-        if gimple_ctypes.TypeLattice.is_word(et) and (gen._words.is_dyn(ev)
+        if et == 'int64_t' and (ev in getattr(gen, '_dyn_word_vals', ())
                                 or gen._is_dyn_word(None, ev)):
             # A runtime-kinded word (e.g. re.Match.group() returns a str/bytes
             # word whose kind is only known at run time, and the lowering marks
@@ -5301,7 +5301,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', res), ('int64_t', ev)])
             gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
-            gen._words.mark_slot_kinds(res)
+            gen._maybe_kinds_vals.add(res)
             return
         suf = gimple_ctypes.TypeLattice.list_suffix(et)
         ev_cast = gen._cast_for_list(et, ev, suf)
@@ -5349,7 +5349,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
             if ev in gen._tuple_slot_types:
                 gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
-        elif gimple_ctypes.TypeLattice.is_word(et) and ev in gen._elem_types and not gimple_ctypes.TypeLattice.is_word(gen._elem_types[ev]):
+        elif et == 'int64_t' and ev in gen._elem_types and gen._elem_types[ev] != 'int64_t':
             # A BOXED tuple element: a call annotated `-> tuple[str, str]`
             # returns its pair as an `int64_t` handle (see `_mojo_type`) and
             # records the slots' type on the result value (`_return_elem_types`).
@@ -5377,7 +5377,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         et = _as_str(_sr[0]); ev = _sr[1]
         if gimple_ctypes.TypeLattice.is_cstr(et):
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', res), ('char *', ev)])
-        elif gimple_ctypes.TypeLattice.is_word(et) and not gen._words.is_int_word(ev):
+        elif et == 'int64_t' and ev not in gen._int_word_vals:
             # A word of unknown kind: see mojo_set_add_word.
             gen._emit_call('void', '', 'mojo_set_add_word', [('MojoSet *', res), ('int64_t', ev)])
         else:
@@ -5393,7 +5393,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # The append above already dispatches on `et`, so the information
         # was available; it just was not written down where the consumer
         # looks for it.
-        if et and not gimple_ctypes.TypeLattice.is_word(et):
+        if et and et != 'int64_t':
             gen._elem_types[res] = et
     elif node.kind == 'dict':
         # The parser stores a dict comprehension as element=key_expr,

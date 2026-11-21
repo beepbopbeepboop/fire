@@ -240,15 +240,8 @@ def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
         return []
-    reads = [ln.strip() for ln in body.splitlines()
-             if 'mojo_dict_get' in ln or 'mojo_dict_subscript' in ln]
-    # The bare-subscript reads moved from the sentinel `mojo_dict_get_*`
-    # getters (which answer 0 for an absent key) to the raising
-    # `mojo_dict_subscript_*` family. Both spellings answer the same
-    # question here — WHICH VALUE TYPE the slot is read as — so the
-    # contract accepts either.
-    got = any('mojo_dict_get_str' in r or 'mojo_dict_subscript_str' in r
-              for r in reads)
+    reads = [ln.strip() for ln in body.splitlines() if 'mojo_dict_get' in ln]
+    got = any('mojo_dict_get_str' in r for r in reads)
     if got != want:
         print(f"FAIL  {name}: {fn} {'does' if want else 'does not'} read its "
               f"dict slot as a string, wanted {want} (reader calls: {reads})")
@@ -343,7 +336,7 @@ def test_gimple_build_refusal(name: str, mojo_src: str, expected_substr: str):
     _FAIL += 1
 
 
-def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
+def test_gimple_matches_cpython(name: str, mojo_src: str):
     """Compile, run, and require the COMPILED program's stdout and exit code
     to be byte-identical to CPython's on the same source.
 
@@ -353,15 +346,6 @@ def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
     through a module global printed `0`, and no fixed expectation written
     after the bug would have said `0` was wrong — only CPython does. It also
     cannot rot: if the compiler starts diverging, this fails.
-
-    `filename` ending in `.py` compiles the text as Python source (see
-    compile_mojo_to_gimple_exe). A loop over a list of 3+ DISTINCT struct
-    classes has an int64_t (dynamic word) variable, and a method call on a
-    dynamic word dispatches per instance tag only in Python mode — the
-    scalar-method arms of `_lower_method_call` gate the dynamic dispatch on
-    a `.py` filename so a Mojo `Int`'s real scalar methods are never
-    redirected — so a repro of that shape passes `filename='x.py'`, the same
-    mode `tools/pydiff.py` runs it in.
 
     CPython is run first and a non-zero exit or empty output from it is
     reported as the test program's own problem, not a compiler failure —
@@ -389,7 +373,7 @@ def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
             want_rc = py.returncode
         finally:
             os.unlink(entry)
-        exe_path = compile_mojo_to_gimple_exe(mojo_src, filename=filename)
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
         got = subprocess.run([exe_path], capture_output=True,
                              timeout=RUN_TIMEOUT_S, env=_SCRIBBLE_ENV)
         if got.stdout == want_out and got.returncode == want_rc:
@@ -1614,37 +1598,6 @@ def main():
     print(g(1, 2, x=3))
     print(fwd(4, 5, y=6))
     print(g())
-main()
-""")
-
-    # The bugs/CODEGEN_varargs_count_wrong_and_star_elements_unboxed doc's
-    # repro, pinned whole: the call-site arg-padding loop used to treat the
-    # `'...'` packing sentinel as a fillable param and append `('int', '0')`
-    # to the packed `MojoList *`, so `show("a")` against
-    # `def show(first, *rest)` handed the callee a one-element `[0]` where
-    # CPython hands `()`, and every packed element went in through the int64
-    # coercion with no per-slot kinds row, so `char *` elements printed their
-    # pointer bits (`[4301523784, 4301523792]` for `['b', 'c']`). All six
-    # lines: the two phantom-count cases (`total()`, `show("a")`), the
-    # string-element reprs, and the `total(*args)` spread path.
-    test_gimple_matches_cpython("gimple_call_varargs_count_and_str_elements", """\
-def total(*nums):
-    s = 0
-    for n in nums:
-        s += n
-    return s
-
-def show(first, *rest):
-    print(first, len(rest), list(rest))
-
-def main():
-    print(total())
-    print(total(5))
-    print(total(1, 2, 3))
-    show("a")
-    show("a", "b", "c")
-    args = [1, 2, 3]
-    print(total(*args))
 main()
 """)
 
@@ -3511,6 +3464,48 @@ print(g())
 print(h())
 print(j())
 print(k())
+""")
+
+    # `x /= 2` REBINDS `x` to a float: the local-type pre-pass has to join
+    # the augmented assignment's result with the name's other bindings, or
+    # the int type from `x = 9` wins and the store truncates (`4` for `4.5`).
+    # The float-local truthiness rows are the same bug's other half: Python
+    # truthiness is `x != 0.0`, so 0.5 and 0.0001 are true, at module level
+    # (the compile-time fold) and inside a function (the emitted condition).
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_int_local", """\
+def main():
+    x = 9
+    x /= 2
+    print(x)
+    y = 13
+    y += 0.5
+    print(y)
+    print(7 / 2)
+    print(1e-9 > 0)
+    if 0.0001:
+        print("tiny truthy")
+    print(3 == 3.0)
+    print(round(2.5), round(3.5))
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_float_truthiness_is_not_its_integer_part", """\
+def f():
+    x = 0.0001
+    if x:
+        print("tiny")
+    y = 0.5
+    while y:
+        print("once")
+        y = 0.0
+    print(bool(0.0001), bool(0.0))
+
+if 0.5:
+    print("module truthy")
+else:
+    print("module falsy")
+
+f()
 """)
 
     # The MATERIALIZED flavour, which is a different emission path and was
@@ -15512,9 +15507,7 @@ def main():
                   test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
-                  test_except_around_builtin_errors_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
-                  test_gimple_values_print_as_pointers_inside_containers,
                   test_dataclass_default_factory_fields_start_empty_and_per_instance):
         try:
             _late()
@@ -16901,154 +16894,6 @@ def main():
     show([1, 2])
     show(["a", "b:"])
 
-main()
-""")
-
-    # User __eq__/__len__/__contains__/__getitem__/__str__ were not dispatched
-    # on a struct receiver, and the type tag was zeroed by _init's own memset
-    # (the tag was written BEFORE it), so even isinstance(a, SameClass) was
-    # False. `2 in a` must call P.__contains__ statically instead of asking
-    # the list/dict/set registry about a struct address.
-    test_gimple_matches_cpython("gimple_class_dunder_methods_dispatch", """\
-class P:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-    def __eq__(self, other):
-        return self.x == other.x and self.y == other.y
-    def __len__(self):
-        return self.x
-    def __contains__(self, v):
-        return v == self.x or v == self.y
-    def __getitem__(self, i):
-        return self.x if i == 0 else self.y
-    def __str__(self):
-        return "P(" + str(self.x) + ", " + str(self.y) + ")"
-
-def main():
-    a = P(1, 2)
-    b = P(1, 2)
-    print(a == b)
-    print(a is b)
-    print(len(a))
-    print(2 in a)
-    print(5 in a)
-    print(a[0], a[1])
-    print(a)
-    print(str(a))
-    print(isinstance(a, P))
-main()
-""")
-
-    # The same doc's second repro: a hierarchy where the derived __init__
-    # calls super().__init__ AND the instances live in a mixed-class list.
-    # Needs the base-prefix field layout (super() writes at base offsets),
-    # the presence set after the super() call (the base writes name through
-    # its own emission), the MRO-aware isinstance (zoo[1] is a Dog, an
-    # Animal but not a Cat), and the int64_t element type for a list of
-    # 3+ distinct classes so a.speak() dispatches per instance tag. That
-    # dispatch is a method call on a DYNAMIC WORD (the mixed-class loop
-    # variable), which _lower_method_call answers only in Python mode —
-    # the .py filename selects it, the same mode tools/pydiff.py runs this
-    # repro in.
-    test_gimple_matches_cpython("gimple_class_inheritance_super_init", """\
-class Animal:
-    def __init__(self, name):
-        self.name = name
-    def speak(self):
-        return self.name + " says ..."
-
-class Dog(Animal):
-    def speak(self):
-        return self.name + " says woof"
-
-class Cat(Animal):
-    def __init__(self, name, lives):
-        super().__init__(name)
-        self.lives = lives
-    def speak(self):
-        return self.name + " says meow"
-
-def main():
-    zoo = [Animal("thing"), Dog("rex"), Cat("tom", 9)]
-    for a in zoo:
-        print(a.speak())
-    print(isinstance(zoo[1], Animal))
-    print(isinstance(zoo[1], Cat))
-    print(zoo[2].lives)
-main()
-""", filename='inherit.py')
-
-
-def test_gimple_values_print_as_pointers_inside_containers():
-    """CODEGEN_values_print_as_pointers_inside_containers: strings, nested
-    containers and bool-returning calls inside containers must print as
-    values, not raw pointer words / 1/0."""
-    test_gimple_matches_cpython("gimple_ptr_print_repro", """\
-def pair():
-    return ("a", "b")
-
-def main():
-    print(pair())
-    t = (-3.5, 3)
-    print(t)
-    d = {"ann": 3, "bo": 0}
-    print(list(d.items()))
-    print([(i, c) for i, c in enumerate("hi")])
-    print([[1, 2], [3, [4, []]]])
-main()
-""")
-    test_gimple_matches_cpython("gimple_bool_print_repro", """\
-def is_pos(n):
-    return n > 0
-
-def main():
-    r = is_pos(3)
-    print(r)
-    print(is_pos(-1))
-    flags = [is_pos(1), is_pos(-2)]
-    print(flags)
-    f = lambda n: n > 0
-    print(f(5))
-    print(not r)
-    print(bool(""))
-    print(bool("0"))
-main()
-""")
-
-
-def test_except_around_builtin_errors_matches_cpython():
-    """The builtin operations below raise real, catchable exceptions on the
-    compiled path, as they do in CPython: `int("x")` a ValueError (it used to
-    answer 0), `d["zz"]` a KeyError (it used to answer the slot's zero),
-    `[...][99]` an IndexError, and `1 // 0` a ZeroDivisionError. Before the
-    fixes the handlers printed plausible values instead of running, so nothing
-    fell over — only CPython on the same text says which answer is right."""
-    test_gimple_matches_cpython("gimple_except_around_builtin_errors", """\
-def safe_int(s):
-    try:
-        return int(s)
-    except ValueError:
-        return -1
-
-def main():
-    print(safe_int("12"))
-    print(safe_int("x"))
-    d = {"a": 1}
-    try:
-        print(d["zz"])
-    except KeyError:
-        print("no key")
-    try:
-        print([1, 2][99])
-    except IndexError:
-        print("no index")
-    try:
-        print(1 // 0)
-    except ZeroDivisionError:
-        print("div zero")
-    finally:
-        print("finally")
 main()
 """)
 

@@ -54,7 +54,7 @@ def _residue_lines(c: str, needle: str) -> list:
     """The `needle` lines of an emitted `.ci` that are NOT the documented
     predeclared prelude `sort` weak stub. Since 00ba62d61 the util preamble
     carries that one honest weak definition in EVERY TU (step 1 of
-    bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md: `sort: unavailable in
+    bugs/CODEGEN_prelude_sort_is_not_resolved.md: `sort: unavailable in
     compiled mode`), so a blanket string scan sees it whether or not the
     fixture calls `sort`. Anything else carrying the stub marker is
     imported-symbol residue this test exists to keep out."""

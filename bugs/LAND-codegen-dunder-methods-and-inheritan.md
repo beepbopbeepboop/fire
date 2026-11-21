@@ -1,9 +1,9 @@
-# Land: should finished branch bug-codegen-float-augmented-assignment-o land?
+# Land: should finished branch bug-codegen-dunder-methods-and-inheritan land?
 
-**Branch:** `work/bug-codegen-float-augmented-assignment-o` (task `bug-codegen-float-augmented-assignment-o`; its tip is also saved as `refs/archive/work/bug-codegen-float-augmented-assignment-o`, so dropping it loses nothing).
-**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 2 commit(s) ahead of master, 45 behind it; task started 2026-11-20 19:19:59
-**Original work:** Fix the bug in bugs/CODEGEN_float_augmented_assignment_on_int_variable.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinnin
-**Original claims:** bug:CODEGEN_float_augmented_assignment_on_int_variable
+**Branch:** `work/bug-codegen-dunder-methods-and-inheritan` (task `bug-codegen-dunder-methods-and-inheritan`; its tip is also saved as `refs/archive/work/bug-codegen-dunder-methods-and-inheritan`, so dropping it loses nothing).
+**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 3 commit(s) ahead of master, 58 behind it; task started 2026-11-20 12:21:05
+**Original work:** Fix the bug in bugs/CODEGEN_dunder_methods_and_inheritance_calls.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test
+**Original claims:** bug:CODEGEN_dunder_methods_and_inheritance_calls
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-20 20:50:59: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 2 commit(s) ahead of master, 45 behind it; task started 2026-11-20 19:19:59)
-  Branch: work/bug-codegen-float-augmented-assignment-o
-  Conflicting files: mojo/backend_gimple/emit_calls.py, mojo/backend_gimple/emit_stmts.py
+- 2026-11-20 20:22:39: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 3 commit(s) ahead of master, 58 behind it; task started 2026-11-20 12:21:05)
+  Branch: work/bug-codegen-dunder-methods-and-inheritan
+  Conflicting files: mojo/backend_gimple/emit_exprs.py
