@@ -2915,6 +2915,17 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         # `_hash(*parts)` forwarding a `*parts` parameter used to hand the
         # callee a one-element list holding the caller's list.
         _nodes_ok = arg_nodes is not None and len(arg_nodes) == len(arg_pairs)
+        # The per-slot kinds of every NON-spread element, in slot order:
+        # `mojo_list_set_kinds` records them on the packed list so each slot
+        # is described by what it holds (a `char *` prints the string, a
+        # double its value) instead of by the int-vs-pointer heuristic. A
+        # spread's element COUNT is not known at compile time, so when one
+        # is present the row is left to the spread's own
+        # `mojo_list_extend` (which appends its operand's kinds at the right
+        # slot) and the surrounding scalars stay undescribed, exactly as
+        # before this record existed.
+        _kind_bytes = []
+        _has_spread = False
         for _vi in range(len(varargs)):
             atype = _as_str(varargs[_vi][0])
             aval = _as_str(varargs[_vi][1])
@@ -2925,9 +2936,12 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 if gimple_ctypes.TypeLattice.is_word(atype):
                     _src = _as_str(gen._materialize_as_list('int64_t', aval))
                 gen._rt_void('mojo_list_extend', [lst, f"{_src}"])
+                _has_spread = True
                 continue
-            aval = gen._coerce_to_type(atype, 'int64_t', aval)
-            gen._rt_void('mojo_list_append_int', [lst, f"{aval}"])
+            ggc._append_vararg_element(gen, lst, atype, aval)
+            _kind_bytes.append(ggc._vararg_elem_kind(atype))
+        if not _has_spread:
+            ggc._pack_vararg_kinds(gen, lst, ''.join(_kind_bytes))
         arg_pairs = fixed_pairs + [('MojoList *', lst)]
         param_types = list(param_types[:-1]) + ['MojoList *']
     elif param_types and '...' in param_types:
@@ -2973,9 +2987,16 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                            + list(param_types[i + 1:]))
         else:
             lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
-            for atype, aval in middle:
-                aval = gen._coerce_to_type(atype, 'int64_t', aval)
-                gen._rt_void('mojo_list_append_int', [lst, f"{aval}"])
+            # Per-slot kinds as in the trailing-`'...'` arm above: the
+            # middle is all NON-list pairs here (the all-list shape took the
+            # pass-through branch), so the record covers every slot.
+            _kind_bytes = []
+            for _mi in range(len(middle)):
+                _mat = _as_str(middle[_mi][0])
+                _mav = _as_str(middle[_mi][1])
+                ggc._append_vararg_element(gen, lst, _mat, _mav)
+                _kind_bytes.append(ggc._vararg_elem_kind(_mat))
+            ggc._pack_vararg_kinds(gen, lst, ''.join(_kind_bytes))
             arg_pairs = arg_pairs[:i] + [('MojoList *', lst)] + suffix
             param_types = (list(param_types[:i]) + ['MojoList *']
                            + list(param_types[i + 1:]))

@@ -1610,6 +1610,37 @@ def main():
 main()
 """)
 
+    # The bugs/CODEGEN_varargs_count_wrong_and_star_elements_unboxed doc's
+    # repro, pinned whole: the call-site arg-padding loop used to treat the
+    # `'...'` packing sentinel as a fillable param and append `('int', '0')`
+    # to the packed `MojoList *`, so `show("a")` against
+    # `def show(first, *rest)` handed the callee a one-element `[0]` where
+    # CPython hands `()`, and every packed element went in through the int64
+    # coercion with no per-slot kinds row, so `char *` elements printed their
+    # pointer bits (`[4301523784, 4301523792]` for `['b', 'c']`). All six
+    # lines: the two phantom-count cases (`total()`, `show("a")`), the
+    # string-element reprs, and the `total(*args)` spread path.
+    test_gimple_matches_cpython("gimple_call_varargs_count_and_str_elements", """\
+def total(*nums):
+    s = 0
+    for n in nums:
+        s += n
+    return s
+
+def show(first, *rest):
+    print(first, len(rest), list(rest))
+
+def main():
+    print(total())
+    print(total(5))
+    print(total(1, 2, 3))
+    show("a")
+    show("a", "b", "c")
+    args = [1, 2, 3]
+    print(total(*args))
+main()
+""")
+
     # The SAME question -- "the function `f` as a bare C value" -- has two
     # spellings in this codegen: a direct binding (`f = g`) and a callable-
     # valued parameter DEFAULT (`def apply(*, g=v): ...`). They were two
