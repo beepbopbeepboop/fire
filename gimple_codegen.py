@@ -3465,6 +3465,68 @@ class GimpleGen:
         # MODULE-wide, not per function (so not in `_reset_func`): once any `type(n, bases, ns)`
         # is lowered, a later function's `isinstance` / `type(x)` must consult the class table.
         self._rt_classes_made: bool = False
+        # Tables some lowering paths still created on first use behind
+        # `if not hasattr(gen, '<name>'): gen.<name> = <container>`. That
+        # pattern does NOT work in the compiled compiler: GimpleGen's
+        # synthetic struct carries every `self.<field> = ...` in the class
+        # from construction, so `hasattr` answers True for a never-assigned
+        # field, the lazy `dict()`/`set()`/`list()` never runs, and the first
+        # mutation dereferences a NULL MojoDict/MojoSet/MojoList. Measured in
+        # a stage2 binary: `./mojo --dump ../array_ops_jit.mojo` died in
+        # `_dict_set_raw_seq_kind_k` (d == NULL) from
+        # `emit_stmts._note_global_slot_kinds`'s `_global_slot_info`, on that
+        # file's module-level `arr = [1, 2, 3, 4, 5]`; `_bool_valued` above
+        # was the same defect. Declaring each table HERE, with the container
+        # type its guard creates, gives `_collect_self_assigns` the real C
+        # type and guarantees a live container from construction on both
+        # paths. `test_gimple.test_every_lazily_initialised_generator_table_
+        # exists` scans the sources for a guard naming a field that is not
+        # declared here, so the next one cannot reintroduce the NULL.
+        #
+        # Module-global slot kinds recorded by `_note_global_slot_kinds`
+        # (see emit_exprs' read of the same table).
+        self._global_slot_info: dict = {}
+        # `dict.fromkeys(...)` / `frozendict.fromkeys(...)` callable temps
+        # (emit_exprs and emit_stmts both record here).
+        self._frozendict_fromkeys_callables: set = set()
+        self._dict_fromkeys_callables: set = set()
+        # Locals bound to a tagged generator word (emit_infra), a generator
+        # handle word, and functions whose drained list is runtime-kinded.
+        self._tagged_gen_vals: set = set()
+        self._gen_handle_word_locals: set = set()
+        self._return_runtime_kinded: set = set()
+        # The C++ emitter's word-local tables. Reset per function where the
+        # generator/async unit gets the chance (cpp_async), created on use
+        # elsewhere -- so they must also exist for the other unit shapes.
+        self._cpp_tagged_word_names: set = set()
+        self._cpp_unpacked_call_words: set = set()
+        self._cpp_word_locals: set = set()
+        self._cpp_word_iter_locals: set = set()
+        # Class prototypes published for the prototype section, and the
+        # Struct_method -> parameter-names table they are registered with.
+        self._method_param_names: dict = {}
+        self._published_class_defs: list = []
+        self._published_class_keys: set = set()
+        # Per-module tables that deliberately persist across the modules of
+        # one compile: GPU per-buffer element counts (`_device_launch_lengths`
+        # is filled by the synthesis pass before the classification pass, so
+        # that pass must not wipe it), and the method -> generator-api map.
+        self._device_launch_lengths: dict = {}
+        self._device_launch_grids: dict = {}
+        self._method_returns_generator: dict = {}
+        # Closure factories with a `nonlocal` in the returned closure, which
+        # must skip the coroutine lift; `mojo.middle.closures` reads it too.
+        self._skip_closure_factory_lift: set = set()
+        # Generic elaboration (elab_intu.run) records: the in-TU mangled names
+        # this compile defines, and the argument tables the `.o` route must not
+        # also emit. Created once per gen and accumulated across modules.
+        self._intu_funcs: dict = {}
+        self._intu_structs: dict = {}
+        self._intu_func_args: dict = {}
+        self._intu_struct_args: dict = {}
+        self._intu_factory_records: dict = {}
+        # Front-end refusals, re-raised by gen_module for LSP/error recovery.
+        self._lsp_recovery_errors: list = []
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus

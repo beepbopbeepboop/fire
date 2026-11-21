@@ -1131,8 +1131,6 @@ def _note_global_slot_kinds(gen, tname: str, v: str) -> None:
     module scope printed `4612811918334230528`). The record is the last store's;
     a read compiled before any store has no record, as before.
     """
-    if not hasattr(gen, '_global_slot_info'):
-        gen._global_slot_info = {}
     info = {}
     if gen._word_has_slot_kinds(v):
         info['mk'] = True
@@ -1351,13 +1349,11 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             _rhs = node.value
             if isinstance(_rhs, gimple_ctypes.MemberExpr) and isinstance(_rhs.obj, gimple_ctypes.IdentExpr):
                 if _rhs.obj.name == 'frozendict' and _rhs.member == 'fromkeys' and not gen._locally_binds_name(_rhs.obj.name):
-                    if not hasattr(gen, '_frozendict_fromkeys_callables'): gen._frozendict_fromkeys_callables = set()
                     gen._frozendict_fromkeys_callables.add(node.target.name)
                     try: gen._frozendict_fromkeys_callables.add(gen._cname(node.target.name))
                     except Exception: pass
             elif isinstance(_rhs, gimple_ctypes.MemberExpr) and isinstance(_rhs.obj, gimple_ctypes.IdentExpr):
                 if _rhs.obj.name in ('dict', 'OrderedDict') and _rhs.member == 'fromkeys' and not gen._locally_binds_name(_rhs.obj.name):
-                    if not hasattr(gen, '_dict_fromkeys_callables'): gen._dict_fromkeys_callables = set()
                     gen._dict_fromkeys_callables.add(node.target.name)
                     try: gen._dict_fromkeys_callables.add(gen._cname(node.target.name))
                     except Exception: pass
@@ -1560,13 +1556,13 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 _dsr.pop(_as_str(tname), None)
         # Track frozendict/dict fromkeys callable values
         try:
-            if hasattr(gen, '_frozendict_fromkeys_callables') and v in gen._frozendict_fromkeys_callables:
+            if v in gen._frozendict_fromkeys_callables:
                 gen._frozendict_fromkeys_callables.add(tname)
                 try:
                     gen._frozendict_fromkeys_callables.add(gen._cname(tname))
                 except Exception:
                     pass
-            if hasattr(gen, '_dict_fromkeys_callables') and v in gen._dict_fromkeys_callables:
+            if v in gen._dict_fromkeys_callables:
                 gen._dict_fromkeys_callables.add(tname)
                 try:
                     gen._dict_fromkeys_callables.add(gen._cname(tname))
@@ -1624,8 +1620,6 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 _vk2 = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
                     _as_str(_gapi2.get('value_ctype') or 'int64_t'))
                 if _vk2 is not None:
-                    if not hasattr(gen, '_gen_handle_word_locals'):
-                        gen._gen_handle_word_locals = set()
                     gen._gen_handle_word_locals.add(_as_str(tname))
                     _hw2 = gen._to_int64(vtype, v)
                     _kv2 = gen._new_val('int64_t', str(_vk2))
@@ -3903,8 +3897,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         # kinds at run time: record that THIS FUNCTION returns such a list, so
         # a call site marks its result runtime-kinded too (`ginf._RuntimeKinded`).
         if isinstance(gen._struct_slot_kinds.get(v), ginf._RuntimeKinded):
-            if not hasattr(gen, '_return_runtime_kinded'):
-                gen._return_runtime_kinded = set()
             gen._return_runtime_kinded.add(gen.current_func_name)
         if v in gen._elem_types and not _is_empty_container_literal(node.value):
             gen._return_elem_types[gen.current_func_name] = gen._elem_types[v]

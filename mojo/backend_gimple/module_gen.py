@@ -12491,8 +12491,6 @@ def _gmp_discover_closures(self, stmts: list) -> None:
         # Prevent lifting of closure factories with nonlocal
         try:
             from mojo.middle import closures as _closures
-            if not hasattr(self, '_skip_closure_factory_lift'):
-                self._skip_closure_factory_lift = set()
             _fns0 = [fn for fn in _walk_ast(stmts) if isinstance(fn, FunctionDef)]
             # Only a module with a generator/async function takes the coroutine
             # lift (captures copied by value); see the refusal below.
@@ -13421,13 +13419,10 @@ def gen_module_impl(self, stmts: list):
     if getattr(self, 'auto_gpu', True) and __file__ != '<bootstrap>':
         # The synthesiser needs somewhere to record per-buffer element counts
         # (a GEMM's A is M*K, B is K*N, C is M*N, and one count cannot say
-        # that). Created HERE, before the synthesis, and read by the
-        # classification pass below -- which is why that pass creates it only if
-        # absent rather than re-initialising it.
-        if not hasattr(self, '_device_launch_lengths'):
-            self._device_launch_lengths = {}
-        if not hasattr(self, '_device_launch_grids'):
-            self._device_launch_grids: dict = {}
+        # that). Filled before the synthesis, and read by the classification
+        # pass below -- which must NOT re-initialise it. Both tables are
+        # declared in `GimpleGen.__init__` (a lazy `hasattr` initialiser never
+        # runs in the compiled compiler).
         stmts, _synth_names = _gmi_offload.offload_module(
             stmts, lengths_sink=self._device_launch_lengths,
             grids_sink=self._device_launch_grids)
@@ -13473,9 +13468,8 @@ def gen_module_impl(self, stmts: list):
     # pass silently wiped it -- measured, every buffer came out sized to the
     # kernel's single Int parameter and two tests failed while the plumbing
     # looked correct. The other two tables ARE reset per module and should be;
-    # this one carries information from an earlier pass.
-    if not hasattr(self, '_device_launch_lengths'):
-        self._device_launch_lengths: dict = {}
+    # this one carries information from an earlier pass (it is declared, and
+    # therefore created once per gen, in `GimpleGen.__init__`).
     _device_kernels_meta: dict = {}
     _gmp_device_kernel_meta(self, stmts, _device_explicit, _device_fallbacks, _device_kernels_meta, _device_kinds)
     self._actual_types['stmts'] = 'MojoList *'
@@ -19479,8 +19473,6 @@ def gen_module_impl(self, stmts: list):
     # in-chain imports, a base method may `return cls.gen_method(...)` where
     # gen_method is a generator on subclasses but not on the base. Analyze
     # each (concrete_struct, method) with cls/self resolved to that struct.
-    if not hasattr(self, '_method_returns_generator'):
-        self._method_returns_generator = {}
     _gmp_generator_returning_methods(self, stmts)
 
     _param_gen_obs: dict[str, dict[str, dict]] = {}  # callee -> {pname -> {fname: count}}
@@ -20807,8 +20799,6 @@ def gen_module_impl(self, stmts: list):
 
         except Exception as _me_err:
             try:
-                if not hasattr(self, '_lsp_recovery_errors'):
-                    self._lsp_recovery_errors = []
                 self._lsp_recovery_errors.append(_me_err)
                 # The refusal itself is not lost: it is recorded here and
                 # re-raised by `gen_module` for LSP/front-end error recovery,

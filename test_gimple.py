@@ -1764,6 +1764,97 @@ def test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals():
         _FAIL += 1
 
 
+def test_every_lazily_initialised_generator_table_exists():
+    """Pin: no `if not hasattr(gen, 'x'): gen.x = <container>` lazy init is left.
+
+    Self-hosted, `hasattr(gen, 'x')` answers True for every field of
+    GimpleGen's synthetic struct -- the field exists from construction, so the
+    guard's body never runs and the field stays NULL. The first
+    `gen.x.add(...)` / `gen.x[k] = v` is then a NULL MojoDict/MojoSet/MojoList
+    dereference. Measured in a stage2 binary (the compiled compiler):
+    `./mojo --dump ../array_ops_jit.mojo` died in `_dict_set_raw_seq_kind_k`
+    (d == NULL) under `emit_stmts._note_global_slot_kinds`, whose
+    `_global_slot_info` guard had been skipped, on that file's module-level
+    `arr = [1, 2, 3, 4, 5]`.
+
+    A fresh `GimpleGen()` therefore has to own every table some lowering path
+    creates lazily, and this scans the sources for a guard naming a field that
+    is not declared in `GimpleGen.__init__`. It also checks that the declared
+    initial value is the container TYPE the guard creates (`set()` vs `{}` vs
+    `[]`), because declaring the wrong one would be the same crash under a
+    different accessor. A dynamic `setattr(gen, <name>, ...)` lazy init cannot
+    be checked statically at all, so the shape is rejected outright.
+    """
+    import re as _re
+    gen = gimple_codegen.GimpleGen()
+    repo = os.path.dirname(os.path.abspath(gimple_codegen.__file__))
+    paths = [os.path.join(repo, 'gimple_codegen.py'),
+             os.path.join(repo, 'mojo', 'middle', 'closures.py')]
+    backend = os.path.join(repo, 'mojo', 'backend_gimple')
+    paths += sorted(os.path.join(backend, f) for f in os.listdir(backend)
+                    if f.endswith('.py'))
+    guard = _re.compile(
+        r"if not hasattr\((?P<recv>gen|self|ctx), "
+        r"'(?P<name>[A-Za-z_]\w*)'\):")
+    expect = {'set()': set, '{}': dict, '[]': list}
+    missing, wrong, dynamic = [], [], []
+    for path in paths:
+        try:
+            with open(path) as f:
+                src = f.read()
+        except OSError:
+            continue
+        rel = os.path.relpath(path, repo)
+        # A name that the guard only CHECKS (never assigns) is not a lazy
+        # init: it is a "was this optional field set" question and declaring
+        # it is a separate decision. Only the create-then-use shape is pinned,
+        # in either spelling:
+        #     if not hasattr(gen, 'x'):
+        #         gen.x = set()
+        #     if not hasattr(gen, 'x'): gen.x = set()
+        for m in guard.finditer(src):
+            name = m.group('name')
+            tail = src[m.end():m.end() + 400]
+            # A comment between the guard and the assignment it creates is
+            # common ("gen_module_impl creates this just before ..."), and it
+            # does not make the shape any less of a lazy initializer.
+            tail = _re.sub(r"(?m)^[ \t]*#[^\n]*\n", "", tail)
+            am = _re.match(
+                r"(?:[ \t]*\n)*[ \t]*(?:" + m.group('recv') + r")\." +
+                _re.escape(name) + r"[^=\n]*=\s*(set\(\)|\{\}|\[\])", tail)
+            if am is None:
+                continue
+            line = src.count('\n', 0, m.start()) + 1
+            rhs = am.group(1)
+            if name not in vars(gen):
+                missing.append(f"{rel}:{line} {name}")
+            elif type(getattr(gen, name)) is not expect[rhs]:
+                wrong.append(f"{rel}:{line} {name} is "
+                             f"{type(getattr(gen, name)).__name__}, guard "
+                             f"creates {expect[rhs].__name__}")
+        for m in _re.finditer(r"if not hasattr\(\s*(?P<recv>gen|self|ctx)\s*,\s*"
+                              r"(?P<var>[A-Za-z_]\w*)\s*\):", src):
+            tail = src[m.end():m.end() + 400]
+            if _re.search(r"setattr\(\s*" + m.group('recv') + r"\s*,\s*" +
+                          _re.escape(m.group('var')) + r"\s*,", tail):
+                line = src.count('\n', 0, m.start()) + 1
+                dynamic.append(f"{rel}:{line}")
+    problems = []
+    if missing:
+        problems.append("not declared in GimpleGen.__init__: "
+                        + "; ".join(missing))
+    if wrong:
+        problems.append("declared with the wrong container type: "
+                        + "; ".join(wrong))
+    if dynamic:
+        problems.append("a setattr() lazy init cannot be checked; declare the "
+                        "field in GimpleGen.__init__ instead: "
+                        + "; ".join(dynamic))
+    if problems:
+        raise AssertionError("; ".join(problems))
+    print("PASS  every_lazily_initialised_generator_table_exists")
+
+
 def _isolate(thunk):
     """Run one test and return the exception it escaped with, or None.
 
@@ -15946,6 +16037,8 @@ main()
 
     _run_isolated(test_two_same_name_free_functions_get_distinct_symbols,
                   'two_same_name_free_functions_get_distinct_symbols')
+    _run_isolated(test_every_lazily_initialised_generator_table_exists,
+                  'every_lazily_initialised_generator_table_exists')
     _run_isolated(test_local_generic_struct_in_own_module_keeps_methods_and_plain_overloads,
                   'local_generic_struct_in_own_module_keeps_methods_and_plain_overloads')
     _run_isolated(test_scalar_integer_dtype_resolution,
