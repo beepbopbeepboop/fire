@@ -17277,6 +17277,22 @@ char *mojo_str_from_int(int64_t v) {
     return out;
 }
 
+/* Python's round(x, ndigits): the correctly rounded decimal of x's exact
+ * binary value (so round(2.675, 2) is 2.67, since 2.675 is really
+ * 2.67499999...), ties to even. printf's %.*f rounds the exact value the same
+ * way; a negative ndigits rounds to a multiple of 10**-ndigits. */
+double mojo_round_ndigits(double x, int64_t nd) {
+    if (x != x || x - x != 0.0) return x;
+    if (nd < 0) {
+        double p = pow(10.0, (double)-nd);
+        return rint(x / p) * p;
+    }
+    if (nd > 300) return x;
+    char buf[400];
+    snprintf(buf, sizeof buf, "%.*f", (int)nd, x);
+    return strtod(buf, NULL);
+}
+
 /* Python's divmod(a, b) builtin: (a // b, a % b) as a real 2-tuple, using
  * the SAME floor-division adjustment __mojo_floordiv (fire_runtime.h) uses
  * for `//`, so the remainder here is always consistent with that quotient

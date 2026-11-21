@@ -898,6 +898,7 @@ char *mojo_list_repr_elem(MojoList *l, int64_t v);
 int64_t     mojo_list_get_boxed(MojoList *l, int64_t i);
 int         mojo_is_boxed(int64_t v);
 double      mojo_box_double(int64_t v);
+double      mojo_round_ndigits(double x, int64_t nd);   /* round(x, ndigits) of the exact binary value */
 int64_t     mojo_box_int(int64_t v);
 /* `int(x)` on a word of unknown kind (see mojo_int_of_word's own comment):
  * plain int stays, bare/boxed string parses, double box truncates, None or

@@ -790,6 +790,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_repr_str_or_none': ['char *', 'char *'],
     'mojo_repr_word': ['char *', 'int64_t'],
     'mojo_reversed': ['void *', 'void *'],
+    'mojo_round_ndigits': ['double', 'double', 'int64_t'],
     'mojo_rtobj_method_call': ['int64_t', 'int64_t', 'char *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t'],
     'mojo_s_isdir': ['int64_t', 'int64_t'],
     'mojo_set_add_bytes': ['void', 'MojoSet *', 'MojoBytes *'],

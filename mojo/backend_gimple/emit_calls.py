@@ -7840,6 +7840,41 @@ def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
     return 'MojoList *', res
 
 
+_LIST_CTYPES = ('MojoList *',)
+
+
+def _lower_minmax_keyed(gen, fname_raw: str, node, arg_pairs: list) -> tuple:
+    """`max(xs, key=f)` / `min(xs, key=f)`: the element whose key is extreme.
+
+    The keys are built exactly as `sorted(xs, key=f)` builds them; `max` takes
+    the first element of the keys' DESCENDING stable order and `min` of the
+    ascending one, which is the first extreme element, as Python returns."""
+    key_expr = None
+    for _k, _v in (getattr(node, 'kwargs', []) or []):
+        if _k == 'key':
+            key_expr = _v
+    at, av = _as_str(arg_pairs[0][0]), _as_str(arg_pairs[0][1])
+    at, av = _resolve_container_kind(gen, at, av)
+    if at not in _LIST_CTYPES:
+        av = gen._materialize_as_list(at, av)
+    elem = gen._elem_of(av)
+    keys_val = _build_sort_keys(gen, av, elem, key_expr)
+    if keys_val == 'NULL':
+        return None
+    srt = gen._call_expr('MojoList *', 'mojo_sorted_by_keys',
+                         [('MojoList *', av), ('MojoList *', keys_val),
+                          ('int', '1' if fname_raw == 'max' else '0')])
+    zero = gen._new_val('int64_t', '(int64_t)0')
+    if gimple_ctypes.TypeLattice.is_float(elem):
+        return 'double', gen._call_expr('double', 'mojo_list_get_double',
+                                        [('MojoList *', srt), ('int64_t', zero)])
+    w = gen._call_expr('int64_t', 'mojo_list_get_int',
+                       [('MojoList *', srt), ('int64_t', zero)])
+    if gimple_ctypes.TypeLattice.is_cstr(elem):
+        return 'char *', gen._cast('char *', w)
+    return 'int64_t', w
+
+
 def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
                         keyed: bool = True) -> tuple[str, str]:
     arg0 = node.args[0]
@@ -12366,15 +12401,12 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _r = gen._rt_call('double', 'rint', [f"{xd}"])
         return 'int64_t', gen._cast('int64_t', _r)
 
-    # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)
+    # round(x, ndigits): the runtime rounds the exact binary value (2.675 -> 2.67)
     if fname_raw == 'round' and len(node.args) == 2:
         (xt, xv), (nt, nv) = arg_pairs
         xd = xv if xt == 'double' else gen._cast('double', f"{xv}")
-        nd = nv if nt == 'double' else gen._cast('double', f"{nv}")
-        p  = gen._rt_call('double', 'pow', ['10.0', f"{nd}"])
-        scaled = gen._binop('double', f"{xd}", '*', f"{p}")
-        r = gen._rt_call('double', 'round', [scaled])
-        return 'double', gen._binop('double', r, '/', f"{p}")
+        nd = gen._to_int64(nt, nv)
+        return 'double', gen._rt_call('double', 'mojo_round_ndigits', [f"{xd}", f"{nd}"])
 
     # A double bound for a parameter whose call sites also passed integers is
     # a box, not its bits (see `_box_float_call_args`). After the padding, so
@@ -12474,6 +12506,12 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # list handle as a "numeric arg" and hand it straight back unchanged
     # (returning the list POINTER as the min/max value — garbage). Real in an
     # A3 stack-switch generator body: `yield min(xs)` on an unannotated param.
+    if (fname_raw in ('min', 'max') and len(arg_pairs) == 1
+            and not gen._locally_binds_name(fname_raw)
+            and 'key' in {k for k, _ in getattr(node, 'kwargs', []) or []}):
+        _kr = _lower_minmax_keyed(gen, fname_raw, node, arg_pairs)
+        if _kr is not None:
+            return _kr
     if (fname_raw in ('min', 'max') and len(arg_pairs) == 1
             and not gen._locally_binds_name(fname_raw)
             and 'key' not in {k for k, _ in getattr(node, 'kwargs', []) or []}):
