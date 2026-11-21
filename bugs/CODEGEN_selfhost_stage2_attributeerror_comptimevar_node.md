@@ -27,3 +27,15 @@ every `bootstrap-stage2-dumps` job exits 1 with:
 
 `make bootstrap` gets past `bootstrap-stage2-dumps` (stage2 dumps all exit 0), then
 `bootstrap-verify` compares stage1 and stage2 byte for byte. Delete this doc in the same commit.
+
+## Status 2026-11-21
+
+- Upstream has DISABLED `bootstrap-stage1-transitive` and `bootstrap-stage2-cc` on master (their docs
+  `bugs/gate-bootstrap-stage1-transitive.md` and `bugs/gate-bootstrap-stage2-cc.md` are the switch). So the
+  stage2 dump jobs now run against a PARTIAL `stage1/fire.ci` (604 KB, not the ~135 MB closure). The
+  `AttributeError` seen in that run is from the partial stage1, not a measured stage2 fact.
+- Tried: `mojo/middle/comptime.py` now `from fire_compiler import _as_comptimevar_node` (as `emit_funcs.py`
+  does). Lint and a pydiff repro pass. The bootstrap run did not reach a full stage2, so this is unverified.
+  It is NOT committed yet.
+- Next: re-enable `bootstrap-stage1-transitive` (delete its doc only when green), regenerate the full closure,
+  then rerun the stage2 dumps.
