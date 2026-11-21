@@ -138,12 +138,7 @@ A test can be REGISTERED AND NOT RUN. `test('x', ..., disabled='bugs/<doc>.md')`
 in `--list`, in its buckets, in the plan and in the tally, and it spawns
 nothing: no process, no memory ceiling, no reservation, no wall time, no peak.
 It reports as its own status, `DISABLED`, with the doc, and does not fail the
-run. A test that DEPENDS on a disabled one does not run either: a disabled
-producer hands on no artifact, so the dependent SKIPs behind it, naming the
-disabled dep and its doc (the switch), until the producer is fixed — the same
-shape as the dependent of a failed dep, and what stops a doc'd-off bootstrap
-producer from turning its fifty-item dumps fanout into fifty one-second
-`FileNotFoundError` reds (2026-11-21, gate c0182fd3).
+run.
 
 It is for a known failure whose test is more expensive than its verdict is
 worth — a job that measures 20.5 GB, takes the `program` class (55 of a 96 GB
@@ -1576,12 +1571,10 @@ class Spec:
               the doc is the marker, so deleting the doc (which is what a fix
               does — see the bug-doc policy) is what turns the test back on,
               and the registry refuses to load while a disabled test's doc is
-              gone. Costs nothing: no process, no reservation. A test that
-              depends on one does not run either — it SKIPs behind the
-              disabled dep, naming the doc, until the producer is fixed. The
-              two markers are not combinable, and `disabled` is the one to
-              reach for when running the test would cost more than its verdict
-              is worth — a 20 GB, minutes-long run to learn something already
+              gone. Costs nothing: no process, no reservation. The two
+              markers are not combinable, and `disabled` is the one to reach
+              for when running the test would cost more than its verdict is
+              worth — a 20 GB, minutes-long run to learn something already
               written down. See "Disabled tests" below, and CLAUDE.md,
               "Known failures: expect= or disabled=, decided by cost".
     artifact  a binary this step produces, cached by the content of its real
@@ -1767,8 +1760,7 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
      timeout=1800,
      extra=GIMPLE_SOURCES + ['test_module_cache.py', 'exec_budget.py',
                              'myinterpreter.py', 'fire.py', 'fire_main.py'],
-     desc='module cache end-to-end stages',
-     disabled='bugs/gate-modcache.md')
+     desc='module cache end-to-end stages')
 # Registered 2026-09-27. Found while implementing FORMAL.md phase 0:
 # `reflect._PROTO_RE` could not match a pointer return (`char *name(...)` — the
 # `*` is attached to the type with no space before the name), so it silently
@@ -1935,8 +1927,7 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # (`.endswith(' *')`, `== 'int64_t'`, ...) may only fall.
 test('type-string-ratchet', [PY, 'test_type_string_ratchet.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_type_string_ratchet.py'],
-     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)',
-     disabled='bugs/gate-type-string-ratchet.md')
+     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)')
 # Every program in tools/pydiff_ok.txt must print what CPython prints (the
 # corpus is tools/pydiff_corpus; the finder is tools/pydiff.py). The list may
 # only grow, so a fix that lands is locked in and a regression is named.
@@ -2077,8 +2068,7 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     desc='compile-and-execute: plain programs, structs, closures, stdlib calls',
-     disabled='bugs/gate-gimplerunner.md')
+     desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
                              'exec_budget.py',      # imported: must be in the key
@@ -6092,47 +6082,19 @@ def plan_for(names, opts):
 # per job is exactly the noise that makes people scroll past the one FAIL.
 HEARTBEAT_SECONDS = 30
 
-# The dep statuses a job may proceed on: PASS only. A dep that settled to any
-# other state did not hand on what the dependent needs, so the dependent
-# cannot run behind it — make's behaviour, and the reason a broken stage1
-# produces one skip rather than six stage2 errors. DISABLED settles here as
-# well, and it is the 2026-11-21 addition: before it, a disabled producer let
-# its dependents run anyway (the bootstrap gcc step was doc'd off while its
-# fifty-item dumps fanout ran on), and every item died in a second on the
-# missing `./mojo`, so one red producer filed fifty docs for one bug. A
-# disabled dep now SKIPs its dependents, naming the doc that is the switch —
-# fixing the producer removes the doc and the dependents run again.
-DEP_SATISFIED = (PASS,)
-
-
-def dep_block_detail(deps, state):
-    """The SKIP reason for a job whose dep did not settle to PASS.
-
-    A disabled dep is named with its doc, because the doc is the switch that
-    turns the producer (and therefore this job) back on, and a reader seeing
-    fifty identical skips in one fanout must tell that apart from a plain
-    failed dep in one glance.
-    """
-    disabled = [d for d in deps if d in state and state[d] == DISABLED]
-    failed = [d for d in deps if d in state
-              and state[d] not in (PASS, DISABLED)]
-    parts = []
-    if disabled:
-        parts.append('dependency is disabled: ' + ', '.join(
-            f'{d} ({REGISTRY[d].disabled} is the switch)' for d in disabled))
-    if failed:
-        parts.append('dependency did not pass: ' + ', '.join(
-            f'{d}={state[d]}' for d in failed))
-    return '; '.join(parts)
+# The dep statuses a job may proceed on. PASS is the ordinary case; DISABLED is
+# in here because a disabled test was never run, so it has no verdict to hand
+# on — see "Disabled tests" for why its dependents run rather than skip.
+DEP_SATISFIED = (PASS, DISABLED)
 
 
 def execute(jobs, per_test, opts, log: Log):
     """Run the plan. Returns (state, results, wall, peak_gb)."""
     order = {j.key: i for i, j in enumerate(jobs)}
     # A disabled test has no job, so nothing will ever `settle` it: its status
-    # is seeded here, BEFORE the scheduler starts, which is what lets the
-    # scheduler tell a disabled dep is settled (no verdict is coming) so a
-    # dependent SKIPs behind it instead of waiting forever.
+    # is seeded here, BEFORE the scheduler starts, which is also what makes a
+    # job depending on one eligible instead of waiting for a verdict that is
+    # never coming (see "Disabled tests" for why a dependent is not skipped).
     state: dict[str, str] = {n: DISABLED for n, k in per_test.items() if k == 0}
     resolved = dict.fromkeys(per_test, 0)
     results: dict[str, Result] = {}
@@ -6192,19 +6154,18 @@ def execute(jobs, per_test, opts, log: Log):
                     ready.append(job)
                 else:
                     blocked.append(job)
-            # A test whose dep did not pass never runs — make's behaviour,
-            # and the reason a broken stage1 does not produce six confusing
-            # stage2 errors instead of one. DISABLED settles in that set,
-            # since 2026-11-21: a disabled producer hands on no artifact, so
-            # a dependent that ran behind it would only die on the missing
-            # thing (bootstrap-stage2-cc doc'd off -> all fifty
-            # bootstrap-stage2-dumps items exited in a second on
-            # `FileNotFoundError: ./mojo`, one bug filed fifty ways, 2026-11-21
-            # gate c0182fd3). The dependent SKIPs, naming the doc that is the
-            # switch, and runs again the day the producer is fixed.
+            # A test whose dep failed never runs — make's behaviour, and the
+            # reason a broken stage1 does not produce six confusing stage2
+            # errors instead of one. DISABLED is in DEP_SATISFIED, not here:
+            # a disabled dep produced no verdict to propagate, and skipping on
+            # it would silently stop work that has nothing to do with the bug
+            # the doc is tracking.
             for job in blocked:
                 del waiting[job.key]
-                res = Result(SKIP, detail=dep_block_detail(job.spec.deps, state))
+                failed = [d for d in job.spec.deps
+                          if state[d] not in DEP_SATISFIED]
+                res = Result(SKIP, detail='dependency did not pass: '
+                             + ', '.join(f'{d}={state[d]}' for d in failed))
                 with lock:
                     results[job.key] = res
                     done += 1
@@ -6231,8 +6192,8 @@ def execute(jobs, per_test, opts, log: Log):
                 failed = [d for d in job.spec.deps
                           if d in state and state[d] not in DEP_SATISFIED]
                 if failed:
-                    res = Result(SKIP, detail=dep_block_detail(job.spec.deps,
-                                                               state))
+                    res = Result(SKIP, detail='dependency did not pass: '
+                                 + ', '.join(f'{d}={state[d]}' for d in failed))
                     del waiting[job.key]
                     with lock:
                         results[job.key] = res
