@@ -1227,6 +1227,50 @@ def main():
 main()
 """)
 
+    # `it = gen(n); return it` -- the handle is returned through a LOCAL, not
+    # a literal generator call in return position. The return slot must stay
+    # the erased word (the old ABI), NOT the local's own `MojoGenerator *`:
+    # the `_fn_returns_generator` pre-pass only records functions whose
+    # returns are literal generator calls, so `list(make(3))` on a
+    # handle-typed signature finds no resume/value/destroy api and silently
+    # builds an EMPTY list (`glob.py`'s own `glob()` is `list(iglob(...))`
+    # with exactly this `it = _iglob(...); return it` shape, which is what
+    # the globcompiled gate job caught). The local may not even be the named
+    # generator: glob.iglob rebinds it to `itertools.chain((s,), it)` for a
+    # leading `**`, so only the runtime-kind dispatch the erased word routes
+    # to can drain it correctly.
+    test_generator_matches_cpython(
+        "generator_handle_local_returned_is_drained_by_list_and_for",
+        """\
+def gen(n):
+    for i in range(n):
+        yield i
+
+def make(n):
+    it = gen(n)
+    return it
+
+def main():
+    print(list(make(3)))
+    for x in make(2):
+        print(x)
+main()
+""", """\
+def gen(n):
+    for i in range(n):
+        yield i
+
+def make(n):
+    it = gen(n)
+    return it
+
+def main():
+    print(list(make(3)))
+    for x in make(2):
+        print(x)
+main()
+""")
+
 
 def _foreign_cpp_module_global_value():
     # A MODULE-LEVEL CONSTANT of one module, read as a VALUE in a cpp-path

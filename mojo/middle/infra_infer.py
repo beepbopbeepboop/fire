@@ -3498,6 +3498,22 @@ def _infer_return_type_with_locals(gen, body: list, func_def=None) -> str:
     emission will build, which is computed from the body here (see
     `resolve_shared._body_pybox_locals`).
 
+    A local whose ctype is `MojoGenerator *` is deliberately NOT merged.
+    A function that returns a generator HANDLE has always been declared
+    with the erased word (`int64_t`) unless its returns are all literal
+    generator calls (the `_fn_returns_generator` pre-pass in module_gen,
+    which is what records the resume/value/destroy api on the call temp —
+    see emit_calls' `ret_type == 'MojoGenerator *'` arm). Merging the
+    local's handle ctype made an unannotated function like glob.py's
+    `iglob` (`it = _iglob(...); return it`) infer `MojoGenerator *`, and a
+    static consumer then trusts it: `list(iglob(...))` takes
+    `_compr_generator_loop`, which has no api for a handle that came out
+    of an ordinary call and emits an EMPTY list.  The erased word is the
+    correct answer there, not merely the old one: `it` may not even be the
+    named generator — glob.iglob rebinds it to `itertools.chain((s,), it)`
+    for a leading `**` — so its runtime kind is what the dynamic
+    `_materialize_as_list` path must dispatch on.
+
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it — with ONE exception. An
     `int64_t` entry is `_prebound_local_ctypes`' CONFLICT verdict (the only
@@ -3538,8 +3554,13 @@ def _infer_return_type_with_locals(gen, body: list, func_def=None) -> str:
             _lt_table = None
         if _lt_table:
             for _ln, _lt in _as_dict(_lt_table).items():
-                if _ln not in _merged:
-                    _merged[_ln] = _as_str(_lt)
+                _lt_s = _as_str(_lt)
+                # A generator handle is not return-slot evidence (see the
+                # docstring): it stays the erased word so the dynamic
+                # iteration path, which dispatches on the handle's runtime
+                # kind, keeps owning the value.
+                if _ln not in _merged and _lt_s != 'MojoGenerator *':
+                    _merged[_ln] = _lt_s
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
     # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
