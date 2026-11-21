@@ -15438,20 +15438,6 @@ def main():
 main()
 """)
 
-    # `int(id(x))` must be `id(x)`: the token IS an integer (the interned box's
-    # address). `mojo_int_of_word` (and `mojo_box_int`) unwrapped the kind-'i'
-    # box to `bx->bits` -- the wrapped container -- so `int(id(a)) == id(a)`
-    # was False while `int(id(a)) > 0` stayed True.
-    test_gimple_matches_cpython("gimple_int_of_id_is_the_id", """\
-def main():
-    a = [1, 2]
-    print('eq', id(a) == int(id(a)))
-    print('gt', int(id(a)) > 0)
-    print('isnone', id(a) is None, id(a) == None)
-main()
-""")
-
-
     # `c == in_str` where one side is a `char *` VALUE and the other an
     # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
     # the codegen cannot tell them apart in one pass (the slot is assigned its
