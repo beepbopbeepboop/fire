@@ -1284,25 +1284,35 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # int used ONLY as a memo key here (never emitted), exactly like
             # gimple_module_gen.py's own `_generator_fns[id(n)]` etc.;
             # stringifying it makes the dict key on CONTENT, not tuple-address.
+            # The entry also holds `func` itself, and a hit requires that exact
+            # object (`is`). `id()` is only unique among LIVE objects: a
+            # FunctionDef that was freed (a temporary elaboration copy, say) can
+            # hand its address to a later function, and the id-only key then
+            # served that function the freed one's field evidence. Measured:
+            # `module_gen._gmi_apply_class_ref_types(self)` took
+            # `Parser`'s fields and was typed `Parser *` for some
+            # PYTHONHASHSEED values (which change the allocation pattern) and
+            # `GimpleGen *` for others. Holding `func` keeps its id from being
+            # reused for as long as the entry exists.
             _pu_key = _pair_key(str(id(func)), pname)
-            _pu_cached = gen._param_usage_scan_cache.get(_pu_key)
-            if _pu_cached is not None:
+            _pu_entry = gen._param_usage_scan_cache.get(_pu_key)
+            if _pu_entry is not None and _pu_entry[0] is func:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
                  is_nondict_key_subscripted, called_methods, is_dict_method,
                  aug_member_targets, is_bytes_method,
-                 is_float_arg) = _pu_cached
+                 is_float_arg) = _pu_entry[1]
             else:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
                  is_nondict_key_subscripted, called_methods, is_dict_method,
                  aug_member_targets, is_bytes_method, is_float_arg
                  ) = analyze_param_usage(func.body, pname)
-                gen._param_usage_scan_cache[_pu_key] = (
+                gen._param_usage_scan_cache[_pu_key] = (func, (
                     fields_accessed, function_calls, is_subscripted, is_string_method,
                     is_iterated, is_char_compared, is_str_key_subscripted,
                     is_nondict_key_subscripted, called_methods, is_dict_method,
-                    aug_member_targets, is_bytes_method, is_float_arg)
+                    aug_member_targets, is_bytes_method, is_float_arg))
             # The SET slots round-trip through the return tuple as int64_t on
             # the self-hosted path (packed/unpacked with the int accessor) —
             # re-view them as `MojoSet *` so the struct-evidence set

@@ -12,7 +12,7 @@ One pass, repeated:
   2. REFILL  `control.py refill --target N --prefix bug-,fix-` -- a worker that finishes frees its slot at once.
   3. LAND    finished bug-*/fix-* branches are merged by `integrate.py`; a conflicting branch is handed to a LAND doc
              (bugs/LAND-*.md) (integrate.hand_to_land_doc). The campaign is tools/pool.json `mode`: `build` lands everything fast
-             behind the light --stdlib gate; `drain` (the default) lands batches of 8 behind the full landing gate,
+             in one pass; `drain` (the default) lands batches of 8,
              finishing work (fix-gate/fix-merge/fix-proof/fix-orch, bug-land-*) first, in priority.json order.
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
@@ -938,12 +938,10 @@ def fresh_first(names, tasks):
     return fresh if fresh else names
 
 
-def probe(batch, stdlib=True):
+def probe(batch):
     """Merge and gate `batch` exactly as a landing would, changing NO state (integrate.py --probe). Returns
-    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs.
-    `stdlib=True` (build mode) gates on the light --stdlib gate; drain mode passes the same full landing gate the landing pays."""
-    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if stdlib else []) +
-                       ["--probe", "--only"] + batch,
+    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs."""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--probe", "--only"] + batch,
                        capture_output=True, text=True, cwd=C.MAIN)
     verdict, merged, failing = classify_probe(r.stdout + r.stderr)
     return verdict, merged, failing, r.stdout + r.stderr
@@ -969,18 +967,15 @@ def failed_files(out):
     return ff.group(1).split() if ff else []
 
 
-def find_culprit(seq, failing, stdlib=True):
+def find_culprit(seq, failing):
     """The branch that turns the gate red when added to the ones before it: binary search for the smallest red prefix
-    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green). The search
-    probes behind the SAME gate the batch was probed behind (`stdlib`): behind the light gate a branch that breaks only
-    a full-gate job looked green, and the last branch of the batch was blamed, held and archived (2026-11-15: a good
-    bootstrap branch was held for a comptime-dtype-diagnostic break that belonged to its batch-mate). A sub-probe that
-    is neither GREEN nor RED (the lock was busy, nothing to merge) proves nothing, so the search stops and names no
+    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green). A sub-probe
+    that is neither GREEN nor RED (the lock was busy, nothing to merge) proves nothing, so the search stops and names no
     culprit: (None, [])."""
     lo, hi = 0, len(seq)
     while hi - lo > 1:
         mid = (lo + hi) // 2
-        v2, _, f2, _ = probe(seq[:mid], stdlib=stdlib)
+        v2, _, f2, _ = probe(seq[:mid])
         if v2 == "RED":
             hi, failing = mid, f2
         elif v2 == "GREEN":
@@ -1058,12 +1053,12 @@ def resolve_stuck_batch(st, key, batch, tasks, out, verdict):
 
 
 def land():
-    # build mode (tools/pool.json `mode`): high volume - the light --stdlib gate, no batch cap. The cap (8) existed
-    # because a batch meant one HEAVY gate run and one conflict storm; the landing gate is cheap now, a conflicting
+    # build mode (tools/pool.json `mode`): high volume, no batch cap. The cap (8) existed because a batch meant one
+    # HEAVY gate run and one conflict storm; the landing gate is cheap now (tools/gates.json `landing`), a conflicting
     # branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit by
     # find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
-    # drain mode: work the master patch down - batches of 8 (a red full gate poisons few; the rest land next pass),
-    # the FULL landing gate per probe and per landing, and finishing work lands before fresh docs.
+    # drain mode: work the master patch down - batches of 8 (a red gate poisons few; the rest land next pass), and
+    # finishing work lands before fresh docs. Both modes gate with the same cheap landing gate.
     build = C.mode() == "build"
     LAND_BATCH = 0 if build else 8
     proofs = []
@@ -1101,10 +1096,9 @@ def land():
             # the triage decision changes the candidate set. This is the bound that stops the loop.
             log("landing: parked, not re-probed (%s); it waits for a branch to change" % " ".join(batch)[:200])
             break
-        log("landing: probing %d branch(es) behind the %s gate: %s" % (
-            len(batch), "light --stdlib" if build else "full", " ".join(batch)[:300]))
+        log("landing: probing %d branch(es) behind the landing gate: %s" % (len(batch), " ".join(batch)[:300]))
         _t0 = time.time()
-        verdict, merged, failing, out = probe(batch, stdlib=build)
+        verdict, merged, failing, out = probe(batch)
         log("landing: probe %s in %.0f s (merged %d of %d)" % (verdict, time.time() - _t0, len(merged), len(batch)))
         if verdict in ("EMPTY", "ERROR"):   # no verdict: say what it printed, and count it against this batch
             log("landing: probe gave no verdict (%s); its last lines: %s" % (
@@ -1132,7 +1126,7 @@ def land():
         if not merged:
             break
         if verdict == "GREEN":
-            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py")] + (["--stdlib"] if build else []) + ["--only"] + merged,
+            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--only"] + merged,
                                capture_output=True, text=True, cwd=C.MAIN)
             for line in (r.stdout + r.stderr).splitlines():
                 if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved", "landing waits")):
@@ -1141,7 +1135,7 @@ def land():
             break
         # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
         # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
-        culprit, failing = find_culprit(merged, failing, stdlib=build)
+        culprit, failing = find_culprit(merged, failing)
         if culprit is None:
             log("red: the batch is red but the culprit search was inconclusive (a sub-probe gave no GREEN/RED); "
                 "nothing is held and no gate doc is filed")
