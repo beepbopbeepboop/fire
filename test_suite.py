@@ -5658,6 +5658,39 @@ def test_the_land_doc_suite_is_registered_where_its_bucket_says():
            '`check` is a coverage decision this row exists to refuse'))
 
 
+def test_the_orchestrator_pins_run_rather_than_being_excused():
+    """The two orchestration-redesign pins are RUN, and an excuse is not a fix.
+
+    `tools/test_integrate_deadline.py` and `tools/test_integrate_probe_loop.py`
+    landed with the orchestration redesign and were the suite-self-test red:
+    neither was named by a spec. Two finished branches answered that red by
+    adding the file to `UNREGISTERED`, which makes the estate check green
+    without running anything. Master's answer (`0feaefa96`) was the
+    registrations below, and that is what makes the stale excuse WRONG rather
+    than merely obsolete: the estate check's `resolved` assertion refuses an
+    excuse for a file a spec names, so merging such a branch as a "fix" turns
+    suite-self-test red again. This pin states the decision in the same terms
+    as the land-doc pin above, so the excuse cannot come back as a fix.
+    """
+    for name, path in (
+            ('orch-integrate-deadline', 'tools/test_integrate_deadline.py'),
+            ('orch-integrate-probe-loop', 'tools/test_integrate_probe_loop.py')):
+        spec = suite.REGISTRY.get(name)
+        files = ({os.path.basename(str(c)) for c in spec.cmd}
+                 if spec is not None else set())
+        check(f'the suite: {name} names {path}',
+              spec is not None and os.path.basename(path) in files,
+              f'no spec names {path} (spec={spec!r}, '
+              f'cmd={sorted(files)}) — the file is then run by nothing and '
+              'its coverage is a claim with no evidence behind it')
+        check(f'the suite: {path} is not excused in UNREGISTERED',
+              path not in _unregistered_reason_table(),
+              f'UNREGISTERED excuses {path}, which {name} already RUNS; '
+              'the estate check refuses an excuse for a registered file, so '
+              'this excuse can only turn suite-self-test red — the fix is the '
+              'registration, not the excuse')
+
+
 def test_no_test_name_is_registered_twice():
     """A second `test('name', …)` overwrites the first, and nothing says so.
 
@@ -7151,6 +7184,7 @@ def main():
                test_the_trait_conformance_diagnostic_suites_are_gated,
                test_the_suite_self_test_registrations_are_gated,
                test_the_land_doc_suite_is_registered_where_its_bucket_says,
+               test_the_orchestrator_pins_run_rather_than_being_excused,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
