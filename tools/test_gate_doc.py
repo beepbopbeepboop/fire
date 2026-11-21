@@ -202,6 +202,38 @@ def test_failed_job_names_stops_at_the_section_end():
         os.unlink(f.name)
 
 
+def test_one_doc_per_failing_test_not_per_fanout_item():
+    """A red fanout is ONE job: its items must not become one doc and one fix task each.
+
+    While the suite runs it prints a `  FAIL     <job>  (0s)  exit 1` progress line per
+    JOB, and for a fanout that is one line per ITEM (`bootstrap-stage2-dumps:hello.mojo`).
+    The `FAILED:` section at the end names the registration only
+    (`bootstrap-stage2-dumps`). Reading the progress lines made the gate ledger file
+    one `bugs/gate-bootstrap-stage2-dumps:<item>.mojo.md` doc and one fix task per item
+    at c0182fd365 — fifty workers chasing one disabled producer's cascade. A fanout
+    item has no registration of its own, so it also cannot carry the `disabled=` the
+    ledger writes; the parent is the unit that can.
+    """
+    log = ("  FAIL     bootstrap-stage2-dumps:hello.mojo  (0s)  exit 1\n"
+           "  FAIL     bootstrap-stage2-dumps:t_print.mojo  (1s)  exit 1\n"
+           "  FAIL     rthdrscan  (1s)  exit 1\n"
+           "[181/290] TIMEOUT  bootstrap-stage1-dumps:t_list.mojo\n"
+           "FAILED:\n"
+           "  bootstrap-stage2-dumps  (1s)\n"
+           "      NEW: no bug doc tracks this job\n"
+           "  rthdrscan  (1s)\n"
+           "      NEW: no bug doc tracks this job\n"
+           "suite: 2 failed (2 tests)\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+        f.write(log)
+    try:
+        check("the failing job is the fanout's registration, not its items",
+              VL.failed_jobs(f.name) ==
+              ["bootstrap-stage1-dumps", "bootstrap-stage2-dumps", "rthdrscan"])
+    finally:
+        os.unlink(f.name)
+
+
 def test_red_gate_writes_one_doc_per_job():
     def body(tmp):
         reg = {"fix-x": {"branch": "work/x", "state": "exited-ok", "claims": ["bug:x"]}}
@@ -279,6 +311,7 @@ if __name__ == "__main__":
     test_ledger_landing_keeps_a_twin_whose_bytes_differ()
     test_two_states_for_a_claim()
     test_red_gate_writes_one_doc_per_job()
+    test_one_doc_per_failing_test_not_per_fanout_item()
     test_a_gate_that_is_off_files_no_second_doc()
     test_gate_doc_never_names_a_path_and_holds_first()
     test_failed_job_names_stops_at_the_section_end()
