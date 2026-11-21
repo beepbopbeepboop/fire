@@ -5725,6 +5725,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # mistaken for a number. Found via fire.py's own `--dump`'s
     # `repr(ast)` on a parsed AST list.
     if fname_raw == 'repr' and node.args:
+        # `repr(None)` is "None": the literal lowers to the integer word 0,
+        # so the generic int path spelled it "0" (str(None) has the same
+        # guard right below).
+        if gen._is_none_literal(node.args[0]):
+            return 'char *', gen._new_val('char *', gen._intern_string('None'))
         rat, rav = gen.lower_expr(node.args[0])
         # The operand NODE as well as its lowered type: a bool's C type here
         # is a plain `int`, so `repr(b)` for a `b = True` printed `1` unless
@@ -5783,6 +5788,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `open`/`filter`/`enumerate` gates elsewhere in this file.
     if (fname_raw == 'str' and len(node.args) == 1
             and not gen._locally_binds_name('str')):
+        # `str(None)` is "None", not "0": the literal lowers to the word 0
+        # (the integer) and the generic int arm spelled that decimal.
+        if gen._is_none_literal(node.args[0]):
+            return 'char *', gen._new_val('char *', gen._intern_string('None'))
         et, ev = gen.lower_expr(node.args[0])
         # A bool lowers with ctype 'int' (not '_Bool' — _lower_BoolLiteral
         # does this deliberately; other sites depend on it), so str(True)

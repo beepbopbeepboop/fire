@@ -697,7 +697,21 @@ def test_every_declaration_is_seen():
     #       receiver is a named container type, so box 536 -> 539 and word
     #       stays 459; total 995 -> 998. `--fix` wrote this rung and every
     #       quoted figure from the same scan.
-    for header, want in (('fire_runtime.h', 888),   # --fix writes the live figure
+    # 888 -> 892 (2026-11-21, landing `CODEGEN_none_prints_as_zero_and_equals_zero`):
+    # FOUR names on the live header, the no-default `d.get(k)` reads that
+    # answer the slot's own word on a hit and the shared None box on a miss:
+    #   +1  `mojo_dict_get_boxed` (`MojoDict *`, `char *` in, int64_t out) —
+    #       the str-key read.
+    #   +1  `mojo_dict_get_boxed_bytes` (`MojoDict *`, `MojoBytes *` in,
+    #       int64_t out) — its bytes-key twin.
+    #   +1  `mojo_dict_get_boxed_none` (`MojoDict *` in, int64_t out) — the
+    #       None-key read.
+    #   +1  `mojo_dict_get_boxed_kw` (`MojoDict *`, `int64_t` in, int64_t out)
+    #       — the integer/content-key twin. All four are BOX-shaped by the
+    #       live rule: the receiver is a named container type, so box
+    #       539 -> 543 and word stays 459; total 998 -> 1002. `--fix` wrote
+    #       this rung and every quoted figure from the same scan.
+    for header, want in (('fire_runtime.h', 892),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
