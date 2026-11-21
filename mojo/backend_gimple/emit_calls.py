@@ -6592,10 +6592,18 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             addr = obj_val
         else:
             addr = gen._cast('int64_t', obj_val)
-        tag = gen._call_expr('int64_t', 'mojo_read_type_tag', [('int64_t', addr)])
+        # MRO-aware, in the runtime: a subclass instance's tag is the
+        # SUBCLASS's, so plain `tag == _struct_type_id(base)` fails
+        # `isinstance(dog, Animal)`. mojo_struct_isinst answers the
+        # derivation from the registered class table (base edges) and falls
+        # back to plain tag equality for structs with no bases, which are
+        # never registered — so same-class isinstance keeps working for
+        # every struct.
         target = gen._cast('int64_t', f"{target_id}")
+        res = gen._call_expr('int', 'mojo_struct_isinst',
+                             [('int64_t', addr), ('int64_t', target)])
         cmp_t = gen._new_temp('_Bool')
-        gen._binop_into(cmp_t, tag, '==', f"{target}")
+        gen._binop_into(cmp_t, res, '!=', '0')
         if gen._rt_classes_made:
             # an instance of a class made at run time that derives this static class: its
             # header is not a struct tag, the class table knows the bases
@@ -12468,6 +12476,9 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # a box, not its bits (see `_box_float_call_args`). After the padding, so
     # position `i` is parameter `i`, and before the emission below.
     arg_pairs = ginf._box_float_call_args(gen, fname_raw, arg_pairs)
+    arg_pairs = ginf._box_param_call_args(gen, fname_raw, arg_pairs,
+                                          getattr(node, 'args', None),
+                                          getattr(node, 'kwargs', None))
     ginf._tag_mixed_list_call_args(gen, fname_raw, arg_pairs)
 
     # surplus pairs here — each dropped arg's lower_expr already ran while

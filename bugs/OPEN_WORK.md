@@ -49,7 +49,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/FORMAL_x86_endtoend_memory_ceiling.md` | **unclaimed** | three generated proofs exceed the per-process `-M 6144` memory ceiling |
+| `bugs/mid/FORMAL_x86_endtoend_memory_ceiling.md` | **unclaimed** | three generated proofs exceed the per-process `-M 6144` memory ceiling |
 
 ---
 

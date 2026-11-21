@@ -20,16 +20,22 @@ like the direct spelling `g = Thing` does today.
 
 Pinned behaviour (class-as-value in general is a separate, documented
 feature gap, NOT this test's job):
-  * constructor probe: zero `unavailable in compiled mode`, stdout ==
-    CPython's (`3`), exit 0;
-  * value probe: zero stubs, and `print(g)` prints the SAME class-value
-    text the direct name `Thing` prints in the same program (CPython
-    prints `<class 'm.Thing'>` for both; the compiled class-value model
-    prints a type id — both spellings must agree, which is what this
-    pins);
+  * constructor probe: no `unavailable in compiled mode` stub FOR THE
+    ALIASED NAME, stdout == CPython's (`3`), exit 0;
+  * value probe: no stub for either spelling, and `print(g)` prints the
+    SAME class-value text the direct name `Thing` prints in the same
+    program (CPython prints `<class 'm.Thing'>` for both; the compiled
+    class-value model prints a type id — both spellings must agree, which
+    is what this pins);
   * the existing function-alias shape (`from m import helper as alias;
     alias(1)`) stays green;
   * `from m import Thing, Thing as Alias` binds BOTH names in one body.
+
+The stub check is per-imported-name, not "the phrase appears nowhere in
+the translation unit": the codegen's prelude carries its own unconditional
+weak `sort` stub (`bugs/CODEGEN_prelude_sort_is_not_resolved.md`), and a
+whole-file grep would fail this pin on an unrelated prelude entry. What
+this regression owns is that no name IT imports is bound to a stub.
 
 Run:  python3 test_function_body_alias_class_import.py
 """
@@ -58,7 +64,7 @@ M_SRC = (
     '    return x * 2\n'
 )
 
-# (name, u.py source, CPython stdout)
+# (name, u.py source, CPython stdout, imported names that must not be stubs)
 CASES = [
     # The constructor probe: the aliased class constructs.
     (
@@ -69,6 +75,7 @@ CASES = [
         '    print(t.v)\n'
         'f()\n',
         '3\n',
+        ('Alias',),
     ),
     # The value probe: the alias READ as a value must be the same
     # class-value the direct spelling produces in the same program.
@@ -82,6 +89,7 @@ CASES = [
         '    print(Thing)\n'
         'f()\n',
         '<class \'m.Thing\'>\n<class \'m.Thing\'>\n',
+        ('Alias', 'Thing'),
     ),
     # No regression: the function-alias shape stays green.
     (
@@ -91,6 +99,7 @@ CASES = [
         '    print(alias(21))\n'
         'f()\n',
         '42\n',
+        ('alias',),
     ),
     # Both names from one statement, both usable in the body.
     (
@@ -103,8 +112,21 @@ CASES = [
         '    print(b.v)\n'
         'f()\n',
         '1\n2\n',
+        ('Thing', 'Alias'),
     ),
 ]
+
+
+def stub_message(name):
+    """The quoted diagnostic of the weak stub bound to `name`, if any.
+
+    The stub emitters print `"<name>: unavailable in compiled mode"` (and
+    the unresolved-import arm adds a parenthetical after it), so the quote
+    and the colon make this an exact-name match: `Thing` must not match a
+    `ThingElse` stub. The prelude's own `sort` stub is not this test's
+    subject and never matches an imported name.
+    """
+    return f'"{name}: unavailable in compiled mode'
 
 
 def build_and_run(name, u_src, work):
@@ -138,13 +160,15 @@ def main():
     os.makedirs(scratch, exist_ok=True)
     work = tempfile.mkdtemp(prefix='fbalias_', dir=scratch)
     try:
-        for name, u_src, expected in CASES:
+        for name, u_src, expected, imported_names in CASES:
             case_dir = os.path.join(work, name)
             os.makedirs(case_dir, exist_ok=True)
             c_src, got = build_and_run(name, u_src, case_dir)
-            if 'unavailable in compiled mode' in c_src:
-                failures.append(f'{name}: generated C still contains '
-                                f'"unavailable in compiled mode" stub(s)')
+            for imported in imported_names:
+                if stub_message(imported) in c_src:
+                    failures.append(f'{name}: generated C binds {imported!r} '
+                                    f'to an "unavailable in compiled mode" '
+                                    f'stub')
             if name == 'value':
                 # The alias and the direct spelling must print the SAME
                 # class-value text in one program (CPython's own text is

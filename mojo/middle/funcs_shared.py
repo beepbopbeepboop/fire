@@ -538,6 +538,26 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # None). Box it the same generic way every other
         # no-runtime-representation type already is throughout this file.
         ctype = 'int64_t'
+    # An ANNOTATED parameter whose BODY stores a value of another kind cannot
+    # keep the annotation's C type for its whole life. `def f(x: str): x =
+    # [x]` (Tools/c-analyzer's `normalize_selection` shape) declared the slot
+    # `char *`, so the list pointer went through the string slot and every
+    # later string operation read the list struct's bytes as text -- a wrong
+    # value at exit 0, not a diagnostic. The tagged `int64_t` word is the
+    # only single C variable that describes both values; the body's stores
+    # and reads are boxed by kind (see `mixed_box_name` and
+    # `boxed_param_names`). A same-kind rebinding is not this case and keeps
+    # the annotation's real container/string type.
+    if ptype is not None:
+        # Function-local import: `funcs_shared` is imported by the backend,
+        # and a top-level edge the other way is the import cycle this file's
+        # header describes. The rule itself lives in `infra_infer` so the
+        # codegen's mixed-kind scans (which also run on this body) classify
+        # the same annotation and the same binding the same way.
+        from mojo.middle.infra_infer import param_annotation_conflicts
+        if param_annotation_conflicts(gen, pname, ctype,
+                                      getattr(node, 'body', None)):
+            ctype = 'int64_t'
     conv  = (getattr(node, 'param_convs', {}) or {}).get(pname)
     # PART 6 (2026-10-23, family D piece 2): a read-only-conv SCALAR param is
     # a pointer to the CALLER's variable — the reference semantics real Mojo

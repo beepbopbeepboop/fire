@@ -336,7 +336,7 @@ def test_gimple_build_refusal(name: str, mojo_src: str, expected_substr: str):
     _FAIL += 1
 
 
-def test_gimple_matches_cpython(name: str, mojo_src: str):
+def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
     """Compile, run, and require the COMPILED program's stdout and exit code
     to be byte-identical to CPython's on the same source.
 
@@ -346,6 +346,15 @@ def test_gimple_matches_cpython(name: str, mojo_src: str):
     through a module global printed `0`, and no fixed expectation written
     after the bug would have said `0` was wrong — only CPython does. It also
     cannot rot: if the compiler starts diverging, this fails.
+
+    `filename` ending in `.py` compiles the text as Python source (see
+    compile_mojo_to_gimple_exe). A loop over a list of 3+ DISTINCT struct
+    classes has an int64_t (dynamic word) variable, and a method call on a
+    dynamic word dispatches per instance tag only in Python mode — the
+    scalar-method arms of `_lower_method_call` gate the dynamic dispatch on
+    a `.py` filename so a Mojo `Int`'s real scalar methods are never
+    redirected — so a repro of that shape passes `filename='x.py'`, the same
+    mode `tools/pydiff.py` runs it in.
 
     CPython is run first and a non-zero exit or empty output from it is
     reported as the test program's own problem, not a compiler failure —
@@ -373,7 +382,7 @@ def test_gimple_matches_cpython(name: str, mojo_src: str):
             want_rc = py.returncode
         finally:
             os.unlink(entry)
-        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        exe_path = compile_mojo_to_gimple_exe(mojo_src, filename=filename)
         got = subprocess.run([exe_path], capture_output=True,
                              timeout=RUN_TIMEOUT_S, env=_SCRIBBLE_ENV)
         if got.stdout == want_out and got.returncode == want_rc:
@@ -15462,6 +15471,7 @@ def main():
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_none_beside_a_scalar_arm_returns_the_tagged_word,
                   test_copy_of_a_tagged_none_keeps_it,
+                  test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -16118,6 +16128,66 @@ print(pick(None, 3))
 """)
 
 
+def test_param_annotation_contradicted_by_the_body():
+    """A parameter whose annotation the body CONTRADICTS is the tagged word.
+
+    `def normalize_selection(selected: str, ...)` is CPython's own
+    `Tools/c-analyzer/c_common/scriptutil.py` shape: an annotation says `str`,
+    and the body rebinds the name to a LIST (`selected = [selected]`) and
+    compares it to `None`/`True`/`False`. Before, the slot stayed `char *` for
+    its whole life, so the list pointer went through the string slot (every
+    later string operation read the list struct's bytes) and a `True` argument
+    arrived as its stringified spelling -- wrong values at exit 0.
+
+    The fix makes the slot the tagged `int64_t` word, boxes the arguments by
+    kind at the call site, appends a box word to a list under its runtime kind,
+    and asks the runtime for membership against a word needle. The two arms a
+    `frozenset` repr cannot spell (this runtime has no frozen marker) are
+    compared by sorted CONTENT against CPython; every other line is the value
+    itself. The extra functions pin the general rule, not just the reported
+    shape: `int` -> list, `str` -> int, and a same-kind `str` rebound must keep
+    its ordinary string type."""
+    test_gimple_matches_cpython("gimple_param_annotation_contradicted_by_body", """\
+def as_int(n: int):
+    n = [n]
+    return n
+
+def as_str(s: str):
+    s = 3
+    return s
+
+def as_dict(x: list):
+    x = {"a": 1}
+    return x
+
+def same_kind(c: str):
+    c = c + "!"
+    return c
+
+def normalize_selection(selected: str, *, possible=None):
+    if selected in (None, True, False):
+        return selected
+    elif isinstance(selected, str):
+        selected = [selected]
+    elif not selected:
+        return ()
+    return frozenset(selected)
+
+print(as_int(5))
+print(as_str("abc"))
+print(as_dict([1]))
+print(same_kind("x"))
+print(normalize_selection(None))
+print(normalize_selection(True))
+print(normalize_selection(False))
+print(normalize_selection(selected=True))
+print(normalize_selection([]))
+print(sorted(normalize_selection("")))
+print(sorted(normalize_selection("a")))
+print(sorted(normalize_selection(selected="ab")))
+""")
+
+
 def test_none_held_in_local_with_if_join_is_none_needle():
     """Flow-sensitive None tracking at if/while/try join points: a local that
     is None on some paths and reassigned on others must still be treated as
@@ -16236,6 +16306,43 @@ def main():
     print(f(1) + 1)
 main()
 """)
+
+
+def test_struct_init_zeroes_storage_before_setting_type_id():
+    """A struct/class _init must memset its storage to zero BEFORE writing
+    __mojo_type_id and registering the runtime tag. Reversing that order
+    (memset after) wipes the type id, so tag-based dispatch, attribute
+    lookup and repr see an uninitialised/untagged instance. Regression for
+    CODEGEN_runner_regressions_after_system_struct_collision_commit."""
+    global _PASS, _FAIL
+    from gimple_codegen import compile_to_gimple
+    name = "gimple_struct_init_zeroes_storage_before_setting_type_id"
+    try:
+        c = compile_to_gimple("""\
+class C:
+    pass
+
+def main():
+    o = C()
+""", do_imports=False, filename='initorder.py')
+        m = re.search(r'(static void _init_C \(C \* _p\)\n\{.*?\n\})', c, re.S)
+        if not m:
+            raise AssertionError("no _init_C definition found")
+        body = m.group(1)
+        memset_i = body.find('memset (_p, 0, sizeof(C));')
+        tag_i = body.find('_p->__mojo_type_id')
+        if memset_i < 0:
+            raise AssertionError(f"no memset in _init_C:\n{body}")
+        if tag_i < 0:
+            raise AssertionError(f"no __mojo_type_id in _init_C:\n{body}")
+        if memset_i > tag_i:
+            raise AssertionError(
+                f"memset must precede __mojo_type_id in _init_C:\n{body}")
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
 
 
 def test_and_chain_with_a_bool_call_and_an_empty_list_caller():
@@ -16659,6 +16766,61 @@ main()
 """)
 
 
+def test_fstring_format_specs_match_cpython():
+    """f-string format specs are applied to the VALUE, not to its text.
+
+    bug:CODEGEN_format_specs_in_fstrings_are_ignored. The old helper parsed
+    only fill/align/width from the spec and padded the already-stringified
+    value, so `:^N` on a negative int centred the sign wrong, `:.2f` was
+    ignored, `:04d` put the zeros before the minus, and `:x`/`:b` printed
+    decimal. `test_gimple_matches_cpython` is the right oracle here: every
+    wrong answer is a plausible string, so a hand-pinned expectation could
+    only restate whatever the compiler happened to print.
+    """
+    test_gimple_matches_cpython("gimple_fstring_format_specs", """\
+def main():
+    s = "ab"
+    n = -3
+    x = 3.14159
+    print(f"[{s:<5}]")
+    print(f"[{s:>5}]")
+    print(f"[{s:^6}]")
+    print(f"[{n:^5}]")
+    print(f"{x:.2f}")
+    print(f"{n:04d}")
+    print(f"{255:x}")
+    print(f"{5:b}")
+    print(f"{42:5d}|")
+main()
+""")
+    test_gimple_matches_cpython("gimple_fstring_format_specs_negative_and_wide", """\
+def main():
+    n = -3
+    p = 255
+    x = 3.14159
+    s = "ab"
+    print(f"[{s:^5}]")
+    print(f"[{s:10.1}]")
+    print(f"[{n:05d}]")
+    print(f"[{n:+05d}]")
+    print(f"[{n:>08d}]")
+    print(f"[{p:X}]")
+    print(f"[{p:#08x}]")
+    print(f"[{p:o}]")
+    print(f"[{p:#b}]")
+    print(f"[{1234:010,d}]")
+    print(f"[{x:^12.2f}]")
+    print(f"[{x:*>12.2f}]")
+    print(f"[{-x:08.2f}]")
+    print(f"[{x:.2e}]")
+    print(f"[{x:.2g}]")
+    print(f"[{1234.5:.3g}]")
+    print(f"[{0.000123:g}]")
+    print(f"[{x:.1%}]")
+main()
+""")
+
+
 def test_list_slice_of_mixed_list_reads_slots_as_values():
     """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
     test_gimple_matches_cpython("gimple_list_slice_mixed", """\
@@ -16701,6 +16863,81 @@ def main():
 
 main()
 """)
+
+    # User __eq__/__len__/__contains__/__getitem__/__str__ were not dispatched
+    # on a struct receiver, and the type tag was zeroed by _init's own memset
+    # (the tag was written BEFORE it), so even isinstance(a, SameClass) was
+    # False. `2 in a` must call P.__contains__ statically instead of asking
+    # the list/dict/set registry about a struct address.
+    test_gimple_matches_cpython("gimple_class_dunder_methods_dispatch", """\
+class P:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def __eq__(self, other):
+        return self.x == other.x and self.y == other.y
+    def __len__(self):
+        return self.x
+    def __contains__(self, v):
+        return v == self.x or v == self.y
+    def __getitem__(self, i):
+        return self.x if i == 0 else self.y
+    def __str__(self):
+        return "P(" + str(self.x) + ", " + str(self.y) + ")"
+
+def main():
+    a = P(1, 2)
+    b = P(1, 2)
+    print(a == b)
+    print(a is b)
+    print(len(a))
+    print(2 in a)
+    print(5 in a)
+    print(a[0], a[1])
+    print(a)
+    print(str(a))
+    print(isinstance(a, P))
+main()
+""")
+
+    # The same doc's second repro: a hierarchy where the derived __init__
+    # calls super().__init__ AND the instances live in a mixed-class list.
+    # Needs the base-prefix field layout (super() writes at base offsets),
+    # the presence set after the super() call (the base writes name through
+    # its own emission), the MRO-aware isinstance (zoo[1] is a Dog, an
+    # Animal but not a Cat), and the int64_t element type for a list of
+    # 3+ distinct classes so a.speak() dispatches per instance tag. That
+    # dispatch is a method call on a DYNAMIC WORD (the mixed-class loop
+    # variable), which _lower_method_call answers only in Python mode —
+    # the .py filename selects it, the same mode tools/pydiff.py runs this
+    # repro in.
+    test_gimple_matches_cpython("gimple_class_inheritance_super_init", """\
+class Animal:
+    def __init__(self, name):
+        self.name = name
+    def speak(self):
+        return self.name + " says ..."
+
+class Dog(Animal):
+    def speak(self):
+        return self.name + " says woof"
+
+class Cat(Animal):
+    def __init__(self, name, lives):
+        super().__init__(name)
+        self.lives = lives
+    def speak(self):
+        return self.name + " says meow"
+
+def main():
+    zoo = [Animal("thing"), Dog("rex"), Cat("tom", 9)]
+    for a in zoo:
+        print(a.speak())
+    print(isinstance(zoo[1], Animal))
+    print(isinstance(zoo[1], Cat))
+    print(zoo[2].lives)
+main()
+""", filename='inherit.py')
 
 
 # Keep the existing main if present; append our test call via module globals not needed

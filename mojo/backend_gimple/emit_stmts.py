@@ -4092,7 +4092,8 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         return b
     if ctype == 'int64_t' and (
             val in gen._dyn_word_vals or val in gen._dyn_word_locals
-            or val in getattr(gen, '_cur_untyped_params', ())):
+            or val in getattr(gen, '_cur_untyped_params', ())
+            or val in ginf.boxed_param_names(gen)):
         # A word of unknown kind: Python truthiness depends on WHAT it is (an
         # empty container or string is false, None is false, 0 is false), and
         # only the runtime knows. `word != 0` called every empty `{}`/`[]`/""

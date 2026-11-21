@@ -127,5 +127,25 @@ class HardIndexIsTrue(unittest.TestCase):
         self.assertEqual(sorted(on_disk - _index_names()), [])
 
 
+# The gate doc for this file's job claims the job is red on master and says to
+# delete itself when the job is green there. It ran that cycle twice in one
+# day: master 8f7e64375 (2026-11-19) deleted it with the index sync, the job
+# went red again (a live doc with no index row) and the integrator re-filed it
+# (ef7029347); the re-filing's cause was closed (that doc went in merge
+# 76bfc1b8d, the c_common rows with ae81bbf68/d960ce50f) and the job has been
+# green since, but the re-filed doc sat behind. Pin its deletion: if this file
+# is red, the doc's claim is live and the real failure is beside this one; if
+# this file is green, the doc is stale.
+class GateDocOfGreenJobIsDeleted(unittest.TestCase):
+    def test_gate_doc_for_green_job_is_deleted(self):
+        doc = os.path.join(HERE, 'bugs', 'gate-doc-refs-stale-verdicts.md')
+        self.assertFalse(
+            os.path.exists(doc),
+            'the gate doc for the doc-refs-stale-verdicts job (deleted with '
+            '8f7e64375, re-filed by ef7029347) is in the tree; its own rule is '
+            'to exist only while the job is red, and every check in this file '
+            'has passed, so it is stale')
+
+
 if __name__ == '__main__':
     unittest.main()

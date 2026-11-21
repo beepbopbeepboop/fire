@@ -1,9 +1,9 @@
-# Land: should finished branch bug-codegen-format-specs-in-fstrings-are land?
+# Land: should finished branch bug-codegen-values-print-as-pointers-ins land?
 
-**Branch:** `work/bug-codegen-format-specs-in-fstrings-are` (task `bug-codegen-format-specs-in-fstrings-are`; its tip is also saved as `refs/archive/work/bug-codegen-format-specs-in-fstrings-are`, so dropping it loses nothing).
-**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 1 commit(s) ahead of master, 16 behind it; task started 2026-11-20 12:21:18
-**Original work:** Fix the bug in CODEGEN_format_specs_in_fstrings_are_ignored (deleted) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test
-**Original claims:** bug:CODEGEN_format_specs_in_fstrings_are_ignored
+**Branch:** `work/bug-codegen-values-print-as-pointers-ins` (task `bug-codegen-values-print-as-pointers-ins`; its tip is also saved as `refs/archive/work/bug-codegen-values-print-as-pointers-ins`, so dropping it loses nothing).
+**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 1 commit(s) ahead of master, 39 behind it; task started 2026-11-20 20:01:49
+**Original work:** Fix the bug in bugs/CODEGEN_values_print_as_pointers_inside_containers.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinnin
+**Original claims:** bug:CODEGEN_values_print_as_pointers_inside_containers
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-20 15:52:18: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 1 commit(s) ahead of master, 16 behind it; task started 2026-11-20 12:21:18)
-  Branch: work/bug-codegen-format-specs-in-fstrings-are
-  Conflicting files: FORMAL.md, build_stdlib_dylib.py, formal/build.py, formal/model/builtins.py, mojo/backend_gimple/emit_exprs.py, runtime/fire_runtime.c, test_runtime_header_scan.py
+- 2026-11-20 20:50:59: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 1 commit(s) ahead of master, 39 behind it; task started 2026-11-20 20:01:49)
+  Branch: work/bug-codegen-values-print-as-pointers-ins
+  Conflicting files: mojo/backend_gimple/emit_infra.py

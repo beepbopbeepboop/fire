@@ -959,6 +959,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_struct_calcsize': ['int64_t', 'char *'],
     'mojo_struct_compile': ['MojoStructFmt *', 'char *'],
     'mojo_struct_format': ['char *', 'MojoStructFmt *'],
+    'mojo_struct_isinst': ['int', 'int64_t', 'int64_t'],
     'mojo_struct_new': ['MojoStructFmt *', 'char *'],
     'mojo_struct_pack_h': ['MojoBytes *', 'MojoStructFmt *', 'MojoList *'],
     'mojo_struct_pack_into': ['void', 'char *', 'MojoBytes *', 'int64_t', 'MojoList *'],

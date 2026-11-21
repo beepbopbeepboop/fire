@@ -1,9 +1,9 @@
-# Land: should finished branch bug-mid-formal-eval-eq-mojo-bridge-red-o land?
+# Land: should finished branch bug-gate-suite-self-test land?
 
-**Branch:** `work/bug-mid-formal-eval-eq-mojo-bridge-red-o` (task `bug-mid-formal-eval-eq-mojo-bridge-red-o`; its tip is also saved as `refs/archive/work/bug-mid-formal-eval-eq-mojo-bridge-red-o`, so dropping it loses nothing).
-**Age:** last commit 2026-11-19, first unlanded commit 2026-11-19; 2 commit(s) ahead of master, 205 behind it; task started 2026-11-20 05:42:03
-**Original work:** An earlier attempt left 2 commit(s) on branch work/bug-formal-eval-eq-mojo-bridge-red-on-he-2, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs
-**Original claims:** bug:FORMAL_eval_eq_mojo_bridge_red_on_head
+**Branch:** `work/bug-gate-suite-self-test` (task `bug-gate-suite-self-test`; its tip is also saved as `refs/archive/work/bug-gate-suite-self-test`, so dropping it loses nothing).
+**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 1 commit(s) ahead of master, 8 behind it; task started 2026-11-20 20:45:21
+**Original work:** Fix the bug in gate-suite-self-test (deleted) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report). QUICK test
+**Original claims:** bug:gate-suite-self-test
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-20 09:40:13: conflicts with master (last commit 2026-11-19, first unlanded commit 2026-11-19; 2 commit(s) ahead of master, 205 behind it; task started 2026-11-20 05:42:03)
-  Branch: work/bug-mid-formal-eval-eq-mojo-bridge-red-o
-  Conflicting files: formal/arm64_proof_gen.py, test_formal_eval_eq_mojo_bridge.py
+- 2026-11-20 21:26:42: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 1 commit(s) ahead of master, 8 behind it; task started 2026-11-20 20:45:21)
+  Branch: work/bug-gate-suite-self-test
+  Conflicting files: test_suite.py

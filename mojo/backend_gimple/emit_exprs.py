@@ -6094,7 +6094,8 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
         if op in ('in', 'not in'):
             cmp_type, cmp_val = gen._lower_in_dispatch(
                 lt, lv, rt, rv, negate=(op == 'not in'),
-                x_is_none=is_none_needle(gen, node.operands[i]))
+                x_is_none=is_none_needle(gen, node.operands[i]),
+                x_is_word=_is_box_word_expr(gen, node.operands[i], lv))
         else:
             cmp_type, cmp_val = gen._lower_binary_tail(op, left_node, lt, lv, right_node, rt, rv)
         cond = gen._ensure_bool_cond(cmp_type, cmp_val)
@@ -6929,11 +6930,13 @@ def _lower_in_impl(gen, node: gimple_ctypes.BinaryOp, negate: bool) -> tuple[str
     elif gimple_ctypes.TypeLattice.ends_in_star(xt) and not gimple_ctypes.TypeLattice.is_cstr(xt) and gen.var_types.get(xv) == 'int64_t':
         xv = gen._cast(xt, xv)
     return gen._lower_in_impl_values(xt, xv, node.right, negate,
-                                     x_is_none=is_none_needle(gen, node.left))
+                                     x_is_none=is_none_needle(gen, node.left),
+                                     x_is_word=_is_box_word_expr(gen, node.left, xv))
 
 
 def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
-                          x_is_none: bool = False) -> tuple[str, str]:
+                          x_is_none: bool = False,
+                          x_is_word: bool = False) -> tuple[str, str]:
     """The rest of `in`/`not in` lowering, taking the already-lowered
     left operand (xt, xv) instead of re-lowering it from an AST node.
     Split out of _lower_in_impl so a CompareChain link (`a in b < c`,
@@ -6949,7 +6952,8 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
         raise RuntimeError(f"'{_scalar_ct}' does not implement the '__contains__' method")
 
     rt, rv = gen.lower_expr(right_node)
-    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate, x_is_none=x_is_none)    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
+    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate, x_is_none=x_is_none,
+                                 x_is_word=x_is_word)    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
     # built for this one membership test and no name can ever refer to it, yet
     # it was never released -- three per character of every tokenizer scan.
     # Free it once the test has read it. Only a display is treated this way (an
@@ -6986,8 +6990,30 @@ def _in_question_result(gen, ti: str, negate: bool) -> tuple[str, str]:
     return '_Bool', t
 
 
+def _in_defines_contains(gen, sn: str):
+    """The first class in `sn`'s chain (self first) that defines its own
+    `__contains__`, or None. `x in obj` for a user struct must call that
+    method (CPython defines `in` as `obj.__contains__(x)` — the same rule
+    `len(obj)` follows through _lower_builtin_len's struct branch). The
+    receiver is cast to the defining class when the method is inherited,
+    whose layout is a base-prefix of the derived one."""
+    seen = set()
+    stack = [sn]
+    while stack:
+        cur = stack.pop()
+        if not cur or cur in seen:
+            continue
+        seen.add(cur)
+        if gen._struct_defines_method(cur, '__contains__'):
+            return cur
+        for b in (getattr(gen, '_struct_bases', {}).get(cur) or []):
+            stack.append(b)
+    return None
+
+
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
-                       x_is_none: bool = False) -> tuple[str, str]:
+                       x_is_none: bool = False,
+                       x_is_word: bool = False) -> tuple[str, str]:
     """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
     given both operands already lowered. Split out of
     _lower_in_impl_values so _lower_compare_chain's 'in'/'not in' links
@@ -7013,6 +7039,25 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
     # cast it to the real pointer type, same idiom as _gen_for_set/_gen_for_dict.
     if gimple_ctypes.TypeLattice.ends_in_star(rt) and gen.var_types.get(rv) == 'int64_t':
         rv = gen._cast(rt, rv)
+    # A BOX-HOLDING needle (`x_is_word`: a mixed-kind local or a parameter
+    # whose annotation the body contradicts) carries its kind in the box, and
+    # the static container dispatch below cannot see it. `in` must compare
+    # VALUES: the bare word of a str box is the box's own address, which no
+    # slot equals, and a None box must match only a None slot rather than the
+    # integer 0 it shares a word with. `mojo_in_dispatch_int` is the runtime's
+    # one word-aware membership entry point (it already handles a str word and
+    # a dict key); the box arms below extend it to None/bool. Only when the
+    # right operand is a container/string the runtime can walk -- a scalar
+    # right operand is the codegen's own type error.
+    if (x_is_word and not x_is_none
+            and (rt in ('MojoList *', 'MojoDict *', 'MojoSet *', 'char *',
+                        'MojoBytes *', 'int64_t', 'int'))):
+        _cw = gen._to_int64(rt, rv)
+        _nw = xv if _as_str(xt) == 'int64_t' else gen._to_int64(xt, xv)
+        ti = gen._new_temp('int')
+        gen._emit_call('int', ti, 'mojo_in_dispatch_int',
+                       [('int64_t', _cw), ('int64_t', _nw)])
+        return _in_question_result(gen, ti, negate)
     ti = gen._new_temp('int')
 
     # A TAGGED word (`_tagged_word_vals`: the result of a float+pointer mixed
@@ -7208,7 +7253,28 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             cv = gen._cast('char', f"{xv}")
             needle = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
         gen._emit_call('int', ti, 'mojo_str_contains', [('char *', rv), ('char *', needle)])
-    elif rt in ('int64_t', 'int', 'void *') or gimple_ctypes.TypeLattice.ends_in_star(rt):
+    elif (rt.endswith(' *') and rt[:-2] in gen.struct_field_types
+          and _in_defines_contains(gen, rt[:-2]) is not None):
+        # `x in obj` with a user struct pointer: call the struct's
+        # `__contains__` statically, the same rule `len(obj)` follows
+        # (CPython defines `in` as `obj.__contains__(x)`). Before this arm
+        # a struct receiver reached the boxed tail below, which cast the
+        # struct address to a word and asked `mojo_in_dispatch_int` — that
+        # runtime only knows the list/dict/set allocation registries, so
+        # every user-class membership test silently answered False
+        # (`1 in P(1, 2)`). The item goes in as int64_t, the unannotated-
+        # param convention of the method bodies this calls (`_Bool
+        # P___contains__ (P * self, int64_t v)`); the return is the method's
+        # truth value, which the shared negate tail below turns into the
+        # `in`/`not in` bool.
+        _dc_in = _in_defines_contains(gen, rt[:-2])
+        import mojo.backend_gimple.emit_funcs as _gef_in
+        _cs_in = _gef_in._struct_method_csym(gen, _dc_in, '__contains__', '')
+        _recv_in = rv if _dc_in == rt[:-2] else gen._cast(f'{_dc_in} *', rv)
+        _item_in = gen._to_int64(xt, xv)
+        gen._emit_call('int', ti, _cs_in,
+                       [(f'{_dc_in} *', _recv_in), ('int64_t', _item_in)])
+    elif rt in ('int64_t', 'int', 'void *') or rt.endswith(' *'):
         # A container that reached here BOXED — no static type, most often
         # a cross-module module-global read (those accessors are declared
         # `int64_t`, so `gimple_ctypes._C_RESERVED_FUNCS` and friends
@@ -7576,6 +7642,22 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
                 # Don't overwrite _elem_types[t] - it correctly says t contains MojoList*
                 # Instead, track what those lists contain in _nested_elem_types
                 gen._nested_elem_types[t] = gen._elem_types[ev]
+            continue
+        # A BOX-HOLDING word (a mixed-kind local, a tagged value, or a
+        # PARAMETER whose annotation the body contradicts) is appended under
+        # its own runtime kind. Appending it through `mojo_list_append_int`
+        # stored a str box's ADDRESS as an int slot: `selected = [selected]`
+        # in the annotation-contradiction shape then iterated the box, and
+        # `frozenset(selected)` held addresses instead of the strings.
+        # `mojo_list_append_word` reads the box kind (a str box -> a str slot,
+        # None -> an 'n' slot, a bool -> a bool slot), so every later read of
+        # the literal — iteration, repr, a set constructor — sees the value,
+        # not the address.
+        if et == 'int64_t' and _is_box_word_expr(gen, el, ev):
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', t), ('int64_t', ev)])
+            gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+            gen._maybe_kinds_vals.add(t)
             continue
         use = gimple_ctypes.TypeLattice.list_suffix(et) if per_element else suf
         ev_cast = gen._cast_for_list(et, ev, use)
@@ -7992,6 +8074,30 @@ def _is_scalar_elem_kind(elem: str) -> bool:
     return (elem in ('int', 'int64_t', 'char', '_Bool')
             or elem in gimple_ctypes._FLOAT_TYPES
             or elem == 'MojoBytes *')
+
+
+def _is_box_word_expr(gen, el, ev) -> bool:
+    """Is this lowered `int64_t` value a BOX-HOLDING word, whose kind the
+    runtime tag carries rather than the C type?
+
+    Three producers: a mixed-kind LOCAL (`mixed_box_name` — a container beside
+    a scalar, or two scalar kinds), a parameter whose annotation the body
+    contradicts (`boxed_param_names`, one of the same names), and a value
+    already marked as a box/tagged word by its lowering (a call to a
+    mixed-return function, a `next()` off a mixed generator). Appending one
+    of these through the int accessor stores the box's own address; the
+    word-aware append keeps the value."""
+    if ev in getattr(gen, '_boxed_vals', ()) \
+            or ev in getattr(gen, '_tagged_word_vals', ()) \
+            or ev in getattr(gen, '_dyn_word_vals', ()):
+        return True
+    if isinstance(el, IdentExpr):
+        _n = _as_str(_as_ident_node(el).name)
+        try:
+            return ginf.mixed_box_name(gen, _n)
+        except Exception:
+            return False
+    return False
 
 
 def _provably_int_word(gen, el, ev: str) -> bool:
