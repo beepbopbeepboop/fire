@@ -3,11 +3,14 @@
 STOP: claimed by the Claude W1 wave (doc/GIR_WORKERS.md); the orchestrator removes this line if the wave releases it
 
 Stage 4 tail of `doc/GIR.md`, run as described in `doc/GIR_WORKERS.md` (W1). Mechanical, and the
-generated C must NOT change. About 66 sites, all in these files and nowhere else:
+generated C must NOT change. About 39 sites, all in these files and nowhere else:
 
 | file | sites left (by ratchet pattern) |
 |---|---|
-| `mojo/backend_gimple/cpp_core.py` | == 'int64_t': 11, in (.., 'int64_t', ..): 31, == 'char *': 12, == 'MojoList *': 12 |
+| `mojo/backend_gimple/cpp_core.py` | == 'int64_t': 11, in (.., 'int64_t', ..): 4, == 'char *': 12, == 'MojoList *': 12 |
+
+Re-measure before you start: `python3 test_type_string_ratchet.py --per-file` is the census; the
+table above is a snapshot (2026-11-21, after the stage-4 tail round).
 
 `tools/type_string_codemod.py` already rewrote every site it can match. The sites left have a left
 side it does not accept (a call, a `.get(..)`, a parenthesized expression) or a tuple it has no
@@ -42,6 +45,15 @@ Rewrite a test ONLY with a predicate whose answer is EXACTLY the old test's answ
 | `t in ('int64_t', 'MojoList *')` | `is_word_or_list(t)` |
 
 Tuple order does not matter. `t != X` and `t not in (...)` become `not <predicate>(t)`.
+
+The rest of the vocabulary is the `TUPLES` table in `tools/type_string_codemod.py`: a tuple that is
+the union of several representation classes maps to a DISJUNCTION of their predicates
+(`is_uword`, `is_char`, `is_voidp`, `is_dict`, `is_set`, `is_bytes`, `is_boxable`,
+`is_word_value`, `is_c_scalar`, `is_number_scalar`), e.g.
+`t in ('int', 'int64_t', 'uint64_t')` -> `is_int_word(t) or is_uword(t)`. Run the codemod
+(`python3 tools/type_string_codemod.py --check`) before working by hand: it rewrites every one of
+these, including tuples wrapped across lines, in a file that names either `gimple_ctypes` or
+`TypeLattice`. `python3 test_type_lattice_predicates.py` pins every entry's exact membership.
 
 SKIP (leave unchanged and list in your report): a test inside a string (emitted C text, a message, an
 f-string), a chained comparison (`a == b == 'int64_t'`), a tuple not in the table, and any site where
