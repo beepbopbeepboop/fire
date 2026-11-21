@@ -17,6 +17,16 @@ fabricated, and they are what dispatched fifty workers after one root cause.
     git log -1 --format=%B 828e356ae | head -20
     python3 tools/suite.py bootstrap-stage2-dumps:class_jit.mojo ; echo "exit=$?"
 
+    python3 - <<'EOF'
+    import sys; sys.path.insert(0, 'tools')
+    import gate_ledger as G
+    st = {"jobs": {}}
+    G.reconcile(st, "c0182fd3...", ["bootstrap-stage2-dumps:class_jit.mojo"], [],
+                {"sha": "d0c0a1cc...", "failed": ["bootstrap-stage2-cc"]})
+    st["jobs"]["bootstrap-stage2-dumps:class_jit.mojo"]["last_good"]
+    # -> 'd0c0a1cc...', although that run's log SKIPped the item
+    EOF
+
 ## What I saw
 
 1. `control/gate_ledger.json` gives all fifty
@@ -48,7 +58,10 @@ must stop the bisect instead of answering "red" (or "green") for every commit.
    `last_good: d0c0a1cc57` from a run whose gate log shows
    `skip bootstrap-stage2-dumps:<item>` and a red producer. It should require
    the job to be in `prev`'s PASSED set (or carry an explicit "unknown" flag),
-   not merely absent from FAILED.
+   not merely absent from FAILED. Measured on the real function: with the
+   previous run's `failed` naming only the producer, the item comes back newly
+   red with `last_good` = that run's sha — the same value a genuine previous
+   PASS produces, so nothing downstream can tell the two apart.
 
 2. **`tools/verify_landed.py::job_is_red_at`** (used by `bisect_job`) and
    **`tools/autointegrate.py::probe`** — both decide from an exit code alone:
@@ -63,9 +76,23 @@ must stop the bisect instead of answering "red" (or "green") for every commit.
    per-job verdict line (`[ n/m] ok|skip|FAIL ...`), not from the process exit
    code.
 
-`tools/verify_landed.py::passed_jobs` already reads the log for PASS lines;
-the same reading, extended to the requested job's verdict, is what both sites
-need.
+`tools/verify_landed.py::passed_jobs` is NOT the working reader this was first
+described as — it matches `^\[\s*\d+/\d+\] PASS\s+(\S+)` in `build/suite.log`,
+while the runner's tag for a pass has been `ok` since the one runner landed
+(`tools/suite.py:6473`, `_TAG = {PASS: 'ok', ...}`). Measured on this worktree's
+own log, which contains
+`[ 76/101] ok       bootstrap-stage1-dumps:class_jit.mojo`:
+
+    $ python3 -c "import sys;sys.path.insert(0,'tools');import verify_landed as V;print(V.passed_jobs('.'))"
+    []
+
+3. **`tools/verify_landed.py::passed_jobs`** — the dead reader is a site of its
+   own, and the first one to fix: `reconcile`'s `passed` loop is fed from it
+   (`verify_landed.py:248`), so no job has ever been recorded as recovered and
+   every `last_good` the ledger holds came from the fabrication in site 1 rather
+   than from a run that saw the job pass. The tri-state reader below must share
+   this one parser; a second regex over the same log is how the two answers
+   drifted apart in the first place.
 
 ## Cost of not fixing it
 
@@ -78,8 +105,9 @@ to re-derive the same cascade. Every one of those workers pays a
 
 1. `tools/verify_landed.py`: add `job_verdict(job, sha)` next to
    `passed_jobs`, parsing `build/suite.log` for the job's own verdict
-   (`[ i/n] ok|skip|DISABLED|FAIL|TIMEOUT|RESOURCE <job>`), and have
-   `job_is_red_at` return a tri-state. `bisect_job` stops with
+   (`[ i/n] ok|skip|DISABLED|FAIL|TIMEOUT|RESOURCE <job>`), and fix
+   `passed_jobs` itself to the runner's `ok` tag (site 3), so both readers share
+   one parser. Have `job_is_red_at` return a tri-state. `bisect_job` stops with
    `bisect_note = "job did not run at <sha>; cannot bisect"` on no-evidence
    rather than picking a commit.
 2. `tools/autointegrate.py::probe`: require a PASS verdict for every requested
