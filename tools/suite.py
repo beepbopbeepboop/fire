@@ -4092,8 +4092,7 @@ test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
      extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
             'tools/formal_host_import_wall.py',
             'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
-     desc='the host-import shapes instrument: which shapes each reader maps to',
-     disabled='bugs/gate-formal-host-import-shapes.md')
+     desc='the host-import shapes instrument: which shapes each reader maps to')
 # The other file the same estate check named on the same day, registered on
 # the same reasoning rather than excused: seven assertions that a per-STRUCT
 # predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is

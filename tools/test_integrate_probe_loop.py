@@ -13,7 +13,6 @@ Temporary state only: swarm.state_path is pointed at a temp file, so the live sw
 import contextlib
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
