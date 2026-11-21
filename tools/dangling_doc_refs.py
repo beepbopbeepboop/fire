@@ -164,6 +164,16 @@ def candidates():
     Falls back to the directory walk, with a warning, if git cannot answer —
     the census is still true, it just cannot distinguish this worktree's
     scaffolding from the repository's files.
+
+    BOTH paths drop `SELF_PATH`. The fallback used to drop only the derived
+    directories, so an export of a commit with no `.git` (which takes the
+    fallback) scanned the LEDGER as if it were a citer: the ledger's whole
+    content is the names of deleted docs other files still cite, so it looks
+    like a file that cites every one of them and `--ratchet` reports the
+    commit's own ledger as fresh gains. That is two answers for two copies of
+    one commit, the failure class this file's module docstring names. The
+    exclusion belongs to the question ("which files can CITE a doc"), not to
+    the way the file list was produced.
     """
     import subprocess
     try:
@@ -190,7 +200,9 @@ def candidates():
         for name in sorted(filenames):
             if name.endswith(SUFFIXES):
                 rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
-                out.append(rel.replace(os.sep, '/'))
+                rel = rel.replace(os.sep, '/')
+                if rel != SELF_PATH:
+                    out.append(rel)
     return out
 
 
