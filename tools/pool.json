@@ -1,6 +1,6 @@
 {
   "default_slot": "qwen-local",
-  "mode": "drain",
+  "mode": "build",
   "mode_note": "build: high-volume campaign - no batch cap, land everything fast. drain: work the backlog down - finishing and gate-repair work starts first, batches of 8. Both gate with the cheap landing gate (tools/gates.json `landing`). `control.py mode build|drain` flips it; everything that used to guess the campaign reads this.",
   "slots": [
     {
