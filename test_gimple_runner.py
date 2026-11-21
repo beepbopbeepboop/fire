@@ -16190,6 +16190,43 @@ main()
 """)
 
 
+def test_struct_init_zeroes_storage_before_setting_type_id():
+    """A struct/class _init must memset its storage to zero BEFORE writing
+    __mojo_type_id and registering the runtime tag. Reversing that order
+    (memset after) wipes the type id, so tag-based dispatch, attribute
+    lookup and repr see an uninitialised/untagged instance. Regression for
+    CODEGEN_runner_regressions_after_system_struct_collision_commit."""
+    global _PASS, _FAIL
+    from gimple_codegen import compile_to_gimple
+    name = "gimple_struct_init_zeroes_storage_before_setting_type_id"
+    try:
+        c = compile_to_gimple("""\
+class C:
+    pass
+
+def main():
+    o = C()
+""", do_imports=False, filename='initorder.py')
+        m = re.search(r'(static void _init_C \(C \* _p\)\n\{.*?\n\})', c, re.S)
+        if not m:
+            raise AssertionError("no _init_C definition found")
+        body = m.group(1)
+        memset_i = body.find('memset (_p, 0, sizeof(C));')
+        tag_i = body.find('_p->__mojo_type_id')
+        if memset_i < 0:
+            raise AssertionError(f"no memset in _init_C:\n{body}")
+        if tag_i < 0:
+            raise AssertionError(f"no __mojo_type_id in _init_C:\n{body}")
+        if memset_i > tag_i:
+            raise AssertionError(
+                f"memset must precede __mojo_type_id in _init_C:\n{body}")
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def test_and_chain_with_a_bool_call_and_an_empty_list_caller():
     """Two defects, one shape. `args and hasattr(args[-1], 'op')` / `lines and
     lines[-1].endswith(':')`: the right operand's type was estimated as an
