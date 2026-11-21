@@ -16119,6 +16119,66 @@ print(pick(None, 3))
 """)
 
 
+def test_param_annotation_contradicted_by_the_body():
+    """A parameter whose annotation the body CONTRADICTS is the tagged word.
+
+    `def normalize_selection(selected: str, ...)` is CPython's own
+    `Tools/c-analyzer/c_common/scriptutil.py` shape: an annotation says `str`,
+    and the body rebinds the name to a LIST (`selected = [selected]`) and
+    compares it to `None`/`True`/`False`. Before, the slot stayed `char *` for
+    its whole life, so the list pointer went through the string slot (every
+    later string operation read the list struct's bytes) and a `True` argument
+    arrived as its stringified spelling -- wrong values at exit 0.
+
+    The fix makes the slot the tagged `int64_t` word, boxes the arguments by
+    kind at the call site, appends a box word to a list under its runtime kind,
+    and asks the runtime for membership against a word needle. The two arms a
+    `frozenset` repr cannot spell (this runtime has no frozen marker) are
+    compared by sorted CONTENT against CPython; every other line is the value
+    itself. The extra functions pin the general rule, not just the reported
+    shape: `int` -> list, `str` -> int, and a same-kind `str` rebound must keep
+    its ordinary string type."""
+    test_gimple_matches_cpython("gimple_param_annotation_contradicted_by_body", """\
+def as_int(n: int):
+    n = [n]
+    return n
+
+def as_str(s: str):
+    s = 3
+    return s
+
+def as_dict(x: list):
+    x = {"a": 1}
+    return x
+
+def same_kind(c: str):
+    c = c + "!"
+    return c
+
+def normalize_selection(selected: str, *, possible=None):
+    if selected in (None, True, False):
+        return selected
+    elif isinstance(selected, str):
+        selected = [selected]
+    elif not selected:
+        return ()
+    return frozenset(selected)
+
+print(as_int(5))
+print(as_str("abc"))
+print(as_dict([1]))
+print(same_kind("x"))
+print(normalize_selection(None))
+print(normalize_selection(True))
+print(normalize_selection(False))
+print(normalize_selection(selected=True))
+print(normalize_selection([]))
+print(sorted(normalize_selection("")))
+print(sorted(normalize_selection("a")))
+print(sorted(normalize_selection(selected="ab")))
+""")
+
+
 def test_none_held_in_local_with_if_join_is_none_needle():
     """Flow-sensitive None tracking at if/while/try join points: a local that
     is None on some paths and reassigned on others must still be treated as

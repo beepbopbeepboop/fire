@@ -10060,6 +10060,36 @@ def _gmh_is_foreign_main(stmts, s):
     return isinstance(s, FunctionDef) and s.name == 'main' and s not in stmts
 
 
+def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
+    """Record, per callee, the parameters whose annotation their own body
+    contradicts (`infra_infer.param_boxed_names`).
+
+    `funcs_shared._param_ctype` declares such a parameter as the tagged
+    `int64_t` word. This is the CALL-SITE half: `_box_param_call_args` must
+    box the argument by its kind, or the callee's reads dispatch on a word
+    the caller never tagged (`normalize_selection(True)` reached the body as
+    the bare 1). The keys are the ones `_func_param_names` uses: bare for a
+    free function, `Struct_method` for a method.
+
+    Called from both population passes of `_inferred_var_types` (the same
+    two `_gmh_reconcile_param_container_kinds` is called from), because both
+    are pre-signature and either may be the first to see a function."""
+    import mojo.middle.infra_infer as ginf
+    self._param_box_names: dict[str, set] = {}
+    for s in all_functions:
+        if isinstance(s, FunctionDef):
+            self._param_box_names[_as_str(s.name)] = ginf.param_boxed_names(
+                self, _as_funcdef_node(s))
+    for s in all_structs_for_methods:
+        if isinstance(s, StructDef):
+            _sd_pb = _as_structdef_node(s)
+            for m in _sd_pb.methods:
+                _pm_pb = _as_funcdef_node(m)
+                _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
+                self._param_box_names[_pbk] = ginf.param_boxed_names(
+                    self, _pm_pb)
+
+
 def _gmh_reconcile_param_container_kinds(self):
     """Rewrite `_inferred_param_types` where a parameter's USAGE evidence
     and its own body BINDINGS disagree about the container kind.
@@ -12037,7 +12067,8 @@ def _gmp_infer_return_types_late(self, all_functions: list) -> None:
                     self.var_types[bare] = (self._inferred_param_types.get(_p3b_s.name, {}).get(bare)
                                             or self._resolve_type(ptype))
                 else:
-                    self.var_types[bare] = self._resolve_type(ptype)
+                    self.var_types[bare] = self._param_ctype(
+                        pname, ptype, _p3b_s)
             for _cln, _clt in self._closure_value_locals(_p3b_s.body).items():
                 if _cln not in self.var_types:
                     self.var_types[_cln] = _clt
@@ -12687,7 +12718,8 @@ def _gmp_infer_return_types(self, stmts: list, all_functions: list) -> None:
                 elif pname.startswith('*'):
                     self.var_types[pname[1:]] = 'MojoList *'
                 else:
-                    self.var_types[pname] = self._resolve_type(ptype)
+                    self.var_types[pname] = self._param_ctype(
+                        pname, ptype, _as_s_p1)
             inferred = self._infer_return_type(_as_s_p1.body)
             if _as_s_p1.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
@@ -15403,7 +15435,8 @@ def gen_module_impl(self, stmts: list):
                                 self.var_types[pname] = self._inferred_param_types[
                                     _mangled_key][pname]
                             else:
-                                self.var_types[pname] = self._resolve_type(ptype)
+                                self.var_types[pname] = self._param_ctype(
+                                    pname, ptype, m)
                         # Seed inferred LOCAL var types (see
                         # `gimple_ctypes._seedable_local_ctype` for the rule
                         # and for why the three call sites share it):
@@ -15948,6 +15981,7 @@ def gen_module_impl(self, stmts: list):
                 # `mojo.*` import (see the import block's comment).
                 import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
+    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
     _gmh_reconcile_param_container_kinds(self)
 
 
@@ -18942,7 +18976,7 @@ def gen_module_impl(self, stmts: list):
                     self.var_types[bare] = (self._inferred_param_types.get(s.name, {}).get(bare)
                                              or self._resolve_type(ptype))
                 else:
-                    self.var_types[bare] = self._resolve_type(ptype)
+                    self.var_types[bare] = self._param_ctype(pname, ptype, s)
             inferred = self._infer_return_type(s.body)
             if s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
@@ -18970,6 +19004,7 @@ def gen_module_impl(self, stmts: list):
                 # `mojo.*` import (see the import block's comment).
                 import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
+    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
     _gmh_reconcile_param_container_kinds(self)
 
     self._param_generator_api: dict[str, dict[str, str]] = {}

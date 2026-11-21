@@ -5546,13 +5546,17 @@ class GimpleGen:
     def _lower_in_impl(self, node: BinaryOp, negate: bool) -> tuple[str, str]:
         return gex._lower_in_impl(self, node, negate)
     def _lower_in_impl_values(self, xt: str, xv: str, right_node, negate: bool,
-                              x_is_none: bool = False) -> tuple[str, str]:
+                              x_is_none: bool = False,
+                              x_is_word: bool = False) -> tuple[str, str]:
         return gex._lower_in_impl_values(self, xt, xv, right_node, negate,
-                                         x_is_none=x_is_none)
+                                         x_is_none=x_is_none,
+                                         x_is_word=x_is_word)
     def _lower_in_dispatch(self, xt: str, xv: str, rt: str, rv: str, negate: bool,
-                           x_is_none: bool = False) -> tuple[str, str]:
+                           x_is_none: bool = False,
+                           x_is_word: bool = False) -> tuple[str, str]:
         return gex._lower_in_dispatch(self, xt, xv, rt, rv, negate,
-                                      x_is_none=x_is_none)
+                                      x_is_none=x_is_none,
+                                      x_is_word=x_is_word)
     def _lower_external_call(self, node: CallExpr) -> tuple[str, str]:
         return gex._lower_external_call(self, node)
     def _lower_mlir_mem(self, kind: str, arg_pairs: list) -> tuple[str, str]:
