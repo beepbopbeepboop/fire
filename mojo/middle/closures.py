@@ -708,7 +708,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                 for _cn, _ct in captures:
                     if _cn not in ctx.var_types:
                         ctx.var_types[_cn] = _ct
-                ctx.func_return_types[lifted] = ctx._infer_return_type(inner_body)
+                ctx.func_return_types[lifted] = ctx._infer_return_type(inner_body, inner)
                 ctx.var_types.clear()
             inner_scope = dict(enriched_scope)
             for pn, pt in inner_params:

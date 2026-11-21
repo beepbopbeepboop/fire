@@ -3513,6 +3513,220 @@ print(j())
 print(k())
 """)
 
+    # `x /= 2` REBINDS `x` to a float: the local-type pre-pass has to join
+    # the augmented assignment's result with the name's other bindings, or
+    # the int type from `x = 9` wins and the store truncates (`4` for `4.5`).
+    # The float-local truthiness rows are the same bug's other half: Python
+    # truthiness is `x != 0.0`, so 0.5 and 0.0001 are true, at module level
+    # (the compile-time fold) and inside a function (the emitted condition).
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_int_local", """\
+def main():
+    x = 9
+    x /= 2
+    print(x)
+    y = 13
+    y += 0.5
+    print(y)
+    print(7 / 2)
+    print(1e-9 > 0)
+    if 0.0001:
+        print("tiny truthy")
+    print(3 == 3.0)
+    print(round(2.5), round(3.5))
+main()
+""")
+
+    # The same rebinding rule, one scope out: a PARAMETER is one C variable
+    # for its whole life, so `x /= 2` cannot declare a new local — the int64_t
+    # parameter slot truncated the double the emitter computed. The parameter
+    # slot widens instead (`funcs_shared.param_aug_rebinding_ctype`).
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_unannotated_parameter", """\
+def f(x):
+    x /= 2
+    print(x)
+f(9)
+
+def g(y):
+    y += 0.5
+    print(y)
+g(9)
+""")
+
+    # The ANNOTATED flavour. CPython evaluates a function annotation at def
+    # time, so the Mojo `Int` of the bug doc's repro is bound here; the
+    # compiler resolves the same annotation to its int64_t slot. Python's
+    # rebinding rule still wins over the annotation (the slot widens) — an
+    # annotation is not enforced in the Python-source mode this test uses,
+    # and truncating would be a silently wrong value.
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_annotated_parameter", """\
+Int = int
+def f(x: Int):
+    x /= 2
+    print(x)
+f(9)
+""")
+
+    # `global x` / module-level `x`: the field's C type is decided by the
+    # module-global scans (`_phase17_apply_augmented_global_types`), and the
+    # store then coerces to it. Without the augmented-assignment join the
+    # field stayed the int its plain `x = 9` froze and truncated.
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_a_global_rebound_in_a_function", """\
+x = 9
+def f():
+    global x
+    x /= 2
+f()
+print(x)
+
+y = 9
+def g():
+    global y
+    y += 0.5
+g()
+print(y)
+""")
+
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_a_module_global", """\
+x = 9
+x /= 2
+print(x)
+y = 9
+y += 0.5
+print(y)
+""")
+
+    # The same truncation through the other typing paths the estimator reads
+    # for a `/`, from the doc this branch closes: `_quick_type`'s BinaryOp
+    # arm fell through to `join(int64_t, int64_t) = int64_t`, so a plain
+    # `x = x / 2` stored a double into the int64_t local and a `return n / 2`
+    # joined an int64_t return slot — while the emitter's `_lower_binary_tail`
+    # answered double. The rule is now shared (`gimple_ctypes._true_div_cotype`),
+    # so the estimator and the emitter cannot drift.
+    test_gimple_matches_cpython("gimple_true_division_widens_a_plain_int_local", """\
+def main():
+    x = 9
+    x = x / 2
+    print(x)
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_true_division_widens_a_return_expression", """\
+def half(n):
+    return n / 2
+
+def main():
+    print(half(9))
+main()
+""")
+
+    # The RETURN slot: by the `return` the local is ALREADY double — the
+    # augmented-assignment join above, and `x * 0.5` for the second — so the
+    # only thing that can cast it back into the int64_t return conversion is
+    # a stale estimate: `_infer_return_type` re-estimated the name before the
+    # local table existed (pass 2a runs before `_infer_local_var_types`), and
+    # a bare identifier answered its int64_t default. Passing the FunctionDef
+    # lets it merge the body's local table instead.
+    test_gimple_matches_cpython("gimple_true_division_widens_an_augmented_return_slot", """\
+def f():
+    x = 9
+    x /= 2
+    return x
+
+def main():
+    print(f())
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_true_division_widens_a_return_slot_local", """\
+def f():
+    x = 3.0
+    y = x * 0.5
+    return y
+
+def main():
+    print(f())
+main()
+""")
+
+    # The control that must NOT be widened: a PythonObject operand keeps its
+    # int64_t word of double bits — `_lower_binary_tail`'s box arm answers
+    # before the true-division gate, so `_true_div_cotype` refuses a box
+    # operand and the estimator says int64_t too. `4614838538166547251` is
+    # 3.4's double bits printed as that word. CPython cannot run the source,
+    # so this pins the emitted value directly rather than matching it.
+    test_gimple_stdout("gimple_python_object_division_keeps_its_box", """\
+def main():
+    a = PythonObject(34)
+    b = PythonObject(10)
+    c = a / b
+    print(c)
+main()
+""", "4614838538166547251\n", filename='true_div_box.py')
+
+    test_gimple_matches_cpython("gimple_float_truthiness_is_not_its_integer_part", """\
+def f():
+    x = 0.0001
+    if x:
+        print("tiny")
+    y = 0.5
+    while y:
+        print("once")
+        y = 0.0
+    print(bool(0.0001), bool(0.0))
+
+if 0.5:
+    print("module truthy")
+else:
+    print("module falsy")
+
+f()
+""")
+
+    # A module-level `if` on a folded NON-NUMERIC constant used to take the
+    # else arm: `eval_const_bool` converted only a folded bool/int/float to a
+    # truth value, so a folded str/list/dict fell through to None and
+    # `eval_const_bool_state` reported CONST_FALSE (the tri-state cannot
+    # distinguish "fold failed" from "false"). `module_gen` then resolved the
+    # statement to its else arm, deleting the then-arm before emission.
+    # CPython's truthiness is the oracle: a non-empty string/list/dict is
+    # true, the empty form false.
+    test_gimple_matches_cpython("gimple_module_constant_container_condition", """\
+def main():
+    print("ran")
+
+if "x":
+    print("str yes")
+else:
+    print("str no")
+
+if [1]:
+    print("list yes")
+else:
+    print("list no")
+
+if {1: 2}:
+    print("dict yes")
+else:
+    print("dict no")
+
+if "":
+    print("empty str yes")
+else:
+    print("empty str no")
+
+if []:
+    print("empty list yes")
+else:
+    print("empty list no")
+
+if {}:
+    print("empty dict yes")
+else:
+    print("empty dict no")
+
+main()
+""")
+
     # The MATERIALIZED flavour, which is a different emission path and was
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env
@@ -9979,7 +10193,7 @@ fn main():
     n[b'a'] = 1
     n['a'] = 2
     print(n.get(b'a'), n.get('a'), n.pop(b'a'), len(n), n['a'])
-""", "7 0 -1\n7 0 0\n-1 2\n7 8 0\n3 3 1\n9 9 3 2\nv v 0\n1.5\n1 2 1 1 2\n")
+""", "7 None -1\n7 0 0\n-1 2\n7 8 0\n3 3 1\n9 9 3 2\nv v 0\n1.5\n1 2 1 1 2\n")
 
     # `x in <dict>` where the DICT arrived at the test with its static type
     # erased -- a dict handed to an unannotated parameter, which is what any
@@ -15175,6 +15389,55 @@ def main():
 main()
 """)
 
+    # Minimal shape of the id-token set bug: two different lists with equal
+    # CONTENT must still contribute two distinct id() elements. Before the
+    # fix, mojo_set_add_word unwrapped a kind-'i' id box to the container
+    # pointer in bx->bits, _set_word_key turned that into a CONTENT key, and
+    # the two equal-content lists collapsed into one set element.
+    test_gimple_matches_cpython("gimple_id_token_set_dedupes_by_identity", """\
+def main():
+    a = [1, 2]
+    b = [1, 2]
+    ids = {id(a), id(b), id(a)}
+    print(len(ids))
+    print(id(a) != id(b))
+    # A different-content list must also be distinct.
+    c = [3, 4]
+    ids2 = {id(a), id(c)}
+    print(len(ids2))
+
+main()
+""")
+
+    # The reduced form of the full `gimple_id_is_an_integer` program: the same
+    # two equal-content lists, their id() tokens as DICT KEYS (written and read
+    # back) and as the members of one set literal, nothing else. Reducing the
+    # full program one statement at a time over the pre-fix tree, the collapse
+    # survived every reduction down to the bare set literal — the codegen
+    # refactors after the bug was found routed the set elements through the
+    # boxed-word path even in isolation, so the floor the doc's next step
+    # expected never stopped failing — which `gimple_id_token_set_dedupes_by_identity`
+    # pins in its bare form. This case pins the dict-keyed interaction the full
+    # program adds: before the fix, `mojo_set_add_word` unwrapped the kind-'i'
+    # id box to the container pointer in bx->bits, `_set_word_key` saw a
+    # registered container and re-keyed by CONTENT, and the two equal-content
+    # lists collapsed to one element (`set 1` where CPython says `set 2`),
+    # with the dict arm printing its hit throughout.
+    test_gimple_matches_cpython("gimple_set_of_id_tokens_collapses", """\
+def main():
+    a = [1, 2]
+    b = [1, 2]
+    # The dict half of the full program: id tokens as keys, read back.
+    cache = {}
+    cache[id(a)] = 'A'
+    print('hit', cache[id(a)] == 'A')
+    # The set half: id tokens of two equal-content lists.
+    ids = {id(a), id(b), id(a)}
+    print('set', len(ids))
+
+main()
+""")
+
     # `c == in_str` where one side is a `char *` VALUE and the other an
     # `int64_t` slot that holds EITHER a boxed string pointer or a byte code:
     # the codegen cannot tell them apart in one pass (the slot is assigned its
@@ -15502,6 +15765,9 @@ def main():
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_none_argument_is_none_in_the_callee,
+                  test_none_prints_as_none,
+                  test_none_vs_zero_distinguished,
+                  test_dict_get_unknown_domain_into_a_list_local,
                   test_textwrap_dedent_matches_cpython,
                   test_mixed_return_none_string_and_set_arms,
                   test_none_held_in_local_with_if_join_is_none_needle,
@@ -15513,9 +15779,12 @@ def main():
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_except_around_builtin_errors_matches_cpython,
+                  test_del_missing_dict_key_raises_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
                   test_gimple_values_print_as_pointers_inside_containers,
-                  test_dataclass_default_factory_fields_start_empty_and_per_instance):
+                  test_dataclass_default_factory_fields_start_empty_and_per_instance,
+                  test_param_annotation_contradicted_by_the_body,
+                  test_untyped_parameter_word_kind_not_recovered):
         try:
             _late()
         except AssertionError as e:
@@ -16108,6 +16377,105 @@ print(repr(r(None)), r(None), repr(r("")), repr(r("0")))
 """)
 
 
+def test_none_prints_as_none():
+    """A None stored in a return value, a dict miss, a local, a list slot, an
+    f-string and `str()` prints `None`, not the integer `0`. The function with
+    a `None` arm returns the tagged word, `dict.get` with no default answers
+    the None box on a miss, and a local bound to None is a box-holding word.
+    The bug was "None prints as 0 and equals 0"; its doc was deleted with this
+    case."""
+    test_gimple_matches_cpython("gimple_none_prints_as_none", """\
+def find(items, target):
+    i = 0
+    for x in items:
+        if x == target:
+            return i
+        i += 1
+    return None
+
+def main():
+    print(find([5, 0], 9))
+    print(find([5, 0], 5))
+    d = {"a": 1}
+    print(d.get("zz"))
+    print(d.get("a"))
+    x = None
+    print(x)
+    print([None, 1])
+    print([0, 1])
+    print(f"{x}")
+    print(str(None))
+    print(repr(None))
+    got = d.get("zz")
+    hit = d.get("a")
+    print(got, got is None, hit, hit is None, hit + 1)
+    print(d.get("zz") is None, d.get("a") is None)
+main()
+""")
+
+
+def test_none_vs_zero_distinguished():
+    """`None` and the integer `0` are different values everywhere this program
+    observes them: an unannotated parameter declared `= None` (a tagged word,
+    so `label(0)` takes the zero arm and `label()`/`label(None)` take the None
+    arm), `0 == None` / `0 is None` / `None == None`, and a local bound to 0
+    (provably an int, so `n is None` is False)."""
+    test_gimple_matches_cpython("gimple_none_vs_zero_distinguished", """\
+def label(value=None):
+    if value is None:
+        return "missing"
+    if value == 0:
+        return "zero"
+    return "value"
+
+def main():
+    print(label())
+    print(label(None))
+    print(label(0))
+    print(label(-1))
+    print(0 == None)
+    print(None == None)
+    n = 0
+    print(n is None)
+    print([0, 1, 2][0])
+    lst = [0, 1]
+    print(lst)
+    print(None in [0, 1])
+    print(0 in [None, 1])
+main()
+""")
+
+
+def test_dict_get_unknown_domain_into_a_list_local():
+    """A no-default `d.get(k)` whose value domain is only the `int64_t`
+    default (here `self.rows`, a class attribute) is boxed, so a miss prints
+    None. Bound to a local that is ALSO bound a list, the local keeps its
+    declared `MojoList *`: the word is unwrapped for the list consumers
+    instead of raising the tagged-word/container refusal. This is the shape
+    `module_gen.py`'s own `param_ctypes = self._mangled_signature_ctypes.get(
+    bare_mangled)` had, which made `fire.py --dump module_gen.py` refuse."""
+    test_gimple_matches_cpython("gimple_dict_get_of_lists", """\
+class Table:
+    def __init__(self):
+        self.rows = {}
+    def put(self, k, v):
+        self.rows[k] = v
+    def lookup(self, k):
+        out = []
+        out = self.rows.get(k)
+        return out
+
+def main():
+    t = Table()
+    t.put("a", [1, 2])
+    t.put("b", [3])
+    r = t.lookup("a")
+    print(len(r), r[1])
+    print(len(t.lookup("b")))
+main()
+""")
+
+
 def test_textwrap_dedent_matches_cpython():
     """`textwrap.dedent` is a runtime helper (the module itself is not compiled into the
     binary, so the call used to raise NotImplementedError; c_common/tables.py runs it at
@@ -16225,6 +16593,43 @@ print(normalize_selection([]))
 print(sorted(normalize_selection("")))
 print(sorted(normalize_selection("a")))
 print(sorted(normalize_selection(selected="ab")))
+""")
+
+
+def test_untyped_parameter_word_kind_not_recovered():
+    """The UNANNOTATED twin of `test_param_annotation_contradicted_by_the_body`.
+
+    `def normalize_selection(selected, ...)` (no annotation) with a body
+    that rebinds the name to a list (`selected = [selected]`) and compares
+    it to `None`/`True`/`False` must get the same tagged `int64_t` word as
+    the annotated shape: the slot's kind is proven by the BODY, not by an
+    annotation. Before, usage inference typed the slot `MojoList *` (the
+    body iterates/frozensets it) and every reader split over that:
+    `None`/`True`/`False` arrived as their raw word bits (printed `0`/`1`/`0`
+    instead of their values) and a `''` argument segfaulted, while the
+    definition's word body and the declaration's pointer slot disagreed.
+
+    The binding-estimator reconcile that corrects a container-KIND error
+    (`list` vs `set`) must not treat that deliberate `int64_t` as a usage
+    guess to overwrite — the same declaration/definition split the annotated
+    fix closes. The two arms a `frozenset` repr cannot spell are compared by
+    sorted CONTENT against CPython, as in the annotated twin.
+    """
+    test_gimple_matches_cpython("gimple_untyped_parameter_word_kind_not_recovered", """\
+def normalize_selection(selected, *, possible=None):
+    if selected in (None, True, False):
+        return selected
+    elif isinstance(selected, str):
+        selected = [selected]
+    elif not selected:
+        return ()
+    return frozenset(selected)
+
+print(normalize_selection(None))
+print(normalize_selection(True))
+print(normalize_selection(False))
+print(sorted(normalize_selection('')))
+print(sorted(normalize_selection('a')))
 """)
 
 
@@ -16630,6 +17035,23 @@ main()
 """)
 
 
+def test_dict_subclass_missing_value_not_reread_as_zero():
+    """A dict subclass __missing__ result is a computed word, not a dict slot,
+    so escaping consumers (print, return, ...) must not re-read the absent key
+    as 0."""
+    test_gimple_matches_cpython("gimple_dict_subclass_missing_value", """\
+class D(dict):
+    def __missing__(self, k):
+        return "miss:" + k
+
+def main():
+    d = D()
+    d["a"] = 1
+    print(d["a"], d["zz"])
+main()
+""")
+
+
 def test_star_unpack_of_generator_expression_in_call():
     """Star-unpacking a generator expression in a call argument is an ITERABLE
     spread, not a C pointer dereference: `f(*(... for ...))` used to lower the
@@ -16998,6 +17420,22 @@ def main():
     print([[1, 2], [3, [4, []]]])
 main()
 """)
+    test_gimple_matches_cpython("gimple_bool_append_repro", """\
+def main():
+    e = []
+    e.append(True)
+    print(e)
+    print(e[0])
+    f = []
+    f.append(False)
+    f.append(True)
+    print(f)
+    g = []
+    g.append(True)
+    g.append("x")
+    print(g)
+main()
+""")
     test_gimple_matches_cpython("gimple_bool_print_repro", """\
 def is_pos(n):
     return n > 0
@@ -17049,6 +17487,38 @@ def main():
         print("div zero")
     finally:
         print("finally")
+main()
+""")
+
+
+def test_del_missing_dict_key_raises_matches_cpython():
+    """`del d[k]` raises a catchable KeyError for an ABSENT key and really
+    removes a PRESENT one. It used to lower to `mojo_dict_pop_int(d, k, 0)`,
+    the defaulted pop, whose miss arm answered the default: the statement was
+    a silent no-op and the `except KeyError:` handler never ran. Both `del`
+    lowering arms are covered — a statically typed `MojoDict *` local, and
+    the dynamic dispatch an untyped parameter gets.
+    """
+    test_gimple_matches_cpython("gimple_del_missing_dict_key_raises", """\
+def remove_from(d, k):
+    try:
+        del d[k]
+    except KeyError:
+        print("param caught")
+    print(len(d))
+
+def main():
+    d = {"a": 1}
+    try:
+        del d["y"]
+    except KeyError:
+        print("del caught")
+    print(len(d))
+    del d["a"]
+    print(len(d))
+    e = {"b": 2}
+    remove_from(e, "zz")
+    remove_from(e, "b")
 main()
 """)
 

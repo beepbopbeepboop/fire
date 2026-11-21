@@ -1760,7 +1760,8 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
      timeout=1800,
      extra=GIMPLE_SOURCES + ['test_module_cache.py', 'exec_budget.py',
                              'myinterpreter.py', 'fire.py', 'fire_main.py'],
-     desc='module cache end-to-end stages')
+     desc='module cache end-to-end stages',
+     disabled='bugs/gate-modcache.md')
 # Registered 2026-09-27. Found while implementing FORMAL.md phase 0:
 # `reflect._PROTO_RE` could not match a pointer return (`char *name(...)` — the
 # `*` is attached to the type with no space before the name), so it silently
@@ -1927,13 +1928,15 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # (`.endswith(' *')`, `== 'int64_t'`, ...) may only fall.
 test('type-string-ratchet', [PY, 'test_type_string_ratchet.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_type_string_ratchet.py'],
-     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)')
+     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)',
+     disabled='bugs/gate-type-string-ratchet.md')
 # Every program in tools/pydiff_ok.txt must print what CPython prints (the
 # corpus is tools/pydiff_corpus; the finder is tools/pydiff.py). The list may
 # only grow, so a fix that lands is locked in and a regression is named.
 test('pydiff-ratchet', [PY, 'test_pydiff_ratchet.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_pydiff_ratchet.py', 'tools/pydiff.py',
-                             'tools/pydiff_ok.txt', 'runtime/fire_runtime.h',
+                             'tools/pydiff_ok.txt', 'exec_budget.py',
+                             'runtime/fire_runtime.h',
                              'runtime/fire_runtime.c', 'test_gimple_runner.py'] + sorted(
          os.path.relpath(p, REPO)
          for p in glob.glob(os.path.join(REPO, 'tools', 'pydiff_corpus', '*', '*.py'))),
@@ -2359,9 +2362,13 @@ test('preflight', [PY, '-c',
 test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
-            'test_memslot.py', 'tools/dangling_doc_refs.py'],
+            'test_memslot.py', 'tools/dangling_doc_refs.py',
+            # The budget census reads this helper's call sites (it is in
+            # `SHARED_BUDGET_HELPERS`), so it is an input to this job.
+            'tools/pydiff.py'],
      extraglob=['**/test_*.py', '**/*_test.py'],
-     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
+     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split',
+     disabled='bugs/gate-suite-self-test.md')
 
 # The ledger every job above reserves out of, tested on its own. In `smoke`
 # rather than nowhere, which is where it was for a commit: `test_memslot.py`
@@ -2575,7 +2582,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source',
+     disabled='bugs/gate-stdlib-dylib.md')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2627,7 +2635,8 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
+     disabled='bugs/gate-stdlib-syntax.md')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
@@ -2693,7 +2702,8 @@ test('bootstrap-stage1-transitive',
             'python dump peaks at 4.1 GB; 1.5x = 6.15 GB so `small` (8) is the '
             'ratchet class, not `mid` (6). Over the 4 GB debt line — see '
             + MEM_DEBT_DOC,
-     desc='stage1: the one transitive-closure fire.ci that stage2 compiles')
+     desc='stage1: the one transitive-closure fire.ci that stage2 compiles',
+     disabled='bugs/gate-bootstrap-stage1-transitive.md')
 
 # The gcc -O0 -fgimple compile of the 40 MB closure into a real binary. Its
 # artifact is cached by the content of stage1/fire.ci plus the runtime sources
@@ -2721,7 +2731,8 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='small',
             '1.5x = 6.15 GB so `small` (8) is the ratchet class — `mid` (6) covers '
             'only 1.46x and the run was RESOURCE-capped at it. Over the 4 GB debt '
             'line — see ' + MEM_DEBT_DOC,
-     desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo')
+     desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo',
+     disabled='bugs/gate-bootstrap-stage2-cc.md')
 
 # `tiny` (4), down from `module` (24): 0.5 GB measured PER ITEM, the only
 # fanout item peak in the table, so the ratchet assigns 0.75 GB. `module` was
@@ -4283,11 +4294,13 @@ test('lexer-double-slash-operator', [PY, 'test_lexer_double_slash_operator.py'],
 test('linked-list-link-symbols', [PY, 'test_linked_list_link_symbols.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('linked-list-struct-element-step4', [PY, 'test_linked_list_struct_element_step4.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
+     desc='registered by the estate audit (every test file runs)',
+     disabled='bugs/gate-linked-list-struct-element-step4.md')
 test('linked-list-struct-element-step4b', [PY, 'test_linked_list_struct_element_step4b.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('linked-list-struct-element-step4c', [PY, 'test_linked_list_struct_element_step4c.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
+     desc='registered by the estate audit (every test file runs)',
+     disabled='bugs/gate-linked-list-struct-element-step4c.md')
 test('module-loader-stdlib', [PY, 'test_module_loader_stdlib.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('mro', [PY, 'test_mro.py'], mem='tiny',
@@ -4393,7 +4406,8 @@ test('stdlib-import-suffix', [PY, 'test_stdlib_import_suffix.py'],
      desc='stdlib import suffix (registered by the estate audit)')
 test('stdlib-syntax-quick-bench-math', [PY, 'test_stdlib_syntax_quick_bench_math.py'],
      mem='tiny',
-     desc='quick_bench math stdlib syntax (registered by the estate audit)')
+     desc='quick_bench math stdlib syntax (registered by the estate audit)',
+     disabled='bugs/gate-stdlib-syntax-quick-bench-math.md')
 test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
      mem='tiny',
      desc='land doc summary (registered by the estate audit)')

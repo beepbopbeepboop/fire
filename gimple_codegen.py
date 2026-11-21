@@ -165,6 +165,10 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_get_int':          'int64_t',
     'mojo_dict_get_double':       'double',
     'mojo_dict_get_str':          'char *',
+    'mojo_dict_get_boxed':        'int64_t',
+    'mojo_dict_get_boxed_bytes':  'int64_t',
+    'mojo_dict_get_boxed_none':   'int64_t',
+    'mojo_dict_get_boxed_kw':     'int64_t',
     'mojo_dict_setdefault_int':   'int64_t',
     'mojo_dict_setdefault_str':   'char *',
     'mojo_dict_contains':         'int',
@@ -3840,10 +3844,14 @@ class GimpleGen:
         'mojo_dict_set_double': ('void',   ['MojoDict *', 'char *', 'double']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
+        'mojo_dict_get_boxed':   ('int64_t',   ['MojoDict *', 'char *']),
+        'mojo_dict_get_boxed_bytes': ('int64_t', ['MojoDict *', 'MojoBytes *']),
+        'mojo_dict_get_boxed_none': ('int64_t', ['MojoDict *']),
         'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
         'mojo_dict_setdefault_str': ('char *',  ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
         'mojo_dict_get_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t']),
+        'mojo_dict_get_boxed_kw':   ('int64_t',  ['MojoDict *', 'int64_t']),
         'mojo_dict_get_double_kw':  ('double',   ['MojoDict *', 'int64_t']),
         'mojo_dict_get_str_kw':     ('char *',   ['MojoDict *', 'int64_t']),
         'mojo_dict_set_int_kw':     ('void',     ['MojoDict *', 'int64_t', 'int64_t']),
@@ -5689,8 +5697,10 @@ class GimpleGen:
     def _is_exc_class_name(self, name: str) -> bool:
         return ginf._is_exc_class_name(self, name)
     def _reset_func(self, body: list=None, params: list=None,
-                    allow_lambda_reduction: bool=True):
-        return ginf._reset_func(self, body, params, allow_lambda_reduction)
+                    allow_lambda_reduction: bool=True,
+                    default_none_params: set=None):
+        return ginf._reset_func(self, body, params, allow_lambda_reduction,
+                                default_none_params)
     def _record_sys_path_inserts(self, source: str, base_dir: str=None) -> None:
         return ginf._record_sys_path_inserts(self, source, base_dir)
     def _compile_link_inline_cpp_unit(self, cpp_code: str):
@@ -5870,8 +5880,8 @@ class GimpleGen:
         return grsl.cpp_word_container_operator(kind, via_intptr)
     def _materialize_as_list(self, src_type: str, value: str) -> str:
         return ginf._materialize_as_list(self, src_type, value)
-    def _infer_return_type(self, body: list) -> str:
-        return ginf._infer_return_type(self, body)
+    def _infer_return_type(self, body: list, func_def=None) -> str:
+        return ginf._infer_return_type(self, body, func_def=func_def)
     def _quick_container_elem(self, node) -> str | None:
         return ginf._quick_container_elem(self, node)
     def _prepass_list_elem(self, elements) -> str:

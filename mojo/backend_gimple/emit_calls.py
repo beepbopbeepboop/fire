@@ -2098,22 +2098,34 @@ def _dtype_arg_name(e):
     return ''
 
 
-def _dtype_cast_ctype(e):
-    """C type named by a dtype bracket argument — `DType.int32` or the
-    dot-relative `.int32` — or None when it is anything else (a parameter, an
-    expression). A float8 dtype (`mojo.middle.float8_dtype`) answers that
-    module's private C type, so a `SIMD`/`Scalar` constructor of one carries
-    the dtype rather than erasing to an integer."""
-    s = ''
+def _dtype_cast_ctype(e, gen=None):
+    """C type named by a dtype bracket argument — `DType.int32`, the
+    dot-relative `.int32`, or (with GEN) a comptime-bound name whose folded
+    value is a dtype — or None when it is anything else (a parameter, an
+    expression).
+
+    The comptime-bound arm is the `comptime integral_type = DType.int32`
+    then `cast[integral_type]()` / `SIMD[integral_type, 1](...)` shape of the
+    stdlib's _ldexp_impl family: the name is not a dtype spelling, it is a
+    binding whose folded VALUE is (`gen._comptime_vals` stores the marker
+    tuple or its REPR string, which the shared dtype table reads), so the
+    lookup goes through `_dtype_token_ctype` on the value, the same table
+    the constructor arm reads. A float8 dtype (`mojo.middle.float8_dtype`)
+    answers that module's private C type, so a `SIMD`/`Scalar` constructor
+    of one carries the dtype rather than erasing to an integer."""
     if isinstance(e, gimple_ctypes.DottedLiteral):
-        s = _as_str(e.path)
-    elif (isinstance(e, gimple_ctypes.MemberExpr)
+        return gimple_ctypes._dtype_token_ctype(_as_str(e.path))
+    if (isinstance(e, gimple_ctypes.MemberExpr)
             and isinstance(e.obj, gimple_ctypes.IdentExpr)
             and _as_str(e.obj.name) == 'DType'):
-        s = _as_str(e.member)
-    else:
-        return None
-    return gimple_ctypes._dtype_token_ctype(s)
+        return gimple_ctypes._dtype_token_ctype(_as_str(e.member))
+    if isinstance(e, gimple_ctypes.IdentExpr) and gen is not None:
+        _cv = getattr(gen, '_comptime_vals', None)
+        if _cv:
+            _v = _cv.get(_as_str(e.name))
+            if _v is not None:
+                return gimple_ctypes._dtype_token_ctype(_v)
+    return None
 
 
 def _comptime_conforms_to_pred(gen):
@@ -3653,7 +3665,10 @@ def _lc_generic_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str
     if (method_name == 'cast' and not node.args and not extra_args
             and len(elems) == 1 and not _kw_bracket
             and _recv_ct in _CAST_SCALAR_CTYPES):
-        _cast_target = _dtype_cast_ctype(elems[0])
+        # GEN so a comptime-bound target (`cast[integral_type]()` for
+        # `comptime integral_type = DType.int32`) resolves to its folded
+        # dtype rather than echoing the receiver.
+        _cast_target = _dtype_cast_ctype(elems[0], gen)
         if _cast_target is not None:
             _cot, _cov = gen.lower_expr(node.func.obj.obj)
             if _cot == _cast_target:
@@ -4072,7 +4087,7 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
             _simd_w = gen._eval_const_int(_idxs[1])
             if _simd_w is not None:
                 _simd_width.reject_invalid_width(_simd_w, _dtype_arg_name(_idxs[0]))
-        _dt_ctype = _dtype_cast_ctype(_idxs[0]) if _idxs else None
+        _dt_ctype = _dtype_cast_ctype(_idxs[0], gen) if _idxs else None
         # The SCALAR TYPE NAME spelling (`SIMD[Float32, 4](1.5)`): the shared
         # resolver normalises every spelling to the one dtype table. A
         # `_dtype_cast_ctype` miss is a `DType.x`/`.x` shape this arm does not
@@ -4084,17 +4099,6 @@ def _lcx_generic_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | No
                     _dt_ctype = gimple_ctypes._dtype_token_ctype(str(_dt_name))
             except Exception:
                 _dt_ctype = None
-        # A `comptime dt = DType.float32` bound name: neither of the two
-        # lookups above knows a bare `dt`, but the folded VALUE is in
-        # `gen._comptime_vals`.  The shared resolver reads it (including
-        # the tuple-REPR string that map stores).
-        if _dt_ctype is None and _idxs:
-            _e0 = _idxs[0]
-            if isinstance(_e0, gimple_ctypes.IdentExpr):
-                _cv = getattr(gen, '_comptime_vals', None)
-                if _cv:
-                    _dt_ctype = gimple_ctypes._dtype_token_ctype(
-                        _cv.get(_as_str(_e0.name)))
         if (_dt_ctype in _CAST_SCALAR_CTYPES
                 or _float8_dtype.float8_spelling_of_ctype(_dt_ctype) is not None):
             # Any scalar C type the dtype table answers is the constructor's
@@ -5725,6 +5729,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # mistaken for a number. Found via fire.py's own `--dump`'s
     # `repr(ast)` on a parsed AST list.
     if fname_raw == 'repr' and node.args:
+        # `repr(None)` is "None": the literal lowers to the integer word 0,
+        # so the generic int path spelled it "0" (str(None) has the same
+        # guard right below).
+        if gen._is_none_literal(node.args[0]):
+            return 'char *', gen._new_val('char *', gen._intern_string('None'))
         rat, rav = gen.lower_expr(node.args[0])
         # The operand NODE as well as its lowered type: a bool's C type here
         # is a plain `int`, so `repr(b)` for a `b = True` printed `1` unless
@@ -5783,6 +5792,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `open`/`filter`/`enumerate` gates elsewhere in this file.
     if (fname_raw == 'str' and len(node.args) == 1
             and not gen._locally_binds_name('str')):
+        # `str(None)` is "None", not "0": the literal lowers to the word 0
+        # (the integer) and the generic int arm spelled that decimal.
+        if gen._is_none_literal(node.args[0]):
+            return 'char *', gen._new_val('char *', gen._intern_string('None'))
         et, ev = gen.lower_expr(node.args[0])
         # A bool lowers with ctype 'int' (not '_Bool' — _lower_BoolLiteral
         # does this deliberately; other sites depend on it), so str(True)
@@ -11623,13 +11636,16 @@ def _lnc_bool(gen, arg_pairs: list) -> tuple[str, str] | None:
         gen._cast_into(_z, 'int64_t', '0')
         gen._binop_into(_b, _n, '!=', _z)
         return '_Bool', _b
-    if gimple_ctypes.TypeLattice.is_cstr(_bt) or (gimple_ctypes.TypeLattice.is_word(_bt) and (
-            gen._word_is_dyn(_bv) or _bv in gen._dyn_word_locals
-            or _bv in getattr(gen, '_cur_untyped_params', ()))):
-        # A string's truth is its length, and a word of unknown kind's is
+    if (gimple_ctypes.TypeLattice.is_cstr(_bt)
+            or _bt in ('double', 'float')
+            or (gimple_ctypes.TypeLattice.is_word(_bt) and (
+                gen._word_is_dyn(_bv) or _bv in gen._dyn_word_locals
+                or _bv in getattr(gen, '_cur_untyped_params', ())))) :
+        # A string's truth is its length, a float's is `x != 0.0` (not
+        # "its integer part is nonzero"), and a word of unknown kind's is
         # whatever the runtime finds there -- the one place that answers
-        # both is `_ensure_bool_cond`, which `if x:` already uses, so
-        # `bool(x)` and `if x:` cannot disagree. Measured: `bool(_mode)`
+        # all of these is `_ensure_bool_cond`, which `if x:` already uses,
+        # so `bool(x)` and `if x:` cannot disagree. Measured: `bool(_mode)`
         # over the '' slot of a `(mode, recv)` unpack was True in the
         # compiled compiler (the pointer is not 0), and every dict loop
         # was lowered as an Int-keyed one.
@@ -12153,7 +12169,7 @@ def _choose_overload_symbol(gen, fname_raw: str, node, nodes, home):
         # body. Left at the sibling's type, a void callee was used as an
         # expression ("invalid use of void expression").
         try:
-            _rt = gen._infer_return_type(_def.body)
+            _rt = gen._infer_return_type(_def.body, _def)
         except Exception:
             _rt = 'void'
         gen.func_return_types[_sym] = _rt or 'void'
@@ -14009,7 +14025,6 @@ def _ls_dict_subclass(gen, _dsub_r, idx_type, iv, ot, ov) -> tuple[str, str]:
         hv = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                             [('MojoDict *', dp), (kt, kv)])
         gen._copy(res, hv)
-        _mark_unknown_dict_value(gen, dp, res, kv, 'str')
         gen._goto(bb_done)
         gen._emit_label(bb_miss)
         miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
@@ -14017,6 +14032,12 @@ def _ls_dict_subclass(gen, _dsub_r, idx_type, iv, ot, ov) -> tuple[str, str]:
         gen._copy(res, mv)
         gen._goto(bb_done)
         gen._emit_label(bb_done)
+        # The __missing__ result is a computed word, not a dict slot. Recording
+        # a slot read here makes escaping consumers (print, return, ...) re-read
+        # the absent key as 0 instead of using the __missing__ value. The hit
+        # value is already boxed by mojo_dict_slot_boxed.
+        if dp not in gen._dict_val_types:
+            gen._word_mark_dyn(res)
         return 'int64_t', res
     t = gen._call_expr('int64_t', 'mojo_dict_subscript_boxed',
                        [('MojoDict *', dp), (kt, kv)])

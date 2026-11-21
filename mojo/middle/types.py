@@ -470,6 +470,30 @@ _CONTAINER_KIND_TYPES = frozenset({'MojoDict *', 'MojoList *', 'MojoSet *', 'Moj
 _BOXED_CONTAINER_CTYPES = ('MojoDict *', 'MojoList *', 'MojoSet *')
 _EMPTY_CONTAINER_CTOR = {'MojoDict *': 'mojo_dict_new ()', 'MojoList *': 'mojo_list_new ()', 'MojoSet *': 'mojo_set_new ()'}
 
+def _true_div_cotype(op, lt, rt):
+    """The C type of `op` on the two operand types, or None when the pair
+    triggers no special rule.
+
+    The one rule: `/` between two signed-integer operands answers
+    `double` — Python's int / int is a float, never an integer. Shared by
+    the estimator's two arms (`resolve_shared._quick_type`'s BinaryOp and
+    `_aug_assign_value_type`) and the emitter's own gate
+    (`emit_exprs._lower_binary_tail`'s `int_true_div`), so the three cannot
+    drift: the estimator must answer exactly what the emitter lowers, or a
+    local declared from the estimate is stored through a cast that truncates
+    the emitter's real value (4.5 stored into an int64_t slot prints 4).
+
+    Box operands are the CALLER's gate: a PythonObject word is routed to the
+    runtime's boxed-word dispatch, which returns the int64 box (a truediv's
+    DOUBLE BITS live in the box), so a caller that sees a box operand must
+    keep the join's `int64_t` rather than take this answer (check
+    `calls_shared._py_box_expr` first)."""
+    if (op == '/' and lt in _SIGNED_INT_TRUE_DIV_TYPES
+            and rt in _SIGNED_INT_TRUE_DIV_TYPES):
+        return 'double'
+    return None
+
+
 def _seedable_local_ctype(t) -> bool:
     """True when `_infer_local_var_types`' answer for a local is real
     EVIDENCE and may therefore be seeded into `var_types` so a

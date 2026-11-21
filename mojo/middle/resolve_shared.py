@@ -452,6 +452,30 @@ def _quick_type(gen, node) -> str:
         if node.op in gimple_ctypes._CMP_OPS or node.op in ('in', 'not in'): return '_Bool'
         lt = gen._quick_type(node.left)
         rt = gen._quick_type(node.right)
+        # The emitter's true-division rule, shared with `_aug_assign_value_
+        # type` (`_true_div_cotype`): `/` between two signed integers
+        # lowers to a DOUBLE division, so the estimate must say `double` —
+        # without it, `x = x / 2` joined int64_t/int64_t to int64_t, the
+        # local was declared int64_t, and the store cast 4.5 back to 4;
+        # `return n / 2` declared an int64_t return slot that did the same.
+        #
+        # EXCEPT when an operand statically produces a PythonObject box: the
+        # emitter routes that pair to the runtime's boxed-word dispatch
+        # (`_lower_binary_tail`'s box arm, checked BEFORE the true-division
+        # gate) and returns the int64 word — so the join is the answer
+        # there, and answering double would declare the local a real double
+        # the box word is never stored as. The gate reads the SAME box set
+        # the emitter reads (`_py_box_expr` over `gen._pybox_vars`), which
+        # the local-type pre-pass and the return scan seed from the body
+        # before they run (emit_stmts populates it only during emission,
+        # after both).
+        _td = gimple_ctypes._true_div_cotype(_as_str(node.op), lt, rt)
+        if _td is not None:
+            from mojo.middle.calls_shared import _py_box_expr
+            _lb, _ = _py_box_expr(gen, node.left)
+            _rb, _ = _py_box_expr(gen, node.right)
+            if not (_lb or _rb):
+                return _td
         return gimple_ctypes.TypeLattice.join(lt, rt)
     if isinstance(node, gimple_ctypes.CompareChain):
         # Same as any single comparison above: a chained comparison
@@ -1695,6 +1719,50 @@ _NONE_TYPE_MARKER = 'NoneType'
 _SCALAR_CTYPES = frozenset(('int64_t', 'int', 'double', '_Bool'))
 
 
+def _aug_assign_value_type(gen, node, target_ctype=None) -> str:
+    """The C type of the new value an augmented assignment binds.
+
+    `target OP= value` REBINDS the target to the result of `target OP value`,
+    exactly as the emitter lowers it (`_gen_stmt_AugAssignStmt`'s fake
+    BinaryOp), so that expression's type is what the local-type pre-pass has
+    to join. The one rule `_quick_type`'s plain operand join does not model
+    is true division: `/` between two signed integers answers `double`
+    (`_lower_binary_tail`'s `int_true_div`). Without this, `x = 9; x /= 2`
+    joined only `x`'s integer binding, the local was declared int64_t, and
+    the double 4.5 was truncated back to 4 at the store.
+
+    `target_ctype` overrides the TARGET's type when the caller already knows
+    the slot it writes into and `gen.var_types` does not (or does not yet):
+    a parameter's declared C type is resolved by `funcs_shared._param_ctype`
+    before the body's `var_types` exists, and a module global's field type is
+    the one Phase 1.7 recorded. The answer must be computed from the REAL
+    target kind, not `_quick_type`'s int64_t unknown fallback, or `/` would
+    report true division on a pointer slot.
+
+    The emitter's struct/`__iOP__`, runtime-object and boxed-PythonObject
+    arms are different: they rebind the target to an object whose static type
+    is the TARGET's own, which the join of the target's other bindings
+    already carries, so the join below is the right answer for those too.
+    """
+    op = _as_str(node.op)
+    base_op = op[:-1]
+    lt = gen._quick_type(node.target) if target_ctype is None else _as_str(target_ctype)
+    rt = _local_value_type(gen, node.value)
+    # The SAME rule the plain-BinaryOp arm of `_quick_type` and the emitter
+    # gate on (`_true_div_cotype`), so the augmented-assignment join cannot
+    # drift from either. Deliberately NO box gate here, unlike the plain
+    # arm: `c /= 2` on a PythonObject local today joins the double, and the
+    # body then declares `c` double and stores the box word into it through
+    # a value conversion (`a = PythonObject(34); a /= 2` prints 17.0, the
+    # CPython answer for 34 / 2) — the plain-assignment arm is the one whose
+    # int64 answer the box emitter shape contradicts, and only that one
+    # gates on `_py_box_expr`.
+    _td = gimple_ctypes._true_div_cotype(base_op, lt, rt)
+    if _td is not None:
+        return _td
+    return gimple_ctypes.TypeLattice.join(lt, rt)
+
+
 def _is_confident_scalar(gen, value) -> bool:
     """Whether `value`'s `_quick_type` answer is a REAL scalar rather than
     this scan's `int64_t` unknown fallback. Used by `_infer_local_var_types`
@@ -1743,6 +1811,94 @@ def _is_confident_scalar(gen, value) -> bool:
     return False
 
 
+def _body_pybox_locals(gen, body: list):
+    """`(names, double_bits)` — the PythonObject box locals `body` binds,
+    in statement order, the SAME recording shapes the emission sites use
+    (emit_stmts' VarDecl / AssignStmt / AugAssignStmt arms, all of them
+    `_py_box_expr` over the value). The true-division rule in `_quick_type`
+    must gate on exactly this set — "the pre-pass must see the same box set
+    the emitter does" — but emit_stmts populates `gen._pybox_vars` only
+    DURING emission, after `_infer_local_var_types` has run, so the
+    pre-pass and the return scan each compute it from the body and install
+    it around their own walk (a copy, never the live set: emission reads
+    the live one and it is restored unchanged).
+
+    The walk runs on a scratch copy of the two gen sets — installed around
+    it, so `_py_box_expr`'s IdentExpr arm resolves alias and box-propagation
+    chains (`c = a / b` with box `a`) the way emission resolves them — and
+    repeats until stable, so an alias bound before its source's box
+    registration still resolves. Same bound-and-break idiom as
+    `_prebound_local_ctypes`: `note` is idempotent and each round only ever
+    adds names, so it terminates; the bound is a backstop."""
+    from mojo.middle.calls_shared import _py_box_expr
+    from mojo.middle.infra_infer import _each_binding
+    names: set = set()
+    dbl: set = set()
+    stmts = _each_binding(body or [])
+    _saved_b = getattr(gen, '_pybox_vars', None)
+    _saved_d = getattr(gen, '_pybox_double_vars', None)
+    gen._pybox_vars = names
+    gen._pybox_double_vars = dbl
+    try:
+        for _round in range(4):
+            _before = (len(names), len(dbl))
+            for _s in stmts:
+                _n = None
+                _v = None
+                _kind = None
+                if (isinstance(_s, gimple_ctypes.AssignStmt)
+                        and isinstance(_s.target, gimple_ctypes.IdentExpr)
+                        and _s.value is not None):
+                    _n = _as_str(_s.target.name)
+                    _v = _s.value
+                    _kind = 'assign'
+                elif (isinstance(_s, gimple_ctypes.VarDecl)
+                        and isinstance(getattr(_s, 'name', None), str)
+                        and ',' not in getattr(_s, 'name', '')):
+                    _n = _as_str(_s.name)
+                    _v = getattr(_s, 'value', None)
+                    _kind = 'vardecl'
+                elif (isinstance(_s, gimple_ctypes.AugAssignStmt)
+                        and isinstance(_s.target, gimple_ctypes.IdentExpr)):
+                    _base = _as_str(_s.op)[:-1]
+                    if _base in ('+', '-', '*', '/', '%', '**'):
+                        # The same fake BinaryOp the emission's AugAssign
+                        # arm checks (`c += 100` on a box local stays a box).
+                        _n = _as_str(_s.target.name)
+                        _v = gimple_ctypes.BinaryOp(op=_base,
+                                                    left=_s.target,
+                                                    right=_s.value)
+                        _kind = 'assign'
+                if _n is None or _v is None:
+                    continue
+                _bx, _bd = _py_box_expr(gen, _v)
+                if _bx:
+                    names.add(_n)
+                    if _bd:
+                        dbl.add(_n)
+                    else:
+                        dbl.discard(_n)
+                elif (_kind == 'vardecl'
+                        and getattr(_s, 'type_ann', None) == 'PythonObject'):
+                    # The ANNOTATED box local the emission's VarDecl arm
+                    # records (a container/string/number literal RHS, so
+                    # `_py_box_expr` misses it); double-bits never set.
+                    names.add(_n)
+                    dbl.discard(_n)
+                elif (_kind == 'assign' and _n in names
+                        and isinstance(_v, gimple_ctypes.IntLiteral)):
+                    # A tracked box local rebound to a plain int literal
+                    # holds a raw number word, never double bits — the
+                    # emission's AssignStmt arm discards the stale flag.
+                    dbl.discard(_n)
+            if (len(names), len(dbl)) == _before:
+                break
+    finally:
+        gen._pybox_vars = _saved_b
+        gen._pybox_double_vars = _saved_d
+    return names, dbl
+
+
 def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
     # A call through a local lambda is answered from the same table the
     # return-type inference reads (see `_lambda_call_ret_table`): `r = f()`
@@ -1750,20 +1906,34 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     # defaults to. Scoped to this one body, and the table it replaces is put
     # back when it is done.
     from mojo.middle.infra_infer import _lambda_call_ret_table
-    _scratch_mark: int = gen._scan_scratch_top
-    _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
-    gen._lambda_call_ret_types = _lambda_call_ret_table(gen, func.body or [])
-    # The def whose locals are being typed: a call to one of its nested
-    # generators (`it = g(2)`, `_nested_generator_api`) is a generator handle
-    # only in that scope. Scoped to this body, like the table above.
-    _saved_lif = getattr(gen, '_local_inference_func', None)
-    gen._local_inference_func = _as_str(func.name)
+    # The body's PythonObject box locals, installed for the duration of the
+    # scan so `_quick_type`'s true-division gate (`_py_box_expr`) sees the
+    # same box set the emitter will build — `c = a / b` on box locals must
+    # keep its int64 word, and this scan declares the local.
+    _saved_pb = getattr(gen, '_pybox_vars', None)
+    _saved_pd = getattr(gen, '_pybox_double_vars', None)
+    _pb_names, _pb_dbl = _body_pybox_locals(gen, func.body or [])
+    gen._pybox_vars = (set() if _saved_pb is None else set(_saved_pb)) | _pb_names
+    gen._pybox_double_vars = (set() if _saved_pd is None else set(_saved_pd)) | _pb_dbl
     try:
-        return _infer_local_var_types_core(gen, func)
+        _scratch_mark: int = gen._scan_scratch_top
+        _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
+        gen._lambda_call_ret_types = _lambda_call_ret_table(gen, func.body or [])
+        # The def whose locals are being typed: a call to one of its nested
+        # generators (`it = g(2)`, `_nested_generator_api`) is a generator
+        # handle only in that scope. Scoped to this body, like the table
+        # above.
+        _saved_lif = getattr(gen, '_local_inference_func', None)
+        gen._local_inference_func = _as_str(func.name)
+        try:
+            return _infer_local_var_types_core(gen, func)
+        finally:
+            gen._lambda_call_ret_types = _saved_lr
+            gen._local_inference_func = _saved_lif
+            gen._scan_scratch_top = _scratch_mark
     finally:
-        gen._lambda_call_ret_types = _saved_lr
-        gen._local_inference_func = _saved_lif
-        gen._scan_scratch_top = _scratch_mark
+        gen._pybox_vars = _saved_pb
+        gen._pybox_double_vars = _saved_pd
 
 
 def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
@@ -1780,6 +1950,11 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
     # `mojo_dict_iter_key` (`it->dict->slots[it->order[...]]`) while
     # compiling `./mojoc fire.py --dump-full`.
     inferred: dict[str, list] = {}
+    # Augmented-assignment bindings, kept apart until the join below: a name
+    # whose ONLY binding is an augmented assignment is a parameter/global
+    # (their type comes from elsewhere) and must not acquire a local
+    # declaration from the result type computed here.
+    aug_inferred: dict[str, list] = {}
 
     # Names assigned a CONFIDENT scalar (a real int/float/bool value, not
     # this scan's `int64_t` UNKNOWN fallback). An `int64_t` in
@@ -1893,6 +2068,16 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                                 and _zi < len(_as_node.value.elements)
                                 and _is_confident_scalar(gen, _as_node.value.elements[_zi])):
                             confident_scalars.add(vname)
+            elif (isinstance(node, gimple_ctypes.AugAssignStmt)
+                    and isinstance(node.target, gimple_ctypes.IdentExpr)):
+                # `x += 0.5` / `x /= 2`: the target is REBOUND to the
+                # expression's result, so its type belongs in the join. The
+                # name already has to be bound somewhere else (a parameter,
+                # or an assignment this scan records); see `aug_inferred`.
+                _aug_name = _as_str(node.target.name)
+                if _aug_name not in aug_inferred:
+                    aug_inferred[_aug_name] = []
+                aug_inferred[_aug_name].append(_aug_assign_value_type(gen, node))
             elif (isinstance(node, gimple_ctypes.VarDecl) and isinstance(node.name, str)
                     and ',' not in node.name):
                 # Fresh local, not a `node` reassignment — see the
@@ -2007,6 +2192,14 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
     finally:
         gen.var_types = _saved_var_types
         gen._scan_scratch_top = _scratch_mark
+
+    # Augmented assignments join only names the scan already knows are BOUND
+    # here. A name whose only binding is `x += v` is a parameter or a global
+    # (both typed outside this table), and giving it a local declaration from
+    # the join would shadow that type.
+    for _aug_name in aug_inferred:
+        if _aug_name in inferred:
+            inferred[_aug_name].extend(aug_inferred[_aug_name])
 
 # Join all types for each variable using TypeLattice
     result: dict[str, str] = {}

@@ -102,6 +102,31 @@ class StaleVerdictRows(unittest.TestCase):
                          'rewrite by symptom (commit or doc name)')
 
 
+class RatchetGreenRequiresBothClasses(unittest.TestCase):
+    """A BARE-only gain must not be reported green.
+
+    `main()`'s `--ratchet` branch used to test only the `bugs/`-prefixed half
+    of `ratchet_verdict`, so a bare gain was printed as "no file gained a
+    citation ... all at or below their baseline" and exited 0. That made
+    `BARE_BASELINE` unenforceable: the failure reporter that names the bare
+    baseline was unreachable for the one case it exists for. The decision is
+    `ratchet_green`, shared with `main()`, so this exercises the condition the
+    CLI actually takes.
+    """
+
+    def test_bare_only_gain_is_not_green(self):
+        prefixed, bare = d.ratchet_verdict(
+            {}, {'bugs/TMP_x': [('gone.md', 1)]}, {}, {})
+        self.assertEqual(prefixed, [])
+        self.assertEqual(bare, [('bugs/TMP_x', 1, 0)])
+        self.assertFalse(d.ratchet_green(prefixed, bare),
+                         'a bare gain was judged green because the prefixed '
+                         'half was clean')
+
+    def test_clean_corpus_is_green(self):
+        self.assertTrue(d.ratchet_green(*d.ratchet_verdict({}, {}, {}, {})))
+
+
 class FallbackCandidatesExcludeTheLedger(unittest.TestCase):
     """The filesystem fallback must apply the `SELF_PATH` exclusion too.
 

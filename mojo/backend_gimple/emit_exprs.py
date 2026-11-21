@@ -48,6 +48,7 @@ import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
+import mojo.middle.infra_infer as ginf_mid
 from mojo.middle.module_shared import builtin_module_constant, bare_global_read_plan
 # `_BOXED_CONTAINER_CTYPES` now lives in `mojo.middle.types` next to
 # `_CONTAINER_KIND_TYPES` (see its own comment for why it left this file) and
@@ -4791,15 +4792,53 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # name holds is that box, so it takes the same kind read.
         _for_tagged = (_ident and isinstance(_other_node, gimple_ctypes.IdentExpr)
                        and ginf.tagged_for_target_name(gen, _other_node.name))
+        # A box-holding LOCAL (`mixed_box_name`, e.g. a local whose every
+        # binding is None) is read as a box for the same reason. Its bare int
+        # 0 is not None and its None is the shared box, which only the kind
+        # read can tell apart.
+        _mixed_none = (isinstance(_other_node, gimple_ctypes.IdentExpr)
+                       and ginf.mixed_box_name(gen, _other_node.name))
         # Only an int word: a `char *` name keeps its NULL-pointer test below.
         # A float box answers 0 here, which is the right answer for a float.
-        if (_other_t in ('int', 'int64_t') and gen._word_may_be_box(_other)
-                and (not _ident or _other in _tagged or _for_tagged)):
+        if (_other_t in ('int', 'int64_t')
+                and (gen._word_may_be_box(_other) or _mixed_none)
+                and (not _ident or _other in _tagged or _for_tagged or _mixed_none)):
             _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
             _cmp = '!= 0' if op in ('==', 'is') else '== 0'
             _t = gen._new_temp('_Bool')
             gen._emit(f'  {_t} = {_is_none} {_cmp};')
             return '_Bool', _t
+    # `x is None` / `is not None` where `x` is PROVABLY an integer: the answer
+    # is a constant False/True, because 0 is an integer and None is not it.
+    # The generic identity arm below compares the words, and None is the word
+    # 0 for a plain `int64_t` (`n = 0; n is None` answered True). Only
+    # evidence about the VALUE (a scalar-shaped expression, an annotated int
+    # parameter, or a local whose every binding is an int literal / int
+    # arithmetic) may answer this: an UNANNOTATED parameter is a word of
+    # unknown kind that may be None, and a `char *` keeps its NULL test.
+    if op in ('is', 'is not') and (_is_none_literal(left_node) != _is_none_literal(right_node)):
+        _on = right_node if _is_none_literal(left_node) else left_node
+        _ot = rt if _is_none_literal(left_node) else lt
+        _proven_int = False
+        if gimple_exprtypes.scalar_shape_arm_kind(_on) is not None:
+            _proven_int = True
+        elif isinstance(_on, gimple_ctypes.IdentExpr) and _ot in ('int', 'int64_t', '_Bool'):
+            _onm = _as_str(_on.name)
+            _oann = (getattr(gen, '_cur_param_ann', None) or {}).get(_onm)
+            if _oann in ('int', 'int64_t', '_Bool'):
+                _proven_int = True
+            elif _onm not in getattr(gen, '_cur_untyped_params', ()):
+                try:
+                    _proven_int = ginf_mid._local_is_provably_int(
+                        gen._cur_func_body, _onm)
+                except Exception:
+                    _proven_int = False
+        if _proven_int:
+            _t = gen._new_temp('_Bool')
+            _ans = 0 if op == 'is' else 1
+            gen._copy(_t, f"{_ans}")
+            return '_Bool', _t
+
     # Int / Int is true division: Python and Mojo answer a Float64, never an
     # integer. The gate is on BOTH operands being plain signed C integers, not
     # on the joined type: a struct operand (`Scalar[dtype]`, `Path`) whose join
@@ -4814,8 +4853,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is how `result /= part` in std/pathlib/path.mojo became a double division
     # of a pointer, which gcc rejects. The `%` gate has the same ordering issue
     # in principle, but its operands reach it unchanged, so it is left alone.
-    int_true_div = (op == '/' and lt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES
-                    and rt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)
+    int_true_div = gimple_ctypes._true_div_cotype(op, lt, rt) is not None
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
     # its payload in a hidden `_data: MojoBytes *` field — an inherited
     # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that

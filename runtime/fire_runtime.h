@@ -916,6 +916,7 @@ int64_t     mojo_box_none(void);             /* None in a tagged word: renders N
 void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
 void        mojo_list_append_str_kinded(MojoList *l, const char *v);   /* a string slot under the 'p' kind */
 void        mojo_list_append_double_kinded(MojoList *l, double v, char prior);   /* append a double under kind 'd'; `prior` describes the slots already there */
+void        mojo_list_append_kinded(MojoList *l, int64_t v, char kind, char prior);   /* append a word under `kind`; use when a kinds row exists or the slot's kind is not in the value's C type */
 /* The result of `+`, `-` or `*` where one operand is a float-possible
  * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
  * answer and `dres` the double answer, both already computed. Returns a fresh
@@ -1660,6 +1661,9 @@ int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt);
 double      mojo_dict_pop_double_kw(MojoDict *d, int64_t kw, double dflt);
+/* The `_kw` twin of `mojo_dict_del_item`, with the same three key kinds every
+ * other twin here dispatches on (see `_kw_kind`). */
+void        mojo_dict_del_item_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
@@ -1740,6 +1744,12 @@ int64_t     mojo_dict_subscript_int_kw(MojoDict *d, int64_t kw);
 double      mojo_dict_subscript_double_kw(MojoDict *d, int64_t kw);
 char       *mojo_dict_subscript_str_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_subscript_boxed_kw(MojoDict *d, int64_t kw);
+/* `d.get(k)` with no default: the stored value's own word on a hit, the
+ * shared None box on a miss (see the C definition's comment). */
+int64_t     mojo_dict_get_boxed(MojoDict *d, char *key);
+int64_t     mojo_dict_get_boxed_bytes(MojoDict *d, MojoBytes *key);
+int64_t     mojo_dict_get_boxed_none(MojoDict *d);
+int64_t     mojo_dict_get_boxed_kw(MojoDict *d, int64_t kw);
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
 char *mojo_dict_repr_slot(MojoDict *d, char *key);
 int64_t mojo_dict_slot_boxed(MojoDict *d, char *key);
@@ -1761,6 +1771,12 @@ void        mojo_dict_update(MojoDict *dst, MojoDict *src);
 int64_t     mojo_dict_pop_int(MojoDict *d, char *key, int64_t dflt);
 char       *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt);
 double      mojo_dict_pop_double(MojoDict *d, char *key, double dflt);
+/* `del d[k]` is CPython's item deletion, not `pop`: an ABSENT key raises the
+ * same catchable KeyError `mojo_dict_subscript_*` raises, and a frozen dict
+ * raises the item-deletion TypeError. Lowering it to `mojo_dict_pop_int(...,
+ * 0)` made a missing key a silent no-op, so a `except KeyError:` handler
+ * never ran. */
+void        mojo_dict_del_item(MojoDict *d, char *key);
 MojoDict   *mojo_dict_copy(MojoDict *d);
 MojoDict   *mojo_dict_union(MojoDict *a, MojoDict *b);  /* a | b */
 MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */

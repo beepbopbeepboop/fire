@@ -6514,6 +6514,44 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
     # halves existed and only the pairing was missing, so
     # `d[b'a'] = 7; d.get(b'a')` read the str domain and answered 0.
     _sfx = '_bytes' if key_is_bytes else ''
+    # NO DEFAULT ARGUMENT on a scalar/unknown value domain: CPython answers
+    # the stored value on a hit and `None` on a miss, and the
+    # `mojo_dict_get_*` getters answer the domain's absent value (0 / NULL /
+    # 0.0) either way, so `print({"a": 1}.get("zz"))` printed `0` (the
+    # None-prints-as-0 and None-equals-0 bug, doc deleted with the fix). The
+    # boxed read answers a hit by the slot's own kind (`_dict_slot_boxed`)
+    # and a miss with the shared None box, so the result is a TAGGED word:
+    # print/str render it by kind, `is None` asks the box's kind, and
+    # arithmetic dispatches by it.
+    # It must be the ONLY key lookup emitted: a transient key's release is
+    # emitted right after its call, so a spare raw read first would free the
+    # key before this one ran and this one always missed.
+    # A str value domain keeps its `char *` result (the NULL miss is the
+    # nullable-pointer convention); a double/container domain is left as it
+    # was, since those results cannot carry the None box in their C type.
+    if default_val is None and not gimple_ctypes.TypeLattice.is_cstr(val_type) \
+            and not gimple_ctypes.TypeLattice.is_double(val_type) \
+            and val_type not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        if gen._is_none_literal(args[0]):
+            _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed_none',
+                                    [('MojoDict *', ov)])
+        elif key_is_bytes:
+            _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed_bytes',
+                                    [('MojoDict *', ov), (key_type, key_val)])
+        else:
+            _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed',
+                                    [('MojoDict *', ov), (key_type, key_val)])
+        gen._word_mark_boxed(_boxed)
+        gen._word_mark_tagged(_boxed)
+        gen._word_mark_dyn(_boxed)
+        # Provenance for the store side: a `.get` word whose value domain is
+        # only `int64_t`-by-default may really be a container (the caller's
+        # target name says so). `emit_stmts` unwraps the word instead of
+        # refusing when it lands in a container/pointer local.
+        if getattr(gen, '_dict_get_boxed_temps', None) is None:
+            gen._dict_get_boxed_temps = set()
+        gen._dict_get_boxed_temps.add(_as_str(_boxed))
+        return 'int64_t', _boxed
     if gen._is_none_literal(args[0]):
         # `d.get(None)`: the None-key entry (keykind 3), which the integer 0
         # the literal lowers to would miss (it reads the int-0 entry).
@@ -6985,7 +7023,20 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             av = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
             at = 'char *'
         if gimple_ctypes.TypeLattice.is_cstr(at):
-            gen._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
+            if gen._word_has_slot_kinds(ov):
+                # A list that already carries a per-slot kinds row (a bool or
+                # float append created one) must record this slot too, or the
+                # kinds-aware repr reads it with the int fallback and prints the
+                # string pointer as a decimal. The plain helper only updates
+                # the static element type, which is not what that repr reads.
+                _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
+                    gen._elem_types.get(ov) or 'int64_t')
+                gen._emit_call('void', '', 'mojo_list_append_kinded',
+                               [('MojoList *', ov),
+                                ('int64_t', gen._coerce_to_type('char *', 'int64_t', av)),
+                                ('char', "'p'"), ('char', "'" + _prior + "'")])
+            else:
+                gen._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
             gen._elem_types[ov] = 'char *'
             # Propagate _field_elem_types for char * append (was missing
             # — the str path had no propagation, only the int path did).
@@ -7008,6 +7059,26 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             gen._emit_call('void', '', 'mojo_list_append_double_kinded',
                            [('MojoList *', ov), ('double', av), ('char', "'" + _prior + "'")])
             gen._word_mark_slot_kinds(ov)
+        elif gimple_exprtypes.is_python_bool_expr(gen, args[0]):
+            # A Python bool is the same 0/1 word as an int (`_Bool` lowers to
+            # `int`), so the value alone cannot tell the printer which spelling
+            # it wants. The append site is the last place that CAN tell — the
+            # expression is still in hand — and it pushes the slot under
+            # MOJO_KIND_BOOL, exactly as `_list_literal_slot_kind` does for a
+            # literal's slot. Without it `[True]` printed `[1]` when the list
+            # was built `e = []; e.append(True)` rather than spelled as a
+            # literal. `prior` describes the slots already present, like the
+            # double path above: a bool appended to a list of ints must not make
+            # those ints render as bools.
+            _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._elem_types.get(ov) or 'int64_t')
+            if at in ('int', '_Bool'):
+                av = gen._coerce_to_type(at, 'int64_t', av)
+                at = 'int64_t'
+            gen._emit_call('void', '', 'mojo_list_append_kinded',
+                           [('MojoList *', ov), ('int64_t', av),
+                            ('char', "'b'"), ('char', "'" + _prior + "'")])
+            gen._word_mark_slot_kinds(ov)
         else:
             # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
             # than leaving it to `_emit_call`'s param-type lookup: in the
@@ -7028,10 +7099,31 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                                [('MojoList *', ov), ('int64_t', av)])
                 gen._word_mark_slot_kinds(ov)
             else:
-                if at in ('int', '_Bool'):
-                    av = gen._coerce_to_type(at, 'int64_t', av)
-                    at = 'int64_t'
-                gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+                # A pointer element on a list that already carries a kinds row
+                # must extend that row, or the kinds-aware repr reads the slot
+                # with the int fallback and prints a pointer decimal. The row is
+                # created by a bool/float append (the two kinds the static
+                # element type cannot express); a struct pointer maps to the
+                # int fallback and needs no byte of its own.
+                _ptr_elem = at
+                if not gimple_ctypes.TypeLattice.ends_in_star(_ptr_elem):
+                    _ptr_elem = gen._actual_types.get(_gmm_as_str(av), at)
+                _row_kind = ''
+                if gimple_ctypes.TypeLattice.ends_in_star(_ptr_elem):
+                    _row_kind = gimple_ctypes.TypeLattice.slot_kind_byte(_ptr_elem)
+                if gen._word_has_slot_kinds(ov) and _row_kind not in ('', 'i'):
+                    _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
+                        gen._elem_types.get(ov) or 'int64_t')
+                    gen._emit_call('void', '', 'mojo_list_append_kinded',
+                                   [('MojoList *', ov),
+                                    ('int64_t', gen._coerce_to_type(_ptr_elem, 'int64_t', av)),
+                                    ('char', "'" + _row_kind + "'"),
+                                    ('char', "'" + _prior + "'")])
+                else:
+                    if at in ('int', '_Bool'):
+                        av = gen._coerce_to_type(at, 'int64_t', av)
+                        at = 'int64_t'
+                    gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
             # A CALLABLE appended to a list, so a later `lst[0](...)` can
             # dispatch. The list literal records through the same helper (see
             # `_lower_list_literal`), and this is the `append` half: without

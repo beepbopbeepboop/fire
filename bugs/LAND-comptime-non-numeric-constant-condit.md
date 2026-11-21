@@ -1,9 +1,9 @@
-# Land: should finished branch bug-land-codegen-float-augmented-assignm-2 land?
+# Land: should finished branch bug-comptime-non-numeric-constant-condit land?
 
-**Branch:** `work/bug-land-codegen-float-augmented-assignm-2` (task `bug-land-codegen-float-augmented-assignm-2`; its tip is also saved as `refs/archive/work/bug-land-codegen-float-augmented-assignm-2`, so dropping it loses nothing).
-**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 4 commit(s) ahead of master, 36 behind it; task started 2026-11-20 21:57:55
-**Original work:** An earlier attempt left 3 commit(s) on branch work/bug-land-codegen-float-augmented-assignm, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. That branch deleted t
-**Original claims:** bug:LAND-codegen-float-augmented-assignment-o
+**Branch:** `work/bug-comptime-non-numeric-constant-condit` (task `bug-comptime-non-numeric-constant-condit`; its tip is also saved as `refs/archive/work/bug-comptime-non-numeric-constant-condit`, so dropping it loses nothing).
+**Age:** last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 9 behind it; task started 2026-11-21 03:26:28
+**Original work:** Fix the bug in COMPTIME_non_numeric_constant_condition_folds_false (deleted) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinni
+**Original claims:** bug:COMPTIME_non_numeric_constant_condition_folds_false
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-20 22:56:45: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 4 commit(s) ahead of master, 36 behind it; task started 2026-11-20 21:57:55)
-  Branch: work/bug-land-codegen-float-augmented-assignm-2
-  Conflicting files: mojo/backend_gimple/emit_calls.py
+- 2026-11-21 04:23:28: conflicts with master (last commit 2026-11-21, first unlanded commit 2026-11-21; 1 commit(s) ahead of master, 9 behind it; task started 2026-11-21 03:26:28)
+  Branch: work/bug-comptime-non-numeric-constant-condit
+  Conflicting files: mojo/middle/comptime.py, test_gimple_runner.py

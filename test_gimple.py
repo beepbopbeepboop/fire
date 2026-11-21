@@ -1429,6 +1429,82 @@ main()
         _PASS += 1
 
 
+def test_return_of_a_dict_slot_beside_a_string_is_the_boxed_word():
+    """`return d[key]` beside `return "missing"` is the boxed word, not `char *`.
+
+    A dict slot read is the slot's own word of unknown kind: the integer for
+    an int value, the string's own pointer for a str value. Joining it with a
+    str arm picked the pointer and cast that word (`(char *)(int64_t)_t8`), so
+    the caller printed `1` as a string pointer and dereferenced address 1 --
+    the doc's five-line program SIGSEGV'd before printing anything.
+
+    Both the doc's exact repro and the same shape without `try` (to show the
+    defect is the return JOIN, not the handler), with an int, a str and a
+    missing key, compared against CPython. `divide` is the other arm shape
+    the same join rules out: `a // b` is an `int64_t` word that can never be
+    a pointer, and beside `return "div by zero"` it was cast the same way
+    (`tools/pydiff_corpus/flow/13_try_except_builtin.py`). The emitted
+    signatures are asserted too: the value is only consumable as a word.
+    """
+    global _PASS, _FAIL
+    name = "return_of_a_dict_slot_beside_a_string_is_the_boxed_word"
+    src = '''\
+def lookup(d, key):
+    try:
+        return d[key]
+    except KeyError:
+        return "missing"
+
+def pick(d, key, flag):
+    if flag:
+        return d[key]
+    return "none"
+
+def divide(a, b):
+    try:
+        return a // b
+    except ZeroDivisionError:
+        return "div by zero"
+
+def main():
+    d = {"a": 1, "s": "text"}
+    print(lookup(d, "a"))
+    print(lookup(d, "s"))
+    print(lookup(d, "zz"))
+    print(pick(d, "a", 1))
+    print(pick(d, "s", 1))
+    print(pick(d, "zz", 0))
+    print(divide(7, 2))
+    print(divide(-7, 2))
+    print(divide(7, 0))
+main()
+'''
+    want = cpython_stdout(src)
+    if want is None:
+        print(f"FAIL  {name}: CPython does not run the fixture")
+        _FAIL += 1
+        return
+    got, c_src, err = program_stdout(src)
+    if got is None:
+        print(f"FAIL  {name}: {err}")
+        _FAIL += 1
+        return
+    problems = []
+    if got != want:
+        problems.append(f'compiled stdout {got!r} != CPython {want!r}')
+    for _fn in ('lookup', 'pick', 'divide'):
+        _rt = defined_return_ctype(c_src, _fn)
+        if _rt != 'int64_t':
+            problems.append(f'{_fn} returns {_rt!r}, want the boxed word '
+                            f"'int64_t'")
+    if problems:
+        print(f"FAIL  {name}: " + '; '.join(problems))
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}  (stdout={got!r})")
+        _PASS += 1
+
+
 def test_phantom_fields_do_not_cross_method_scopes():
     """A local of one method must not type a same-named local of another.
 
@@ -2048,6 +2124,10 @@ def main():
     # A return join that mixes a pointer with a scalar is the boxed word, not
     # the pointer (the bug gimple-lint's cast-narrow-int-to-ptr named).
     _run_isolated(lambda: test_mixed_pointer_scalar_returns_are_the_boxed_word(), 'test_mixed_pointer_scalar_returns_are_the_boxed_word')
+    # A dict slot / floor division arm is a word of unknown kind, not a
+    # pointer: beside `return "missing"` it was cast to `char *` and the
+    # caller dereferenced address 1.
+    _run_isolated(lambda: test_return_of_a_dict_slot_beside_a_string_is_the_boxed_word(), 'test_return_of_a_dict_slot_beside_a_string_is_the_boxed_word')
     # A local of one method must not mint fields on the class another method's
     # same-named local was built from.
     _run_isolated(lambda: test_phantom_fields_do_not_cross_method_scopes(), 'test_phantom_fields_do_not_cross_method_scopes')

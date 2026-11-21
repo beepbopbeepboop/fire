@@ -1995,10 +1995,221 @@ def param_annotation_conflicts(gen, pname: str, ann_ctype, body) -> str | None:
     return _param_annotation_cached(gen, pname, ann_ctype, body)
 
 
-def param_boxed_names(gen, func) -> set:
-    """The parameter names of `func` whose annotation the body contradicts
-    in a way that needs the tagged word (a scalar beside a container, or two
-    different scalar kinds).
+def param_default_is_none(func, pname: str) -> bool:
+    """Is `pname`'s declared default the literal `None`?
+
+    That declaration says the parameter is OPTIONAL (`value=None`), not that
+    it is an integer zero that happens to be the default: a caller may pass
+    None, the integer 0, or any other value, and the body is entitled to tell
+    them apart with `is None` / `== None`."""
+    _defs = getattr(func, 'param_defaults', None) or {}
+    _d = _defs.get(_as_str(pname).lstrip('*'))
+    if isinstance(_d, gimple_ctypes.NoneLiteral):
+        return True
+    return isinstance(_d, IdentExpr) and _as_str(_d.name) == 'None'
+
+
+def param_default_none_names(gen, func, func_key: str = None) -> set:
+    """The UNANNOTATED parameters of `func` declared `= None`.
+
+    They are optionally-None values: the declared default is `None`, so the
+    slot has to be able to hold both None and a real value, and the integer 0
+    must not be the same word as None (`def label(value=None): if value is
+    None: ...; if value == 0: ...`). Such a parameter is the TAGGED word, the
+    representation the runtime already has (`mojo_box_none` / `mojo_box_int`,
+    read by `mojo_word_is_none`, `mojo_repr_boxed`, `mojo_truthy_word`): a
+    call site boxes the argument by its kind and the body's stores and reads
+    dispatch on the box's kind.
+
+    Excluded when the parameter resolved to a declared C type that already has
+    a distinct absent value: an annotated parameter keeps its annotation, and
+    an UNANNOTATED one that usage inference or its call sites resolved to a
+    pointer/container (a nullable `char *`, where None is NULL) keeps that
+    type. Only a slot that would otherwise be the plain `int64_t` word — where
+    None and 0 are the same bits — is boxed."""
+    out: set = set()
+    _ann = {_as_str(_p[0]): (_p[1] if isinstance(_p, (tuple, list)) and len(_p) > 1 else None)
+            for _p in (getattr(func, 'params', None) or [])
+            if isinstance(_p, (tuple, list))}
+    _inferred = (getattr(gen, '_inferred_param_types', None) or {}).get(
+        _as_str(func_key) if func_key is not None
+        else _as_str(getattr(func, 'name', ''))) or {}
+    for _pn in _ann:
+        if _ann[_pn] is not None or _as_str(_pn).startswith('*'):
+            continue
+        if not param_default_is_none(func, _pn):
+            continue
+        _ct = _inferred.get(_as_str(_pn)) if hasattr(_inferred, 'get') else None
+        if isinstance(_ct, str) and _ct not in ('int', 'int64_t'):
+            continue
+        if not isinstance(_ct, str):
+            # The other resolver `_param_ctype` consults for an unannotated
+            # parameter is the whole-module call-site kind scan. A slot every
+            # call site passes a str/float for is that type, not the box.
+            try:
+                import mojo.middle.coro as _coro
+                _ck = _coro._CALLSITE_PARAM_KINDS.get(
+                    _as_str(getattr(func, 'name', '')), {}).get(_as_str(_pn))
+                if isinstance(_ck, str) and _coro._KIND_TO_SLOT_CTYPE.get(
+                        _ck) not in (None, 'int', 'int64_t'):
+                    continue
+            except Exception:
+                pass
+        out.add(_as_str(_pn))
+    return out
+
+
+# The value kind an `isinstance(p, T)` type argument names, by the BUILTIN
+# name `T` carries (a tuple of names is read as all of them). The same
+# container-vs-scalar split the annotation twin draws, so `selected =
+# [selected]` beside `isinstance(selected, str)` is the method-free spelling
+# of the annotation lie the detector exists for.
+_PARAM_ISINSTANCE_KIND = {
+    'str': 'str',
+    'bytes': 'bytes', 'bytearray': 'bytes',
+    'int': 'int', 'bool': 'bool', 'float': 'float',
+    'list': 'list', 'tuple': 'list',
+    'dict': 'dict', 'frozendict': 'dict',
+    'set': 'set', 'frozenset': 'set',
+}
+
+# The one-argument reads of a parameter that name a kind: the string-only
+# method set is `mojo.middle.types`' own (`is_string_only_method`, shared
+# with the method dispatch on an unknown-kind receiver), and `decode`/`hex`
+# are `_infer_param_types`'s BYTES_ONLY_METHODS — the only member calls
+# that exist on exactly one builtin kind, so `p.strip()` beside `p = [p]`
+# is the method-call spelling of the `isinstance` read above.
+_PARAM_BYTES_ONLY_METHODS = ('decode', 'hex')
+
+
+def _untyped_param_mixed_kinds(gen, pname: str, body) -> str | None:
+    """The category of disagreement an UNANNOTATED parameter's OWN body use
+    proves between the kinds it holds, or None.
+
+    The annotation-less twin of `_param_annotation_conflict`. That rule
+    compares the annotation's kind against the body's provable bindings;
+    with no annotation there is nothing to contradict, so BOTH sides come
+    from the body: a BINDING of the parameter to a kind (`selected =
+    [selected]` — the container the body stores through the slot) beside a
+    READ of it as a named kind (`isinstance(selected, str)`, a string-only
+    or bytes-only method call). Two kinds that do not agree is the same
+    "no single C type" shape the annotation rule covers, and the tagged
+    `int64_t` word is the same answer, with the same categories, so the
+    declaration (`funcs_shared._param_ctype`), the body's stores and reads
+    (`emit_infra.boxed_param_names`) and the call sites (`param_boxed_names`)
+    apply one rule instead of two.
+
+    Kind-neutral uses contribute nothing: a membership test, truthiness, an
+    iterable-consuming builtin (`frozenset(selected)` accepts a str and a
+    list alike) and a bare `print` each say which KINDS are possible, not
+    which one the value is. `None` means no provable disagreement: fewer
+    than two kinds, a same-family numeric pair (`True` beside `5`), or a
+    container beside a container (both arms are already bare words).
+    """
+    _pn = _as_str(pname)
+    _kinds: set = set()
+    for n in _each_binding(body or []):
+        value = None
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            if isinstance(n.target, gimple_ctypes.IdentExpr) \
+                    and _as_str(n.target.name) == _pn:
+                value = n.value
+        elif isinstance(n, gimple_ctypes.VarDecl):
+            if _as_str(getattr(n, 'name', '')) == _pn:
+                value = n.value
+        else:
+            continue
+        _k = _param_value_binding_kind(gen, value)
+        if _k is not None and _k != 'none':
+            _kinds.add(_k)
+    # `_walk_ast`, not a hand walk: it is the one whole-node traversal this
+    # file already trusts for pre-pass scans (`_seed_addressed_locals`), it
+    # is memoized per node, and descending into a nested def is right, not
+    # an overreach — a closure that reads the parameter names a real use.
+    for n in gimple_exprtypes._walk_ast(body or []):
+        if not isinstance(n, gimple_ctypes.CallExpr):
+            continue
+        _fn = n.func
+        if isinstance(_fn, gimple_ctypes.IdentExpr) \
+                and _as_str(_fn.name) == 'isinstance' \
+                and len(n.args or []) == 2:
+            _arg0 = n.args[0]
+            if isinstance(_arg0, gimple_ctypes.IdentExpr) \
+                    and _as_str(_arg0.name) == _pn:
+                _targ = n.args[1]
+                _tnames = []
+                if isinstance(_targ, gimple_ctypes.TupleExpr):
+                    _tnames = list(_targ.elements or [])
+                else:
+                    _tnames = [_targ]
+                for _t in _tnames:
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _tk = _PARAM_ISINSTANCE_KIND.get(_as_str(_t.name))
+                        if _tk is not None:
+                            _kinds.add(_tk)
+        elif isinstance(_fn, gimple_ctypes.MemberExpr):
+            _obj = _fn.obj
+            if isinstance(_obj, gimple_ctypes.IdentExpr) \
+                    and _as_str(_obj.name) == _pn:
+                _m = _as_str(_fn.member)
+                if gimple_ctypes.is_string_only_method(_m):
+                    _kinds.add('str')
+                elif _m in _PARAM_BYTES_ONLY_METHODS:
+                    _kinds.add('bytes')
+    if len(_kinds) < 2:
+        return None
+    _scalars = {k for k in _kinds if not _param_kind_is_container(k)}
+    _has_container = any(_param_kind_is_container(k) for k in _kinds)
+    if _has_container and _scalars:
+        return 'value'
+    if not _has_container:
+        # All scalar. Collapse the numeric family the annotation twin does:
+        # `True` beside `5` is one kind, not a disagreement.
+        _distinct = {('num' if k in ('int', 'bool') else k) for k in _scalars}
+        if len(_distinct) > 1:
+            return 'scalar'
+    return None
+
+
+def _untyped_param_mixed_kinds_cached(gen, pname: str, body) -> str | None:
+    """`_untyped_param_mixed_kinds`, memoized per (body identity, name).
+
+    The signature, the forward declaration, the return-type seeds and the
+    call-site registry all ask this same question for the same parameter
+    (`_param_ctype` is reached from every one of them), and a large
+    function's body walk is not free. Cached on the generator the way
+    `_param_annotation_cached` is, with the same key: one compile keeps
+    every body list alive, so identity cannot be recycled underneath it,
+    and a fresh compile is a fresh generator."""
+    cache = getattr(gen, '_untyped_param_conflict_cache', None)
+    if cache is None:
+        cache = {}
+        gen._untyped_param_conflict_cache = cache
+    key = (id(body) if body is not None else None, _as_str(pname))
+    got = cache.get(key)
+    if got is not None:
+        return got if got != '<none>' else None
+    ans = _untyped_param_mixed_kinds(gen, pname, body or [])
+    cache[key] = '<none>' if ans is None else ans
+    return ans
+
+
+def untyped_param_mixed_kinds(gen, pname: str, body) -> str | None:
+    """Public spelling of `_untyped_param_mixed_kinds_cached` for the
+    codegen's parameter-type resolver and boxed-name scans (the middle tier
+    owns the rule; the backend only consumes its answer, so the
+    binding/read classification cannot drift between the two)."""
+    return _untyped_param_mixed_kinds_cached(gen, pname, body)
+
+
+def param_boxed_names(gen, func, func_key: str = None) -> set:
+    """The parameter names of `func` that need the tagged word: an
+    ANNOTATION the body contradicts (a scalar beside a container, or two
+    different scalar kinds), NO annotation whose own body use proves the
+    same mixed kind (`untyped_param_mixed_kinds`, the annotation-less twin —
+    the usage inference picks one kind and the body disproves it), or an
+    UNANNOTATED parameter declared `= None` (`param_default_none_names`,
+    where None and the integer 0 would otherwise be the same bits).
 
     Used by the call site to box the argument by its own kind, so the callee
     receives a word that still says what it is. A container-vs-container
@@ -2008,16 +2219,23 @@ def param_boxed_names(gen, func) -> set:
     body = getattr(func, 'body', None) or []
     for _p in (getattr(func, 'params', None) or []):
         _pn = _as_str(_p[0] if isinstance(_p, (tuple, list)) else _p)
+        if _pn.startswith('*'):
+            continue
         _ann = _p[1] if isinstance(_p, (tuple, list)) and len(_p) > 1 else None
-        if _ann is None or _pn.startswith('*'):
-            continue
-        try:
-            _ann_ct = gen._resolve_type(_ann)
-        except Exception:
-            continue
-        _conf = _param_annotation_conflict(gen, _pn, _ann_ct, body)
+        if _ann is None:
+            try:
+                _conf = untyped_param_mixed_kinds(gen, _pn, body)
+            except Exception:
+                _conf = None
+        else:
+            try:
+                _ann_ct = gen._resolve_type(_ann)
+            except Exception:
+                continue
+            _conf = _param_annotation_conflict(gen, _pn, _ann_ct, body)
         if _conf == 'value' or _conf == 'scalar':
             out.add(_pn)
+    out |= param_default_none_names(gen, func, func_key)
     return out
 
 def _seed_addressed_locals(gen, body: list):
@@ -2337,7 +2555,7 @@ def _is_none_return_arm(node) -> bool:
             and _as_str(node.name) == 'None')
 
 
-def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
+def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> bool:
     """Does an unannotated function whose arms joined to a POINTER really mix
     a pointer with a scalar, so its return type must be the boxed word?
 
@@ -2361,7 +2579,16 @@ def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
 
       * `_Bool` and a float — C types no pointer value can have; and
       * an int/int64_t arm whose SOURCE SHAPE is unambiguously scalar
-        (a literal, a comparison, `not`, a sign on a literal)
+        (a literal, a comparison, `not`, a sign on a literal, `//`); and
+      * an int/int64_t arm that is a SUBSCRIPT of a named container, when the
+        join is the STRING pointer — `return d[k]` beside `return "missing"`.
+        The slot is the dict/list's own word (`mojo_dict_slot_boxed`): an
+        integer for an int slot and the string itself for a str slot. Cast
+        to `char *`, the int 1 became address 1 and the caller dereferenced
+        it (the `try: return d[k]` / `except: return "missing"` crash). The
+        gates are load-bearing: a dict-of-sets subscript beside a `MojoSet *`
+        arm really is that pointer, and `s.split('.')[-1]` (a subscript of a
+        CALL) really is a string, so widening either loses a real type.
 
     are evidence. An IdentExpr or a call is not: `return result^` (String)
     and `return len(x)` are both named `int64_t` here, and only the first
@@ -2369,7 +2596,11 @@ def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
     ignored, as the join ignores it.
 
     `acc` and `arms` are index-aligned; `arms` may be shorter when a caller
-    did not ask for nodes, in which case there is no node evidence."""
+    did not ask for nodes, in which case there is no node evidence. `joined`
+    is the arm join the caller already computed (the joined pointer the
+    subscript arm is compared against), or None to compute it here."""
+    _joined = _as_str(joined) if joined is not None else _as_str(
+        gimple_ctypes.TypeLattice.join_all(acc))
     for _i in range(len(acc)):
         _t = _as_str(acc[_i])
         if _t == 'void' or gimple_ctypes.TypeLattice.is_pointer(_t):
@@ -2381,6 +2612,20 @@ def _return_arms_need_boxed_word(acc: list, arms: list) -> bool:
             return True
         if _t in ('int', 'int64_t'):
             if gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
+                return True
+            # A bare-name container subscript beside a STRING arm
+            # (`return d[key]` with `return "missing"`) is the slot's own word
+            # of unknown kind: an int slot's integer, a str slot's pointer.
+            # Cast to the joined `char *` the int slot's `1` became address 1
+            # and the caller dereferenced it. Named containers only (not a
+            # call result or a member), and only when the join is the string
+            # pointer: a subscript of a dict of sets beside a `MojoSet *` arm
+            # really is that pointer (`_conforms_to_bases`), and widening it
+            # would lose the container type for every caller, and a
+            # `p.split('.')[-1]` (a subscript of a CALL) really is a string.
+            if (gimple_ctypes.TypeLattice.is_cstr(_joined)
+                    and isinstance(_node, gimple_ctypes.SubscriptExpr)
+                    and isinstance(_node.obj, gimple_ctypes.IdentExpr)):
                 return True
     return False
 
@@ -2511,7 +2756,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # exactly the functions this decision widened, rather than re-deriving
         # the mix from a differently-seeded type table.
         if (gimple_ctypes.TypeLattice.is_pointer(_rt)
-                and _return_arms_need_boxed_word(acc, arms)) \
+                and _return_arms_need_boxed_word(acc, arms, _rt)) \
                 or (_rt in ('int', 'int64_t')
                     and _return_arms_are_int_or_none(acc, arms, body)):
             _mixed = getattr(gen, '_mixed_return_bodies', None)
@@ -3280,7 +3525,7 @@ def _lambda_call_ret_table(gen, body: list) -> dict:
     return _merged_lr
 
 
-def _infer_return_type_with_locals(gen, body: list) -> str:
+def _infer_return_type_with_locals(gen, body: list, func_def=None) -> str:
     """`_infer_return_type`, but with the body's own pointer-valued locals
     visible to it (see `_prebound_local_ctypes`).
 
@@ -3298,6 +3543,43 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     `env_additions | wasi_sdk_env(context)` then passed an integer to
     `mojo_dict_union` (a hard `-Wint-conversion` error in
     `Tools/wasm/wasi/__main__.py`).
+
+    When `func_def` (the body's own `FunctionDef`) is given, the body's
+    full local table is made visible the same way. That is the OTHER
+    scalar the `int64_t` default erases: a local the body declares
+    `double` (a true-division or float-arithmetic result: `x = 9; x /= 2`
+    or `y = x * 0.5`) whose `return x` read the name it had not bound yet
+    and inferred `int64_t f(void)` over a `double` local, casting 4.5 back
+    to 4 at the return. The table merged here is the SAME computation the
+    codegen declares each local from (`resolve_shared._infer_local_var_
+    types`), so the return slot and the local's own declaration cannot
+    disagree; it is merged strictly additive (a name an earlier pass
+    decided for keeps that answer) and computed fresh, because every
+    caller of this entry point passes a body at a different pass, and the
+    tables these passes hold for the same body are what this function
+    exists to make irrelevant.
+
+    The body's PythonObject box locals ride the same window: `return a / 2`
+    with box local `a` must stay the int64 box the emitter's box arm
+    returns, and `_quick_type`'s true-division gate reads the box set the
+    emission will build, which is computed from the body here (see
+    `resolve_shared._body_pybox_locals`).
+
+    A local whose ctype is `MojoGenerator *` is deliberately NOT merged.
+    A function that returns a generator HANDLE has always been declared
+    with the erased word (`int64_t`) unless its returns are all literal
+    generator calls (the `_fn_returns_generator` pre-pass in module_gen,
+    which is what records the resume/value/destroy api on the call temp —
+    see emit_calls' `ret_type == 'MojoGenerator *'` arm). Merging the
+    local's handle ctype made an unannotated function like glob.py's
+    `iglob` (`it = _iglob(...); return it`) infer `MojoGenerator *`, and a
+    static consumer then trusts it: `list(iglob(...))` takes
+    `_compr_generator_loop`, which has no api for a handle that came out
+    of an ordinary call and emits an EMPTY list.  The erased word is the
+    correct answer there, not merely the old one: `it` may not even be the
+    named generator — glob.iglob rebinds it to `itertools.chain((s,), it)`
+    for a leading `**` — so its runtime kind is what the dynamic
+    `_materialize_as_list` path must dispatch on.
 
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it — with ONE exception. An
@@ -3326,6 +3608,26 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     for _n, _t in _locals.items():
         if _n not in _merged or gimple_ctypes.TypeLattice.is_word(_t):
             _merged[_n] = _t
+    # The body's own local table (see the docstring): strictly additive —
+    # a name an earlier pass already put in `var_types` (a parameter, or a
+    # prebound pointer local the loop above just recorded) keeps that
+    # answer. A failed scan is the pre-existing behaviour (no overlay),
+    # never a reason the return inference itself should raise.
+    if func_def is not None:
+        try:
+            from mojo.middle.resolve_shared import _infer_local_var_types as _lt_scan
+            _lt_table = _lt_scan(gen, func_def)
+        except Exception:
+            _lt_table = None
+        if _lt_table:
+            for _ln, _lt in _as_dict(_lt_table).items():
+                _lt_s = _as_str(_lt)
+                # A generator handle is not return-slot evidence (see the
+                # docstring): it stays the erased word so the dynamic
+                # iteration path, which dispatches on the handle's runtime
+                # kind, keeps owning the value.
+                if _ln not in _merged and _lt_s != 'MojoGenerator *':
+                    _merged[_ln] = _lt_s
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
     # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
@@ -3352,6 +3654,15 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     # already carrying a real return type keeps it.
     _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
     gen._lambda_call_ret_types = _lambda_call_ret_table(gen, body)
+    # The body's box locals, same window: installed so `_quick_type`'s
+    # true-division gate (and `_py_box_expr` in general) answers for this
+    # body the way the emission of it will, then restored.
+    _saved_pb = getattr(gen, '_pybox_vars', None)
+    _saved_pd = getattr(gen, '_pybox_double_vars', None)
+    from mojo.middle.resolve_shared import _body_pybox_locals
+    _pb_names, _pb_dbl = _body_pybox_locals(gen, body)
+    gen._pybox_vars = (set() if _saved_pb is None else set(_saved_pb)) | _pb_names
+    gen._pybox_double_vars = (set() if _saved_pd is None else set(_saved_pd)) | _pb_dbl
     try:
         return _infer_return_type_core(gen, body)
     finally:
@@ -3360,14 +3671,19 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         gen._dict_val_types = _saved_dv
         gen._dict_val_elem_types = _saved_de
         gen._lambda_call_ret_types = _saved_lr
+        gen._pybox_vars = _saved_pb
+        gen._pybox_double_vars = _saved_pd
 
 
-def _infer_return_type(gen, body: list) -> str:
+def _infer_return_type(gen, body: list, func_def=None) -> str:
     """`gen`'s public return-type inference: the core scan, with the
-    body's own pointer-valued locals made visible to it. Every consumer
-    (free functions, struct methods, lifted closures, lambdas) goes
-    through this one entry point, so the fix cannot be half-applied."""
-    return _infer_return_type_with_locals(gen, body)
+    body's own pointer-valued locals and, when the body's `FunctionDef`
+    node is passed as `func_def`, its full local table made visible.
+    Every consumer (free functions, struct methods, lifted closures,
+    lambdas) goes through this one entry point, so the fix cannot be
+    half-applied. Lambdas and synthetic bodies pass only the body and get
+    exactly the pre-local-table behaviour."""
+    return _infer_return_type_with_locals(gen, body, func_def=func_def)
 
 
 def multi_kind_locals(gen) -> set:

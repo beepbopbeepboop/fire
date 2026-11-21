@@ -5129,7 +5129,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
             _rd_target = _rd_defs.get(_rd_name)
             if _rd_target is None or _rd_target is _rd_fn:
                 continue
-            _rd_ret = self._infer_return_type(_rd_target.body)
+            _rd_ret = self._infer_return_type(_rd_target.body, _rd_target)
             if _rd_ret not in _GMI_NONCALLABLE_DECORATOR_RET:
                 continue
             # An untyped parameter infers as int64_t, so `return f` looks
@@ -10228,10 +10228,18 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
     are pre-signature and either may be the first to see a function."""
     import mojo.middle.infra_infer as ginf
     self._param_box_names: dict[str, set] = {}
+    # The subset of `_param_box_names` whose boxed slot exists because the
+    # parameter is declared `= None`: a call that OMITS the argument pads the
+    # declared default, which must be the None box (the plain word 0 is the
+    # integer 0). See `infra_infer.param_default_none_names`.
+    self._param_box_none_defaults: dict[str, set] = {}
     for s in all_functions:
         if isinstance(s, FunctionDef):
+            _fs_pb = _as_funcdef_node(s)
             self._param_box_names[_as_str(s.name)] = ginf.param_boxed_names(
-                self, _as_funcdef_node(s))
+                self, _fs_pb, _as_str(s.name))
+            self._param_box_none_defaults[_as_str(s.name)] = \
+                ginf.param_default_none_names(self, _fs_pb, _as_str(s.name))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sd_pb = _as_structdef_node(s)
@@ -10239,7 +10247,33 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
                 _pm_pb = _as_funcdef_node(m)
                 _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
                 self._param_box_names[_pbk] = ginf.param_boxed_names(
-                    self, _pm_pb)
+                    self, _pm_pb, _pbk)
+                self._param_box_none_defaults[_pbk] = \
+                    ginf.param_default_none_names(self, _pm_pb, _pbk)
+    # The DECLARATION half of the same rule, applied to the table every
+    # signature reader consults. `funcs_shared._param_ctype` overrides a
+    # flagged parameter to the tagged word for its OWN readers, but the
+    # forward declarations, the method signature passes and the return-type
+    # seeds read `_inferred_param_types` directly, and a flagged slot still
+    # carrying its usage-inferred kind (`MojoList *` for `frozenset(
+    # selected)`) would declare one type and define another — the same
+    # declaration/definition split `_gmh_reconcile_param_container_kinds`
+    # exists to close, so the correction is one write to the shared table.
+    # An entry for an ANNOTATED parameter is ignored by every reader that
+    # honours annotations (`_param_ctype` decides from the annotation, the
+    # observation refiners skip annotated names), so the whole set goes in.
+    # Re-asserted from BOTH population passes: the scalar/struct observation
+    # refiners that run between them settle slots "left at the int64_t
+    # default" and would read a flagged slot as one, so the second pass
+    # restores the word after them.
+    _pbt = getattr(self, '_inferred_param_types', None)
+    if _pbt is not None:
+        for _pbk, _pbns in self._param_box_names.items():
+            if not _pbns:
+                continue
+            _pbf = _pbt.setdefault(_as_str(_pbk), {})
+            for _pbn in _pbns:
+                _pbf[_as_str(_pbn)] = 'int64_t'
 
 
 def _gmh_reconcile_param_container_kinds(self):
@@ -10270,7 +10304,21 @@ def _gmh_reconcile_param_container_kinds(self):
         if not _rp:
             _rp = {}
             self._inferred_param_types[_rn] = _rp
+        # Same deliberate-word exemption as the unanimous-container arm
+        # below: a slot `_gmh_record_param_box_names` retyped to `int64_t`
+        # because the body proved it a tagged word is NOT a usage guess the
+        # binding estimator may correct. The binding estimator is right
+        # that the name holds a list (it sees `selected = [selected]`),
+        # but the slot's reader is the word dispatch (a list APPEND under
+        # the runtime kind), and the forward declaration must match the
+        # definition's word signature — rule (a) running here is exactly
+        # the `int64_t` definition / `MojoList *` declaration split this
+        # function exists to close. The guard reads the recorded set,
+        # never the table value, so it holds after the record passes.
+        _pbns = (getattr(self, '_param_box_names', None) or {}).get(_rn)
         for _rpn in list(_rp.keys()):
+            if _pbns and _rpn in _pbns:
+                continue
             _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
             if _fixed != _rp[_rpn]:
                 _rp[_rpn] = _fixed
@@ -10281,12 +10329,86 @@ def _gmh_reconcile_param_container_kinds(self):
     for _fn, _pmap in _pct.items():
         if _fn not in self._inferred_param_types:
             self._inferred_param_types[_fn] = {}
+        # A slot the parameter's own body proved to be a tagged word
+        # (`_param_box_names`, written into the table by
+        # `_gmh_record_param_box_names`) holds a DELIBERATE int64_t, not an
+        # unresolved default: overriding it with the unanimous-container
+        # guess would declare the container kind the definition's box slot
+        # disproves — the same declaration/definition split this function
+        # exists to close. The guard reads the recorded set, never the table
+        # value, so it holds for a slot the refiners below retyped.
+        _pbns = (getattr(self, '_param_box_names', None) or {}).get(_fn)
         for _pname, _ctype in _pmap.items():
             if _ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                continue
+            if _pbns and _pname in _pbns:
                 continue
             _cur = self._inferred_param_types[_fn].get(_pname)
             if _cur in (None, 'int64_t', 'int', ''):
                 self._inferred_param_types[_fn][_pname] = _ctype
+
+
+def _gmh_aug_widen_params_of(self, func, key: str) -> None:
+    """Apply `funcs_shared.param_aug_rebinding_ctype` to one signature's
+    UNANNOTATED parameters, writing the widened type into
+    `_inferred_param_types[key]`.
+
+    The definition's C parameter list and its forward declaration must
+    agree, and for an unannotated method parameter they do not both go
+    through `_param_ctype`: `_gen_struct_method` seeds `var_types` from
+    `_inferred_param_types[f"{Struct}_{method}"][param]` (falling back to
+    `_resolve_type(None)`), while the signature registration prefers the
+    same qualified entry. Writing the conclusion into that ONE table is
+    what makes them agree — the same reason
+    `_gmh_reconcile_param_container_kinds` writes it rather than hooking a
+    reader. (An ANNOTATED parameter needs no entry here: both sides call
+    `_param_ctype`, whose own augmented-assignment widening sees it.)
+    """
+    _params = getattr(func, 'params', None) or []
+    # Plain unpack over the signature's own `list[tuple[str, str]]` field,
+    # not `params[i][0]`: the double-subscript form is the one that comes
+    # back with a broken `len()`/dict-key hashing on the self-hosted path
+    # (see `_gen_func`'s identical note), while this loop shape is the one
+    # `_gen_struct_method` uses for the same list.
+    for _pn0, _pt in _params:
+        _pn = _as_str(_pn0)
+        if _pt is not None or _pn.startswith('*'):
+            continue
+        _bare = _pn.lstrip('*')
+        _pmap = self._inferred_param_types.get(key)
+        _cur = _as_str(_pmap.get(_bare)) if _pmap is not None else ''
+        _base = _cur if _cur else 'int64_t'
+        _wide = funcs_shared.param_aug_rebinding_ctype(
+            self, func, _bare, _base)
+        if _wide is None:
+            continue
+        if _pmap is None:
+            _pmap = {}
+            self._inferred_param_types[key] = _pmap
+        _pmap[_bare] = _wide
+
+
+def _gmh_reconcile_augmented_param_types(self, all_functions,
+                                         all_structs_for_methods) -> None:
+    """Widen every UNANNOTATED parameter whose body rebinds it with an
+    augmented assignment (see `_gmh_aug_widen_params_of`).
+
+    Called from both population passes of `_inferred_var_types`, like
+    `_gmh_reconcile_param_container_kinds`: it must run after usage
+    inference has filled `_inferred_param_types` (its answer is the base
+    the widening joins) and before any signature is emitted.
+    """
+    for s in all_functions:
+        if isinstance(s, FunctionDef):
+            _fn = _as_funcdef_node(s)
+            _gmh_aug_widen_params_of(self, _fn, _as_str(_fn.name))
+    for s in all_structs_for_methods:
+        if isinstance(s, StructDef):
+            _sd = _as_structdef_node(s)
+            for m in _sd.methods:
+                _m = _as_funcdef_node(m)
+                _gmh_aug_widen_params_of(
+                    self, _m, f"{_as_str(_sd.name)}_{_as_str(_m.name)}")
 
 
 def _gmh_arg_scalar_type(self, caller_name, a, deep_str=False,
@@ -12141,6 +12263,125 @@ def _gmp_emit_utility_stubs(self, _renamed_lines: list[str], _util_stubs: list[s
     ])
 
 
+def _phase17_collect_body_stmts(body) -> list:
+    """Every statement of `body` (and of any `def` nested in it) as a flat
+    pre-order list. Lists, never a generator: this file is in the self-host
+    closure, where a coroutine's symbols are referenced but never defined
+    (`_each_binding`'s own docstring)."""
+    seq: list = []
+
+    def walk(stmts):
+        for s in (stmts or []):
+            seq.append(s)
+            if isinstance(s, FunctionDef):
+                walk(s.body)
+            elif isinstance(s, IfStmt):
+                walk(s.then_body)
+                walk(getattr(s, 'else_body', None))
+                for _c, eb in (getattr(s, 'elifs', None) or []):
+                    walk(eb)
+            elif isinstance(s, (WhileStmt, ForStmt)):
+                walk(getattr(s, 'body', None))
+                walk(getattr(s, 'else_body', None))
+            elif isinstance(s, WithStmt):
+                walk(s.body)
+            elif isinstance(s, TryStmt):
+                walk(s.body)
+                for h in (getattr(s, 'handlers', None) or []):
+                    walk(getattr(h, 'body', None))
+                walk(getattr(s, 'else_body', None))
+                walk(getattr(s, 'finally_body', None))
+
+    walk(body)
+    return seq
+
+
+def _phase17_global_aug_stmts(stmts: list) -> list:
+    """Every augmented assignment in `stmts` that rebinds a MODULE global.
+
+    A module-level `x /= 2` is one. An augmented assignment inside a `def`
+    is one only when that def declares `global x` (Python scoping: otherwise
+    the target is a local and belongs to the local pre-pass). The declared
+    set is built over the whole collected body, including nested defs —
+    exactly the two-round scan `_phase17_scan_global_reassignments` performs
+    and the same documented approximation it states (a `global N` still
+    names the module binding at any nesting depth).
+    """
+    out: list = []
+    for s in (stmts or []):
+        if isinstance(s, FunctionDef):
+            _seq = _phase17_collect_body_stmts(s.body or [])
+            _declared: list = []
+            for _x in _seq:
+                if isinstance(_x, GlobalStmt):
+                    for _nm in (_x.names or []):
+                        _declared.append(_as_str(_nm))
+            for _x in _seq:
+                if (isinstance(_x, AugAssignStmt)
+                        and isinstance(_x.target, IdentExpr)
+                        and _as_str(_x.target.name) in _declared):
+                    out.append(_x)
+        elif isinstance(s, AugAssignStmt) and isinstance(s.target, IdentExpr):
+            out.append(s)
+        elif isinstance(s, IfStmt):
+            out.extend(_phase17_global_aug_stmts(s.then_body))
+            for _elif in (getattr(s, 'elifs', None) or []):
+                out.extend(_phase17_global_aug_stmts(_elif[1]))
+            if s.else_body:
+                out.extend(_phase17_global_aug_stmts(s.else_body))
+        elif isinstance(s, TryStmt):
+            out.extend(_phase17_global_aug_stmts(s.body))
+            for _h in (getattr(s, 'handlers', None) or []):
+                out.extend(_phase17_global_aug_stmts(
+                    getattr(_h, 'body', None)))
+            if s.else_body:
+                out.extend(_phase17_global_aug_stmts(s.else_body))
+            if s.finally_body:
+                out.extend(_phase17_global_aug_stmts(s.finally_body))
+    return out
+
+
+def _phase17_apply_augmented_global_types(self, stmts: list) -> None:
+    """Widen a module global whose binding an augmented assignment rebinds.
+
+    `x = 9` at module scope declares the field `int`; a later `x /= 2` (at
+    module scope, or inside `def f(): global x`) REBINDS it to a double.
+    The module-global declaration scan only reads plain `AssignStmt` RHS
+    values, so the field stayed int and the emitter's correct `mojo_div_double`
+    result was truncated by the store's `_safe_coerce_emit('double', 'int')`
+    (CPython 4.5, compiled 4).
+
+    Runs after Phase 1.7 has typed every global and BEFORE the first body
+    emission: the top-level store/read and every function body decide their
+    C type from these tables as they are emitted. The later plain-RHS
+    declaration scan consults `_aug_widened_globals` and leaves these names
+    alone, so its `g_mtype` cannot freeze the narrow kind back under the
+    widened own-overlay/field. Only a NUMERIC widening is applied: a
+    container or string rebinding has its own conventions
+    (`_gmp_reconcile_reassigned_globals`, `_BOXED_CONTAINER_CTYPES`) and is
+    not guessed at here.
+    """
+    from mojo.middle.resolve_shared import _aug_assign_value_type
+    widened: set = getattr(self, '_aug_widened_globals', None)
+    if widened is None:
+        widened = set()
+        self._aug_widened_globals = widened
+    for _aug in _phase17_global_aug_stmts(stmts):
+        _nm = _as_str(_aug.target.name)
+        _base = _as_str(self._global_var_types.get(_nm, ''))
+        if not _base:
+            continue
+        _t = _aug_assign_value_type(self, _aug, _base)
+        _join = gimple_ctypes.TypeLattice.join(_base, _t)
+        if _join == _base:
+            continue
+        if not gimple_ctypes.TypeLattice.is_numeric(_join):
+            continue
+        _gmh_phase17_set_gtype(self, _nm, _join, True)
+        self._global_c_decl_types[_nm] = _join
+        widened.add(_nm)
+
+
 def _gmp_reconcile_reassigned_globals(self, _mgk: set, _none_init_globals: set, _rgscan: dict) -> None:
     """Widen a module global that is reassigned with a different kind of value.
 
@@ -12231,7 +12472,7 @@ def _gmp_infer_return_types_late(self, all_functions: list) -> None:
             for _cln, _clt in self._closure_value_locals(_p3b_s.body).items():
                 if _cln not in self.var_types:
                     self.var_types[_cln] = _clt
-            inferred = self._infer_return_type(_p3b_s.body)
+            inferred = self._infer_return_type(_p3b_s.body, _p3b_s)
             if _p3b_s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_3b
@@ -12879,7 +13120,7 @@ def _gmp_infer_return_types(self, stmts: list, all_functions: list) -> None:
                 else:
                     self.var_types[pname] = self._param_ctype(
                         pname, ptype, _as_s_p1)
-            inferred = self._infer_return_type(_as_s_p1.body)
+            inferred = self._infer_return_type(_as_s_p1.body, _as_s_p1)
             if _as_s_p1.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.func_return_types[_as_s_p1.name] = inferred
@@ -15609,7 +15850,7 @@ def gen_module_impl(self, stmts: list):
                                     self.var_types.setdefault(_vn, _vt)
                         except Exception:
                             pass
-                        inferred = self._infer_return_type(m.body)
+                        inferred = self._infer_return_type(m.body, m)
                         key = _mangled_key
                         if self.func_return_types.get(key) != inferred:
                             self.func_return_types[key] = inferred
@@ -15811,7 +16052,7 @@ def gen_module_impl(self, stmts: list):
                                 self.var_types.setdefault(_vn, _vt)
                     except Exception:
                         pass
-                    _ret_type = self._infer_return_type(m.body)
+                    _ret_type = self._infer_return_type(m.body, m)
                     self.var_types = _saved_var_types
                     self._scan_scratch_top = _scratch_mark_sm
                 # Self-hosting bootstrap: the frozen GimpleGen signature
@@ -16143,6 +16384,8 @@ def gen_module_impl(self, stmts: list):
                 ginf.alias_multi_kind_locals(self, key, m)
     _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
     _gmh_reconcile_param_container_kinds(self)
+    _gmh_reconcile_augmented_param_types(
+        self, all_functions, all_structs_for_methods)
 
 
 
@@ -16407,7 +16650,7 @@ def gen_module_impl(self, stmts: list):
                     self.var_types[_rpn] = _rref[_rpn]
                 else:
                     self.var_types[_rpn] = self._resolve_type(_rpt)
-            _rinf = self._infer_return_type(_rm.body)
+            _rinf = self._infer_return_type(_rm.body, _rm)
             if _rinf in ('char *', 'double'):
                 self.func_return_types[_rkey] = _rinf
             self.var_types.clear()
@@ -19137,7 +19380,7 @@ def gen_module_impl(self, stmts: list):
                                              or self._resolve_type(ptype))
                 else:
                     self.var_types[bare] = self._param_ctype(pname, ptype, s)
-            inferred = self._infer_return_type(s.body)
+            inferred = self._infer_return_type(s.body, s)
             if s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_23e
@@ -19166,6 +19409,8 @@ def gen_module_impl(self, stmts: list):
                 ginf.alias_multi_kind_locals(self, key, m)
     _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
     _gmh_reconcile_param_container_kinds(self)
+    _gmh_reconcile_augmented_param_types(
+        self, all_functions, all_structs_for_methods)
 
     self._param_generator_api: dict[str, dict[str, str]] = {}
     self._fn_returns_generator: dict[str, str] = {}
@@ -19794,36 +20039,6 @@ def gen_module_impl(self, stmts: list):
         declared a field with NO C type in the stage2 closure dump."""
         out: dict[str, list[str]] = {}
 
-        def collect(body) -> list:
-            """Every statement of `body` (and of any `def` nested in it) as a
-            flat pre-order list. Lists, never a generator: this file is in
-            the self-host closure, where a coroutine's symbols are
-            referenced but never defined (`_each_binding`'s own docstring)."""
-            seq: list = []
-            def walk(stmts):
-                for s in (stmts or []):
-                    seq.append(s)
-                    if isinstance(s, FunctionDef):
-                        walk(s.body)
-                    elif isinstance(s, IfStmt):
-                        walk(s.then_body)
-                        walk(getattr(s, 'else_body', None))
-                        for _c, eb in (getattr(s, 'elifs', None) or []):
-                            walk(eb)
-                    elif isinstance(s, (WhileStmt, ForStmt)):
-                        walk(getattr(s, 'body', None))
-                        walk(getattr(s, 'else_body', None))
-                    elif isinstance(s, WithStmt):
-                        walk(s.body)
-                    elif isinstance(s, TryStmt):
-                        walk(s.body)
-                        for h in (getattr(s, 'handlers', None) or []):
-                            walk(getattr(h, 'body', None))
-                        walk(getattr(s, 'else_body', None))
-                        walk(getattr(s, 'finally_body', None))
-            walk(body)
-            return seq
-
         for _fn_stmt in _phase17_stmts:
             if not isinstance(_fn_stmt, FunctionDef):
                 continue
@@ -19832,7 +20047,7 @@ def gen_module_impl(self, stmts: list):
             # cover the WHOLE function regardless of where the statement
             # sits relative to the assignments, so the answer cannot depend
             # on traversal order and does not need to.
-            _seq = collect(_fn_stmt.body)
+            _seq = _phase17_collect_body_stmts(_fn_stmt.body)
             _declared: set = set()
             for _s in _seq:
                 if isinstance(_s, GlobalStmt):
@@ -20157,6 +20372,16 @@ def gen_module_impl(self, stmts: list):
     # Phase 1.7 has typed every global, and each `do_imports` sibling has been
     # compiled into this unit, so the definer's final accessor types are known.
     self._reconcile_imported_global_accessors()
+    # An augmented assignment REBINDS its target, so a global `x = 9` later
+    # rebound by `x /= 2` (at module scope, or under `global x` in a
+    # function) is a double, not the int its plain assignment froze. BEFORE
+    # the first body emission below: the top-level store and read, and every
+    # function body reading or writing the global, all decide their C type
+    # from these tables as they are emitted. (The later module-level
+    # declaration scan re-derives plain-RHS types without touching the
+    # own-overlay, which is the table the field/read/store then resolve
+    # through, so this conclusion survives it.)
+    _phase17_apply_augmented_global_types(self, stmts)
 
     func_parts: list[str] = []
 
@@ -21605,6 +21830,14 @@ def gen_module_impl(self, stmts: list):
         next line's slice of the same name was typed as a string."""
         if gname in getattr(self, '_multi_kind_globals', ()):
             return
+        # A global whose binding an augmented assignment widened
+        # (`x = 9; x /= 2` is a double, not the int this plain-RHS scan
+        # would derive) is answered by `_phase17_apply_augmented_global_
+        # types`, which runs BEFORE this later scan. Re-freezing the plain
+        # assignment's narrow kind here would make this scan's `g_mtype`
+        # disagree with the widened own-overlay/field the read path uses.
+        if gname in getattr(self, '_aug_widened_globals', ()):
+            return
         # The dispatch/type-table globals answer from the ONE table, before
         # any RHS-shape row below — see `_gmi_declare_table_global`.
         if _gmi_declare_table_global(self, gname, global_decls):
@@ -21879,6 +22112,10 @@ def gen_module_impl(self, stmts: list):
             _declared_globals[gname] = True
             if stmt.value is not None:
                 _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
+            # See `_gscan_declare_global`'s identical guard: the augmented-
+            # assignment conclusion is newer than this plain-RHS scan.
+            if gname in getattr(self, '_aug_widened_globals', ()):
+                continue
             # The second of the two declaration scans, and the same table
             # answers here — `funcs_shared.py`'s `_SELFHOST_EXTRA_FIELD_CACHE:
             # dict = {}` is a VarDecl, so a guard only in `_gscan_declare_global`

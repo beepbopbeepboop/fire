@@ -1695,8 +1695,20 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # A tagged word and a non-int64 name never mix: see
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
-        _tagged_bind = (gen._word_is_tagged(v) or _for_copy
-                        or _call_tagged)
+        # A no-default `d.get(k)` on an UNKNOWN value domain is boxed so that
+        # a miss prints None (`emit_methods._ldm_get`). Stored into a name
+        # already declared a container/pointer, the name's consumers read its
+        # declared C type, not a box, so this word is unwrapped below
+        # (`mojo_box_word`) exactly as every `.get` result was before the miss
+        # gained the None representation. Only a tagged word the NAME-level
+        # rule keeps as a box is a representation conflict and refused.
+        _declared_t = _as_str(gen.var_types.get(_as_str(tname)) or '')
+        _boxed_get_into_container = (
+            gimple_ctypes.TypeLattice.ends_in_star(_declared_t)
+            and _declared_t not in ('char *', 'const char *')
+            and _as_str(v) in getattr(gen, '_dict_get_boxed_temps', ()))
+        _tagged_bind = ((gen._word_is_tagged(v) and not _boxed_get_into_container)
+                        or _for_copy or _call_tagged)
         # A float/str/bool/int store into a box-holding name is boxed by its
         # kind here, BEFORE any refusal below reads the value's C type, so it
         # is carried by the box rather than refused. A container stored into a
@@ -4082,6 +4094,17 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         b = gen._new_temp('_Bool')
         gen._binop_into(b, n, '!=', '0')
         return b
+    if ctype in ('double', 'float'):
+        # Python's truthiness for a float is `x != 0.0`, NOT "its integer
+        # part is nonzero": the int64_t fallback below casts the value to
+        # int64_t first, so every float with |x| < 1 (`0.5`, `0.0001`) read
+        # as falsy — a real `if 0.0001:` took the else arm. Compare in the
+        # value's own type; gcc -fgimple accepts a double comparison (only
+        # inline float DIVISION has the expmed_mode_index ICE).
+        zero = gen._new_val(ctype, '0.0f' if ctype == 'float' else '0.0')
+        b = gen._new_temp('_Bool')
+        gen._binop_into(b, val, '!=', zero)
+        return b
     if ctype in ('void *',) or (gimple_ctypes.TypeLattice.ends_in_star(ctype) and not gimple_ctypes.TypeLattice.is_bool(ctype)):
         ip   = gen._new_temp('int64_t')
         zero = gen._new_temp('int64_t')
@@ -4783,12 +4806,12 @@ def _gen_stmt_DelStmt(gen, node):
         if ot == 'MojoDict *':
             key_type, key_val = gen.lower_expr(target.index)
             key_type, key_val = gen._char_to_cstr(key_type, key_val, True, True)
-            # `del d[k]` — a removal whose VALUE is discarded, so the
-            # absent-box default (0) is the whole answer it needs from the
-            # new `dflt` parameter `d.pop(k, default)` requires.
-            gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
-                             [('MojoDict *', ov), (key_type, key_val),
-                              ('int64_t', '0')])
+            # `del d[k]` is CPython's item deletion, whose miss RAISES — not
+            # `d.pop(k, 0)`, whose miss returned the default 0 and made the
+            # statement a silent no-op on a missing key. The runtime function
+            # raises the same catchable KeyError a bare `d[k]` does.
+            gen._emit_call('void', '', 'mojo_dict_del_item',
+                             [('MojoDict *', ov), (key_type, key_val)])
         elif gimple_ctypes.TypeLattice.is_list(ot):
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
@@ -4818,9 +4841,8 @@ def _gen_stmt_DelStmt(gen, node):
             dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
             dkey_type, dkey_val = gen.lower_expr(target.index)
             dkey_type, dkey_val = gen._char_to_cstr(dkey_type, dkey_val, True, True)
-            gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
-                             [('MojoDict *', dp), (dkey_type, dkey_val),
-                              ('int64_t', '0')])
+            gen._emit_call('void', '', 'mojo_dict_del_item',
+                             [('MojoDict *', dp), (dkey_type, dkey_val)])
             gen._goto(bb_after)
             gen._emit_label(bb_list)
             lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
