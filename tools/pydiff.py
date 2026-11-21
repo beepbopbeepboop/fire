@@ -40,8 +40,26 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RUN_TIMEOUT_S = 20
-COMPILE_TIMEOUT_S = 300
+
+# The per-child budgets are the SHARED ones, for the reason `exec_budget.py`
+# records: literals sized as "much more than a tiny program needs" fire on a
+# loaded machine, and a timeout here is reported as an ordinary FAIL -- as a
+# compiler bug. This file kept 20 s / 300 s after that campaign, and the
+# 2026-11-21 gate paid for it: four `strings/` programs that run in
+# milliseconds were reported TIMEOUT ("the compiled program did not finish")
+# while the gate's whole-closure jobs had the box thrashing. Same programs,
+# same tree, alone: 111/111 OK. A literal is exactly how that happens.
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S  # noqa: E402
+
+# `--one` is a second child that compiles and then runs, so its wall must
+# exceed both inner budgets or this wrapper is killed first and the inner
+# budget's own verdict never gets to speak (the same layering rule as
+# test_gimple_runner's two-child probe). The extra allowance covers CPython
+# start-up and the child's teardown after a kill.
+ONE_TIMEOUT_S = COMPILE_TIMEOUT_S + RUN_TIMEOUT_S + 120
+
 BAD = ('WRONG', 'CRASH', 'GCC', 'ERROR', 'TIMEOUT')
 
 
@@ -92,10 +110,10 @@ def run_child(path: str) -> dict:
     leftover compiler state cannot touch the next."""
     try:
         r = subprocess.run([sys.executable, os.path.abspath(__file__), '--one', path],
-                           capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S,
+                           capture_output=True, text=True, timeout=ONE_TIMEOUT_S,
                            cwd=HERE)
     except subprocess.TimeoutExpired:
-        return {'verdict': 'TIMEOUT', 'detail': 'compile did not finish'}
+        return {'verdict': 'TIMEOUT', 'detail': 'the compiler child did not finish'}
     for line in reversed(r.stdout.splitlines()):
         if line.startswith('PYDIFF '):
             return json.loads(line[7:])

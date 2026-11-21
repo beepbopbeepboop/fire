@@ -2386,6 +2386,19 @@ BUDGET_SUBJECT_WHY = {
 }
 
 
+# The files that adopt the shared budgets but are not named `test_*`. The walk
+# below is `_test_files_in_repo()`, which by design recognizes only the two
+# `test_*` spellings, so a helper a registered job runs as part of its SUBJECT
+# was invisible to it. That is not hypothetical: `tools/pydiff.py` kept a 20 s
+# run budget and a 300 s compile budget after the campaign, and the
+# `pydiff-ratchet` gate job reported four millisecond programs as TIMEOUT once
+# the machine was thrashing -- a compiler bug that was a stale wall clock. The
+# rule the walk enforces ("imported exec_budget, so a literal is wrong") is
+# right for these files too; only their NAME kept them out. Add one here when a
+# registered job's subject moves into a tool.
+SHARED_BUDGET_HELPERS = ('tools/pydiff.py',)
+
+
 def test_no_stale_per_child_budget_is_left_as_a_literal():
     """A file that adopted the shared per-child budgets must not still spell one.
 
@@ -2421,7 +2434,11 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     """
     import ast
     importers, literals, unused = [], [], []
-    for rel in _test_files_in_repo():
+    # One list for both walks: the census's two halves have to see the same
+    # files, or "the residue census is the residue" compares two different
+    # subjects.
+    files = _test_files_in_repo() + list(SHARED_BUDGET_HELPERS)
+    for rel in files:
         path = os.path.join(HERE, rel)
         try:
             with open(path, 'r', errors='replace') as f:
@@ -2497,7 +2514,7 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     # exemptions and that reasoning are in
     # `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED).
     residue, subject = {}, {}
-    for rel in _test_files_in_repo():
+    for rel in files:
         path = os.path.join(HERE, rel)
         try:
             with open(path, 'r', errors='replace') as f:
