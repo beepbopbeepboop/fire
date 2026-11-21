@@ -1421,23 +1421,26 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
             f.write(src)
 
     exe = os.path.join(proj, 'main')
-    # A BUILD, not a run, and the timeout is the file's own exec budget rather
-    # than a bare literal: this call escaped as an uncaught TimeoutExpired and
-    # took the whole file with it, so every check after this one was silently
-    # not run — which is what happened in a `modcache` run alongside four other
-    # suites at -j18 (2026-10-02, 429 s of wall clock, this build at 120.0 s).
-    # A timeout here is LOAD, not a wrong answer, and it has to read as a
-    # failed check rather than as the end of the file — the same reasoning, and
-    # the same `_TIMED_OUT_PREFIX`, as `_run` above.
+    # A BUILD, not a run, so it gets the COMPILE budget like this file's three
+    # other `fire.py build` children — not the run budget doubled. It was
+    # converted to `EXE_TIMEOUT_S * 2` (240 s) after it escaped as an uncaught
+    # TimeoutExpired and took the whole file with it (2026-10-02, a `modcache`
+    # run alongside four other suites at -j18, this build at 120.0 s), and the
+    # doubling was the wrong shape: a build is a compilation, and 240 s was
+    # reached again on a loaded box (2026-11-21, this build timed out at 240 s
+    # while the healthy case measured 1.16 s). A timeout here is LOAD, not a
+    # wrong answer, and it has to read as a failed check rather than as the end
+    # of the file — the same reasoning, and the same `_TIMED_OUT_PREFIX`, as
+    # `_run` above.
     try:
         r = subprocess.run(
             [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
             cwd=proj, capture_output=True, text=True,
-            timeout=EXE_TIMEOUT_S * 2)
+            timeout=COMPILE_TIMEOUT_S)
     except subprocess.TimeoutExpired as e:
         r = subprocess.CompletedProcess(
             e.cmd, -1, stdout='', stderr=f'{_TIMED_OUT_PREFIX} after '
-            f'{EXE_TIMEOUT_S * 2}s building main.mojo')
+            f'{COMPILE_TIMEOUT_S}s building main.mojo')
     check("SB-1 (fire.py build CLI): two sibling modules' same-named free "
           "function build without a redefinition error",
           'redefinition of' not in r.stderr and 'redefinition of' not in r.stdout,
