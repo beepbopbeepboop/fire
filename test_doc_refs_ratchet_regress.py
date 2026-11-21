@@ -15,6 +15,7 @@ queue, so the round's close deletes it.
 """
 import subprocess, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
+import dangling_refs_baseline  # noqa: E402 — after the sys.path line
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -106,6 +107,28 @@ def test_two_preexisting_gains_are_pinned():
         'the bug doc for this ratchet red should be deleted with the fix'
 
 
+def test_gate_doc_refs_red_on_master_is_retired():
+    """The 2026-11-20 `gate-doc-refs` filing: the ratchet was red on master
+    for one gain, `tools/test_integrate_probe_loop.py` naming a doc-shaped
+    FIXTURE inside a mock. The name does not exist by construction, so it is
+    the deliberate-fixture case the tool documents, and the ledger is the
+    sanctioned place to say so. The fix (3783b2cf1) added that entry and the
+    doc leaves the queue with it. This pins both halves: the entry stays, and
+    the ratchet stays green. The doc name is assembled from its stem so this
+    file does not itself become the next citation of the deleted doc."""
+    assert dangling_refs_baseline.BASELINE.get(
+        'tools/test_integrate_probe_loop.py') == 1, \
+        'the deliberate mock fixture lost its ledger entry; the ratchet goes red'
+    assert not os.path.exists(
+        os.path.join(HERE, 'bugs', 'gate-doc-refs' + '.md')), \
+        'the gate-doc-refs doc is back in the queue after its fix'
+    result = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'tools', 'dangling_doc_refs.py'), '--ratchet'],
+        capture_output=True, text=True, cwd=HERE)
+    assert result.returncode == 0, \
+        f'ratchet red after the fixture entry landed:\n{result.stdout}{result.stderr}'
+
+
 if __name__ == '__main__':
     test_doc_is_deleted()
     test_ratchet_does_not_gain_after_doc_removal()
@@ -113,4 +136,5 @@ if __name__ == '__main__':
     test_round_2026_11_11_doc_not_over_ratchet_baseline()
     test_gate_doc_refs_ratchet_red_on_master_fixed()
     test_two_preexisting_gains_are_pinned()
+    test_gate_doc_refs_red_on_master_is_retired()
     print('regression: PASS')
