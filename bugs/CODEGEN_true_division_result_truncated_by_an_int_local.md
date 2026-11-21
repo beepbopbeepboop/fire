@@ -41,6 +41,19 @@ The augmented-assignment fix did not need this because it computes the one
 result type it needs in `_aug_assign_value_type`; the plain-assignment and
 return arms still read `_quick_type`.
 
+A THIRD path with the same symptom, measured 2026-11-20 on the branch WITH the
+augmented-assignment fix (so the local really is `double`, unlike the two
+above): the RETURN slot. `def f(): x = 9; x /= 2; return x` compiles to
+`int64_t f(void)` over `double x`, casts `x` back at the `return`, and prints
+`4` for 4.5. `def f(): x = 3.0; y = x * 0.5; return y` prints `1` for 1.5.
+`def f(): x = 1.5; return x` is correctly `double f(void)`, so what
+`_collect_return_types` cannot see is a local bound to an EXPRESSION: Pass 2b
+runs before `_infer_local_var_types`, and `_quick_type` of the bare
+identifier answers its `int64_t` default. Re-running the return join after
+the local table exists (or seeding the inferred table into that scan) is a
+second, independent fix; teaching `_quick_type` the `BinaryOp` rule above does
+not cover it.
+
 ## Next step
 
 Teach `_quick_type`'s `BinaryOp` arm the same true-division rule the emitter
@@ -65,8 +78,9 @@ before the pre-pass, or keep the fix in the pre-pass (`_local_value_type`)
 and answer the box shapes explicitly.
 
 Cases to pin in `test_gimple_runner.py` (`test_gimple_matches_cpython`):
-`x = 9; x = x / 2`, `def half(n): return n / 2`, and a `PythonObject`
-division as the control that must keep its box.
+`x = 9; x = x / 2`, `def half(n): return n / 2`, the two return-slot cases
+above (`x = 9; x /= 2; return x` and `y = x * 0.5; return y`), and a
+`PythonObject` division as the control that must keep its box.
 
 ## Done when
 
