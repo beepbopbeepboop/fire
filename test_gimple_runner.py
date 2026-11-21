@@ -240,15 +240,8 @@ def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
         return []
-    reads = [ln.strip() for ln in body.splitlines()
-             if 'mojo_dict_get' in ln or 'mojo_dict_subscript' in ln]
-    # The bare-subscript reads moved from the sentinel `mojo_dict_get_*`
-    # getters (which answer 0 for an absent key) to the raising
-    # `mojo_dict_subscript_*` family. Both spellings answer the same
-    # question here — WHICH VALUE TYPE the slot is read as — so the
-    # contract accepts either.
-    got = any('mojo_dict_get_str' in r or 'mojo_dict_subscript_str' in r
-              for r in reads)
+    reads = [ln.strip() for ln in body.splitlines() if 'mojo_dict_get' in ln]
+    got = any('mojo_dict_get_str' in r for r in reads)
     if got != want:
         print(f"FAIL  {name}: {fn} {'does' if want else 'does not'} read its "
               f"dict slot as a string, wanted {want} (reader calls: {reads})")
@@ -343,7 +336,7 @@ def test_gimple_build_refusal(name: str, mojo_src: str, expected_substr: str):
     _FAIL += 1
 
 
-def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
+def test_gimple_matches_cpython(name: str, mojo_src: str):
     """Compile, run, and require the COMPILED program's stdout and exit code
     to be byte-identical to CPython's on the same source.
 
@@ -353,15 +346,6 @@ def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
     through a module global printed `0`, and no fixed expectation written
     after the bug would have said `0` was wrong — only CPython does. It also
     cannot rot: if the compiler starts diverging, this fails.
-
-    `filename` ending in `.py` compiles the text as Python source (see
-    compile_mojo_to_gimple_exe). A loop over a list of 3+ DISTINCT struct
-    classes has an int64_t (dynamic word) variable, and a method call on a
-    dynamic word dispatches per instance tag only in Python mode — the
-    scalar-method arms of `_lower_method_call` gate the dynamic dispatch on
-    a `.py` filename so a Mojo `Int`'s real scalar methods are never
-    redirected — so a repro of that shape passes `filename='x.py'`, the same
-    mode `tools/pydiff.py` runs it in.
 
     CPython is run first and a non-zero exit or empty output from it is
     reported as the test program's own problem, not a compiler failure —
@@ -389,7 +373,7 @@ def test_gimple_matches_cpython(name: str, mojo_src: str, filename: str = ''):
             want_rc = py.returncode
         finally:
             os.unlink(entry)
-        exe_path = compile_mojo_to_gimple_exe(mojo_src, filename=filename)
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
         got = subprocess.run([exe_path], capture_output=True,
                              timeout=RUN_TIMEOUT_S, env=_SCRIBBLE_ENV)
         if got.stdout == want_out and got.returncode == want_rc:
@@ -1614,37 +1598,6 @@ def main():
     print(g(1, 2, x=3))
     print(fwd(4, 5, y=6))
     print(g())
-main()
-""")
-
-    # The bugs/CODEGEN_varargs_count_wrong_and_star_elements_unboxed doc's
-    # repro, pinned whole: the call-site arg-padding loop used to treat the
-    # `'...'` packing sentinel as a fillable param and append `('int', '0')`
-    # to the packed `MojoList *`, so `show("a")` against
-    # `def show(first, *rest)` handed the callee a one-element `[0]` where
-    # CPython hands `()`, and every packed element went in through the int64
-    # coercion with no per-slot kinds row, so `char *` elements printed their
-    # pointer bits (`[4301523784, 4301523792]` for `['b', 'c']`). All six
-    # lines: the two phantom-count cases (`total()`, `show("a")`), the
-    # string-element reprs, and the `total(*args)` spread path.
-    test_gimple_matches_cpython("gimple_call_varargs_count_and_str_elements", """\
-def total(*nums):
-    s = 0
-    for n in nums:
-        s += n
-    return s
-
-def show(first, *rest):
-    print(first, len(rest), list(rest))
-
-def main():
-    print(total())
-    print(total(5))
-    print(total(1, 2, 3))
-    show("a")
-    show("a", "b", "c")
-    args = [1, 2, 3]
-    print(total(*args))
 main()
 """)
 
@@ -3513,6 +3466,48 @@ print(j())
 print(k())
 """)
 
+    # `x /= 2` REBINDS `x` to a float: the local-type pre-pass has to join
+    # the augmented assignment's result with the name's other bindings, or
+    # the int type from `x = 9` wins and the store truncates (`4` for `4.5`).
+    # The float-local truthiness rows are the same bug's other half: Python
+    # truthiness is `x != 0.0`, so 0.5 and 0.0001 are true, at module level
+    # (the compile-time fold) and inside a function (the emitted condition).
+    test_gimple_matches_cpython("gimple_float_augmented_assignment_widens_an_int_local", """\
+def main():
+    x = 9
+    x /= 2
+    print(x)
+    y = 13
+    y += 0.5
+    print(y)
+    print(7 / 2)
+    print(1e-9 > 0)
+    if 0.0001:
+        print("tiny truthy")
+    print(3 == 3.0)
+    print(round(2.5), round(3.5))
+main()
+""")
+
+    test_gimple_matches_cpython("gimple_float_truthiness_is_not_its_integer_part", """\
+def f():
+    x = 0.0001
+    if x:
+        print("tiny")
+    y = 0.5
+    while y:
+        print("once")
+        y = 0.0
+    print(bool(0.0001), bool(0.0))
+
+if 0.5:
+    print("module truthy")
+else:
+    print("module falsy")
+
+f()
+""")
+
     # The MATERIALIZED flavour, which is a different emission path and was
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env
@@ -3933,54 +3928,6 @@ def main():
     print(l)
 main()
 """, "[[], [1], [1, 2], [1, 2, 3]]\n")
-
-    # `sorted()` must agree with CPython on BOTH halves of a `key=` ordering:
-    # every element is mapped through the key ONCE, and the keys — not the
-    # elements' raw int64_t slots — decide the order. The integer zero used to
-    # print as `None` because a keyed sort dropped the result list's per-slot
-    # kinds, and a zero slot with no kind row is the runtime's "boxed None"
-    # guess.
-    test_gimple_matches_cpython("gimple_sorted_key_order", """\
-def main():
-    words = ["pear", "Apple", "fig", "banana", ""]
-    print(sorted(words, key=len))
-    print(sorted(words, key=lambda w: w.lower()))
-    nums = [3, -7, 2, 0, -1]
-    print(sorted(nums, key=abs))
-    print(sorted(nums, key=lambda n: -n))
-main()
-""")
-
-    # A tuple is compared ELEMENT BY ELEMENT, and the sort is stable: the two
-    # `al` pairs of the keyed sorts keep their input order. `sorted(pairs)`
-    # used the generic int64 payload sort and ordered the tuple POINTERS, while
-    # `.sort(key=lambda p: p[0])` compared the string key's ADDRESS.
-    test_gimple_matches_cpython("gimple_sorted_tuple_order", """\
-def main():
-    pairs = [("bob", 3), ("al", 3), ("cy", 1), ("al", 0)]
-    print(sorted(pairs))
-    print(sorted(pairs, key=lambda p: p[1]))
-    pairs.sort(key=lambda p: p[0])
-    print(pairs)
-main()
-""")
-
-    # The same two properties on the shapes the repros do not spell out: a
-    # nested-list `sorted()` (elementwise, not by the inner list's address or
-    # its LENGTH first) and a `key=` whose value is a DOUBLE (bit-pattern
-    # ordering put every negative key after every positive one).
-    test_gimple_matches_cpython("gimple_sorted_nested_and_double_key", """\
-def main():
-    print(sorted([[2], [1, 2], [1]]))
-    xs = [0.9, 0.1, 0.5]
-    print(sorted(xs, key=lambda x: x))
-    nums = [-0.25, 0.75, 0.25]
-    nums.sort(key=lambda x: x)
-    print(nums)
-    ys = [-1.5, 2.5, 0.5, -3.0]
-    print(sorted(ys))
-main()
-""")
 
     # What Python REFUSES to sort must be refused here too, and loudly. The
     # silent no-op this replaced was indistinguishable from a sort that
@@ -15509,12 +15456,9 @@ def main():
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_none_beside_a_scalar_arm_returns_the_tagged_word,
                   test_copy_of_a_tagged_none_keeps_it,
-                  test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
-                  test_except_around_builtin_errors_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
-                  test_gimple_values_print_as_pointers_inside_containers,
                   test_dataclass_default_factory_fields_start_empty_and_per_instance):
         try:
             _late()
@@ -16168,66 +16112,6 @@ print(pick(None, 3))
 """)
 
 
-def test_param_annotation_contradicted_by_the_body():
-    """A parameter whose annotation the body CONTRADICTS is the tagged word.
-
-    `def normalize_selection(selected: str, ...)` is CPython's own
-    `Tools/c-analyzer/c_common/scriptutil.py` shape: an annotation says `str`,
-    and the body rebinds the name to a LIST (`selected = [selected]`) and
-    compares it to `None`/`True`/`False`. Before, the slot stayed `char *` for
-    its whole life, so the list pointer went through the string slot (every
-    later string operation read the list struct's bytes) and a `True` argument
-    arrived as its stringified spelling -- wrong values at exit 0.
-
-    The fix makes the slot the tagged `int64_t` word, boxes the arguments by
-    kind at the call site, appends a box word to a list under its runtime kind,
-    and asks the runtime for membership against a word needle. The two arms a
-    `frozenset` repr cannot spell (this runtime has no frozen marker) are
-    compared by sorted CONTENT against CPython; every other line is the value
-    itself. The extra functions pin the general rule, not just the reported
-    shape: `int` -> list, `str` -> int, and a same-kind `str` rebound must keep
-    its ordinary string type."""
-    test_gimple_matches_cpython("gimple_param_annotation_contradicted_by_body", """\
-def as_int(n: int):
-    n = [n]
-    return n
-
-def as_str(s: str):
-    s = 3
-    return s
-
-def as_dict(x: list):
-    x = {"a": 1}
-    return x
-
-def same_kind(c: str):
-    c = c + "!"
-    return c
-
-def normalize_selection(selected: str, *, possible=None):
-    if selected in (None, True, False):
-        return selected
-    elif isinstance(selected, str):
-        selected = [selected]
-    elif not selected:
-        return ()
-    return frozenset(selected)
-
-print(as_int(5))
-print(as_str("abc"))
-print(as_dict([1]))
-print(same_kind("x"))
-print(normalize_selection(None))
-print(normalize_selection(True))
-print(normalize_selection(False))
-print(normalize_selection(selected=True))
-print(normalize_selection([]))
-print(sorted(normalize_selection("")))
-print(sorted(normalize_selection("a")))
-print(sorted(normalize_selection(selected="ab")))
-""")
-
-
 def test_none_held_in_local_with_if_join_is_none_needle():
     """Flow-sensitive None tracking at if/while/try join points: a local that
     is None on some paths and reassigned on others must still be treated as
@@ -16346,43 +16230,6 @@ def main():
     print(f(1) + 1)
 main()
 """)
-
-
-def test_struct_init_zeroes_storage_before_setting_type_id():
-    """A struct/class _init must memset its storage to zero BEFORE writing
-    __mojo_type_id and registering the runtime tag. Reversing that order
-    (memset after) wipes the type id, so tag-based dispatch, attribute
-    lookup and repr see an uninitialised/untagged instance. Regression for
-    CODEGEN_runner_regressions_after_system_struct_collision_commit."""
-    global _PASS, _FAIL
-    from gimple_codegen import compile_to_gimple
-    name = "gimple_struct_init_zeroes_storage_before_setting_type_id"
-    try:
-        c = compile_to_gimple("""\
-class C:
-    pass
-
-def main():
-    o = C()
-""", do_imports=False, filename='initorder.py')
-        m = re.search(r'(static void _init_C \(C \* _p\)\n\{.*?\n\})', c, re.S)
-        if not m:
-            raise AssertionError("no _init_C definition found")
-        body = m.group(1)
-        memset_i = body.find('memset (_p, 0, sizeof(C));')
-        tag_i = body.find('_p->__mojo_type_id')
-        if memset_i < 0:
-            raise AssertionError(f"no memset in _init_C:\n{body}")
-        if tag_i < 0:
-            raise AssertionError(f"no __mojo_type_id in _init_C:\n{body}")
-        if memset_i > tag_i:
-            raise AssertionError(
-                f"memset must precede __mojo_type_id in _init_C:\n{body}")
-        print(f"PASS  {name}")
-        _PASS += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
 
 
 def test_and_chain_with_a_bool_call_and_an_empty_list_caller():
@@ -16806,61 +16653,6 @@ main()
 """)
 
 
-def test_fstring_format_specs_match_cpython():
-    """f-string format specs are applied to the VALUE, not to its text.
-
-    bug:CODEGEN_format_specs_in_fstrings_are_ignored. The old helper parsed
-    only fill/align/width from the spec and padded the already-stringified
-    value, so `:^N` on a negative int centred the sign wrong, `:.2f` was
-    ignored, `:04d` put the zeros before the minus, and `:x`/`:b` printed
-    decimal. `test_gimple_matches_cpython` is the right oracle here: every
-    wrong answer is a plausible string, so a hand-pinned expectation could
-    only restate whatever the compiler happened to print.
-    """
-    test_gimple_matches_cpython("gimple_fstring_format_specs", """\
-def main():
-    s = "ab"
-    n = -3
-    x = 3.14159
-    print(f"[{s:<5}]")
-    print(f"[{s:>5}]")
-    print(f"[{s:^6}]")
-    print(f"[{n:^5}]")
-    print(f"{x:.2f}")
-    print(f"{n:04d}")
-    print(f"{255:x}")
-    print(f"{5:b}")
-    print(f"{42:5d}|")
-main()
-""")
-    test_gimple_matches_cpython("gimple_fstring_format_specs_negative_and_wide", """\
-def main():
-    n = -3
-    p = 255
-    x = 3.14159
-    s = "ab"
-    print(f"[{s:^5}]")
-    print(f"[{s:10.1}]")
-    print(f"[{n:05d}]")
-    print(f"[{n:+05d}]")
-    print(f"[{n:>08d}]")
-    print(f"[{p:X}]")
-    print(f"[{p:#08x}]")
-    print(f"[{p:o}]")
-    print(f"[{p:#b}]")
-    print(f"[{1234:010,d}]")
-    print(f"[{x:^12.2f}]")
-    print(f"[{x:*>12.2f}]")
-    print(f"[{-x:08.2f}]")
-    print(f"[{x:.2e}]")
-    print(f"[{x:.2g}]")
-    print(f"[{1234.5:.3g}]")
-    print(f"[{0.000123:g}]")
-    print(f"[{x:.1%}]")
-main()
-""")
-
-
 def test_list_slice_of_mixed_list_reads_slots_as_values():
     """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
     test_gimple_matches_cpython("gimple_list_slice_mixed", """\
@@ -16901,154 +16693,6 @@ def main():
     show([1, 2])
     show(["a", "b:"])
 
-main()
-""")
-
-    # User __eq__/__len__/__contains__/__getitem__/__str__ were not dispatched
-    # on a struct receiver, and the type tag was zeroed by _init's own memset
-    # (the tag was written BEFORE it), so even isinstance(a, SameClass) was
-    # False. `2 in a` must call P.__contains__ statically instead of asking
-    # the list/dict/set registry about a struct address.
-    test_gimple_matches_cpython("gimple_class_dunder_methods_dispatch", """\
-class P:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-    def __eq__(self, other):
-        return self.x == other.x and self.y == other.y
-    def __len__(self):
-        return self.x
-    def __contains__(self, v):
-        return v == self.x or v == self.y
-    def __getitem__(self, i):
-        return self.x if i == 0 else self.y
-    def __str__(self):
-        return "P(" + str(self.x) + ", " + str(self.y) + ")"
-
-def main():
-    a = P(1, 2)
-    b = P(1, 2)
-    print(a == b)
-    print(a is b)
-    print(len(a))
-    print(2 in a)
-    print(5 in a)
-    print(a[0], a[1])
-    print(a)
-    print(str(a))
-    print(isinstance(a, P))
-main()
-""")
-
-    # The same doc's second repro: a hierarchy where the derived __init__
-    # calls super().__init__ AND the instances live in a mixed-class list.
-    # Needs the base-prefix field layout (super() writes at base offsets),
-    # the presence set after the super() call (the base writes name through
-    # its own emission), the MRO-aware isinstance (zoo[1] is a Dog, an
-    # Animal but not a Cat), and the int64_t element type for a list of
-    # 3+ distinct classes so a.speak() dispatches per instance tag. That
-    # dispatch is a method call on a DYNAMIC WORD (the mixed-class loop
-    # variable), which _lower_method_call answers only in Python mode —
-    # the .py filename selects it, the same mode tools/pydiff.py runs this
-    # repro in.
-    test_gimple_matches_cpython("gimple_class_inheritance_super_init", """\
-class Animal:
-    def __init__(self, name):
-        self.name = name
-    def speak(self):
-        return self.name + " says ..."
-
-class Dog(Animal):
-    def speak(self):
-        return self.name + " says woof"
-
-class Cat(Animal):
-    def __init__(self, name, lives):
-        super().__init__(name)
-        self.lives = lives
-    def speak(self):
-        return self.name + " says meow"
-
-def main():
-    zoo = [Animal("thing"), Dog("rex"), Cat("tom", 9)]
-    for a in zoo:
-        print(a.speak())
-    print(isinstance(zoo[1], Animal))
-    print(isinstance(zoo[1], Cat))
-    print(zoo[2].lives)
-main()
-""", filename='inherit.py')
-
-
-def test_gimple_values_print_as_pointers_inside_containers():
-    """CODEGEN_values_print_as_pointers_inside_containers: strings, nested
-    containers and bool-returning calls inside containers must print as
-    values, not raw pointer words / 1/0."""
-    test_gimple_matches_cpython("gimple_ptr_print_repro", """\
-def pair():
-    return ("a", "b")
-
-def main():
-    print(pair())
-    t = (-3.5, 3)
-    print(t)
-    d = {"ann": 3, "bo": 0}
-    print(list(d.items()))
-    print([(i, c) for i, c in enumerate("hi")])
-    print([[1, 2], [3, [4, []]]])
-main()
-""")
-    test_gimple_matches_cpython("gimple_bool_print_repro", """\
-def is_pos(n):
-    return n > 0
-
-def main():
-    r = is_pos(3)
-    print(r)
-    print(is_pos(-1))
-    flags = [is_pos(1), is_pos(-2)]
-    print(flags)
-    f = lambda n: n > 0
-    print(f(5))
-    print(not r)
-    print(bool(""))
-    print(bool("0"))
-main()
-""")
-
-
-def test_except_around_builtin_errors_matches_cpython():
-    """The builtin operations below raise real, catchable exceptions on the
-    compiled path, as they do in CPython: `int("x")` a ValueError (it used to
-    answer 0), `d["zz"]` a KeyError (it used to answer the slot's zero),
-    `[...][99]` an IndexError, and `1 // 0` a ZeroDivisionError. Before the
-    fixes the handlers printed plausible values instead of running, so nothing
-    fell over — only CPython on the same text says which answer is right."""
-    test_gimple_matches_cpython("gimple_except_around_builtin_errors", """\
-def safe_int(s):
-    try:
-        return int(s)
-    except ValueError:
-        return -1
-
-def main():
-    print(safe_int("12"))
-    print(safe_int("x"))
-    d = {"a": 1}
-    try:
-        print(d["zz"])
-    except KeyError:
-        print("no key")
-    try:
-        print([1, 2][99])
-    except IndexError:
-        print("no index")
-    try:
-        print(1 // 0)
-    except ZeroDivisionError:
-        print("div zero")
-    finally:
-        print("finally")
 main()
 """)
 

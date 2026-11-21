@@ -638,11 +638,11 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
         kt = _as_str(_pair[0])
         kv = _pair[1]
         _val_ty = kt if not _val_ty or _val_ty == kt else 'int64_t'
-        if gimple_ctypes.TypeLattice.is_cstr(kt):
+        if kt == 'char *':
             gen._emit_call('void', '', 'mojo_dict_set_str',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
                              ('char *', kv)])
-        elif gimple_ctypes.TypeLattice.is_double(kt):
+        elif kt == 'double':
             # Not `mojo_dict_set_int`: `_emit_call` would coerce the double to
             # an integer and `run(g, scale=2.5)` would arrive as 2. The slot
             # carries the double kind, which `mojo_dyn_call` also reads to
@@ -702,7 +702,7 @@ def _ref_scalar_param_ctype(chosen: dict, index: int):
     if not (0 <= index < len(_cts)):
         return None
     ct = _cts[index]
-    if not (isinstance(ct, str) and gimple_ctypes.TypeLattice.ends_in_star(ct)):
+    if not (isinstance(ct, str) and ct.endswith(' *')):
         return None
     if ct[:-2] not in _REF_SCALAR_CSET:
         return None
@@ -1002,7 +1002,7 @@ def _struct_operator_receiver(gen, op: str, left_node, aug: bool) -> str | None:
     if aug:
         dunder = '__i' + dunder[2:]
     qt = _as_str(gen._quick_type(left_node))
-    if not gimple_ctypes.TypeLattice.ends_in_star(qt) or qt in ('char *', 'void *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+    if not qt.endswith(' *') or qt in ('char *', 'void *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
         return None
     sname = gimple_exprtypes._struct_name_of(qt)
     if sname not in gen.struct_field_types:

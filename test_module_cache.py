@@ -2018,7 +2018,7 @@ def test_type_param_markers_and_simd_unification(wd):
           el.unbound_type_parameter(_dflt, ['2']) is None
           and el.bind_type_args(_dflt, ['2']) == {'x': '2', 'y': '4'})
     # The generic-struct binder, measured on std/collections/span.mojo's head
-    # (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md, binder defects 1-4). The
+    # (bugs/CODEGEN_prelude_sort_is_not_resolved.md, binder defects 1-4). The
     # synthetic head has the same shape: a `//`-deduced `mut`, an origin whose
     # annotation names `mut` inside brackets, a `*`, and a leading-dot enum
     # default.

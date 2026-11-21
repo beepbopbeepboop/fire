@@ -8408,60 +8408,6 @@ int64_t mojo_dict_slot_boxed(MojoDict *d, char *key)
     return _dict_slot_boxed(sl);
 }
 
-/* The SUBSCRIPT reads: `d[k]` in Python raises KeyError for an absent key,
- * and none of the sentinel getters above do — they answer their type's zero
- * so `.get`, `setdefault`, `pop(default)` and `in` can test presence. Using
- * them for a bare subscript is why `try: ... except KeyError:` never fired on
- * the compiled path (`d["missing"]` printed 0 and carried on). Each of these
- * finds the slot once and raises the real, catchable KeyError when it is not
- * there; the value conversion is the same one the getter above performs.
- * `_dict_lookup` is shared, so a subscript and a `.get` never disagree about
- * which slot a key names. */
-static _DictSlot *_dict_subscr_slot(MojoDict *d, char *key)
-{
-    _DictSlot *sl = _dict_lookup(d, key);
-    if (!sl) mojo_raise_key_error(key);
-    return sl;
-}
-
-int64_t mojo_dict_subscript_int(MojoDict *d, char *key)
-{ return _dict_subscr_slot(d, key)->val; }
-
-char *mojo_dict_subscript_str(MojoDict *d, char *key)
-{ return (char *)(uintptr_t)_dict_subscr_slot(d, key)->val; }
-
-double mojo_dict_subscript_double(MojoDict *d, char *key)
-{
-    double v;
-    memcpy(&v, &_dict_subscr_slot(d, key)->val, sizeof v);
-    return v;
-}
-
-int64_t mojo_dict_subscript_boxed(MojoDict *d, char *key)
-{ return _dict_slot_boxed(_dict_subscr_slot(d, key)); }
-
-/* The None-key subscript (`d[None]`, keykind 3) has no key text to report, so
- * its KeyError says `None` — CPython's own `str(KeyError(None))`. */
-static _DictSlot *_dict_subscr_slot_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    if (!sl) mojo_raise_key_error((char *)"None");
-    return sl;
-}
-
-char *mojo_dict_subscript_none_str(MojoDict *d)
-{ return (char *)(uintptr_t)_dict_subscr_slot_none(d)->val; }
-
-double mojo_dict_subscript_none_double(MojoDict *d)
-{
-    double v;
-    memcpy(&v, &_dict_subscr_slot_none(d)->val, sizeof v);
-    return v;
-}
-
-int64_t mojo_dict_subscript_none_boxed(MojoDict *d)
-{ return _dict_slot_boxed(_dict_subscr_slot_none(d)); }
-
 int mojo_dict_contains(MojoDict *d, char *key)
 {
     return _dict_lookup(d, key) != NULL;
@@ -8614,34 +8560,6 @@ int64_t mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key)
     _DictSlot *sl = _dict_lookup_bytes(d, key);
     return _dict_slot_boxed(sl);
 }
-
-/* The bytes-key subscript: same contract as the str-key family above (a bare
- * `d[b'k']` raises the catchable KeyError; `d.get(b'k')` keeps the sentinel).
- * `mojo_bytes_cstr_key` is the same NUL-terminated copy the lookup probes
- * with, so the message names the key that was actually searched for. */
-static _DictSlot *_dict_subscr_slot_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    if (!sl) {
-        char *k = mojo_bytes_cstr_key(key);
-        mojo_raise_key_error(k);
-        free(k);
-    }
-    return sl;
-}
-
-char *mojo_dict_subscript_bytes_str(MojoDict *d, MojoBytes *key)
-{ return (char *)(uintptr_t)_dict_subscr_slot_bytes(d, key)->val; }
-
-double mojo_dict_subscript_bytes_double(MojoDict *d, MojoBytes *key)
-{
-    double v;
-    memcpy(&v, &_dict_subscr_slot_bytes(d, key)->val, sizeof v);
-    return v;
-}
-
-int64_t mojo_dict_subscript_bytes_boxed(MojoDict *d, MojoBytes *key)
-{ return _dict_slot_boxed(_dict_subscr_slot_bytes(d, key)); }
 
 int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)
 {
@@ -9471,22 +9389,6 @@ int mojo_set_contains_str(MojoSet *s, char *v)
  */
 void mojo_set_add_word(MojoSet *s, int64_t w)
 {
-    /* A tagged word read back from a kind-carrying list (`mojo_list_get_boxed`
-     * hands a str slot back as a kind-'p' BOX, not the bare pointer) must join
-     * the set under the kind it carries. `mojo_boxed_is_str` deliberately
-     * rejects boxes, so without this arm a `frozenset([selected])` over a
-     * mixed-kind list added the box's ADDRESS as an integer slot and printed
-     * `{4383...}` where CPython prints `{''}`. */
-    if (mojo_is_str_box(w)) {
-        mojo_set_add_str(s, (char *)(intptr_t)mojo_str_box_word(w));
-        return;
-    }
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'n') { mojo_set_add_none(s); return; }
-        if (bx->kind == 's') { mojo_set_add_bytes(s, (MojoBytes *)(intptr_t)bx->bits); return; }
-        w = bx->bits;
-    }
     if (mojo_boxed_is_str(w)) mojo_set_add_str(s, (char *)(intptr_t)w);
     else mojo_set_add_int(s, w);
 }
@@ -9494,13 +9396,6 @@ void mojo_set_add_word(MojoSet *s, int64_t w)
 int mojo_set_contains_word(MojoSet *s, int64_t w)
 {
     if (!s) return 0;
-    if (mojo_is_str_box(w))
-        return mojo_set_contains_str(s, (char *)(intptr_t)mojo_str_box_word(w));
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'n') return mojo_set_contains_none(s);
-        w = bx->bits;
-    }
     if (mojo_set_contains_int(s, w)) return 1;
     return mojo_boxed_is_str(w) && mojo_set_contains_str(s, (char *)(intptr_t)w);
 }
@@ -9508,10 +9403,6 @@ int mojo_set_contains_word(MojoSet *s, int64_t w)
 void mojo_set_discard_word(MojoSet *s, int64_t w)
 {
     if (!s) return;
-    if (mojo_is_str_box(w)) {
-        mojo_set_discard_str(s, (char *)(intptr_t)mojo_str_box_word(w));
-        return;
-    }
     mojo_set_discard_int(s, w);
     if (mojo_boxed_is_str(w)) mojo_set_discard_str(s, (char *)(intptr_t)w);
 }
@@ -9806,34 +9697,6 @@ int mojo_in_dispatch_str(int64_t container, char *needle)
 int mojo_in_dispatch_int(int64_t container, int64_t needle)
 {
     if (container == 0) return 0;
-    /* A kind-'p' STRING box: `mojo_boxed_is_str` deliberately rejects every
-     * box, so a boxed str needle fell through to the integer predicates and
-     * compared the box's own ADDRESS. This is the tagged-word spelling of a
-     * string, and the container-side answer is the same one a bare string
-     * needle gets. */
-    if (mojo_is_str_box(needle))
-        return mojo_in_dispatch_str(container,
-                                    (char *)(intptr_t)mojo_str_box_word(needle));
-    /* A non-string box (None / bool / int / double / bytes / container). A
-     * None box must test the container's None slot, not the word 0 it shares
-     * with the integer 0: `None in {0}` is False and `None in (None,)` is
-     * True. Every other box's `bits` is the value itself for the integer
-     * domains (a bool box holds 0/1), which is exactly what the predicates
-     * below compare. A double box's bits are IEEE-754, not an integer, so it
-     * keeps the old (integer-view) answer rather than pretending. */
-    if (mojo_is_boxed(needle)) {
-        MojoBox *nbx = (MojoBox *)(intptr_t)needle;
-        if (nbx->kind == 'n') {
-            if (mojo_is_registered_dict(container))
-                return mojo_dict_contains_none((MojoDict *)(intptr_t)container);
-            if (mojo_is_registered_list(container))
-                return mojo_list_contains_none((MojoList *)(intptr_t)container);
-            if (mojo_is_registered_set(container))
-                return mojo_set_contains_none((MojoSet *)(intptr_t)container);
-            return 0;
-        }
-        needle = nbx->bits;
-    }
     if (mojo_boxed_is_str(needle))
         return mojo_in_dispatch_str(container, (char *)(intptr_t)needle);
     if (mojo_is_registered_dict(container))
@@ -12343,10 +12206,7 @@ static MojoFmtSpec _fmt_parse(const char *spec) {
         while (*p >= '0' && *p <= '9') { f.prec = f.prec * 10 + (*p - '0'); p++; }
     }
     if (*p) f.type = *p;
-    if (zero) {
-        f.fill[0] = '0'; f.fill[1] = '\0'; f.fill_len = 1;
-        if (!f.align) f.align = '=';
-    }
+    if (zero && !f.align) { f.fill[0] = '0'; f.fill[1] = '\0'; f.fill_len = 1; f.align = '='; }
     return f;
 }
 
@@ -12486,6 +12346,12 @@ char *mojo_fmt_int(int64_t v, char *spec) {
     char body[96];
     for (size_t i = 0; i < n; i++) body[i] = digs[n - 1 - i];
     body[n] = '\0';
+    char *grouped = NULL;
+    const char *b = body;
+    if (f.group) {
+        grouped = _fmt_group(body, (char)f.group, base == 10 ? 3 : 4);
+        b = grouped;
+    }
     char pre[8] = {0};
     size_t k = 0;
     if (neg) pre[k++] = '-';
@@ -12493,38 +12359,6 @@ char *mojo_fmt_int(int64_t v, char *spec) {
     else if (f.sign == ' ') pre[k++] = ' ';
     if (f.alt && base != 10) { pre[k++] = '0'; pre[k++] = (t == 'X') ? 'X' : t; }
     pre[k] = '\0';
-    char align = f.align ? f.align : '>';
-    if (f.group && align == '=' && f.fill[0] == '0' && f.fill_len == 1) {
-        /* Sign-aware zero padding: the pad zeros are part of the number, so
-         * grouping must be applied to the digit string AFTER padding. Grouping
-         * adds separators, so iterate until the grouped result fills width. */
-        size_t pre_len = strlen(pre);
-        size_t dlen = strlen(body);
-        int64_t pad = 0;
-        char *grouped = NULL;
-        for (;;) {
-            char *padded = (char *)malloc((size_t)pad + dlen + 1);
-            if (!padded) { if (grouped) free(grouped); return (char *)""; }
-            for (int64_t i = 0; i < pad; i++) padded[i] = '0';
-            memcpy(padded + pad, body, dlen + 1);
-            char *next = _fmt_group(padded, (char)f.group, base == 10 ? 3 : 4);
-            free(padded);
-            if (grouped) free(grouped);
-            grouped = next;
-            if (!grouped) return (char *)"";
-            if ((int64_t)(pre_len + mojo_str_codepoint_len(grouped)) >= f.width) break;
-            pad++;
-        }
-        char *r = _fmt_finish(pre, grouped, &f, '>');
-        free(grouped);
-        return r;
-    }
-    char *grouped = NULL;
-    const char *b = body;
-    if (f.group) {
-        grouped = _fmt_group(body, (char)f.group, base == 10 ? 3 : 4);
-        b = grouped;
-    }
     char *r = _fmt_finish(pre, b, &f, '>');
     if (grouped) free(grouped);
     return r;
@@ -14572,18 +14406,14 @@ static int _mojo_sort_cmp_at(int64_t a, int64_t b, int kind, int depth)
 {
     if (kind != MOJO_KIND_LIST || depth >= MOJO_SORT_MAX_DEPTH)
         return _mojo_sort_cmp(a, b, kind);
-    /* Python's sequence ordering: ELEMENTWISE, and only when one sequence is
-     * a prefix of the other does the shorter one sort first. (Length first
-     * is a different order: CPython puts `[1, 2]` before `[2]`, not after it.)
-     * Tuples and lists share this comparator because this runtime represents
-     * a tuple as a MojoList plus a marker. */
+    /* Python's list ordering: shorter first, then elementwise. */
     MojoList *x = (MojoList *)(intptr_t)a;
     MojoList *y = (MojoList *)(intptr_t)b;
     if (x == y) return 0;
     if (!x) return -1;
     if (!y) return 1;
-    int64_t same = x->len < y->len ? x->len : y->len;
-    for (int64_t i = 0; i < same; i++) {
+    if (x->len != y->len) return x->len < y->len ? -1 : 1;
+    for (int64_t i = 0; i < x->len; i++) {
         /* The inner element's kind, by the same two sources _mojo_sort_kind
          * uses: the per-slot side table when the inner list recorded one,
          * else the runtime's own discriminator. */
@@ -14596,8 +14426,6 @@ static int _mojo_sort_cmp_at(int64_t a, int64_t b, int kind, int depth)
         int c = _mojo_sort_cmp_at(x->data[i], y->data[i], k, depth + 1);
         if (c) return c;
     }
-    if (x->len < y->len) return -1;
-    if (x->len > y->len) return 1;
     return 0;
 }
 
@@ -14676,110 +14504,36 @@ static int _mojo_sort_kind(MojoList *l, int kind)
     return s0 ? MOJO_KIND_STR : MOJO_KIND_INT;
 }
 
-/* The kind to order a `key=` list by. Same two sources as _mojo_sort_kind,
- * in the same order — the per-slot kinds a builder recorded (a `char *` key
- * is recorded as 'p', a double key as 'd') and then the runtime's own
- * string discriminator for an unrecorded word.
+/* The one ordering loop: selection sort, permuting `l` in place and — when
+   `keys` is given — the parallel key list with it, so the two stay aligned
+   (that is why mojo_sorted_by_keys has always permuted both).
  *
- * The discriminator is needed because a lambda called through a function
- * POINTER reports `int64_t` whatever it returns, so `sorted(pairs,
- * key=lambda p: p[0])` builds a keys list whose slots are real `char *`
- * addresses with no static type to say so. It was passed to the ordering
- * loop as MOJO_KIND_INT and compared by ADDRESS — `.sort(key=...)` came out
- * in heap order. `mojo_sorted_by_keys` already probed for exactly this; the
- * METHOD path trusted its call-site byte instead, so the two keyed sorts
- * disagreed on the same key function. One helper now answers both. */
-static int _mojo_sort_keys_kind(MojoList *keys)
-{
-    if (!keys || keys->len < 1) return MOJO_KIND_INT;
-    const char *k = mojo_list_get_kinds(keys);
-    if (k && k[0]) {
-        char first = k[0];
-        int uniform = 1;
-        for (int64_t i = 1; i < keys->len; i++) {
-            char c = k[i] ? k[i] : MOJO_KIND_INT;
-            if (c != first) { uniform = 0; break; }
-        }
-        if (uniform) return first;
-    }
-    if (mojo_boxed_is_str(mojo_list_get_int(keys, 0))) return MOJO_KIND_STR;
-    if (keys->len > 1 && mojo_boxed_is_str(mojo_list_get_int(keys, 1)))
-        return MOJO_KIND_STR;
-    return MOJO_KIND_INT;
-}
-
-/* The one ordering loop: a STABLE insertion sort, permuting `l` in place and
- * — when `keys` is given — the parallel key list with it, so the two stay
- * aligned (that is why mojo_sorted_by_keys has always permuted both).
- *
- * Stable is a Python guarantee, not a nicety: `sorted(pairs, key=lambda p:
- * p[1])` keeps equal keys in their input order, and the pairs repro's two
- * `('al', ...)` entries depend on it. The selection-ish loop this replaces
- * swapped any out-of-order pair, which could move an equal element past its
- * predecessor. Adjacent swaps that stop on `c == 0` never do.
- *
- * A sort PERMUTES the slots, so a recorded per-slot kinds string has to move
- * with them. Dropping it (what the keyed path used to do) loses each slot's
- * kind: the repr then falls back to its "a zero word is a boxed None" guess,
- * and `sorted([3, -7, 2, 0, -1], key=...)` printed `[None, -1, 2, 3, -7]`.
- * A FRESH string rather than an in-place edit, because the recorded one is
- * shared with every copy and slice taken from this list (mojo_list_inherit_
- * kinds hands over the same pointer) — the same rule mojo_list_reverse and
- * mojo_list_reversed follow. */
+ * Keys MOVED the slots, so a recorded per-slot kind string no longer
+ * describes them; drop it, which is exactly what mojo_sorted_by_keys did for
+ * the `sorted(x, key=f)` copy.  A KEYLESS sort needs no such step: it reaches
+ * the loop with a recorded kinds string only when every slot agreed on one
+ * kind (_mojo_sort_kind), and permuting identical kinds leaves it correct. */
 static void _mojo_permute_by(MojoList *l, MojoList *keys, int kind, int reverse)
 {
     int64_t n = l->len;
     if (keys && keys->len < n) n = keys->len;
     if (n < 2) return;
-
-    const char *lk = mojo_list_get_kinds(l);
-    char *lk_new = NULL;
-    if (lk) {
-        size_t llen = strlen(lk);
-        size_t cap = (size_t)n > llen ? (size_t)n : llen;
-        lk_new = (char *)calloc(cap + 1, 1);
-        if (lk_new) memcpy(lk_new, lk, llen);
-    }
-    const char *kk = keys ? mojo_list_get_kinds(keys) : NULL;
-    char *kk_new = NULL;
-    if (kk) {
-        size_t klen = strlen(kk);
-        size_t cap = (size_t)keys->len > klen ? (size_t)keys->len : klen;
-        kk_new = (char *)calloc(cap + 1, 1);
-        if (kk_new) memcpy(kk_new, kk, klen);
-    }
-
-    for (int64_t i = 1; i < n; i++) {
-        int64_t j = i;
-        while (j > 0) {
-            int64_t ki = keys ? mojo_list_get_int(keys, j - 1) : l->data[j - 1];
+    if (keys) mojo_list_set_kinds(l, NULL);
+    for (int64_t i = 0; i < n; i++) {
+        for (int64_t j = i + 1; j < n; j++) {
+            int64_t ki = keys ? mojo_list_get_int(keys, i) : l->data[i];
             int64_t kj = keys ? mojo_list_get_int(keys, j) : l->data[j];
             int c = _mojo_sort_cmp_at(ki, kj, kind, 0);
             int swap = reverse ? (c < 0) : (c > 0);
-            if (!swap) break;
-            int64_t t = l->data[j - 1];
-            l->data[j - 1] = l->data[j];
-            l->data[j] = t;
+            if (!swap) continue;
+            int64_t t = l->data[i]; l->data[i] = l->data[j]; l->data[j] = t;
             if (keys) {
-                int64_t tk = mojo_list_get_int(keys, j - 1);
-                mojo_list_set_int(keys, j - 1, mojo_list_get_int(keys, j));
+                int64_t tk = mojo_list_get_int(keys, i);
+                mojo_list_set_int(keys, i, mojo_list_get_int(keys, j));
                 mojo_list_set_int(keys, j, tk);
             }
-            if (lk_new) {
-                char tc = lk_new[j - 1];
-                lk_new[j - 1] = lk_new[j];
-                lk_new[j] = tc;
-            }
-            if (kk_new) {
-                char tc = kk_new[j - 1];
-                kk_new[j - 1] = kk_new[j];
-                kk_new[j] = tc;
-            }
-            j--;
         }
     }
-    if (lk_new) mojo_list_set_kinds(l, lk_new);
-    if (kk_new) mojo_list_set_kinds(keys, kk_new);
 }
 
 /* `l.sort()`, in place.  `kind` is the ELEMENT kind codegen knew at the call
@@ -14798,12 +14552,7 @@ void mojo_list_sort(MojoList *l, int kind, int reverse, MojoList *keys)
      * tuple. */
     mojo_require_mutable_list(l, "sort");
     if (!l || l->len < 2) return;
-    if (keys) {
-        /* The keys are what get compared, so their kind — not the call
-         * site's guess at the ELEMENTS, and not an `int64_t` a function-
-         * pointer call cannot refine — decides the order. */
-        kind = _mojo_sort_keys_kind(keys);
-    } else {
+    if (!keys) {
         kind = _mojo_sort_kind(l, kind);
         if (!kind) {
             fprintf(stderr,
@@ -16747,74 +16496,6 @@ char *mojo_dict_get_str_kw(MojoDict *d, int64_t kw)
     return sl ? (char *)(uintptr_t)sl->val : NULL;
 }
 
-/* The SUBSCRIPT reads' `_kw` twins — `mojo_dict_subscript_*` with the key as a
- * raw word, spelled the same three-arm way as every twin above (boxed str,
- * container content key, integer). They exist because a bare `d[k]` now goes
- * through the raising subscript family: without a `_kw` twin, `_apply_kw_keys`
- * materialises the key word as text and a TUPLE key is looked up under its
- * repr instead of `mojo_dict_key_for`'s content key, which the store did use —
- * `d[("a", 1)] = ...; d[("a", 1)]` then raised a KeyError against itself.
- * `_dict_lookup_ik` answers the word's integer entry directly; an absent one
- * raises the same KeyError the str-key subscript does, with the key's decimal
- * spelling, and the container arm frees the key it allocated. */
-int64_t mojo_dict_subscript_int_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_int(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_subscript_int(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    return sl->val;
-}
-
-int64_t mojo_dict_subscript_boxed_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_boxed(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_subscript_boxed(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    return _dict_slot_boxed(sl);
-}
-
-double mojo_dict_subscript_double_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_double(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        double v = mojo_dict_subscript_double(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    double v;
-    memcpy(&v, &sl->val, sizeof(v));
-    return v;
-}
-
-char *mojo_dict_subscript_str_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_subscript_str(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        char *v = mojo_dict_subscript_str(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    if (!sl) mojo_raise_key_error(mojo_str_from_int(kw));
-    return (char *)(uintptr_t)sl->val;
-}
-
 void mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v)
 {
     char *ck; int k = _kw_kind(kw, &ck);
@@ -17098,35 +16779,58 @@ MojoList *mojo_list_reversed(MojoList *l) {
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse) {
     MojoList *dst = mojo_list_copy(items);
     if (!keys) return dst;
-    int kind = _mojo_sort_keys_kind(keys);
+    int kind = MOJO_KIND_INT;
+    if (keys->len > 0) {
+        if (mojo_boxed_is_str(mojo_list_get_int(keys, 0))) {
+            kind = MOJO_KIND_STR;
+        } else if (keys->len > 1
+                   && mojo_boxed_is_str(mojo_list_get_int(keys, 1))) {
+            kind = MOJO_KIND_STR;
+        }
+    }
     _mojo_permute_by(dst, keys, kind, reverse);
     return dst;
 }
 
-/* `sorted(x)`, with the element kind the CALL SITE knows (a MOJO_KIND_*
- * byte, 0 for "it did not know"). This is the same fact `mojo_list_sort`
- * takes, and for the same reason: a MojoList slot is a raw int64_t, so
- * ordering the slots as integers orders a list of doubles by their IEEE bits
- * (every negative after every positive) and a list of tuples by the tuple
- * POINTERS. The keyless `sorted(pairs)` repro returned the input order for
- * exactly that reason while `.sort()` — which was already told the kind —
- * was right.
- *
- * With no useful call-site answer the per-slot kinds row and then the
- * runtime's own discriminator decide (_mojo_sort_kind, whose fallback is the
- * old int64 payload order); `mojo_sorted` below is that spelling. */
-void *mojo_sorted_kind(void *iterable, int kind) {
-    MojoList *src = (MojoList *)iterable;
-    MojoList *dst = mojo_list_copy(src);
-    if (!src) return (void *)dst;
-    int k = _mojo_sort_kind(src, kind);
-    if (!k) k = MOJO_KIND_INT;   /* mixed: keep the old lenient answer */
-    _mojo_permute_by(dst, NULL, k, 0);
-    return (void *)dst;
-}
-
 void *mojo_sorted(void *iterable) {
-    return mojo_sorted_kind(iterable, 0);
+    MojoList *src = (MojoList *)iterable;
+    /* The generic int64-payload sort. Correct for int lists, and wrong for a
+     * list whose elements are char* — see mojo_list_sorted_str below for why
+     * the codegen dispatches around this one. */
+    /* A list that records its OWN slot kinds says when every element is a string
+     * (a drained generator, `os.listdir`-style results): sort those as strings.
+     * The BYTES twin is the same fact for a bytes-typed generator: `sorted()`
+     * over a list whose slots are all 's' must order as bytes (memcmp then
+     * length — Python's bytes ordering), not by the struct pointer's value.
+     * `glob.glob(b'*.py', ...)` drained its generator to registered-bytes words
+     * (bugs/SUITE_globcompiled); with two or more matches the generic int64
+     * payload sort below would order them by ADDRESS, not lexically. */
+    if (src && src->len > 0) {
+        int all_str = 1, all_bytes = 1;
+        for (int64_t i = 0; i < src->len && (all_str || all_bytes); i++) {
+            char k = mojo_list_slot_kind(src, i);
+            if (k != 'p') all_str = 0;
+            if (k != MOJO_KIND_BYTES) all_bytes = 0;
+        }
+        if (all_str) {
+            MojoList *sd = mojo_list_sorted_str(src);
+            mojo_list_set_kinds_uniform(sd, 'p');
+            return (void *)sd;
+        }
+        if (all_bytes) {
+            MojoList *sd = mojo_list_copy(src);
+            /* Sorting PERMUTES the slots, so the per-slot kinds copied along no
+             * longer describe them; drop them, exactly as mojo_list_sorted_str
+             * does, then re-record the uniform kind the elements all share. */
+            mojo_list_set_kinds(sd, NULL);
+            _mojo_permute_by(sd, NULL, MOJO_KIND_BYTES, 0);
+            mojo_list_set_kinds_uniform(sd, MOJO_KIND_BYTES);
+            return (void *)sd;
+        }
+    }
+    MojoList *dst = mojo_list_copy(src);
+    _mojo_permute_by(dst, NULL, MOJO_KIND_INT, 0);
+    return (void *)dst;
 }
 
 /* String-aware `sorted()` variants. The generic mojo_sorted above compares
@@ -17357,18 +17061,15 @@ double mojo_min_double(void *args) {
  * the equivalent negative machine word, same as a real 64-bit register
  * would hold it — this runtime has no bignum type to hold the literal
  * value exactly the way Python's arbitrary-precision int does. */
-/* `int(x)`: a small word is a numeric argument (int(True), a truncating
- * int(float) that reached the generic path) and passes through; a string is
- * parsed exactly as CPython's one-argument `int(str)` parses it. `atoll`
- * used to answer 0 for "x" and 12 for "12abc" — no exception, so
- * `try: int(s) except ValueError:` never fired on the compiled path. The
- * decimal parse is the same strict one `int(s, 10)` uses (and the same
- * ValueError text: "invalid literal for int() with base 10: ..."), so the
- * two spellings cannot drift; note that a 0x/0o/0b prefix is a ValueError
- * here, as it is in CPython, and is only accepted with an explicit base. */
 int64_t mojo_make_int(char *s) {
     if ((intptr_t)s < 65536) return (int64_t)(intptr_t)s;
-    return mojo_make_int_base(s, 10);
+    if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
+        return (int64_t)strtoull(s + 2, NULL, 2);
+    if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O'))
+        return (int64_t)strtoull(s + 2, NULL, 8);
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        return (int64_t)strtoull(s + 2, NULL, 16);
+    return (int64_t)atoll(s);
 }
 double mojo_make_float(char *s) { return s ? atof(s) : 0.0; }
 /* See the header. The digits are accumulated in uint64_t with wraparound, the
@@ -19260,23 +18961,6 @@ static int _class_derives(int64_t tag, int64_t want, int depth)
     if (!c || depth > 32) return 0;
     for (int i = 0; i < c->nbases; i++) if (_class_derives(c->bases[i], want, depth + 1)) return 1;
     return 0;
-}
-/* `isinstance(obj, StaticStructCls)`: 1 when obj is a tagged struct whose
- * type tag is want's or derives from it through the registered class table
- * (mojo_class_register's base edges — that is what makes
- * `isinstance(dog, Animal)` true for `class Dog(Animal)`). A struct with no
- * bases is never registered (module_gen emits the class registrations only
- * for classes that HAVE bases), so fall back to plain tag equality when the
- * table has no entry for obj's tag: same-class isinstance must work for
- * every struct, not only ones with bases. `mojo_read_type_tag_safe`, not
- * the bare deref: obj may be a boxed word (small int / None), same caller
- * profile as the generic dispatch. */
-int mojo_struct_isinst(int64_t obj, int64_t want)
-{
-    int64_t tag = mojo_read_type_tag_safe(obj);
-    if (tag == want) return 1;
-    if (!_class_find(tag)) return 0;
-    return _class_derives(tag, want, 0);
 }
 /* `isinstance(obj, Cls)` where `Cls` is a class made at run time: `obj` is an instance whose
  * class is `Cls` or derives from it. */

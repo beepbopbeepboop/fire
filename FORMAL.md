@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (823 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (819 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -93,11 +93,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **12** headers | **969** | `fire_runtime.h` 859, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 11, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_alloc_census.h` 4, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **451** | every parameter and the return value is one 64-bit word |
+| entry points across **12** headers | **967** | `fire_runtime.h` 857, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 11, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_alloc_census.h` 4, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **449** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **518** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **451 of 969 (46.5%)** is the reachable-surface ceiling. The previous
+So **449 of 967 (46.4%)** is the reachable-surface ceiling. The previous
 revision of this section published 418 of 920 (45.4%), and before that 402 of
 863 (46.6%) and 389 of 455 (77%) — the word *share* has been stable across recent censuses. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
@@ -524,20 +524,20 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 451 | 451 |
+| word-shaped entry points (`runtime_abi`) | 449 | 449 |
 | …of which the runtime dylib actually **exports** | 375 | 375 |
 | …reachable with no heap handle the formal path cannot obtain | **328** | **328** |
 
 So the honest statement of the surface is **328 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 451 of §2.2. The two gaps between the
-451 of the row above and 328 are
+was written, and not the 449 of §2.2. The two gaps between the
+449 of the row above and 328 are
 both deliberate and both named:
 
 - **47 of the 375** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **76 of the 451** the dylib does not export at all, because
+- **74 of the 449** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c` 16, `fire_ncurses.c` 16, `fire_ssl.c` 11, `fire_metal.c` 5,
@@ -1276,7 +1276,7 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **451 of 969** entry points are word-in/word-out
+yet for any actual export. **449 of 967** entry points are word-in/word-out
 (§2.2) and **328** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the

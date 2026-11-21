@@ -47,8 +47,8 @@ the compiled binary, so execution falls into `elif isinstance(selected, str)`
 `frozenset([<word>])`; printing the API's result produced `4383444896` (the set
 pointer) where CPython prints `None`. (That refusal, a `_Bool` return arm in a `char *`
 function, no longer applies: the module builds, and the function's arms are boxed as a tagged
-word. What still differs from CPython for this function is the UNANNOTATED spelling
-of the same body: `bugs/CODEGEN_untyped_parameter_word_kind_not_recovered.md`.
+word. What still differs from CPython for this function is tracked in
+`bugs/CODEGEN_param_annotation_contradicted_by_the_body.md`.)
 
 ## What is already there
 
