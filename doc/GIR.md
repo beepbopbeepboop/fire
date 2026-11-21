@@ -218,8 +218,8 @@ that is meant to be behaviour-preserving:
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the
-  counts of `.endswith(' *')` (344), `== 'int64_t'` (404), `in (.., 'int64_t')`
-  (312), `== 'char *'` (398), `== '_Bool'` (68), `== 'double'` (187) and
+  counts of `.endswith(' *')` (344; 67 after the codemod), `== 'int64_t'` (404), `in (.., 'int64_t')`
+  (312), `== 'char *'` (398; 159 after the 2026-11-20 codemod that turned 240 of them into `TypeLattice.is_cstr(x)`, byte-identical C on 284 programs), `== '_Bool'` (68; 23 after the codemod), `== 'double'` (187) and
   `== 'MojoList *'` (203) may only shrink.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
@@ -238,6 +238,35 @@ that is meant to be behaviour-preserving:
 - **Stage 5b. One value-info record.** The name-keyed tables become fields
   of one `ValueInfo` object per temp. `int64_t` splits into
   Int / Erased(T) / DynWord / Box in the value's info.
+  *Measured 2026-11-20 (the guide for the next round).* The six
+  dynamic-word sets, by uses / files / writers (`.add`, `.update`, `[x] =`):
+  `_boxed_vals` 93/11/30, `_dyn_word_vals` 75/8/51, `_tagged_word_vals`
+  61/7/19, `_int_word_vals` 46/7/9, `_maybe_kinds_vals` 84/11/33,
+  `_boxed_container_vals` 17/6/8: about 376 sites. Each is created in
+  `GimpleGen.__init__` AND again in `emit_infra.py` (lines near 248, 424, 509,
+  698), emptied per function (`.clear()` near 368, 549, 1296-1305), and saved
+  and restored across nested function bodies by `FuncState`
+  (`emit_infra.py` ~958-1310: an `fs_*` field and an `fs_*_items` copy for
+  each). Two of them (`_boxed_vals`, `_tagged_word_vals`) have the save code
+  written TWICE in `FuncState`; the rebinding is deliberate (a rebind in
+  `__init__` leaks under the self-hosted compiler), so do not "simplify" it.
+  Plan, in order, each step byte-identical C on `tools/pydiff_corpus` (hash
+  `compile_to_gimple_with_cpp` output before and after):
+  1. (LANDED 2026-11-20, byte-identical on 284 programs) A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
+     six sets and has `save()` / `restore(saved)`; `FuncState` keeps ONE
+     `fs_words` instead of twelve fields; the six `gen._x_vals` names stay
+     bound to the same set objects (assigned once at construction, `.clear()`
+     per function), so no reader changes.
+  (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through `gen._words`; `test_type_string_ratchet.py` counts the direct spelling, baseline 10 = the six `bind` lines and docs. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
+  2. Add read predicates on it (`words.may_be_box(name)`, `words.is_tagged(name)`,
+     `words.is_dyn(name)`, `words.is_int_word(name)`) and move the ~200 readers
+     (`x in gen._boxed_vals`) onto them by codemod, as the type-string codemods
+     did. Ratchet: a text count of `gen._boxed_vals` etc. may only shrink.
+  3. Add writers (`words.mark_tagged(name)` ...) and move the ~150 writers.
+  4. Only then change the storage to one `ValueInfo` per temp and give it the
+     `Int / Erased(T) / DynWord / Box` kind; that step is allowed to change C
+     (it is the one that carries the sets across copies, +~1,200 box/repr
+     calls measured), and must be landed alone with its own diff review.
 - **Stage 5c. Optional values (measured 2026-11-20; first slice landed).**
   Why the split in 5b matters, measured on `tools/pydiff_corpus`: of 240
   programs only 60 matched CPython, and the largest single cause (about a

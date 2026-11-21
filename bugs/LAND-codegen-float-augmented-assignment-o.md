@@ -1,9 +1,9 @@
-# Land: should finished branch bug-mid-formal-eval-eq-mojo-bridge-red-o land?
+# Land: should finished branch bug-codegen-float-augmented-assignment-o land?
 
-**Branch:** `work/bug-mid-formal-eval-eq-mojo-bridge-red-o` (task `bug-mid-formal-eval-eq-mojo-bridge-red-o`; its tip is also saved as `refs/archive/work/bug-mid-formal-eval-eq-mojo-bridge-red-o`, so dropping it loses nothing).
-**Age:** last commit 2026-11-19, first unlanded commit 2026-11-19; 2 commit(s) ahead of master, 205 behind it; task started 2026-11-20 05:42:03
-**Original work:** An earlier attempt left 2 commit(s) on branch work/bug-formal-eval-eq-mojo-bridge-red-on-he-2, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs
-**Original claims:** bug:FORMAL_eval_eq_mojo_bridge_red_on_head
+**Branch:** `work/bug-codegen-float-augmented-assignment-o` (task `bug-codegen-float-augmented-assignment-o`; its tip is also saved as `refs/archive/work/bug-codegen-float-augmented-assignment-o`, so dropping it loses nothing).
+**Age:** last commit 2026-11-20, first unlanded commit 2026-11-20; 2 commit(s) ahead of master, 45 behind it; task started 2026-11-20 19:19:59
+**Original work:** Fix the bug in bugs/CODEGEN_float_augmented_assignment_on_int_variable.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinnin
+**Original claims:** bug:CODEGEN_float_augmented_assignment_on_int_variable
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-20 09:40:13: conflicts with master (last commit 2026-11-19, first unlanded commit 2026-11-19; 2 commit(s) ahead of master, 205 behind it; task started 2026-11-20 05:42:03)
-  Branch: work/bug-mid-formal-eval-eq-mojo-bridge-red-o
-  Conflicting files: formal/arm64_proof_gen.py, test_formal_eval_eq_mojo_bridge.py
+- 2026-11-20 20:50:59: conflicts with master (last commit 2026-11-20, first unlanded commit 2026-11-20; 2 commit(s) ahead of master, 45 behind it; task started 2026-11-20 19:19:59)
+  Branch: work/bug-codegen-float-augmented-assignment-o
+  Conflicting files: mojo/backend_gimple/emit_calls.py, mojo/backend_gimple/emit_stmts.py

@@ -71,6 +71,24 @@ def master_lock(wait_s=None):
         f.close()
 
 
+def regenerate_generated(tree):
+    """Generated files are a pure function of their sources, so the round regenerates them in its own tree before it
+    gates. A branch that changed runtime/*.h but not the table generated from it (mojo/middle/rt_sigs.py) used to fail
+    the freshness gate for whoever was merged with it, and the bisect blamed the wrong branch. The regeneration is
+    committed to the round's branch only when it changed something, so it lands with the merge it belongs to."""
+    r = subprocess.run(["python3", "tools/gen_rt_sigs.py"], cwd=tree, capture_output=True, text=True)
+    if r.returncode:
+        print("regenerate rt_sigs: generator failed (exit %d): %s" % (r.returncode, (r.stdout + r.stderr)[-300:]))
+        return
+    # porcelain, not `git diff --quiet`: diff ignores an untracked file, which would leave a new table uncommitted
+    if subprocess.run(["git", "status", "--porcelain", "--", "mojo/middle/rt_sigs.py"], cwd=tree,
+                      capture_output=True, text=True).stdout.strip():
+        subprocess.run(["git", "add", "mojo/middle/rt_sigs.py"], cwd=tree, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "integrate: regenerate mojo/middle/rt_sigs.py from runtime/*.h"],
+                       cwd=tree, check=True)
+        print("regenerated mojo/middle/rt_sigs.py for this round (committed)")
+
+
 def remove_probe_tree(path):
     """Remove a probe's detached worktree when the probe ends, by any exit path (registered with atexit)."""
     subprocess.run(["git", "worktree", "remove", "--force", path], cwd=C.MAIN, capture_output=True)
@@ -872,6 +890,7 @@ def main():
         sys.exit(1)
     else:
         print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
+        regenerate_generated(INTEG)
         holder("gate")
         rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"), step="gate")
     if a.jobs:

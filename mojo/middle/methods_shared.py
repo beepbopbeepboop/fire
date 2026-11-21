@@ -362,7 +362,7 @@ def poly_dispatch_plan(self):
             eligible = True
             for S in defining:
                 extra_n, ret = shapes[S]
-                if extra_n or ret != 'int64_t':
+                if extra_n or not gimple_ctypes.TypeLattice.is_word(ret):
                     eligible = False
                     break
             if not eligible:

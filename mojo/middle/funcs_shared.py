@@ -448,13 +448,13 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # bare declared name (the parser stores no star prefixes there),
     # matching how dup_def_signature_key looks the same table up.
     _pdflt = (getattr(node, 'param_defaults', None) or {}).get(pname.lstrip('*'))
-    if (ptype is None and ctype == 'int64_t'
+    if (ptype is None and gimple_ctypes.TypeLattice.is_word(ctype)
             and isinstance(_pdflt, StringLiteral)):
         # A `b'...'` default makes the param a `bytes` param; a plain string
         # default makes it a `str` (char *) param. bytes must NOT be
         # conflated with str — b[i] is an int, not a 1-char string.
         ctype = 'MojoBytes *' if getattr(_pdflt, 'is_bytes', False) else 'char *'
-    elif (ptype is None and ctype == 'char *'
+    elif (ptype is None and gimple_ctypes.TypeLattice.is_cstr(ctype)
           and isinstance(_pdflt, StringLiteral) and getattr(_pdflt, 'is_bytes', False)):
         # A `b'...'` default is unambiguous `bytes` evidence and must win
         # over a weak usage-inferred `char *` — `len(b)` alone (the only
@@ -463,14 +463,14 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # `strlen()` the struct (non-deterministic length). An explicit
         # annotation still takes precedence (ptype is not None there).
         ctype = 'MojoBytes *'
-    elif (ptype is None and ctype == 'int64_t'
+    elif (ptype is None and gimple_ctypes.TypeLattice.is_word(ctype)
           and isinstance(_pdflt, FloatLiteral)):
         # The float half of the same rule: `scale=0.5` is a float parameter.
         # Left as the int64_t box, an omitted argument was padded with the
         # literal's bits as an integer. Generator parameters follow the same
         # rule (cpp_async's parameter loop reaches it through this resolver).
         ctype = 'double'
-    elif (ptype is None and ctype == 'int64_t'
+    elif (ptype is None and gimple_ctypes.TypeLattice.is_word(ctype)
           and isinstance(_pdflt, (DictExpr, TupleExpr, ListExpr, SetExpr))):
         # The CONTAINER-literal half of the rule the two branches above
         # state for strings: an unannotated parameter whose declared
@@ -538,6 +538,26 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # None). Box it the same generic way every other
         # no-runtime-representation type already is throughout this file.
         ctype = 'int64_t'
+    # An ANNOTATED parameter whose BODY stores a value of another kind cannot
+    # keep the annotation's C type for its whole life. `def f(x: str): x =
+    # [x]` (Tools/c-analyzer's `normalize_selection` shape) declared the slot
+    # `char *`, so the list pointer went through the string slot and every
+    # later string operation read the list struct's bytes as text -- a wrong
+    # value at exit 0, not a diagnostic. The tagged `int64_t` word is the
+    # only single C variable that describes both values; the body's stores
+    # and reads are boxed by kind (see `mixed_box_name` and
+    # `boxed_param_names`). A same-kind rebinding is not this case and keeps
+    # the annotation's real container/string type.
+    if ptype is not None:
+        # Function-local import: `funcs_shared` is imported by the backend,
+        # and a top-level edge the other way is the import cycle this file's
+        # header describes. The rule itself lives in `infra_infer` so the
+        # codegen's mixed-kind scans (which also run on this body) classify
+        # the same annotation and the same binding the same way.
+        from mojo.middle.infra_infer import param_annotation_conflicts
+        if param_annotation_conflicts(gen, pname, ctype,
+                                      getattr(node, 'body', None)):
+            ctype = 'int64_t'
     conv  = (getattr(node, 'param_convs', {}) or {}).get(pname)
     # PART 6 (2026-10-23, family D piece 2): a read-only-conv SCALAR param is
     # a pointer to the CALLER's variable — the reference semantics real Mojo
@@ -1415,7 +1435,7 @@ def _home_signature_ctypes(gen, module: str, fs) -> list:
         return pts
     out = list(pts)
     for _i, (_pn, _pt) in enumerate(params):
-        if out[_i] == 'int64_t' and isinstance(_pt, str):
+        if gimple_ctypes.TypeLattice.is_word(out[_i]) and isinstance(_pt, str):
             _base = _pt.split('[', 1)[0].strip()
             if _base in structs:
                 out[_i] = 'struct ' + _base + ' *'

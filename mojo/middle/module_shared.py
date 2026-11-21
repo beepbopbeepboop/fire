@@ -315,7 +315,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
                     # boxed as int64_t by convention — leaving it is the
                     # pre-existing behavior, not a regression, and seeding it
                     # here would widen this pre-pass's blast radius.
-                    if _vt == 'char *':
+                    if gimple_ctypes.TypeLattice.is_cstr(_vt):
                         # A named, typed inner dict rather than a chained
                         # `_out.setdefault(...).setdefault(...)`: the chain's
                         # intermediate has no static type in the self-hosted
@@ -364,7 +364,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                 _ct0 = _ct
             elif _ct != _ct0:
                 return None
-        return _ct0 if _ct0 and _ct0 != 'int64_t' else None
+        return _ct0 if _ct0 and not gimple_ctypes.TypeLattice.is_word(_ct0) else None
 
     for _f, _stmts in _selfhost_parsed_modules(sd):
         for _s in _stmts:
@@ -1061,7 +1061,7 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
                     # A container or other type the kind table does not name: its quick type, except the int64_t
                     # default, which is no evidence of an int and would join with every other kind.
                     _qt = self._quick_type(_n.value)
-                    if _qt and _qt != 'int64_t':
+                    if _qt and not gimple_ctypes.TypeLattice.is_word(_qt):
                         _k = _qt
                 _store_hits.setdefault(_p17_dname, []).append(_k)
         if (isinstance(_n, ExprStmt)
@@ -1447,7 +1447,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                         str(node.type_ann).split('[', 1)[1].rstrip(']').strip())
                     if _li_sa:
                         _et_sa = self._resolve_type(_li_sa[0].strip())
-                        if _et_sa and _et_sa != 'int64_t':
+                        if _et_sa and not gimple_ctypes.TypeLattice.is_word(_et_sa):
                             _et_hits.append((fn, _et_sa))
         elif isinstance(node, MultiAssignStmt):
             for tgt in node.targets:

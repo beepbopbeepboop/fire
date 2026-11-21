@@ -56,9 +56,24 @@ Differences:
 line 3: CPython '[True, False]'   compiled '[1, 0]'
 ```
 
+## Status
+
+- 2026-11-20: the `ptr_print.py` repro (and the bool-literal / bool-returning
+  call cases in `bool_print.py`) now match CPython: the archived branch
+  `work/bug-codegen-values-print-as-pointers-ins` was adapted and landed. A
+  string now materializes as a list of 1-char `char *` slots (so `enumerate`
+  and comprehensions over a string read values), and a list literal only
+  records a nested element type when every element list agrees on it.
+- STILL OPEN: `e = []; e.append(True); print(e)` prints `[1]`, not `[True]`.
+  That is the whole-function "every append to this list is a bool" proof the
+  paragraph above calls for; nothing landed for it. Keep this doc until that
+  case is fixed.
+
 ## Done when
 
-Save each repro as a `.py` file and run
+`ptr_print.py`, `bool_print.py` and the append repro
+(`e = []; e.append(True); print(e)`) all match CPython. Save each repro as a
+`.py` file and run
 
     python3 tools/pydiff.py <file>...
 

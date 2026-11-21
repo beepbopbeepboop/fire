@@ -14,9 +14,11 @@ not a unit test.
 """
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -100,6 +102,40 @@ class StaleVerdictRows(unittest.TestCase):
                          'rewrite by symptom (commit or doc name)')
 
 
+class FallbackCandidatesExcludeTheLedger(unittest.TestCase):
+    """The filesystem fallback must apply the `SELF_PATH` exclusion too.
+
+    `candidates()` has two paths, and only the `git ls-files` one dropped
+    `tools/dangling_refs_baseline.py`. The fallback is taken whenever git
+    cannot answer — a source export has no `.git`, so the census there walks
+    the filesystem — and the ledger's whole content is the names of deleted
+    docs that other files still cite. Scanning it made the ledger look like a
+    citer of every one of them, so `--ratchet` reported two fresh gains in an
+    export of the very commit that is green in a checkout: two answers for two
+    copies of one commit, which is the failure class the module's docstring
+    names.
+    """
+
+    def _fallback_candidates(self, returncode, stdout):
+        proc = subprocess.CompletedProcess(['git', 'ls-files', '-z'],
+                                           returncode, stdout, '')
+        with mock.patch('subprocess.run', return_value=proc):
+            return d.candidates()
+
+    def test_ledger_is_not_a_candidate_when_git_fails(self):
+        got = self._fallback_candidates(128, '')
+        self.assertNotIn(d.SELF_PATH, got,
+                         'the ratchet ledger is being scanned as a citer of '
+                         'the deleted docs it records')
+        self.assertIn('test_dangling_doc_refs.py', got,
+                      'the fallback dropped ordinary files as well as the '
+                      'ledger')
+
+    def test_ledger_is_not_a_candidate_when_git_returns_nothing(self):
+        got = self._fallback_candidates(0, '')
+        self.assertNotIn(d.SELF_PATH, got)
+
+
 # The hard-bug index is hand-maintained prose, so nothing but these two checks
 # ever compares it with the directory it indexes. Both were false at once on
 # 2026-10-29: nine of the names it cited were deleted docs, and three live docs
@@ -125,6 +161,26 @@ class HardIndexIsTrue(unittest.TestCase):
         on_disk = {f for f in os.listdir(HARD)
                    if f.endswith('.md') and f != 'README.md'}
         self.assertEqual(sorted(on_disk - _index_names()), [])
+
+
+# The gate doc for this file's job claims the job is red on master and says to
+# delete itself when the job is green there. It ran that cycle twice in one
+# day: master 8f7e64375 (2026-11-19) deleted it with the index sync, the job
+# went red again (a live doc with no index row) and the integrator re-filed it
+# (ef7029347); the re-filing's cause was closed (that doc went in merge
+# 76bfc1b8d, the c_common rows with ae81bbf68/d960ce50f) and the job has been
+# green since, but the re-filed doc sat behind. Pin its deletion: if this file
+# is red, the doc's claim is live and the real failure is beside this one; if
+# this file is green, the doc is stale.
+class GateDocOfGreenJobIsDeleted(unittest.TestCase):
+    def test_gate_doc_for_green_job_is_deleted(self):
+        doc = os.path.join(HERE, 'bugs', 'gate-doc-refs-stale-verdicts.md')
+        self.assertFalse(
+            os.path.exists(doc),
+            'the gate doc for the doc-refs-stale-verdicts job (deleted with '
+            '8f7e64375, re-filed by ef7029347) is in the tree; its own rule is '
+            'to exist only while the job is red, and every check in this file '
+            'has passed, so it is stale')
 
 
 if __name__ == '__main__':

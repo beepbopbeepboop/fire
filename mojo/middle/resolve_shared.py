@@ -240,7 +240,7 @@ def _and_or_operand_type(gen, node) -> str:
     takes its bool-merge path. Both the lowering (`_lower_BinaryOp`) and
     `_quick_type`'s own `and` / `or` rule ask this, so they agree."""
     qt: str = _as_str(gen._quick_type(node))
-    if qt == '_Bool':
+    if gimple_ctypes.TypeLattice.is_bool(qt):
         return qt
     if isinstance(node, gimple_ctypes.CallExpr):
         fn = node.func
@@ -424,16 +424,16 @@ def _quick_type(gen, node) -> str:
             # A string and a word of unknown kind: the value may be either,
             # so it is the word -- the lowering (`_lower_BinaryOp`'s and/or
             # arm) types the result the same way, and the two must agree.
-            if ((lt == 'char *' and rt == 'int64_t')
-                    or (lt == 'int64_t' and rt == 'char *')):
+            if ((gimple_ctypes.TypeLattice.is_cstr(lt) and gimple_ctypes.TypeLattice.is_word(rt))
+                    or (gimple_ctypes.TypeLattice.is_word(lt) and gimple_ctypes.TypeLattice.is_cstr(rt))):
                 return 'int64_t'
             # A container pointer against a `_Bool`: the lowering turns the
             # whole `and`/`or` into a `_Bool` (`_lower_binary`'s `_bool_merge`),
             # so a CHAIN (`a or b or c`, parsed right-nested) must report
             # `_Bool` for its inner link too, or the outer link sees a pointer
             # type for a value that is the bool 1 and runs `mojo_dict_len` on it.
-            if ((lt.endswith(' *') and rt == '_Bool')
-                    or (lt == '_Bool' and rt.endswith(' *') and node.op == 'or')):
+            if ((gimple_ctypes.TypeLattice.ends_in_star(lt) and gimple_ctypes.TypeLattice.is_bool(rt))
+                    or (gimple_ctypes.TypeLattice.is_bool(lt) and gimple_ctypes.TypeLattice.ends_in_star(rt) and node.op == 'or')):
                 return '_Bool'
             return gimple_ctypes.TypeLattice.join(lt, rt)
         if node.op == '|':
@@ -487,7 +487,7 @@ def _quick_type(gen, node) -> str:
             _nrw = gen._narrowed_exprs.get(f'i:{node.args[0].name}')
             if _nrw is not None:
                 _gt = _as_str(_nrw[0])
-            if isinstance(_gt, str) and _gt.endswith(' *'):
+            if isinstance(_gt, str) and gimple_ctypes.TypeLattice.ends_in_star(_gt):
                 _gf = (gen.struct_field_types.get(_gt[:-2].strip()) or {}).get(
                     node.args[1].value)
                 if isinstance(_gf, str) and _gf in gimple_ctypes._CONTAINER_KIND_TYPES:
@@ -693,9 +693,9 @@ def _quick_type(gen, node) -> str:
         _sot = ''
         if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             _sot = gen.var_types.get(node.func.obj.name, '')
-        if not (_sot and _sot.endswith(' *')):
+        if not (_sot and gimple_ctypes.TypeLattice.ends_in_star(_sot)):
             _sot = gen._quick_type(node.func.obj)
-        if (not (isinstance(_sot, str) and _sot.endswith(' *'))
+        if (not (isinstance(_sot, str) and gimple_ctypes.TypeLattice.ends_in_star(_sot))
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.name in ('self', 'cls')):
             # `cls.<method>(...)` / `self.<method>(...)` in a method body:
@@ -715,7 +715,7 @@ def _quick_type(gen, node) -> str:
                 _crt = gen.func_return_types.get(f"{_cstruct}_{node.func.member}")
                 if _crt:
                     return _crt
-        if isinstance(_sot, str) and _sot.endswith(' *'):
+        if isinstance(_sot, str) and gimple_ctypes.TypeLattice.ends_in_star(_sot):
             _ssn = gimple_exprtypes._struct_name_of(_sot)
             if _ssn in gen.struct_field_types:
                 _smeth = node.func.member
@@ -1046,7 +1046,7 @@ def _quick_type(gen, node) -> str:
         # pathlib.Path attribute reads on a path-shaped char* value —
         # `.name` is basename and `.parent` is dirname, both real char*
         # results (see _lower_MemberExpr's matching char*-receiver case).
-        if ot == 'char *' and node.member in ('name', 'parent'):
+        if gimple_ctypes.TypeLattice.is_cstr(ot) and node.member in ('name', 'parent'):
             return 'char *'
         # Receiver's struct type unresolved (sn not in struct_field_types —
         # e.g. a free function's `self` param typed int64_t, so ot is
@@ -1114,7 +1114,7 @@ def _quick_type(gen, node) -> str:
     # list slice -> list, str slice -> str, plain pointer -> same pointer).
     if isinstance(node, gimple_ctypes.SliceExpr):
         _st = gen._quick_type(node.obj)
-        if _st == 'int64_t' and isinstance(node.obj, gimple_ctypes.IdentExpr):
+        if gimple_ctypes.TypeLattice.is_word(_st) and isinstance(node.obj, gimple_ctypes.IdentExpr):
             # The object is a MODULE GLOBAL of this compile, whose semantic
             # type this estimator otherwise never consults (`var_types` is
             # per-function and has no entry for it), so `L[1:]` was the box
@@ -1236,6 +1236,23 @@ def _quick_type(gen, node) -> str:
             # own body.
             if _as_str(getattr(gen, 'var_types', {}).get(_as_str(obj.name))) == 'char *':
                 return 'char *'
+            # A TUPLE's own per-slot record answers the indexed slot's type.
+            # The call site that binds a tuple element to a lambda parameter
+            # (`sorted(pairs, key=lambda p: p[0])`) installs this record under
+            # the parameter name; asking it here is what lets the estimator
+            # say `char *` for a string slot, so the key is compared as a
+            # string instead of as its address (the lowering already reads
+            # through the same table). A later `_elem_types` answer cannot
+            # stand in for it: a tuple's element type is `MojoList *`, the
+            # tuple itself, while this is the slot's type.
+            _ts = getattr(gen, '_tuple_slot_types', {}).get(_as_str(obj.name))
+            if _ts is not None and isinstance(node.index, gimple_ctypes.IntLiteral):
+                try:
+                    _tsi = int(node.index.value)
+                except Exception:
+                    _tsi = None
+                if _tsi is not None and 0 <= _tsi < len(_ts):
+                    return _as_str(_ts[_tsi])
             e = gen._elem_types.get(obj.name)
             if e:
                 return e
@@ -1317,6 +1334,33 @@ def _infer_list_elem_type(gen, elements: list) -> str:
         # vouch for, and appending is the idiom the loops above already use.
         types.append('char *')
     _joined = gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
+    # TWO OR MORE DISTINCT STRUCT POINTER TYPES: the list holds instances of
+    # different classes, and no single pointer type can name the slots.
+    # Answer with the scalar box — the same answer `TypeLattice.join` already
+    # gives for a pair of struct pointers (both pointer, neither char/void),
+    # which is what makes a loop over a TWO-class list a dynamic word. The
+    # third class is where the left-to-right fold regressed: join(A*, B*)
+    # answers int64_t, and join(int64_t, C*) returns the pointer side — the
+    # LAST class — so the loop variable was statically typed `C *`:
+    # `a.speak()` on an `A` slot read `C`'s layout (a presence word that does
+    # not exist in `A`'s) and raised, while CPython calls each instance's own
+    # method. With an `int64_t` element type `_gen_for_list` marks the loop
+    # variable in `_dyn_word_locals`, and the method call on it goes through
+    # the per-tag dispatch that already exists for such words
+    # (`_mojo_dispatch_getattr` + `mojo_maybe_bound_call_N`) — no new path.
+    _sp_count = 0
+    _sp_seen = set()
+    for _t in types:
+        if not _t or not gimple_ctypes.TypeLattice.ends_in_star(_t):
+            continue
+        if _t in ('char *', 'void *'):
+            continue
+        if _t in _sp_seen:
+            continue
+        _sp_seen.add(_t)
+        _sp_count += 1
+    if _sp_count > 1:
+        return 'int64_t'
     # A HETEROGENEOUS literal is not a string list. `TypeLattice.join`
     # short-circuits to `char *` whenever either side is `char *`, which is
     # right for an arithmetic result and wrong for STORAGE: the joined type
@@ -1336,8 +1380,8 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     # winning when it is not the common type. `void *` was tried here and is
     # wrong: appending a scalar element to a `void *` slot needs a cast the
     # list builder does not emit, which is its own `-Wint-conversion` error.
-    if _joined == 'char *' and any(
-            _t and _t.endswith(' *') and _t != 'char *' for _t in types):
+    if gimple_ctypes.TypeLattice.is_cstr(_joined) and any(
+            _t and gimple_ctypes.TypeLattice.ends_in_star(_t) and not gimple_ctypes.TypeLattice.is_cstr(_t) for _t in types):
         return 'int64_t'
     # A literal of NOTHING BUT Python bools is a `_Bool` list, which
     # `_list_repr_fn` routes to `mojo_repr_list_bools` (that helper exists for
@@ -1886,7 +1930,7 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                         _vt = gimple_ctypes._mojo_type(_vd_node.type_ann)
                     except Exception:
                         _vt = ''
-                if (not _vt or _vt == 'int64_t') and _vd_node.value is not None:
+                if (not _vt or gimple_ctypes.TypeLattice.is_word(_vt)) and _vd_node.value is not None:
                     _vt = _local_value_type(gen, _vd_node.value)
                 if _vt:
                     inferred.setdefault(vname, []).append(_vt)
@@ -2548,7 +2592,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
             if materialize is not None:
                 ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)
-            if better_ret != 'int64_t':
+            if not gimple_ctypes.TypeLattice.is_word(better_ret):
                 if (isinstance(better_ret, str)
                         and better_ret.startswith('MojoTuple_')
                         and not _body_builds_struct_tuple(
