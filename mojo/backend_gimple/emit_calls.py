@@ -11623,13 +11623,16 @@ def _lnc_bool(gen, arg_pairs: list) -> tuple[str, str] | None:
         gen._cast_into(_z, 'int64_t', '0')
         gen._binop_into(_b, _n, '!=', _z)
         return '_Bool', _b
-    if gimple_ctypes.TypeLattice.is_cstr(_bt) or (gimple_ctypes.TypeLattice.is_word(_bt) and (
-            gen._words.is_dyn(_bv) or _bv in gen._dyn_word_locals
-            or _bv in getattr(gen, '_cur_untyped_params', ()))):
-        # A string's truth is its length, and a word of unknown kind's is
+    if (gimple_ctypes.TypeLattice.is_cstr(_bt)
+            or _bt in ('double', 'float')
+            or (gimple_ctypes.TypeLattice.is_word(_bt) and (
+                gen._words.is_dyn(_bv) or _bv in gen._dyn_word_locals
+                or _bv in getattr(gen, '_cur_untyped_params', ())))) :
+        # A string's truth is its length, a float's is `x != 0.0` (not
+        # "its integer part is nonzero"), and a word of unknown kind's is
         # whatever the runtime finds there -- the one place that answers
-        # both is `_ensure_bool_cond`, which `if x:` already uses, so
-        # `bool(x)` and `if x:` cannot disagree. Measured: `bool(_mode)`
+        # all of these is `_ensure_bool_cond`, which `if x:` already uses,
+        # so `bool(x)` and `if x:` cannot disagree. Measured: `bool(_mode)`
         # over the '' slot of a `(mode, recv)` unpack was True in the
         # compiled compiler (the pointer is not 0), and every dict loop
         # was lowered as an Int-keyed one.
